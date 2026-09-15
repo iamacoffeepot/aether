@@ -39,6 +39,20 @@ pub const FOREIGN_SESSION_ID: &str = "sess-foreign";
 /// can look a baseline up by the same key the failing check used.
 pub const NAMED_TEST: &str = "aether-example shell::tests::named_failure";
 
+/// The mid-turn transcript a [`LaneMode::NeverExits`] lane leaves: two billed
+/// assistant turns and no terminal record — the shape a lane killed mid-run
+/// leaves behind, whose tokens the coordinator prices from the transcript
+/// (issue 6029) rather than from a result record that never arrives.
+///
+/// The columns are small but non-zero so a priced-then-cancelled study row is
+/// distinguishable from an unmeasured attempt.
+pub const MID_TURN_TRANSCRIPT: &str = concat!(
+    "{\"type\":\"assistant\",\"message\":{\"model\":\"mock-opus\",\"content\":[],\"usage\":{\"input_tokens\":1200,",
+    "\"cache_read_input_tokens\":800,\"cache_creation_input_tokens\":100,\"output_tokens\":150}}}\n",
+    "{\"type\":\"assistant\",\"message\":{\"model\":\"mock-opus\",\"content\":[],\"usage\":{\"input_tokens\":2000,",
+    "\"cache_read_input_tokens\":1500,\"cache_creation_input_tokens\":200,\"output_tokens\":300}}}\n",
+);
+
 /// The path a [`LaneMode::DeclinesRequestingSurface`] run asks for (ADR-0207).
 ///
 /// A crate the fixture project has and no scenario's member surface covers, so

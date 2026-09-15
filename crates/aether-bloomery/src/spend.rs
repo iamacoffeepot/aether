@@ -11,9 +11,11 @@
 //! [`crate::grade`] takes: the evidence log holds
 //! digests, not columns. An unresolvable record, or a resolved one that does
 //! not grade its evidence's subject or name its own bloom, contributes zero
-//! and raises the unaccounted count. A record whose priced column is zero
-//! raises the unpriced count, so a fleet nobody has authored rates for is
-//! distinguishable from a cheap one.
+//! and raises the unaccounted count — which is, since every dispatch whose
+//! harness session log survived is priced at lane exit whatever the outcome
+//! (issue 6029), the count of dispatches with no session log at all. A record
+//! whose priced column is zero raises the unpriced count, so a fleet nobody
+//! has authored rates for is distinguishable from a cheap one.
 
 use crate::digest::Digest;
 use crate::reduce::Snapshot;

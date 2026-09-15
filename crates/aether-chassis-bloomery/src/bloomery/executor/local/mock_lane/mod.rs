@@ -164,6 +164,11 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
     evidence::apply(&outcome, worktree, &args.out)?;
 
     if mode == LaneMode::NeverExits {
+        // A parked lane streamed before it parked: leave the mid-turn
+        // transcript a real lane killed mid-run leaves behind, so a scenario
+        // that cancels this run prices the turns it billed (issue 6029).
+        fs::create_dir_all(&args.out)?;
+        fs::write(args.out.join("transcript.jsonl"), evidence::MID_TURN_TRANSCRIPT)?;
         // Park rather than spin: most scenarios let their own budget end this
         // run. A grouping scenario may explicitly release several parked
         // children together, after all of them crossed the real spawn and Git

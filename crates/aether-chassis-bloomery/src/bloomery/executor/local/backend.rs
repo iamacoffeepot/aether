@@ -17,7 +17,7 @@ use aether_bloomery::{
     ConfigRegistry, ConfigScopes, ConstructionCheckpoint, CoordinationPolicy, DeltaClass, Digest, EvidenceRef,
     ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, ModelProcessInstructions, Nonce,
     ObservedConstructionCheckpoint, ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim,
-    SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest,
+    SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
     Transformation, VERIFY_BASE_COMMAND, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address,
     is_model_lane, narrow_composition,
 };
@@ -591,6 +591,10 @@ struct Registry {
     // were released (#5998). Read once per nonce by `cancelled_capture`, which
     // is the reactor collecting the answer to the cancel it just made.
     cancelled_captures: HashMap<String, CandidateRef>,
+    // Tokens cancelled lanes had spent, recovered from their harness session
+    // logs before their slots were released (issue 6029). Read once per nonce
+    // by `cancelled_usage`, the same handoff as the tree capture beside it.
+    cancelled_usage: HashMap<String, (StudyCost, Option<Vec<StudyCall>>)>,
 }
 
 impl Registry {
@@ -2432,11 +2436,55 @@ impl LocalExecutor {
         self.lock().cancelled_captures.insert(nonce.0.clone(), candidate);
     }
 
+    /// Recover a cancelled lane's spent tokens and hold them for the reactor's
+    /// [`cancelled_usage`](ExecutorBackend::cancelled_usage) read (issue 6029) —
+    /// the same once-per-nonce handoff as the tree capture beside it, and on
+    /// every lane rather than only constructs: a cancelled verify burned
+    /// prover tokens all the same.
+    ///
+    /// Best-effort like that capture: a lane killed before it streamed names
+    /// no session and holds no log, and the cancel proceeds either way. Read
+    /// here, after the kill and before the release — the release hands the
+    /// checkout to the next dispatch, which resets the transcript this reads.
+    fn retain_cancelled_usage(&self, nonce: &Nonce, run: &Run) {
+        let Some(usage) = super::harness_usage::recover_evidence_usage(&run.evidence_dir, None) else {
+            return;
+        };
+        self.lock().cancelled_usage.insert(nonce.0.clone(), (usage.cost, usage.calls));
+    }
+
+    /// Persist the harness session id the lane at `nonce` streamed under, read
+    /// off its transcript, onto the order row (issue 6029) — the key the
+    /// session-log recovery prices a cancelled dispatch from after the run is
+    /// gone.
+    ///
+    /// Best-effort: a lane killed before it streamed names no session, a
+    /// backend without a store has no row to write, and a store fault must not
+    /// turn a successful kill into a failed cancel.
+    fn persist_harness_session(&self, nonce: &Nonce, evidence_dir: &Path) {
+        let transcript = fs::read_to_string(evidence_dir.join(TRANSCRIPT_FILE)).unwrap_or_default();
+        let (Some(session), Some(messages)) =
+            (super::harness_usage::session_id_from_transcript(&transcript), self.messages.as_ref())
+        else {
+            return;
+        };
+        if let Err(error) =
+            messages.lock().unwrap_or_else(PoisonError::into_inner).record_harness_session(&nonce.0, &session)
+        {
+            tracing::warn!(
+                nonce = %nonce.0,
+                %error,
+                "local executor backend: harness session write failed; a cancelled lane's tokens stay unpriced",
+            );
+        }
+    }
+
     fn fail_closed_host_fault(
         &self,
         handle: &WorkHandle,
         subject: &Digest,
         worktree_dir: Option<PathBuf>,
+        evidence_dir: &Path,
         is_construct: bool,
         cause: HostFaultCause,
     ) -> Vec<EvidenceRef> {
@@ -2447,9 +2495,14 @@ impl LocalExecutor {
             .then(|| cause.may_capture_partial())
             .and_then(|may| may.then(|| self.construct_capture(worktree_dir, &handle.nonce, false, None)))
             .flatten();
+        // The run judged nothing, but it still spent: price what its harness
+        // session log holds like any other attempt (issue 6029), so the
+        // metrics ledger sees the tokens the fault would otherwise hide.
+        let (cost, calls) = super::harness_usage::recover_evidence_usage(evidence_dir, None)
+            .map_or((None, None), |usage| (Some(usage.cost), usage.calls));
         self.retire(&handle.nonce.0);
         self.pump();
-        synthesized_executor_fault(handle, subject, cause, candidate)
+        synthesized_executor_fault(handle, subject, cause, candidate, cost, calls)
     }
 
     // A lane-authored `environment` stamp is already a no-judgment report.
@@ -2835,7 +2888,14 @@ impl LocalExecutor {
             cause = cause.token(),
             "local executor backend: terminal run left no readable evidence — host fault",
         );
-        Ok(self.fail_closed_host_fault(handle, &run.subject, run.worktree_dir.clone(), run.gates.is_construct, cause))
+        Ok(self.fail_closed_host_fault(
+            handle,
+            &run.subject,
+            run.worktree_dir.clone(),
+            &run.evidence_dir,
+            run.gates.is_construct,
+            cause,
+        ))
     }
 
     fn unbound_body_fault(
@@ -2855,7 +2915,14 @@ impl LocalExecutor {
             cause = cause.token(),
             "local executor backend: child body is not a bound judgment — host fault",
         );
-        self.fail_closed_host_fault(handle, &run.subject, run.worktree_dir, run.gates.is_construct, cause)
+        self.fail_closed_host_fault(
+            handle,
+            &run.subject,
+            run.worktree_dir,
+            &run.evidence_dir,
+            run.gates.is_construct,
+            cause,
+        )
     }
 
     fn capture_bound_construction(
@@ -2905,6 +2972,7 @@ impl LocalExecutor {
                 handle,
                 subject,
                 worktree_dir.map(Path::to_path_buf),
+                evidence_dir,
                 is_construct,
                 HostFaultCause::Unparseable,
             )
@@ -2961,6 +3029,7 @@ impl LocalExecutor {
                 handle,
                 &subject,
                 worktree_dir,
+                &evidence_dir,
                 is_construct,
                 host_fault.unwrap_or(HostFaultCause::Unparseable),
             );
@@ -3008,7 +3077,7 @@ impl LocalExecutor {
             && !authored
             && let Some(cause) = host_fault
         {
-            return self.fail_closed_host_fault(handle, &subject, worktree_dir, is_construct, cause);
+            return self.fail_closed_host_fault(handle, &subject, worktree_dir, &evidence_dir, is_construct, cause);
         }
         // A declining construct-family lane that named the paths its work
         // requires asks for surface (ADR-0207); one whose claim does not
@@ -3237,6 +3306,8 @@ fn synthesized_executor_fault(
     subject: &Digest,
     cause: HostFaultCause,
     candidate: Option<CandidateRef>,
+    cost: Option<StudyCost>,
+    calls: Option<Vec<StudyCall>>,
 ) -> Vec<EvidenceRef> {
     let mut body = serde_json::json!({
         "status": "environment",
@@ -3249,7 +3320,7 @@ fn synthesized_executor_fault(
     }
     let bytes = serde_json::to_vec(&body)
         .unwrap_or_else(|_| br#"{"status":"environment","cause":"unparseable-evidence"}"#.to_vec());
-    vec![executor_fault_ref(handle, subject, &bytes, candidate, None, None, None)]
+    vec![executor_fault_ref(handle, subject, &bytes, candidate, None, cost, calls)]
 }
 
 /// What the lane's own conclusion says about the attempt, as opposed to what
@@ -3338,7 +3409,7 @@ fn executor_fault_ref(
     candidate: Option<CandidateRef>,
     findings: Option<String>,
     cost: Option<StudyCost>,
-    calls: Option<Vec<aether_bloomery::StudyCall>>,
+    calls: Option<Vec<StudyCall>>,
 ) -> EvidenceRef {
     let detail = Digest::of_wire_bytes(bytes);
     EvidenceRef {
@@ -3683,6 +3754,14 @@ impl ExecutorBackend for LocalExecutor {
                 // (#5998). After the kill so the capture cannot race the child's
                 // last write, and before the release so it cannot race the reset.
                 self.retain_cancelled_capture(&handle.nonce, reservation.run_mut());
+                // The same ordering for the tokens the lane spent (issue 6029):
+                // the kill above gave the harness its bounded SIGTERM grace to
+                // flush its last usage record, and the release below resets the
+                // transcript it is recovered from. The session id rides the
+                // order row, so a recovery after this process is gone still
+                // finds the log.
+                self.retain_cancelled_usage(&handle.nonce, reservation.run_mut());
+                self.persist_harness_session(&handle.nonce, reservation.evidence_dir());
                 if let Some(slot) = reservation.slot() {
                     quarantine::clear(&self.base_dir, slot);
                 }
@@ -3721,6 +3800,12 @@ impl ExecutorBackend for LocalExecutor {
         // timeout's observation, and a capture left behind would ride a later
         // cancel of the same nonce as if that run had produced it.
         self.lock().cancelled_captures.remove(&handle.nonce.0)
+    }
+
+    fn cancelled_usage(&self, handle: &WorkHandle) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
+        // Removed rather than read, like the capture beside it: the tokens
+        // belong to this cancel's run, not to whatever nonce reuse follows.
+        self.lock().cancelled_usage.remove(&handle.nonce.0)
     }
 
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]
@@ -4406,14 +4491,14 @@ fn parse_retrospect_findings(bytes: &[u8]) -> Vec<RetrospectClaim> {
 /// indistinguishable from a free one and quietly corrupt every average taken
 /// over the ledger. Dual-consumer observation paths parse here once and split
 /// the pair; fabricating a zero cost for the `None` case is the defect.
-fn parse_measured(bytes: &[u8]) -> Option<(StudyCost, Option<Vec<aether_bloomery::StudyCall>>)> {
+fn parse_measured(bytes: &[u8]) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
     let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
     parse_study(&serde_json::to_vec(value.get("result_record")?).ok()?).ok()
 }
 
 /// Session-reuse stamping needs only the call vector. Dual-consumer observation
 /// paths call [`parse_measured`] once instead of this wrapper.
-fn parse_calls(bytes: &[u8]) -> Option<Vec<aether_bloomery::StudyCall>> {
+fn parse_calls(bytes: &[u8]) -> Option<Vec<StudyCall>> {
     parse_measured(bytes).and_then(|(_, calls)| calls)
 }
 
@@ -4598,6 +4683,69 @@ mod tests {
     use aether_bloomery::Digest;
 
     use super::{LaneGates, Registry, contextual_observation_bundle, parse_notes, usable_target_base};
+
+    // A faulted run that left a harness session log still observes its cost
+    // (issue 6029). The ledger prices a dispatch only from the evidence a
+    // lane deposits, and a lane that died mid-run deposits no result record —
+    // without the log read its tokens would price at nothing while the vendor
+    // meter billed every one of them.
+    #[test]
+    fn a_faulted_exit_with_a_session_log_still_observes_its_cost() {
+        use super::super::harness_usage::recover_evidence_usage;
+        use super::{HostFaultCause, synthesized_executor_fault};
+        use aether_bloomery::{Nonce, WorkHandle};
+
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::{env, process};
+
+        static SEQ: AtomicU64 = AtomicU64::new(0);
+        let tag = SEQ.fetch_add(1, Ordering::Relaxed);
+        let pid = process::id();
+        let base = env::temp_dir().join(format!("aether-fault-cost-{pid}-{tag}"));
+        let session = "2a2aeda2-6f38-4462-b519-2bf30e59a52e";
+        let log_dir = base.join("logs/sessions/2026/09/14").join(session);
+        fs::create_dir_all(&log_dir).expect("create session log dir");
+        fs::write(
+            log_dir.join("session.jsonl"),
+            "{\"payload\":{\"event\":{\"kind\":\"model_completed\",\"usage\":{\"input_tokens\":21450,\
+             \"output_tokens\":289,\"cache_write_tokens\":100,\"cache_read_tokens\":20465,\
+             \"reasoning_tokens\":63}}}}\n",
+        )
+        .expect("write session log");
+        let evidence = base.join("dispatch-1-evidence");
+        fs::create_dir_all(&evidence).expect("create evidence dir");
+        fs::write(
+            evidence.join("transcript.jsonl"),
+            format!(
+                "{{\"stream\":{{\"kind\":\"session\",\"id\":\"{session}\"}},\"payload_type\":\"run.lifecycle.started\"}}\n"
+            ),
+        )
+        .expect("write transcript");
+
+        let usage = recover_evidence_usage(&evidence, Some(&base.join("logs")))
+            .expect("the session log prices the faulted run");
+        let handle = WorkHandle::new(Nonce("dispatch-1".to_owned()));
+        let subject = Digest::of_wire_bytes(b"subject");
+        let refs = synthesized_executor_fault(
+            &handle,
+            &subject,
+            HostFaultCause::Signaled(9),
+            None,
+            Some(usage.cost),
+            usage.calls,
+        );
+
+        assert_eq!(refs.len(), 1, "a host fault synthesizes one fault reference");
+        let cost = refs[0].observation.cost.expect("the faulted dispatch carries its cost");
+        assert_eq!(cost.input_tokens, 985, "uncached input only: 21450 - 20465");
+        assert_eq!(cost.cache_read_tokens, 20465);
+        assert_eq!(cost.output_tokens, 352, "output plus reasoning: 289 + 63");
+        assert_eq!(
+            refs[0].observation.calls.as_ref().map(Vec::len),
+            Some(1),
+            "the per-call columns ride along for band selection"
+        );
+    }
 
     // Tripwire: `occupied` counts leases against the prover ceiling, so a
     // reconcile that frees a live run's retention would hand its slot to a

@@ -44,7 +44,7 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery::{
-    BloomId, ConfigResolveError, ConfigScopes, Digest, Event, Evidence, EvidenceKind, Fact, Nonce, PriceTable,
+    Admit, BloomId, ConfigResolveError, ConfigScopes, Digest, Event, Evidence, EvidenceKind, Fact, Nonce, PriceTable,
     SealedPriceTable, StudyCall, StudyCost, StudyRecord,
 };
 use aether_bloomery_github::{InwardError, StudyResult, normalize_study_result};
@@ -283,6 +283,81 @@ pub fn study_evidence_event(admission: &StudyAdmission, nonce: &Nonce) -> Option
             },
         },
     })
+}
+
+/// Admit the study row for a dispatch the host cancelled at its deadline or
+/// for silence (issue 6029): the recovered tokens, priced here against the
+/// bloom's sealed table exactly as a completed attempt's are.
+///
+/// Study first, verdict after: [`admit_study`] matches the order without
+/// consuming it, so the timeout's own admission still consumes exactly once.
+/// Returns the study [`Admit`] to forward beside the verdict.
+///
+/// `None` is never a fault: no artifacts handle, a broker refusal, or an
+/// encode/store fault each warn and yield nothing — the verdict still admits,
+/// and the gap stays legible as unaccounted rather than stalling the member
+/// on a missing ledger row. The intake cycle's `record_cost` takes the same
+/// posture for completed runs; this is its timeout-path sibling.
+pub fn admit_cancelled_study(
+    store: &mut dyn StoreBackend,
+    artifacts: Option<&mut ArtifactsCapabilityState>,
+    record: &DispatchRecord,
+    cost: StudyCost,
+    calls: Option<Vec<StudyCall>>,
+) -> Option<Admit> {
+    let Some(artifacts) = artifacts else {
+        return None;
+    };
+    let upload = UploadedStudyRecord {
+        nonce: record.nonce.clone(),
+        subject: record.displayed_digest,
+        cost,
+        calls,
+        session_reuse_arm: None,
+        session_reuse_saved_micro_usd: None,
+        peak_resident_bytes: None,
+    };
+    let admission = match admit_study(store, artifacts, &upload) {
+        Ok(StudyAdmitDecision::Admitted(admission)) => admission,
+        Ok(StudyAdmitDecision::Refused(refusal)) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::intake",
+                nonce = %upload.nonce.0,
+                ?refusal,
+                "cancelled attempt's study record refused; the timeout admits normally but its cost is unrecorded",
+            );
+            return None;
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::intake",
+                nonce = %upload.nonce.0,
+                %error,
+                "cancelled attempt's study record could not be stored; the timeout admits normally but its cost is unrecorded",
+            );
+            return None;
+        }
+    };
+    let Some(event) = study_evidence_event(&admission, &record.nonce) else {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::intake",
+            nonce = %record.nonce.0,
+            "cancelled attempt's study artifact digest is not 32-byte hex; the timeout admits normally but its cost is unjournaled",
+        );
+        return None;
+    };
+    match to_vec(&event) {
+        Ok(bytes) => Some(Admit { event: bytes }),
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::intake",
+                nonce = %record.nonce.0,
+                %error,
+                "cancelled attempt's study evidence event could not encode; the timeout admits normally but its cost is unjournaled",
+            );
+            None
+        }
+    }
 }
 
 /// What the attempt's measured tokens are worth, in micro-USD, under the

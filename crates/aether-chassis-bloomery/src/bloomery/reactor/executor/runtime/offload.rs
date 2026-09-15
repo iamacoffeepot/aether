@@ -61,7 +61,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_bloomery::{
     BackendId, BloomId, CandidateRef, Digest, Nonce, ObservedConstructionCheckpoint, ObservedLaneWrites,
-    SourceSnapshot, WorkHandle, WorkOrder, WorkpieceId,
+    SourceSnapshot, StudyCall, StudyCost, WorkHandle, WorkOrder, WorkpieceId,
 };
 use aether_substrate::actor::native::{DEFAULT_MAX_IN_FLIGHT, NativeCtx};
 
@@ -564,6 +564,13 @@ impl ExecutorPort for OffloadedPort<'_> {
         // already happened inside the cancel a worker answered, so this is the
         // reactor collecting a registry row, not asking for work.
         self.shell.cancelled_capture(handle)
+    }
+
+    fn cancelled_usage(&self, handle: &WorkHandle) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
+        // Straight to the shell, like `cancelled_capture`: the recovery
+        // already happened inside the cancel a worker answered, so this is
+        // the reactor collecting a registry row, not asking for work.
+        self.shell.cancelled_usage(handle)
     }
 
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {

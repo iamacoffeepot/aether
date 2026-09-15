@@ -213,6 +213,13 @@ where
         self.0.cancelled_capture(handle)
     }
 
+    fn cancelled_usage(
+        &self,
+        handle: &WorkHandle,
+    ) -> Option<(aether_bloomery::StudyCost, Option<Vec<aether_bloomery::StudyCall>>)> {
+        self.0.cancelled_usage(handle)
+    }
+
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
         self.0.release_physical_run(physical_run).map_err(Into::into)
     }

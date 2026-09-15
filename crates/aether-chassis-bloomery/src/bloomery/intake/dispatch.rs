@@ -147,6 +147,7 @@ impl DispatchRecord {
             profile: to_vec(&self.profile).unwrap_or_default(),
             lifecycle: OrderLifecycle::Submitting,
             prompt_manifest: self.prompt_manifest.map(|digest| digest.as_bytes().to_vec()),
+            harness_session_id: None,
         }
     }
 }

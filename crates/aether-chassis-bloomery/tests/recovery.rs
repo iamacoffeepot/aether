@@ -221,6 +221,7 @@ fn plant_completed_order(store: &mut SqliteStore, worktrees: &Path, bloom: Bloom
             deadline_unix_millis: u64::MAX / 2,
             lifecycle: OrderLifecycle::Submitted,
             prompt_manifest: None,
+            harness_session_id: None,
         })
         .unwrap();
 
@@ -391,6 +392,7 @@ fn precheck_order(
         deadline_unix_millis,
         lifecycle,
         prompt_manifest: None,
+        harness_session_id: None,
     }
 }
 

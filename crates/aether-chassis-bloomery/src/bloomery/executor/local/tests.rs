@@ -2254,6 +2254,7 @@ fn member_order_at(nonce: &str, workpiece: &str, stage: StageId) -> OutstandingO
         deadline_unix_millis: 1_700_000_000_000,
         lifecycle: OrderLifecycle::Submitted,
         prompt_manifest: None,
+        harness_session_id: None,
     }
 }
 
@@ -4353,6 +4354,7 @@ fn contained_member_store(dir: &TempDir, verify: &str, queued: &str) -> SqliteSt
                 deadline_unix_millis: 1_700_000_000_000,
                 lifecycle: OrderLifecycle::Submitted,
                 prompt_manifest: None,
+                harness_session_id: None,
             })
             .unwrap();
     }

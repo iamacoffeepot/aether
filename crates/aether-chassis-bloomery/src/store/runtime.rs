@@ -169,6 +169,13 @@ pub struct OutstandingOrder {
     /// attempt evidence (ADR-0214). `None` on a mechanical lane or a row
     /// recorded before this column existed.
     pub prompt_manifest: Option<Vec<u8>>,
+    /// The harness session id the lane worked under (issue 6029) — the handle
+    /// a later lap resumes this run's conversation with, and the key the
+    /// harness session log carrying this dispatch's tokens is filed under.
+    /// `None` until the backend reads it off the lane's transcript (a dispatch
+    /// records its order before any session exists), or when the lane never
+    /// streamed one.
+    pub harness_session_id: Option<String>,
     /// Whether this row is a live dispatch or only a submit intent (#5564).
     ///
     /// The registry row is written *before* `submit` runs so the local lane can
@@ -582,6 +589,10 @@ pub trait StoreBackend: Send + CommissionBackend {
     /// `submitting` row was updated. Idempotent on an already-submitted nonce
     /// (returns `false`); a consumed nonce also returns `false`.
     fn mark_order_submitted(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    /// Record the harness session id the lane at `nonce` worked under (issue
+    /// 6029), read off its transcript. Last write wins; a consumed nonce
+    /// returns `false` and writes nothing.
+    fn record_harness_session(&mut self, nonce: &str, session_id: &str) -> rusqlite::Result<bool>;
     /// Every nonce still outstanding as a *live dispatch* — the restart recovery
     /// set (issue #3641): the executor reactor's `init` seeds its in-memory
     /// tracked-handle set from this so a dispatched-but-unresolved order is
@@ -1607,9 +1618,14 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// admitting, and `intake_refusals`, the one standing broker refusal per member
 /// that `GET /view` left-joins onto the member's live order. Created empty and
 /// nothing is backfilled — a nonce nobody cancelled is not cancelled, and a
-/// refusal that only ever reached the host log is not a block anyone can still
-/// read off the board.
-pub(super) const SCHEMA_VERSION: i64 = 27;
+/// refusal that only ever reached the host log cannot be recovered onto the
+/// member it blocked.
+///
+/// `28` is the harness session id on each order row (issue 6029):
+/// `harness_session_id`, nullable. A pre-column row names no session; the
+/// backend fills it from the lane's transcript, and a dispatch that never
+/// streamed one keeps the null.
+pub(super) const SCHEMA_VERSION: i64 = 28;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1812,6 +1828,7 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     }
 
     add_prompt_manifest_column(migration)?;
+    add_harness_session_column(migration)?;
 
     // Versions 23 and 24 (ADR-0218): the durable shared-run projection. Created
     // empty; the journal holds the coordination facts a physical run is about.
@@ -1875,6 +1892,19 @@ fn add_prompt_manifest_column(migration: &rusqlite::Transaction<'_>) -> rusqlite
     for table in ORDER_BEARING_TABLES {
         if !has_column(migration, table, "prompt_manifest")? {
             migration.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN prompt_manifest BLOB;"))?;
+        }
+    }
+    Ok(())
+}
+
+/// Schema v28 (issue 6029): the harness session id on each order row.
+/// Nullable with no backfill — a pre-column dispatch streamed under a session
+/// the host never recorded, and inventing one would price another run's tokens
+/// against this order.
+fn add_harness_session_column(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()> {
+    for table in ORDER_BEARING_TABLES {
+        if !has_column(migration, table, "harness_session_id")? {
+            migration.execute_batch(&format!("ALTER TABLE {table} ADD COLUMN harness_session_id TEXT;"))?;
         }
     }
     Ok(())
@@ -2037,6 +2067,15 @@ fn add_deadline_column(table: &str) -> String {
 }
 
 /// The schema, applied idempotently on every open.
+///
+/// Spelling note: `SQLite` reprints an `ALTER TABLE ... ADD COLUMN` table's
+/// stored DDL with the appended column joined as `BLOB , ... TEXT)` — space
+/// before the comma, none before the closing paren — and the schema-snapshot
+/// tests require a store migrated from v26/v27 byte-identical to a fresh one.
+/// So `outstanding_orders`, whose newest column is an appended one with no
+/// table constraint after it, spells its tail exactly that way below. A table
+/// with a trailing `PRIMARY KEY` constraint reprints normally (`parked_question`
+/// needs no such spelling).
 const MIGRATIONS: &str = "\
 CREATE TABLE IF NOT EXISTS journal (
     sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2082,8 +2121,9 @@ CREATE TABLE IF NOT EXISTS outstanding_orders (
     profile              BLOB NOT NULL,
     deadline_unix_millis INTEGER NOT NULL,
     lifecycle            TEXT NOT NULL DEFAULT 'submitted',
-    prompt_manifest      BLOB
-);
+    prompt_manifest      BLOB ,
+    harness_session_id   TEXT)
+;
 CREATE TABLE IF NOT EXISTS parked_question (
     bloom                BLOB NOT NULL,
     question             BLOB NOT NULL,
@@ -2099,6 +2139,7 @@ CREATE TABLE IF NOT EXISTS parked_question (
     deadline_unix_millis INTEGER NOT NULL,
     lifecycle            TEXT NOT NULL DEFAULT 'submitted',
     prompt_manifest      BLOB,
+    harness_session_id   TEXT,
     PRIMARY KEY (bloom, question)
 );
 CREATE TABLE IF NOT EXISTS study_index (
@@ -2458,7 +2499,8 @@ fn is_constraint_violation(error: &rusqlite::Error) -> bool {
 /// `parked_question` keyed by the question that parked it — select through this
 /// one spelling, so they cannot drift apart column-wise.
 const ORDER_COLUMNS: &str = "nonce, bloom, workpiece, scope_revision, candidate, displayed_digest, stage, \
-                             transformation, configs, profile, deadline_unix_millis, lifecycle, prompt_manifest";
+                             transformation, configs, profile, deadline_unix_millis, lifecycle, prompt_manifest, \
+                             harness_session_id";
 
 /// The [`CandidateHash`] columns, in the order [`candidate_hash_from_row`] reads
 /// them. List and latest share this spelling so they cannot drift.
@@ -2499,6 +2541,7 @@ fn order_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<OutstandingOrder>
         deadline_unix_millis: u64::try_from(row.get::<_, i64>(10)?).unwrap_or_default(),
         lifecycle: OrderLifecycle::parse(&row.get::<_, String>(11)?),
         prompt_manifest: row.get(12)?,
+        harness_session_id: row.get(13)?,
     })
 }
 
@@ -2584,7 +2627,7 @@ fn order_params<'a>(
     order: &'a OutstandingOrder,
     deadline: &'a i64,
     lifecycle: &'a dyn rusqlite::ToSql,
-) -> [&'a dyn rusqlite::ToSql; 13] {
+) -> [&'a dyn rusqlite::ToSql; 14] {
     [
         &order.nonce,
         &order.bloom,
@@ -2599,6 +2642,7 @@ fn order_params<'a>(
         deadline,
         lifecycle,
         &order.prompt_manifest,
+        &order.harness_session_id,
     ]
 }
 
@@ -2612,7 +2656,7 @@ impl StoreBackend for SqliteStore {
         let changed = self.conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO outstanding_orders ({ORDER_COLUMNS}) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ),
             order_params(order, &deadline, &lifecycle).as_slice(),
         )?;
@@ -2647,6 +2691,14 @@ impl StoreBackend for SqliteStore {
         let updated = self.conn.execute(
             "UPDATE outstanding_orders SET lifecycle = ?2 WHERE nonce = ?1 AND lifecycle = ?3",
             rusqlite::params![nonce, OrderLifecycle::Submitted.as_str(), OrderLifecycle::Submitting.as_str()],
+        )?;
+        Ok(updated > 0)
+    }
+
+    fn record_harness_session(&mut self, nonce: &str, session_id: &str) -> rusqlite::Result<bool> {
+        let updated = self.conn.execute(
+            "UPDATE outstanding_orders SET harness_session_id = ?2 WHERE nonce = ?1",
+            rusqlite::params![nonce, session_id],
         )?;
         Ok(updated > 0)
     }
@@ -3397,7 +3449,7 @@ impl StoreBackend for SqliteStore {
         self.conn.execute(
             &format!(
                 "INSERT OR REPLACE INTO parked_question (question, {ORDER_COLUMNS}) \
-                 VALUES (?14, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13)"
+                 VALUES (?15, ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)"
             ),
             [order_params(order, &deadline, &lifecycle).as_slice(), &[&question as &dyn rusqlite::ToSql]]
                 .concat()

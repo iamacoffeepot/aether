@@ -84,7 +84,9 @@
 //! coordinator restart, the [`priority`] band that decides which waiting
 //! dispatch takes a slot as it frees, the [`quarantine`] a slot takes when that
 //! child cannot be killed, the per-base warm-target [`snapshot`] store a slot
-//! is cloned from before it builds, and the [`backend`] registry +
+//! is cloned from before it builds, the [`harness_usage`] recovery that prices
+//! a lane which left no result record from its harness session log, and the
+//! [`backend`] registry +
 //! [`ExecutorBackend`](aether_bloomery::ExecutorBackend) impl over them.
 
 mod affinity;
@@ -92,6 +94,7 @@ mod backend;
 mod error;
 #[cfg(any(test, feature = "testing"))]
 mod group_absence;
+pub mod harness_usage;
 mod identity;
 mod lane_env;
 mod lane_program;

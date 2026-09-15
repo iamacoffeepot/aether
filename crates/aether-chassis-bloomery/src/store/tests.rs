@@ -462,6 +462,7 @@ fn order_due_at(nonce: &str, deadline_unix_millis: u64) -> OutstandingOrder {
         deadline_unix_millis,
         lifecycle: OrderLifecycle::Submitted,
         prompt_manifest: None,
+        harness_session_id: None,
     }
 }
 

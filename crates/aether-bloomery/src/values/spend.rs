@@ -82,10 +82,14 @@ pub struct SpendWindow {
     /// Per-bloom totals inside the window, keyed by bloom id so the first
     /// crossing is a stable scan rather than an insertion-order accident.
     pub per_bloom: BTreeMap<BloomId, u64>,
-    /// Study-record evidence the resolver could not fold — missing bytes, or a
-    /// record that does not grade its evidence's subject or name its own bloom.
-    /// Counted apart from the total so an accounting gap is a number, not a
-    /// suspicion.
+    /// Dispatches with no session log at all (issue 6029) — study-record
+    /// evidence the resolver could not fold because its bytes are missing, or
+    /// because the record does not grade its evidence's subject or name its
+    /// own bloom. Every dispatch whose harness session log survived yields a
+    /// study record, priced at lane exit whatever the outcome, so what remains
+    /// here is a lane killed before it streamed, a harness that reported no
+    /// usage, or bytes the store lost. Counted apart from the total so an
+    /// accounting gap is a number, not a suspicion.
     pub unaccounted_dispatches: u64,
     /// Resolved records whose priced column is zero — a model the sealed table
     /// priced at nothing, distinguishable from a cheap fleet whose totals are

@@ -1872,6 +1872,7 @@ fn an_expired_order_that_does_not_decode_is_reclaimed_before_it_is_read() {
             deadline_unix_millis: AT_THE_DEADLINE,
             lifecycle: OrderLifecycle::Submitted,
             prompt_manifest: None,
+            harness_session_id: None,
         })
         .unwrap();
     let mut tracked = track(vec![WorkHandle::new(Nonce(nonce.clone()))]);
@@ -4748,6 +4749,7 @@ mod offloaded_adapter_calls {
             deadline_unix_millis,
             lifecycle: OrderLifecycle::Submitted,
             prompt_manifest: None,
+            harness_session_id: None,
         }
     }
 

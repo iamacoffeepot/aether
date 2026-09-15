@@ -162,6 +162,17 @@ impl ExecutorBackend for RoutingExecutor {
         }
     }
 
+    fn cancelled_usage(
+        &self,
+        handle: &WorkHandle,
+    ) -> Option<(aether_bloomery::StudyCost, Option<Vec<aether_bloomery::StudyCall>>)> {
+        // Collected from the same lane as the capture beside it.
+        match self.lane_of(&handle.nonce.0) {
+            Lane::Actions => self.actions.cancelled_usage(handle),
+            Lane::Local => self.local.cancelled_usage(handle),
+        }
+    }
+
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
         self.local.release_physical_run(physical_run)?;
         Ok(())

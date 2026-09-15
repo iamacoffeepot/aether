@@ -490,6 +490,23 @@ pub trait ExecutorBackend {
         None
     }
 
+    /// The tokens a lane this backend cancelled had spent, recovered from its
+    /// harness session log (issue 6029) — the usage a faulted or cancelled
+    /// dispatch prices like any other.
+    ///
+    /// Read once per nonce, after a cancel this backend answered `Ok`: the
+    /// slot release behind the cancel resets the checkout and the transcript
+    /// with it, so a read that never happens loses the tokens the kill went
+    /// out of its way to flush. `None` is the ordinary answer: a backend with
+    /// no session log to read (the zero-secret Actions lane), a handle that
+    /// named no local run, and a lane that streamed nothing billable all say
+    /// it. Unpriced token columns for the intake to price, never a dollar
+    /// figure — the sealed table stays the one price.
+    fn cancelled_usage(&self, handle: &WorkHandle) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
+        let _ = handle;
+        None
+    }
+
     /// Stream the references to the evidence the run uploaded, filtered to the
     /// order's nonce.
     ///

@@ -76,6 +76,7 @@ use crate::bloomery::outbox::TopicOutbox;
 use crate::bloomery::poll_timer::{TimerHandle, spawn_timer};
 use crate::bloomery::precheck::PrecheckProjection;
 use crate::bloomery::provenance::{ProvenanceRefusal, drain_refusals, journal_refusal};
+use crate::bloomery::study::admit_cancelled_study;
 #[cfg(any(test, feature = "testing"))]
 use crate::bloomery::study::{StudyAdmitDecision, UploadedStudyRecord, admit_study, study_evidence_event};
 #[cfg(any(test, feature = "testing"))]
@@ -467,7 +468,7 @@ fn expire_overdue_orders(
         if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
             continue;
         }
-        if let Some(admit) = terminate_live_order(
+        admits.extend(terminate_live_order(
             store,
             artifacts.as_deref_mut(),
             executor,
@@ -475,9 +476,7 @@ fn expire_overdue_orders(
             &order,
             TerminationCause::Deadline,
             captures,
-        ) {
-            admits.push(admit);
-        }
+        ));
     }
     admits
 }
@@ -514,13 +513,13 @@ fn warn_terminated(cause: TerminationCause, record: &DispatchRecord, deadline: u
 /// the same consume-once retry story.
 fn terminate_live_order(
     store: &mut dyn StoreBackend,
-    artifacts: Option<&mut ArtifactsCapabilityState>,
+    mut artifacts: Option<&mut ArtifactsCapabilityState>,
     executor: &dyn ExecutorPort,
     tracked: &mut Vec<TrackedHandle>,
     order: &OutstandingOrder,
     cause: TerminationCause,
     captures: &mut Vec<CancelledCapture>,
-) -> Option<Admit> {
+) -> Vec<Admit> {
     let deadline = order.deadline_unix_millis;
     let nonce = Nonce(order.nonce.clone());
     // An order this build already cancelled and then could not terminate is
@@ -530,7 +529,7 @@ fn terminate_live_order(
     // will never change again, once per poll interval for the life of the
     // process.
     if reported_unterminable(tracked, &nonce) {
-        return None;
+        return Vec::new();
     }
     // Cancel first, verdict second, and before the decode. Whether this
     // build can *account* for the expiry is a separate question from whether
@@ -544,7 +543,7 @@ fn terminate_live_order(
     // every tick is one worker call rather than one probe per poll interval —
     // and the sweeps behind it keep running while it is out.
     match executor.cancel(&WorkHandle::new(nonce.clone())) {
-        Settled::InFlight => return None,
+        Settled::InFlight => return Vec::new(),
         Settled::Answered(Ok(())) => {}
         Settled::Answered(Err(error)) => {
             tracing::warn!(
@@ -553,7 +552,7 @@ fn terminate_live_order(
                 %error,
                 "expired order's cancel failed; leaving it live to retry",
             );
-            return None;
+            return Vec::new();
         }
     }
     // What the cancelled lane had built, if it was a construct and left a dirty
@@ -562,6 +561,12 @@ fn terminate_live_order(
     // read once per nonce, and a read that never happens loses the tree the
     // cancel went out of its way to keep.
     let kept_tree = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
+    // What the cancelled lane had spent, recovered from its harness session
+    // log (issue 6029). Collected beside the tree capture above, for the same
+    // reason: the cancel gave the harness its bounded SIGTERM grace to flush
+    // its last usage record, and anything below that declines to terminate
+    // the order must not lose the tokens with it.
+    let kept_usage = executor.cancelled_usage(&WorkHandle::new(nonce.clone()));
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
         tracing::error!(
@@ -569,11 +574,11 @@ fn terminate_live_order(
             nonce = %nonce.0,
             "expired order did not decode into a dispatch record; its run was cancelled, but the order cannot be terminated by this build",
         );
-        return None;
+        return Vec::new();
     };
     let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage, cause) else {
         warn_deferred_timeout(tracked, &record, deadline);
-        return None;
+        return Vec::new();
     };
 
     let timeout = TimeoutRecord {
@@ -587,14 +592,30 @@ fn terminate_live_order(
         subject: record.displayed_digest,
         deadline_unix_millis: deadline,
     };
-    let detail = store_timeout_record(artifacts, &timeout)?;
+    let Some(detail) = store_timeout_record(artifacts.as_deref_mut(), &timeout) else {
+        return Vec::new();
+    };
 
+    // The cancelled attempt's cost rides the same study path a completed
+    // attempt's does: priced here against the bloom's sealed table, journaled
+    // as its own evidence, and admitted before the verdict below consumes the
+    // order — the study matches without consuming, so the consume stays
+    // exactly once. A lane that streamed nothing billable prices nothing, and
+    // the dispatch stays unaccounted, which is now exactly what that count
+    // means (issue 6029).
+    let mut admits = Vec::new();
+    let (cost, calls) = kept_usage.map_or((None, None), |(cost, calls)| (Some(cost), calls));
+    if let Some(cost) = cost
+        && let Some(study) = admit_cancelled_study(store, artifacts, &record, cost, calls.clone())
+    {
+        admits.push(study);
+    }
     let upload = UploadedEvidence {
         nonce: record.nonce.clone(),
         subject: record.displayed_digest,
         verdict,
         detail,
-        observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
+        observation: LaneObservation { failed_verifiers, cost, calls, ..LaneObservation::default() },
     };
     // The captured tree is published as a host effect rather than carried on
     // the observation (#5998). A cancelled member admits
@@ -616,7 +637,8 @@ fn terminate_live_order(
         Ok(AdmitDecision::Admitted(admission)) => {
             warn_terminated(cause, &record, deadline);
             tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
-            Some(admission.admit)
+            admits.push(admission.admit);
+            admits
         }
         // A scoping run's timeout landed on the commission store's own run
         // ledger (ADR-0208, #5304), so there is no event to hand the control
@@ -631,7 +653,7 @@ fn terminate_live_order(
                 "dispatched scoping run outlived its sealed execution limit; cancelled and recorded on the run ledger",
             );
             tracked.retain(|tracked_handle| tracked_handle.handle.nonce != record.nonce);
-            None
+            admits
         }
         Ok(AdmitDecision::Refused(refusal)) => {
             // A refusal is a judgement about the order's own stored columns,
@@ -645,7 +667,7 @@ fn terminate_live_order(
                 ?refusal,
                 "the intake refused a timeout for this order; it cannot be terminated by this build",
             );
-            None
+            admits
         }
         Err(error) => {
             tracing::warn!(
@@ -654,7 +676,7 @@ fn terminate_live_order(
                 %error,
                 "timeout admission faulted; leaving the order live to retry",
             );
-            None
+            admits
         }
     }
 }
@@ -825,7 +847,7 @@ fn expire_silent_orders(
         if !is_silent(start, observation.observed_from_unix_millis, silence_millis) {
             continue;
         }
-        if let Some(admit) = terminate_live_order(
+        admits.extend(terminate_live_order(
             store,
             artifacts.as_deref_mut(),
             executor,
@@ -833,9 +855,7 @@ fn expire_silent_orders(
             &order,
             TerminationCause::HeartbeatSilence,
             captures,
-        ) {
-            admits.push(admit);
-        }
+        ));
     }
     admits
 }

@@ -36,7 +36,7 @@
 
 use aether_bloomery::{
     BackendId, CandidateRef, Digest, EvidenceRef, ExecutionStatus, ObservedConstructionCheckpoint, ObservedLaneWrites,
-    WorkHandle, WorkOrder,
+    StudyCall, StudyCost, WorkHandle, WorkOrder,
 };
 
 use super::{ExecutorPortError, ExecutorShell};
@@ -142,6 +142,14 @@ pub trait ExecutorPort {
         None
     }
 
+    /// The tokens a lane the backend just cancelled had spent (issue 6029) —
+    /// see [`aether_bloomery::ExecutorBackend::cancelled_usage`]. A registry
+    /// read beside the capture above, never offloaded, for the same reason.
+    fn cancelled_usage(&self, handle: &WorkHandle) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
+        let _ = handle;
+        None
+    }
+
     /// Release a retained warm lane after cancellation or retirement.
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
         let _ = physical_run;
@@ -221,6 +229,10 @@ impl ExecutorPort for ExecutorShell {
 
     fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
         self.backend.cancelled_capture(handle)
+    }
+
+    fn cancelled_usage(&self, handle: &WorkHandle) -> Option<(StudyCost, Option<Vec<StudyCall>>)> {
+        self.backend.cancelled_usage(handle)
     }
 
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
