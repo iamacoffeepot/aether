@@ -78,13 +78,13 @@ pub struct BloomGrade {
     /// member withdrawn for a cause other than its own verdict is dropped from
     /// it, because its work was never judged. The synthetic composition
     /// workpiece is not a sealed member and is on neither side. See
-    /// [`send_back_counts`].
+    /// `send_back_counts`.
     #[serde(default)]
     pub graded_members: u32,
     /// How many of [`graded_members`](Self::graded_members) had their work
     /// refused — sent back for a repair lap under the `Refine` disposition, or
     /// withdrawn on their own red verdict under `Eject`. See
-    /// [`send_back_counts`] for how each is recognized.
+    /// `send_back_counts` for how each is recognized.
     ///
     /// The send-back rate is this over `graded_members`. Both halves are counts
     /// rather than a ratio because a [`BloomGrade`] is `Eq` and
