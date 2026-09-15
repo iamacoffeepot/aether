@@ -105,6 +105,8 @@ const READ_TABLES: &[&str] = &[
     "outbox",
     "outbox_results",
     "outstanding_orders",
+    "operator_cancelled_orders",
+    "intake_refusals",
     "parked_question",
     "dispatch_owners",
     "capture_diff",
@@ -151,10 +153,15 @@ impl SqliteStore {
     ///
     /// Runs after the migration opening the store performs, the way boot
     /// would — so a column the readers name but the store lacks fails here,
-    /// not at restart. Never writes: the metrics fold and every
-    /// record/mark/consume path are deliberately absent. Always returns
-    /// `Ok`; per-table failures collect into the tally, and the `Result`
-    /// keeps a future fatal open error from reshaping the proof.
+    /// not at restart. Every record/mark/consume path is deliberately
+    /// absent, with one write the sweep does perform: the dispatch-rollup
+    /// reader folds the journal into the `metric_*` tables first
+    /// (`StoreBackend::ensure_metrics`) whenever the journal has run past
+    /// the persisted cursor, which is the same derived-data rebuild boot
+    /// would do and is what makes the rollup's own `SELECT` meaningful.
+    /// Nothing else here writes. Always returns `Ok`; per-table failures
+    /// collect into the tally, and the `Result` keeps a future fatal open
+    /// error from reshaping the proof.
     pub fn read_everything(&mut self) -> rusqlite::Result<ReadTally> {
         let mut tally = ReadTally::default();
         self.read_journal_and_config(&mut tally);
@@ -308,5 +315,33 @@ impl SqliteStore {
         tally.probe("adrs", AdrBackend::list(self));
         tally.probe("adrs", AdrBackend::load(self, PROBE_DIGEST));
         tally.probe("adrs", AdrBackend::load_by_number(self, 0));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{READ_TABLES, SqliteStore};
+
+    #[test]
+    fn every_schema_table_is_in_the_sweep() {
+        // Tripwire (issue #6024): the sweep's table list is hand-maintained, so
+        // a table that lands without joining it is read by nothing and the
+        // columns its readers name go unproven — which is the whole failure
+        // `--check-store` exists to catch, reappearing one table lower. The
+        // schema is the authority, so this reads it rather than restating it;
+        // the allowlist is the `sqlite_` internals no backend read can name.
+        let store = SqliteStore::open(":memory:").expect("a fresh in-memory store opens");
+        let mut statement =
+            store.conn.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").expect("sqlite_master reads");
+
+        let mut missing: Vec<String> = statement
+            .query_map([], |row| row.get::<_, String>(0))
+            .expect("the table names read")
+            .map(|name| name.expect("a table name is text"))
+            .filter(|name| !name.starts_with("sqlite_") && !READ_TABLES.contains(&name.as_str()))
+            .collect();
+        missing.sort();
+
+        assert!(missing.is_empty(), "schema tables no read sweep names: {missing:?}");
     }
 }
