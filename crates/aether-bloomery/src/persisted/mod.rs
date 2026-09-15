@@ -538,7 +538,7 @@ pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
 /// never recomputed from live code (#5500). The new field is `Option`, but
 /// that rescues JSON only: on the positional wire a capture-less row still
 /// runs out of bytes under today's decoder, so rows of this shape read
-/// through [`upcast_event_pre_checkpoint`] with no capture.
+/// through `upcast_event_pre_checkpoint` with no capture.
 pub const EVENT_PRE_CHECKPOINT_DIGEST: Digest =
     Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
 
