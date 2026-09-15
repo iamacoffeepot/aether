@@ -44,6 +44,14 @@ impl DigestHex {
         aether_bloomery::encode_hex(&self.0)
     }
 
+    /// Parse a full 64-character hex digest. Anything shorter, longer, or not
+    /// hex is `None` — the journal filter reads a typed line this way, so a
+    /// half-typed id stays search text instead of becoming a bloom.
+    #[must_use]
+    pub fn from_hex(text: &str) -> Option<Self> {
+        decode(text).map(Self)
+    }
+
     /// The short id the board prints for a bloom.
     #[must_use]
     pub fn prefix(&self) -> String {

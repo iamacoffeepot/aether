@@ -96,6 +96,48 @@ fn following_next_from_sequence_yields_every_record_once() {
 }
 
 #[test]
+fn a_contains_filter_pages_without_stepping_over_a_match() {
+    // The plausible bug: `contains` filters the page the cursor already
+    // selected instead of the scan that feeds it. The page then returns the
+    // matches that happen to fall inside one limit-sized window and names the
+    // last *scanned* sequence as the continuation, so every match between two
+    // windows is skipped — a search over yesterday's journal silently loses
+    // records. Paging a filter to exhaustion must visit each match once.
+    let wanted = Digest::from_bytes([7; 32]);
+    let records = vec![observe(1, 1), land(2, wanted), observe(3, 3), land(4, wanted), observe(5, 5)];
+    let first = JournalQuery { limit: 1, ..JournalQuery::parse("contains=Land").expect("contains parses") };
+    assert_eq!(first.contains.as_deref(), Some("Land"));
+
+    let page_a = page_journal(&records, &first).expect("fixture records decode");
+    assert_eq!(page_a.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![4]);
+    assert_eq!(page_a.total_matched, 2);
+    assert!(page_a.truncated);
+    assert_eq!(page_a.next_from_sequence, Some(4));
+
+    let second = JournalQuery { from_sequence: page_a.next_from_sequence, ..first };
+    let page_b = page_journal(&records, &second).expect("fixture records decode");
+    assert_eq!(page_b.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![2]);
+    assert!(!page_b.truncated);
+    assert_eq!(page_b.next_from_sequence, None);
+}
+
+#[test]
+fn a_contains_filter_reads_the_idempotency_key_and_ignores_an_empty_value() {
+    // The plausible bug: `contains` matches only the fact variant, so the
+    // console's own needle — which searches the key too — finds rows on the
+    // loaded page that the server refuses to page to. Or an empty value (the
+    // operator clearing the filter) is taken as a needle and matches nothing.
+    let records = vec![observe(1, 1), land(2, Digest::from_bytes([7; 32]))];
+    let by_key = JournalQuery::parse("contains=obs-1").expect("contains parses");
+    let view = page_journal(&records, &by_key).expect("fixture records decode");
+    assert_eq!(view.records.iter().map(|entry| entry.sequence).collect::<Vec<_>>(), vec![1]);
+
+    let cleared = JournalQuery::parse("contains=").expect("an empty contains parses");
+    assert_eq!(cleared.contains, None);
+    assert_eq!(page_journal(&records, &cleared).expect("fixture records decode").total_matched, 2);
+}
+
+#[test]
 fn a_percent_encoded_limit_decodes_then_clamps() {
     // The plausible bug: the query is not decoded, so `%31%30%30%31` is not an
     // integer and the read is a `400` instead of a named clamp.

@@ -26,12 +26,13 @@ pub(in crate::api::runtime) use query::{clamp_limit, pairs, parse_u64};
 /// Render the store's journal page as one bounded HTTP body.
 pub fn journal_response(result: PageJournalResult) -> HttpServerResponse {
     match result {
-        PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, notice } => {
+        PageJournalResult::Ok { records, bloom, from_sequence, limit, descending, contains, notice } => {
             let query = JournalQuery {
                 bloom: bloom.as_deref().and_then(digest_from_hex),
                 from_sequence,
                 limit,
                 descending,
+                contains,
                 notice,
             };
             match page_journal(&records, &query) {
