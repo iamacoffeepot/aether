@@ -5454,11 +5454,7 @@ mod tests {
             &snapshot,
             &bloom,
             plan.digest(),
-            &SharedRunPreparation::Conflict {
-                input: colliding.clone(),
-                at: head.candidate,
-                evidence: evidence.clone(),
-            },
+            &SharedRunPreparation::Conflict { input: colliding, at: head.candidate, evidence: evidence.clone() },
         );
 
         let next = recorded(&decisions);
