@@ -13,7 +13,7 @@ use crate::palette;
 use crate::store::{ResourceKey, Store};
 
 use super::bucket::format_duration;
-use super::life::{self, MemberLife, RollupRow, duration_bar};
+use super::life::{self, MemberLife, duration_bar};
 
 const HINTS: &[KeyHint] = &[
     KeyHint { keys: "j/k", action: "select" },
@@ -97,13 +97,15 @@ impl Time {
             .split(area);
         render_header(frame, chunks[0], &life);
         self.render_member(frame, chunks[1], &life);
-        render_rollup(frame, chunks[2], &life.rollup);
+        render_rollup(frame, chunks[2], &life);
     }
 
     fn life(&self, store: &Store) -> MemberLife {
-        let spans =
-            store.timeline(self.bloom).and_then(|cell| cell.value.as_ref()).map_or(&[][..], |doc| doc.spans.as_slice());
-        life::compose(spans, &self.workpiece)
+        let (spans, truncated) = store
+            .timeline(self.bloom)
+            .and_then(|cell| cell.value.as_ref())
+            .map_or((&[][..], false), |doc| (doc.spans.as_slice(), doc.truncated));
+        life::compose(spans, &self.workpiece, truncated)
     }
 
     fn render_member(&mut self, frame: &mut Frame<'_>, area: Rect, life: &MemberLife) {
@@ -140,7 +142,10 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, life: &MemberLife) {
     } else {
         format_duration(life.total_millis)
     };
-    let title = format!("TIME  {}  {total}", life.workpiece);
+    let mut title = format!("TIME  {}  {total}", life.workpiece);
+    if life.truncated {
+        title.push_str("  truncated");
+    }
     let text = if life.bar.is_empty() {
         title
     } else {
@@ -149,11 +154,16 @@ fn render_header(frame: &mut Frame<'_>, area: Rect, life: &MemberLife) {
     frame.render_widget(Paragraph::new(text).style(palette::body()), area);
 }
 
-fn render_rollup(frame: &mut Frame<'_>, area: Rect, rows: &[RollupRow]) {
+fn render_rollup(frame: &mut Frame<'_>, area: Rect, life: &MemberLife) {
+    let rollup = if life.truncated {
+        "ROLLUP (partial)"
+    } else {
+        "ROLLUP"
+    };
     let header =
-        Row::new(["ROLLUP".to_owned(), "SUM".to_owned(), "MIN".to_owned(), "MAX".to_owned(), "HOLDER".to_owned()])
+        Row::new([rollup.to_owned(), "SUM".to_owned(), "MIN".to_owned(), "MAX".to_owned(), "HOLDER".to_owned()])
             .style(palette::body().add_modifier(Modifier::BOLD));
-    let table_rows = rows.iter().map(|row| {
+    let table_rows = life.rollup.iter().map(|row| {
         Row::new([
             Cell::from(row.stage.label().to_owned()),
             Cell::from(format_duration(row.sum_millis)),
@@ -220,6 +230,10 @@ mod tests {
     }
 
     fn fixture() -> Store {
+        fixture_truncated(false)
+    }
+
+    fn fixture_truncated(truncated: bool) -> Store {
         let mut store = Store::new(Duration::from_secs(1));
         store.apply_timeline(
             bloom(),
@@ -245,7 +259,7 @@ mod tests {
                     span("wp-b", StageId::Construct, 0, 8_000),
                     verify_run("wp-b", 8_000, 40_000, run(3), SPAN_OUTCOME_INTEGRATED),
                 ],
-                ..MetricsTimeline::default()
+                truncated,
             }),
         );
         store
@@ -275,7 +289,7 @@ mod tests {
         // max because substages were counted twice.
         let store = fixture();
         let spans = store.timeline(bloom()).unwrap().value.as_ref().unwrap();
-        let life = life::compose(&spans.spans, "wp-a");
+        let life = life::compose(&spans.spans, "wp-a", spans.truncated);
         assert_eq!(
             life.rows
                 .iter()
@@ -299,5 +313,19 @@ mod tests {
         let painted = painted(&store);
         assert!(painted.contains("retired"), "the painted frame must carry the retirement: {painted}");
         assert!(painted.contains("wp-b"), "the rollup must name the max-verify member: {painted}");
+    }
+
+    #[test]
+    fn a_truncated_timeline_marks_the_header_and_the_rollup_as_partial() {
+        // The plausible bug: the ledger cuts spans at its cap while the Time
+        // screen sums whatever came back, so the header total and the rollup
+        // read as complete while silently undercounting.
+        let whole = painted(&fixture());
+        assert!(!whole.contains("truncated"), "a whole timeline carries no cut marker: {whole}");
+        assert!(!whole.contains("partial"), "a whole rollup is not partial: {whole}");
+
+        let painted = painted(&fixture_truncated(true));
+        assert!(painted.contains("truncated"), "the header must mark the cut: {painted}");
+        assert!(painted.contains("partial"), "the rollup must read as a partial sum: {painted}");
     }
 }

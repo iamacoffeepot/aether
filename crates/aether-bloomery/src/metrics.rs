@@ -299,7 +299,8 @@ pub struct TimelineGateTiming {
     pub prepare_millis: Option<u64>,
 }
 
-/// A bloom's stage timeline, truncated at [`TIMELINE_SPAN_CAP`].
+/// A bloom's stage timeline. Only top-level spans count toward
+/// [`TIMELINE_SPAN_CAP`]; substages ride under their kept parent.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct MetricsTimeline {
     pub bloom: BloomId,
@@ -505,8 +506,11 @@ impl MetricsLedger {
         cells.into_values().collect()
     }
 
-    /// Stage spans for `bloom`, capped at [`TIMELINE_SPAN_CAP`]. Member lanes
-    /// and the composition's aggregate-gate identities share this list.
+    /// Stage spans for `bloom`, capped at [`TIMELINE_SPAN_CAP`]. Only
+    /// top-level spans count toward the cap — member lanes, the composition's
+    /// aggregate-gate identities, and shared-run verify spans — while prepare
+    /// and gate substages ride under their kept parent and never push a
+    /// top-level span out.
     #[must_use]
     pub fn timeline(&self, bloom: BloomId) -> MetricsTimeline {
         self.timeline_with(bloom, |_| None)
@@ -525,7 +529,7 @@ impl MetricsLedger {
         let attributed =
             |workpiece: &str| self.verify_spans.values().any(|span| span.bloom == bloom && span.workpiece == workpiece);
         let has_member_verify = self.verify_spans.values().any(|span| span.bloom == bloom);
-        let mut spans: Vec<TimelineSpan> = self
+        let mut parents: Vec<TimelineSpan> = self
             .dispatches
             .values()
             .filter(|row| row.bloom == bloom)
@@ -545,7 +549,7 @@ impl MetricsLedger {
                 substage: None,
             })
             .collect();
-        spans.extend(self.verify_spans.values().filter(|span| span.bloom == bloom).map(|span| TimelineSpan {
+        parents.extend(self.verify_spans.values().filter(|span| span.bloom == bloom).map(|span| TimelineSpan {
             workpiece: span.workpiece.clone(),
             stage: StageId::Verify,
             sequence: span.sequence,
@@ -556,18 +560,43 @@ impl MetricsLedger {
             outcome: span.outcome.clone(),
             substage: None,
         }));
-        spans.extend(self.prepare_spans.values().filter(|span| span.bloom == bloom).map(|span| TimelineSpan {
-            workpiece: span.workpiece.clone(),
-            stage: StageId::Verify,
-            sequence: span.sequence,
-            started_unix_millis: span.started_unix_millis,
-            reconstructed: span.reconstructed,
-            ended_unix_millis: span.ended_unix_millis,
-            run: span.run,
-            outcome: None,
-            substage: Some(String::from(SPAN_SUBSTAGE_PREPARE)),
-        }));
-        for span in self.verify_spans.values().filter(|span| span.bloom == bloom) {
+        parents.sort_by(|a, b| {
+            a.sequence
+                .cmp(&b.sequence)
+                .then_with(|| a.workpiece.cmp(&b.workpiece))
+                .then_with(|| a.substage.is_some().cmp(&b.substage.is_some()))
+                .then_with(|| a.substage.cmp(&b.substage))
+        });
+        let cap = usize::try_from(TIMELINE_SPAN_CAP).unwrap_or(usize::MAX);
+        let truncated = parents.len() > cap;
+        parents.truncate(cap);
+        let kept: Vec<(Digest, String)> =
+            parents.iter().filter_map(|span| span.run.map(|run| (run, span.workpiece.clone()))).collect();
+        let mut spans = parents;
+        spans.extend(
+            self.prepare_spans
+                .values()
+                .filter(|span| span.bloom == bloom)
+                .filter(|span| {
+                    span.run.is_none() || kept.contains(&(span.run.unwrap_or_default(), span.workpiece.clone()))
+                })
+                .map(|span| TimelineSpan {
+                    workpiece: span.workpiece.clone(),
+                    stage: StageId::Verify,
+                    sequence: span.sequence,
+                    started_unix_millis: span.started_unix_millis,
+                    reconstructed: span.reconstructed,
+                    ended_unix_millis: span.ended_unix_millis,
+                    run: span.run,
+                    outcome: None,
+                    substage: Some(String::from(SPAN_SUBSTAGE_PREPARE)),
+                }),
+        );
+        for span in self
+            .verify_spans
+            .values()
+            .filter(|span| span.bloom == bloom && kept.contains(&(span.run, span.workpiece.clone())))
+        {
             let Some(evidence) = span.evidence else {
                 continue;
             };
@@ -583,9 +612,6 @@ impl MetricsLedger {
                 .then_with(|| a.substage.is_some().cmp(&b.substage.is_some()))
                 .then_with(|| a.substage.cmp(&b.substage))
         });
-        let cap = usize::try_from(TIMELINE_SPAN_CAP).unwrap_or(usize::MAX);
-        let truncated = spans.len() > cap;
-        spans.truncate(cap);
         MetricsTimeline { bloom, spans, truncated }
     }
 
@@ -1014,5 +1040,148 @@ mod window_tests {
     fn window_label_names_the_utc_day_of_the_envelope() {
         assert_eq!(window_label(0), "bloomery/daily/1970-01-01");
         assert_eq!(RECONSTRUCTED_WINDOW, "reconstructed");
+    }
+}
+
+#[cfg(test)]
+mod timeline_cap_tests {
+    use super::{
+        DispatchAcc, MetricsLedger, PrepareSpanAcc, SPAN_SUBSTAGE_PREPARE, TIMELINE_SPAN_CAP, TimelineGateTiming,
+        TimelineTimings, VerifySpanAcc,
+    };
+    use crate::digest::Digest;
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::values::{DispatchKey, Harness, ReasoningEffort, ResolvedModel};
+    use alloc::format;
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    fn digest_of(index: usize) -> Digest {
+        let mut bytes = [0xA0; 32];
+        bytes[0..8].copy_from_slice(&u64::try_from(index).unwrap_or(u64::MAX).to_le_bytes());
+        Digest::from_bytes(bytes)
+    }
+
+    fn agent() -> ResolvedModel {
+        ResolvedModel { harness: Harness::Claude, model: String::from("test"), effort: ReasoningEffort::Medium }
+    }
+
+    fn push_dispatch(ledger: &mut MetricsLedger, bloom: BloomId, workpiece: &str, stage: StageId, index: usize) {
+        let sequence = u64::try_from(index).unwrap_or(u64::MAX);
+        let key = DispatchKey::Member { workpiece: WorkpieceId(String::from(workpiece)), stage };
+        ledger.dispatches.insert(
+            (bloom, key, digest_of(index)),
+            DispatchAcc {
+                bloom,
+                workpiece: String::from(workpiece),
+                stage,
+                displayed: digest_of(index),
+                sequence,
+                recorded_unix_millis: Some(sequence.saturating_mul(1_000)),
+                ended_unix_millis: Some(sequence.saturating_mul(1_000).saturating_add(500)),
+                reconstructed: false,
+                agent: agent(),
+                model_lane: true,
+            },
+        );
+    }
+
+    #[test]
+    fn gate_substages_do_not_push_the_land_span_out() {
+        // The plausible bug: every gate substage counted toward
+        // TIMELINE_SPAN_CAP, so a bloom with a few shared runs and several
+        // gates each truncated away its own latest spans — integration,
+        // review, fold, land — while reporting them as a complete timeline.
+        let mut ledger = MetricsLedger::default();
+        let bloom = BloomId(digest_of(999_999));
+        for index in 1..=9usize {
+            push_dispatch(&mut ledger, bloom, "wp-a", StageId::Construct, index);
+        }
+        push_dispatch(&mut ledger, bloom, "wp-a", StageId::Land, 10);
+        let run = digest_of(500_001);
+        let plan = digest_of(500_002);
+        let evidence = digest_of(500_003);
+        ledger.verify_spans.insert(
+            (run, String::from("wp-a")),
+            VerifySpanAcc {
+                bloom,
+                workpiece: String::from("wp-a"),
+                run,
+                plan,
+                sequence: 5,
+                started_unix_millis: Some(5_000),
+                ended_unix_millis: Some(6_000),
+                reconstructed: false,
+                outcome: None,
+                evidence: Some(evidence),
+            },
+        );
+        ledger.prepare_spans.insert(
+            (plan, String::from("wp-a")),
+            PrepareSpanAcc {
+                bloom,
+                workpiece: String::from("wp-a"),
+                plan,
+                run: Some(run),
+                sequence: 4,
+                started_unix_millis: Some(4_000),
+                ended_unix_millis: Some(5_000),
+                reconstructed: false,
+            },
+        );
+        let gates: Vec<TimelineGateTiming> = (0..300)
+            .map(|index| TimelineGateTiming {
+                command: format!("verify.gate-{index:03}"),
+                duration_millis: 1,
+                prepare_millis: None,
+            })
+            .collect();
+        let timings = TimelineTimings { duration_millis: 300, gates };
+        let timeline = ledger.timeline_with(bloom, |detail| (*detail == evidence).then_some(timings.clone()));
+        assert!(
+            !timeline.truncated,
+            "eleven top-level spans are under the cap however many gates they carry: {}",
+            timeline.spans.len()
+        );
+        assert!(
+            timeline.spans.iter().any(|span| span.stage == StageId::Land && span.substage.is_none()),
+            "the land span survives its bloom's own gate detail: {:?}",
+            timeline.spans.iter().map(|span| (span.stage, span.substage.clone())).collect::<Vec<_>>()
+        );
+        assert!(
+            timeline.spans.iter().any(|span| span.substage.as_deref() == Some(SPAN_SUBSTAGE_PREPARE)),
+            "the prepare substage rides under its kept run: {:?}",
+            timeline.spans.len()
+        );
+        assert_eq!(
+            timeline
+                .spans
+                .iter()
+                .filter(|span| span.substage.as_deref().is_some_and(|name| name.starts_with("verify.gate-")))
+                .count(),
+            300,
+            "no gate substage is cut: {:?}",
+            timeline.spans.len()
+        );
+    }
+
+    #[test]
+    fn the_cap_still_binds_top_level_spans() {
+        // The companion tripwire: excluding substages must not remove the cap
+        // itself — a bloom with more member spans than the cap still truncates.
+        let mut ledger = MetricsLedger::default();
+        let bloom = BloomId(digest_of(999_998));
+        let parents = usize::try_from(TIMELINE_SPAN_CAP).unwrap_or(usize::MAX).saturating_add(5);
+        for index in 1..=parents {
+            push_dispatch(&mut ledger, bloom, "wp-a", StageId::Construct, index);
+        }
+        let timeline = ledger.timeline(bloom);
+        assert!(timeline.truncated, "parents past the cap still truncate");
+        assert_eq!(
+            timeline.spans.len(),
+            usize::try_from(TIMELINE_SPAN_CAP).unwrap_or(usize::MAX),
+            "only the top-level cap binds: {:?}",
+            timeline.spans.len()
+        );
     }
 }
