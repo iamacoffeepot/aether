@@ -207,15 +207,15 @@ impl ApiCapabilityState {
         })
     }
 
-    /// `POST /blooms/{id}/members/{workpiece}/repair` — hand the wedged
+    /// `POST /blooms/{id}/members/{workpiece}/repair` — hand a non-terminal
     /// `{workpiece}` the candidate the operator pushed to its candidate ref, and
     /// let the ordinary gates judge it (#4957).
     ///
     /// The path names the workpiece for the reason the grant body does: the
-    /// reducer refuses one that is not wedged, so a stale read cannot act. The
-    /// reserved composition id is accepted here too — a composition whose weave
-    /// repair wedged is repaired the same way a member is, by someone supplying
-    /// the candidate its own lane could not.
+    /// reducer judges the candidate now, and the wedge is no longer the gate.
+    /// The reserved composition id is accepted here too — a composition whose
+    /// weave repair wedged is repaired the same way a member is, by someone
+    /// supplying the candidate its own lane could not.
     ///
     /// Journal-first and gate-preserving: the appended fact is the whole effect,
     /// and the reducer re-enters the workpiece at `Verify`, so the mechanical
@@ -864,15 +864,18 @@ pub(super) fn query_response(
 ) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
-            Ok(document) => json(
-                200,
-                &ViewWithDoctor {
-                    surface_alerts: surface_alerts(&document),
-                    document: &document,
-                    doctor,
-                    orders: order_alerts(orders),
-                },
-            ),
+            Ok(mut document) => {
+                overlay_intake_refusals(&mut document, orders);
+                json(
+                    200,
+                    &ViewWithDoctor {
+                        surface_alerts: surface_alerts(&document),
+                        document: &document,
+                        doctor,
+                        orders: order_alerts(orders),
+                    },
+                )
+            }
             Err(error) => error_response(500, &format!("view document decode failed: {error}")),
         },
         QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
@@ -927,13 +930,18 @@ struct ViewWithDoctor<'a> {
 
 /// One live outstanding order flattened onto `/view`: which bloom (zero for a
 /// bloom-less workspace stage), which workpiece (empty for a bloom-wide or
-/// workspace stage), and which stage the host is actually running.
+/// workspace stage), which stage the host is actually running, the displayed
+/// digest the evidence must bind to, and the absolute deadline.
 #[derive(Serialize)]
 struct OrderAlert {
     nonce: String,
     bloom: Digest,
     workpiece: String,
     stage: StageId,
+    displayed: Digest,
+    deadline_unix_millis: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
 }
 
 fn order_alerts(orders: &[LiveOrder]) -> Vec<OrderAlert> {
@@ -945,6 +953,9 @@ fn order_alerts(orders: &[LiveOrder]) -> Vec<OrderAlert> {
                 bloom: Digest::from_slice(&order.bloom)?,
                 workpiece: order.workpiece.clone(),
                 stage: from_bytes(&order.stage).ok()?,
+                displayed: Digest::from_slice(&order.displayed).unwrap_or_else(|| Digest::from_bytes([0; 32])),
+                deadline_unix_millis: order.deadline_unix_millis,
+                blocker: (!order.refusal.is_empty()).then(|| order.refusal.clone()),
             })
         })
         .collect()
@@ -971,6 +982,26 @@ struct SurfaceAlert<'a> {
     requests: u32,
     /// The requested paths, each with its one-line reason.
     paths: &'a [SurfacePathRequest],
+}
+
+/// Stamp each member carrying a live order with an intake refusal as blocked by
+/// it. The reducer projection knows nothing of the host-side refusal table, so
+/// the overlay joins the live orders (which already left-join the refusals) by
+/// bloom digest and workpiece.
+fn overlay_intake_refusals(document: &mut ViewDocument, orders: &[LiveOrder]) {
+    for bloom in &mut document.blooms {
+        let bloom_bytes = bloom.id.0.as_bytes();
+        for member in &mut bloom.members {
+            member.intake_refusal = orders
+                .iter()
+                .find(|order| {
+                    !order.refusal.is_empty()
+                        && order.bloom.as_slice() == bloom_bytes.as_slice()
+                        && order.workpiece == member.workpiece.0
+                })
+                .map(|order| order.refusal.clone());
+        }
+    }
 }
 
 /// Walk the decoded document for members awaiting a surface amendment, in
@@ -1133,6 +1164,9 @@ mod tests {
             bloom: vec![0; 32],
             workpiece: String::new(),
             stage: to_vec(&StageId::BaseVerify).unwrap(),
+            displayed: vec![1; 32],
+            deadline_unix_millis: 1_700_000_000_000,
+            refusal: String::new(),
         }];
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
         let response = query_response(result, None, &orders);

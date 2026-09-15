@@ -8,11 +8,11 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
-    CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
-    SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
+    ApprovalStoredView, BloomView, CancelCommissionRequest, CancelOrderRequest, CancelOrderView,
+    CommissionCancelledView, CommissionReopenedView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView,
+    DraftPatch, DraftView, JournalEntry, JournalView, OutcomeView, ProposeRequest, ReopenCommissionRequest,
+    RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView,
+    ScopeRunRequest, SealRequest, SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
 use super::http;
 use super::plan::spec_id;
@@ -100,6 +100,11 @@ impl<'a> Client<'a> {
     /// ordinary gates judge it (#4957).
     pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/repair"), request)
+    }
+
+    /// Drop one outstanding order from the board without faulting its lane.
+    pub fn cancel_order(&self, nonce: &str, request: &CancelOrderRequest) -> Result<CancelOrderView> {
+        self.send("POST", &format!("/orders/{nonce}/cancel"), request)
     }
 
     /// Propose a signed operator change onto the day's branch (ADR-0205).

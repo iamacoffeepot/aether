@@ -1123,8 +1123,6 @@ mod tests {
     use tempfile::TempDir;
 
     use super::super::lane_program::LaneProgram;
-    #[cfg(unix)]
-    use super::super::runner::RunProcess;
     use super::super::runner::{RunLifecycle, RunSpec};
     #[cfg(unix)]
     use super::link_slot_target;

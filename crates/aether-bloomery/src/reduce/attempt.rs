@@ -436,45 +436,16 @@ pub(super) fn reduce_member_executor_fault(
     stage: StageId,
     evidence: &Evidence,
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
-            MemberExecutorFaultError::UnknownOrInactiveBloom,
-        ));
+    let ctx = match FaultCtx::admissible(snapshot, bloom, workpiece, stage, evidence) {
+        Ok(ctx) => ctx,
+        Err(refusal) => return Decisions::rejected(Outcome::MemberExecutorFaultRejected(refusal)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(
-            MemberExecutorFaultError::UnknownOrInactiveBloom,
-        ));
-    }
-    let Some(member) = record.spec.members().iter().find(|member| member.workpiece == *workpiece) else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotAMember(
-            workpiece.clone(),
-        )));
-    };
-    let Some(cursor) = record.progress.get(workpiece).copied() else {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::NotDispatched(
-            workpiece.clone(),
-        )));
-    };
-    if cursor.stage != stage {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::StageMismatch {
-            expected: cursor.stage,
-            got: stage,
-        }));
-    }
-    let subject = cursor.candidate.map_or_else(|| member.scope_revision, |current| current.tree);
-    if !evidence.validates(&subject) {
-        return Decisions::rejected(Outcome::MemberExecutorFaultRejected(MemberExecutorFaultError::EvidenceNotBound {
-            expected: subject,
-            got: evidence.subject,
-        }));
-    }
 
     let rolls = match snapshot.member_machinery(bloom, workpiece) {
         Some(fault) if fault.stage == stage => fault.rolls.saturating_add(1),
         _ => 1,
     };
-    let budget = record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
+    let budget = ctx.record.stage_catalog.retry_budget_of(stage).unwrap_or(1);
     let mut effects = alloc::vec![
         Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
         Decision::RecordMemberMachinery {
@@ -498,13 +469,95 @@ pub(super) fn reduce_member_executor_fault(
         };
     }
 
-    let fold_checkpoint = cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile);
-    let (targets, construct_checkpoint_base) = reconcile_or_line_targets(
+    effects.extend(if ctx.cursor.stage == stage {
+        redispatch_current_stage(&ctx)
+    } else {
+        hand_held_candidate_to_stage(&ctx)
+    });
+    Decisions {
+        outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
+        effects,
+    }
+}
+
+/// Everything the two redispatch shapes read, resolved once by
+/// [`FaultCtx::admissible`].
+#[derive(Clone, Copy)]
+struct FaultCtx<'a> {
+    snapshot: &'a Snapshot,
+    record: &'a BloomRecord,
+    bloom: &'a BloomId,
+    workpiece: &'a WorkpieceId,
+    member: &'a Membership,
+    /// The member's cursor as the fault found it. `cursor.stage` is the stage
+    /// the member sits at; [`Self::stage`] is the stage the fault names, and
+    /// the two differ only on the held-candidate hand-off.
+    cursor: StageProgress,
+    stage: StageId,
+}
+
+impl<'a> FaultCtx<'a> {
+    /// Resolve the fault against the snapshot, or name the refusal that keeps
+    /// it out.
+    ///
+    /// The stage gate is the door #5969 opens: ordinarily a fault must name the
+    /// stage the cursor sits at, because a fault aimed from a stale read of the
+    /// board would otherwise spend a roll on the wrong stage. A member *holding
+    /// a candidate* is the one shape where that is demonstrably not a stale
+    /// read — the capture exists, and `Verify` is the only stage that judges it
+    /// — so naming `Verify` over a held candidate is accepted and hands the
+    /// capture to its verify rather than wedging the member behind another
+    /// construct lap.
+    fn admissible(
+        snapshot: &'a Snapshot,
+        bloom: &'a BloomId,
+        workpiece: &'a WorkpieceId,
+        stage: StageId,
+        evidence: &Evidence,
+    ) -> Result<Self, MemberExecutorFaultError> {
+        let record = snapshot
+            .blooms
+            .get(bloom)
+            .filter(|record| record.status == BloomStatus::Sealed)
+            .ok_or(MemberExecutorFaultError::UnknownOrInactiveBloom)?;
+        let member = record
+            .spec
+            .members()
+            .iter()
+            .find(|member| member.workpiece == *workpiece)
+            .ok_or_else(|| MemberExecutorFaultError::NotAMember(workpiece.clone()))?;
+        let cursor = record
+            .progress
+            .get(workpiece)
+            .copied()
+            .ok_or_else(|| MemberExecutorFaultError::NotDispatched(workpiece.clone()))?;
+
+        let holds_a_capture_to_verify = stage == StageId::Verify && cursor.candidate.is_some();
+        if cursor.stage != stage && !holds_a_capture_to_verify {
+            return Err(MemberExecutorFaultError::StageMismatch { expected: cursor.stage, got: stage });
+        }
+
+        let subject = cursor.candidate.map_or_else(|| member.scope_revision, |current| current.tree);
+        if !evidence.validates(&subject) {
+            return Err(MemberExecutorFaultError::EvidenceNotBound { expected: subject, got: evidence.subject });
+        }
+
+        Ok(Self { snapshot, record, bloom, workpiece, member, cursor, stage })
+    }
+}
+
+/// Redispatch the member's current stage over the same artifact under a fresh
+/// order: nothing about the cursor moves, so the cursor itself is the progress
+/// the move carries. A Construct order displays no candidate — the lane is
+/// building one — while every later stage displays the capture it judges.
+fn redispatch_current_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let targets = reconcile_or_line_targets(
         stage,
         member.scope_revision,
         member_construct_base(record, workpiece),
         cursor.candidate,
-        fold_checkpoint,
+        cursor.fold_checkpoint.filter(|_| stage == StageId::Reconcile),
         snapshot.member_checkpoint(bloom, workpiece),
     );
     let displayed = if stage == StageId::Construct {
@@ -512,19 +565,56 @@ pub(super) fn reduce_member_executor_fault(
     } else {
         cursor.candidate.map(|current| current.tree)
     };
-    effects.extend(move_effects_with_checkpoint(
+
+    move_effects_with_checkpoint(
         *bloom,
         workpiece,
         member.scope_revision,
         &cursor,
-        (targets, construct_checkpoint_base),
+        targets,
         displayed,
         SealedLine::of(record, member),
-    ));
-    Decisions {
-        outcome: Outcome::MachineryRetried { bloom: *bloom, workpiece: workpiece.clone(), stage, rolls, budget },
-        effects,
-    }
+    )
+}
+
+/// Move the cursor to `ctx.stage` carrying the capture it already holds — the
+/// hand-off [`FaultCtx::admissible`] lets through.
+///
+/// A fresh stage entry, so `attempts` restarts at one, and the fold round
+/// outlives the stage exactly as it does on a passing advance (#4952): the
+/// checkpoint the capture was reconciled onto rides along until the fold either
+/// takes the candidate or moves, while the conflict evidence does not — that
+/// was the wedge attachment of the Reconcile stage this capture has left.
+fn hand_held_candidate_to_stage(ctx: &FaultCtx<'_>) -> [Decision; 2] {
+    let FaultCtx { snapshot, record, bloom, workpiece, member, cursor, stage } = *ctx;
+    let progress = StageProgress {
+        stage,
+        attempts: 1,
+        candidate: cursor.candidate,
+        repair_rolls: cursor.repair_rolls,
+        seen_verify_failures: cursor.seen_verify_failures,
+        fold_checkpoint: cursor.fold_checkpoint,
+        fold_conflict_evidence: None,
+        reconcile_assembles_base: false,
+    };
+    let targets = reconcile_or_line_targets(
+        stage,
+        member.scope_revision,
+        member_construct_base(record, workpiece),
+        cursor.candidate,
+        None,
+        snapshot.member_checkpoint(bloom, workpiece),
+    );
+
+    move_effects_with_checkpoint(
+        *bloom,
+        workpiece,
+        member.scope_revision,
+        &progress,
+        targets,
+        cursor.candidate.map(|current| current.tree),
+        SealedLine::of(record, member),
+    )
 }
 
 #[derive(Clone, Copy)]
@@ -1778,5 +1868,82 @@ mod tests {
             }
             other => panic!("expected the later revocation to rejoin Verify, got {other:?}"),
         }
+    }
+
+    // A member at Construct holding a candidate from an admitted Reconcile
+    // completion accepts `retry --stage Verify`: the held capture moves onto
+    // its verify without another construct lap.
+    #[test]
+    fn a_retry_naming_verify_is_accepted_when_the_member_holds_a_candidate() {
+        let (snapshot, bloom) = sealed();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "splice-conflict",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: conflict_evidence(30),
+                },
+            ),
+        );
+        let assembled = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let (snapshot, advanced) = step(
+            &snapshot,
+            &event(
+                "reconcile-pass",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Reconcile,
+                    passed: true,
+                    evidence: evidence(),
+                    candidate: Some(assembled),
+                },
+            ),
+        );
+        assert!(matches!(
+            advanced.outcome,
+            Outcome::AttemptAdvanced { from: StageId::Reconcile, to: StageId::Construct, .. }
+        ));
+        let progress = snapshot.blooms[&bloom].progress[&WorkpieceId("wp".into())];
+        assert_eq!(progress.stage, StageId::Construct);
+        assert_eq!(progress.candidate, Some(assembled));
+        assert_eq!(progress.fold_checkpoint, Some(digest(31)), "the capture carries the head it reconciled onto");
+
+        let (after, retried) = step(
+            &snapshot,
+            &event(
+                "retry-verify",
+                Fact::MemberExecutorFault {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Verify,
+                    evidence: Evidence {
+                        subject: assembled.tree,
+                        kind: EvidenceKind::ExecutorFault,
+                        detail: digest(71),
+                    },
+                },
+            ),
+        );
+        let Outcome::MachineryRetried { stage, .. } = retried.outcome else {
+            panic!("expected a Verify retry, got {:?}", retried.outcome);
+        };
+        assert_eq!(stage, StageId::Verify);
+        let (stage, subject) = dispatch_stage_and_subject(&retried);
+        assert_eq!(stage, StageId::Verify);
+        assert_eq!(subject, assembled.tree);
+
+        // Tripwire (#4952): the fold round outlives the stage. Dropping the
+        // checkpoint on the way to Verify would leave the fold with no record
+        // of what this capture was reconciled onto, and the next fold would
+        // replay the conflict this reconcile already resolved.
+        let moved = after.blooms[&bloom].progress[&WorkpieceId("wp".into())];
+        assert_eq!(moved.stage, StageId::Verify);
+        assert_eq!(moved.candidate, Some(assembled));
+        assert_eq!(moved.fold_checkpoint, Some(digest(31)));
     }
 }

@@ -9,8 +9,8 @@
 
 use super::commission::{CommissionBackend, RevisionEvidence};
 use super::runtime::{
-    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OrderLifecycle, OutstandingOrder,
-    ProofFactWrite, RecordOutcome, ScopeRunOpen, SealOutcome, SqliteStore, StoreBackend,
+    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, IntakeRefusalRow, JournalWrite, OrderLifecycle,
+    OutstandingOrder, ProofFactWrite, RecordOutcome, ScopeRunOpen, SealOutcome, SqliteStore, StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{
@@ -1534,6 +1534,64 @@ fn list_live_orders_includes_a_bloom_less_base_verify_and_drops_submit_intents()
     let base = live.iter().find(|order| order.nonce == "dispatch-base").expect("the bloom-less order is listed");
     assert!(base.bloom.iter().all(|byte| *byte == 0), "the placeholder bloom is the zero digest");
     assert!(base.workpiece.is_empty(), "a workspace stage has no member");
+}
+
+#[test]
+fn a_cancelled_order_leaves_the_board_but_stays_ignored() {
+    // A doomed lane is dropped without faulting it: the order is gone from the
+    // live set, the cancellation is recorded, and a later lookup finds nothing
+    // to admit.
+    let mut store = memory();
+    store.record_order(&order("dispatch-9")).unwrap();
+    assert!(store.cancel_order("dispatch-9", "doomed lane", "eve").unwrap());
+    assert!(store.lookup_order("dispatch-9").unwrap().is_none(), "the board no longer holds the nonce");
+    assert!(store.is_order_cancelled("dispatch-9").unwrap(), "the dispatch entry is marked cancelled");
+    assert!(store.list_live_orders().unwrap().is_empty());
+    assert!(!store.cancel_order("dispatch-unknown", "doomed lane", "eve").unwrap());
+    assert!(store.is_order_cancelled("dispatch-unknown").unwrap());
+}
+
+fn refusal_against(placed: &OutstandingOrder, text: &str) -> IntakeRefusalRow {
+    IntakeRefusalRow {
+        bloom: placed.bloom.clone(),
+        workpiece: placed.workpiece.clone(),
+        nonce: placed.nonce.clone(),
+        stage: placed.stage.clone(),
+        displayed_digest: placed.displayed_digest.clone(),
+        deadline_unix_millis: placed.deadline_unix_millis,
+        refusal: text.to_owned(),
+    }
+}
+
+#[test]
+fn a_refused_order_stays_live_and_carries_its_blocker_until_the_next_one_lands() {
+    // The join is the point: an intake refusal is not a row an operator goes
+    // looking for, it is an attribute of the order still sitting on the board.
+    // The refused order must stay live *and* name the block, a second refusal
+    // must replace the first rather than accumulate, and a consumed order must
+    // leave no stale blocker behind.
+    let mut store = memory();
+    let placed = order("dispatch-7");
+    store.record_order(&placed).unwrap();
+    store.record_intake_refusal(&refusal_against(&placed, "DigestMismatch { displayed, claimed }")).unwrap();
+
+    let held = store
+        .list_live_orders()
+        .unwrap()
+        .into_iter()
+        .find(|order| order.nonce == "dispatch-7")
+        .expect("the refused order stays live");
+    assert!(held.refusal.contains("DigestMismatch"), "the live order carries its blocker");
+    assert!(!held.displayed.is_empty(), "the displayed digest rides along");
+    assert!(held.deadline_unix_millis > 0, "the deadline rides along");
+
+    store.record_intake_refusal(&refusal_against(&placed, "OutOfLineStage(Study)")).unwrap();
+    let live = store.list_live_orders().unwrap();
+    assert_eq!(live.len(), 1, "one standing refusal per member, not a growing pile");
+    assert!(live[0].refusal.contains("OutOfLineStage"), "the later refusal replaces the earlier one");
+
+    store.clear_intake_refusal(&placed.bloom, &placed.workpiece).unwrap();
+    assert!(store.list_live_orders().unwrap()[0].refusal.is_empty(), "a consumed order leaves no blocker behind");
 }
 
 #[test]

@@ -309,13 +309,12 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
     if record.operator_hold.is_some() {
         return rejected(OperatorRepairError::Held);
     }
-    // Only a stopped workpiece is repairable, for the reason only a wedged
-    // member is grantable: one still holding a dispatched attempt would end up
-    // with two workers on it.
-    if !record.wedged.contains_key(&repair.workpiece) {
-        return rejected(OperatorRepairError::NotWedged(repair.workpiece.clone()));
-    }
-
+    // Any non-terminal workpiece is repairable: the candidate is judged now and
+    // the wedge is no longer the gate. A member that still holds a dispatched
+    // attempt keeps it; the repair re-enters at Verify and the gates judge the
+    // operator's tree on its own terms. (`NotWedged` stays on the error enum so
+    // prior refusals keep their wire discriminants, but this door no longer
+    // emits it.)
     let recorded = Decision::RecordOperatorRepair { bloom: *bloom, repair: repair.clone() };
     if repair.workpiece.is_composition() {
         return rewoven_by_operator(record, bloom, repair, recorded);
@@ -324,9 +323,8 @@ pub(super) fn reduce_operator_repair(snapshot: &Snapshot, bloom: &BloomId, repai
         return rejected(OperatorRepairError::NotAMember(repair.workpiece.clone()));
     };
     // A member carrying a resolution claim has passed its review and is
-    // immutable (ADR-0191 §4). Unreachable through the wedge check above under
-    // today's transitions — a resolved member is not wedged — and stated anyway,
-    // because it is the rule this door must not become a way around.
+    // immutable (ADR-0191 §4). Stated because it is the rule this door must
+    // not become a way around.
     if record.claims.contains_key(&repair.workpiece) {
         return rejected(OperatorRepairError::AlreadyResolved(repair.workpiece.clone()));
     }
@@ -405,5 +403,124 @@ fn rewoven_by_operator(
             candidate: weave.tree,
         },
         effects,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::testing::{step as testing_step, with_compiled_manifest};
+
+    use super::super::{Decision, Event, Fact, Outcome, Snapshot};
+    use super::*;
+    use crate::digest::Digest;
+    use crate::ids::{IdempotencyKey, StageId, WorkpieceId};
+    use crate::values::{BloomDraft, CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership};
+
+    fn digest(seed: u8) -> Digest {
+        Digest::from_bytes([seed; 32])
+    }
+
+    fn event(key: &str, fact: Fact) -> Event {
+        Event { idempotency_key: IdempotencyKey(key.into()), fact }
+    }
+
+    fn membership(name: &str, revision: u8) -> Membership {
+        let mut member = Membership {
+            workpiece: WorkpieceId(name.into()),
+            scope_revision: digest(revision),
+            configs: ConfigRegistry::default(),
+            approval: Evidence { subject: digest(0), kind: EvidenceKind::Approval, detail: digest(200) },
+        };
+        member.approval.subject = member.subject();
+        member
+    }
+
+    /// A one-member bloom sealed over a green base, its member sitting at
+    /// Construct holding the capture an admitted Reconcile completion assembled
+    /// — the shape #5969 is about, and the one no test over the whole reducer
+    /// (`tests/invariants.rs`) reaches.
+    fn holding_a_capture() -> (Snapshot, BloomId, CandidateRef) {
+        let spec = with_compiled_manifest(BloomDraft {
+            proposals: vec![membership("wp", 10)],
+            base: digest(0),
+            ..BloomDraft::default()
+        })
+        .seal();
+        let bloom = spec.id();
+        let (snapshot, _) =
+            testing_step(&Snapshot::new(digest(0)).with_green_base(digest(0)), &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) = testing_step(
+            &snapshot,
+            &event(
+                "splice",
+                Fact::FoldConflict {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    checkpoint: digest(30),
+                    head: digest(31),
+                    evidence: Evidence { subject: digest(30), kind: EvidenceKind::FoldConflict, detail: digest(90) },
+                },
+            ),
+        );
+
+        let assembled = CandidateRef { tree: digest(41), checkout: digest(42) };
+        let (snapshot, advanced) = testing_step(
+            &snapshot,
+            &event(
+                "reconcile-pass",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: WorkpieceId("wp".into()),
+                    stage: StageId::Reconcile,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(30),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(91),
+                    },
+                    candidate: Some(assembled),
+                },
+            ),
+        );
+        assert!(
+            matches!(
+                advanced.outcome,
+                Outcome::AttemptAdvanced { from: StageId::Reconcile, to: StageId::Construct, .. }
+            ),
+            "the assembling reconcile returns the member to Construct holding its capture",
+        );
+
+        (snapshot, bloom, assembled)
+    }
+
+    // The plausible bug: the door keeps refusing `NotWedged` for a member that
+    // is demonstrably stuck holding a capture, so the only way to judge the
+    // operator's tree is to wait for the roll budget to wedge the member first.
+    #[test]
+    fn a_repair_on_a_member_holding_a_capture_is_judged_now_at_verify() {
+        let (snapshot, bloom, _) = holding_a_capture();
+        let decided = reduce_operator_repair(
+            &snapshot,
+            &bloom,
+            &OperatorRepair {
+                workpiece: WorkpieceId("wp".into()),
+                candidate: CandidateRef { tree: digest(51), checkout: digest(52) },
+                reason: "hand-built".into(),
+                operator: "eve".into(),
+            },
+        );
+
+        let Outcome::OperatorRepairAccepted { workpiece, candidate, .. } = decided.outcome else {
+            panic!("expected an accepted repair, got {:?}", decided.outcome);
+        };
+        assert_eq!(workpiece.0, "wp");
+        assert_eq!(candidate, digest(51), "the operator's tree is what gets judged, not the held capture");
+        assert!(
+            decided
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::DispatchAttempt { stage: StageId::Verify, .. })),
+            "the repair re-enters at Verify"
+        );
     }
 }

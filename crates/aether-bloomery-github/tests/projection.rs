@@ -48,20 +48,7 @@ fn member(number: u64, revision: u8) -> MemberView {
         workpiece: WorkpieceId(format!("issue-{number}")),
         scope_revision: digest(revision),
         approval: approval(digest(revision)),
-        resolution: None,
-        pending_decision: None,
-        wedge: None,
-        blocked_by: None,
-        host_fault: None,
-        machinery_rolls: 0,
-        machinery_budget: 0,
-        wedge_cause: None,
-        cursor: None,
-        park: None,
-        awaiting_surface: None,
-        withdrawn: None,
-        leases: Vec::new(),
-        evicted_by: None,
+        ..MemberView::default()
     }
 }
 

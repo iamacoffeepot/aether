@@ -20,14 +20,15 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 
 use super::projection::{
-    BloomView, CompositionView, ExecutorFaultView, LandingBlock, LeaseView, MemberView, NarrowedCompositionView,
-    ReviewParkView,
+    AwaitingSurfaceView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView, HostFaultView,
+    LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView, PendingDecisionView,
+    ReviewParkView, WedgeCause, WithdrawnView,
 };
 use crate::ids::WorkpieceId;
 use crate::reduce::RecordedRefusal;
 use crate::values::SpendQuiesce;
-use crate::values::{OperatorHold, PrecheckState};
-use crate::{BaseAlertView, BloomId, BloomStatus, Digest, ViewDocument};
+use crate::values::{Evidence, OperatorHold, PrecheckState, ResolutionClaim, Wedge};
+use crate::{BaseAlertView, BloomId, BloomStatus, Digest, MemberPark, ViewDocument};
 use serde::Deserialize;
 
 /// Pre-adoption positional identity. An absent stamp is this identity.
@@ -220,6 +221,57 @@ impl StorageLeaves for BaseAlertView {
     }
 }
 
+// The member element both frozen fixtures below carry — everything a
+// `MemberView` held before #5969 added `intake_refusal`. Frozen separately for
+// the reason the bloom elements are: a member is a `Vec` element inside a
+// positional bloom, so a defaulted field appended to the current shape gives
+// those rows no additive decoding window and serde cannot upcast an element.
+#[derive(aether_data::Schema, Clone, Serialize, Deserialize)]
+struct MemberViewPreIntakeRefusal {
+    workpiece: WorkpieceId,
+    scope_revision: Digest,
+    approval: Evidence,
+    resolution: Option<ResolutionClaim>,
+    pending_decision: Option<PendingDecisionView>,
+    wedge: Option<Wedge>,
+    blocked_by: Option<WorkpieceId>,
+    host_fault: Option<HostFaultView>,
+    machinery_rolls: u32,
+    machinery_budget: u32,
+    wedge_cause: Option<WedgeCause>,
+    cursor: Option<CompositionCursorView>,
+    park: Option<MemberPark>,
+    awaiting_surface: Option<AwaitingSurfaceView>,
+    withdrawn: Option<WithdrawnView>,
+    leases: Vec<String>,
+    evicted_by: Option<LeaseEvictionView>,
+}
+
+impl From<MemberViewPreIntakeRefusal> for MemberView {
+    fn from(prior: MemberViewPreIntakeRefusal) -> Self {
+        Self {
+            workpiece: prior.workpiece,
+            scope_revision: prior.scope_revision,
+            approval: prior.approval,
+            resolution: prior.resolution,
+            pending_decision: prior.pending_decision,
+            wedge: prior.wedge,
+            blocked_by: prior.blocked_by,
+            host_fault: prior.host_fault,
+            machinery_rolls: prior.machinery_rolls,
+            machinery_budget: prior.machinery_budget,
+            wedge_cause: prior.wedge_cause,
+            cursor: prior.cursor,
+            park: prior.park,
+            awaiting_surface: prior.awaiting_surface,
+            withdrawn: prior.withdrawn,
+            leases: prior.leases,
+            evicted_by: prior.evicted_by,
+            intake_refusal: None,
+        }
+    }
+}
+
 // The view row written at d04707893456077046715e189d2739e80c97646c.
 // Bloom elements were positional even inside storage rows. Keep that exact
 // element shape for queued rows; serde defaults cannot upcast a Vec element.
@@ -238,7 +290,7 @@ struct BloomViewPrePrecheck {
     id: BloomId,
     status: BloomStatus,
     superseded_by: Option<BloomId>,
-    members: Vec<MemberView>,
+    members: Vec<MemberViewPreIntakeRefusal>,
     landing_blocked: Option<LandingBlock>,
     executor_fault: Option<ExecutorFaultView>,
     review_park: Option<ReviewParkView>,
@@ -255,7 +307,7 @@ impl From<BloomViewPrePrecheck> for BloomView {
             id: prior.id,
             status: prior.status,
             superseded_by: prior.superseded_by,
-            members: prior.members,
+            members: prior.members.into_iter().map(MemberView::from).collect(),
             landing_blocked: prior.landing_blocked,
             executor_fault: prior.executor_fault,
             review_park: prior.review_park,
@@ -300,7 +352,7 @@ struct BloomViewPreCoordination {
     id: BloomId,
     status: BloomStatus,
     superseded_by: Option<BloomId>,
-    members: Vec<MemberView>,
+    members: Vec<MemberViewPreIntakeRefusal>,
     landing_blocked: Option<LandingBlock>,
     executor_fault: Option<ExecutorFaultView>,
     review_park: Option<ReviewParkView>,
@@ -318,7 +370,7 @@ impl From<BloomViewPreCoordination> for BloomView {
             id: prior.id,
             status: prior.status,
             superseded_by: prior.superseded_by,
-            members: prior.members,
+            members: prior.members.into_iter().map(MemberView::from).collect(),
             landing_blocked: prior.landing_blocked,
             executor_fault: prior.executor_fault,
             review_park: prior.review_park,

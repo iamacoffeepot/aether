@@ -20,7 +20,7 @@ use super::retrospect::file_retrospect_findings;
 use crate::bloomery::findings::{FindingsDecomposition, decompose_findings, verification_findings_key};
 use crate::bloomery::precheck::findings_key;
 use crate::bloomery::triage::{TriageVerdict, triage_note, triage_repair};
-use crate::store::{OutstandingOrder, StoreBackend};
+use crate::store::{IntakeRefusalRow, OutstandingOrder, StoreBackend};
 
 /// What a worker uploaded as an attempt result: the nonce it claims to answer,
 /// the digest its evidence is about (what the observation *claims*), the
@@ -118,6 +118,10 @@ pub enum IntakeRefusal {
     /// unratified semantics by admission. The refusal precedes the consume, so
     /// the order stays live.
     SurfaceRequestOutOfStage(StageId),
+    /// The nonce was cancelled by the operator. The lane process was left to
+    /// finish unobserved; its later upload is ignored and never touches the
+    /// reducer.
+    CancelledByOperator(Nonce),
 }
 
 /// An accepted attempt result: the reducer [`Event`] the upload normalized to
@@ -934,20 +938,48 @@ fn record_scope_verdict(
     Ok(AdmitDecision::Recorded)
 }
 
+/// Answer with `refusal`, recorded against the member whose order it refused.
+///
+/// The broker refuses without touching the reducer, so the refusal reaches no
+/// journal and no projection — before #5969 it landed only in the host log,
+/// where the operator watching `bloom view` never saw it. Standing it on the
+/// member beside its still-outstanding order is what makes the block readable
+/// from the board. A refusal with no order to hang it on (a fabricated or
+/// already-consumed nonce) has no member to stand against and stays a log line.
+fn refused(
+    store: &mut dyn StoreBackend,
+    stored: &OutstandingOrder,
+    refusal: IntakeRefusal,
+) -> Result<AdmitDecision, IntakeError> {
+    store.record_intake_refusal(&IntakeRefusalRow {
+        bloom: stored.bloom.clone(),
+        workpiece: stored.workpiece.clone(),
+        nonce: stored.nonce.clone(),
+        stage: stored.stage.clone(),
+        displayed_digest: stored.displayed_digest.clone(),
+        deadline_unix_millis: stored.deadline_unix_millis,
+        refusal: format!("{refusal:?}"),
+    })?;
+    Ok(AdmitDecision::Refused(refusal))
+}
+
 pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -> Result<AdmitDecision, IntakeError> {
     let Some(stored) = store.lookup_order(&upload.nonce.0)? else {
+        if store.is_order_cancelled(&upload.nonce.0)? {
+            return Ok(AdmitDecision::Refused(IntakeRefusal::CancelledByOperator(upload.nonce.clone())));
+        }
         // Fabricated, or the order was already consumed (a replay).
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     };
     let Some(record) = DispatchRecord::from_stored(&stored) else {
-        return Ok(AdmitDecision::Refused(IntakeRefusal::CorruptOrder(upload.nonce.clone())));
+        return refused(store, &stored, IntakeRefusal::CorruptOrder(upload.nonce.clone()));
     };
     if let Some(refusal) = out_of_stage_refusal(&record, upload) {
-        return Ok(AdmitDecision::Refused(refusal));
+        return refused(store, &stored, refusal);
     }
     let interned = intern_and_bind(store, &record, upload)?;
     let (upload, evidence) = match interned.as_ref() {
-        Err(refusal) => return Ok(AdmitDecision::Refused(refusal.clone())),
+        Err(refusal) => return refused(store, &stored, refusal.clone()),
         Ok((upload, evidence)) => (upload, evidence.clone()),
     };
     // A pre-bloom scoping run (ADR-0208, #5304) routes before the member-stage
@@ -1081,7 +1113,7 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         // An out-of-line stage never comes from a well-formed dispatch; refuse it
         // rather than folding a non-line result into the member's resolution. The
         // order stays live (unconsumed) — the refusal precedes the consume below.
-        return Ok(AdmitDecision::Refused(IntakeRefusal::OutOfLineStage(record.stage)));
+        return refused(store, &stored, IntakeRefusal::OutOfLineStage(record.stage));
     };
     let admit = Admit { event: to_vec(&event)? };
     // A parked attempt's order is re-filed under the question it raised, *before*
@@ -1104,6 +1136,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
     if !store.consume_order(&record.nonce.0)? {
         return Ok(AdmitDecision::Refused(IntakeRefusal::UnknownNonce(upload.nonce.clone())));
     }
+    // The order is spent, so whatever refusal stood against this member is
+    // over — the next dispatch is a fresh question.
+    store.clear_intake_refusal(&stored.bloom, &stored.workpiece)?;
     persist_consumed(store, &record, upload, &triage, aggregate_findings.as_ref())?;
 
     Ok(AdmitDecision::Admitted(Box::new(Admission { admit, event })))

@@ -385,6 +385,8 @@ pub use values::CHECK_KEY;
 pub use values::CONSTRUCT_IMPLEMENT_COMMAND;
 pub use values::CRITICAL_KEY;
 pub use values::CancelCommissionRequest;
+pub use values::CancelOrderRequest;
+pub use values::CancelOrderView;
 pub use values::CandidatePreparation;
 pub use values::CandidatePreparationPlan;
 pub use values::CandidateRef;
