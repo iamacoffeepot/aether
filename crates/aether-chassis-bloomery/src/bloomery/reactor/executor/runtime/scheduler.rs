@@ -158,6 +158,7 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
         prompt_manifest: None,
         physical_run: Some(plan.digest()),
         release_physical_run: false,
+        selected_gates: Vec::new(),
     })
 }
 

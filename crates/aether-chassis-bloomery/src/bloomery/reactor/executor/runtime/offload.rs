@@ -631,6 +631,7 @@ mod tests {
             prompt_manifest: None,
             physical_run: None,
             release_physical_run: true,
+            selected_gates: Vec::new(),
         }
     }
 

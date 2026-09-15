@@ -482,6 +482,9 @@ struct PendingRun {
     // The landing-receipt digest this dispatch's evidence binds, hex-encoded
     // for `--receipt`. Present whenever the order named a subject input.
     receipt_hex: Option<String>,
+    // Gates this dispatch's umbrella narrows its fan-out to (ADR-0218
+    // amendment). Empty is the whole fan-out.
+    selected_gates: Vec<String>,
     // The sealed manifest's `[entrypoint]` for this bloom, used when the host
     // has not overridden the lane program.
     entrypoint: LaneProgram,
@@ -531,6 +534,7 @@ impl PendingRun {
             instruction_bundle: self.instruction_bundle.as_deref(),
             instruction_bundle_digest: self.instruction_bundle_digest.as_deref(),
             deadline_unix_millis: self.deadline_unix_millis,
+            selected_gates: &self.selected_gates,
         }
     }
 }
@@ -1298,6 +1302,7 @@ impl LocalExecutor {
         let subject = evidence_subject(&order.transformation);
 
         Ok(PendingRun {
+            selected_gates: order.selected_gates.clone(),
             entrypoint: self.sealed_entrypoint(&nonce),
             nonce,
             command: order.transformation.command.clone(),

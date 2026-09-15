@@ -932,6 +932,39 @@ fn verify_check_members() -> Vec<&'static str> {
     Position::Fold.members()
 }
 
+/// The gates one umbrella run actually spawns: every member `position` declares,
+/// or the subset `selection` narrows it to (ADR-0218 amendment).
+///
+/// An ADR-0218 attribution probe asks one check and reads one check, so running
+/// the other seven buys minutes of clippy, docs and test for a question none of
+/// them answers. The narrowing is the position's list *filtered*, never the
+/// selection taken as a list of its own: a gate the position does not fan out to
+/// is not a gate this run can answer for, and silently spawning it would let a
+/// `verify.member` receipt carry a `verify.docs` verdict the member position
+/// deliberately omits.
+///
+/// # Errors
+/// The selection names an identity this position does not fan out to. Refused
+/// rather than dropped, because a selection filtered down to nothing would run
+/// no gate at all and report the pass of an empty fan-out.
+fn selected_members(position: Position, selection: &[String]) -> Result<Vec<&'static str>> {
+    let members = position.members();
+    if selection.is_empty() {
+        return Ok(members);
+    }
+
+    let unknown = selection
+        .iter()
+        .filter(|asked| !members.iter().any(|id| id == *asked))
+        .map(String::as_str)
+        .collect::<Vec<&str>>();
+    if !unknown.is_empty() {
+        bail!("{} does not fan out to {}", position.command(), unknown.join(", "));
+    }
+
+    Ok(members.into_iter().filter(|id| selection.iter().any(|asked| asked == id)).collect())
+}
+
 /// Identities `[verifiers.runs]` names for `command` that this lane can actually
 /// spawn. `verify.preflight` is a legal identity no process implements: the
 /// umbrella attributes operational faults to it, and `verify_command` does not
@@ -1139,15 +1172,17 @@ fn interned_failure(manifest: &PipelineManifest, outcome: MemberOutcome, id: &st
 /// Every program the members `position` fans out to need — the roots
 /// [`tools::preflight`] resolves through the dependency graph.
 ///
-/// Keyed on the position rather than on the whole vocabulary, so the check is
-/// over what this run will actually dispatch: a host missing a tool only the
-/// fold's `verify.docs` needs has nothing to say about a member run that never
-/// reaches it, and refusing there would report a host fault for work nobody
-/// asked to do.
-fn required_tools(position: Position) -> Vec<&'static str> {
-    position
-        .members()
-        .into_iter()
+/// Keyed on the members this run spawns rather than on the whole vocabulary, so
+/// the check is over what this run will actually dispatch: a host missing a tool
+/// only the fold's `verify.docs` needs has nothing to say about a member run that
+/// never reaches it, and refusing there would report a host fault for work nobody
+/// asked to do. A narrowed run (ADR-0218 amendment) is the same reading one step
+/// further — a probe asking `verify.suppress` on a host without `npx` is a probe
+/// whose answer that host can compute.
+fn required_tools(members: &[&'static str]) -> Vec<&'static str> {
+    members
+        .iter()
+        .copied()
         .filter_map(verify_command)
         .flat_map(|invocation| invocation.requires.iter().copied())
         .collect()
@@ -1161,8 +1196,8 @@ const STANDALONE_TOOLS: [(&str, &str); 2] =
 
 /// Resolve the dependency graph and the suppression scanner's standalone host
 /// roots into one fail-closed preflight result.
-fn preflight_tools(position: Position) -> Vec<tools::Missing> {
-    let required = required_tools(position);
+fn preflight_tools(members: &[&'static str]) -> Vec<tools::Missing> {
+    let required = required_tools(members);
     let mut missing = tools::preflight(&required);
     missing.extend(
         STANDALONE_TOOLS
@@ -1176,14 +1211,14 @@ fn preflight_tools(position: Position) -> Vec<tools::Missing> {
     missing
 }
 
-/// Every toolchain target the members `position` fans out to cross-build for,
-/// checked alongside the programs. Pure so the union is testable without probing
-/// a host: a target declared on a member but never gathered here is a
-/// prerequisite nothing verifies.
-fn required_targets(position: Position) -> Vec<&'static str> {
-    position
-        .members()
-        .into_iter()
+/// Every toolchain target these `members` cross-build for, checked alongside
+/// the programs. Pure so the union is testable without probing a host: a target
+/// declared on a member but never gathered here is a prerequisite nothing
+/// verifies.
+fn required_targets(members: &[&'static str]) -> Vec<&'static str> {
+    members
+        .iter()
+        .copied()
         .filter_map(verify_command)
         .flat_map(|invocation| invocation.requires_targets.iter().copied())
         .collect()
@@ -2835,11 +2870,16 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
 
+    // Resolved before the preflight, because it is what the preflight is about:
+    // a narrowed run (ADR-0218 amendment) asks the host only for the tools the
+    // gates it will actually spawn need.
+    let members = selected_members(position, &args.gate)?;
+
     // Preflight before anything runs. A host missing a tool cannot compute what
     // the member would have said, and reporting that as a pass would let a
     // candidate integrate on the strength of a check that never happened.
-    let mut missing = preflight_tools(position);
-    missing.extend(tools::preflight_targets(&required_targets(position)));
+    let mut missing = preflight_tools(&members);
+    missing.extend(tools::preflight_targets(&required_targets(&members)));
     if !missing.is_empty() {
         let evidence = Evidence {
             failed_verifiers: Some(VerifyFailureSet::one(
@@ -2855,19 +2895,21 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
             peak_resident_bytes: None,
             duration_millis: None,
             gates: None,
+            selected_gates: None,
             command: position.command().to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
             exit_code: Some(1),
             log: String::new(),
             channels: Channels::new([EvidenceChannel::findings(tools::missing_findings(&missing))]),
-        };
+        }
+        .with_selection(args.gate.clone());
         write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
         process::exit(1);
     }
 
     let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
-        check_pass(args, &args.out, position)?;
+        check_pass(args, &args.out, position, &members)?;
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
     let failures = failed_verifiers(runs.iter().map(|run| (run.id.as_str(), run.outcome)));
@@ -2877,6 +2919,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
         peak_resident_bytes,
         duration_millis: None,
         gates: None,
+        selected_gates: None,
         command: position.command().to_owned(),
         nonce: args.nonce.clone(),
         status,
@@ -2896,7 +2939,8 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
         ),
     }
     .timed(elapsed_millis(umbrella_started))
-    .with_gates(gates);
+    .with_gates(gates)
+    .with_selection(args.gate.clone());
     append_flake_log(&args.out, evidence.flakes());
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
@@ -3030,7 +3074,12 @@ fn fan_out(
 ///
 /// `logs` is the evidence directory each member's log and the scope receipt are
 /// written into, under the names the envelope's `log` field then lists.
-fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<CheckPass> {
+///
+/// `members` is the resolved spawn list — the position's own, or the subset a
+/// selection narrowed it to (see [`selected_members`]). Taken as an argument
+/// rather than re-resolved here, so the list this pass runs is the one the
+/// preflight checked the host against.
+fn check_pass(args: &TransformArgs, logs: &Path, position: Position, members: &[&'static str]) -> Result<CheckPass> {
     let full = position.whole_workspace();
     // Resolved once for the whole pass, so the counters the evidence carries
     // cover every member's build rather than one member's slice of it, and the
@@ -3079,8 +3128,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
         peak: &peak,
         input: input.as_deref(),
     };
-    let members = position.members();
-    let mut completed = fan_out(&members, |id| run_gate(id, &pass))?;
+    let mut completed = fan_out(members, |id| run_gate(id, &pass))?;
 
     // Reassembled in CI-parity order rather than completion order: the umbrella's
     // exit code is the *first* failing member's, the evidence `log` field lists
@@ -3089,7 +3137,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
     let mut runs = Vec::with_capacity(completed.len());
     let mut gates = Vec::with_capacity(completed.len());
     let mut first_failure_code: Option<i32> = None;
-    for &id in &members {
+    for &id in members {
         let ran = completed
             .iter()
             .position(|(run, _)| run.id == id)
@@ -3123,8 +3171,8 @@ mod tests {
         fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
         member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
         render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, spawnable_runs, umbrella_status, unjudged_notice, verify_check_members, verify_command,
-        verify_findings, workflow,
+        run_timed_prepare, selected_members, spawnable_runs, umbrella_status, unjudged_notice, verify_check_members,
+        verify_command, verify_findings, workflow,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -3133,12 +3181,12 @@ mod tests {
     use std::{env, fs, iter, process};
 
     use crate::cargo::WASM_TARGET;
-    use crate::transform::GateTiming;
     use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::peak_memory;
     use crate::transform::review::REVIEW_CRITIC;
     use crate::transform::sccache::CompilerCache;
     use crate::transform::verify::vocabulary::checkout_vocabulary;
+    use crate::transform::{GateTiming, build_evidence};
     use aether_bloomery::{PipelineManifest, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet};
 
     /// The full command line an invocation dispatches, program first, in the
@@ -3892,14 +3940,88 @@ mod tests {
             "no work-order base leaves the stated argv, so the script keeps its own default",
         );
         assert_eq!(suppress.requires, &["git", "python3"]);
-        let tools = required_tools(Position::Member);
+        let members = Position::Member.members();
+        let tools = required_tools(&members);
         assert!(tools.contains(&"git"));
         assert!(tools.contains(&"python3"));
         assert!(
-            preflight_tools(Position::Member)
+            preflight_tools(&members)
                 .iter()
                 .all(|missing| missing.requirement != "git" && missing.requirement != "python3"),
             "the host running the verifier tests must satisfy the scanner roots",
+        );
+    }
+
+    #[test]
+    fn a_selection_spawns_the_gates_it_names_and_no_others() {
+        // Tripwire for the ADR-0218 amendment (bloom 0f16e207, run 84DB66FF):
+        // nine probes asked `verify.suppress` — a scanner that answers in under
+        // a second — and each ran the full eight-gate fan-out behind it, 4 to 6
+        // minutes apiece. The selection is what makes the probe cost its own
+        // question. A narrowing that leaked an extra member back in would
+        // restore that bill while every assertion about the verdict still held.
+        let selection = owned(&[SUPPRESS_MEMBER]);
+        let members = selected_members(Position::Fold, &selection).expect("the fold fans out to the scanner");
+
+        assert_eq!(members, [SUPPRESS_MEMBER], "a one-check probe spawns one gate");
+        for id in verify_check_members().into_iter().filter(|id| *id != SUPPRESS_MEMBER) {
+            assert!(!members.contains(&id), "`{id}` is not what this probe asked; it must not spawn");
+        }
+
+        // And the host is asked only for what that gate needs. Preflighting the
+        // whole position would refuse a scanner probe on a box without `npx`,
+        // reporting a host fault for a question that box can answer.
+        assert!(!required_tools(&members).contains(&"npx"), "the scanner does not run the clone detector's npx");
+        assert!(required_targets(&members).is_empty(), "nor does it wait on a cross-build target");
+    }
+
+    #[test]
+    fn a_selection_naming_a_gate_the_position_never_runs_is_refused() {
+        // Tripwire: `verify.member` deliberately omits `verify.docs` — an
+        // intra-doc link resolves across crates, so a member's closure cannot
+        // prove it. Filtering such a selection down to nothing would run no gate
+        // at all and stamp the pass of an empty fan-out; the run must refuse
+        // instead, and say which identity it was asked for.
+        let refused = selected_members(Position::Member, &owned(&["verify.docs"]))
+            .expect_err("the member position does not fan out to the docs gate");
+
+        assert!(refused.to_string().contains("verify.docs"), "the refusal names the identity: {refused}");
+        assert_eq!(
+            selected_members(Position::Fold, &owned(&["verify.docs"])).expect("the fold does run it"),
+            ["verify.docs"],
+            "the same identity is selectable where the position actually runs it",
+        );
+    }
+
+    #[test]
+    fn a_narrowed_receipt_names_its_selection_and_reports_no_gate_it_did_not_run() {
+        // Tripwire: `gates`, `failed_verifiers` and the `failure_mask` derived
+        // from them are read as a whole-position report. A narrowed run must
+        // therefore say it was narrowed — otherwise a reader that finds seven
+        // of eight gates missing cannot tell "this run answered one check" from
+        // "this run lost seven gates", and a gate that never spawned must not
+        // appear anywhere a reader could take for a pass.
+        let evidence =
+            build_evidence(VERIFY_CHECK, None, true, Some(0), String::from("verify.suppress.log"), None, None)
+                .with_gates(vec![GateTiming {
+                    command: String::from(SUPPRESS_MEMBER),
+                    duration_millis: 812,
+                    prepare_millis: None,
+                }])
+                .with_selection(owned(&[SUPPRESS_MEMBER]));
+        let rendered = serde_json::to_string(&evidence).expect("the envelope serializes");
+
+        assert!(rendered.contains("\"selected_gates\":[\"verify.suppress\"]"), "{rendered}");
+        for id in verify_check_members().into_iter().filter(|id| *id != SUPPRESS_MEMBER) {
+            assert!(!rendered.contains(id), "`{id}` never ran, so nothing in the receipt may name it: {rendered}");
+        }
+
+        // And a full fan-out stays silent about a selection it was never given,
+        // so the presence of the key is what distinguishes the two runs.
+        let full = build_evidence(VERIFY_CHECK, None, true, Some(0), String::new(), None, None).with_selection(vec![]);
+        assert!(
+            !serde_json::to_string(&full).expect("the envelope serializes").contains("selected_gates"),
+            "an unnarrowed run must not stamp an empty selection",
         );
     }
 
@@ -4097,7 +4219,7 @@ mod tests {
         assert_eq!(test.requires_targets, &[WASM_TARGET], "the dist pre-build cross-builds for this target");
         for position in [Position::Member, Position::Fold, Position::Base] {
             assert!(
-                required_targets(position).contains(&WASM_TARGET),
+                required_targets(&position.members()).contains(&WASM_TARGET),
                 "a declared target the {position:?} preflight never checks is inert",
             );
         }

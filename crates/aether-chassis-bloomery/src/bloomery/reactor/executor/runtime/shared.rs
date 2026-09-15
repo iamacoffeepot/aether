@@ -20,8 +20,8 @@ use aether_data::wire::{from_bytes, to_vec};
 use crate::artifacts::{ArtifactsCapabilityState, GetResult, PutResult};
 use crate::bloomery::executor::{ExecutorPort, Settled};
 use crate::bloomery::intake::{
-    DispatchError, DispatchRecord, EvidenceClaims, NameEvidenceClaims, UploadedEvidence, dispatch_and_record,
-    dispatch_and_record_idle, dispatch_shared_and_record,
+    DispatchError, DispatchRecord, EvidenceClaims, NameEvidenceClaims, SharedStepDispatch, UploadedEvidence,
+    dispatch_and_record, dispatch_and_record_idle, dispatch_shared_and_record,
 };
 use crate::bloomery::outbox::{OutboxResultDelivery, TopicOutbox};
 use crate::bloomery::reactor::shared_run::{
@@ -1046,7 +1046,22 @@ fn submit_step(
     if store.lookup_order(&step.nonce)?.is_some_and(|order| order.lifecycle == OrderLifecycle::Submitted) {
         return Ok(());
     }
-    match dispatch_shared_and_record(executor, store, artifacts, &record, run, false, deadline) {
+
+    // Derived from this step's own durable descriptor rather than carried
+    // beside it: the probe's `BatchCheck` is the sealed statement of what the
+    // step is for, so a selection computed from it cannot name a gate the
+    // contract did not ask about. A descriptor that no longer decodes narrows
+    // nothing — the whole fan-out is the safe answer, never a guessed subset.
+    let selection = decode_host::<SharedStepDescriptor>(&step.descriptor)
+        .map(|descriptor| selected_gates(&descriptor))
+        .unwrap_or_default();
+    let physical_step = SharedStepDispatch {
+        physical_run: run,
+        release_physical_run: false,
+        deadline_unix_millis: deadline,
+        selected_gates: selection,
+    };
+    match dispatch_shared_and_record(executor, store, artifacts, &record, physical_step) {
         Ok(Settled::Answered(_)) => {
             store.update_shared_run(&row.run, SharedRunLifecycle::Running, step.ordinal)?;
         }
@@ -1797,6 +1812,25 @@ fn retained_probe_receipts(
         });
     }
     Ok(receipts)
+}
+
+/// The gates this step's umbrella narrows its fan-out to (ADR-0218 amendment).
+///
+/// An attribution probe asks exactly one check and reads exactly one check, so
+/// the seven other gates behind it buy minutes of clippy, docs and test for a
+/// question none of them answers — measured on bloom `0f16e207`, where nine
+/// `verify.suppress` probes (run `84DB66FF`) each ran the full fan-out for a
+/// scanner that answers in under a second.
+///
+/// A full node selects nothing, which is how it stays a full node: ADR-0218
+/// admits a report against the *exact* gate obligation the sealed contract
+/// declared, and a narrowed run answers a subset of it. The narrowing is the
+/// probe's own `BatchCheck` restated for the lane, so the two cannot disagree.
+fn selected_gates(descriptor: &SharedStepDescriptor) -> Vec<String> {
+    match descriptor {
+        SharedStepDescriptor::Probe(request) => vec![request.probe.check.gate().to_owned()],
+        SharedStepDescriptor::Member { .. } | SharedStepDescriptor::ContextualFull { .. } => Vec::new(),
+    }
 }
 
 fn probe_materialization(
@@ -2937,6 +2971,54 @@ mod tests {
             duration_millis: completed.then_some(1),
             release_physical_run: false,
         }
+    }
+
+    #[test]
+    fn a_probe_step_runs_the_one_check_it_asked_and_a_full_node_still_owes_every_gate() {
+        // Tripwire for the ADR-0218 amendment. Measured on bloom 0f16e207: run
+        // 84DB66FF planned nine probes asking only `verify.suppress` — a
+        // scanner that answers in under a second — and each materialized as a
+        // full `verify.check`, running clippy, docs and test behind it for 4 to
+        // 6 minutes apiece, 37.6 minutes of lane time for nine one-second
+        // questions. The selection is what the lane reads to spawn one gate.
+        //
+        // The other half is the one ADR-0218 rules on directly: "subset and
+        // baseline probes cannot pose as full-node reports". A narrowed step
+        // answers a subset of the sealed gate obligation, so the full node must
+        // keep selecting nothing — the moment it named a subset it would be
+        // filing a partial answer under a complete contract.
+        let dispatch = reducer_shaped_contextual_dispatch();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("the reducer-shaped dispatch is contextual");
+        };
+        let row = SharedRunRow {
+            run: Digest::of_wire_bytes(b"probe-run").as_bytes().to_vec(),
+            nonce: "probe-run".to_owned(),
+            dispatch: b"immutable-dispatch".to_vec(),
+            lifecycle: SharedRunLifecycle::Running,
+            next_ordinal: 1,
+            deadline_unix_millis: 10,
+            charged: false,
+            physical_cost: None,
+        };
+
+        let probe = BatchProbeRequest {
+            plan: dispatch.plan.digest(),
+            members: vec![dispatch.plan.requests[0].member.workpiece.clone()],
+            baseline: None,
+            check: BatchCheck::Gate { id: "verify.suppress".to_owned() },
+            repetition: 0,
+        };
+        let materialized = probe_materialization(&row, &dispatch, probe).expect("the probe materializes a step");
+        let descriptor =
+            decode_host::<SharedStepDescriptor>(&materialized.descriptor).expect("the step descriptor decodes");
+
+        assert_eq!(selected_gates(&descriptor), ["verify.suppress"], "a probe spawns the check it asked for");
+        assert_eq!(
+            selected_gates(&SharedStepDescriptor::ContextualFull { node: node.digest() }),
+            Vec::<String>::new(),
+            "the full node names no subset, so its receipt stays a report against the whole gate obligation",
+        );
     }
 
     #[test]
