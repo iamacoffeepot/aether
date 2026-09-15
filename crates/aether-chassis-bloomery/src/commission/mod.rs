@@ -467,9 +467,38 @@ fn digest_from_hex(hex: &str) -> Result<Digest> {
 mod tests {
     use std::fs;
 
-    use super::{Command, CommissionCli, load_intent, refuse_unread_digest, signed_statement};
-    use aether_bloomery::Digest;
+    use super::{
+        Command, CommissionCli, lint_surface_granularity, load_intent, refuse_unread_digest, signed_statement,
+    };
+    use crate::bloomery::load_policy;
+    use aether_bloomery::{Digest, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, WorkpieceId, coarsen};
     use clap::Parser;
+
+    fn lint_revision(surface: &[&str]) -> ScopeRevision {
+        ScopeRevision {
+            schema: SCOPE_REVISION_SCHEMA,
+            workpiece: WorkpieceId("issue-6030".to_owned()),
+            predecessor: None,
+            problem: "problem".to_owned(),
+            design: "design".to_owned(),
+            plan: "plan".to_owned(),
+            declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
+            dogfood_brief: String::new(),
+            routing: ScopeRouting { size: "S".to_owned(), model: "construct: test".to_owned() },
+            dependencies: Vec::new(),
+            description: "advisory".to_owned(),
+            implements: Vec::new(),
+            declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
+        }
+    }
+
+    fn lint_policy() -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap_or_else(|error| panic!("temp dir: {error}"));
+        fs::write(dir.path().join("approval-policy.toml"), "default = \"auto\"\nrules = []\n")
+            .unwrap_or_else(|error| panic!("write policy fixture: {error}"));
+        dir
+    }
 
     #[test]
     fn the_cli_is_a_subcommand_family_on_its_own_binary() {
@@ -606,6 +635,42 @@ mod tests {
             Err(error) => {
                 let message = error.to_string();
                 assert!(message.contains("not both"), "refusal names the conflict, got {message}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_src_only_surface_passes_the_granularity_lint_as_its_crate() {
+        // Tripwire (issue 6030): the lint is the authoring-time backstop of the
+        // seal door's granularity check. A `src/**` declaration passes it — only
+        // a file no policy rule names is refused — and the estate admits it as
+        // the whole crate, so the `tests/` edit the change needs is contained.
+        let dir = lint_policy();
+        let revision = lint_revision(&["crates/example-a/src/**"]);
+        lint_surface_granularity(&revision, &dir.path().join("approval-policy.toml"))
+            .unwrap_or_else(|error| panic!("a src-only subtree passes the lint: {error}"));
+
+        let policy = load_policy(&dir.path().join("approval-policy.toml"))
+            .unwrap_or_else(|error| panic!("the fixture policy loads: {error}"));
+        assert_eq!(
+            coarsen(&policy, &revision.declared_surface),
+            vec!["crates/example-a/**".to_owned()],
+            "the lint passes the declaration the crate atom admits",
+        );
+    }
+
+    #[test]
+    fn a_file_no_rule_names_still_fails_the_granularity_lint() {
+        // The crate atom must not become a blanket amnesty: a file-granular
+        // entry no policy rule names is still refused at authoring time, in the
+        // seal door's words.
+        let dir = lint_policy();
+        let revision = lint_revision(&["crates/example-a/src/lib.rs"]);
+        match lint_surface_granularity(&revision, &dir.path().join("approval-policy.toml")) {
+            Ok(()) => panic!("an unnamed file must not pass the lint"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(message.contains("crates/example-a/src/lib.rs"), "refusal names the entry: {message}");
             }
         }
     }

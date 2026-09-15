@@ -81,9 +81,11 @@ declared-surface entry naming one file only when a file-granular
 approval-policy rule names that same file. So the amendment widens the ask to
 the glob covering it — `crates/<crate>/**`, `docs/<book>/**`,
 `.github/<area>/**`, or the top-level tree anything else lives in — and prints
-the ask beside the grant. The same rewrite runs over the entries the current
-revision carries, so a raw file entry sealed before the request arrived leaves
-with it.
+the ask beside the grant. A crate is the surface atom: any entry under
+`crates/<crate>/…` (even `crates/<crate>/src/**`) is admitted as
+`crates/<crate>/**`, because one crate's `src` and `tests` compile together.
+The same rewrite runs over the entries the current revision carries, so a raw
+file entry sealed before the request arrived leaves with it.
 
 Drop `--dry-run` to grant it. `--path` unions extra globs into the lane's
 request, and is required when the member carries no request at all — amending a
