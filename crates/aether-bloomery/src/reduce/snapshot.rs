@@ -1703,6 +1703,15 @@ impl Snapshot {
             Decision::RecordAggregateGatePass { bloom, stage } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.aggregate_passed.insert(*stage);
+                    // A gate that has passed on the fold now held owes no work
+                    // order, so it leaves the deferral set here (ADR-0219). In
+                    // the ordinary flow the dispatch cleared its own deferral
+                    // long before its verdict arrived and this is a no-op; the
+                    // case it is for is an operator waiver, which records the
+                    // pass with no dispatch behind it — and a release that then
+                    // re-dispatched the waived gate would re-run the critic the
+                    // operator had just stood in for.
+                    record.deferred_aggregates.remove(stage);
                 }
             }
             Decision::RecordAggregateRoll { bloom, rolls } => {

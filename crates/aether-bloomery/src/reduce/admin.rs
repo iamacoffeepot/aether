@@ -354,28 +354,46 @@ pub(super) fn reduce_admin_set_candidate(snapshot: &Snapshot, bloom: &BloomId, s
 ///
 /// The lineage the previous fold recorded rides along, because placing a weave
 /// edits the composed tree rather than re-ordering what went into it — the same
-/// carry `rewoven_by_operator` makes. Both gates are deferred rather than
+/// carry `rewoven_by_operator` makes. The gates are deferred rather than
 /// dispatched: admin mode dispatches nothing, and the deferral is what exit
-/// reads to send them out. A gate the operator goes on to waive clears its own
-/// deferral, so a waived gate is not re-run on the way out.
+/// reads to send them out.
+///
+/// Placing the weave the record *already* holds is the incident's own move —
+/// the operator putting the composition back on the tree its gates passed,
+/// after a repair lap replaced it. So it is treated as what it is: a no-op on
+/// the fold. No [`Decision::RecordIntegration`] is emitted, because that clears
+/// the composite-gate join, and a gate that passed this exact tree has not
+/// stopped having passed it; only the gates that have *not* passed fall due.
 fn rewoven(record: &BloomRecord, bloom: BloomId, weave: CandidateRef) -> Vec<Decision> {
-    alloc::vec![
-        Decision::RecordIntegration {
+    let held = record.integration.as_ref();
+    // Compared as one candidate rather than field by field: a fold's `head` and
+    // a candidate's `checkout` are the same digest under two names, and pairing
+    // them by hand is how a transposition gets written.
+    let unchanged = held.map(|held| CandidateRef { tree: held.tree, checkout: held.head }) == Some(weave);
+    let mut effects = Vec::new();
+    if !unchanged {
+        effects.push(Decision::RecordIntegration {
             bloom,
             integration: Some(FoldedIntegration {
                 tree: weave.tree,
                 head: weave.checkout,
-                lineage: record.integration.as_ref().map_or_else(Vec::new, |held| held.lineage.clone()),
+                lineage: held.map_or_else(Vec::new, |held| held.lineage.clone()),
             }),
-        },
-        Decision::AdvanceStage {
-            bloom,
-            workpiece: WorkpieceId::composition(),
-            progress: composition_progress(StageId::Verify, 1, weave),
-        },
-        Decision::DeferAggregate { bloom, stage: StageId::AggregateVerify },
-        Decision::DeferAggregate { bloom, stage: StageId::AggregateReview },
-    ]
+        });
+    }
+    effects.push(Decision::AdvanceStage {
+        bloom,
+        workpiece: WorkpieceId::composition(),
+        progress: composition_progress(StageId::Verify, 1, weave),
+    });
+    effects.extend(
+        COMPOSITION_RERUNNABLE
+            .iter()
+            .filter(|gate| !unchanged || !record.aggregate_passed.contains(gate))
+            .map(|gate| Decision::DeferAggregate { bloom, stage: *gate }),
+    );
+
+    effects
 }
 
 /// Reduce an admin re-run ([`Fact::AdminRerun`](crate::Fact::AdminRerun)).
@@ -610,8 +628,8 @@ mod tests {
     use crate::reduce::{Decision, Decisions, Fact, Outcome, Snapshot, StageProgress};
     use crate::testing::{draft, event, membership, step};
     use crate::values::{
-        AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver, CandidateRef, Evidence,
-        EvidenceKind, OperatorHold,
+        AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver, CandidateRef,
+        CompositionFinding, Evidence, EvidenceKind, OperatorHold, VerifyFailureSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -889,7 +907,7 @@ mod tests {
             note: note(),
         };
 
-        let (waived, decided) = admit(&snapshot, "waive", Fact::AdminWaive { bloom, waiver });
+        let (closed, decided) = admit(&snapshot, "waive", Fact::AdminWaive { bloom, waiver });
         assert!(effects_name(&decided, |effect| matches!(effect, Decision::RecordAdjudication { .. })));
         assert!(effects_name(&decided, |effect| matches!(
             effect,
@@ -901,7 +919,7 @@ mod tests {
             decided.effects
         );
 
-        let record = &waived.blooms[&bloom];
+        let record = &closed.blooms[&bloom];
         assert_eq!(record.open_composition_findings().count(), 0, "the finding is closed");
         assert!(record.aggregate_passed.contains(&StageId::AggregateReview), "and the gate counts as passed");
     }
@@ -1084,7 +1102,7 @@ mod tests {
                 attempts: 1,
                 candidate: Some(CandidateRef { tree: weave.tree, checkout: weave.head }),
                 repair_rolls: 0,
-                seen_verify_failures: Default::default(),
+                seen_verify_failures: VerifyFailureSet::default(),
                 fold_checkpoint: None,
                 fold_conflict_evidence: None,
                 reconcile_assembles_base: false,
@@ -1111,7 +1129,7 @@ mod tests {
         // refusing verdict seeds it rather than by editing the record: one
         // recorded finding naming the tree the fold is holding.
         let record = snapshot.blooms.get_mut(&bloom).expect("the sealed bloom");
-        record.composition_findings.push(crate::values::CompositionFinding {
+        record.composition_findings.push(CompositionFinding {
             subject: weave.tree,
             detail: red_verdict(),
             implicated: Vec::new(),
