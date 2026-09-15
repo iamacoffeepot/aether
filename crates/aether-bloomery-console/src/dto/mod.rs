@@ -745,6 +745,11 @@ pub struct JournalRecordView {
     pub outcome: Value,
     #[serde(default)]
     pub decider: String,
+    /// Host-clock stamp the `GET /journal` route renders beside the decoded
+    /// event. `None` is a pre-column row or a coordinator that predates the
+    /// field; the time column then reads blank rather than inventing a time.
+    #[serde(default)]
+    pub recorded_unix_millis: Option<u64>,
 }
 
 /// `GET /artifacts/{digest}/decoded` — a known kind, or a raw range.

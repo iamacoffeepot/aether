@@ -116,6 +116,17 @@ fn a_limit_above_the_journal_clamp_is_applied_and_named() {
 }
 
 #[test]
+fn the_journal_page_carries_the_recorded_stamp() {
+    // The plausible bug: the route decodes the event but drops the store's
+    // `recorded_unix_millis`, so the console's time column has no source.
+    let mut stamped = observe(1, 1);
+    stamped.recorded_unix_millis = Some(3_723_000);
+    let view = page_journal(&[stamped], &bare()).expect("fixture record decodes");
+    assert_eq!(view.records.len(), 1);
+    assert_eq!(view.records[0].recorded_unix_millis, Some(3_723_000));
+}
+
+#[test]
 fn the_bloom_filter_keeps_only_events_that_name_it() {
     let wanted = Digest::from_bytes([7; 32]);
     let other = Digest::from_bytes([8; 32]);
