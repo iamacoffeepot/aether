@@ -704,7 +704,9 @@ impl MetricsLedger {
             Fact::SharedRunPrepared { plan, .. } => self.close_prepare_spans(*plan, envelope),
             Fact::SharedRunStarted { plan, run, .. } => self.open_verify_spans(sequence, *plan, *run, envelope),
             Fact::SharedRunCompleted { completion, .. } => self.close_verify_spans(completion, envelope),
-            Fact::IntegrationAdvanced { head, .. } => self.mark_integrated(&head.coverage, envelope),
+            Fact::IntegrationAdvanced { bloom, head, .. } => {
+                self.mark_integrated(*bloom, &head.coverage, envelope);
+            }
             Fact::AttemptCompleted { bloom, workpiece, stage, .. } => {
                 self.close_dispatch(*bloom, &workpiece.0, *stage, envelope);
             }
@@ -810,13 +812,14 @@ impl MetricsLedger {
         self.close_prepare_spans(plan, envelope);
     }
 
-    fn mark_integrated(&mut self, coverage: &[MemberPin], envelope: Option<u64>) {
+    fn mark_integrated(&mut self, bloom: BloomId, coverage: &[MemberPin], envelope: Option<u64>) {
         for pin in coverage {
             let Some(span) = self
                 .verify_spans
                 .values_mut()
                 .filter(|span| {
-                    span.workpiece == pin.workpiece.0
+                    span.bloom == bloom
+                        && span.workpiece == pin.workpiece.0
                         && span.outcome.as_deref() != Some(SPAN_OUTCOME_RETIRED)
                         && span.outcome.as_deref() != Some(SPAN_OUTCOME_FAILED)
                 })
