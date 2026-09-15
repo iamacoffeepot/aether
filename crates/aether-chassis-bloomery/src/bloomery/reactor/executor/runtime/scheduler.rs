@@ -751,8 +751,7 @@ struct BloomSettlement {
 /// head of the slice it is given, so each bloom is settled over its own
 /// oldest-first view: when the head bloom holds for coalescing this turn, its
 /// hold is recorded and the loop moves on, so the hold never stalls an
-/// unrelated bloom's ready requests behind it. A bloom already holding this
-/// turn is skipped.
+/// unrelated bloom's ready requests behind it.
 fn settle_blooms(
     scheduler: &MemberVerificationScheduler,
     executor: &dyn ExecutorPort,
@@ -769,21 +768,14 @@ fn settle_blooms(
         }
     }
     let mut settlement = BloomSettlement { holds: Vec::new(), proposals: Vec::new(), declined: None };
-    let mut holding_blooms = BTreeSet::new();
     for bloom in blooms {
-        if holding_blooms.contains(&bloom) {
-            continue;
-        }
         match settle_proposal(scheduler, executor, queued, bloom, now_unix_millis)? {
             ProposalOutcome::Declined(reason) => {
                 if settlement.declined.is_none() {
                     settlement.declined = Some(reason);
                 }
             }
-            ProposalOutcome::Hold(hold) => {
-                holding_blooms.insert(bloom);
-                settlement.holds.push(hold);
-            }
+            ProposalOutcome::Hold(hold) => settlement.holds.push(hold),
             ProposalOutcome::Propose { plan, requests } => {
                 settlement.proposals.push((bloom, plan, requests));
             }
@@ -826,8 +818,9 @@ fn settle_proposal(
     let Some(state) = scheduler.states.get(&bloom) else {
         // The projection has not seen this bloom yet. Its rows stay queued for
         // a later turn; declining the bloom rather than erroring keeps a bloom
-        // the journal has not caught up to from stalling the blooms behind it.
-        return Ok(ProposalOutcome::Declined(ProposalDeclined::EmptySelection));
+        // the journal has not caught up to from stalling the blooms behind it,
+        // and the reason says so rather than blaming the selection policy.
+        return Ok(ProposalOutcome::Declined(ProposalDeclined::ProjectionBehind));
     };
     // The sealed selection anchors on the head of the slice it is given, so it
     // runs over this bloom's own oldest-first view rather than the shared
