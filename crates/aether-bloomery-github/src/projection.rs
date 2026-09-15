@@ -76,7 +76,7 @@ const ISSUE_PREFIX: &str = "issue-";
 const GITHUB_BODY_LIMIT_CHARS: usize = 65_536;
 
 /// The cap a mirrored commission's full body (banner, intent, work order,
-/// footer, and marker) stays under — below [`GITHUB_BODY_LIMIT_CHARS`] with
+/// footer, and marker) stays under — below `GITHUB_BODY_LIMIT_CHARS` with
 /// headroom for the marker the caller appends after the bound render.
 pub const MAX_COMMISSION_BODY_CHARS: usize = 60_000;
 
