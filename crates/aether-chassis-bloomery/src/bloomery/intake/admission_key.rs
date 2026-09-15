@@ -92,6 +92,13 @@ pub enum AdmissionKey {
     StudyCompleted,
     /// A speculative aggregate run or its final-fold join, accounted once.
     PrecheckCompleted,
+    /// A final aggregate verify red on documentation alone (ADR-0218
+    /// §Amendment: documentation is judged once, over the product). Its own key
+    /// rather than sharing [`Self::AggregateVerify`]'s, for the reason
+    /// [`Self::MemberDeadlineExpired`] has its own: the two admit different
+    /// facts off one nonce, and sharing a key would make whichever arrived
+    /// second a replayed duplicate the journal silently dropped.
+    AggregateDocsRefused,
 }
 
 impl AdmissionKey {
@@ -99,7 +106,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -114,6 +121,7 @@ impl AdmissionKey {
         Self::Scope,
         Self::StudyCompleted,
         Self::PrecheckCompleted,
+        Self::AggregateDocsRefused,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -135,6 +143,7 @@ impl AdmissionKey {
             Self::Scope => "aether.bloomery.scope",
             Self::StudyCompleted => "aether.bloomery.study_completed",
             Self::PrecheckCompleted => "aether.bloomery.precheck_completed",
+            Self::AggregateDocsRefused => "aether.bloomery.aggregate_docs_refused",
         }
     }
 

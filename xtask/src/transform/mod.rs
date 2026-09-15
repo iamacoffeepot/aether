@@ -1101,6 +1101,7 @@ mod tests {
             "verify.suppress",
             "verify.check",
             "verify.member",
+            "verify.compose",
             "verify.base",
             "construct.implement",
         ];

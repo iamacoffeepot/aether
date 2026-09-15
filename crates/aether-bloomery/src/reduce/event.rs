@@ -1045,6 +1045,35 @@ pub enum Fact {
         /// Which lap, and on whose word.
         drop: AdminLapDrop,
     },
+    /// The final aggregate verify came back red on documentation and nothing
+    /// else (ADR-0218 §Amendment: documentation is judged once, over the
+    /// product).
+    ///
+    /// Its own fact rather than a field on [`Fact::AggregateVerifyCompleted`]
+    /// because the two route to opposite places. A fold that does not build is
+    /// a statement about the combination with no member to eject, so the bloom
+    /// stops and an operator reads it. A broken intra-doc link is a mechanical
+    /// edit against a diagnostic that already names the file and the line, and
+    /// the ADR-0191 weave repair exists to make exactly that edit — so this one
+    /// buys a repair lap on the product instead of a park. That is the same
+    /// split [`Fact::ContainmentRefused`] draws from [`Fact::VerifyFailed`]: one
+    /// red verdict shape, two different things for the reducer to do, so two
+    /// facts rather than one fact a reader has to interrogate.
+    ///
+    /// Appended past [`Fact::AdminDropLap`] — past every existing discriminant
+    /// — so every journaled row keeps its wire meaning and the upcast from each
+    /// prior stamp is the identity. Widening
+    /// [`Fact::AggregateVerifyCompleted`]'s body instead would have displaced
+    /// every variant after it and un-identified all of them, which is the
+    /// failure the `findings` append had to be repaired for.
+    AggregateDocsRefused {
+        /// The bloom whose product's documentation was refused.
+        bloom: BloomId,
+        /// The verify evidence, bound to the folded tree it judged — the
+        /// reducer refuses a verdict whose subject is not the held fold's tree,
+        /// so a stale refusal cannot re-weave a newer integration.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

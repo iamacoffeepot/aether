@@ -787,6 +787,23 @@ fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, ev
             fact: Fact::PrecheckCompleted { bloom: record.bloom, node: record.scope_revision, completion },
         };
     }
+    // A red that names documentation and *only* documentation is the one gate
+    // failure the product can repair itself out of, so it admits as its own
+    // fact and buys a weave repair rather than the low-tolerance park
+    // (ADR-0218 §Amendment: documentation is judged once, over the product).
+    // Exact set equality, not `contains`: a fold that failed documentation
+    // alongside anything else failed for a reason a documentation edit will not
+    // answer, and reading that as a documentation refusal would spend repair
+    // laps on a tree that does not build.
+    if !verdict_passed(upload.verdict)
+        && upload.observation.failed_verifiers == VerifyFailureSet::one(VerifyFailure::Docs)
+    {
+        return Event {
+            idempotency_key: AdmissionKey::AggregateDocsRefused.of(&record.nonce.0),
+            fact: Fact::AggregateDocsRefused { bloom: record.bloom, evidence },
+        };
+    }
+
     Event {
         idempotency_key: AdmissionKey::AggregateVerify.of(&record.nonce.0),
         fact: Fact::AggregateVerifyCompleted { bloom: record.bloom, passed: verdict_passed(upload.verdict), evidence },

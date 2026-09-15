@@ -24,8 +24,8 @@ use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::StageId;
 use crate::values::VerifyFailureSet;
 use crate::values::{
-    Evidence, NetworkProfile, PipelineManifest, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE,
-    VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND,
+    Evidence, NetworkProfile, PipelineManifest, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_COMPOSE_COMMAND,
+    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND,
 };
 
 /// The identity of the gate set one verify position runs (ADR-0178): the
@@ -107,6 +107,36 @@ impl VerifyGateSet {
     #[must_use]
     pub fn member_of(manifest: &PipelineManifest) -> Self {
         Self::of(manifest, VERIFY_MEMBER_COMMAND)
+    }
+
+    /// The gate set the compiled composition verify lane runs —
+    /// [`Self::compose_of`] over [`PipelineManifest::compiled`].
+    ///
+    /// The position that judges an assembly of the product which is not yet the
+    /// product: an ADR-0217 pre-check of a partial eager head, and an ADR-0218
+    /// contextual shared run over a composition group. Its vocabulary is
+    /// [`Self::fold`]'s less [`crate::VerifyFailure::Docs`], for the two reasons
+    /// [`Self::member`] omits it — a partial product can neither break the
+    /// workspace's documentation alone nor prove it alone — plus the one that
+    /// made the placement urgent: rustdoc is the most expensive gate the line
+    /// runs and `sccache` cannot cache it, so a composition step paid fifteen
+    /// minutes to re-discover the same cosmetic defect on every fold.
+    ///
+    /// A distinct identity rather than a borrowed one is the whole point. A
+    /// composition run's proof must not answer the fold's question, because the
+    /// fold's question includes a gate this position deliberately does not run —
+    /// so a settled shared run can no longer clear the final `AggregateVerify`
+    /// by identity, and the documentation pass actually happens, once.
+    #[must_use]
+    pub fn compose() -> Self {
+        Self::compose_of(&PipelineManifest::compiled())
+    }
+
+    /// The gate set `manifest` declares for the composition position
+    /// (`verify.compose`).
+    #[must_use]
+    pub fn compose_of(manifest: &PipelineManifest) -> Self {
+        Self::of(manifest, VERIFY_COMPOSE_COMMAND)
     }
 
     /// The gate set the compiled whole-workspace base verify runs —
@@ -326,6 +356,39 @@ mod tests {
         assert_eq!(VerifyGateSet::fold().verifiers.to_mask(), "02ff");
         assert_ne!(member.digest(), VerifyGateSet::fold().digest());
         assert_ne!(member.digest(), VerifyGateSet::base().digest());
+    }
+
+    #[test]
+    fn the_composition_position_omits_documentation_and_is_its_own_identity() {
+        // Tripwire: the placement of `verify.docs` is the whole of ADR-0218
+        // §Amendment: documentation is judged once, over the product, and it is
+        // stated as a difference between two gate sets that nothing else
+        // enforces. A composition set that regained the identity puts rustdoc —
+        // the line's long pole, and the one gate `sccache` cannot cache — back
+        // on every pre-check and every contextual shared run, which is the cost
+        // the amendment removed. A composition digest that collided with the
+        // fold's would be worse and quieter: a settled composition run would
+        // clear the final aggregate verify by identity, and the documentation
+        // pass the amendment exists to guarantee would never happen at all.
+        let compose = VerifyGateSet::compose();
+
+        assert!(
+            !compose.verifiers.contains(VerifyFailure::Docs),
+            "the composition position does not run documentation",
+        );
+        assert_eq!(
+            compose.verifiers,
+            VerifyGateSet::member().verifiers,
+            "a composition omits exactly what a member omits, and nothing else",
+        );
+        assert_eq!(
+            compose.verifiers,
+            VerifyGateSet::fold().verifiers.difference(VerifyFailureSet::one(VerifyFailure::Docs)),
+            "and that omission is stated against the fold's own list",
+        );
+        assert_ne!(compose.digest(), VerifyGateSet::fold().digest(), "a composition proof cannot answer the fold");
+        assert_ne!(compose.digest(), VerifyGateSet::member().digest(), "nor share the member's identity");
+        assert_ne!(compose.digest(), VerifyGateSet::base().digest());
     }
 
     #[test]

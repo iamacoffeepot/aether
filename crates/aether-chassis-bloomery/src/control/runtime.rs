@@ -1439,6 +1439,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::AttemptCompleted { bloom, .. }
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
+        | Fact::AggregateDocsRefused { bloom, .. }
         | Fact::PrecheckPrepared { bloom, .. }
         | Fact::IntegrationAdvanced { bloom, .. }
         | Fact::IntegrationAppendConflicted { bloom, .. }

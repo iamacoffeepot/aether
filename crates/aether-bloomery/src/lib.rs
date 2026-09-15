@@ -633,6 +633,7 @@ pub use values::Transformation;
 pub use values::Unproducible;
 pub use values::VERIFY_BASE_COMMAND;
 pub use values::VERIFY_CHECK_COMMAND;
+pub use values::VERIFY_COMPOSE_COMMAND;
 pub use values::VERIFY_GATES_ENV;
 pub use values::VERIFY_LANE_IMAGE;
 pub use values::VERIFY_LANE_NETWORK;

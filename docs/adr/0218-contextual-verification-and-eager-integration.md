@@ -907,3 +907,68 @@ While the hold stands the scheduler journals
 naming the bloom, the instant the hold lifts, and the in-flight sibling
 workpieces it is waiting for — so "why did nothing go out" is answerable
 without re-deriving the scheduler's state.
+
+## Amendment: documentation is judged once, over the product (2026-09-15, #6076)
+
+`verify.docs` is the long pole of every verification the line runs — 245 to 607
+seconds per invocation — and it is the one gate `sccache` cannot cache at all,
+because rustdoc's output is not a compilation artifact the wrapper knows how to
+key. It was nonetheless the fan-out of every aggregate-shaped position. The
+member position had already dropped it, but a pre-check over a partial eager
+head and a contextual shared run over a composition group both inherited
+`verify.check`'s list through `VerifyGateSet::fold_of`, and both of those run on
+every fold. So the most expensive gate in the line ran per composition step, and
+a bloom whose shared runs all settled reached its landing with the finished
+product's documentation judged by whichever partial assembly happened to be
+current — or, when every step had already answered, by nothing.
+
+The cost is not theoretical. On 2026-09-15 bloom `0c5a157ecbe4` spent 15 to 17
+minutes on `dispatch-8280-step-0` and again on `dispatch-8297-step-0`, each red
+on documentation alone: a public doc link to a private item in one file, and one
+unresolved intra-doc link. Both runs bounced or ejected members, because a red
+gate inside a shared run attributes to the members in the group — and neither
+defect was an interaction between members, nor a property a subset of the
+product can honestly judge, since an intra-doc link resolves across the whole
+workspace.
+
+The positions therefore split. `verify.compose` is the composition position:
+`verify.check`'s fan-out less `verify.docs`, dispatched by the same
+`AggregateVerify` stage over the same union-of-diffs closure, and named by
+pre-checks and contextual shared runs. Its distinct command gives it a distinct
+`VerifyGateSet` identity, which is the whole mechanism — a composition's green
+cannot answer the fold's question about a gate it never ran. The two seams that
+let it try are gated on gate-set equality with the aggregate position rather
+than deleted: `precheck::final_join` and the contextual aggregate authority each
+compare, so a repository whose `pipeline.toml` declares one fan-out for both
+commands is saying the two positions ask one question and the substitution is
+sound again with no code change.
+
+What is left is one pass. `verify.docs` runs at `verify.base`, so the day's base
+is already clean and the bloom's own pass sees only the bloom's own defects, and
+at `verify.check` — once, over the product the bloom will land, immediately
+before `Land`. A bloom now pays one real aggregate verify it used to elide. That
+is the trade, and it is the right one: one whole-fold run per bloom against
+rustdoc on every composition step.
+
+A red there does not eject anyone. §Amendment: low tolerance parks a bloom on
+its first red fold because a fold that does not build is a statement about the
+combination and there is no member to blame — which is exactly right for a
+compile failure and exactly wrong for a documentation defect, whose diagnostic
+names the file and the line and whose repair is a mechanical edit. So a verdict
+whose failed set is *precisely* `verify.docs` — not documentation plus anything
+else, which is still the parking case — is journaled as its own
+`Fact::AggregateDocsRefused` and opens the ADR-0191 weave repair over the
+product: the findings are the work order, the files they name are the surface,
+the bloom's own builder seat runs it, and its completion re-runs the pass. Two
+laps, then the bloom parks for the operator with the findings in hand and a hold
+that says documentation is what stopped it. Its own fact rather than a field on
+`Fact::AggregateVerifyCompleted` for the reason `Fact::ContainmentRefused` is
+its own fact: the two route differently, and a variant appended past every
+discriminant upcasts as the identity where widening an existing body would
+un-identify every journaled stamp.
+
+The gate stays out of the construct lane. A construct lane authors against one
+member's closure and cannot see the workspace an intra-doc link resolves
+across, so putting the question there would ask it of the one position least
+able to answer it, and pay rustdoc's minutes for every lap of every member to do
+it.

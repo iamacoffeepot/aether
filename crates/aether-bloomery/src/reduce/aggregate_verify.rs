@@ -17,7 +17,9 @@ use super::boundary::EffectBoundary;
 use super::composition::{Refusal, finding_of, reweave};
 use super::gate::{AGGREGATE_REVIEW_GATE, AGGREGATE_VERIFY_GATE};
 use super::verify_memo::proof_of;
-use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot};
+use super::{
+    AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions, FoldedIntegration, Outcome, Snapshot,
+};
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::reads;
@@ -219,23 +221,10 @@ pub(super) fn reduce_aggregate_verify_completed(
     passed: bool,
     evidence: &Evidence,
 ) -> Decisions {
-    let Some(record) = snapshot.blooms.get(bloom) else {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::UnknownOrInactiveBloom));
+    let (record, integration) = match judged_fold(snapshot, bloom, evidence) {
+        Ok(judged) => judged,
+        Err(error) => return Decisions::rejected(Outcome::AggregateVerifyRejected(error)),
     };
-    if record.status != BloomStatus::Sealed {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::UnknownOrInactiveBloom));
-    }
-    let Some(integration) = record.integration.as_ref() else {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::NoPendingIntegration));
-    };
-    // The verdict must bind the exact tree the held fold produced — a stale
-    // verdict from a superseded fold cannot act on a newer integration.
-    if !evidence.validates(&integration.tree) {
-        return Decisions::rejected(Outcome::AggregateVerifyRejected(AggregateVerifyError::SubjectMismatch {
-            expected: integration.tree,
-            got: evidence.subject,
-        }));
-    }
 
     let rolls = record.aggregate_verify_rolls + 1;
     let mut effects = alloc::vec![
@@ -275,7 +264,20 @@ pub(super) fn reduce_aggregate_verify_completed(
     // what stops every other dispatch this bloom would otherwise go on making
     // while nobody is looking at the fold that did not build.
     if record.red_verify == RedVerify::Eject {
-        return parked_on_the_fold(record, *bloom, integration.tree, evidence, rolls, effects);
+        return parked_on_the_fold(
+            record,
+            *bloom,
+            integration.tree,
+            evidence,
+            rolls,
+            effects,
+            &format!(
+                "the aggregate verify over fold {} came back red and the bloom's sealed disposition does not \
+                 re-weave; read its findings under evidence {} and release the hold once the fold is answered",
+                integration.tree.to_hex(),
+                evidence.detail.to_hex()
+            ),
+        );
     }
 
     if at_park_ceiling(record, StageId::AggregateVerify, rolls) {
@@ -313,6 +315,122 @@ pub(super) fn reduce_aggregate_verify_completed(
     Decisions { outcome: repair.outcome, effects }
 }
 
+/// The sealed bloom and the fold a verdict is entitled to act on, or the typed
+/// [`AggregateVerifyError`] that says why it is not.
+///
+/// The three guards every whole-bloom mechanical verdict passes, named once
+/// because two facts now reach them — [`Fact::AggregateVerifyCompleted`] and
+/// the documentation refusal below — and a second copy would let one of them
+/// drift into accepting a stale verdict against a newer integration.
+///
+/// [`Fact::AggregateVerifyCompleted`]: crate::Fact::AggregateVerifyCompleted
+fn judged_fold<'a>(
+    snapshot: &'a Snapshot,
+    bloom: &BloomId,
+    evidence: &Evidence,
+) -> Result<(&'a BloomRecord, &'a FoldedIntegration), AggregateVerifyError> {
+    let Some(record) = snapshot.blooms.get(bloom).filter(|record| record.status == BloomStatus::Sealed) else {
+        return Err(AggregateVerifyError::UnknownOrInactiveBloom);
+    };
+    let Some(integration) = record.integration.as_ref() else {
+        return Err(AggregateVerifyError::NoPendingIntegration);
+    };
+    // The verdict must bind the exact tree the held fold produced — a stale
+    // verdict from a superseded fold cannot act on a newer integration.
+    if !evidence.validates(&integration.tree) {
+        return Err(AggregateVerifyError::SubjectMismatch { expected: integration.tree, got: evidence.subject });
+    }
+
+    Ok((record, integration))
+}
+
+/// How many documentation-repair laps one bloom's product may buy before the
+/// question goes to an operator.
+///
+/// Two, and its own number rather than the sealed catalog's `AggregateVerify`
+/// budget that [`at_park_ceiling`] reads. That budget governs how many times a
+/// *fold* may be re-woven, and ADR-0218's low tolerance deliberately spends
+/// none of it: a compile red parks on the first verdict. This ceiling is the
+/// opposite calibration for the opposite defect — a rustdoc diagnostic names
+/// the file and the line, so the first lap almost always answers it, and the
+/// second exists for the case where fixing one link exposed another. A third
+/// would be the machine guessing, which is the thing the amendment refuses.
+///
+/// Counted from [`BloomRecord::aggregate_verify_rolls`] rather than a counter
+/// of its own, because that is the honest number: every documentation lap ends
+/// by re-dispatching the aggregate gates over the repaired weave, so each lap
+/// costs exactly one roll, and a bloom that reached this gate three times has
+/// had two chances to fix its documentation whatever else happened in between.
+/// A field would be a second thing to keep true.
+const DOCS_REPAIR_LAPS: u32 = 2;
+
+/// Reduce a final aggregate verify that came back red on documentation and
+/// nothing else (ADR-0218 §Amendment: documentation is judged once, over the
+/// product).
+///
+/// The product is assembled, every member has passed, and the one thing
+/// standing between the bloom and its landing is a diagnostic that already
+/// names a file and a line. So this refusal does not eject a member and does
+/// not park on the first red: it opens a repair lap on the composition — the
+/// ADR-0191 weave repair, whose work order is the refusing evidence and whose
+/// subject is the woven tree — and the lap's own completion re-dispatches the
+/// aggregate gates, which is how the documentation pass gets re-run. Nothing
+/// here duplicates that machinery.
+///
+/// [`BloomRecord::red_verify`] is deliberately not consulted. It chooses
+/// between ejecting a member and repairing one, and this refusal implicates no
+/// member at all: a documentation defect in the product is the composition's,
+/// and the composition's answer to a refusal is the same lap under either
+/// disposition.
+///
+/// At [`DOCS_REPAIR_LAPS`] the bloom parks with the findings, the same way a
+/// red fold parks — a person reading a diagnostic two laps failed to clear is
+/// faster than a third lap.
+pub(super) fn reduce_aggregate_docs_refused(snapshot: &Snapshot, bloom: &BloomId, evidence: &Evidence) -> Decisions {
+    let (record, integration) = match judged_fold(snapshot, bloom, evidence) {
+        Ok(judged) => judged,
+        Err(error) => return Decisions::rejected(Outcome::AggregateVerifyRejected(error)),
+    };
+
+    let rolls = record.aggregate_verify_rolls + 1;
+    let mut effects = alloc::vec![
+        Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() },
+        Decision::RecordAggregateVerifyRoll { bloom: *bloom, rolls },
+    ];
+
+    if rolls > DOCS_REPAIR_LAPS {
+        return parked_on_the_fold(
+            record,
+            *bloom,
+            integration.tree,
+            evidence,
+            rolls,
+            effects,
+            &format!(
+                "the aggregate verify over product {} came back red on documentation for the {DOCS_REPAIR_LAPS}th \
+                 time; read its findings under evidence {} and release the hold once the documentation is answered",
+                integration.tree.to_hex(),
+                evidence.detail.to_hex()
+            ),
+        );
+    }
+
+    let repair = reweave(
+        record,
+        bloom,
+        &Refusal {
+            refused_at: StageId::AggregateVerify,
+            tree: integration.tree,
+            head: integration.head,
+            evidence,
+            implicated: &[],
+        },
+    );
+    effects.extend(repair.effects);
+
+    Decisions { outcome: repair.outcome, effects }
+}
+
 /// Park a bloom whose fold did not build, under an operator hold naming the
 /// aggregate and what the gate said (ADR-0218 §Amendment: low tolerance).
 ///
@@ -327,6 +445,12 @@ pub(super) fn reduce_aggregate_verify_completed(
 /// Nothing is dispatched. That is the point: the ADR-0191 re-weave is a paid
 /// lap on a combination no verdict has yet accepted, and the amendment's whole
 /// claim is that a person reading the findings is the faster path.
+///
+/// `reason` is the hold's own sentence, because the two refusals that reach
+/// here stop for different causes and an operator reading the brake needs which
+/// one: a fold that does not build, or documentation two repair laps failed to
+/// clear. Everything else about the park is identical, so it is one function
+/// with the sentence handed in rather than two that drift.
 fn parked_on_the_fold(
     record: &BloomRecord,
     bloom: BloomId,
@@ -334,6 +458,7 @@ fn parked_on_the_fold(
     evidence: &Evidence,
     rolls: u32,
     mut effects: Vec<Decision>,
+    reason: &str,
 ) -> Decisions {
     effects.push(finding_of(bloom, tree, evidence, &[]));
     effects.push(Decision::RecordReviewPark { bloom, question: Some(evidence.detail) });
@@ -343,17 +468,116 @@ fn parked_on_the_fold(
     if record.operator_hold.is_none() {
         effects.push(Decision::RecordOperatorHold {
             bloom,
-            hold: OperatorHold {
-                reason: format!(
-                    "the aggregate verify over fold {} came back red and the bloom's sealed disposition does not \
-                     re-weave; read its findings under evidence {} and release the hold once the fold is answered",
-                    tree.to_hex(),
-                    evidence.detail.to_hex()
-                ),
-                operator: HOLDING_DECIDER.to_owned(),
-            },
+            hold: OperatorHold { reason: String::from(reason), operator: HOLDING_DECIDER.to_owned() },
         });
     }
 
     Decisions { outcome: Outcome::AggregateVerifyParked { bloom, rolls, question: evidence.detail }, effects }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec;
+
+    use crate::ids::{BloomId, StageId, WorkpieceId};
+    use crate::reduce::{Decision, Decisions, Fact, Outcome, Snapshot};
+    use crate::testing::{claim, digest, draft, event, membership, step};
+    use crate::values::{Evidence, EvidenceKind};
+
+    /// Two members folded into a held integration — the position a whole-bloom
+    /// mechanical verdict arrives at.
+    fn folded_bloom() -> (Snapshot, BloomId) {
+        let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+        let bloom = spec.id();
+        let snapshot = Snapshot::new(digest(1)).with_green_base(digest(1));
+        let (snapshot, _) = step(&snapshot, &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+        let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+        let (snapshot, _) = step(
+            &snapshot,
+            &event("fold", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }),
+        );
+
+        (snapshot, bloom)
+    }
+
+    fn docs_refused(bloom: BloomId) -> Fact {
+        Fact::AggregateDocsRefused {
+            bloom,
+            evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+        }
+    }
+
+    fn held(decisions: &Decisions) -> bool {
+        decisions.effects.iter().any(|effect| matches!(effect, Decision::RecordOperatorHold { .. }))
+    }
+
+    fn repairs_the_composition(decisions: &Decisions) -> bool {
+        decisions.effects.iter().any(|effect| {
+            matches!(
+                effect,
+                Decision::AdvanceStage { workpiece, progress, .. }
+                    if *workpiece == WorkpieceId::composition() && progress.stage == StageId::Refine
+            )
+        })
+    }
+
+    #[test]
+    fn a_documentation_refusal_opens_a_repair_lap_instead_of_parking_the_bloom() {
+        // The plausible bug: the documentation refusal falls through to the
+        // low-tolerance park that a red fold takes, and a broken intra-doc link
+        // — a diagnostic naming a file and a line — stops the bloom dead and
+        // waits for a person, which is the placement this amendment exists to
+        // undo.
+        let (snapshot, bloom) = folded_bloom();
+
+        let decisions = super::reduce_aggregate_docs_refused(&snapshot, &bloom, &evidence_of(&docs_refused(bloom)));
+
+        assert!(repairs_the_composition(&decisions), "the product repairs its own documentation: {decisions:?}");
+        assert!(!held(&decisions), "a documentation refusal does not brake the bloom: {decisions:?}");
+        assert!(
+            !decisions.effects.iter().any(|effect| matches!(effect, Decision::RecordWithdrawal { .. })),
+            "and it ejects nobody: {decisions:?}",
+        );
+    }
+
+    #[test]
+    fn the_lap_past_the_documentation_ceiling_parks_with_its_findings() {
+        // The plausible bug: the ceiling is never reached, so a product whose
+        // documentation two laps could not clear re-weaves forever on a
+        // diagnostic the model is not converging on.
+        let (snapshot, bloom) = folded_bloom();
+        let refusal = docs_refused(bloom);
+        let mut snapshot = snapshot;
+        for lap in 0..super::DOCS_REPAIR_LAPS {
+            let stepped = step(&snapshot, &event(&alloc::format!("docs-{lap}"), refusal.clone()));
+            snapshot = stepped.0;
+        }
+
+        let decisions = super::reduce_aggregate_docs_refused(&snapshot, &bloom, &evidence_of(&refusal));
+
+        assert!(
+            matches!(decisions.outcome, Outcome::AggregateVerifyParked { .. }),
+            "the ceiling parks: {:?}",
+            decisions.outcome,
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(effect, Decision::RecordCompositionFinding { .. })),
+            "the operator gets the findings that stopped it: {decisions:?}",
+        );
+        assert!(
+            decisions.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::RecordOperatorHold { hold, .. } if hold.reason.contains("documentation")
+            )),
+            "and a brake that says documentation stopped it: {decisions:?}",
+        );
+    }
+
+    fn evidence_of(fact: &Fact) -> Evidence {
+        match fact {
+            Fact::AggregateDocsRefused { evidence, .. } => evidence.clone(),
+            other => panic!("not a documentation refusal: {other:?}"),
+        }
+    }
 }

@@ -37,7 +37,7 @@ args = ["xtask", "transform"]
 # nothing.
 [lanes]
 model = ["construct.implement", "review.critic", "scope.fill", "retrospect.read"]
-mechanical = ["verify.member", "verify.check", "verify.base"]
+mechanical = ["verify.member", "verify.compose", "verify.check", "verify.base"]
 
 # The verifier identity vocabulary, in canonical order. A position here is an
 # identity's bit in every recorded failure set, so an identity is appended and
@@ -55,15 +55,19 @@ identities = [
 # lane runs: containment is judged coordinator-side, and stating that as data is
 # what keeps the omission from being an obligation somebody has to remember.
 #
-# `verify.docs` is absent from the member position alone. Documentation
-# correctness is a whole-workspace property — an intra-doc link resolves across
-# crates, so a member's closure can neither break it alone nor prove it alone —
-# while running it there was the single most expensive gate the member position
-# carried.
+# `verify.docs` is absent from the two positions that judge something short of
+# the finished product. Documentation correctness is a whole-workspace property —
+# an intra-doc link resolves across crates, so neither a member's closure nor a
+# partial composition can break it alone or prove it alone — and rustdoc is both
+# the single most expensive gate the line runs and the one `sccache` cannot cache
+# at all. It therefore runs at exactly two whole-tree positions: `verify.base`,
+# so the day's base is already clean, and `verify.check`, once, over the product
+# the bloom will land.
 [verifiers.runs]
-"verify.member" = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
-"verify.check"  = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
-"verify.base"   = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.member"  = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.compose" = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.check"   = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
+"verify.base"    = ["verify.preflight", "verify.fmt", "verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.suppress", "verify.lock"]
 
 # The evidence-envelope shape the lane writes and the intake admits.
 [evidence]

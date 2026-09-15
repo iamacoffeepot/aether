@@ -92,7 +92,7 @@ use admin::{
     reduce_admin_cancel_lane, reduce_admin_drop_lap, reduce_admin_enter, reduce_admin_exit, reduce_admin_rerun,
     reduce_admin_set_candidate, reduce_admin_waive,
 };
-use aggregate_verify::reduce_aggregate_verify_completed;
+use aggregate_verify::{reduce_aggregate_docs_refused, reduce_aggregate_verify_completed};
 use attempt::{reduce_attempt_completed, reduce_member_deadline_expired, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use coordination::{
@@ -186,6 +186,7 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         Fact::AggregateVerifyCompleted { bloom, passed, evidence } => {
             reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
         }
+        Fact::AggregateDocsRefused { bloom, evidence } => reduce_aggregate_docs_refused(snapshot, bloom, evidence),
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
         Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers, findings } => {
             reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers, findings)
@@ -266,6 +267,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         fact @ (Fact::AttemptCompleted { .. }
         | Fact::AggregateReviewCompleted { .. }
         | Fact::AggregateVerifyCompleted { .. }
+        | Fact::AggregateDocsRefused { .. }
         | Fact::LandingRejected { .. }
         | Fact::VerifyFailed { .. }
         | Fact::ContainmentRefused { .. }

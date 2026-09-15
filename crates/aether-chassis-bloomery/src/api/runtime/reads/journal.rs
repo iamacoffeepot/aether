@@ -163,6 +163,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::AttemptCompleted { bloom, .. }
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
+        | Fact::AggregateDocsRefused { bloom, .. }
         | Fact::PrecheckPrepared { bloom, .. }
         | Fact::RequestPrecheck { bloom, .. }
         | Fact::PrecheckCompleted { bloom, .. }

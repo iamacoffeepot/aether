@@ -106,7 +106,20 @@ fn contextual_memo_proof(record: &BloomRecord, tree: Digest) -> Option<VerifyPro
     if record.verify_proof_for(StageId::AggregateVerify, tree).is_some() {
         return None;
     }
-    let receipt = record.coordination.as_deref()?.contextual_proof_for_tree(tree)?;
+    let coordination = record.coordination.as_deref()?;
+    // The same refusal [`super::coordination::contextual_aggregate_authority`]
+    // makes, at the other seam a contextual receipt reaches the fold identity
+    // through. A shared run is sealed under the composition position's gate
+    // set, so minting a fold proof from one would file a green for
+    // `verify.docs` under a run that never spawned it — and the landing reads
+    // exactly this proof when it decides whether to mint a whole-workspace base
+    // receipt. Nothing is filed instead, so the next seal pays an honest
+    // `verify.base`.
+    let aggregate = VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest();
+    if coordination.composition_contract.gate_set != aggregate {
+        return None;
+    }
+    let receipt = coordination.contextual_proof_for_tree(tree)?;
     if receipt.kind != EvidenceKind::VerificationResult || !receipt.validates(&tree) {
         return None;
     }

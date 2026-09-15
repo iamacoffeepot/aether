@@ -21,7 +21,7 @@ use std::{fs, io};
 
 use aether_bloomery::{
     CONSTRUCT_IMPLEMENT_COMMAND, Digest, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND,
-    VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VerifyFailure, VerifyFailureSet,
+    VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_COMPOSE_COMMAND, VerifyFailure, VerifyFailureSet,
 };
 use serde_json::{Value, json};
 
@@ -388,7 +388,10 @@ fn verify_outcome(
     report: Option<&VerifyReport>,
 ) -> Outcome {
     let passed = authored_pass(mode) || mode == LaneMode::ConcludesWithoutWriting;
-    let umbrella = command == VERIFY_CHECK_COMMAND || command == VERIFY_BASE_COMMAND;
+    // Every umbrella position, `verify.compose` included: what makes a run an
+    // umbrella is that it fans out to a list, not which list the checkout
+    // declares for it.
+    let umbrella = matches!(command, VERIFY_CHECK_COMMAND | VERIFY_COMPOSE_COMMAND | VERIFY_BASE_COMMAND);
     let mut evidence = json!({
         "command": command,
         "nonce": evidence_nonce,
@@ -489,7 +492,7 @@ fn write_verify_test_observations(out: &Path, evidence: &[u8]) -> io::Result<()>
         return Ok(());
     };
     let command = value.get("command").and_then(Value::as_str).unwrap_or_default();
-    if command != VERIFY_CHECK_COMMAND && command != VERIFY_BASE_COMMAND {
+    if !matches!(command, VERIFY_CHECK_COMMAND | VERIFY_COMPOSE_COMMAND | VERIFY_BASE_COMMAND) {
         return Ok(());
     }
     let Some(nonce) = value.get("nonce").and_then(Value::as_str) else {

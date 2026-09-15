@@ -54,6 +54,18 @@ pub(super) use aether_bloomery::VERIFY_CHECK_COMMAND as VERIFY_CHECK;
 /// own identity: the proof a member files must name the gates that ran over it.
 pub(super) use aether_bloomery::VERIFY_MEMBER_COMMAND as VERIFY_MEMBER;
 
+/// The typed id of the composition verify — the gate over an assembly of the
+/// product that is not yet the product: a pre-check of a partial eager head, or
+/// a contextual shared run over a composition group.
+///
+/// Reads the same closure [`VERIFY_CHECK`] does, because a composition's
+/// subject is a union of contributions the same way a fold's is. Its own id for
+/// the reason [`VERIFY_MEMBER`] has one: the fan-out differs — the checkout
+/// omits `verify.docs` from it — so the gate-set identity the resulting proof is
+/// filed under has to differ with it, or a composition's green would answer the
+/// fold's question about a gate it never ran.
+pub(super) use aether_bloomery::VERIFY_COMPOSE_COMMAND as VERIFY_COMPOSE;
+
 /// The typed id of the whole-workspace base verify. Same fan-out as
 /// [`VERIFY_CHECK`] in this repository's manifest, but closure resolution is
 /// skipped: with an empty candidate range `Scope::resolve` yields an empty
@@ -861,11 +873,14 @@ fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
 
 /// Which verify position an umbrella run answers for.
 ///
-/// The three positions of the line, and the two axes that separate them: how
+/// The four positions of the line, and the two axes that separate them: how
 /// much of the workspace a run reads, and which members it fans out to. Stated
 /// as one closed vocabulary rather than as two booleans threaded through the
 /// pass, because every combination a pair of booleans admits is not a position —
-/// there is no docs-less base and no closure-narrowed vocabulary the base runs.
+/// there is no docs-less base, and no closure-narrowed vocabulary the base runs.
+/// The two axes also do not separate the positions pairwise: [`Self::Fold`] and
+/// [`Self::Compose`] read the same closure and differ only in the fan-out, which
+/// is exactly why the position is the unit and not the pair.
 ///
 /// The fan-out itself is the checkout's: [`members`](Self::members) reads
 /// `[verifiers.runs]` for this position's command, so a manifest that omits an
@@ -875,6 +890,10 @@ fn unjudged_notice(stdout: &str, scope: &Scope) -> Option<String> {
 pub(super) enum Position {
     /// One member's candidate, narrowed to its diff's closure.
     Member,
+    /// An assembly of the product that is not yet the product — a pre-check of a
+    /// partial eager head, or a contextual shared run over a composition group —
+    /// narrowed to the union of the contributions it carries.
+    Compose,
     /// The bloom's fold, narrowed to the union of its members' diffs.
     Fold,
     /// A sealed base, over the whole workspace.
@@ -882,10 +901,11 @@ pub(super) enum Position {
 }
 
 impl Position {
-    /// The position `command` names, if it is one of the three umbrellas.
+    /// The position `command` names, if it is one of the four umbrellas.
     pub(super) fn of(command: &str) -> Option<Self> {
         match command {
             VERIFY_MEMBER => Some(Self::Member),
+            VERIFY_COMPOSE => Some(Self::Compose),
             VERIFY_CHECK => Some(Self::Fold),
             VERIFY_BASE => Some(Self::Base),
             _ => None,
@@ -897,6 +917,7 @@ impl Position {
     fn command(self) -> &'static str {
         match self {
             Self::Member => VERIFY_MEMBER,
+            Self::Compose => VERIFY_COMPOSE,
             Self::Fold => VERIFY_CHECK,
             Self::Base => VERIFY_BASE,
         }
@@ -2880,7 +2901,8 @@ fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
     (!observed.is_empty()).then(|| EvidenceChannel::environment(observed.join("\n\n")))
 }
 
-/// The `verify.check` / `verify.base` umbrella (#3626): runs every spawnable
+/// The `verify.member` / `verify.compose` / `verify.check` / `verify.base`
+/// umbrella (#3626): runs every spawnable
 /// member in the checkout's `[verifiers.runs]` for this position
 /// unconditionally — no short-circuit on first failure, so a partial failure
 /// still leaves every member's log for diagnosis — then writes one aggregate
@@ -2896,10 +2918,11 @@ fn environment_observations(members: &[MemberRun]) -> Option<EvidenceChannel> {
 /// empty candidate range would otherwise false-green a workspace-wide question.
 ///
 /// `position` also chooses the fan-out from the checkout's `[verifiers.runs]`
-/// for that command — this repository's member run omits `verify.docs` because
-/// documentation correctness is a whole-workspace property — and names the
-/// command the evidence reports itself under, which is half the gate-set
-/// identity a bloom files the resulting proof against.
+/// for that command — this repository's member and compose runs omit
+/// `verify.docs`, because documentation correctness is a whole-workspace
+/// property neither a member's closure nor a partial composition can prove — and
+/// names the command the evidence reports itself under, which is half the
+/// gate-set identity a bloom files the resulting proof against.
 pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Result<()> {
     let umbrella_started = Instant::now();
     fs::create_dir_all(&args.out).with_context(|| format!("create {}", args.out.display()))?;
@@ -3223,13 +3246,13 @@ mod tests {
     use super::{
         BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
         MemberRunner, Memo, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, TriageInputs, VERIFY_BASE,
-        VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
-        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
-        fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
-        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
-        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, selected_members, spawnable_runs, stated_selection, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        VERIFY_CHECK, VERIFY_COMPOSE, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure,
+        distil_diagnostics, effective_exit_code, empty_closure_run, environment_observations, failed_verifiers,
+        failed_verifiers_of, fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base,
+        member_outcome, member_scope_notice, operational_failure_notice, package_name, preflight_tools,
+        prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools, run_member,
+        run_member_discriminated, run_timed_prepare, selected_members, spawnable_runs, stated_selection,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -4051,6 +4074,30 @@ mod tests {
     }
 
     #[test]
+    fn the_composition_position_is_the_fold_less_documentation() {
+        // Tripwire: the fan-out is read from the checkout's `pipeline.toml`, so
+        // both lists drift with that file. `verify.docs` is the most expensive
+        // gate the line runs and the one sccache cannot cache; running it at
+        // every composition step re-discovered the same cosmetic defect on every
+        // fold, at fifteen to seventeen minutes a time. Putting it back in the
+        // compose run — or quietly dropping a second gate from compose so the
+        // two lists diverge by more than the one deliberate omission — restores
+        // that bill or silently weakens the gate, and every other assertion
+        // about either position stays green.
+        let compose = Position::Compose.members();
+        let fold = Position::Fold.members();
+
+        assert!(!compose.contains(&"verify.docs"), "a partial composition cannot prove a whole-workspace property");
+        assert!(fold.contains(&"verify.docs"), "the fold is where documentation is judged, once");
+        assert_eq!(
+            compose,
+            fold.iter().copied().filter(|id| *id != "verify.docs").collect::<Vec<_>>(),
+            "the composition run is the fold's, less exactly that one identity, in the fold's own order",
+        );
+        assert!(!Position::Compose.whole_workspace(), "a composition narrows to the contributions it carries");
+    }
+
+    #[test]
     fn the_stated_selection_reads_off_what_ran_whichever_narrowing_produced_it() {
         // Tripwire for the one selection pipeline: two inputs narrow a run — the
         // stated `--gate` probe selection and the delta carry — and the envelope
@@ -4297,7 +4344,7 @@ mod tests {
         // fine (#4717).
         let test = verify_command("verify.test").expect("verify.test mapped");
         assert_eq!(test.requires_targets, &[WASM_TARGET], "the dist pre-build cross-builds for this target");
-        for position in [Position::Member, Position::Fold, Position::Base] {
+        for position in [Position::Member, Position::Compose, Position::Fold, Position::Base] {
             assert!(
                 required_targets(&position.members()).contains(&WASM_TARGET),
                 "a declared target the {position:?} preflight never checks is inert",
@@ -4386,12 +4433,15 @@ mod tests {
         // added to the required list without a member fails here instead of
         // passing unnoticed the way `lock-freshness` did.
         //
-        // Asked of the two whole-tree positions, which are the ones that stand
-        // between a candidate and the landing CI. The member position runs a
-        // subset by design (the checkout's `[verifiers.runs]` for
-        // `verify.member`), and
-        // `a_manifest_that_omits_an_identity_skips_that_gate` pins that the
-        // resolved run list, not a compiled skip, is what drops a gate.
+        // Asked of the fold and the base, which are the two positions that stand
+        // between a candidate and the landing CI with the whole required list
+        // owed. The member and compose positions run a subset by design (the
+        // checkout's `[verifiers.runs]` for their own commands), so neither can
+        // join this loop; what each of them omits is pinned instead —
+        // `a_manifest_that_omits_an_identity_skips_that_gate` for the resolved
+        // run list being what drops a gate at all, and
+        // `the_composition_position_is_the_fold_less_documentation` for the one
+        // identity the composition drops and no other.
         for job in workflow::required_jobs() {
             if NOT_A_GATE.contains(&job.as_str()) {
                 continue;
@@ -5561,13 +5611,18 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // does not (and must not) recognize the umbrella id, else an unrouted
         // verify.check would silently run as a single (wrong) cargo invocation
         // instead of falling to the unrecognized-id bail!.
-        for umbrella in [VERIFY_MEMBER, VERIFY_CHECK, VERIFY_BASE] {
+        for umbrella in [VERIFY_MEMBER, VERIFY_COMPOSE, VERIFY_CHECK, VERIFY_BASE] {
             assert!(verify_command(umbrella).is_none(), "{umbrella} is an umbrella, not a member invocation");
+            assert_eq!(
+                Position::of(umbrella).map(Position::command),
+                Some(umbrella),
+                "{umbrella} routes to a position"
+            );
             assert_ne!(umbrella, CONSTRUCT_IMPLEMENT);
         }
         assert_eq!(
-            [Position::Member, Position::Fold, Position::Base].map(Position::command),
-            [VERIFY_MEMBER, VERIFY_CHECK, VERIFY_BASE],
+            [Position::Member, Position::Compose, Position::Fold, Position::Base].map(Position::command),
+            [VERIFY_MEMBER, VERIFY_COMPOSE, VERIFY_CHECK, VERIFY_BASE],
             "each position reports itself under its own id, or two positions' evidence is indistinguishable",
         );
     }

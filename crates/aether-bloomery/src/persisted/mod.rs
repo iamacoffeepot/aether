@@ -522,6 +522,19 @@ pub const DECISIONS_RESCUE_ADMIN_DIGEST: Digest =
 pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
     Digest::pinned("7765f5ee28b4ac779ac5a7e0205c037fd0a91fe238a1f71023adf60037ff33cd");
 
+/// The stamp on journaled event rows written before
+/// `Fact::AggregateDocsRefused` (ADR-0218 §Amendment: documentation is judged
+/// once, over the product).
+///
+/// Copied verbatim from the `event` line the ledger carried as current
+/// immediately before that fact — never recomputed from live code (#5500,
+/// ADR-0187 §Amendment). Unlike [`EVENT_PRE_RED_VERIFY_DIGEST`], this era's
+/// rows need no cursor walk: the fact is appended past every existing
+/// discriminant, so nothing already journaled moved and the upcast is the
+/// identity.
+pub const EVENT_PRE_AGGREGATE_DOCS_DIGEST: Digest =
+    Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -781,6 +794,13 @@ fn upcast_event_pre_admin(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-documentation-refusal event rows carry the same wire layout today's
+/// decoder reads: `Fact::AggregateDocsRefused` is appended past every existing
+/// discriminant, so no journaled row's selector moved.
+fn upcast_event_pre_aggregate_docs(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Rescue-binary decision rows (see [`DECISIONS_RESCUE_ADMIN_DIGEST`]) carry
 /// the three admin effects one discriminant below today's and a nine-field
 /// policy inside `RecordCoordinationState`.
@@ -856,6 +876,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_findings,
             upcast_event_pre_admin,
             upcast_event_rescue_admin,
+            upcast_event_pre_aggregate_docs,
         ],
     )
 }
@@ -898,6 +919,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_AGGREGATE_DOCS_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

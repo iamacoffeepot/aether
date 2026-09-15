@@ -74,7 +74,7 @@ fn selected_head_plan(record: &BloomRecord, bloom: BloomId, coordination: &Coord
                 candidate: pin.candidate,
             })
             .collect(),
-        gate_set: VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest(),
+        gate_set: VerifyGateSet::compose_of(&record.pipeline_manifest).digest(),
     })
 }
 
@@ -178,13 +178,13 @@ fn plan_from_candidates(
         bloom,
         base: record.spec.base(),
         members,
-        gate_set: VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest(),
+        gate_set: VerifyGateSet::compose_of(&record.pipeline_manifest).digest(),
     })
 }
 
 fn run_decision(record: &BloomRecord, bloom: BloomId, node: &PrecheckNode, dispatch: bool) -> Decision {
     let binding = stage_binding(&record.stage_catalog, StageId::AggregateVerify);
-    let transformation = Transformation::for_aggregate_verify(&binding, node.tree, node.head, record.spec.base());
+    let transformation = Transformation::for_composition_verify(&binding, node.tree, node.head, record.spec.base());
     if dispatch {
         Decision::DispatchPrecheck {
             bloom,
@@ -337,9 +337,7 @@ pub(super) fn reduce_precheck_completed(
     if issued.digest() != node {
         return rejected(PrecheckError::NodeMismatch { expected: issued.digest(), got: node });
     }
-    let expected_gate = VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)
-        .expect("aggregate verify has a gate")
-        .digest();
+    let expected_gate = VerifyGateSet::compose_of(&record.pipeline_manifest).digest();
     if issued.gate_set != expected_gate {
         return rejected(PrecheckError::GateMismatch { expected: expected_gate, got: issued.gate_set });
     }
@@ -527,16 +525,35 @@ fn complete_joined(
     }
 }
 
-/// Exact issued pre-check that final resolution may join.
+/// Exact issued pre-check that final resolution may join — `None` unless the
+/// pre-check asked the fold's own question.
+///
+/// A pre-check runs the composition position ([`VerifyGateSet::compose_of`]),
+/// which is the fold's fan-out less `verify.docs`, so its green answers a
+/// strictly weaker question than the one final resolution owes. Joining it
+/// would be the whole placement defect: documentation would be judged by
+/// whichever partial head happened to be current when the last member folded,
+/// or by nothing at all. So the join is gated on gate-set equality with the
+/// aggregate position, and a pre-check under today's manifest never satisfies
+/// it — the bloom pays one real `AggregateVerify` over the finished product and
+/// that is the one place its documentation is judged (ADR-0218 §Amendment:
+/// documentation is judged once, over the product).
+///
+/// The comparison rather than a flat `None` is deliberate: a repository whose
+/// `pipeline.toml` declares the same fan-out for both commands is stating that
+/// the two positions ask one question, and the join is sound again without this
+/// code changing.
 pub(super) fn final_join(record: &BloomRecord, bloom: BloomId, tree: Digest, _head: Digest) -> Option<PrecheckNode> {
     let state = record.precheck.as_ref()?;
     let issued = state.issued.as_ref()?;
     let plan = plan_of(record, bloom)?;
+    let aggregate = VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest();
     let active_members = record.spec.members().len().saturating_sub(record.withdrawn.len());
     (plan.members.len() == active_members
         && issued.plan == plan.digest()
         && issued.tree == tree
-        && issued.gate_set == plan.gate_set)
+        && issued.gate_set == plan.gate_set
+        && issued.gate_set == aggregate)
         .then_some(issued.clone())
 }
 

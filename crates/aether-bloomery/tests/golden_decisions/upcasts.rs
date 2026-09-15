@@ -24,9 +24,9 @@
 use aether_bloomery::persisted::{
     DECISIONS_PRE_COALESCE_DIGEST, DECISIONS_PRE_COORDINATION_DIGEST, DECISIONS_PRE_PRECHECK_DIGEST,
     DECISIONS_PRE_PROPOSE_DIGEST, DECISIONS_PRE_RED_VERIFY_DIGEST, DECISIONS_PRE_STUDY_DIGEST,
-    DECISIONS_RESCUE_ADMIN_DIGEST, EVENT_PRE_COALESCE_DIGEST, EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST,
-    EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_RED_VERIFY_DIGEST, EVENT_PRE_STUDY_DIGEST, EVENT_RESCUE_ADMIN_DIGEST,
-    decode_recorded_decisions, decode_recorded_event,
+    DECISIONS_RESCUE_ADMIN_DIGEST, EVENT_PRE_AGGREGATE_DOCS_DIGEST, EVENT_PRE_COALESCE_DIGEST,
+    EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST, EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_RED_VERIFY_DIGEST,
+    EVENT_PRE_STUDY_DIGEST, EVENT_RESCUE_ADMIN_DIGEST, decode_recorded_decisions, decode_recorded_event,
 };
 use aether_bloomery::testing::{containment_refused_event, surface_overlap_event};
 
@@ -37,6 +37,7 @@ const PRE_PRECHECK_DECISIONS: &[u8] = include_bytes!("fixtures/pre-precheck-deci
 const PRE_PRECHECK_EVENT: &[u8] = include_bytes!("fixtures/pre-precheck-event.bin");
 const PRE_COORDINATION_DECISIONS: &[u8] = include_bytes!("fixtures/pre-coordination-decisions.bin");
 const PRE_COORDINATION_EVENT: &[u8] = include_bytes!("fixtures/pre-coordination-event.bin");
+const PRE_AGGREGATE_DOCS_EVENT: &[u8] = include_bytes!("fixtures/pre-aggregate-docs-event.bin");
 const PRE_COALESCE_DECISIONS: &[u8] = include_bytes!("fixtures/pre-coalesce-decisions.bin");
 const PRE_COALESCE_EVENT: &[u8] = include_bytes!("fixtures/pre-coalesce-event.bin");
 const PRE_RED_VERIFY_DECISIONS: &[u8] = include_bytes!("fixtures/pre-red-verify-decisions.bin");
@@ -158,5 +159,16 @@ fn a_rescue_admin_decisions_row_decodes_through_its_pinned_upcast() {
 fn a_rescue_admin_event_row_decodes_through_its_pinned_upcast() {
     let decoded = decode_recorded_event(RESCUE_ADMIN_EVENT, Some(EVENT_RESCUE_ADMIN_DIGEST.as_bytes()))
         .expect("a row stamped 7765f5ee… decodes through the rescue upcast");
+    assert_eq!(decoded, containment_refused_event());
+}
+
+#[test]
+fn a_pre_aggregate_docs_event_row_decodes_through_its_pinned_upcast() {
+    // The plausible bug: `Fact::AggregateDocsRefused` is inserted rather than
+    // appended, which shifts every fact above it — `ContainmentRefused`
+    // included — and silently re-reads every journaled row as some other fact.
+    // These are the bytes the binary before it actually wrote.
+    let decoded = decode_recorded_event(PRE_AGGREGATE_DOCS_EVENT, Some(EVENT_PRE_AGGREGATE_DOCS_DIGEST.as_bytes()))
+        .expect("a row stamped 76e2d5e1… decodes through the pre-documentation-refusal upcast");
     assert_eq!(decoded, containment_refused_event());
 }

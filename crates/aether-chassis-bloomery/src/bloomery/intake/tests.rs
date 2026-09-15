@@ -1353,6 +1353,54 @@ fn a_failing_aggregate_verify_admits_its_typed_set_as_a_bloom_level_failure() {
     assert!(store.lookup_order("n-agg-ver").unwrap().is_none(), "the admitted order is consumed");
 }
 
+// The documentation refusal's discrimination (ADR-0218 §Amendment:
+// documentation is judged once, over the product). The plausible bug is that it
+// inverts: read as `contains`, a fold that fails documentation *and* does not
+// compile buys repair laps on a tree no documentation edit will fix; read too
+// narrowly or not at all, the one defect the product can repair itself out of
+// parks the bloom on its first red.
+#[test]
+fn only_a_documentation_only_aggregate_red_admits_as_a_documentation_refusal() {
+    let bloom = BloomId(Digest::from_bytes([1; 32]));
+    let tree = Digest::from_bytes([30; 32]);
+    let admitted = |nonce: &str, failed: VerifyFailureSet| {
+        let mut store = store();
+        let mut record = dispatch_record(nonce, bloom, &WorkpieceId(String::new()), tree, tree);
+        record.stage = StageId::AggregateVerify;
+        record_dispatch(&mut store, &record).unwrap();
+
+        let upload = UploadedEvidence {
+            nonce: Nonce(nonce.to_owned()),
+            subject: tree,
+            verdict: StageVerdict::VerificationFailed,
+            detail: Digest::from_bytes([7; 32]),
+            observation: LaneObservation { failed_verifiers: failed, ..Default::default() },
+        };
+        let AdmitDecision::Admitted(admission) = admit_uploaded(&mut store, &upload).unwrap() else {
+            panic!("a matching failing AggregateVerify upload is admitted");
+        };
+        admission.event.fact
+    };
+
+    assert!(
+        matches!(
+            admitted("n-docs-only", VerifyFailureSet::one(VerifyFailure::Docs)),
+            Fact::AggregateDocsRefused { bloom: refused, .. } if refused == bloom
+        ),
+        "documentation alone is the repairable refusal",
+    );
+    assert!(
+        matches!(
+            admitted(
+                "n-docs-and-clippy",
+                [VerifyFailure::Docs, VerifyFailure::Clippy].into_iter().collect::<VerifyFailureSet>(),
+            ),
+            Fact::AggregateVerifyCompleted { .. }
+        ),
+        "documentation beside another identity is still a fold that does not build",
+    );
+}
+
 // #5098 — a failing AggregateVerify's findings persist on the composition
 // workpiece so the reserved Refine can assemble a work order from them. A
 // passing verdict clears that row: otherwise a later review-triggered repair

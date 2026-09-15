@@ -29,7 +29,7 @@ use crate::values::{
     OperatorHold, PartialHeadRepairCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest,
     PreparedCandidate, RedVerify, ResolutionClaim, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
     SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
-    SharedRunRecord, StableHeadReservation, StageCatalog, SurvivorGroup, Transformation, VERIFY_CHECK_COMMAND,
+    SharedRunRecord, StableHeadReservation, StageCatalog, SurvivorGroup, Transformation, VERIFY_COMPOSE_COMMAND,
     VERIFY_MEMBER_COMMAND, VerificationContract, VerificationMode, VerificationObligation, VerifyFailureSet,
     VerifyGateSet, Wedge, Withdrawal, WithdrawalCause, host_class_digest, verification_environment_digest,
 };
@@ -140,13 +140,19 @@ pub(super) fn initialized_effects(
         .iter()
         .map(|member| GenerationMember { workpiece: member.workpiece.clone(), scope_revision: member.scope_revision })
         .collect();
+    // The composition position, not the fold's: a shared run judges the group
+    // it carries, which is an assembly of the product and not the product. Its
+    // fan-out therefore omits `verify.docs`, and pinning that weaker vocabulary
+    // into the contract is what stops a settled run from answering the fold's
+    // question about a gate it never ran (ADR-0218 §Amendment: documentation is
+    // judged once, over the product).
     let binding = stage_binding(catalog, StageId::AggregateVerify);
-    let transformation = Transformation::for_aggregate_verify(&binding, base.tree, base.checkout, base.checkout);
+    let transformation = Transformation::for_composition_verify(&binding, base.tree, base.checkout, base.checkout);
     let host_class = host_class_digest(&policy.host_class);
     let environment = verification_environment_digest(&transformation.image, transformation.network, host_class);
     let composition_contract = CompositionContractTemplate {
-        gate_set: VerifyGateSet::fold_of(manifest).digest(),
-        gate_identities: gates_for_manifest(manifest, VERIFY_CHECK_COMMAND),
+        gate_set: VerifyGateSet::compose_of(manifest).digest(),
+        gate_identities: gates_for_manifest(manifest, VERIFY_COMPOSE_COMMAND),
         invocation: ContextualInvocationTemplate {
             command: transformation.command,
             extra_inputs: transformation.inputs.into_iter().skip(1).collect(),
@@ -240,6 +246,37 @@ fn hold_invalidated_inherited_construction(
         ),
         effects,
     );
+}
+
+/// The settled contextual receipt that may stand in for the *aggregate* verify
+/// over `head`, or `None` when the run asked a weaker question than the fold
+/// owes.
+///
+/// A shared run is sealed under the composition contract, and that contract now
+/// pins the composition position — the fold's fan-out less `verify.docs`. A
+/// receipt from it answers the composition's question, not the fold's, so it
+/// cannot clear the aggregate position by identity. Before this guard it did,
+/// and that is exactly how a bloom whose shared runs all settled reached its
+/// landing with nothing having judged the finished product's documentation,
+/// while every intermediate composition step paid rustdoc's fifteen minutes to
+/// re-discover the same cosmetic defect (ADR-0218 §Amendment: documentation is
+/// judged once, over the product).
+///
+/// Stated as a comparison rather than a removal: a repository whose
+/// `pipeline.toml` declares one fan-out for both commands is saying the two
+/// positions ask one question, and the substitution is sound again with no code
+/// change — the same shape [`super::precheck::final_join`] uses.
+fn contextual_aggregate_authority<'a>(
+    record: &BloomRecord,
+    state: &'a CoordinationState,
+    head: &IntegrationHead,
+) -> Option<&'a Evidence> {
+    let aggregate = VerifyGateSet::for_stage_of(StageId::AggregateVerify, &record.pipeline_manifest)?.digest();
+    if state.composition_contract.gate_set != aggregate {
+        return None;
+    }
+
+    state.contextual_aggregate_proof(head)
 }
 
 fn gates_for(record: &BloomRecord, command: &str) -> Vec<String> {
@@ -2006,7 +2043,7 @@ fn finalize_selected_root(record: &BloomRecord, state: &mut CoordinationState, e
     }
     let head = state.integration.head.clone();
     let lineage = state.integration.admitted.iter().map(|input| input.candidate.tree).collect::<Vec<_>>();
-    let decided = state.contextual_aggregate_proof(&head).map_or_else(
+    let decided = contextual_aggregate_authority(record, state, &head).map_or_else(
         || {
             super::integrate::folded(
                 record,

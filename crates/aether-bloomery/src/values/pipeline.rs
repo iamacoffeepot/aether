@@ -42,8 +42,8 @@ use serde::{Deserialize, Serialize};
 
 use super::{
     CONSTRUCT_IMPLEMENT_COMMAND, ConfigScopes, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, ResolvedConfigs,
-    SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND, VerifyFailure,
-    VerifyFailureSet,
+    SCOPE_FILL_COMMAND, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_COMPOSE_COMMAND, VERIFY_MEMBER_COMMAND,
+    VerifyFailure, VerifyFailureSet,
 };
 
 /// Where a repository states its lanes: the root of the checkout, beside
@@ -170,8 +170,9 @@ const COMPILED_ENTRYPOINT_ARGS: [&str; 2] = ["xtask", "transform"];
 /// Named here rather than read off a [`VerifyGateSet`](super::VerifyGateSet):
 /// those constructors project this list, so rendering `compiled` from them
 /// would be circular. `verify.containment` is a legal identity no lane runs
-/// and is therefore absent; `verify.docs` belongs at the two whole-tree
-/// positions because an intra-doc link resolves across crates.
+/// and is therefore absent; `verify.docs` belongs at these two whole-tree
+/// positions alone, because an intra-doc link resolves across crates and
+/// rustdoc is the most expensive gate the line runs.
 const COMPILED_FOLD_RUNS: [VerifyFailure; 9] = [
     VerifyFailure::Preflight,
     VerifyFailure::Fmt,
@@ -184,9 +185,14 @@ const COMPILED_FOLD_RUNS: [VerifyFailure; 9] = [
     VerifyFailure::Lock,
 ];
 
-/// The fan-out `verify.member` runs — [`COMPILED_FOLD_RUNS`] less
-/// [`VerifyFailure::Docs`].
-const COMPILED_MEMBER_RUNS: [VerifyFailure; 8] = [
+/// The fan-out `verify.member` and `verify.compose` run — [`COMPILED_FOLD_RUNS`]
+/// less [`VerifyFailure::Docs`].
+///
+/// One list for the two positions that judge something short of the finished
+/// product, because they omit the same one identity for the same reason: a
+/// member's closure and a partial composition can each neither break the
+/// workspace's documentation alone nor prove it alone.
+const COMPILED_INTERMEDIATE_RUNS: [VerifyFailure; 8] = [
     VerifyFailure::Preflight,
     VerifyFailure::Fmt,
     VerifyFailure::Clippy,
@@ -243,12 +249,18 @@ impl PipelineManifest {
                     SCOPE_FILL_COMMAND,
                     RETROSPECT_READ_COMMAND,
                 ]),
-                mechanical: commands(&[VERIFY_MEMBER_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_BASE_COMMAND]),
+                mechanical: commands(&[
+                    VERIFY_MEMBER_COMMAND,
+                    VERIFY_COMPOSE_COMMAND,
+                    VERIFY_CHECK_COMMAND,
+                    VERIFY_BASE_COMMAND,
+                ]),
             },
             verifiers: DeclaredVerifiers {
                 identities: identities(VerifyFailure::ALL.into_iter()),
                 runs: [
-                    (VERIFY_MEMBER_COMMAND, COMPILED_MEMBER_RUNS.as_slice()),
+                    (VERIFY_MEMBER_COMMAND, COMPILED_INTERMEDIATE_RUNS.as_slice()),
+                    (VERIFY_COMPOSE_COMMAND, COMPILED_INTERMEDIATE_RUNS.as_slice()),
                     (VERIFY_CHECK_COMMAND, COMPILED_FOLD_RUNS.as_slice()),
                     (VERIFY_BASE_COMMAND, COMPILED_FOLD_RUNS.as_slice()),
                 ]

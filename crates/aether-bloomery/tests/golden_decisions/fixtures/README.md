@@ -69,3 +69,13 @@ The digest test pins that prefix in source; it does not compare the
 fixture to itself, to git, or to the on-disk path at runtime. Do not
 update existing pins to bless rewritten history. Later history may add
 independent checkpoints; it must not erase earlier ones.
+
+`pre-aggregate-docs-event.bin` is the `containment-refused-event.bin` of
+`451f4cf95d2fe3a414b2ef754a226062ed1c508a`, the last commit before
+`Fact::AggregateDocsRefused`. Raw sha256
+`28a3ba3a8bd3477f805b52cedb7cadd5a575cadaf050f1ae61cb62fddc444a2a`; it carries
+the stamp `event 76e2d5e1…`. It has no decisions half: the documentation
+refusal appends a fact and no effect, so the decisions column did not move. Its
+upcast is the identity, because the fact is appended past every existing
+discriminant — the era is frozen anyway, so the claim is checked against real
+bytes rather than asserted.

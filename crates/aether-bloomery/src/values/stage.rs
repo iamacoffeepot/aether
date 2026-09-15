@@ -52,10 +52,31 @@ pub const RETROSPECT_READ_COMMAND: &str = "retrospect.read";
 /// The fold's mechanical verify lane — the whole fan-out, in CI-parity order,
 /// dispatched by `AggregateVerify` over the woven tree (ADR-0149 §The line).
 ///
-/// The complete verifier vocabulary runs here: the fold is the first tree that
-/// carries every member at once, so it is the first place a whole-workspace
-/// property like documentation can honestly be judged.
+/// The complete verifier vocabulary runs here, `verify.docs` included, and this
+/// is the **only** position that runs it over a bloom's own work: the final fold
+/// is the first and last tree that carries every member at once, so it is both
+/// the first place a whole-workspace property like documentation can honestly be
+/// judged and the last place it is still cheap to fix (ADR-0218 §Amendment:
+/// documentation is judged once, over the product).
 pub const VERIFY_CHECK_COMMAND: &str = "verify.check";
+
+/// The composition's mechanical verify lane — [`VERIFY_CHECK_COMMAND`]'s fan-out
+/// less `verify.docs`, dispatched over an assembly of the product that is not
+/// yet the product: an ADR-0217 pre-check of a partial eager head, and an
+/// ADR-0218 contextual shared run over a composition group.
+///
+/// Its own spelling for the reason [`VERIFY_MEMBER_COMMAND`] has one — the
+/// fan-out differs, so the identity a proof is filed under has to differ with
+/// it — and its own *position* because the closure it reads is the fold's, not
+/// one member's: a composition gate narrows to the union of the contributions it
+/// carries. What it must not do is answer the documentation question, on both
+/// counts the member position cannot: an intra-doc link resolves across the
+/// whole workspace, so a partial product can neither break it alone nor prove it
+/// alone, and rustdoc is the most expensive gate the line runs and the one
+/// `sccache` cannot cache at all. Running it per composition step bought a
+/// re-discovery of the same cosmetic defect on every fold, at fifteen to
+/// seventeen minutes a time, and spent member ejections on it.
+pub const VERIFY_COMPOSE_COMMAND: &str = "verify.compose";
 
 /// The member's mechanical verify lane — [`VERIFY_CHECK_COMMAND`]'s fan-out
 /// less `verify.docs`, dispatched by the per-member `Verify` over one
@@ -1087,9 +1108,12 @@ impl Transformation {
     /// an owner. Zero-egress like the member lane — it runs a compiler and
     /// nothing else.
     ///
-    /// It is also the first position that can answer a whole-workspace question
-    /// at all, which is why `verify.docs` runs here and not at the member
-    /// (`VERIFY_MEMBER_COMMAND`).
+    /// It is also the **only** position that answers the whole-workspace
+    /// documentation question over a bloom's own work, which is why
+    /// `verify.docs` runs here and at neither of the two positions that judge
+    /// something short of the finished product — the member
+    /// ([`VERIFY_MEMBER_COMMAND`]) and the composition
+    /// ([`VERIFY_COMPOSE_COMMAND`], [`Self::for_composition_verify`]).
     ///
     /// `base` is the bloom's sealed base the fold was built onto. The woven
     /// tree against that base is the union of the members' diffs, so naming
@@ -1129,6 +1153,27 @@ impl Transformation {
             network: VERIFY_LANE_NETWORK,
             description: None,
             model: None,
+        }
+    }
+
+    /// The composition-verify transformation: the `verify.compose` fan-out over
+    /// an assembly of the product that is not yet the product — an ADR-0217
+    /// pre-check of a partial eager head, or an ADR-0218 contextual shared run
+    /// over a composition group.
+    ///
+    /// Identical to [`Self::for_aggregate_verify`] in every field but the
+    /// command, and that one difference is the whole of it: the same stage
+    /// dispatches both, over the same union-of-diffs closure, under the same
+    /// zero-egress lane. What the command changes is the fan-out the checkout
+    /// declares for it — `verify.docs` is absent — and, through that, the
+    /// [`VerifyGateSet`](crate::VerifyGateSet) identity the run's proof is filed
+    /// under, so a composition's green cannot answer the fold's question about a
+    /// gate it never ran.
+    #[must_use]
+    pub fn for_composition_verify(binding: &StageBinding, subject: Digest, checkout: Digest, base: Digest) -> Self {
+        Self {
+            command: String::from(VERIFY_COMPOSE_COMMAND),
+            ..Self::for_aggregate_verify(binding, subject, checkout, base)
         }
     }
 
