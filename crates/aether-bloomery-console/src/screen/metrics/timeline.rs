@@ -109,15 +109,20 @@ impl Timeline {
         if self.cursor.selected().is_none() {
             self.reseat(store);
         }
-        let reconstructed = store
-            .timeline(self.bloom)
-            .and_then(|cell| cell.value.as_ref())
-            .is_some_and(|doc| doc.spans.iter().any(|span| span.reconstructed || span.started_unix_millis.is_none()));
+        let (reconstructed, truncated) =
+            store.timeline(self.bloom).and_then(|cell| cell.value.as_ref()).map_or((false, false), |doc| {
+                (doc.spans.iter().any(|span| span.reconstructed || span.started_unix_millis.is_none()), doc.truncated)
+            });
+        let spans_header = if truncated {
+            "SPANS (truncated)"
+        } else {
+            "SPANS"
+        };
         let header = Row::new([
             lane_title(&self.bloom.prefix(), reconstructed),
             "STAGE".to_owned(),
             "DUR".to_owned(),
-            "SPANS".to_owned(),
+            spans_header.to_owned(),
         ])
         .style(palette::body().add_modifier(if reconstructed {
             Modifier::DIM | Modifier::BOLD
@@ -338,6 +343,40 @@ mod tests {
         assert!(reconstructed.contains("axis: reconstructed"), "{reconstructed}");
         assert!(!live.contains("axis: reconstructed"), "{live}");
         assert_ne!(live, reconstructed);
+    }
+
+    #[test]
+    fn a_truncated_timeline_is_marked() {
+        // The plausible bug: the ledger cuts spans at its cap while the lane
+        // table paints the same header, so the operator reads a partial
+        // timeline as a complete one.
+        let bloom = DigestHex::from_bytes([1; 32]);
+        let paint = |truncated: bool| -> String {
+            let mut store = Store::new(Duration::from_secs(1));
+            store.apply_timeline(
+                bloom,
+                Ok(MetricsTimeline {
+                    bloom,
+                    spans: vec![TimelineSpan {
+                        workpiece: "wp-a".to_owned(),
+                        stage: StageId::Construct,
+                        started_unix_millis: Some(1_000),
+                        ..TimelineSpan::default()
+                    }],
+                    truncated,
+                }),
+            );
+            let mut timeline = Timeline::new(bloom);
+            let mut terminal = Terminal::new(TestBackend::new(80, 8)).expect("test backend");
+            terminal.draw(|frame| timeline.render(frame, frame.area(), &store)).expect("draw");
+            let buffer = terminal.backend().buffer();
+            let area = buffer.area();
+            (0..area.height).flat_map(|y| (0..area.width).map(move |x| buffer[(x, y)].symbol().to_owned())).collect()
+        };
+        let whole: String = paint(false);
+        assert!(!whole.contains("truncated"), "a whole timeline carries no cut marker: {whole}");
+        let painted: String = paint(true);
+        assert!(painted.contains("truncated"), "the lane header must mark the cut: {painted}");
     }
 
     #[test]
