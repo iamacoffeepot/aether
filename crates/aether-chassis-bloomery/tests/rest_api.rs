@@ -83,42 +83,58 @@ fn owner_signed_at(door: AuthorityDoor, binding: Digest, words: Vec<u8>, parents
     }
 }
 
+/// What one seeded commission's frozen revision says.
+///
+/// A struct rather than a row of positional arguments because the seeder grew
+/// past the point where `("problem", "task for wp", true, &[])` reads as
+/// anything at a call site.
+struct Seed<'a> {
+    /// The workpiece the commission is.
+    id: &'a str,
+    /// Declared-surface globs.
+    surface: &'a [&'a str],
+    /// The problem statement.
+    problem: &'a str,
+    /// The advisory one-line summary.
+    description: &'a str,
+    /// The routing model line. Empty is the incompleteness a *stored* revision
+    /// can still carry: every section a lane reads is non-nullable at the
+    /// revision door (#5995), so an empty one never reaches the seal gate, and
+    /// a missing routing is what the gate's completeness check still refuses.
+    routing_model: &'a str,
+    /// Whether to submit the owner-signed approval.
+    approve: bool,
+    /// Declared `## Depends on` ids.
+    dependencies: &'a [&'a str],
+}
+
+impl<'a> Seed<'a> {
+    /// A complete, approved commission over `surface`.
+    fn complete(id: &'a str, surface: &'a [&'a str]) -> Self {
+        Self {
+            id,
+            surface,
+            problem: "problem",
+            description: "",
+            routing_model: "construct: test",
+            approve: true,
+            dependencies: &[],
+        }
+    }
+}
+
 /// Persist an open commission with a complete revision and a signed approval.
 fn seed_commission(port: u16, id: &str, surface: &[&str]) -> Digest {
-    seed_commission_with(port, id, surface, "problem", true)
-}
-
-/// Persist a commission; `approve` submits the owner-signed approval.
-fn seed_commission_with(port: u16, id: &str, surface: &[&str], problem: &str, approve: bool) -> Digest {
-    seed_commission_described(port, id, surface, problem, &format!("task for {id}"), approve)
-}
-
-/// Persist a commission whose revision carries an explicit description.
-fn seed_commission_described(
-    port: u16,
-    id: &str,
-    surface: &[&str],
-    problem: &str,
-    description: &str,
-    approve: bool,
-) -> Digest {
-    seed_commission_revision(port, id, surface, problem, description, approve, &[])
+    seed_commission_revision(port, &Seed::complete(id, surface))
 }
 
 /// Persist a complete approved commission whose frozen revision depends on `depends_on`.
 fn seed_depending(port: u16, id: &str, depends_on: &[&str]) -> Digest {
-    seed_commission_revision(port, id, &["docs/guide/**"], "problem", &format!("task for {id}"), true, depends_on)
+    seed_commission_revision(port, &Seed { dependencies: depends_on, ..Seed::complete(id, &["docs/guide/**"]) })
 }
 
-fn seed_commission_revision(
-    port: u16,
-    id: &str,
-    surface: &[&str],
-    problem: &str,
-    description: &str,
-    approve: bool,
-    dependencies: &[&str],
-) -> Digest {
+fn seed_commission_revision(port: u16, seed: &Seed<'_>) -> Digest {
+    let Seed { id, surface, problem, description, routing_model, approve, dependencies } = *seed;
     let intent = Statement {
         words: format!("intent {id}").into_bytes(),
         provenance: Provenance::ObservationAttestation(Observation { source: "rest-api".to_owned() }),
@@ -127,6 +143,11 @@ fn seed_commission_revision(
     let (status, created) = send_auth(port, "POST", "/commissions", &serde_json::json!({ "id": id, "intent": intent }));
     assert_eq!(status, 201, "create commission {id}: {created:?}");
 
+    let description = if description.is_empty() {
+        format!("task for {id}")
+    } else {
+        description.to_owned()
+    };
     let revision = ScopeRevision {
         schema: SCOPE_REVISION_SCHEMA,
         workpiece: WorkpieceId(id.to_owned()),
@@ -136,9 +157,9 @@ fn seed_commission_revision(
         plan: "plan".to_owned(),
         declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
         dogfood_brief: "dogfood".to_owned(),
-        routing: ScopeRouting { size: "M".to_owned(), model: "construct: test".to_owned() },
+        routing: ScopeRouting { size: "M".to_owned(), model: routing_model.to_owned() },
         dependencies: dependencies.iter().map(|dep| WorkpieceId((*dep).to_owned())).collect(),
-        description: description.to_owned(),
+        description,
         implements: Vec::new(),
         declared_crates: Vec::new(),
         declared_reads: Vec::new(),
@@ -480,7 +501,14 @@ fn assert_store_door_fails_closed(http_port: u16) {
         "missing commission: {body:?}"
     );
 
-    let incomplete = seed_commission_with(http_port, "wp-incomplete", &["docs/guide/**"], "", true);
+    // Incomplete by its routing rather than by an empty section: the revision
+    // door refuses an empty problem, design, or plan before the bytes are
+    // stored (#5995), so the incompleteness the seal gate is still the first to
+    // see is a revision that states no model routing.
+    let incomplete = seed_commission_revision(
+        http_port,
+        &Seed { routing_model: "", ..Seed::complete("wp-incomplete", &["docs/guide/**"]) },
+    );
     let incomplete_id =
         patch_draft(http_port, &serde_json::to_value(valid_draft("wp-incomplete", incomplete)).unwrap());
     let (status, body) = send_json(http_port, "POST", &format!("/drafts/{incomplete_id}/seal"), &seal_body());
@@ -490,7 +518,10 @@ fn assert_store_door_fails_closed(http_port: u16) {
         "incomplete must name incompleteness: {body:?}"
     );
 
-    let unsigned = seed_commission_with(http_port, "wp-unsigned", &["docs/guide/**"], "problem", false);
+    let unsigned = seed_commission_revision(
+        http_port,
+        &Seed { approve: false, ..Seed::complete("wp-unsigned", &["docs/guide/**"]) },
+    );
     let unsigned_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-unsigned", unsigned)).unwrap());
     let (status, body) = send_json(http_port, "POST", &format!("/drafts/{unsigned_id}/seal"), &seal_body());
     assert_eq!(status, 422, "absent approval fails closed: {body:?}");
@@ -605,7 +636,10 @@ design
 
 plan
 ";
-    let revision = seed_commission_described(http_port, "wp-local", &["docs/guide/**"], "Need a CLI.", order, true);
+    let revision = seed_commission_revision(
+        http_port,
+        &Seed { problem: "Need a CLI.", description: order, ..Seed::complete("wp-local", &["docs/guide/**"]) },
+    );
     let draft_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-local", revision)).unwrap());
     let (status, sealed) = send_json(http_port, "POST", &format!("/drafts/{draft_id}/seal"), &seal_body());
     assert_eq!(status, 200, "a commission with no GitHub issue seals: {sealed:?}");
@@ -754,7 +788,10 @@ fn run_with_bloomery(_label: &str, body: impl FnOnce(u16)) {
 /// closed (422); a valid owner-signed statement admits with a gate-formed
 /// approval the reducer accepts.
 fn assert_single_above_auto_seal(http_port: u16) {
-    let unsigned = seed_commission_with(http_port, "wp-1", &["crates/aether-data/**"], "problem", false);
+    let unsigned = seed_commission_revision(
+        http_port,
+        &Seed { approve: false, ..Seed::complete("wp-1", &["crates/aether-data/**"]) },
+    );
     let unsigned_id = patch_draft(http_port, &serde_json::to_value(valid_draft("wp-1", unsigned)).unwrap());
     let (status, body) = send_json(http_port, "POST", &format!("/drafts/{unsigned_id}/seal"), &seal_body());
     assert_eq!(status, 422, "above-auto with no stored approval fails closed: {body:?}");
@@ -831,7 +868,10 @@ fn assert_configured_above_auto_member_is_refused(http_port: u16) {
 /// once its signature verifies.
 fn assert_mixed_above_auto_seal(http_port: u16) {
     let wp1 = seed_commission(http_port, "wp-1", &["docs/guide/**"]);
-    let wp2_unsigned = seed_commission_with(http_port, "wp-2", &["crates/aether-data/**"], "problem", false);
+    let wp2_unsigned = seed_commission_revision(
+        http_port,
+        &Seed { approve: false, ..Seed::complete("wp-2", &["crates/aether-data/**"]) },
+    );
     let mixed_id = patch_draft(http_port, &serde_json::to_value(two_member_draft(wp1, wp2_unsigned)).unwrap());
     let (status, body) = send_json(http_port, "POST", &format!("/drafts/{mixed_id}/seal"), &seal_body());
     assert_eq!(status, 422, "a mixed draft with an unsigned above-auto member fails closed: {body:?}");

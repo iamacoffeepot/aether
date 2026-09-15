@@ -63,7 +63,11 @@ Authored kinds. Call the setter with the kebab-case name.
 - **evidence** — grounding for the problem, not attestation over a digest.
   Repeated.
 - **success** — what success looks like. Singular.
-- **approach** — the chosen path and why. Singular.
+- **approach** — the chosen path and why. Singular. Required: it is the whole
+  of the frozen revision's design section, and every door that admits a
+  revision refuses one whose problem, design, or plan is empty — a construct
+  lane's prompt is rendered from those three, so a scope missing one dispatches
+  a lane with a heading and no work order.
 - **rejected-option** — an option considered and why it loses. Repeated.
 - **plan-step** — one implementation step. Name the behavior, the
   repository-relative paths it edits, and the stable symbol anchors a later

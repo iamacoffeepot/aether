@@ -33,26 +33,42 @@ const RERENDERED_REASON: &str = "re-rendered from the stored revision, which car
 impl ScopeRevision {
     /// Work-order text a lane or an outward replica reads.
     ///
-    /// A stored advisory description wins when the operator put one on the
-    /// revision. Otherwise the signed managed headings are rendered. A GitHub
-    /// issue body is never an input.
+    /// Every section comes from its own signed field: the problem, the design,
+    /// the plan and its routing lines, the surface declaration, and the dogfood
+    /// brief when the scope asked for one. A GitHub issue body is never an
+    /// input, and neither is [`Self::description`] beyond the heading below.
     ///
-    /// The surface declaration is the exception: it is always rendered from
-    /// this revision's own fields, over whatever block the stored description
-    /// carries. [`Self::declared_surface`] is what the seal door and the
-    /// containment gate read, so it is the authority and the block is its
-    /// rendering. An operator answering a parked surface request writes the
-    /// successor as the current revision with a widened field and every other
-    /// field — the description included — carried unchanged
-    /// ([`Self::with_widened_surface`]). A renderer that echoed a description
-    /// frozen one revision ago would hand the re-dispatched lane the exact
-    /// surface it had just declined against.
+    /// The fields are the authority because they are what the rest of the
+    /// estate reads. [`Self::declared_surface`] is what the seal door and the
+    /// containment gate check; `problem` / `design` / `plan` are what the
+    /// completeness gate counts and what the revision doors refuse when empty.
+    /// A renderer that echoed a stored body instead would hand the lane text no
+    /// gate ever looked at — which is how a commission carrying a one-line
+    /// title in `description` and nothing in its fields dispatched a lane that
+    /// had a subject and no work order.
+    ///
+    /// [`Self::description`] is the one-line summary it was named for, so it
+    /// renders as the order's heading and nowhere else. A description holding a
+    /// whole body — what the markdown parse path stores, so the next edit of a
+    /// work order starts from the bytes an approval covers — is not a summary
+    /// and is left out: the fields it was rendered from are right below it.
     #[must_use]
     pub fn render(&self) -> String {
-        if self.description.trim().is_empty() {
-            return self.render_fields();
+        let mut out = String::new();
+        if let Some(summary) = self.summary_heading() {
+            out.push_str("# ");
+            out.push_str(summary);
+            out.push_str("\n\n");
         }
-        retarget_declaration(&self.description, self)
+        out.push_str(&self.render_fields());
+        out
+    }
+
+    /// [`Self::description`] when it is the one-line summary the field is for,
+    /// and `None` when it carries a body instead.
+    fn summary_heading(&self) -> Option<&str> {
+        let summary = self.description.trim();
+        (!summary.is_empty() && !summary.contains('\n')).then_some(summary)
     }
 
     /// Managed headings rendered from the signed fields, ignoring
@@ -102,55 +118,6 @@ impl ScopeRevision {
         }
         out
     }
-}
-
-/// `body` with its managed surface-declaration blocks replaced by the ones
-/// `revision` renders to, spliced in where the first of them stood.
-///
-/// A body that declares no surface at all gets the declaration appended, which
-/// is the honest rendering of a revision whose field says something the text
-/// never did.
-fn retarget_declaration(body: &str, revision: &ScopeRevision) -> String {
-    let mut declaration = String::new();
-    push_declaration(&mut declaration, revision);
-
-    let mut out = String::with_capacity(body.len() + declaration.len());
-    let mut spliced = false;
-    let mut dropping = false;
-    for line in body.split_inclusive('\n') {
-        if let Some(name) = line.trim_end_matches(['\n', '\r']).strip_prefix("## ") {
-            dropping = matches!(name, SURFACE | CRATES | PROTECTED);
-            if dropping && !spliced {
-                splice(&mut out, &declaration);
-                spliced = true;
-            }
-        }
-        if !dropping {
-            out.push_str(line);
-        }
-    }
-    if !spliced {
-        splice(&mut out, &declaration);
-    }
-    out
-}
-
-/// Append `declaration` to `out` with exactly one blank line before it.
-///
-/// `declaration` opens with the newline [`push_list`] emits, so what varies is
-/// how much whitespace the text it lands after already ended with.
-fn splice(out: &mut String, declaration: &str) {
-    if out.is_empty() {
-        out.push_str(declaration.trim_start_matches('\n'));
-        return;
-    }
-    while out.ends_with("\n\n") {
-        out.pop();
-    }
-    if !out.ends_with('\n') {
-        out.push('\n');
-    }
-    out.push_str(declaration);
 }
 
 /// The surface-declaration blocks a revision renders to.
@@ -204,4 +171,91 @@ fn push_section(out: &mut String, name: &str, body: &str) {
     out.push_str("\n\n");
     out.push_str(body.trim());
     out.push_str("\n\n");
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::string::{String, ToString};
+    use alloc::vec;
+    use alloc::vec::Vec;
+
+    use super::{DESIGN, DOGFOOD, PLAN, PROBLEM, SURFACE};
+    use crate::ids::WorkpieceId;
+    use crate::values::commission::{SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting};
+
+    fn revision(description: &str) -> ScopeRevision {
+        ScopeRevision {
+            schema: SCOPE_REVISION_SCHEMA,
+            workpiece: WorkpieceId(String::from("issue-5995")),
+            predecessor: None,
+            problem: String::from("the lane reads a title and nothing else"),
+            design: String::from("render each section from its own field"),
+            plan: String::from("1. render\n2. refuse an empty section at the door"),
+            declared_surface: vec![String::from("crates/aether-bloomery/**")],
+            dogfood_brief: String::from("seal a member and read its prompt"),
+            routing: ScopeRouting { size: String::from("M"), model: String::from("construct: test") },
+            dependencies: Vec::new(),
+            description: description.to_string(),
+            implements: Vec::new(),
+            declared_crates: Vec::new(),
+            declared_reads: Vec::new(),
+        }
+    }
+
+    /// The byte offset of `needle` in `haystack`, or a panic naming the order
+    /// that was missing it.
+    fn at(haystack: &str, needle: &str) -> usize {
+        haystack.find(needle).unwrap_or_else(|| panic!("the work order states {needle:?}:\n{haystack}"))
+    }
+
+    // Tripwire: every typed section reaches the lane, in the order a reader
+    // works through them. The pre-fix renderer returned `description` verbatim,
+    // so a commission whose summary was a one-line title dispatched a lane that
+    // had the title and none of the four sections — which is how six members
+    // were built from titles on 2026-09-14.
+    #[test]
+    fn every_typed_section_renders_in_order_and_the_description_is_only_the_heading() {
+        let revision = revision("thread the typed sections into the lane prompt");
+        let order = revision.render();
+
+        assert!(
+            order.starts_with("# thread the typed sections into the lane prompt\n\n"),
+            "the one-line summary is the heading: {order}"
+        );
+        assert_eq!(
+            order.matches("thread the typed sections into the lane prompt").count(),
+            1,
+            "the summary appears as the heading and nowhere else: {order}"
+        );
+
+        for (section, body) in [
+            (PROBLEM, revision.problem.as_str()),
+            (DESIGN, revision.design.as_str()),
+            (PLAN, revision.plan.as_str()),
+            (DOGFOOD, revision.dogfood_brief.as_str()),
+        ] {
+            assert!(order.contains(body), "## {section} carries its field verbatim: {order}");
+        }
+        assert!(order.contains("crates/aether-bloomery/**"), "the declared surface reaches the lane: {order}");
+
+        let order = order.as_str();
+        let positions =
+            [at(order, PROBLEM), at(order, DESIGN), at(order, PLAN), at(order, SURFACE), at(order, DOGFOOD)];
+        assert!(
+            positions.windows(2).all(|pair| pair[0] < pair[1]),
+            "problem, design, plan, surface, dogfood in that order: {order}"
+        );
+    }
+
+    // Tripwire: the markdown parse path stores the whole rendered work order in
+    // `description` so the next edit starts from the bytes an approval covers.
+    // A renderer that treated that body as a heading would open every such
+    // order with a `# ## Problem statement` line.
+    #[test]
+    fn a_description_holding_a_body_renders_no_heading() {
+        let carried = revision("");
+        let order = revision(&carried.render()).render();
+
+        assert_eq!(order, carried.render(), "a body-valued description changes nothing the fields render");
+    }
 }

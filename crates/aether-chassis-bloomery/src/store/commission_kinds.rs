@@ -94,6 +94,13 @@ pub enum WriteScopeRevisionResult {
         /// add: proposing the widening is what drives surface inflation.
         paths: Vec<String>,
     },
+    /// A section the construct prompt is rendered from is empty. Appended past
+    /// [`Self::SurfaceGap`] so the earlier variants keep their wire
+    /// discriminants.
+    EmptySection {
+        /// The empty field: `problem`, `design`, or `plan`.
+        section: String,
+    },
 }
 
 /// Persist an approval whose signature the caller has already verified.

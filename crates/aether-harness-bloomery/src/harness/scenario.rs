@@ -485,9 +485,13 @@ impl ScenarioHarness {
             schema: SCOPE_REVISION_SCHEMA,
             workpiece,
             predecessor: None,
+            // Every section the lane prompt is rendered from is filled, because
+            // the doors this revision goes through refuse an empty one: the
+            // sections are what a construct lane is handed, so a fixture that
+            // left them blank would author a commission no operator could.
             problem: String::from("the harness authored this scope"),
-            design: String::new(),
-            plan: String::new(),
+            design: String::from("the harness declares the surface and nothing else"),
+            plan: String::from("1. run the scripted lane"),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
             dogfood_brief: String::new(),
             routing: ScopeRouting { size: String::from("S"), model: String::new() },

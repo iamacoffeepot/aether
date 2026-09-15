@@ -195,6 +195,8 @@ fn finalize(args: &TransformArgs, run_dir: &Path, run: LaneRun) -> Value {
                 Ok(description) => revision.description = description,
                 Err(finding) => refusals.push(finding),
             }
+            refusals
+                .extend(revision.empty_required_section().map(|section| door::empty_section(&workpiece.0, section)));
 
             let (status, findings) = terminal(&refusals);
             stamp_scope_evidence(
@@ -381,17 +383,20 @@ mod tests {
     use std::{env, process};
 
     #[test]
-    fn a_run_that_authored_only_problem_plan_and_surface_still_freezes_sealably() {
+    fn a_run_that_authored_the_required_sections_and_a_surface_freezes_sealably() {
         // The minimum a scoper can author, replayed and frozen the way
         // `finalize` freezes it. The seal door refuses a member whose stored
-        // revision carries an empty description, and its completeness gate
-        // counts an empty model routing as zero routings — so a revision frozen
-        // from the builder's own defaults is unsealable on both counts, which is
-        // what refused all three of 2026-09-13's lane-frozen revisions.
+        // revision carries an empty description, its completeness gate counts an
+        // empty model routing as zero routings, and every door that admits a
+        // revision refuses an empty problem, design or plan — so a revision
+        // frozen from the builder's own defaults is unsealable on all three
+        // counts, which is what refused all three of 2026-09-13's lane-frozen
+        // revisions.
         let run = env::temp_dir().join(format!("aether-scope-freeze-{}", process::id()));
         let _ = remove_dir_all(&run);
         for (kind, value) in [
             (FieldKind::Problem, "Step 3 calls a concrete path a glob. The seal door disagrees."),
+            (FieldKind::Approach, "Rewrite the step to name a directory glob."),
             (FieldKind::PlanStep, "Rewrite step 3 in xtask/src/transform/scope/scope_instructions.md."),
             (FieldKind::DeclaredSurface, "xtask/src/**"),
         ] {
@@ -401,9 +406,10 @@ mod tests {
 
         let mut revision = replay(WorkpieceId(String::from("issue-5924")), &calls)
             .finish(None, door::routing(&owned(winning_texts(&calls, FieldKind::RoutingHint))))
-            .expect("problem, plan and surface are a fillable workpiece");
+            .expect("problem, design, plan and surface are a fillable workpiece");
         assert!(!revision.routing.model.trim().is_empty(), "the gate counts this as one model routing");
         assert!(revision.description.is_empty(), "the builder renders none, so the lane has to derive one");
+        assert_eq!(revision.empty_required_section(), None, "no door refuses this revision for an empty section");
 
         revision.description = door::description(
             Some("Workpiece: issue-5924\n\nan order with no heading of its own\n"),
