@@ -819,6 +819,64 @@ member and fewer members landed per bloom. That trade is the decision: a lap is
 only worth its price when the bloom can tell that the next one will converge, and
 nothing in the journal has ever been able to tell that.
 
+## Amendment: a member is verified over the context it was built on (2026-09-15)
+
+§Amendment: eager integration assembles the product said a member's Verify
+proves its own candidate. The scheduler did not: it composed every ready
+request onto `state.integration.head` — the product — and the reducer enforced
+that with `plan.base == state.integration.head`. So the product was still the
+tree members were proved against, and every fold silently re-contexted every
+request that had not yet been planned.
+
+**What a member's green means.** A member's Verify proves the tree the member
+authored, over the context the member was constructed on: the `starting_head`
+its `ConstructContext` names, which is fixed for that candidate's whole life and
+which no sibling can move. `CompositionPlan.base` is that context —
+`CoordinationState::construct_base` — and members share a run only when they
+share it; a selection that does not agree on one base is planned as separate
+runs rather than one of them being rebased onto the other's. Because that base
+is an ancestor of every candidate in the selection, the source's pinned fold
+fast-forwards: `IntegrateOutcome::Integrated` returns the candidate's own tree
+and its own checkout, so a run carrying one member hands the lane that member's
+own candidate commit — the exact ref its slot last built — and its
+`--diff-base` is its own construct base. Nothing about the tree under test is a
+function of what the product happens to carry at the moment the run is planned.
+
+**What the product's green means.** The product is proved as a delta, once per
+fold. When a fold advances it, the composition owns the proof — the
+`aether.bloomery.composition` pre-check over the materialized head, and the
+partial-head repair when that comes back red — and the range it confirms is the
+fold, not the bloom: the previous product tree is already proved, so the new one
+diffs against that proof the way §Amendment: reconcile is scoped to the merge
+diffs a reconciled member against the candidate it started from. The gates that
+range can move are the delta classes of the fold's changed paths (ADR-0200's
+`DeltaClass::invalidates`), and the gates it cannot move are carried from the
+previous product's receipt. The final aggregate verify over the selected root
+still stands: membership is atomic at Resolve and the tree that lands is proved
+under matching candidate and ordered coverage, exactly as before.
+
+**No in-flight or queued member is ever re-contexted by a sibling's fold.** A
+fold retires no run, cancels no composition, re-contexts no author, re-prepares
+no candidate, and — this is the part that was missing — does not change the base
+of a request that is queued, admitted, or about to be planned. The only tree
+movement that reaches unstarted work is a product the bloom has *abandoned*, as
+§Amendment: eager integration assembles the product already states. A fold
+conflict is a Reconcile on the one completed member that authored the colliding
+candidate, and that member is green before the merge is ever asked about.
+
+The cost of the other reading is measured. Bloom `9680c483`, 2026-09-15: every
+verify run rebuilt the coordinator's whole downstream closure from scratch,
+because the product tree it verified against had changed at the previous fold —
+`verify.clippy` recompiled 67 to 176 crates where the member's own checkout
+would have recompiled 9. Two members went red for nothing: a folded sibling had
+added required struct fields, and `xtask` would not compile (E0063) against a
+candidate that, on its own base, compiles and passes. And the attribution delta
+read answered `changed-path base <product head> is not an ancestor of
+<candidate>` on every run, because a candidate authored before a fold does not
+descend from the tree that fold produced — #6054 fixed that read by measuring
+from the construct base, which is the same conclusion arrived at from the other
+end.
+
 ## Amendment: shared runs wait for siblings (2026-09-15, #6027)
 
 A ready contextual request waits for sibling constructs still in flight before
