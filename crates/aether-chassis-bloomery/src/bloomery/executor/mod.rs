@@ -216,6 +216,10 @@ where
         self.0.release_physical_run(physical_run).map_err(Into::into)
     }
 
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        self.0.reconcile_physical_run_leases(live).map_err(Into::into)
+    }
+
     fn stream_evidence(&self, handle: &WorkHandle) -> Result<Vec<EvidenceRef>, Self::Error> {
         self.0.stream_evidence(handle).map_err(Into::into)
     }
@@ -420,6 +424,14 @@ impl ExecutorShell {
     /// Release a retained shared-run lane lease.
     pub fn release_physical_run(&self, physical_run: &Digest) -> Result<(), ExecutorPortError> {
         self.backend.release_physical_run(physical_run)
+    }
+
+    /// Release every retained lane lease whose physical run is not in `live`.
+    ///
+    /// # Errors
+    /// The backend's release faulted.
+    pub fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), ExecutorPortError> {
+        self.backend.reconcile_physical_run_leases(live)
     }
 
     /// Stream the references to the run's uploaded evidence, filtered to the
