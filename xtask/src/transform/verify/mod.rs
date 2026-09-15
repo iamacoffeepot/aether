@@ -698,13 +698,17 @@ fn parse_suppression_finding(line: &str) -> Option<SuppressionRequest> {
 /// The remedy a `verify.suppress` finding without a request hands the lane:
 /// state the request on the suppression's own line, where the scanner reads
 /// it.
+///
+/// Indented, like every other remedy below: the finding it answers is the
+/// column-zero line, and an unindented remedy would open a block of its own
+/// under the rule [`opens_a_block`] holds every distilled line to.
 const UNREQUESTED_SUPPRESSION_REMEDY: &str =
-    "unrequested — add \"// aether-suppression-request: <reason>\" on this line";
+    "  unrequested — add \"// aether-suppression-request: <reason>\" on this line";
 
 /// The remedy a `verify.suppress` finding that already states a request hands
 /// the lane: nothing. The grant is the operator's, so a repair lap directed
 /// at this line either strips a correct suppression or resubmits unchanged.
-const REQUESTED_SUPPRESSION_REMEDY: &str = "requested — awaiting the operator's answer; nothing to change here";
+const REQUESTED_SUPPRESSION_REMEDY: &str = "  requested — awaiting the operator's answer; nothing to change here";
 
 /// The state and remedy one `verify.suppress` finding hands the lane, read
 /// off the finding's own line (#6031).
@@ -725,14 +729,19 @@ fn suppression_remedy(line: &str) -> &'static str {
 /// Render the `verify.suppress` findings in `log` with each finding's state
 /// and remedy, or `None` when the log holds no suppression finding at all.
 ///
-/// Each scanner line rides intact on its own line with its remedy indented
-/// beneath it, inside the same line budget every other member's findings
-/// keep, so a repair lap is directed at the lines that lack a marker and
-/// told to leave the ones that carry one.
+/// Each scanner line rides intact and opens its own block, with its remedy
+/// indented beneath it, inside the same line budget every other member's
+/// findings keep — so a repair lap is directed at the lines that lack a
+/// marker and told to leave the ones that carry one.
+///
+/// A finding opens at column zero, the rule [`opens_a_block`] holds the
+/// generic distiller to: an indented lookalike rides inside whatever block
+/// printed it, and lifting it out would hand the lane a remedy for a line the
+/// scanner never reported.
 fn distil_suppression_findings(log: &str) -> Option<String> {
     let blocks: Vec<Vec<&str>> = log
         .lines()
-        .filter(|line| opens_a_suppression_finding(line))
+        .filter(|line| !line.starts_with(char::is_whitespace) && opens_a_suppression_finding(line))
         .map(|line| vec![line, suppression_remedy(line)])
         .collect();
     (!blocks.is_empty()).then(|| render_finding_blocks(&blocks))
@@ -4693,7 +4702,8 @@ mod tests {
         // allow or resubmitted unchanged. Each finding now carries the remedy
         // its own line declares.
         let log = "crates/aether-chassis-bloomery/src/store/schema/tests.rs:238 — ignore — #[ignore]\n\
-                   xtask/src/bloom/roll/mod.rs:144 — allow(clippy::disallowed_methods) — #[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config\n";
+                   xtask/src/bloom/roll/mod.rs:144 — allow(clippy::disallowed_methods) — #[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config\n\
+                   \x20  crates/demo/src/lib.rs:9 — allow(dead_code) — quoted inside another tool's block\n";
 
         let findings = verify_findings(&[member(SUPPRESS_MEMBER, MemberOutcome::Failed, log)])
             .and_then(|channel| channel.text().map(str::to_owned))
@@ -4719,6 +4729,10 @@ mod tests {
             findings.matches("aether-suppression-request: <reason>").count(),
             1,
             "the marker remedy is aimed at the one line that lacks it: {findings}"
+        );
+        assert!(
+            !findings.contains("crates/demo/src/lib.rs:9"),
+            "an indented lookalike is another tool's output, not a finding to hand a remedy: {findings}"
         );
     }
 
