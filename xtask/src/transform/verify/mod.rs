@@ -1,4 +1,5 @@
 mod closure;
+mod delta;
 mod inputs;
 mod lockfile;
 mod memo;
@@ -34,6 +35,7 @@ use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
+pub(super) use crate::transform::verify::delta::Carried;
 use crate::transform::verify::memo::Memo;
 use crate::transform::verify::scope::Scope;
 pub(super) use crate::transform::verify::triage::Excused;
@@ -2855,6 +2857,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
             peak_resident_bytes: None,
             duration_millis: None,
             gates: None,
+            carried: Vec::new(),
             command: position.command().to_owned(),
             nonce: args.nonce.clone(),
             status: "fail",
@@ -2866,7 +2869,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
         process::exit(1);
     }
 
-    let CheckPass { runs, gates, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
+    let CheckPass { runs, gates, carried, log_names, first_failure_code, sccache_served, peak_resident_bytes } =
         check_pass(args, &args.out, position)?;
 
     let status = umbrella_status(&runs.iter().map(|run| run.outcome).collect::<Vec<MemberOutcome>>());
@@ -2877,6 +2880,7 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
         peak_resident_bytes,
         duration_millis: None,
         gates: None,
+        carried: Vec::new(),
         command: position.command().to_owned(),
         nonce: args.nonce.clone(),
         status,
@@ -2896,7 +2900,8 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
         ),
     }
     .timed(elapsed_millis(umbrella_started))
-    .with_gates(gates);
+    .with_gates(gates)
+    .with_carried(carried);
     append_flake_log(&args.out, evidence.flakes());
     write_json_pretty(&args.out.join("evidence.json"), &evidence)?;
 
@@ -2916,6 +2921,11 @@ pub(super) fn run_verify_check(args: &TransformArgs, position: Position) -> Resu
 struct CheckPass {
     runs: Vec<MemberRun>,
     gates: Vec<GateTiming>,
+    /// The members this pass did not run because an earlier receipt already
+    /// judged them over a tree the delta cannot have moved for them (ADR-0200
+    /// amendment). Empty on a first verify and on any run the host stated no
+    /// carry for.
+    carried: Vec<Carried>,
     log_names: Vec<String>,
     first_failure_code: Option<i32>,
     sccache_served: Option<Counters>,
@@ -3079,7 +3089,11 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
         peak: &peak,
         input: input.as_deref(),
     };
-    let members = position.members();
+    // Which members this invocation owes, from the host's stated carry: a
+    // delta-confirm after a Refine runs the gates its delta can reach and
+    // carries the rest from the receipt the failing verify left (ADR-0200
+    // amendment). A first verify states no carry and runs everything.
+    let delta::Selection { run: members, carried } = delta::resolve(&position.members());
     let mut completed = fan_out(&members, |id| run_gate(id, &pass))?;
 
     // Reassembled in CI-parity order rather than completion order: the umbrella's
@@ -3106,6 +3120,7 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
     Ok(CheckPass {
         runs,
         gates,
+        carried,
         log_names,
         first_failure_code,
         sccache_served: cache.as_ref().and_then(CompilerCache::served),

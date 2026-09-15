@@ -7,9 +7,9 @@ use std::fmt;
 use std::slice::from_ref;
 
 use aether_bloomery::{
-    Admit, BloomId, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce, PipelineManifest,
-    ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure, VerifyFailureSet,
-    WorkpieceId, classify_findings, normalize_stage_result,
+    Admit, BloomId, CarryRefusal, Digest, Event, Evidence, EvidenceKind, Fact, InwardError, LaneObservation, Nonce,
+    PipelineManifest, ResolutionClaim, StageCatalog, StageId, StageResult, StageVerdict, SurfaceRequest, VerifyFailure,
+    VerifyFailureSet, WorkpieceId, classify_findings, normalize_stage_result,
 };
 use aether_data::wire::{Error as WireError, from_bytes, to_vec};
 use std::fmt::Write as _;
@@ -793,6 +793,26 @@ fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidenc
 /// `ContainmentRefused` (ADR-0209), and every other failing set is a
 /// candidate `VerifyFailed`.
 fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    // Ahead of the verdict, because an unsound carry poisons a pass as much as
+    // a failure: the gates the run did not execute were judged over a different
+    // tree, so a green receipt on that footing is the false green the whole
+    // mechanism exists not to produce (ADR-0200's 2026-09-15 amendment).
+    //
+    // Routed as a host fault on the `Preflight` arm's own reasoning below: the
+    // candidate did nothing wrong and owes no repair roll, and the hold that
+    // fact takes re-dispatches the same member Verify — the full umbrella,
+    // since a refused claim is not one the next lane may carry from either.
+    if let Some(refusal) = incomplete_coverage(upload) {
+        return Event {
+            idempotency_key: AdmissionKey::VerifyFailed.of(&record.nonce.0),
+            fact: Fact::VerifyHostFault {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                evidence,
+                findings: refusal,
+            },
+        };
+    }
     if verdict_passed(upload.verdict) {
         let claim = ResolutionClaim {
             workpiece: record.workpiece.clone(),
@@ -847,6 +867,20 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
             }
         },
     }
+}
+
+/// Why this receipt's carried-coverage claim does not stand, or `None` when it
+/// carried nothing or carried soundly.
+///
+/// Only the ledger-free half of the rule ([`CarriedCoverage::self_consistent`]):
+/// intake reads the store's order registry, never the reducer's proof memo, so
+/// "receipt R is on record for exactly tree T" is not a question it is in a
+/// position to ask. What it can ask is whether the claim refutes itself against
+/// the shared delta table — a gate carried that the stated classes reach, an
+/// identity that is not a gate at all, an entry pointing at some other receipt
+/// — and a claim that does is refused here rather than folded into a verdict.
+fn incomplete_coverage(upload: &UploadedEvidence) -> Option<String> {
+    upload.observation.carried.as_ref()?.self_consistent().err().map(CarryRefusal::reason)
 }
 
 /// Every refusal a claimed verdict earns by naming a stage that cannot carry

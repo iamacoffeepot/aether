@@ -13,12 +13,13 @@ use std::time::Duration;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use aether_bloomery::{
-    BackendObjectId, BloomId, CandidateRef, CompositionParents, Conclusion, ConfigRegistry, ConfigScopes,
-    ConstructionCheckpoint, CoordinationPolicy, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    FoldContribution, LaneObservation, ModelProcessInstructions, Nonce, ObservedConstructionCheckpoint,
-    ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim, SessionSlug,
-    SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest, Transformation,
-    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, is_model_lane, narrow_composition,
+    BackendObjectId, BloomId, CandidateRef, CarriedCoverage, CarriedGate, CompositionParents, Conclusion,
+    ConfigRegistry, ConfigScopes, ConstructionCheckpoint, CoordinationPolicy, DeltaClass, Digest, EvidenceRef,
+    ExecutionStatus, ExecutorBackend, FoldContribution, LaneObservation, ModelProcessInstructions, Nonce,
+    ObservedConstructionCheckpoint, ObservedLaneWrites, PipelineManifest, PriceTable, ResolvedModel, RetrospectClaim,
+    SessionSlug, SharedCorrespondence, StageId, StageVerdict, StudyCost, SuppressionRequest, SurfaceRequest,
+    Transformation, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, config_address, is_model_lane,
+    narrow_composition,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_git::source::{candidate_ref_name, partial_head_repair_ref_name};
@@ -3167,6 +3168,7 @@ fn judged_evidence_ref(
             contextual_observations,
             duration_millis: parse_duration_millis(bytes),
             gates: parse_gates(bytes),
+            carried: parse_carried(bytes),
         },
     }
 }
@@ -4289,6 +4291,61 @@ fn parse_gates(bytes: &[u8]) -> Vec<aether_bloomery::EvidenceGateTiming> {
             })
         })
         .collect()
+}
+
+/// The coverage claim a re-verify wrote under `carried` — the gates it did not
+/// run and the receipt it says already judged them (ADR-0200's 2026-09-15
+/// amendment).
+///
+/// Folded into one [`CarriedCoverage`] because one re-verify carries from one
+/// receipt over one tree under one reading of one delta: the lane repeats those
+/// three on every entry so a single row is legible on its own, and an entry
+/// that disagrees with the first is exactly the inconsistency the admission
+/// door refuses, so it is kept rather than reconciled here.
+///
+/// A malformed entry yields `None` for the whole claim, not a claim missing
+/// that entry: a partial reading would narrow what the door is asked to judge,
+/// and `None` means "carried nothing", which refuses no receipt and runs
+/// nothing less.
+fn parse_carried(bytes: &[u8]) -> Option<CarriedCoverage> {
+    let value = serde_json::from_slice::<serde_json::Value>(bytes).ok()?;
+    let entries = value.get("carried")?.as_array()?;
+    let first = entries.first()?;
+    let carried = entries
+        .iter()
+        .map(|entry| {
+            Some(CarriedGate {
+                gate: entry.get("gate")?.as_str()?.to_owned(),
+                receipt: parse_hex_digest(entry.get("receipt")?.as_str()?)?,
+                tree: parse_hex_digest(entry.get("tree")?.as_str()?)?,
+                // A lane records only what it carried, and it carries only what
+                // its receipt was green on — so an entry that reached this
+                // array is a pass by construction. Stated on the value anyway,
+                // because the rule that refuses a carried red belongs to the
+                // judge, not to the parser's trust in the producer.
+                passed: true,
+            })
+        })
+        .collect::<Option<Vec<_>>>()?;
+    let classes = first
+        .get("classes")?
+        .as_array()?
+        .iter()
+        .map(|class| DeltaClass::from_name(class.as_str()?))
+        .collect::<Option<Vec<_>>>()?;
+
+    Some(CarriedCoverage {
+        proved: parse_hex_digest(first.get("tree")?.as_str()?)?,
+        receipt: parse_hex_digest(first.get("receipt")?.as_str()?)?,
+        classes,
+        carried,
+    })
+}
+
+/// A 32-byte digest from its lowercase hex spelling, or `None` for anything
+/// else.
+fn parse_hex_digest(hex: &str) -> Option<Digest> {
+    aether_bloomery::decode_hex(hex)?.try_into().ok().map(Digest::from_bytes)
 }
 
 /// How a construct lane's `evidence.json` classified (#3596, #5292).

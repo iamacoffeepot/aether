@@ -64,6 +64,7 @@ pub fn verdict(order: &OutstandingOrder, verdict: ScriptedVerdict) -> ScriptedUp
         calls: None,
         narrowing: None,
         retrospect_findings: Vec::new(),
+        carried: None,
     }
 }
 
