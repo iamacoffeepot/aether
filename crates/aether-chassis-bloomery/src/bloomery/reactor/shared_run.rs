@@ -2,7 +2,7 @@
 
 use aether_bloomery::{
     AgentProfile, CandidateRef, CompositionInput, ConfigRegistry, Digest, Evidence, StageVerdict, StudyCall, StudyCost,
-    Transformation, VerifyFailureSet,
+    SuppressionRequest, Transformation, VerifyFailureSet,
 };
 use serde::{Deserialize, Serialize};
 
@@ -86,6 +86,12 @@ pub struct SharedStepReceipt {
     pub contextual_observations: Option<Vec<u8>>,
     #[serde(default)]
     pub probe_verdict: Option<ProbeVerdict>,
+    /// The suppressions the lane stated a case for (ADR-0193), as the backend
+    /// normalized them off the step's evidence. Empty on every row written
+    /// before the settlement learned to carry them — and on every step whose
+    /// lane stated none, which is the ordinary case.
+    #[serde(default)]
+    pub suppression_requests: Vec<SuppressionRequest>,
 }
 
 #[derive(Serialize, Deserialize)]

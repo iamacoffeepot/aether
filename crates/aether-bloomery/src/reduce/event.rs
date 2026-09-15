@@ -15,8 +15,8 @@ use crate::values::{
     ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead, MemberDependency,
     OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
     PartialHeadRepairCompletion, PrecheckCompletion, PrecheckPreparation, ResolutionClaim, SharedRunCompletion,
-    SharedRunPlan, SharedRunPreparation, StableHeadReservation, Statement, SuppressionDisposition, SurfaceRequest,
-    VerifyFailureSet, Withdrawal,
+    SharedRunPlan, SharedRunPreparation, StableHeadReservation, Statement, SuppressionDisposition, SuppressionRequest,
+    SurfaceRequest, VerifyFailureSet, Withdrawal,
 };
 
 /// An admitted fact plus its idempotency key (ADR-0149 §The control core).
@@ -1044,6 +1044,34 @@ pub enum Fact {
         bloom: BloomId,
         /// Which lap, and on whose word.
         drop: AdminLapDrop,
+    },
+    /// A composed shared run settled with only the suppress gate open and the
+    /// lane's stated requests covering every finding, so the member parks
+    /// awaiting a reviewer's sign-off instead of buying attribution probes
+    /// (issue 6032).
+    ///
+    /// The host admits one per held member at settlement, before the run's own
+    /// completion, so the requests are recorded and the route and verb answer
+    /// before any probe could. The member's cursor does not move and no budget
+    /// is spent — the remedy is a person, the same reason
+    /// [`Fact::SurfaceRequested`] parks rather than fails.
+    ///
+    /// Appended past [`Fact::AdminDropLap`] so every prior fact keeps its wire
+    /// discriminant.
+    SuppressionHold {
+        /// The bloom whose member parks.
+        bloom: BloomId,
+        /// The member awaiting sign-off.
+        workpiece: WorkpieceId,
+        /// The step's verdict artifact, bound to the member's own candidate —
+        /// the reducer refuses a hold naming any other subject, so a report
+        /// from a superseded candidate cannot park a newer one.
+        evidence: Evidence,
+        /// The standing requests the member's candidate states, as the lane
+        /// normalized them. Nonempty; an answer that closes nothing is refused
+        /// at the disposition door, so a hold that records nothing is refused
+        /// here too.
+        requests: Vec<SuppressionRequest>,
     },
 }
 

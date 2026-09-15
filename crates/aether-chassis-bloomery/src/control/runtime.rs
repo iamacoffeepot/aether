@@ -1484,7 +1484,8 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::AdminSetCandidate { bloom, .. }
         | Fact::AdminRerun { bloom, .. }
         | Fact::AdminWaive { bloom, .. }
-        | Fact::AdminDropLap { bloom, .. } => Some(*bloom),
+        | Fact::AdminDropLap { bloom, .. }
+        | Fact::SuppressionHold { bloom, .. } => Some(*bloom),
         Fact::ConstructionCheckpointObserved { checkpoint } => Some(checkpoint.bloom),
         Fact::RequestConstructionAdmission { admission } => Some(admission.dispatch.bloom),
         Fact::ObserveMainline { .. }

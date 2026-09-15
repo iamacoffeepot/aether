@@ -4,10 +4,12 @@
 //! The reviewer's half of ADR-0193. The lane states its case and continues; the
 //! answer arrives later, from a person, and this is what it does to the member.
 
+use alloc::boxed::Box;
+
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
 use super::{BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionDispositionError};
 use crate::ids::{BloomId, StageId, WorkpieceId};
-use crate::values::{CandidateRef, SuppressionDisposition, VerifyFailure, VerifyFailureSet, Wedge};
+use crate::values::{CandidateRef, SuppressionDisposition, SuppressionVerdict, VerifyFailure, VerifyFailureSet, Wedge};
 
 /// Reduce one reviewer answer to a member's standing suppression requests.
 ///
@@ -19,6 +21,11 @@ use crate::values::{CandidateRef, SuppressionDisposition, VerifyFailure, VerifyF
 /// effect: no [`Decision`] variant is added, so the wire-frozen decision graph
 /// and its pinned fixture are untouched. That is the shape ADR-0204's lease
 /// table established.
+///
+/// The one exception is a member parked awaiting sign-off (issue 6032): a
+/// composed run held it instead of verifying it, so the grant re-queues that
+/// same coordinated request — a resume, not a re-verdict, and only the held
+/// member moves.
 ///
 /// A **denial** re-opens the member at `Refine` and spends a repair roll,
 /// because a denied request is a candidate carrying a suppression it may not
@@ -54,6 +61,35 @@ pub(super) fn reduce_suppression_disposition(
         return Decisions::rejected(Outcome::SuppressionRejected(SuppressionDispositionError::AlreadyWithdrawn(
             workpiece.clone(),
         )));
+    }
+
+    // A grant on a member parked awaiting sign-off resumes it (issue 6032).
+    // The hold recorded no verdict, so the member is still standing at Verify
+    // on the candidate the hold named, and the coordinated request its run
+    // settled from is re-queued untouched — the rest of the run already
+    // integrated, so nothing else is re-verified. A member that already holds
+    // a claim resolved some other way and needs no resume, and a request that
+    // is no longer exact (the line moved under the park) is not revived: the
+    // answer is still recorded and the hold still clears, but inventing a
+    // verify for a member the coordinator no longer names would strand it.
+    if disposition.verdict == SuppressionVerdict::Granted && snapshot.awaiting_suppression(bloom, workpiece).is_some() {
+        let mut effects = alloc::vec![];
+        if let Some(state) = record.coordination.as_deref()
+            && !state.claims.contains_key(&workpiece.0)
+            && let Some(request) = state
+                .requests
+                .iter()
+                .find(|request| {
+                    request.member.workpiece == *workpiece && super::coordination::exact_request(record, state, request)
+                })
+                .cloned()
+        {
+            effects.push(Decision::QueueMemberVerification { request: Box::new(request) });
+        }
+        return Decisions {
+            outcome: Outcome::SuppressionAnswered { bloom: *bloom, workpiece: workpiece.clone(), reopened: false },
+            effects,
+        };
     }
 
     if !disposition.reopens() {
@@ -224,6 +260,56 @@ mod tests {
             decided.outcome
         );
         assert!(decided.effects.is_empty(), "a grant dispatches nothing: {:?}", decided.effects);
+    }
+
+    #[test]
+    fn a_grant_on_a_held_member_answers_and_clears_the_hold() {
+        // A held member no coordination owns has nothing to resume, but the
+        // answer is still recorded and the hold clears on fold rather than
+        // stranding the member parked.
+        let (snapshot, bloom) = member_at_verify();
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "hold-alpha",
+                Fact::SuppressionHold {
+                    bloom,
+                    workpiece: workpiece("alpha"),
+                    evidence: Evidence {
+                        subject: digest(20),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(81),
+                    },
+                    requests: crate::values::SuppressionRequest::normalize(vec![(
+                        "crates/a/src/lib.rs".to_string(),
+                        4,
+                        "allow(dead_code)".to_string(),
+                        "operator tooling".to_string(),
+                    )]),
+                },
+            ),
+        );
+        assert!(snapshot.awaiting_suppression(&bloom, &workpiece("alpha")).is_some(), "the hold is recorded");
+
+        let (next, decided) = step(
+            &snapshot,
+            &event(
+                "answer-alpha",
+                Fact::SuppressionDisposition {
+                    bloom,
+                    workpiece: workpiece("alpha"),
+                    disposition: answer(SuppressionVerdict::Granted),
+                },
+            ),
+        );
+
+        assert!(
+            matches!(decided.outcome, Outcome::SuppressionAnswered { reopened: false, .. }),
+            "{:?}",
+            decided.outcome
+        );
+        assert!(decided.effects.is_empty(), "nothing to resume without a coordinated request");
+        assert!(next.awaiting_suppression(&bloom, &workpiece("alpha")).is_none(), "the answer clears the hold");
     }
 
     #[test]

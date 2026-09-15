@@ -380,7 +380,9 @@ fn completion_row(run: &SharedRunRecord, outcome: &MemberVerifyOutcome) -> Optio
             (CompletionVerdict::Failed, gates, None)
         }
         MemberVerifyOutcome::HostFault { .. } => (CompletionVerdict::Faulted, request_gates(request), None),
-        MemberVerifyOutcome::Survived { .. } | MemberVerifyOutcome::Pending { .. } => return None,
+        MemberVerifyOutcome::Survived { .. }
+        | MemberVerifyOutcome::Pending { .. }
+        | MemberVerifyOutcome::AwaitingSuppression { .. } => return None,
     };
     Some(CompletionRecord {
         nonce: run.plan.digest(),

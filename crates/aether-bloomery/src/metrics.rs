@@ -912,7 +912,8 @@ fn outcome_label(outcome: &MemberVerifyOutcome) -> Option<&'static str> {
         | MemberVerifyOutcome::PassedStandalone { .. }
         | MemberVerifyOutcome::HostFault { .. }
         | MemberVerifyOutcome::Survived { .. }
-        | MemberVerifyOutcome::Pending { .. } => None,
+        | MemberVerifyOutcome::Pending { .. }
+        | MemberVerifyOutcome::AwaitingSuppression { .. } => None,
     }
 }
 
@@ -926,7 +927,9 @@ fn outcome_evidence(outcome: &MemberVerifyOutcome) -> Option<Digest> {
         MemberVerifyOutcome::PassedIn { receipt, .. }
         | MemberVerifyOutcome::Failed { evidence: receipt, .. }
         | MemberVerifyOutcome::HostFault { evidence: receipt, .. } => Some(receipt.detail),
-        MemberVerifyOutcome::Survived { .. } | MemberVerifyOutcome::Pending { .. } => None,
+        MemberVerifyOutcome::Survived { .. }
+        | MemberVerifyOutcome::Pending { .. }
+        | MemberVerifyOutcome::AwaitingSuppression { .. } => None,
     }
 }
 

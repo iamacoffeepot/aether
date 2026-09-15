@@ -344,6 +344,7 @@ fn coordination_run(fixture: &CoordinationGolden) -> SharedRunRecord {
                 observation: digest(97),
             },
             MemberVerifyOutcome::Pending { request: fixture.request.digest(), observation: digest(98) },
+            MemberVerifyOutcome::AwaitingSuppression { request: fixture.request.digest(), observation: digest(46) },
         ],
         unfinished: vec![fixture.request.digest()],
         latencies: vec![MemberVerifyLatency {

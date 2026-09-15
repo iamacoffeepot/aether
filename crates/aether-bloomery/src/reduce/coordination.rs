@@ -175,7 +175,7 @@ fn current_member(record: &BloomRecord, pin: &MemberPin) -> bool {
         && !record.withdrawn.contains_key(&pin.workpiece)
 }
 
-fn exact_request(record: &BloomRecord, state: &CoordinationState, request: &MemberVerifyRequest) -> bool {
+pub(super) fn exact_request(record: &BloomRecord, state: &CoordinationState, request: &MemberVerifyRequest) -> bool {
     if request.bloom != state.integration.generation.bloom || !current_member(record, &request.member) {
         return false;
     }
@@ -1884,6 +1884,9 @@ fn blocked_members(
             MemberVerifyOutcome::PassedStandalone { .. }
             | MemberVerifyOutcome::PassedIn { .. }
             | MemberVerifyOutcome::Survived { .. } => {}
+            // A parked member names no failure and joins no survivor group, so
+            // it blocks nothing behind it.
+            MemberVerifyOutcome::AwaitingSuppression { .. } => {}
         }
     }
     loop {
@@ -2086,6 +2089,10 @@ fn validates_immutable_run_outcome(
                 && run.node.as_ref().is_some_and(|current| current.digest() == *node)
         }
         MemberVerifyOutcome::Pending { .. } => true,
+        // A hold parks rather than proves: the reducer's apply arm requires
+        // the journaled hold beside it, so validation only checks the shape
+        // the host can vouch for — the request is this run's own.
+        MemberVerifyOutcome::AwaitingSuppression { .. } => true,
     }
 }
 
@@ -2536,6 +2543,17 @@ fn apply_run_outcome(
         MemberVerifyOutcome::Survived { .. } => {
             effects.push(Decision::QueueMemberVerification { request: Box::new(request.clone()) });
         }
+        MemberVerifyOutcome::AwaitingSuppression { .. } => {
+            // A hold, not a verdict: the member keeps its cursor, spends no
+            // budget, takes no claim, and is re-queued by nothing here. The
+            // journaled hold beside this completion is what parks it — without
+            // the recorded requests there is nothing for a reviewer to answer,
+            // so a completion naming a hold nobody recorded is incoherent
+            // rather than charitable.
+            if context.snapshot.awaiting_suppression(&context.bloom, &request.member.workpiece).is_none() {
+                return Err(CoordinationError::InvalidPlan);
+            }
+        }
         MemberVerifyOutcome::Pending { .. } => queue_run_retry(state, context.run, request, effects),
     }
     Ok(())
@@ -2607,7 +2625,12 @@ fn validate_shared_completion(
     }) || completion.outcomes.iter().any(|outcome| matches!(outcome, MemberVerifyOutcome::PassedIn { .. }))
         && (!completion.unfinished.is_empty()
             || completion.outcomes.len() != outstanding.len()
-            || completion.outcomes.iter().any(|outcome| !matches!(outcome, MemberVerifyOutcome::PassedIn { .. })))
+            || completion.outcomes.iter().any(|outcome| {
+                !matches!(
+                    outcome,
+                    MemberVerifyOutcome::PassedIn { .. } | MemberVerifyOutcome::AwaitingSuppression { .. }
+                )
+            }))
     {
         return Err(CoordinationError::InvalidPlan);
     }
@@ -3435,10 +3458,12 @@ pub(super) fn schedule(snapshot: &Snapshot, mut decisions: Decisions) -> Decisio
 mod tests {
     use super::*;
     use crate::reduce::gate::RecordedRefusal;
-    use crate::testing::{digest, draft, membership};
+    use crate::reduce::{Event, Fact, reduce};
+    use crate::testing::{compiled_resolved, digest, draft, event, membership};
     use crate::values::{
-        ConfigRegistry, ContextualResolutionClaim, Harness, ReasoningEffort, ResolutionProof, ToolPolicy, VerifyProof,
-        Withdrawal, WithdrawalCause,
+        ConfigRegistry, ContextualResolutionClaim, Harness, ReasoningEffort, ResolutionProof, SpendWindow,
+        SuppressionDisposition, SuppressionRequest, SuppressionVerdict, ToolPolicy, VerifyProof, Withdrawal,
+        WithdrawalCause,
     };
     use alloc::boxed::Box;
     use core::iter::once;
@@ -4791,6 +4816,183 @@ mod tests {
             "and buys no repair lap: {:?}",
             decisions.effects,
         );
+    }
+
+    fn hold_requests() -> Vec<SuppressionRequest> {
+        SuppressionRequest::normalize(alloc::vec![(
+            String::from("crates/aether-chassis-bloomery/src/bloomery/verify/batch.rs"),
+            144,
+            String::from("allow(clippy::disallowed_methods)"),
+            String::from("operator tooling reading the coordinator's REST bind, not cap config"),
+        )])
+    }
+
+    fn hold_event(bloom: BloomId, request: &MemberVerifyRequest) -> Event {
+        event(
+            "suppression-hold",
+            Fact::SuppressionHold {
+                bloom,
+                workpiece: request.member.workpiece.clone(),
+                evidence: Evidence {
+                    subject: request.member.candidate.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: digest(80),
+                },
+                requests: hold_requests(),
+            },
+        )
+    }
+
+    fn held_snapshot(snapshot: &Snapshot, bloom: BloomId, request: &MemberVerifyRequest) -> Snapshot {
+        let hold = hold_event(bloom, request);
+        let decided = reduce(snapshot, &hold, &compiled_resolved(), &SpendWindow::default());
+        assert!(
+            matches!(decided.outcome, Outcome::SuppressionHold { requests: 1, .. }),
+            "the hold parks: {:?}",
+            decided.outcome
+        );
+        snapshot.apply(&hold, &decided, &compiled_resolved())
+    }
+
+    #[test]
+    fn a_held_member_parks_while_its_sibling_integrates() {
+        // Issue 6032: a suppress-only settlement holds the requesting member
+        // instead of probing it, and the sibling's pass still integrates — the
+        // run proceeds as if the requester were absent.
+        let (snapshot, bloom, plan, node) = active_contextual_run();
+        let held = plan.requests[0].clone();
+        let passing = plan.requests[1].clone();
+        let snapshot = held_snapshot(&snapshot, bloom, &held);
+
+        let receipt =
+            Evidence { subject: node.candidate.tree, kind: EvidenceKind::VerificationResult, detail: digest(82) };
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            outcomes: alloc::vec![
+                MemberVerifyOutcome::AwaitingSuppression { request: held.digest(), observation: digest(81) },
+                MemberVerifyOutcome::PassedIn { request: passing.digest(), node: node.digest(), receipt },
+            ],
+            unfinished: Vec::new(),
+            latencies: plan
+                .requests
+                .iter()
+                .map(|request| MemberVerifyLatency {
+                    request: request.digest(),
+                    member: request.member.clone(),
+                    latency_millis: 10,
+                })
+                .collect(),
+        };
+        let decided = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+        assert!(
+            matches!(decided.outcome, Outcome::CoordinationAdvanced { .. }),
+            "the split settlement is coherent: {:?}",
+            decided.outcome
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(
+                effect,
+                Decision::QueueMemberVerification { request }
+                    if request.member.workpiece == held.member.workpiece
+            )),
+            "the held member is re-queued by nothing: {:?}",
+            decided.effects
+        );
+
+        let snapshot = snapshot.apply(
+            &event("shared-completed", Fact::SharedRunCompleted { bloom, completion }),
+            &decided,
+            &compiled_resolved(),
+        );
+        let record = snapshot.blooms.get(&bloom).expect("the bloom still walks");
+        let state = record.coordination.as_deref().expect("coordination still owns the line");
+        assert!(
+            state.has_exact_claim(&passing.member),
+            "the sibling integrated on its pass while the requester parked"
+        );
+        assert!(!state.claims.contains_key(&held.member.workpiece.0), "the parked member holds no claim");
+        assert!(
+            snapshot.awaiting_suppression(&bloom, &held.member.workpiece).is_some(),
+            "the hold stands until a reviewer answers"
+        );
+        assert_eq!(
+            record.progress.get(&held.member.workpiece).map(|cursor| cursor.stage),
+            Some(StageId::Verify),
+            "the parked member keeps the cursor the grant resumes from"
+        );
+    }
+
+    #[test]
+    fn a_completion_naming_an_unrecorded_hold_is_refused() {
+        // The hold beside the completion is what parks the member: without the
+        // recorded requests there is nothing for a reviewer to answer, so a
+        // completion naming a hold nobody recorded is incoherent.
+        let (snapshot, bloom, plan, _) = active_contextual_run();
+        let completion = SharedRunCompletion {
+            plan: plan.digest(),
+            run: digest(62),
+            outcomes: alloc::vec![MemberVerifyOutcome::AwaitingSuppression {
+                request: plan.requests[0].digest(),
+                observation: digest(81),
+            }],
+            unfinished: plan.requests.iter().skip(1).map(MemberVerifyRequest::digest).collect(),
+            latencies: alloc::vec![MemberVerifyLatency {
+                request: plan.requests[0].digest(),
+                member: plan.requests[0].member.clone(),
+                latency_millis: 10,
+            }],
+        };
+
+        assert!(
+            matches!(
+                reduce_shared_run_completed(&snapshot, &bloom, &completion).outcome,
+                Outcome::CoordinationRejected(CoordinationError::InvalidPlan)
+            ),
+            "an unrecorded hold refuses the completion",
+        );
+    }
+
+    #[test]
+    fn a_grant_on_a_held_member_requeues_only_its_request() {
+        // Issue 6032: the grant resumes the run from the step it was on — the
+        // held member re-verifies alone, without re-verifying the sibling that
+        // already integrated.
+        let (snapshot, bloom, plan, _) = active_contextual_run();
+        let held = plan.requests[0].clone();
+        let snapshot = held_snapshot(&snapshot, bloom, &held);
+
+        let answer = event(
+            "suppression-answer",
+            Fact::SuppressionDisposition {
+                bloom,
+                workpiece: held.member.workpiece.clone(),
+                disposition: SuppressionDisposition {
+                    requests: alloc::vec![digest(99)],
+                    verdict: SuppressionVerdict::Granted,
+                    reason: String::from("operator tooling, not cap config"),
+                    operator: String::from("owner"),
+                },
+            },
+        );
+        let decided = reduce(&snapshot, &answer, &compiled_resolved(), &SpendWindow::default());
+        assert!(
+            matches!(decided.outcome, Outcome::SuppressionAnswered { reopened: false, .. }),
+            "a grant re-opens nothing: {:?}",
+            decided.outcome
+        );
+        let requeued = decided
+            .effects
+            .iter()
+            .filter_map(|effect| match effect {
+                Decision::QueueMemberVerification { request } => Some(request.digest()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(requeued, alloc::vec![held.digest()], "only the held member resumes: {requeued:?}");
+
+        let snapshot = snapshot.apply(&answer, &decided, &compiled_resolved());
+        assert!(snapshot.awaiting_suppression(&bloom, &held.member.workpiece).is_none(), "the answer clears the hold");
     }
 
     #[test]

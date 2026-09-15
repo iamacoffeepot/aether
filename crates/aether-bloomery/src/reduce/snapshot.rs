@@ -21,8 +21,8 @@ use crate::values::{
     Adjudication, AdminAct, AdminNote, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents,
     ConfigScopes, CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold,
     OperatorProposal, OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, RedVerify,
-    ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
-    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    ResolutionClaim, ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SuppressionRequest,
+    SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -188,6 +188,15 @@ pub struct Snapshot {
     /// `surface_requests` precedent.
     #[serde(default)]
     pub suppression_dispositions: BTreeMap<BloomId, BTreeMap<WorkpieceId, Vec<SuppressionDisposition>>>,
+    /// Members parked awaiting suppression sign-off (issue 6032), keyed by
+    /// bloom then workpiece. Folded from [`Fact::SuppressionHold`] the way a
+    /// surface request is folded from its own fact, so no new [`Decision`]
+    /// enters the frozen graph. A later hold restates the whole standing set
+    /// rather than appending: the lane states every request its candidate
+    /// carries each time, the way a surface lane restates its whole need.
+    /// `#[serde(default)]` is the `surface_requests` precedent.
+    #[serde(default)]
+    pub suppression_holds: BTreeMap<BloomId, BTreeMap<WorkpieceId, AwaitingSuppression>>,
     /// Why a bloom-scoped boundary refused (ADR-0206), keyed by bloom then
     /// gate name.
     ///
@@ -343,6 +352,13 @@ impl Snapshot {
     #[must_use]
     pub fn awaiting_surface(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSurface> {
         self.surface_requests.get(bloom)?.get(workpiece)
+    }
+
+    /// The suppression sign-off `workpiece` is waiting on in `bloom` (issue
+    /// 6032).
+    #[must_use]
+    pub fn awaiting_suppression(&self, bloom: &BloomId, workpiece: &WorkpieceId) -> Option<&AwaitingSuppression> {
+        self.suppression_holds.get(bloom)?.get(workpiece)
     }
 
     /// Who holds the write lease on `path` in `bloom` (ADR-0204).
@@ -848,6 +864,21 @@ pub struct AwaitingSurface {
     pub requests: u32,
 }
 
+/// A member parked awaiting suppression sign-off (issue 6032) — not wedged:
+/// no attempt or repair roll moved, and the remedy is a reviewer's grant or
+/// denial rather than another lap.
+///
+/// Projection state, not a journal row: the durable write is
+/// [`Fact::SuppressionHold`]. A later hold restates the whole standing set
+/// rather than appending, the way a surface lane restates its whole need.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AwaitingSuppression {
+    /// The step's verdict artifact — the evidence a reviewer reads.
+    pub evidence: Digest,
+    /// The standing requests the member's candidate states.
+    pub requests: Vec<SuppressionRequest>,
+}
+
 /// One narrowed composition as the snapshot holds it (ADR-0210): the parents it
 /// is over, and every member still waiting on the repair in flight.
 ///
@@ -1198,6 +1229,7 @@ impl Snapshot {
         next.retire_composition_waiters(event, decisions);
         next.record_file_leases(event, decisions);
         next.record_suppression_disposition(event, decisions);
+        next.record_suppression_hold(event, decisions);
         next
     }
 
@@ -1586,6 +1618,69 @@ impl Snapshot {
             .entry(workpiece.clone())
             .or_default()
             .push(disposition.clone());
+    }
+
+    /// Record (or clear) a member's suppression hold from the admitted fact
+    /// (issue 6032).
+    ///
+    /// Gated on [`Outcome::SuppressionHold`] so a refused admission cannot
+    /// plant a park the reducer rejected. A reviewer's answer clears the entry
+    /// — a grant resumes the member and a denial re-opens it, so neither
+    /// leaves it parked. A later passing attempt, integration, or verify
+    /// failure means the member moved, so the hold is stale and the entry is
+    /// dropped, the way a moved member drops its surface request.
+    fn record_suppression_hold(&mut self, event: &Event, decisions: &Decisions) {
+        match &event.fact {
+            Fact::SuppressionHold { bloom, workpiece, evidence, requests } => {
+                if !matches!(decisions.outcome, Outcome::SuppressionHold { .. }) {
+                    return;
+                }
+                self.suppression_holds.entry(*bloom).or_default().insert(
+                    workpiece.clone(),
+                    AwaitingSuppression { evidence: evidence.detail, requests: requests.clone() },
+                );
+            }
+            Fact::SuppressionDisposition { bloom, workpiece, .. } => {
+                if !matches!(decisions.outcome, Outcome::SuppressionAnswered { .. }) {
+                    return;
+                }
+                if let Some(members) = self.suppression_holds.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::AttemptCompleted { bloom, workpiece, passed: true, .. } => {
+                if !matches!(decisions.outcome, Outcome::AttemptAdvanced { .. } | Outcome::VerifyReused { .. }) {
+                    return;
+                }
+                if let Some(members) = self.suppression_holds.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::Integrate { bloom, claim: ResolutionClaim { workpiece, .. } } => {
+                let Outcome::Integrated { .. } = &decisions.outcome else {
+                    return;
+                };
+                if let Some(members) = self.suppression_holds.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            Fact::VerifyFailed { bloom, workpiece, .. } => {
+                if !matches!(
+                    decisions.outcome,
+                    Outcome::RefineReentered { .. }
+                        | Outcome::AttemptWedged { stage: StageId::Verify, .. }
+                        | Outcome::MachineryWedged { stage: StageId::Verify, .. }
+                        | Outcome::AttemptRetried { stage: StageId::Verify, .. }
+                        | Outcome::VerifyHostFaultHeld { .. }
+                ) {
+                    return;
+                }
+                if let Some(members) = self.suppression_holds.get_mut(bloom) {
+                    members.remove(workpiece);
+                }
+            }
+            _ => {}
+        }
     }
 
     /// Move the bloom's file-lease table from the admitted fact (ADR-0204).

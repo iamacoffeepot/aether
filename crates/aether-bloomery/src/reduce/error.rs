@@ -990,3 +990,35 @@ pub enum AdminError {
     /// above `auto` still needs its signed statement.
     UnapprovedMember(WorkpieceId),
 }
+
+/// Why a suppression hold was refused (issue 6032).
+///
+/// Checked in declaration order, so the first thing wrong with a hold is the
+/// thing the host is told about.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum SuppressionHoldError {
+    /// No active bloom with this id.
+    UnknownOrInactiveBloom,
+    /// The hold names a workpiece that is not a member of the bloom.
+    NotAMember(WorkpieceId),
+    /// The member holds no dispatched cursor.
+    NotDispatched(WorkpieceId),
+    /// The member has left Verify — a stale report from a step the member has
+    /// already moved past.
+    StageMismatch {
+        /// The stage the member is actually waiting at.
+        expected: StageId,
+    },
+    /// The hold records no request. Refused rather than treated as a no-op, so
+    /// the journal never carries a hold that parks a member with nothing for a
+    /// reviewer to answer.
+    ClosesNothing,
+    /// The hold's evidence binds a tree other than the member's current
+    /// subject — a stale step over a superseded candidate, never acted on.
+    EvidenceNotBound {
+        /// The member's current subject.
+        expected: Digest,
+        /// The tree the hold's evidence binds.
+        got: Digest,
+    },
+}

@@ -55,6 +55,7 @@ mod snapshot;
 mod splice;
 mod study;
 mod suppression;
+mod suppression_hold;
 mod surface_request;
 mod verify;
 mod verify_memo;
@@ -70,7 +71,7 @@ pub use error::{
     HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
     ProposalError, ResolveError, SealConflict, SealError, SpliceError, StudyError, SupersedeError,
-    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    SuppressionDispositionError, SuppressionHoldError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 pub use event::{Event, Fact};
 pub use gate::{
@@ -80,8 +81,9 @@ pub use gate::{
 pub use outcome::{Decisions, Outcome};
 pub use seal::is_active_unlanded;
 pub use snapshot::{
-    AggregateReviewFault, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldRound, FoldedIntegration,
-    HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot, StageProgress,
+    AggregateReviewFault, AwaitingSuppression, AwaitingSurface, BloomRecord, BloomStatus, Excuse, FileLease, FoldRound,
+    FoldedIntegration, HostFaultHold, LeaseEviction, MemberMachineryFault, MemberPark, NarrowedComposition, Snapshot,
+    StageProgress,
 };
 pub use view::view_of;
 pub use why::why_of;
@@ -124,6 +126,7 @@ use review::{reduce_aggregate_review_completed, reduce_aggregate_review_executor
 use seal::{reduce_seal, reduce_supersede, reduce_surface_overlap};
 use study::reduce_study_completed;
 use suppression::reduce_suppression_disposition;
+use suppression_hold::reduce_suppression_hold;
 use surface_request::reduce_surface_requested;
 use verify::{reduce_resume_host_fault, reduce_verify_failed, reduce_verify_host_fault};
 use withdraw::reduce_withdraw;
@@ -312,6 +315,9 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         }
         Fact::SuppressionDisposition { bloom, workpiece, disposition } => {
             reduce_suppression_disposition(snapshot, bloom, workpiece, disposition)
+        }
+        Fact::SuppressionHold { bloom, workpiece, evidence, requests } => {
+            reduce_suppression_hold(snapshot, bloom, workpiece, evidence, requests)
         }
         Fact::BaseReverify(reverify) => reduce_base_reverify(snapshot, reverify),
         Fact::ProposeChange { proposal, authorization } => reduce_propose(snapshot, proposal, authorization),

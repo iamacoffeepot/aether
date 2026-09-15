@@ -854,6 +854,18 @@ pub enum MemberVerifyOutcome {
         request: Digest,
         observation: Digest,
     },
+    /// The run's suppress gate surfaced stated requests and nothing else, so
+    /// the member parks awaiting a reviewer's sign-off instead of passing or
+    /// failing (issue 6032). Appended last so every prior outcome keeps its
+    /// wire discriminant.
+    ///
+    /// Not a proof and not a regroup: the member holds no claim, spends no
+    /// budget, and is re-queued only by the grant that answers
+    /// [`Fact::SuppressionHold`](crate::Fact::SuppressionHold).
+    AwaitingSuppression {
+        request: Digest,
+        observation: Digest,
+    },
 }
 
 impl MemberVerifyOutcome {
@@ -865,7 +877,8 @@ impl MemberVerifyOutcome {
             | Self::Failed { request, .. }
             | Self::HostFault { request, .. }
             | Self::Survived { request, .. }
-            | Self::Pending { request, .. } => *request,
+            | Self::Pending { request, .. }
+            | Self::AwaitingSuppression { request, .. } => *request,
         }
     }
 }

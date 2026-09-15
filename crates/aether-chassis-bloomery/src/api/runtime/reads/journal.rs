@@ -208,7 +208,8 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::AdminSetCandidate { bloom, .. }
         | Fact::AdminRerun { bloom, .. }
         | Fact::AdminWaive { bloom, .. }
-        | Fact::AdminDropLap { bloom, .. } => vec![*bloom],
+        | Fact::AdminDropLap { bloom, .. }
+        | Fact::SuppressionHold { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }

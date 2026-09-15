@@ -12,8 +12,8 @@ use aether_bloomery::{
     MemberVerifyLatency, MemberVerifyOutcome, ModelOverride, Nonce, PartialHeadRepairCompletion,
     PartialHeadRepairDispatch, PartialHeadRepairPayload, SharedRunCompletion, SharedRunDispatch,
     SharedRunDispatchPayload, SharedRunExecution, SharedRunMode, SharedRunNode, StageId, StageVerdict, StudyCall,
-    StudyCost, Topic, VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof, WorkHandle, WorkpieceId,
-    construction_nonce_digest,
+    StudyCost, SuppressionRequest, Topic, VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyProof,
+    WorkHandle, WorkpieceId, construction_nonce_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 
@@ -33,7 +33,7 @@ use crate::bloomery::study::{
 };
 use crate::bloomery::{
     BatchCheck, BatchFailure, BatchMember, BatchProbeReceipt, BatchProbeRequest, BatchProgress, BatchReport,
-    ContextualProofReuse, ExtentSource, GateAttribution, HostClass, KNOWN_FLAKE_CANDIDATES, MemberExtents,
+    ContextualProofReuse, ExtentSource, GateAttribution, HostClass, KNOWN_FLAKE_CANDIDATES, MemberExtents, PathOwner,
     ProbeVerdict, SourceShell, attribute_gate, contextual_bundle_reports, contextual_fact_key, dispatch_model,
     findings::verification_findings_key, gate_findings, next_batch_probe, observed_failed_tests,
     observed_probe_verdict, record_contextual_facts, record_green_contextual_facts, reuse_contextual_proof,
@@ -1072,6 +1072,7 @@ fn submit_step(
             replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: Some(ProbeVerdict::Infrastructure),
+            suppression_requests: Vec::new(),
         };
         store.complete_shared_run_step(&step.nonce, &encode_host(&receipt)?, 0)?;
         return Ok(());
@@ -1333,6 +1334,12 @@ fn complete_observed_step(
         replayed_flakes: upload.observation.replayed_flakes,
         contextual_observations,
         probe_verdict,
+        // Carried so the settlement can hold a requesting member with its
+        // case recorded (issue 6032) rather than dropping the lane's claim
+        // with the step. The scalar intake records the same channel per
+        // member; a shared step serves the whole composition at once, so the
+        // settlement below partitions it back onto owners.
+        suppression_requests: upload.observation.suppression_requests,
     };
     let bytes = encode_host(&receipt)?;
     if store.complete_shared_run_step(&step.nonce, &bytes, duration_millis)? {
@@ -1488,6 +1495,7 @@ fn settle_refused_preparation(store: &mut dyn StoreBackend, step: &SharedRunStep
         replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
+        suppression_requests: Vec::new(),
     };
     store.complete_shared_run_step(&step.nonce, &encode_host(&receipt)?, 0)
 }
@@ -2364,6 +2372,206 @@ fn pending_contextual_outcomes(dispatch: &SharedRunDispatch, observation: Digest
         .collect()
 }
 
+/// Which members a suppress-only settlement holds for sign-off (issue 6032).
+///
+/// A suppress verdict of awaiting sign-off — the lane's stated requests with
+/// no unrequested finding behind them — is a hold, not a failure: `Some` when
+/// the step carries requests, every failing check is the suppress gate (an
+/// empty check set is the requested pass, which fails no gate), and every path
+/// the suppress findings name is covered by a request. Anything else — another
+/// red gate, a finding no request covers, or no requests at all — is `None`,
+/// and the run settles or probes exactly as it does today.
+fn suppression_hold(
+    dispatch: &SharedRunDispatch,
+    receipt: &SharedStepReceipt,
+    checks: &[BatchCheck],
+    extents: Option<&MemberExtents>,
+) -> Option<BTreeSet<WorkpieceId>> {
+    if receipt.suppression_requests.is_empty() {
+        return None;
+    }
+    if !checks.iter().all(|check| matches!(check, BatchCheck::Gate { id } if id == VerifyFailure::Suppress.as_str())) {
+        return None;
+    }
+    if !suppress_findings_covered(receipt.findings.as_deref(), &receipt.suppression_requests) {
+        return None;
+    }
+    let owners = suppression_hold_owners(dispatch, &receipt.suppression_requests, extents);
+    if owners.is_empty() {
+        return None;
+    }
+    Some(owners)
+}
+
+/// Whether every path the suppress findings name is covered by a stated
+/// request. A missing suppress section means there is no unrequested finding
+/// to match — the requested pass distils none — so it covers vacuously; a
+/// section naming a path no request covers means the lane left something
+/// unanswered, and the run must settle or probe as it does today.
+fn suppress_findings_covered(findings: Option<&str>, requests: &[SuppressionRequest]) -> bool {
+    let sections = findings.map(gate_findings).unwrap_or_default();
+    let Some(section) = sections.iter().find(|section| section.gate == VerifyFailure::Suppress.as_str()) else {
+        return true;
+    };
+    section.paths.iter().all(|path| requests.iter().any(|request| request_covers_finding(&request.path, path)))
+}
+
+/// Whether a stated request covers a path a finding named: exactly, or by
+/// segment-boundary suffix, because a diagnostic spells a location however the
+/// tool that produced it does. The same rule ownership reads extents by, so a
+/// finding and the request answering it agree on what names a path.
+fn request_covers_finding(request_path: &str, finding_path: &str) -> bool {
+    request_path == finding_path || request_path.strip_suffix(finding_path).is_some_and(|head| head.ends_with('/'))
+}
+
+/// Which run members a hold parks: the owners of the requested paths. An
+/// ambiguous request — outside every member's extent, or inside several — or
+/// missing extents parks the whole run rather than landing a suppression no
+/// parked member answers for. Fail-closed reads harsh until the alternative is
+/// stated: a request nobody parks for integrates ungranted.
+fn suppression_hold_owners(
+    dispatch: &SharedRunDispatch,
+    requests: &[SuppressionRequest],
+    extents: Option<&MemberExtents>,
+) -> BTreeSet<WorkpieceId> {
+    let members: BTreeSet<WorkpieceId> =
+        dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect();
+    let Some(extents) = extents else {
+        return members;
+    };
+    let mut held = BTreeSet::new();
+    for request in requests {
+        match extents.owner(&request.path) {
+            PathOwner::One(owner) => {
+                held.insert(owner);
+            }
+            PathOwner::Unowned | PathOwner::Several => return members,
+        }
+    }
+    held
+}
+
+/// Settle a suppress-only step as a hold: the requesting members park with
+/// their case recorded, the rest pass in, and no probe is bought.
+///
+/// The store rows land here, at settlement, so the route and the verb answer
+/// before any probe could have run; the journal facts that park the members
+/// ride the completion admit, which names the hold outcome beside them.
+fn settle_suppression_hold(
+    store: &mut dyn StoreBackend,
+    dispatch: &SharedRunDispatch,
+    receipt: &SharedStepReceipt,
+    held: &BTreeSet<WorkpieceId>,
+) -> rusqlite::Result<ContextualSettlement> {
+    let node = match &dispatch.execution {
+        SharedRunExecution::Contextual { node, .. } => node.digest(),
+        SharedRunExecution::Serial => Digest::default(),
+    };
+    if let Some(bloom) = dispatch_bloom(dispatch) {
+        for request in &dispatch.plan.requests {
+            if held.contains(&request.member.workpiece) {
+                store.record_suppression_requests(
+                    bloom.0.as_bytes(),
+                    &request.member.workpiece.0,
+                    &receipt.suppression_requests,
+                )?;
+            }
+        }
+    }
+    Ok(ContextualSettlement {
+        outcomes: dispatch
+            .plan
+            .requests
+            .iter()
+            .map(|request| {
+                let request_id = request.digest();
+                if held.contains(&request.member.workpiece) {
+                    MemberVerifyOutcome::AwaitingSuppression {
+                        request: request_id,
+                        observation: receipt.evidence.detail,
+                    }
+                } else {
+                    MemberVerifyOutcome::PassedIn { request: request_id, node, receipt: receipt.evidence.clone() }
+                }
+            })
+            .collect(),
+        provenance: BTreeMap::new(),
+    })
+}
+
+/// The journal facts that park held members, in completion order before the
+/// completion itself: one per held outcome, carrying the step's requests bound
+/// to the member's own candidate. Re-derived on every replay rather than
+/// stored, so a crash between settlement and journaling converges instead of
+/// parking a member whose case the journal never recorded.
+///
+/// A missing receipt (steps already retired) or a missing request (a member
+/// the plan no longer names) settles nothing: the outcome still parks, and the
+/// empty set here only means there is nothing new to journal.
+fn suppression_hold_admits(
+    store: &mut dyn StoreBackend,
+    row: &SharedRunRow,
+    dispatch: &SharedRunDispatch,
+    outcomes: &[MemberVerifyOutcome],
+) -> rusqlite::Result<Vec<Admit>> {
+    let held: Vec<Digest> = outcomes
+        .iter()
+        .filter_map(|outcome| match outcome {
+            MemberVerifyOutcome::AwaitingSuppression { request, .. } => Some(*request),
+            _ => None,
+        })
+        .collect();
+    if held.is_empty() {
+        return Ok(Vec::new());
+    }
+    let steps = store.shared_run_steps(&row.run)?;
+    let Some(step) = steps.iter().find(|step| {
+        matches!(decode_host::<SharedStepDescriptor>(&step.descriptor), Ok(SharedStepDescriptor::ContextualFull { .. }))
+    }) else {
+        return Ok(Vec::new());
+    };
+    let Ok(receipt) = decode_host::<SharedStepReceipt>(step.receipt.as_deref().unwrap_or_default()) else {
+        return Ok(Vec::new());
+    };
+    if receipt.suppression_requests.is_empty() {
+        return Ok(Vec::new());
+    }
+    let Some(bloom) = dispatch_bloom(dispatch) else {
+        return Ok(Vec::new());
+    };
+    let Some(run) = Digest::from_slice(&row.run) else {
+        return Ok(Vec::new());
+    };
+    let mut admits = Vec::new();
+    for request in held {
+        let Some(pin) = dispatch.plan.requests.iter().find(|candidate| candidate.digest() == request) else {
+            continue;
+        };
+        let event = Event {
+            idempotency_key: IdempotencyKey(format!(
+                "aether.bloomery.suppression_hold:{}:{}",
+                run.to_hex(),
+                pin.member.workpiece.0
+            )),
+            fact: Fact::SuppressionHold {
+                bloom,
+                workpiece: pin.member.workpiece.clone(),
+                evidence: Evidence {
+                    subject: pin.member.candidate.tree,
+                    kind: EvidenceKind::VerificationResult,
+                    detail: receipt.evidence.detail,
+                },
+                requests: receipt.suppression_requests.clone(),
+            },
+        };
+        if store.journal_holds_any(from_ref(&event.idempotency_key.0))? {
+            continue;
+        }
+        admits.extend(admit(&event));
+    }
+    Ok(admits)
+}
+
 fn contextual_terminal_outcomes(
     store: &mut dyn StoreBackend,
     source: Option<&SourceShell>,
@@ -2400,6 +2608,17 @@ fn contextual_terminal_outcomes(
         return Ok(None);
     };
     let checks = declared_failed_checks(dispatch, &receipt, &step.nonce, &excused_flakes(store, node, &receipt)?);
+    let extents = member_extents(store, source, dispatch);
+    // Awaiting sign-off is a hold, not a failure (issue 6032): when the only
+    // open question is the suppress gate and the lane stated requests covering
+    // every finding, the requesting members park with their case recorded and
+    // no attribution probe is spent. This sits before attribution, before the
+    // green path below could pass a requesting member through with its case
+    // dropped, and after the fault arm — a faulted run judged nothing, so its
+    // requests answer nothing either.
+    if let Some(held) = suppression_hold(dispatch, &receipt, &checks, extents.as_ref()) {
+        return Ok(Some(settle_suppression_hold(store, dispatch, &receipt, &held)?));
+    }
     if contextual_run_passed(receipt.verdict, &checks) {
         return Ok(Some(settled(
             dispatch
@@ -2431,7 +2650,6 @@ fn contextual_terminal_outcomes(
         return Ok(Some(settled(pending_contextual_outcomes(dispatch, receipt.evidence.detail))));
     }
 
-    let extents = member_extents(store, source, dispatch);
     let (attributed, remaining, mut provenance) =
         attribute_from_findings(dispatch, &receipt, &checks, extents.as_ref());
     let members = batch_members(dispatch);
@@ -2484,9 +2702,13 @@ fn record_contextual_member_outcomes(
         if members.iter().any(|member| member.request == outcome.request().as_bytes() && member.cancelled) {
             continue;
         }
-        let outcome = if members.iter().any(|member| {
-            member.request == outcome.request().as_bytes() && member.deadline_unix_millis <= now_unix_millis
-        }) {
+        // A hold is not a timeout: the member is parked with its case
+        // recorded, not waiting on work, so an expired member deadline must
+        // not convert it to `Pending` and re-verify it without sign-off.
+        let outcome = if !matches!(outcome, MemberVerifyOutcome::AwaitingSuppression { .. })
+            && members.iter().any(|member| {
+                member.request == outcome.request().as_bytes() && member.deadline_unix_millis <= now_unix_millis
+            }) {
             MemberVerifyOutcome::Pending {
                 request: outcome.request(),
                 observation: Digest::of_wire_bytes(b"aether.bloomery.shared_run.member_deadline_expired"),
@@ -2690,6 +2912,10 @@ fn replay_completion(
             })
         })
         .collect();
+    // The facts that park held members ride in completion order before the
+    // completion itself, re-derived here rather than at settlement so a crash
+    // between the two still converges (issue 6032).
+    let mut admits = suppression_hold_admits(store, row, &dispatch, &outcomes)?;
     let completion = SharedRunCompletion { plan: dispatch.plan.digest(), run, outcomes, unfinished, latencies };
     let bloom = dispatch_bloom(&dispatch)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run requests disagree on bloom".to_owned()))?;
@@ -2704,9 +2930,14 @@ fn replay_completion(
         if matches!(executor.release_physical_run(&run), Settled::Answered(Ok(()))) {
             store.update_shared_run(&row.run, SharedRunLifecycle::Completed, current.next_ordinal)?;
         }
-        return Ok(Vec::new());
+        // The holds ride even here: a crash between the hold admits and the
+        // completion admit leaves the completion journaled with its parks
+        // missing, and the per-key guard above makes the re-admission a no-op
+        // when nothing was lost.
+        return Ok(admits);
     }
-    Ok(admit(&event).into_iter().collect())
+    admits.extend(admit(&event));
+    Ok(admits)
 }
 
 fn retained_member_completion(
@@ -3001,6 +3232,7 @@ fn cancelled_receipt(step: &SharedRunStepRow) -> SharedStepReceipt {
         replayed_flakes: Vec::new(),
         contextual_observations: None,
         probe_verdict: Some(ProbeVerdict::Unknown),
+        suppression_requests: Vec::new(),
     }
 }
 
@@ -3412,6 +3644,244 @@ mod tests {
         );
     }
 
+    fn suppression_request(path: &str) -> SuppressionRequest {
+        SuppressionRequest {
+            path: path.to_owned(),
+            line: 144,
+            lint: "allow(clippy::disallowed_methods)".to_owned(),
+            reason: "operator tooling reading the coordinator's REST bind, not cap config".to_owned(),
+        }
+    }
+
+    fn suppression_receipt(requests: Vec<SuppressionRequest>) -> SharedStepReceipt {
+        SharedStepReceipt {
+            invocation: Digest::of_wire_bytes(b"suppress-step"),
+            evidence: Evidence {
+                subject: Digest::of_wire_bytes(b"node-tree"),
+                kind: EvidenceKind::VerificationResult,
+                detail: Digest::of_wire_bytes(b"umbrella-detail"),
+            },
+            verdict: StageVerdict::VerificationPassed,
+            failed_verifiers: VerifyFailureSet::default(),
+            failed_verifier_names: Vec::new(),
+            findings: None,
+            cost: None,
+            calls: None,
+            replayed_flakes: Vec::new(),
+            contextual_observations: None,
+            probe_verdict: None,
+            suppression_requests: requests,
+        }
+    }
+
+    fn two_member_dispatch() -> SharedRunDispatch {
+        let mut dispatch = reducer_shaped_contextual_dispatch();
+        let mut sibling = dispatch.plan.requests[0].clone();
+        sibling.member = pin("sibling", 19);
+        dispatch.plan.requests.push(sibling);
+        dispatch
+    }
+
+    fn changed_paths(members: Vec<(WorkpieceId, Vec<&str>)>) -> MemberExtents {
+        MemberExtents {
+            source: ExtentSource::ChangedPaths,
+            members: members
+                .into_iter()
+                .map(|(id, paths)| (id, paths.into_iter().map(str::to_owned).collect()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_requested_suppression_holds_only_its_owner() {
+        // The ownership half of the issue-6032 hold: the member whose extent
+        // carries the requested path parks, and the sibling that never touched
+        // it is not named.
+        let dispatch = two_member_dispatch();
+        let owner = dispatch.plan.requests[0].member.workpiece.clone();
+        let other = dispatch.plan.requests[1].member.workpiece.clone();
+        let path = "crates/aether-chassis-bloomery/src/bloomery/verify/batch.rs";
+        let receipt = suppression_receipt(vec![suppression_request(path)]);
+        let extents = changed_paths(vec![
+            (owner.clone(), vec![path]),
+            (other, vec!["crates/aether-chassis-bloomery/src/bloomery/mod.rs"]),
+        ]);
+
+        // Both shapes the order names: the requested pass, which fails no
+        // gate, and a suppress-only red, which fails only it.
+        for checks in [Vec::new(), vec![BatchCheck::Gate { id: "verify.suppress".to_owned() }]] {
+            assert_eq!(
+                suppression_hold(&dispatch, &receipt, &checks, Some(&extents)),
+                Some(BTreeSet::from([owner.clone()])),
+                "only the requesting member parks",
+            );
+        }
+    }
+
+    #[test]
+    fn a_hold_needs_requests_covering_every_open_question() {
+        // The guard half: anything the lane left unanswered — another red
+        // gate, a finding no request covers, or no requests at all — is not a
+        // hold, and the run settles or probes exactly as it does today.
+        let dispatch = two_member_dispatch();
+        let owner = dispatch.plan.requests[0].member.workpiece.clone();
+        let other = dispatch.plan.requests[1].member.workpiece.clone();
+        let path = "crates/aether-chassis-bloomery/src/bloomery/verify/batch.rs";
+        let extents = changed_paths(vec![
+            (owner.clone(), vec![path]),
+            (other, vec!["crates/aether-chassis-bloomery/src/bloomery/mod.rs"]),
+        ]);
+
+        assert_eq!(
+            suppression_hold(&dispatch, &suppression_receipt(Vec::new()), &[], Some(&extents)),
+            None,
+            "a run stating nothing holds nothing",
+        );
+
+        let receipt = suppression_receipt(vec![suppression_request(path)]);
+        assert_eq!(
+            suppression_hold(
+                &dispatch,
+                &receipt,
+                &[BatchCheck::Gate { id: "verify.clippy".to_owned() }],
+                Some(&extents),
+            ),
+            None,
+            "another red gate is a defect, not a hold",
+        );
+
+        let mut uncovered = receipt.clone();
+        uncovered.findings = Some(
+            "### verify.suppress\n\ncrates/aether-chassis-bloomery/src/store/runtime.rs:844 — allow(dead_code) — stale\n"
+                .to_owned(),
+        );
+        assert_eq!(
+            suppression_hold(&dispatch, &uncovered, &[], Some(&extents)),
+            None,
+            "a finding no request covers stays on the settle-or-probe path",
+        );
+
+        let mut covered = receipt;
+        covered.findings =
+            Some(format!("### verify.suppress\n\n{path}:144 — allow(clippy::disallowed_methods) — test\n"));
+        assert_eq!(
+            suppression_hold(&dispatch, &covered, &[], Some(&extents)),
+            Some(BTreeSet::from([owner])),
+            "a finding its request covers holds",
+        );
+    }
+
+    #[test]
+    fn an_ambiguous_request_parks_the_run_rather_than_landing_ungranted() {
+        // Fail-closed: a request outside every member's extent — or inside
+        // several — parks the whole run, because a request nobody parks for
+        // integrates ungranted.
+        let dispatch = two_member_dispatch();
+        let members: BTreeSet<WorkpieceId> =
+            dispatch.plan.requests.iter().map(|request| request.member.workpiece.clone()).collect();
+        let extents = changed_paths(vec![
+            (dispatch.plan.requests[0].member.workpiece.clone(), vec!["crates/a/src/lib.rs"]),
+            (dispatch.plan.requests[1].member.workpiece.clone(), vec!["crates/b/src/lib.rs"]),
+        ]);
+
+        let receipt = suppression_receipt(vec![suppression_request("crates/unowned/src/lib.rs")]);
+        assert_eq!(suppression_hold(&dispatch, &receipt, &[], Some(&extents)), Some(members.clone()));
+
+        assert_eq!(suppression_hold(&dispatch, &receipt, &[], None), Some(members), "no map, everybody parks");
+    }
+
+    #[test]
+    fn a_suppress_only_settlement_parks_with_requests_recorded_and_no_probe() {
+        // The scheduler half of the issue-6032 hold, through the settlement
+        // entrypoint: the requesting member parks with its case in the store
+        // (the route and the verb answer at once), the sibling passes in, and
+        // the terminal settlement materializes no probe step. Without
+        // extents the ownership read is blind, so both members park — the
+        // fail-closed shape, not the split one.
+        let mut dispatch = reducer_shaped_contextual_dispatch();
+        dispatch
+            .plan
+            .composition
+            .as_mut()
+            .expect("the reducer-shaped dispatch carries its composition")
+            .contract
+            .gate_identities = vec!["verify.suppress".to_owned()];
+        let member = dispatch.plan.requests[0].member.workpiece.clone();
+        let SharedRunExecution::Contextual { node, .. } = &dispatch.execution else {
+            panic!("the reducer-shaped dispatch is contextual");
+        };
+        let path = "crates/aether-chassis-bloomery/src/bloomery/verify/batch.rs";
+        let receipt = SharedStepReceipt {
+            contextual_observations: Some(suppress_bundle("full")),
+            ..suppression_receipt(vec![suppression_request(path)])
+        };
+        let row = SharedRunRow {
+            run: Digest::of_wire_bytes(b"suppress-run").as_bytes().to_vec(),
+            nonce: "suppress-run".to_owned(),
+            dispatch: b"immutable-dispatch".to_vec(),
+            lifecycle: SharedRunLifecycle::Running,
+            next_ordinal: 1,
+            deadline_unix_millis: 10,
+            charged: false,
+            physical_cost: None,
+        };
+        let steps = vec![SharedRunStepRow {
+            run: row.run.clone(),
+            ordinal: 0,
+            nonce: "full".to_owned(),
+            request: None,
+            descriptor: encode_host(&SharedStepDescriptor::ContextualFull { node: node.digest() })
+                .expect("the step descriptor encodes"),
+            prepared: None,
+            receipt: Some(encode_host(&receipt).expect("the step receipt encodes")),
+            duration_millis: Some(1),
+            release_physical_run: false,
+        }];
+
+        let mut store = SqliteStore::open(":memory:").expect("an in-memory store opens");
+        let settlement =
+            contextual_terminal_outcomes(&mut store, None, &row, &dispatch, &steps).expect("the step settles");
+        let Some(settlement) = settlement else {
+            panic!("a suppress-only step settles terminally; a probe would have returned no settlement");
+        };
+        assert_eq!(settlement.outcomes.len(), 1);
+        assert!(
+            matches!(
+                &settlement.outcomes[0],
+                MemberVerifyOutcome::AwaitingSuppression { request, .. }
+                    if *request == dispatch.plan.requests[0].digest()
+            ),
+            "the requesting member parks: {:?}",
+            settlement.outcomes
+        );
+        assert!(store.shared_run_steps(&row.run).expect("steps read back").is_empty(), "settling bought no probe step");
+        let bloom = dispatch_bloom(&dispatch).expect("the fixture names one bloom");
+        assert_eq!(
+            store.lookup_suppression_requests(bloom.0.as_bytes(), &member.0).expect("the request rows read back").len(),
+            1,
+            "the case is recorded where the route and the verb read it",
+        );
+    }
+
+    fn suppress_bundle(nonce: &str) -> Vec<u8> {
+        let mut outcomes = serde_json::Map::new();
+        outcomes.insert("gate:verify.suppress".to_owned(), serde_json::json!("passed"));
+        serde_json::to_vec(&serde_json::json!({
+            "protocol": 1,
+            "documents": [{
+                "protocol": 1,
+                "nonce": nonce,
+                "gate": "verify.suppress",
+                "invocations": [{
+                    "invocation": Digest::from_bytes([11; 32]),
+                    "at": serde_json::Value::Null,
+                    "outcomes": outcomes
+                }]
+            }]
+        }))
+        .expect("the suppress observation fixture encodes")
+    }
+
     #[test]
     fn repaired_composition_input_is_atomic_without_a_dependency_cycle() {
         let a = pin("A", 1);
@@ -3508,6 +3978,7 @@ mod tests {
             replayed_flakes: Vec::new(),
             contextual_observations: Some(named_test_bundle("step", test, true)),
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         };
 
         assert_eq!(
@@ -3535,6 +4006,7 @@ mod tests {
             replayed_flakes: replayed.iter().map(|name| (*name).to_owned()).collect(),
             contextual_observations: Some(named_test_bundle("step", test, true)),
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         }
     }
 
@@ -3792,6 +4264,7 @@ mod tests {
             replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         };
 
         project_shared_findings_for_bloom(&mut store, bloom, &receipt).expect("retain exact findings");
@@ -3926,6 +4399,7 @@ mod tests {
             replayed_flakes: Vec::new(),
             contextual_observations: Some(b"stale but parseable observations".to_vec()),
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         };
 
         assert!(!contextual_receipt_matches_node(&receipt, &node));
@@ -3962,6 +4436,7 @@ mod tests {
             replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         };
         let failed = |gate: &str| {
             let check = BatchCheck::Gate { id: gate.to_owned() };
@@ -4094,6 +4569,7 @@ mod tests {
             replayed_flakes: Vec::new(),
             contextual_observations: None,
             probe_verdict: None,
+            suppression_requests: Vec::new(),
         }
     }
 

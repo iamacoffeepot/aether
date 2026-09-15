@@ -522,12 +522,17 @@ fn push_run_progress(events: &mut Vec<NotifyEvent>, id: &str, coordination: &Coo
 fn run_verdict(run: &SharedRunRecord) -> (&'static str, Vec<String>) {
     let mut gates = Vec::new();
     let mut faulted = false;
+    let mut held = false;
     for outcome in &run.completed {
         match outcome {
             MemberVerifyOutcome::Failed { failures, .. } => {
                 gates.extend(failures.iter().map(|failure| failure.as_str().to_owned()));
             }
             MemberVerifyOutcome::HostFault { .. } => faulted = true,
+            // A parked member reached a hold, not a verdict: the run has not
+            // concluded while it waits on a reviewer, so it reads partial
+            // rather than green.
+            MemberVerifyOutcome::AwaitingSuppression { .. } => held = true,
             MemberVerifyOutcome::PassedStandalone { .. }
             | MemberVerifyOutcome::PassedIn { .. }
             | MemberVerifyOutcome::Survived { .. }
@@ -538,7 +543,7 @@ fn run_verdict(run: &SharedRunRecord) -> (&'static str, Vec<String>) {
         ("red", gates)
     } else if faulted {
         ("faulted", Vec::new())
-    } else if !run.unfinished.is_empty() || run.completed.is_empty() {
+    } else if held || !run.unfinished.is_empty() || run.completed.is_empty() {
         ("partial", Vec::new())
     } else {
         ("green", Vec::new())

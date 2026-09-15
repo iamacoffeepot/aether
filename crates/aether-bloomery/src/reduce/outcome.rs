@@ -11,7 +11,7 @@ use super::{
     GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
     MemberExecutorFaultError, NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
     PrecheckError, ProposalError, ResolveError, SealError, SpliceError, StudyError, SupersedeError,
-    SuppressionDispositionError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
+    SuppressionDispositionError, SuppressionHoldError, SurfaceRequestedError, VerifyFailedError, WithdrawError,
 };
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -880,6 +880,23 @@ pub enum Outcome {
     },
     /// An admin fact was refused (ADR-0219).
     AdminRejected(AdminError),
+    /// A member parked awaiting suppression sign-off (issue 6032). Appended
+    /// last so every prior outcome keeps its wire discriminant.
+    ///
+    /// A hold, not a failure: the cursor, the attempt count, and the repair
+    /// ledger stay where they were, and no probe is bought — the remedy is a
+    /// reviewer's grant or denial through
+    /// [`Fact::SuppressionDisposition`](super::Fact::SuppressionDisposition).
+    SuppressionHold {
+        /// The bloom whose member parks.
+        bloom: BloomId,
+        /// The member awaiting sign-off.
+        workpiece: WorkpieceId,
+        /// How many requests this hold records.
+        requests: u32,
+    },
+    /// A suppression hold was refused.
+    SuppressionHoldRejected(SuppressionHoldError),
 }
 
 impl Outcome {

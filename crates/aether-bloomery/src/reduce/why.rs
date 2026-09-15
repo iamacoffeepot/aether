@@ -172,6 +172,20 @@ fn member_state(
     if snapshot.awaiting_surface(&bloom, workpiece).is_some() {
         return (WhyState::Blocked, "waiting on an operator to widen its declared surface".to_owned());
     }
+    if let Some(held) = snapshot.awaiting_suppression(&bloom, workpiece) {
+        return (
+            WhyState::Blocked,
+            format!(
+                "waiting on a reviewer to answer {} suppression request{}",
+                held.requests.len(),
+                if held.requests.len() == 1 {
+                    ""
+                } else {
+                    "s"
+                },
+            ),
+        );
+    }
     if let Some(eviction) = snapshot.lease_eviction(&bloom, workpiece) {
         return (
             WhyState::Blocked,
@@ -390,6 +404,65 @@ mod tests {
 
     fn rung<'a>(chain: &'a [TransitionWhy], name: &str) -> &'a TransitionWhy {
         chain.iter().find(|rung| rung.transition == name).expect("every chain carries every rung")
+    }
+
+    #[test]
+    fn a_member_parked_for_sign_off_names_the_hold() {
+        // Issue 6032: the hold is journaled as its own fact so the console
+        // and /why name it — a parked member reads as waiting on a reviewer,
+        // not as a lane still out.
+        use crate::ids::StageId;
+        use crate::values::{CandidateRef, SuppressionRequest};
+
+        let (snapshot, bloom) = sealed(&[]);
+        let wp_a = WorkpieceId("wp-a".to_string());
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "construct-a",
+                Fact::AttemptCompleted {
+                    bloom,
+                    workpiece: wp_a.clone(),
+                    stage: StageId::Construct,
+                    passed: true,
+                    evidence: Evidence {
+                        subject: digest(1),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(80),
+                    },
+                    candidate: Some(CandidateRef { tree: digest(20), checkout: digest(22) }),
+                },
+            ),
+        );
+        let (snapshot, _) = step(
+            &snapshot,
+            &event(
+                "hold-a",
+                Fact::SuppressionHold {
+                    bloom,
+                    workpiece: wp_a.clone(),
+                    evidence: Evidence {
+                        subject: digest(20),
+                        kind: EvidenceKind::VerificationResult,
+                        detail: digest(81),
+                    },
+                    requests: SuppressionRequest::normalize(vec![(
+                        "crates/a/src/lib.rs".to_string(),
+                        4,
+                        "allow(dead_code)".to_string(),
+                        "operator tooling".to_string(),
+                    )]),
+                },
+            ),
+        );
+
+        let document = why_of(&snapshot, &bloom).expect("the bloom is known");
+        let member =
+            document.members.iter().find(|member| member.workpiece == wp_a).expect("sealed order carries wp-a");
+
+        assert_eq!(member.state, WhyState::Blocked);
+        assert!(member.because.contains("1 suppression request"), "{}", member.because);
+        assert!(member.because.contains("reviewer"), "{}", member.because);
     }
 
     #[test]

@@ -522,6 +522,27 @@ pub const DECISIONS_RESCUE_ADMIN_DIGEST: Digest =
 pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
     Digest::pinned("7765f5ee28b4ac779ac5a7e0205c037fd0a91fe238a1f71023adf60037ff33cd");
 
+/// Journal schema immediately before issue 6032 appended the suppression-hold
+/// outcome, its refusal, and the `AwaitingSuppression` completion outcome.
+///
+/// Copied verbatim from the `decisions` line the ledger carries as current at
+/// this commit — `cb23090e24674178e173da9037c2036449db4939af7bbdb1abd5138dcff404a1`
+/// — never recomputed from live code. The hold appends past every prior
+/// outcome, so no discriminant a row of that era could hold has moved.
+pub const DECISIONS_PRE_SUPPRESSION_HOLD_DIGEST: Digest =
+    Digest::pinned("cb23090e24674178e173da9037c2036449db4939af7bbdb1abd5138dcff404a1");
+
+/// Event schema immediately before issue 6032 appended `Fact::SuppressionHold`.
+///
+/// Copied verbatim from the `event` line the ledger carries as current at this
+/// commit — `76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4`
+/// — the same way and for the same reason. The fact is appended past
+/// `AdminDropLap`, so this upcast is the identity where
+/// [`EVENT_PRE_RED_VERIFY_DIGEST`] — a field appended *inside*
+/// `Fact::VerifyFailed` — is not.
+pub const EVENT_PRE_SUPPRESSION_HOLD_DIGEST: Digest =
+    Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -559,6 +580,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_red_verify,
             upcast_decisions_pre_admin,
             upcast_decisions_rescue_admin,
+            upcast_decisions_pre_suppression_hold,
         ],
     )
 }
@@ -813,6 +835,20 @@ fn upcast_event_rescue_admin(bytes: &[u8]) -> Result<Event, WireError> {
     decode_event_with(bytes, decode_fact_rescue_admin)
 }
 
+/// Pre-suppression-hold decision rows carry the same wire layout today's
+/// decoder reads: the hold outcome and its refusal, the
+/// `AwaitingSuppression` completion outcome, and the requests folded off them
+/// are all appended past every discriminant a row of that era could hold.
+fn upcast_decisions_pre_suppression_hold(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-suppression-hold event rows carry the same wire layout today's decoder
+/// reads: `Fact::SuppressionHold` is appended past `AdminDropLap`.
+fn upcast_event_pre_suppression_hold(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 fn decode_fact_rescue_admin(cursor: &mut &[u8]) -> Result<Fact, WireError> {
     let selector = peek_selector(cursor)?;
     if selector < MEMBER_DEADLINE_EXPIRED {
@@ -856,6 +892,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_findings,
             upcast_event_pre_admin,
             upcast_event_rescue_admin,
+            upcast_event_pre_suppression_hold,
         ],
     )
 }
@@ -878,6 +915,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_SUPPRESSION_HOLD_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -898,6 +936,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_SUPPRESSION_HOLD_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
