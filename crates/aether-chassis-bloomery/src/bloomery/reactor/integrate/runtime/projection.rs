@@ -97,7 +97,17 @@ impl CoordinationProjection {
             .or_else(|| plan.requests.first().map(|request| request.bloom));
         bloom.and_then(|bloom| self.states.get(&bloom)).is_some_and(|state| {
             state.runs.iter().any(|run| run.phase == SharedRunPhase::Preparing && run.plan.digest() == plan.digest())
-                && plan.composition.as_ref().is_none_or(|composition| composition.base == state.integration.head)
+                // The composition stands on the context its members were built
+                // on, so this door asks the same question the reducer's
+                // `validate_composition` asks. It used to read `== head`, which
+                // refused every plan a sibling's fold had overtaken between
+                // proposal and preparation and sent the member to its standalone
+                // fallback (ADR-0218 §Amendment: a member is verified over the
+                // context it was built on).
+                && plan
+                    .composition
+                    .as_ref()
+                    .is_none_or(|composition| Some(&composition.base) == state.construct_base(&plan.requests).as_ref())
         })
     }
 }

@@ -1095,6 +1095,29 @@ impl CoordinationState {
         self.preparations.iter().find(|plan| plan.digest() == id)
     }
 
+    /// The context `requests` were constructed on, which is the only tree their
+    /// composition may stand on (ADR-0218 §Amendment: a member is verified over
+    /// the context it was built on).
+    ///
+    /// Never the product. The product is the virtual final tree the bloom is
+    /// assembling and it grows every time a sibling folds; a candidate authored
+    /// before that fold does not descend from it, so basing a member's
+    /// verification there re-contexts a member nobody re-authored. Bloom
+    /// `9680c483` is the measurement: every run rebuilt the coordinator's whole
+    /// downstream closure because the tree it verified against had moved at the
+    /// previous fold, and two members went red on a struct field a folded
+    /// sibling had added that their own candidates never saw.
+    ///
+    /// `None` when the requests do not agree on one base, which is the signal
+    /// that they cannot share a run — each is then planned alone rather than
+    /// one of them being rebased onto the other's context.
+    #[must_use]
+    pub fn construct_base(&self, requests: &[MemberVerifyRequest]) -> Option<IntegrationHead> {
+        let mut bases = requests.iter().map(|request| request.context.as_ref().map(|context| &context.starting_head));
+        let first = bases.next()?;
+        bases.all(|base| base == first).then(|| first.cloned().unwrap_or_else(|| self.integration.head.clone()))
+    }
+
     /// Whether `pin` carries an exact admitted proof in this coordination
     /// state. Contextual receipts remain bound to their physical node and
     /// complete contract; they never impersonate standalone tree proofs.

@@ -256,9 +256,27 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
     })
 }
 
+/// Plan the physical run one selection of ready requests becomes.
+///
+/// The composition stands on the context its members were **constructed** on —
+/// [`CoordinationState::construct_base`] — and never on the product
+/// (ADR-0218 §Amendment: a member is verified over the context it was built on).
+/// That base is an ancestor of every candidate in the selection by construction,
+/// so the source's pinned fold fast-forwards and the node it prepares carries
+/// each member's own tree and, for a single-member selection, that member's own
+/// candidate checkout: the lane is handed the exact commit its slot last built,
+/// not a fresh composition ref over a tree a sibling's fold moved.
+///
+/// A selection that does not agree on one base cannot be composed at all, and
+/// [`SealedPolicySelection::select`] is what keeps that from being reached — a
+/// disagreeing selection here falls back to the standalone invocation rather
+/// than rebasing one member onto another's context.
 fn build_plan(state: &CoordinationState, requests: Vec<MemberVerifyRequest>) -> SharedRunPlan {
+    let base = state.construct_base(&requests);
     let mode = match state.policy.verification {
-        VerificationMode::Contextual if requests.iter().all(|request| state.composition_contract.covers(request)) => {
+        VerificationMode::Contextual
+            if base.is_some() && requests.iter().all(|request| state.composition_contract.covers(request)) =>
+        {
             SharedRunMode::Contextual
         }
         VerificationMode::Standalone | VerificationMode::Contextual => SharedRunMode::Standalone,
@@ -276,7 +294,7 @@ fn build_plan(state: &CoordinationState, requests: Vec<MemberVerifyRequest>) -> 
             .collect();
         CompositionPlan {
             bloom: state.integration.generation.bloom,
-            base: state.integration.head.clone(),
+            base: base.expect("a contextual plan is only built over an agreed construct base"),
             inputs,
             requests: requests.clone(),
             contract: state.composition_contract.bind(members),
@@ -377,11 +395,16 @@ fn retained_survivor_group(
         return Some(Vec::new());
     };
     let selected = indices.iter().copied().collect::<BTreeSet<_>>();
+    let group_base = request.context.as_ref().map(|context| context.starting_head.digest());
     let atomic_group_is_complete = indices.iter().all(|index| {
         let Some(candidate) = current_request(state, &queued[*index]) else {
             return false;
         };
-        state.composition_contract.covers(&candidate)
+        // A survivor whose repair lap was handed a different context is no
+        // longer part of this group's composition: it waits for a plan of its
+        // own rather than being composed over a base it was not built on.
+        candidate.context.as_ref().map(|context| context.starting_head.digest()) == group_base
+            && state.composition_contract.covers(&candidate)
             && candidate.input.members.iter().all(|pin| {
                 state.integration.head.coverage.contains(pin)
                     || queued.iter().enumerate().any(|(peer_index, row)| {
@@ -430,12 +453,24 @@ impl SharedRunSelection for SealedPolicySelection {
         }
         let mut selected = Vec::new();
         let mut inputs = BTreeSet::new();
+        // Members share a run only when they share the context they were built
+        // on. Two members constructed on different trees have no common base to
+        // compose over, and picking either one's would re-context the other
+        // (ADR-0218 §Amendment: a member is verified over the context it was
+        // built on). The input digest already separates most of them — a
+        // `CompositionInput` names its candidate and its complete coverage — but
+        // the loop deliberately admits *several* distinct inputs into one plan,
+        // so the base has to be asked for directly.
+        let group_base = first_request.context.as_ref().map(|context| context.starting_head.digest());
         for row in queued {
             let Some(request) = current_request(state, row).filter(|request| request.bloom == first_request.bloom)
             else {
                 continue;
             };
             if !state.composition_contract.covers(&request) {
+                continue;
+            }
+            if request.context.as_ref().map(|context| context.starting_head.digest()) != group_base {
                 continue;
             }
             if state.survivor_groups.iter().any(|group| group.requests.contains(&request.digest())) {

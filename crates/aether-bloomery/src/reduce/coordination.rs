@@ -1481,8 +1481,17 @@ fn composition_requests_match(record: &BloomRecord, state: &CoordinationState, p
             .all(|pin| plan.requests.iter().any(|request| request.member == *pin) || plan.base.coverage.contains(pin))
 }
 
+/// A composition stands on the context its members were constructed on, never
+/// on the product (ADR-0218 §Amendment: a member is verified over the context it
+/// was built on).
+///
+/// This line used to read `plan.base == state.integration.head`, which is what
+/// made every ready member's verification a function of what its siblings had
+/// folded in the meantime: a plan proposed a moment before a fold was refused a
+/// moment after it, and the replacement plan re-contexted the member onto a tree
+/// it had never compiled against.
 fn validate_composition(record: &BloomRecord, state: &CoordinationState, plan: &CompositionPlan) -> bool {
-    composition_requests_match(record, state, plan) && plan.base == state.integration.head
+    composition_requests_match(record, state, plan) && Some(&plan.base) == state.construct_base(&plan.requests).as_ref()
 }
 
 fn validate_run_plan(record: &BloomRecord, state: &CoordinationState, plan: &SharedRunPlan) -> bool {
@@ -5437,6 +5446,126 @@ mod tests {
         let mut effects = Vec::new();
         retire_abandoned_product_work(record, &mut growing, &mut effects);
         assert!(!growing.runs[0].stale, "a head that only grew keeps the run it overtook");
+    }
+
+    /// Alpha at Verify on a candidate it authored over the pristine base, with
+    /// `folded` describing whether beta has since taken the product somewhere
+    /// alpha's tree has never been.
+    fn alpha_verifying(folded: bool) -> (BloomRecord, CoordinationState, MemberVerifyRequest, IntegrationHead) {
+        let (mut record, mut state) = fixture();
+        let construct_base = state.integration.head.clone();
+        state.contexts.insert(
+            record.spec.members()[0].workpiece.0.clone(),
+            ConstructContext { bloom_base: state.integration.generation.base, starting_head: construct_base.clone() },
+        );
+        let alpha = current_requests(&mut record, &state).swap_remove(0);
+        state.requests = alloc::vec![alpha.clone()];
+        if folded {
+            let beta = pin("beta", 11, 30);
+            state.integration.head = IntegrationHead {
+                generation: state.integration.generation.digest(),
+                node: digest(90),
+                candidate: beta.candidate,
+                plan: digest(91),
+                coverage: alloc::vec![beta],
+            };
+        }
+        (record, state, alpha, construct_base)
+    }
+
+    fn contextual_plan_over(
+        state: &CoordinationState,
+        request: &MemberVerifyRequest,
+        base: IntegrationHead,
+    ) -> SharedRunPlan {
+        let plan = SharedRunPlan {
+            mode: SharedRunMode::Contextual,
+            requests: alloc::vec![request.clone()],
+            composition: Some(CompositionPlan {
+                bloom: state.integration.generation.bloom,
+                base,
+                inputs: alloc::vec![request.input.clone()],
+                requests: alloc::vec![request.clone()],
+                contract: state.composition_contract.bind(alloc::vec![MemberContractPin {
+                    request: request.digest(),
+                    contract: request.contract.digest(),
+                }]),
+            }),
+            probe_budget: state.policy.max_attribution_probes,
+            execution_attempt: 0,
+        };
+        SharedRunPlan { execution_attempt: state.next_execution_attempt(&plan), ..plan }
+    }
+
+    /// The tree a member is judged on is the one its lane was handed.
+    ///
+    /// The composition base used to be `state.integration.head`, so the moment a
+    /// sibling folded, the only plan the reducer would accept for a member was
+    /// one over a tree that member had never compiled against — which is how
+    /// bloom 9680c483 rebuilt its whole downstream closure on every run and took
+    /// two members red on a folded sibling's struct fields.
+    #[test]
+    fn a_member_verify_plan_stands_on_the_base_the_member_was_constructed_on() {
+        let (record, state, alpha, construct_base) = alpha_verifying(true);
+        assert_ne!(construct_base, state.integration.head, "the sibling's fold moved the product");
+        assert_eq!(state.construct_base(from_ref(&alpha)), Some(construct_base.clone()));
+
+        assert!(
+            validate_run_plan(&record, &state, &contextual_plan_over(&state, &alpha, construct_base)),
+            "the member's own construct base is the base its verification stands on"
+        );
+        assert!(
+            !validate_run_plan(&record, &state, &contextual_plan_over(&state, &alpha, state.integration.head.clone())),
+            "the product is not a base any member is verified over"
+        );
+    }
+
+    /// Two members are composed only when they were built on the same tree.
+    ///
+    /// Otherwise composing them would pick one member's context and silently
+    /// re-context the other, which is the same move on a smaller scale.
+    #[test]
+    fn requests_built_on_different_contexts_have_no_shared_base() {
+        let (mut record, mut state) = fixture();
+        let base = state.integration.head.clone();
+        let later = IntegrationHead { node: digest(90), plan: digest(91), ..base.clone() };
+        for (index, member) in record.spec.members().to_vec().iter().enumerate() {
+            state.contexts.insert(
+                member.workpiece.0.clone(),
+                ConstructContext {
+                    bloom_base: state.integration.generation.base,
+                    starting_head: if index == 0 {
+                        base.clone()
+                    } else {
+                        later.clone()
+                    },
+                },
+            );
+        }
+        let requests = current_requests(&mut record, &state);
+
+        assert_eq!(state.construct_base(&requests[..1]), Some(base));
+        assert_eq!(state.construct_base(&requests[1..]), Some(later));
+        assert_eq!(state.construct_base(&requests), None, "the two were not built on the same tree");
+    }
+
+    /// A fold is not news a queued verification is told.
+    ///
+    /// The plan a member was already planned under stays valid across a sibling's
+    /// fold, and the request itself is byte-identical: nothing about the member's
+    /// verification is a function of what the product grew to carry.
+    #[test]
+    fn a_sibling_fold_leaves_a_queued_verify_request_planned_on_its_own_base() {
+        let (record, before, alpha, construct_base) = alpha_verifying(false);
+        let (_, after, alpha_after, _) = alpha_verifying(true);
+        assert_eq!(alpha_after, alpha, "a fold rewrites nothing in the member's request");
+
+        let plan = contextual_plan_over(&before, &alpha, construct_base);
+        assert!(validate_run_plan(&record, &before, &plan), "the plan is valid before the sibling folds");
+        assert!(
+            validate_run_plan(&record, &after, &plan),
+            "and the same plan is still valid after it: the fold retires no request and re-bases none"
+        );
     }
 
     /// Every request of `plan` passed in `node`, nothing outstanding.
