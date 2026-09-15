@@ -58,7 +58,7 @@ impl Workspace {
     }
 
     /// The workspace packages `changed` writes into — the closure's other half,
-    /// see [`owning_packages`](crate::affected::owners::owning_packages).
+    /// see [`owning_packages`].
     pub fn owning_packages(&self, changed: &[String]) -> BTreeSet<String> {
         owning_packages(&self.graph, changed)
     }

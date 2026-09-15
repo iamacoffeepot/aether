@@ -10,7 +10,7 @@
 //! owning set is computed here from the same graph the closure is taken over.
 //!
 //! The match is the crate-root prefix guppy itself reports, with the trailing
-//! separator [`Workspace::crate_roots`] already carries for the reason it
+//! separator [`Workspace::crate_roots`](super::graph::Workspace::crate_roots) already carries for the reason it
 //! carries it: `crates/aether-math/` must not claim `crates/aether-math-derive/`.
 //! A path inside no workspace crate — a doc, a workflow, the lockfile — owns
 //! nothing and is simply absent, which is the truthful answer rather than a
