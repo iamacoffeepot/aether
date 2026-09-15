@@ -169,10 +169,11 @@ Passing, empty, or executor-fault observations cannot seed code-repair findings.
 Cancellation withdraws unstarted logical work while preserving completed
 receipts and other still-needed work. An already-running composition retains
 its immutable input until it finishes or is explicitly cancelled as a
-physical operation. A later head does not itself cancel that composition
-when every fold between its composition base and the current head is
-closure-disjoint from the run's members (#5938); a closure-intersecting
-move, a generation change, or an explicit physical cancel still retires it.
+physical operation. A later head does not itself cancel that composition,
+however the folds between its composition base and the current head relate to
+the run's members (#5938, amended 2026-09-15): only a head that dropped
+coverage the composition had already folded in — a generation reset — strands
+the run, and an explicit physical cancel still retires it.
 Joining a required final gate preserves the original deadline and uses the
 existing outstanding-order lifecycle.
 
@@ -453,3 +454,42 @@ and its completion admits outcomes for the members that stay. A run that is
 retired keeps its siblings' logical requests, so the re-proposal reuses the
 exact request identities its recorded per-step rows are addressed by rather
 than re-deriving them from a cold dispatch.
+
+## Amendment: proofs survive head movement (2026-09-15)
+
+A proof is never discarded because the head moved. A running composition keeps
+running against the node it prepared, and head movement alone — closure-disjoint
+or closure-intersecting — retires nothing.
+
+The closure-disjoint rule above was the wrong axis. A run's proof is over its
+own node, never over the head, so the folds between its composition base and
+the current head cannot make that proof wrong; they only make it *behind*. The
+one head move that does strand a run is a head that **dropped** a pin the
+composition had already folded in: the node's tree then carries ancestry the
+bloom has abandoned, which is the removed-code carry this decision forbids. A
+generation reset is that same case seen from the namespace side — it re-derives
+the head from the bloom base with the invalidated coverage gone — so an epoch
+bump retires exactly the runs that stood on a head carrying the invalidated
+member and leaves a sibling standing on the untouched base alone, which is what
+#5997 already says invalidation may reach. The generation's *base* is fixed for
+a bloom's life, so a genuinely new bloom base is a successor seal rather than a
+live head move.
+
+A `PassedIn` outcome from a run the head overtook is therefore not accepted
+head-exact. It is accepted as a proof of its node, and that node is queued onto
+the *current* head through the ordinary append the closure-disjoint rebase
+already used: a clean fold advances the head with the proved candidate intact,
+and a collision is `Fact::IntegrationAppendConflicted`, which sends exactly the
+members the head does not already carry to Reconcile and on to their
+delta-confirm Verify. Nothing re-runs Construct, the candidate that was proved
+stays the member's candidate, and the receipt keeps naming the node it proved,
+so the evidence stays honest — the merged head earns its own aggregate proof
+rather than inheriting one, because aggregate reuse still matches candidate and
+ordered coverage exactly.
+
+The evidence is measured. In bloom 7a2ff988 on 2026-09-14 runs E57A2F45
+(21 min), BD230801 (14 min), B99A2D0D (6 min) and 95CA8BE6 (23 min) had each
+finished their `verify.check` and were cancelled at the exact instant of an
+integration (22:03:07 and 23:28:37 UTC): 64 prover-minutes of finished proof
+thrown away, and four members re-proposed from scratch against a head their
+completed runs would have folded onto anyway.

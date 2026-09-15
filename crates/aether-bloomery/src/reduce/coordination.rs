@@ -313,50 +313,28 @@ fn affected_closure(record: &BloomRecord, state: &CoordinationState, changed: &W
     }
 }
 
-/// Whether folds between `plan`'s composition base and `head` can change the
-/// plan's answer (ADR-0218 as amended by #5938).
+/// Whether `head` has left `plan`'s composition behind — the only way a head
+/// move retires a running composition (ADR-0218 as amended 2026-09-15).
 ///
-/// A run is retired only when a newly folded pin sits in the invalidation
-/// closure of the run's members — the same [`affected_closure`] dependency
-/// walk member-version invalidation uses, without the live-coverage expansion
-/// that would join every sibling through the shared parent head. A version
-/// change of a pin the run already tested always intersects: that member is
-/// already in the composed node. A generation change is not a closure-disjoint
-/// fold; the namespace itself moved.
-fn head_folds_intersect_plan(record: &BloomRecord, plan: &SharedRunPlan, head: &IntegrationHead) -> bool {
-    let Some(composition) = plan.composition.as_ref() else {
-        return false;
-    };
-    if composition.base == *head {
-        return false;
-    }
-    if composition.base.generation != head.generation {
-        return true;
-    }
-    let run_members = plan.requests.iter().map(|request| request.member.workpiece.clone()).collect::<BTreeSet<_>>();
-    let tested = plan
-        .requests
-        .iter()
-        .flat_map(|request| request.input.members.iter().map(|pin| pin.workpiece.clone()))
-        .chain(composition.base.coverage.iter().map(|pin| pin.workpiece.clone()))
-        .collect::<BTreeSet<_>>();
-    let mut folded = BTreeSet::new();
-    for pin in &head.coverage {
-        if composition.base.coverage.contains(pin) {
-            continue;
-        }
-        if tested.contains(&pin.workpiece) {
-            return true;
-        }
-        folded.insert(pin.workpiece.clone());
-    }
-    if folded.is_empty() {
-        return true;
-    }
-    folded.iter().any(|changed| {
-        let mut affected = BTreeSet::from([changed.clone()]);
-        expand_dependents(record, &mut affected);
-        affected.iter().any(|member| run_members.contains(member))
+/// A head that merely *grew* is not a reason. The run keeps testing the node it
+/// prepared, and a `PassedIn` outcome folds that node onto the current head
+/// through the ordinary append: clean, the head advances; colliding,
+/// `Fact::IntegrationAppendConflicted` sends the members to Reconcile. Retiring
+/// there threw away finished prover time and re-proposed the members cold,
+/// which is what a closure-intersecting fold used to cost.
+///
+/// A head that *dropped* a pin the composition already folded in is different:
+/// the node's tree carries ancestry the bloom has abandoned, and ADR-0218
+/// forbids carrying removed code back through Git ancestry. That is also what
+/// a generation reset looks like from this seam — it re-derives the head from
+/// the bloom base with the invalidated coverage gone — so an epoch bump retires
+/// exactly the runs that stood on a head carrying the invalidated member, and
+/// leaves a sibling standing on the untouched base alone (#5997). The
+/// generation's *base* is fixed for a bloom's life, so a genuinely new bloom
+/// base is a successor seal, not a live head move.
+fn head_strands_plan(plan: &SharedRunPlan, head: &IntegrationHead) -> bool {
+    plan.composition.as_ref().is_some_and(|composition| {
+        composition.base != *head && composition.base.coverage.iter().any(|pin| !head.coverage.contains(pin))
     })
 }
 
@@ -699,12 +677,18 @@ fn release_ready_dependents(record: &BloomRecord, state: &mut CoordinationState,
     }
 }
 
+/// Re-pin the work that reads the head — candidate preparations, previews, and
+/// unadmitted construction — after the head moved, and retire only the runs the
+/// move stranded ([`head_strands_plan`]).
+///
+/// A composition the head merely overtook keeps running: its proof is over the
+/// node it prepared, not over the head, and that node folds onto whatever head
+/// it finds when it settles. Preparations are the opposite case — a prepared
+/// candidate *is* a merge onto one exact head, so a moved head re-dispatches it.
 fn retire_displaced_head_work(record: &BloomRecord, state: &mut CoordinationState, effects: &mut Vec<Decision>) {
     let head = state.integration.head.clone();
-    for run in state
-        .runs
-        .iter_mut()
-        .filter(|run| !run.is_terminal() && !run.stale && head_folds_intersect_plan(record, &run.plan, &head))
+    for run in
+        state.runs.iter_mut().filter(|run| !run.is_terminal() && !run.stale && head_strands_plan(&run.plan, &head))
     {
         run.stale = true;
         effects.push(Decision::CancelSharedRun { plan: run.plan.digest() });
@@ -1506,9 +1490,7 @@ fn retained_plan_current(record: &BloomRecord, state: &CoordinationState, plan: 
             && state.requests.iter().any(|current| current.digest() == request.digest())
             && !state.claims.contains_key(workpiece_key(&request.member.workpiece))
     }) && plan.composition.as_ref().is_none_or(|composition| {
-        composition_requests_match(record, state, composition)
-            && (composition.base == state.integration.head
-                || !head_folds_intersect_plan(record, plan, &state.integration.head))
+        composition_requests_match(record, state, composition) && !head_strands_plan(plan, &state.integration.head)
     })
 }
 
@@ -5002,7 +4984,8 @@ mod tests {
 
     /// One member verifying contextually against the empty head, with the sibling
     /// ready to append. `overlapping` puts a declared edge from the verifying
-    /// member onto the folding sibling so they share an [`affected_closure`].
+    /// member onto the folding sibling, so the fold lands inside the verifying
+    /// member's dependency closure rather than beside it.
     fn sibling_fold_mid_verify(
         overlapping: bool,
     ) -> (Snapshot, BloomId, SharedRunPlan, SharedRunNode, CompositionInput) {
@@ -5103,20 +5086,58 @@ mod tests {
     }
 
     #[test]
-    fn an_overlapping_sibling_fold_retires_a_contextual_run() {
+    fn an_overlapping_sibling_fold_leaves_a_contextual_run_running() {
         let (snapshot, bloom, plan, _, folding) = sibling_fold_mid_verify(true);
         let decisions = advance_folded_sibling(&snapshot, &bloom, &folding);
         let next = recorded(&decisions);
-        assert_eq!(cancelled_plans(&decisions), alloc::vec![plan.digest()]);
-        assert!(next.runs.iter().any(|run| run.plan.digest() == plan.digest() && run.stale && run.is_running()));
+        assert!(
+            cancelled_plans(&decisions).is_empty(),
+            "a closure-intersecting fold must not cancel the run either: the prover time is already spent and the \
+             node it proved folds onto the new head at integration"
+        );
+        assert!(
+            next.runs.iter().any(|run| run.plan.digest() == plan.digest() && !run.stale && run.is_running()),
+            "the verifying member keeps the plan it was already running"
+        );
     }
 
+    /// A head that abandoned coverage the composition already folded in is the
+    /// one move that does retire: the node's tree carries ancestry the bloom
+    /// left behind, which is the generation reset seen from this seam.
     #[test]
-    fn a_disjoint_behind_head_pass_integrates_onto_the_current_head() {
-        let (mut snapshot, bloom, plan, node, folding) = sibling_fold_mid_verify(false);
-        let advanced = advance_folded_sibling(&snapshot, &bloom, &folding);
-        install_recorded_state(&mut snapshot, bloom, &advanced);
-        let completion = SharedRunCompletion {
+    fn a_head_that_drops_the_composition_base_coverage_retires_the_run() {
+        let (snapshot, bloom, _, _, _) = sibling_fold_mid_verify(false);
+        let record = snapshot.blooms.get(&bloom).expect("record");
+        let mut state = record.coordination.as_deref().expect("coordination").clone();
+        let folded = pin("beta", 11, 30);
+        state.runs[0].plan.composition.as_mut().expect("contextual composition").base.coverage =
+            alloc::vec![folded.clone()];
+        state.integration.head.coverage = alloc::vec![folded];
+        state.integration.head.node = digest(91);
+
+        let mut stranding = state.clone();
+        stranding.integration.head =
+            IntegrationHead { coverage: Vec::new(), node: digest(92), ..state.integration.head.clone() };
+        let mut effects = Vec::new();
+        retire_displaced_head_work(record, &mut stranding, &mut effects);
+        assert!(stranding.runs[0].stale, "a head that dropped the composition's own coverage strands the run");
+        assert_eq!(
+            effects.iter().filter(|effect| matches!(effect, Decision::CancelSharedRun { .. })).count(),
+            1,
+            "the stranded run is cancelled once"
+        );
+
+        let mut growing = state;
+        growing.integration.head.coverage.push(pin("alpha", 10, 40));
+        growing.integration.head.node = digest(93);
+        let mut effects = Vec::new();
+        retire_displaced_head_work(record, &mut growing, &mut effects);
+        assert!(!growing.runs[0].stale, "a head that only grew keeps the run it overtook");
+    }
+
+    /// Every request of `plan` passed in `node`, nothing outstanding.
+    fn contextual_pass_completion(plan: &SharedRunPlan, node: &SharedRunNode) -> SharedRunCompletion {
+        SharedRunCompletion {
             plan: plan.digest(),
             run: digest(62),
             latencies: plan
@@ -5142,8 +5163,18 @@ mod tests {
                 })
                 .collect(),
             unfinished: Vec::new(),
-        };
-        let decisions = reduce_shared_run_completed(&snapshot, &bloom, &completion);
+        }
+    }
+
+    /// The pass a run earns behind the head is kept and queued onto the current
+    /// head, whether the intervening fold was closure-disjoint or not: a proof
+    /// is never discarded because the head moved.
+    fn assert_behind_head_pass_integrates(overlapping: bool) {
+        let (mut snapshot, bloom, plan, node, folding) = sibling_fold_mid_verify(overlapping);
+        let advanced = advance_folded_sibling(&snapshot, &bloom, &folding);
+        install_recorded_state(&mut snapshot, bloom, &advanced);
+
+        let decisions = reduce_shared_run_completed(&snapshot, &bloom, &contextual_pass_completion(&plan, &node));
         let next = recorded(&decisions);
         assert!(next.claims.contains_key("alpha"), "the pass is kept rather than requeued as stale");
         assert!(
@@ -5155,6 +5186,16 @@ mod tests {
             !decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueMemberVerification { .. })),
             "a kept pass must not fall through the stale requeue"
         );
+    }
+
+    #[test]
+    fn a_disjoint_behind_head_pass_integrates_onto_the_current_head() {
+        assert_behind_head_pass_integrates(false);
+    }
+
+    #[test]
+    fn an_overlapping_behind_head_pass_integrates_onto_the_current_head() {
+        assert_behind_head_pass_integrates(true);
     }
 
     #[test]
