@@ -134,4 +134,7 @@ pub use runtime::{
 };
 
 #[cfg(all(test, feature = "runtime"))]
+mod schema;
+
+#[cfg(all(test, feature = "runtime"))]
 mod tests;
