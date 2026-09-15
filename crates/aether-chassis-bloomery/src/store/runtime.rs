@@ -1548,7 +1548,13 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// copy and re-date an older result past a newer one. Rows that already
 /// duplicate an identity are collapsed onto their earliest sequence — the
 /// duplicates carry no information the retained row does not.
-const SCHEMA_VERSION: i64 = 25;
+///
+/// `26` is the model-override digest on the scoping-run ledger (issue 5945):
+/// `scope_runs.model_override`, nullable. Its guarded `ALTER` first shipped
+/// under version 25, so a store already stamped 25 skipped it and the first
+/// `list_scope_runs` on boot failed with "no such column". A pre-column row
+/// ran the compiled seat; nothing is backfilled.
+const SCHEMA_VERSION: i64 = 26;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.

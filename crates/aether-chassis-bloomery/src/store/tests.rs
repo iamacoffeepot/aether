@@ -1713,7 +1713,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
 }
 
 #[test]
@@ -1745,7 +1745,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
 }
 
 /// A workpiece shaped the way a `scope.fill` lane emits one: no predecessor,
@@ -1868,7 +1868,7 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v20 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
 
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1892,6 +1892,89 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].instructions.as_deref(), Some(b"pin".as_slice()));
+    assert_eq!(rows[1].model_override.as_deref(), Some(b"override".as_slice()));
+}
+
+#[test]
+fn a_v25_store_gains_a_nullable_scope_run_seat_column() {
+    // Version 26 adds scope_runs.model_override nullable. Its guarded ALTER
+    // first shipped without a version bump, so a store already stamped 25 (the
+    // live journal on 2026-09-15) skipped it and the boot-path read failed with
+    // "no such column: model_override". Opening a schema-25 file that has the
+    // table must ALTER rather than skip it because user_version was already
+    // "current" at 25 — and must backfill nothing, because a pre-column row ran
+    // the compiled seat.
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v25-scope-runs.db").to_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT
+         );
+         CREATE TABLE commissions (
+             id               TEXT PRIMARY KEY,
+             intent           BLOB NOT NULL,
+             current_revision BLOB,
+             current_ordinal  INTEGER,
+             status           TEXT NOT NULL CHECK (status IN ('open', 'cancelled', 'landed'))
+         );
+         CREATE TABLE scope_runs (
+             sequence   INTEGER PRIMARY KEY AUTOINCREMENT,
+             commission TEXT NOT NULL REFERENCES commissions(id),
+             ordinal    INTEGER NOT NULL CHECK (ordinal >= 1),
+             kind       TEXT NOT NULL CHECK (kind IN ('enqueued', 'dispatched', 'verdict', 'frozen')),
+             nonce      TEXT,
+             intent     BLOB,
+             base       BLOB,
+             subject    BLOB,
+             verdict    TEXT,
+             evidence   BLOB,
+             revision   BLOB,
+             instructions BLOB
+         );",
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO commissions (id, intent, status) VALUES (?1, ?2, 'open')",
+        rusqlite::params!["wp-v25", b"intent"],
+    )
+    .unwrap();
+    conn.execute(
+        "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject, instructions)
+         VALUES (?1, 1, 'enqueued', ?2, ?3, ?4, ?5)",
+        rusqlite::params!["wp-v25", b"intent", b"base", b"subject", b"pin"],
+    )
+    .unwrap();
+    conn.execute_batch("PRAGMA user_version = 25;").unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v25 store migrates");
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+
+    let rows = store.list_scope_runs("wp-v25").unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].instructions.as_deref(), Some(b"pin".as_slice()), "migration keeps the pin");
+    assert!(rows[0].model_override.is_none(), "migration invents no seat digest");
+
+    store
+        .enqueue_scope_run(&ScopeRunOpen {
+            commission: "wp-v25",
+            ordinal: 2,
+            intent: b"intent",
+            base: b"base",
+            subject: b"subject",
+            instructions: Some(b"pin"),
+            model_override: Some(b"override"),
+            payload: b"payload",
+        })
+        .unwrap();
+    let rows = store.list_scope_runs("wp-v25").unwrap();
+    assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].model_override.as_deref(), Some(b"override".as_slice()));
 }
 
@@ -1956,7 +2039,7 @@ fn a_v21_store_gains_a_nullable_prompt_manifest_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v21 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
     let found = store.lookup_order("n-v21").unwrap().expect("the pre-column row survives");
     assert!(found.prompt_manifest.is_none(), "migration invents no retained manifest");
 }
@@ -2023,7 +2106,7 @@ fn a_v22_store_gains_the_empty_shared_run_tables() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v22 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
     assert!(store.lookup_order("n-v22").unwrap().is_some(), "the pre-projection order row survives");
     for table in ["shared_runs", "shared_run_members", "shared_run_steps", "shared_member_verification_queue"] {
         assert_eq!(
@@ -2101,7 +2184,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -2249,7 +2332,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -2493,7 +2576,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 25);
+        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");
