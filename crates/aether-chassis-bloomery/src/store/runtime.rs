@@ -19,12 +19,12 @@ use super::commission::{
 };
 use super::holder::{self, JournalHolderError};
 use super::kinds::{
-    AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, ClaimSeal,
-    ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult, ListBloomDispatches,
-    ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder, LookupDispatch,
-    LookupDispatchResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig, RecordConfigResult,
-    RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership, ReleaseMembershipResult, Supersede,
-    SupersedeResult,
+    AckOutbox, AckOutboxResult, AppendEvent, AppendEventResult, BloomDispatchLive, BloomDispatchRollup, CancelOrder,
+    CancelOrderResult, ClaimSeal, ClaimSealResult, DrainOutbox, DrainOutboxResult, EnqueueOutbox, EnqueueOutboxResult,
+    ListBloomDispatches, ListBloomDispatchesResult, ListOutstandingOrders, ListOutstandingOrdersResult, LiveOrder,
+    LookupDispatch, LookupDispatchResult, OutboxEntry, PageJournal, PageJournalResult, RecordConfig,
+    RecordConfigResult, RecordDispatchDescription, RecordDispatchDescriptionResult, ReleaseMembership,
+    ReleaseMembershipResult, Supersede, SupersedeResult,
 };
 use aether_actor::runtime;
 // The control-plane transact-mails the wasm control actor drives — `Commit` and
@@ -226,6 +226,25 @@ pub enum RecordOutcome {
     Recorded,
     /// The nonce was already outstanding — nothing was written.
     Duplicate,
+}
+
+/// One intake refusal recorded against its member.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IntakeRefusalRow {
+    /// The bloom the refused order belonged to.
+    pub bloom: Vec<u8>,
+    /// The member the refused order belonged to.
+    pub workpiece: String,
+    /// The nonce the upload named.
+    pub nonce: String,
+    /// The order's stage as wire bytes.
+    pub stage: Vec<u8>,
+    /// The digest the order displayed.
+    pub displayed_digest: Vec<u8>,
+    /// The order's absolute deadline.
+    pub deadline_unix_millis: u64,
+    /// The refusal text.
+    pub refusal: String,
 }
 
 /// Host-owned lifecycle of one durable shared physical verification run.
@@ -1117,6 +1136,21 @@ pub trait StoreBackend: Send + CommissionBackend {
     /// this set so `running` names a live lane and a `BaseVerify` order is
     /// visible without a bloom to hang off.
     fn list_live_orders(&mut self) -> rusqlite::Result<Vec<LiveOrder>>;
+    /// Drop the outstanding order at `nonce` from the board and mark it
+    /// cancelled by the operator. The lane process is left alone to finish
+    /// unobserved; its later upload refuses as a cancelled nonce and never
+    /// touches the reducer. Returns whether an outstanding row was removed.
+    fn cancel_order(&mut self, nonce: &str, reason: &str, operator: &str) -> rusqlite::Result<bool>;
+    /// Whether `nonce` was cancelled by the operator.
+    fn is_order_cancelled(&mut self, nonce: &str) -> rusqlite::Result<bool>;
+    /// Record an intake refusal against its member so the bloom view can name
+    /// the blocker beside the outstanding order it refused. One standing
+    /// refusal per member: a later one replaces it.
+    fn record_intake_refusal(&mut self, refusal: &IntakeRefusalRow) -> rusqlite::Result<()>;
+    /// Clear the intake refusal standing against one member, if any. Called
+    /// once the member's order is consumed — the block is over, whether or not
+    /// a refusal was ever recorded.
+    fn clear_intake_refusal(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()>;
     /// The bloom that names `nonce` in `dispatch_owners`, `outstanding_orders`, or
     /// `metric_dispatch` — `None` when the journal has never heard of it.
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>>;
@@ -1554,7 +1588,15 @@ fn migrate(conn: &mut Connection) -> rusqlite::Result<()> {
 /// under version 25, so a store already stamped 25 skipped it and the first
 /// `list_scope_runs` on boot failed with "no such column". A pre-column row
 /// ran the compiled seat; nothing is backfilled.
-pub(super) const SCHEMA_VERSION: i64 = 26;
+///
+/// `27` is the stopped-order pair (issue 5969): `operator_cancelled_orders`,
+/// the tombstone that makes a cancelled lane's later upload refuse instead of
+/// admitting, and `intake_refusals`, the one standing broker refusal per member
+/// that `GET /view` left-joins onto the member's live order. Created empty and
+/// nothing is backfilled — a nonce nobody cancelled is not cancelled, and a
+/// refusal that only ever reached the host log is not a block anyone can still
+/// read off the board.
+pub(super) const SCHEMA_VERSION: i64 = 27;
 
 /// Historical TEXT stamp written beside v2 decisions rows before the digest
 /// column existed. Kept only so migration 17 can map it onto the v2 digest.
@@ -1761,6 +1803,12 @@ fn migrate_schema(migration: &rusqlite::Transaction<'_>) -> rusqlite::Result<()>
     // Versions 23 and 24 (ADR-0218): the durable shared-run projection. Created
     // empty; the journal holds the coordination facts a physical run is about.
     migration.execute_batch(SHARED_RUN_TABLES)?;
+
+    // Version 27 (issue 5969): the stopped-order pair. Created empty; a store
+    // written before the cancel verb holds no cancellation to invent, and a
+    // refusal that only ever reached the host log cannot be recovered onto the
+    // member it blocked.
+    migration.execute_batch(STOPPED_ORDER_TABLES)?;
 
     migrate_proof_fact_identity(migration)?;
     migration.pragma_update(None, "user_version", SCHEMA_VERSION)?;
@@ -2212,6 +2260,39 @@ CREATE TABLE IF NOT EXISTS outbox_results (
     event        BLOB NOT NULL,
     event_schema BLOB NOT NULL,
     PRIMARY KEY (sequence, ordinal)
+);
+";
+
+/// The two ways an order stops short of admitting: the operator cancelled it,
+/// or the broker refused its upload.
+///
+/// `operator_cancelled_orders` is a tombstone, not a queue — the row outlives
+/// the outstanding order it dropped, because what it exists to do is refuse the
+/// lane's upload when that finally arrives. `intake_refusals` holds at most one
+/// standing refusal per member, keyed that way because the operator's question
+/// is "what is blocking this member now", and a refusal the next upload cleared
+/// is not an answer to it.
+///
+/// Defined here rather than in [`MIGRATIONS`] for the reason
+/// [`SHARED_RUN_TABLES`] is: one definition, executed by the versioned step, so
+/// a fresh store and a migrated one cannot be given different shapes.
+const STOPPED_ORDER_TABLES: &str = "\
+CREATE TABLE IF NOT EXISTS operator_cancelled_orders (
+    nonce TEXT PRIMARY KEY,
+    reason TEXT NOT NULL,
+    operator TEXT NOT NULL,
+    cancelled_unix_millis INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS intake_refusals (
+    bloom BLOB NOT NULL,
+    workpiece TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    stage BLOB NOT NULL,
+    displayed_digest BLOB NOT NULL,
+    deadline_unix_millis INTEGER NOT NULL,
+    refusal TEXT NOT NULL,
+    recorded_unix_millis INTEGER NOT NULL,
+    PRIMARY KEY (bloom, workpiece)
 );
 ";
 
@@ -4376,14 +4457,80 @@ impl StoreBackend for SqliteStore {
     }
 
     fn list_live_orders(&mut self) -> rusqlite::Result<Vec<LiveOrder>> {
+        // Left-joined rather than read separately: the refusal standing against
+        // a member is an attribute of the order it refused, and `/view` renders
+        // the two together.
         let mut stmt = self.conn.prepare(
-            "SELECT nonce, bloom, workpiece, stage FROM outstanding_orders \
-             WHERE lifecycle = ?1 ORDER BY nonce",
+            "SELECT o.nonce, o.bloom, o.workpiece, o.stage, o.displayed_digest, o.deadline_unix_millis, \
+             COALESCE(r.refusal, '') FROM outstanding_orders AS o \
+             LEFT JOIN intake_refusals AS r ON r.bloom = o.bloom AND r.workpiece = o.workpiece \
+             WHERE o.lifecycle = ?1 ORDER BY o.nonce",
         )?;
         let rows = stmt.query_map(rusqlite::params![OrderLifecycle::Submitted.as_str()], |row| {
-            Ok(LiveOrder { nonce: row.get(0)?, bloom: row.get(1)?, workpiece: row.get(2)?, stage: row.get(3)? })
+            Ok(LiveOrder {
+                nonce: row.get(0)?,
+                bloom: row.get(1)?,
+                workpiece: row.get(2)?,
+                stage: row.get(3)?,
+                displayed: row.get(4)?,
+                deadline_unix_millis: row.get::<_, i64>(5)?.unsigned_abs(),
+                refusal: row.get(6)?,
+            })
         })?;
         rows.collect()
+    }
+
+    fn cancel_order(&mut self, nonce: &str, reason: &str, operator: &str) -> rusqlite::Result<bool> {
+        let removed =
+            self.conn.execute("DELETE FROM outstanding_orders WHERE nonce = ?1", rusqlite::params![nonce])? > 0;
+
+        // Recorded even for a nonce the board never held: the tombstone is what
+        // makes the lane's later upload refuse, and a cancel racing the upload
+        // that consumed the order must still stop the *next* one.
+        self.conn.execute(
+            "INSERT OR IGNORE INTO operator_cancelled_orders (nonce, reason, operator, cancelled_unix_millis) \
+             VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![nonce, reason, operator, recorded_column(now_unix_millis())],
+        )?;
+        Ok(removed)
+    }
+
+    fn is_order_cancelled(&mut self, nonce: &str) -> rusqlite::Result<bool> {
+        self.conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM operator_cancelled_orders WHERE nonce = ?1)",
+            rusqlite::params![nonce],
+            |row| row.get::<_, i64>(0).map(|exists| exists != 0),
+        )
+    }
+
+    fn record_intake_refusal(&mut self, refusal: &IntakeRefusalRow) -> rusqlite::Result<()> {
+        // One standing refusal per member, replaced rather than appended: the
+        // operator asks what is blocking this member now, and a refusal the
+        // next upload cleared is not an answer to that.
+        self.conn.execute(
+            "INSERT OR REPLACE INTO intake_refusals \
+             (bloom, workpiece, nonce, stage, displayed_digest, deadline_unix_millis, refusal, recorded_unix_millis) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            rusqlite::params![
+                refusal.bloom,
+                refusal.workpiece,
+                refusal.nonce,
+                refusal.stage,
+                refusal.displayed_digest,
+                recorded_column(refusal.deadline_unix_millis),
+                refusal.refusal,
+                recorded_column(now_unix_millis())
+            ],
+        )?;
+        Ok(())
+    }
+
+    fn clear_intake_refusal(&mut self, bloom: &[u8], workpiece: &str) -> rusqlite::Result<()> {
+        self.conn.execute(
+            "DELETE FROM intake_refusals WHERE bloom = ?1 AND workpiece = ?2",
+            rusqlite::params![bloom, workpiece],
+        )?;
+        Ok(())
     }
 
     fn lookup_named_dispatch(&mut self, nonce: &str) -> rusqlite::Result<Option<Vec<u8>>> {
@@ -4908,6 +5055,15 @@ impl NativeActor for StoreCapability {
         match state.backend.list_live_orders() {
             Ok(orders) => ListOutstandingOrdersResult::Ok { orders },
             Err(error) => ListOutstandingOrdersResult::Err { error: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_cancel_order(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: CancelOrder) -> CancelOrderResult {
+        let CancelOrder { nonce, reason, operator } = mail;
+        match state.backend.cancel_order(&nonce, &reason, &operator) {
+            Ok(removed) => CancelOrderResult::Ok { nonce, removed },
+            Err(error) => CancelOrderResult::Err { error: error.to_string() },
         }
     }
 

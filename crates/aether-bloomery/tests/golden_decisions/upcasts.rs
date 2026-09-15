@@ -10,8 +10,12 @@
 //! decisions and event rows from before aggregate pre-check vocabulary existed,
 //! and the `pre-coordination-*` pair the last rows from before shared
 //! verification and eager integration.
-//! There is no regen command for any of them: the bytes are history. Each
-//! pinned upcast decodes as the current shape
+//! The `rescue-admin-*` pair is the odd one: not an earlier shape but a
+//! *sibling* of the red-verify one, written by the coordinator that ran off
+//! `feat/bloomery-admin-mode` on 2026-09-15 while the trunk integrated the same
+//! appends in the other order.
+//! There is no regen command for any of them: the bytes are history. Most
+//! pinned upcasts decode as the current shape
 //! because everything since is a tail-appended enum variant, so when one of
 //! these stops decoding, a change has moved wire positions those rows still
 //! occupy — the remedy is a real frozen decode shape for the pinned digest,
@@ -19,9 +23,10 @@
 
 use aether_bloomery::persisted::{
     DECISIONS_PRE_COALESCE_DIGEST, DECISIONS_PRE_COORDINATION_DIGEST, DECISIONS_PRE_PRECHECK_DIGEST,
-    DECISIONS_PRE_PROPOSE_DIGEST, DECISIONS_PRE_STUDY_DIGEST, EVENT_PRE_COALESCE_DIGEST, EVENT_PRE_COORDINATION_DIGEST,
-    EVENT_PRE_PRECHECK_DIGEST, EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_STUDY_DIGEST, decode_recorded_decisions,
-    decode_recorded_event,
+    DECISIONS_PRE_PROPOSE_DIGEST, DECISIONS_PRE_RED_VERIFY_DIGEST, DECISIONS_PRE_STUDY_DIGEST,
+    DECISIONS_RESCUE_ADMIN_DIGEST, EVENT_PRE_COALESCE_DIGEST, EVENT_PRE_COORDINATION_DIGEST, EVENT_PRE_PRECHECK_DIGEST,
+    EVENT_PRE_PROPOSE_DIGEST, EVENT_PRE_RED_VERIFY_DIGEST, EVENT_PRE_STUDY_DIGEST, EVENT_RESCUE_ADMIN_DIGEST,
+    decode_recorded_decisions, decode_recorded_event,
 };
 use aether_bloomery::testing::{containment_refused_event, surface_overlap_event};
 
@@ -34,6 +39,10 @@ const PRE_COORDINATION_DECISIONS: &[u8] = include_bytes!("fixtures/pre-coordinat
 const PRE_COORDINATION_EVENT: &[u8] = include_bytes!("fixtures/pre-coordination-event.bin");
 const PRE_COALESCE_DECISIONS: &[u8] = include_bytes!("fixtures/pre-coalesce-decisions.bin");
 const PRE_COALESCE_EVENT: &[u8] = include_bytes!("fixtures/pre-coalesce-event.bin");
+const PRE_RED_VERIFY_DECISIONS: &[u8] = include_bytes!("fixtures/pre-red-verify-decisions.bin");
+const PRE_RED_VERIFY_EVENT: &[u8] = include_bytes!("fixtures/pre-red-verify-event.bin");
+const RESCUE_ADMIN_DECISIONS: &[u8] = include_bytes!("fixtures/rescue-admin-decisions.bin");
+const RESCUE_ADMIN_EVENT: &[u8] = include_bytes!("fixtures/rescue-admin-event.bin");
 
 #[test]
 fn a_pre_propose_decisions_row_decodes_through_its_pinned_upcast() {
@@ -113,5 +122,41 @@ fn a_pre_coalesce_decisions_row_decodes_through_its_pinned_upcast() {
 fn a_pre_coalesce_event_row_decodes_through_its_pinned_upcast() {
     let decoded = decode_recorded_event(PRE_COALESCE_EVENT, Some(EVENT_PRE_COALESCE_DIGEST.as_bytes()))
         .expect("a row stamped 9e55e67b… decodes through the pre-coalesce upcast");
+    assert_eq!(decoded, containment_refused_event());
+}
+
+#[test]
+fn a_pre_red_verify_decisions_row_decodes_through_its_pinned_upcast() {
+    let decoded = decode_recorded_decisions(PRE_RED_VERIFY_DECISIONS, Some(DECISIONS_PRE_RED_VERIFY_DIGEST.as_bytes()))
+        .expect("a row stamped b67ebb69… decodes through the pre-red-verify upcast");
+    assert!(!decoded.effects.is_empty(), "the pre-red-verify representative row retains its complete vocabulary");
+}
+
+#[test]
+fn a_pre_red_verify_event_row_decodes_through_its_pinned_upcast() {
+    let decoded = decode_recorded_event(PRE_RED_VERIFY_EVENT, Some(EVENT_PRE_RED_VERIFY_DIGEST.as_bytes()))
+        .expect("a row stamped 37e4b124… decodes through the pre-red-verify upcast");
+    assert_eq!(decoded, containment_refused_event());
+}
+
+#[test]
+fn a_rescue_admin_decisions_row_decodes_through_its_pinned_upcast() {
+    // Tripwire, and the one row here whose era is a *sibling* of the shape
+    // beside it rather than an ancestor: the rescue coordinator wrote ADR-0219's
+    // three admin effects one discriminant below where the integration put them.
+    // These are the bytes it actually wrote for the complete representative row
+    // — `RecordAdminMode`, seven `RecordAdminAct`s, and `CancelLane` past the
+    // boundary, a `RecordCoordinationState` holding the nine-field pre-amendment
+    // policy below it — so an effect inserted on either side of the boundary
+    // fails here rather than at the live unit's boot.
+    let decoded = decode_recorded_decisions(RESCUE_ADMIN_DECISIONS, Some(DECISIONS_RESCUE_ADMIN_DIGEST.as_bytes()))
+        .expect("a row stamped 45eddd56… decodes through the rescue upcast");
+    assert!(!decoded.effects.is_empty(), "the rescue representative row retains its complete vocabulary");
+}
+
+#[test]
+fn a_rescue_admin_event_row_decodes_through_its_pinned_upcast() {
+    let decoded = decode_recorded_event(RESCUE_ADMIN_EVENT, Some(EVENT_RESCUE_ADMIN_DIGEST.as_bytes()))
+        .expect("a row stamped 7765f5ee… decodes through the rescue upcast");
     assert_eq!(decoded, containment_refused_event());
 }

@@ -116,6 +116,10 @@ pub struct RunSpec<'a> {
     /// [`aether_bloomery::EXECUTION_DEADLINE_ENV`] rather than as a flag. `None`
     /// on a mechanical lane and on a store-less backend.
     pub deadline_unix_millis: Option<u64>,
+    /// Gates the umbrella narrows its fan-out to (`--gate`, ADR-0218
+    /// amendment) — one entry per gate the dispatch asked for. Empty is the
+    /// whole fan-out, which every lane but an attribution probe runs.
+    pub selected_gates: &'a [String],
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

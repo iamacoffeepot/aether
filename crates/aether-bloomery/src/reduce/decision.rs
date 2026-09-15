@@ -3,6 +3,7 @@
 //! host drains and turns into I/O) — the reducer never does I/O itself.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
@@ -13,12 +14,13 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::port::ProjectedReceipt;
 use crate::values::{
-    Adjudication, AgentProfile, BaseReceipt, CandidatePreparationPlan, CandidateRef, CompatibilityPreviewPlan,
-    CompositionFinding, ConfigRegistry, ContextualAttemptDispatch, CoordinationState, Evidence, IntegrationAppendPlan,
-    MemberCandidate, MemberDependency, MemberVerifyRequest, OperatorHold, OperatorProposal, OperatorRepair,
-    OrphanClaimRelease, OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PipelineManifest, PrecheckNode,
-    PrecheckPlan, PrecheckState, ResolutionClaim, ResolvedBloom, SharedRunDispatch, SharedRunPlan, SpendQuiesce,
-    StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    Adjudication, AdminAct, AdminNote, AgentProfile, BaseReceipt, CandidatePreparationPlan, CandidateRef,
+    CompatibilityPreviewPlan, CompositionFinding, ConfigRegistry, ContextualAttemptDispatch, CoordinationState,
+    Evidence, IntegrationAppendPlan, MemberCandidate, MemberDependency, MemberVerifyRequest, OperatorHold,
+    OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion, PartialHeadRepairDispatch,
+    PipelineManifest, PrecheckNode, PrecheckPlan, PrecheckState, RedVerify, ResolutionClaim, ResolvedBloom,
+    SharedRunDispatch, SharedRunPlan, SpendQuiesce, StageCatalog, Transformation, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal,
 };
 
 /// The ordered effects a decision applies to the projection (and, in
@@ -990,4 +992,68 @@ pub enum Decision {
     QueueConstructionAdmission { dispatch: ContextualAttemptDispatch },
     /// Repair one exact red eager head under composition ownership.
     DispatchPartialHeadRepair { dispatch: PartialHeadRepairDispatch },
+    /// Record what this bloom does with a member whose `Verify` did not go
+    /// green (ADR-0218 §Amendment: low tolerance).
+    ///
+    /// Decided at seal from the sealed [`CoordinationPolicy`]'s `red_verify`,
+    /// or [`RedVerify::Eject`] when the bloom sealed no policy. Recorded rather
+    /// than re-resolved from the configuration registry at fold time, for the
+    /// reason [`Self::RecordStageCatalog`] is recorded (#4944): a later binary
+    /// with a different default would otherwise rewrite the disposition of a
+    /// bloom that is already walking under the old one.
+    ///
+    /// It is its own row rather than a field on
+    /// [`Self::RecordCoordinationState`] because that state exists only for a
+    /// bloom that opted into shared verification, and the disposition governs
+    /// every bloom. Appended past every prior effect so their discriminants are
+    /// unchanged.
+    RecordRedVerify { bloom: BloomId, red_verify: RedVerify },
+    /// Open or close a bloom's admin session (ADR-0219).
+    ///
+    /// The flag alone. The brake that actually withholds dispatch is the
+    /// ordinary [`Decision::RecordOperatorHold`] emitted beside it, so admin
+    /// mode inherits the one dispatch choke rather than adding a second — and
+    /// what this decision adds is the part a hold cannot express: that the
+    /// operator is *working on* the bloom, so a fault costs them nothing and
+    /// the admin doors are open. Snapshot-only. Appended so the prior
+    /// decisions' wire discriminants are unchanged.
+    RecordAdminMode {
+        /// The bloom.
+        bloom: BloomId,
+        /// The open session, or `None` to close it.
+        admin: Option<AdminNote>,
+    },
+    /// Append one act to a bloom's admin log (ADR-0219).
+    ///
+    /// One decision for all seven verbs, because they differ in what they moved
+    /// and not at all in how they are recorded: the movement rides the ordinary
+    /// decisions beside this row — an [`Decision::AdvanceStage`], an
+    /// [`Decision::RecordAdjudication`], a [`Decision::CancelLane`] — and this
+    /// is the row that says a person decided it and why. Snapshot-only.
+    /// Appended so the prior decisions' wire discriminants are unchanged.
+    RecordAdminAct {
+        /// The bloom.
+        bloom: BloomId,
+        /// What was done, and on whose word.
+        act: AdminAct,
+    },
+    /// Kill one named dispatch without charging its workpiece (ADR-0219) — the
+    /// transactional-outbox intent the executor reactor drains under
+    /// [`Topic::CancelLane`](crate::Topic::CancelLane).
+    ///
+    /// The nonce-scoped sibling of [`Decision::CancelDispatch`], which cancels
+    /// every order a *withdrawn* member holds. An admin cancellation names one
+    /// lane because the operator is stopping a specific lap, not retiring the
+    /// workpiece — and like the withdrawal path it admits no fact, so no budget
+    /// moves. Snapshot-inert. Appended so the prior decisions' wire
+    /// discriminants are unchanged.
+    CancelLane {
+        /// The bloom the lane was dispatched under.
+        bloom: BloomId,
+        /// The workpiece whose lane it is — what the executor logs and what the
+        /// drain checks the resolved order against.
+        workpiece: WorkpieceId,
+        /// The host dispatch nonce to cancel and consume.
+        nonce: String,
+    },
 }

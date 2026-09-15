@@ -166,6 +166,24 @@ impl LaneStep {
     }
 }
 
+/// What a failing mechanical verify run reports, when a scenario needs it to
+/// name a particular gate and diagnostic.
+///
+/// Scripted rather than canned, because attribution now reads the findings for
+/// the paths they name (ADR-0218, amended 2026-09-15): which member a red gate
+/// belongs to is decided by *which file* the diagnostic points at, so a
+/// scenario about that decision has to be able to say. The canned failure —
+/// `verify.test` over a file no member of any scenario owns — stays the
+/// default, so every scenario that is not about this keeps the shape it had.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VerifyReport {
+    /// The gate identity the run names as failed.
+    pub gate: String,
+    /// The findings prose it reports, sectioned by gate the way the verify
+    /// transform assembles a real one.
+    pub findings: String,
+}
+
 /// The whole script: ordered steps, plus the mode every run past its command's
 /// last step takes.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -177,6 +195,10 @@ pub struct LaneScript {
     /// unbounded number of times, and the script should not have to predict the
     /// ceiling it is trying to observe.
     pub default: LaneMode,
+    /// What every failing mechanical verify run under this script reports.
+    /// `None` is the canned `verify.test` failure.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub verify_report: Option<VerifyReport>,
 }
 
 impl LaneScript {
@@ -204,6 +226,14 @@ impl LaneScript {
     #[must_use]
     pub fn then_for(mut self, workpiece: impl Into<String>, stage: StageId, mode: LaneMode) -> Self {
         self.steps.push(LaneStep::for_axis(workpiece, stage, mode));
+        self
+    }
+
+    /// Report `gate` with `findings` on every failing mechanical verify run,
+    /// instead of the canned `verify.test` failure.
+    #[must_use]
+    pub fn reporting(mut self, gate: impl Into<String>, findings: impl Into<String>) -> Self {
+        self.verify_report = Some(VerifyReport { gate: gate.into(), findings: findings.into() });
         self
     }
 

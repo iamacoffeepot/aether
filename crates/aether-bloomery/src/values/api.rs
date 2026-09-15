@@ -518,6 +518,33 @@ pub struct ReverifyBaseRequest {
     pub idempotency_key: Option<String>,
 }
 
+/// `POST /orders/{nonce}/cancel` body — drop one outstanding order from the
+/// board without faulting its lane.
+///
+/// The lane process is left alone to finish unobserved; its later upload
+/// refuses as cancelled and never touches the reducer. No host fault is
+/// recorded and no session is reset.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderRequest {
+    /// Why the order is being dropped, in the operator's own words. Required
+    /// and non-blank; a blank one is `422`.
+    pub reason: String,
+    /// Who is deciding. Recorded as the decider; required and non-blank.
+    pub operator: String,
+}
+
+/// `POST /orders/{nonce}/cancel` reply — whether an outstanding row was
+/// dropped. `cancelled: false` names a nonce the board never held (or one an
+/// earlier cancel already dropped); the cancellation is still recorded so a
+/// later upload for it stays ignored.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CancelOrderView {
+    /// The nonce as the caller spelled it.
+    pub nonce: String,
+    /// Whether an outstanding order was removed.
+    pub cancelled: bool,
+}
+
 /// The reply to a write route: the reducer outcome the admitted event resolved
 /// to (decoded from the control core's wire bytes).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -997,6 +1024,148 @@ pub struct CoordinatorLogEntry {
     pub message: String,
     /// journald `__CURSOR`, used as the page cursor.
     pub cursor: String,
+}
+
+/// `POST /blooms/{id}/admin/enter` and `.../admin/exit` body — the two session
+/// doors (ADR-0219).
+///
+/// One shape for both edges, the way [`HoldRequest`] serves the brake's two:
+/// opening a session and closing one say exactly the same two things and
+/// nothing else. A session carries no scope, no member selector, and no expiry
+/// — it is a window a person opens and closes, and a window that could express
+/// more would need a policy to resolve it against.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminSessionRequest {
+    /// Why the bloom is being taken out of the machine's hands, or handed back.
+    /// Required and non-blank; an admin act's whole product is its audit trail.
+    pub reason: String,
+    /// Who is acting. Recorded as the decider; required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content under this route's name, so a resend is a duplicate rather than
+    /// a second session edge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/admin/cancel-lane` body — stop one running dispatch
+/// without charging anyone for it (ADR-0219).
+///
+/// Both the workpiece and the nonce, because the executor checks them together
+/// before it kills anything: a nonce read off a stale board can name an order
+/// that has since been consumed and re-minted for a sibling, and a cancel that
+/// trusted the nonce alone would stop that sibling's lane instead.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminCancelLaneRequest {
+    /// The workpiece whose lane is being stopped.
+    pub workpiece: WorkpieceId,
+    /// The host dispatch nonce, as `GET /view` reports it under `orders`.
+    pub nonce: String,
+    /// Why. Required and non-blank.
+    pub reason: String,
+    /// Who is deciding. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/admin/set-candidate` body — the repair door without its
+/// wedged precondition (ADR-0219).
+///
+/// Name exactly one source, the same one-of-three [`RepairRequest`] takes and
+/// resolved through the same chassis path: `from_commit` / `from_worktree` derive
+/// the pair, push the candidate ref, and record both correspondence rows.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminSetCandidateRequest {
+    /// The member, or the reserved composition id.
+    pub workpiece: WorkpieceId,
+    /// The candidate the operator already pushed. Required unless `from_commit`
+    /// or `from_worktree` is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub candidate: Option<CandidateRef>,
+    /// A commit reachable from the coordinator's repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_commit: Option<String>,
+    /// A worktree whose `HEAD` the coordinator's repository can already see.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_worktree: Option<String>,
+    /// Why. Required and non-blank.
+    pub reason: String,
+    /// Who is deciding. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/admin/rerun` body — run one stage again on the candidate
+/// the workpiece already holds (ADR-0219).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminRerunRequest {
+    /// The member, or the reserved composition id.
+    pub workpiece: WorkpieceId,
+    /// The stage to run. Refused unless the record can honestly run the
+    /// workpiece from it.
+    pub stage: StageId,
+    /// Dispatch at once rather than when the session closes.
+    #[serde(default)]
+    pub now: bool,
+    /// Why. Required and non-blank.
+    pub reason: String,
+    /// Who is deciding. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/admin/waive` body — void a red verdict's findings so the
+/// gate counts as passed for landing (ADR-0219).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminWaiveRequest {
+    /// The gate whose verdict is being voided.
+    pub gate: StageId,
+    /// The verdict artifact digests being voided. Non-empty; every one must be
+    /// a finding this bloom actually raised.
+    pub findings: Vec<Digest>,
+    /// The operator's acknowledgement that waiving a mechanical gate lands code
+    /// no gate proved. Required for a verify waiver, ignored for a review one.
+    #[serde(default)]
+    pub acknowledged_unverified: bool,
+    /// Why. Required and non-blank.
+    pub reason: String,
+    /// Who is deciding. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
+}
+
+/// `POST /blooms/{id}/admin/drop-lap` body — discard a completed lap's captured
+/// candidate (ADR-0219).
+///
+/// Carries the nonce the lap ran under for the record rather than for the
+/// revert: what the cursor goes back to is read off the bloom's own one-deep
+/// displaced-candidate table, so a mistyped nonce cannot choose a tree.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AdminDropLapRequest {
+    /// The workpiece whose candidate is reverting.
+    pub workpiece: WorkpieceId,
+    /// The host dispatch nonce of the lap being dropped.
+    pub nonce: String,
+    /// Why. Required and non-blank.
+    pub reason: String,
+    /// Who is deciding. Required and non-blank.
+    pub operator: String,
+    /// Override the admit idempotency key; defaults to the request's own
+    /// content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub idempotency_key: Option<String>,
 }
 
 #[cfg(test)]

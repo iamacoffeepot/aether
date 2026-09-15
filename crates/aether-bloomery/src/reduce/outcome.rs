@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use super::{
-    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
+    AdjudicationError, AdminError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateReviewFault,
     AggregateVerifyError, AttemptCompletedError, BaseReverifyError, CoordinationError, Decision, FoldConflictError,
     GrantAttemptsError, HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError,
     MemberExecutorFaultError, NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError,
@@ -845,6 +845,41 @@ pub enum Outcome {
     CoordinationAdvanced { bloom: BloomId, subject: Digest },
     /// A shared-verification or eager-integration transition was refused.
     CoordinationRejected(CoordinationError),
+    /// An admin session opened on a bloom (ADR-0219). Appended so every prior
+    /// outcome keeps its wire discriminant, as is each admin outcome after it.
+    AdminEntered {
+        /// The bloom now in the operator's hands.
+        bloom: BloomId,
+    },
+    /// An admin session closed (ADR-0219).
+    AdminExited {
+        /// The bloom handed back.
+        bloom: BloomId,
+        /// The workpieces whose withheld dispatch went out on the way.
+        dispatched: Vec<WorkpieceId>,
+        /// Whether the close proposed a landing the gates could not have
+        /// completed on their own — a waived gate leaves no verdict to arrive.
+        landing: bool,
+    },
+    /// One act inside an admin session was journaled (ADR-0219).
+    AdminActed {
+        /// The bloom acted on.
+        bloom: BloomId,
+        /// The act's content address — the handle the operator reads back.
+        act: Digest,
+    },
+    /// A fault arrived while the bloom was in admin mode (ADR-0219): its
+    /// evidence is on the record and no budget moved.
+    AdminFaultAbsorbed {
+        /// The bloom being worked on.
+        bloom: BloomId,
+        /// The member whose lane faulted, or `None` for the bloom-level critic.
+        workpiece: Option<WorkpieceId>,
+        /// The fault's evidence artifact.
+        evidence: Digest,
+    },
+    /// An admin fact was refused (ADR-0219).
+    AdminRejected(AdminError),
 }
 
 impl Outcome {
@@ -868,6 +903,7 @@ impl Outcome {
                 | Self::SuppressionRejected(_)
                 | Self::BaseReverifyRejected(_)
                 | Self::ProposalRejected(_)
+                | Self::AdminRejected(_)
         )
     }
 }

@@ -8,14 +8,16 @@ use serde_json::Value;
 
 use super::Endpoint;
 use super::dto::{
-    ApprovalStoredView, BloomView, CancelCommissionRequest, CommissionCancelledView, CommissionReopenedView,
-    CommissionShowView, ConfigRequest, ConfigValueView, ConfigView, DraftPatch, DraftView, JournalEntry, JournalView,
-    OutcomeView, ProposeRequest, ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest,
-    RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest,
+    AdminWaiveRequest, ApprovalStoredView, BloomView, CancelCommissionRequest, CancelOrderRequest, CancelOrderView,
+    CommissionCancelledView, CommissionReopenedView, CommissionShowView, ConfigRequest, ConfigValueView, ConfigView,
+    DraftPatch, DraftView, JournalEntry, JournalView, LiveOrderView, OutcomeView, ProposeRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
     SuppressionAnswerRequest, WithdrawRequest, WriteRevisionRequest,
 };
-use super::http;
 use super::plan::spec_id;
+use super::{hex, http};
 
 /// Thin client over one coordinator.
 pub struct Client<'a> {
@@ -100,6 +102,55 @@ impl<'a> Client<'a> {
     /// ordinary gates judge it (#4957).
     pub fn repair(&self, bloom_id: &str, workpiece: &str, request: &RepairRequest) -> Result<OutcomeView> {
         self.send("POST", &format!("/blooms/{bloom_id}/members/{workpiece}/repair"), request)
+    }
+
+    /// The live projection plus the outstanding orders `GET /view` renders
+    /// beside it (ADR-0219).
+    ///
+    /// Two deserializations of one body rather than one flattened type: the
+    /// orders are not a [`ViewDocument`] field — that document is wire-encoded
+    /// into the outbox, where a trailing optional would break queued payloads —
+    /// so the route flattens them in beside it. Reading the body once as
+    /// [`Value`] and shaping it twice keeps this client honest about that
+    /// without teaching the projection a field the coordinator does not have.
+    pub fn live_view(&self) -> Result<(ViewDocument, Vec<LiveOrderView>)> {
+        split_live_view(self.get("/view")?)
+    }
+
+    /// Open or close one bloom's admin session (ADR-0219). `edge` is `enter` or
+    /// `exit`, which are the same body at two doors.
+    pub fn admin_session(&self, bloom_id: &str, edge: &str, request: &AdminSessionRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/{edge}"), request)
+    }
+
+    /// Cancel one running dispatch from inside admin mode (ADR-0219).
+    pub fn admin_cancel_lane(&self, bloom_id: &str, request: &AdminCancelLaneRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/cancel-lane"), request)
+    }
+
+    /// Hand a workpiece a candidate from inside admin mode (ADR-0219).
+    pub fn admin_set_candidate(&self, bloom_id: &str, request: &AdminSetCandidateRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/set-candidate"), request)
+    }
+
+    /// Run one stage again from inside admin mode (ADR-0219).
+    pub fn admin_rerun(&self, bloom_id: &str, request: &AdminRerunRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/rerun"), request)
+    }
+
+    /// Void a red verdict's findings from inside admin mode (ADR-0219).
+    pub fn admin_waive(&self, bloom_id: &str, request: &AdminWaiveRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/waive"), request)
+    }
+
+    /// Discard a completed lap's candidate from inside admin mode (ADR-0219).
+    pub fn admin_drop_lap(&self, bloom_id: &str, request: &AdminDropLapRequest) -> Result<OutcomeView> {
+        self.send("POST", &format!("/blooms/{bloom_id}/admin/drop-lap"), request)
+    }
+
+    /// Drop one outstanding order from the board without faulting its lane.
+    pub fn cancel_order(&self, nonce: &str, request: &CancelOrderRequest) -> Result<CancelOrderView> {
+        self.send("POST", &format!("/orders/{nonce}/cancel"), request)
     }
 
     /// Propose a signed operator change onto the day's branch (ADR-0205).
@@ -219,6 +270,32 @@ fn spec_in_fact(fact: &Fact) -> Option<BloomSpec> {
     }
 }
 
+/// Split one `GET /view` body into the projection and the orders flattened
+/// beside it.
+///
+/// Both halves decode through [`hex`] — the REST edge's own body codec — and
+/// not through `serde_json` directly. The coordinator renders every digest as
+/// 64 hex characters while [`Digest`](aether_bloomery::Digest)'s own
+/// `Deserialize` expects the canonical 32-byte array, so the raw codec refuses
+/// a live body at the first digest it reaches. That is the codec every other
+/// verb here already reaches the coordinator through, by way of
+/// [`http::json`]; this is the one reader that holds the parsed [`Value`]
+/// first, which is exactly the entry point `hex::from_value` exists for.
+///
+/// The orders are taken out of the body before the document decodes, so the
+/// document is not cloned to read them. What it leaves behind is a null at a
+/// key `ViewDocument` does not declare, which it ignores the same way it
+/// ignores the route's other flattened siblings.
+fn split_live_view(mut body: Value) -> Result<(ViewDocument, Vec<LiveOrderView>)> {
+    let orders = body
+        .get_mut("orders")
+        .map(Value::take)
+        .map_or_else(|| Ok(Vec::new()), hex::from_value)
+        .context("decode the live view's outstanding orders")?;
+
+    Ok((hex::from_value(body).context("decode the live view document")?, orders))
+}
+
 /// The bloom in `view` whose id is `bloom_id`.
 pub fn bloom_in<'a>(view: &'a ViewDocument, bloom_id: &str) -> Result<&'a BloomView> {
     view.blooms
@@ -238,11 +315,64 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use aether_bloomery::HTTP_READ_TIMEOUT;
+    use aether_bloomery::{HTTP_READ_TIMEOUT, StageId};
     use serde_json::{Value, json};
 
-    use super::Client;
+    use super::{Client, split_live_view};
     use crate::bloom::Endpoint;
+
+    #[test]
+    fn the_live_view_decodes_the_coordinators_hex_digests() {
+        // The live defect (ADR-0219, 2026-09-15): `admin status` refused every
+        // real `/view` with `invalid type: string "0140bd…", expected an array
+        // of length 32`. The coordinator renders each digest as 64 hex
+        // characters, while `Digest`'s own `Deserialize` expects the canonical
+        // 32-byte array — so a body decoded through `serde_json` rather than
+        // the REST edge's codec dies at the first digest it reaches, which is
+        // the document's own `mainline`, before any bloom is even looked at.
+        let mainline = "01".repeat(32);
+        let bloom = "ab".repeat(32);
+        let body = json!({
+            "mainline": mainline,
+            "observed": mainline,
+            "spend_quiesce": null,
+            "blooms": [],
+            "base_alert": null,
+            "orders": [{
+                "nonce": "dispatch-7265",
+                "bloom": bloom,
+                "workpiece": "aether.bloomery.composition",
+                "stage": "Refine",
+            }],
+        });
+
+        let (document, orders) = split_live_view(body).expect("the live hex spelling decodes");
+
+        assert_eq!(document.mainline.to_hex(), mainline);
+        assert_eq!(orders.len(), 1);
+        assert_eq!(orders[0].bloom.to_hex(), bloom, "an order's digest takes the same spelling");
+        assert_eq!(orders[0].stage, StageId::Refine, "and its stage arrives as the name the board prints");
+    }
+
+    #[test]
+    fn an_idle_view_omits_orders_and_still_decodes() {
+        // The route drops `orders` entirely when nothing is running
+        // (`skip_serializing_if = "Vec::is_empty"`), so a reader that required
+        // the key would refuse every quiet coordinator — the state an operator
+        // is most likely to be reading `admin status` in.
+        let zero = "00".repeat(32);
+        let body = json!({
+            "mainline": zero,
+            "observed": zero,
+            "spend_quiesce": null,
+            "blooms": [],
+            "base_alert": null,
+        });
+
+        let (_, orders) = split_live_view(body).expect("an idle view decodes");
+
+        assert!(orders.is_empty());
+    }
 
     #[derive(Clone, Debug)]
     struct Recorded {

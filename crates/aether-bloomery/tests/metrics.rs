@@ -15,9 +15,9 @@ use aether_bloomery::{
     AgentSelection, BloomId, BloomStatus, CandidateRef, ConfigKind, ConstructionAdmission, CoordinationPolicy,
     Decision, Decisions, Event, Evidence, EvidenceKind, Fact, Harness, MemberDependency, MemberVerifyLatency,
     MemberVerifyOutcome, MetricBloom, MetricDispatch, MetricsLedger, ModelOverride, Nonce, Outcome, ReasoningEffort,
-    ResolvedConfigs, SPAN_OUTCOME_RETIRED, SPAN_SUBSTAGE_PREPARE, SealError, SharedRunCompletion, SharedRunMode,
-    SharedRunPlan, SharedRunPreparation, Snapshot, SpendWindow, StageId, StageOverride, StudyCost, StudyRecord,
-    SupersedeError, TimelineGateTiming, TimelineTimings, VerificationMode, VerifyFailureSet, Withdrawal,
+    RedVerify, ResolvedConfigs, SPAN_OUTCOME_RETIRED, SPAN_SUBSTAGE_PREPARE, SealError, SharedRunCompletion,
+    SharedRunMode, SharedRunPlan, SharedRunPreparation, Snapshot, SpendWindow, StageId, StageOverride, StudyCost,
+    StudyRecord, SupersedeError, TimelineGateTiming, TimelineTimings, VerificationMode, VerifyFailureSet, Withdrawal,
     WithdrawalCause, WorkpieceId, construction_nonce_digest, reduce,
 };
 use common::{claim, compiled_resolved, digest, draft, draft_with_member_override, event, membership, workpiece};
@@ -73,6 +73,7 @@ impl Journal {
             movement_budget: 1,
             reservation_millis: 1_000,
             coalesce_millis: None,
+            red_verify: RedVerify::Refine,
             host_class: String::from("test"),
         };
         let mut configs = compiled_resolved();

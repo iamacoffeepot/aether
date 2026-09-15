@@ -29,6 +29,7 @@ const NEXT: &str = "wp-c";
 
 fn contextual_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Contextual,
         eager_integration: false,
         max_run_members: 2,

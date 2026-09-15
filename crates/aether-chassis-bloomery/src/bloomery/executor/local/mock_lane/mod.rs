@@ -33,7 +33,9 @@ pub mod script;
 
 pub use argv::{ArgvError, LaneArgs};
 pub use evidence::{CANDIDATE_FILE, FOREIGN_SESSION_ID, NAMED_TEST, REQUESTED_PATH};
-pub use script::{DispatchIdentity, LaneMode, LaneRun, LaneScript, LaneStep, ScriptSelectError, read_ledger};
+pub use script::{
+    DispatchIdentity, LaneMode, LaneRun, LaneScript, LaneStep, ScriptSelectError, VerifyReport, read_ledger,
+};
 
 const RELEASE_POLL: Duration = Duration::from_millis(5);
 
@@ -157,7 +159,8 @@ fn run_recorded(parse_from: Vec<String>, recorded: Vec<String>, worktree: &Path)
         },
     )?;
 
-    let outcome = evidence::outcome_for(&args.command, &args.nonce, mode, args.subject.as_deref());
+    let outcome =
+        evidence::outcome_for(&args.command, &args.nonce, mode, args.subject.as_deref(), script.verify_report.as_ref());
     evidence::apply(&outcome, worktree, &args.out)?;
 
     if mode == LaneMode::NeverExits {

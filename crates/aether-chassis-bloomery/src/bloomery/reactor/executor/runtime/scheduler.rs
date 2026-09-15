@@ -158,6 +158,7 @@ fn proposal_capacity_order(plan: &SharedRunPlan) -> Option<WorkOrder> {
         prompt_manifest: None,
         physical_run: Some(plan.digest()),
         release_physical_run: false,
+        selected_gates: Vec::new(),
     })
 }
 
@@ -629,7 +630,7 @@ mod tests {
         ConstructionAdmissionPayload, ConstructionCheckpoint, ContextualAttemptDispatch, ContextualDispatchPayload,
         ContextualInvocationTemplate, CoordinationPolicy, Digest, ExecutionLimits, GenerationMember, Harness,
         IntegrationHead, MemberPin, MemberVerifyRequest, NetworkProfile, ObservedLaneWrites, ReasoningEffort,
-        SharedRunPhase, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+        RedVerify, SharedRunPhase, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
         VerificationObligation, WorkHandle, WorkOrder, WorkpieceId, construction_nonce_digest,
     };
 
@@ -743,6 +744,7 @@ mod tests {
                 movement_budget: 2,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
+                red_verify: RedVerify::Refine,
                 host_class: "test-host".to_owned(),
             },
             CompositionContractTemplate {

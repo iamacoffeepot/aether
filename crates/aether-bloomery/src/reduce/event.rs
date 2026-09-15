@@ -10,9 +10,10 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReverify, BloomSpec, CandidatePreparation, CandidateRef, CompatibilityPreview, CompositionInput,
-    CompositionParents, ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead,
-    MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    Adjudication, AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver, BaseReverify,
+    BloomSpec, CandidatePreparation, CandidateRef, CompatibilityPreview, CompositionInput, CompositionParents,
+    ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead, MemberDependency,
+    OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
     PartialHeadRepairCompletion, PrecheckCompletion, PrecheckPreparation, ResolutionClaim, SharedRunCompletion,
     SharedRunPlan, SharedRunPreparation, StableHeadReservation, Statement, SuppressionDisposition, SurfaceRequest,
     VerifyFailureSet, Withdrawal,
@@ -293,6 +294,17 @@ pub enum Fact {
         evidence: Evidence,
         /// The nonempty, canonical verifier identities that failed together.
         failed_verifiers: VerifyFailureSet,
+        /// The lane's human-readable findings, or empty when it wrote none.
+        ///
+        /// Carried for the reason [`Fact::VerifyHostFault`] carries its own:
+        /// the reducer authors the member's departure reason when the bloom's
+        /// sealed disposition ejects on red (ADR-0218 §Amendment: low
+        /// tolerance), and a reason that named only an evidence digest would
+        /// send whoever picks the candidate up back to the journal for the one
+        /// sentence they need. Never an accounting input — ADR-0178's rule that
+        /// findings are advisory prose is unchanged, and the repeat ledger still
+        /// reads `failed_verifiers` alone.
+        findings: String,
     },
     /// An operator authorized releasing one orphaned claim ref (ADR-0179).
     ///
@@ -934,6 +946,105 @@ pub enum Fact {
     /// Appended past [`Fact::ProofReused`] so every prior fact keeps its wire
     /// discriminant.
     HoldSharedRunCoalesce { bloom: BloomId, until_unix_millis: u64, waiting_for: Vec<WorkpieceId> },
+    /// A dispatched member stage the host **cancelled at its sealed wall
+    /// clock** (ADR-0177, ADR-0218 §Amendment: low tolerance).
+    ///
+    /// The narrow sibling of [`Fact::MemberExecutorFault`], carrying the same
+    /// four fields and the same evidence shape. What separates them is the one
+    /// thing the reducer cannot otherwise know: whether the lane had its whole
+    /// sealed allowance. A `Verify` that did, and did not finish, has answered
+    /// about its own work, so a bloom on the `Eject` disposition withdraws the
+    /// member; every other stage, and a bloom on `Refine`, reaches the
+    /// machinery ledger exactly as an executor fault does.
+    ///
+    /// Its own fact rather than a field on `MemberExecutorFault` or a new
+    /// [`EvidenceKind`](crate::EvidenceKind): a field appended inside an
+    /// existing variant re-encodes every historical row of it, and an evidence
+    /// kind is embedded in every projected view row, whose frozen prior-shape
+    /// decoders cannot read a widened enum. A tail-appended fact costs neither.
+    ///
+    /// Appended past [`Fact::HoldSharedRunCoalesce`] so the prior facts' wire
+    /// discriminants are unchanged.
+    MemberDeadlineExpired {
+        /// The bloom whose member ran out of time.
+        bloom: BloomId,
+        /// The member sitting at the named stage.
+        workpiece: WorkpieceId,
+        /// The stage the expired order dispatched — must be the member's
+        /// current cursor stage.
+        stage: StageId,
+        /// The expiry evidence, bound to the member's current subject. Its
+        /// `detail` names the deterministic
+        /// [`TimeoutRecord`](crate::TimeoutRecord) the sweep stored.
+        evidence: Evidence,
+    },
+    /// An operator opened an admin session on a bloom (ADR-0219).
+    ///
+    /// The brake plus a flag. While it is open the reducer dispatches nothing
+    /// for the bloom — it records an [`OperatorHold`] alongside, so the one
+    /// dispatch choke #4976 built is the one that holds here too — an executor
+    /// fault charges no budget, and the six acts below are accepted.
+    ///
+    /// Appended past [`Fact::MemberDeadlineExpired`] so every prior fact keeps
+    /// its wire discriminant; the same is true of each admin fact after it.
+    AdminEnter {
+        /// The bloom being taken out of the machine's hands.
+        bloom: BloomId,
+        /// Who, and why.
+        note: AdminNote,
+    },
+    /// An operator closed an admin session (ADR-0219).
+    ///
+    /// Clears the flag, releases the brake, and re-derives what is due from the
+    /// cursors as they now stand — the release path #4976 already owns — plus
+    /// the landing a waived gate left nothing to dispatch.
+    AdminExit {
+        /// The bloom being handed back.
+        bloom: BloomId,
+        /// Who, and why.
+        note: AdminNote,
+    },
+    /// An operator cancelled a running dispatch from inside admin mode
+    /// (ADR-0219), charging nobody for it.
+    AdminCancelLane {
+        /// The bloom the lane was dispatched under.
+        bloom: BloomId,
+        /// Which lane, and on whose word.
+        cancel: AdminLaneCancel,
+    },
+    /// An operator handed a workpiece a candidate from inside admin mode
+    /// (ADR-0219) — the repair door without its wedge precondition.
+    AdminSetCandidate {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// The candidate, its workpiece, and on whose word.
+        set: AdminCandidate,
+    },
+    /// An operator asked for one stage to run again (ADR-0219).
+    AdminRerun {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// Which stage of which workpiece, and on whose word.
+        rerun: AdminRerun,
+    },
+    /// An operator voided a red verdict's findings (ADR-0219).
+    ///
+    /// Recorded as an operator adjudication over the named evidence — never as
+    /// a synthesized green verdict — plus the admin act that says a person made
+    /// the call.
+    AdminWaive {
+        /// The bloom whose gate is being waived.
+        bloom: BloomId,
+        /// Which findings, at which gate, and on whose word.
+        waiver: AdminWaiver,
+    },
+    /// An operator discarded a completed lap's captured candidate (ADR-0219).
+    AdminDropLap {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// Which lap, and on whose word.
+        drop: AdminLapDrop,
+    },
 }
 
 impl Fact {

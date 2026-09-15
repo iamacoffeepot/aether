@@ -95,6 +95,7 @@ fn construct_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     }
 }
 
@@ -224,6 +225,7 @@ fn a_verify_status_field_drives_the_verdict() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     let handle = exec.submit(&order).unwrap();
     let refs = exec.stream_evidence(&handle).unwrap();
@@ -260,6 +262,7 @@ fn a_passing_verify_body_projects_the_empty_failure_set() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -287,6 +290,7 @@ fn a_malformed_body_failure_set_fails_closed() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
 
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
@@ -324,6 +328,7 @@ fn an_environment_status_yields_an_executor_fault_rather_than_a_failing_review()
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -359,6 +364,7 @@ fn a_verify_lane_environment_status_is_an_executor_fault() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload =
@@ -397,6 +403,7 @@ fn an_unrecognized_or_absent_status_still_fails_closed_on_the_exit() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
 
     for (label, body) in [
@@ -441,6 +448,7 @@ fn verify_order(subject: Digest, nonce: &str) -> aether_bloomery::WorkOrder {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     }
 }
 
@@ -1397,6 +1405,7 @@ fn an_authored_environment_fault_still_carries_measured_cost_and_calls() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     let reference = exec.stream_evidence(&exec.submit(&order).unwrap()).unwrap().remove(0);
     let upload = NameEvidenceClaims.claim_for(&reference).expect("the fault name round-trips through the claim seam");
@@ -1636,6 +1645,7 @@ struct SeenSpec {
     resume: Option<String>,
     worktree: Option<PathBuf>,
     task: Option<String>,
+    selected_gates: Vec<String>,
 }
 
 // A spawn seam that records the `RunSpec` it was handed, so a test can assert what
@@ -1658,6 +1668,7 @@ impl TransformRunner for CapturingRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            selected_gates: spec.selected_gates.to_vec(),
         };
         Ok(Box::new(RecordingProcess { lifecycle: RunLifecycle::Running }))
     }
@@ -1677,6 +1688,32 @@ impl TransformRunner for CapturingRunner {
     ) -> Result<Option<CapturedObjects>, LocalExecutorError> {
         Ok(None)
     }
+}
+
+#[test]
+fn a_narrowed_order_hands_its_gate_selection_to_the_spawn() {
+    // Tripwire for the ADR-0218 amendment: the coordinator narrows an
+    // attribution probe to the one check it asked for, and the narrowing is
+    // useful only if it survives to the spawn. On bloom 0f16e207 (runs
+    // 84DB66FF and A05DA0B9) fourteen probes each ran the full eight-gate
+    // fan-out behind a single-check question — 58 minutes of clippy, docs and
+    // test nobody read. A selection dropped anywhere between the work order and
+    // the `RunSpec` restores exactly that bill while every verdict still looks
+    // right, because the asked check did run.
+    let seen = Arc::new(Mutex::new(SeenSpec::default()));
+    let base = TempDir::new().unwrap();
+    let exec = LocalExecutor::new(Arc::new(CapturingRunner { seen: Arc::clone(&seen) }), correspondence(), base.path());
+
+    let mut probe = verify_order(digest(5), &test_nonce("probe"));
+    probe.selected_gates = vec![String::from("verify.suppress")];
+    exec.submit(&probe).unwrap();
+
+    assert_eq!(seen.lock().unwrap().selected_gates, ["verify.suppress"], "the spawn runs the check the probe asked");
+
+    // And an ordinary member Verify still owes the whole gate set, so nothing
+    // about a full dispatch changed.
+    exec.submit(&verify_order(digest(6), &test_nonce("full"))).unwrap();
+    assert!(seen.lock().unwrap().selected_gates.is_empty(), "an unnarrowed order names no subset");
 }
 
 #[test]
@@ -1828,6 +1865,7 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     exec.submit(&review).unwrap();
 
@@ -1866,6 +1904,7 @@ fn an_aggregate_review_spawn_names_the_range_a_member_spawn_does_not() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     exec.submit(&verify).unwrap();
     assert_eq!(
@@ -1928,6 +1967,7 @@ fn an_unresolvable_diff_base_refuses_the_submit() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
 
     match exec.submit(&review) {
@@ -3101,6 +3141,7 @@ fn reconcile_order(subject: Digest, nonce: &str, task: &str, checkout: Digest) -
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     order.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -3181,6 +3222,7 @@ impl TransformRunner for ReuseRunner {
             resume: spec.resume.map(str::to_owned),
             worktree: Some(spec.worktree_dir.to_owned()),
             task: spec.task.map(str::to_owned),
+            selected_gates: spec.selected_gates.to_vec(),
         });
         if self.fail_start.as_deref() == Some(spec.nonce) {
             return Err(LocalExecutorError::Io(IoError::from(ErrorKind::StorageFull)));
@@ -3433,6 +3475,7 @@ fn a_critic_does_not_resume_the_constructors_session() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,
@@ -3727,6 +3770,7 @@ fn a_judge_dispatch_never_acquires_a_builder_session() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     critic.transformation.model = Some(ResolvedModel {
         harness: Harness::Claude,

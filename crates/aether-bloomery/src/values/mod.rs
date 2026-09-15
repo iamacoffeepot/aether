@@ -6,6 +6,7 @@
 //! DAG is built from; they are plain data — no I/O, no engine boot, no
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
+mod admin;
 mod adr;
 mod api;
 mod approval;
@@ -16,6 +17,7 @@ mod composition;
 mod config;
 mod coordination;
 pub(crate) mod coordination_pre_coalesce;
+pub(crate) mod coordination_pre_red_verify;
 mod fields;
 mod finding;
 mod granularity;
@@ -44,19 +46,25 @@ mod suppression;
 mod surface;
 mod timeout;
 mod verify;
+mod verify_delta;
 mod workpiece_builder;
 
+pub use admin::{
+    AdminAct, AdminActKind, AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver,
+};
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use api::{
-    AdjudicateRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView,
-    BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView, CommissionApprovalView,
-    CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
-    CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
-    DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView,
-    ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView,
-    ProposeRequest, ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest,
-    ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest,
-    SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
+    AdjudicateRequest, AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest,
+    AdminSetCandidateRequest, AdminWaiveRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView,
+    ArchiveRecordView, BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, CancelOrderRequest,
+    CancelOrderView, ClaimRefView, ClaimsView, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
+    CommissionHeadView, CommissionReopenedView, CommissionShowView, CommissionsView, Completeness, CoordinatorLogEntry,
+    CoordinatorLogsView, CreateCommissionRequest, DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage,
+    DispatchProcessView, DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest,
+    JournalEntry, JournalView, MemberProjection, OutcomeView, ProposeRequest, ReleaseAcceptedView, ReleaseRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
@@ -84,7 +92,7 @@ pub use coordination::{
     CoordinationState, DEFAULT_COALESCE_MILLIS, EagerIntegrationState, FailureScope, GenerationMember,
     IntegrationAppendPlan, IntegrationGeneration, IntegrationHead, MemberContractPin, MemberPin, MemberVerifyLatency,
     MemberVerifyOutcome, MemberVerifyRequest, PartialHeadRepairCompletion, PartialHeadRepairDispatch,
-    PartialHeadRepairPlan, PreparedCandidate, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
+    PartialHeadRepairPlan, PreparedCandidate, RedVerify, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
     SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
     SharedRunRecord, StableHeadReservation, SurvivorGroup, VerificationContract, VerificationMode,
     VerificationObligation, construction_nonce_digest, host_class_digest, verification_environment_digest,
@@ -131,9 +139,9 @@ pub use scope_verify::{
 pub use spend::{SpendCeiling, SpendQuiesce, SpendWindow};
 pub use stage::{
     Attempt, CONSTRUCT_IMPLEMENT_COMMAND, CandidateRef, CatalogError, DispatchKey, EXECUTION_DEADLINE_ENV,
-    ExecutionLimits, NetworkProfile, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND, SCOPE_FILL_COMMAND, StageBinding,
-    StageCatalog, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND, VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK,
-    VERIFY_MEMBER_COMMAND, is_model_lane, sized_wall_clock_secs,
+    ExecutionLimits, GATE_WALL_CLOCK_SECS, NetworkProfile, RETROSPECT_READ_COMMAND, REVIEW_CRITIC_COMMAND,
+    SCOPE_FILL_COMMAND, StageBinding, StageCatalog, Transformation, VERIFY_BASE_COMMAND, VERIFY_CHECK_COMMAND,
+    VERIFY_LANE_IMAGE, VERIFY_LANE_NETWORK, VERIFY_MEMBER_COMMAND, is_model_lane, sized_wall_clock_secs,
 };
 pub use statement::{Observation, Provenance, StageReceipt, Statement};
 #[cfg(not(target_arch = "wasm32"))]
@@ -143,6 +151,10 @@ pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVer
 pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{DeclaredIdentity, MAX_VERIFIER_IDENTITY_BYTES, VerifyFailure, VerifyFailureSet};
+pub use verify_delta::{
+    CarriedCoverage, CarriedGate, CarryRefusal, DELTA_GATES, DeltaClass, VERIFY_GATES_ENV, VERIFY_PROVED_ENV,
+    carryable, invalidated_by,
+};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};
 
 use alloc::string::String;

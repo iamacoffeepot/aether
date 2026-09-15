@@ -71,6 +71,28 @@ pub enum VerificationMode {
     Contextual,
 }
 
+/// What a bloom does with a member whose `Verify` came back red, or whose
+/// `Verify` the host killed at its sealed wall clock (ADR-0218 §Amendment: low
+/// tolerance).
+///
+/// The choice is between spending another paid lap on the member and handing it
+/// to a person. A repair lap costs a model's construct budget plus a fresh full
+/// verify, and on 2026-09-15 bloom `0f16e207` spent that twice over on members
+/// that still had not gone green; the candidate is already on a ref, so ejecting
+/// loses no work and a person — or an agent a person dispatches — picks the
+/// candidate up with the verdict that stopped it attached.
+#[derive(aether_data::Schema, Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RedVerify {
+    /// Withdraw the member from the bloom, carrying the failed verifiers and
+    /// the findings as its reason, and dispatch no repair. The default, and
+    /// what a policy sealed before this field existed reads as.
+    #[default]
+    Eject,
+    /// Spend a repair roll and re-enter `Refine` — the ADR-0153 loop, bounded
+    /// by the sealed `Verify` retry budget and the ADR-0178 accounting.
+    Refine,
+}
+
 /// Default coalescing hold when [`CoordinationPolicy::coalesce_millis`] is
 /// absent: two minutes, long enough for sibling constructs that finish a
 /// minute apart to share one run, short enough that a stuck sibling does not
@@ -95,9 +117,13 @@ pub struct CoordinationPolicy {
     pub max_serial_requests: u32,
     /// Maximum dependency-preserving attribution probes for one red node.
     pub max_attribution_probes: u32,
-    /// Head movements tolerated in one repair episode before reservation.
+    /// Retained for decode only. It rationed how often the product could grow
+    /// under a member that was about to merge onto it; nothing merges onto the
+    /// product any more, so there is nothing to ration (ADR-0218 §Amendment:
+    /// eager integration assembles the product).
     pub movement_budget: u32,
-    /// Duration of a stable-head reservation.
+    /// Retained for decode only. The lifetime of the reservation
+    /// [`Self::movement_budget`] used to arm.
     pub reservation_millis: u64,
     /// Explicit execution class every contextual proof must run on.
     pub host_class: String,
@@ -105,6 +131,14 @@ pub struct CoordinationPolicy {
     /// in flight. `None` is [`DEFAULT_COALESCE_MILLIS`]. `Some(0)` proposes
     /// as soon as a request is ready — the behaviour before this field existed.
     pub coalesce_millis: Option<u64>,
+    /// What a red or wall-clock-killed member `Verify` does to the member.
+    ///
+    /// [`RedVerify::Eject`] by default, and a policy sealed before this field
+    /// existed upcasts to `Eject` rather than to the `Refine` it ran under: the
+    /// upcast is the operator's standing instruction, not an archaeological
+    /// reconstruction of one, and the instruction is that a bloom stops
+    /// spending laps on members that have not gone green.
+    pub red_verify: RedVerify,
 }
 
 impl CoordinationPolicy {
@@ -114,11 +148,27 @@ impl CoordinationPolicy {
         self.max_run_members > 0
             && self.max_serial_requests > 0
             && (self.verification != VerificationMode::Contextual || self.max_attribution_probes > 0)
-            && self.movement_budget > 0
-            && self.reservation_millis > 0
             && !self.host_class.is_empty()
             && self.host_class.len() <= 128
             && self.host_class.bytes().all(|byte| byte.is_ascii_graphic())
+    }
+
+    /// Whether this policy asks for coordination at all.
+    ///
+    /// A policy that keeps one physical run per member and advances no partial
+    /// head coordinates nothing: it describes the legacy reducer's own
+    /// behaviour. Sealing coordination state for it would route every member
+    /// verification through the shared-run machinery to arrive at the same
+    /// single physical run, so the seal leaves the state off and the bloom runs
+    /// the line it would have run with no policy at all.
+    ///
+    /// What such a policy is *for* is the dispositions it carries beside the
+    /// resource bounds — [`Self::red_verify`] above all, which governs every
+    /// bloom's red verdicts and so has to be statable by a bloom that
+    /// coordinates nothing (ADR-0218 §Amendment: low tolerance).
+    #[must_use]
+    pub fn coordinates(&self) -> bool {
+        self.eager_integration || self.verification != VerificationMode::Standalone
     }
 
     /// The coalescing hold the scheduler applies, in milliseconds.
@@ -257,8 +307,14 @@ impl ConstructContext {
     }
 }
 
-/// Source request that mechanically places an authored reconcile result onto
-/// the head its order recorded before Verify can judge it.
+/// Retained for decode only: the source request that used to place an authored
+/// reconcile result onto a recorded head before Verify could judge it.
+///
+/// No reducer issues one any more. A member's Verify proves the candidate the
+/// member authored, and the merge onto the product happens at the append, after
+/// that proof, never before it (ADR-0218 §Amendment: eager integration assembles
+/// the product). The shape, its `Decision`, and its `Fact` stay so a bloom that
+/// had a preparation in flight across the change still settles it.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct CandidatePreparationPlan {
     pub bloom: BloomId,
@@ -900,7 +956,14 @@ impl SharedRunRecord {
     }
 }
 
-/// Durable reservation after repeated repair displacement.
+/// Retained for decode only: the durable pin that used to hold one product tree
+/// still while a displaced member merged onto it.
+///
+/// No member merges onto the product any more — each proves the candidate it
+/// authored and the product absorbs it — so nothing is pinned and no reducer
+/// writes one (ADR-0218 §Amendment: eager integration assembles the product).
+/// The shape stays so sealed journals and `Fact::StableHeadReservationExpired`
+/// keep decoding.
 #[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct StableHeadReservation {
     pub owner: WorkpieceId,
@@ -926,8 +989,9 @@ pub struct EagerIntegrationState {
     /// green that may clear `known_red`: a verdict established anywhere else
     /// stays red until repair and promotion clear it (ADR-0218).
     pub unproved_repair: Option<Digest>,
+    /// Retained for decode only; see [`StableHeadReservation`].
     pub reservation: Option<StableHeadReservation>,
-    /// Head moves in the current repair episode.
+    /// Retained for decode only; the movement counter that armed the reservation.
     pub movement_count: u32,
 }
 
@@ -943,7 +1007,9 @@ pub struct CoordinationState {
     pub requests: Vec<MemberVerifyRequest>,
     pub runs: Vec<SharedRunRecord>,
     pub claims: BTreeMap<String, ContextualResolutionClaim>,
+    /// Retained for decode only; see [`CandidatePreparationPlan`].
     pub prepared: BTreeMap<String, PreparedCandidate>,
+    /// Retained for decode only; see [`CandidatePreparationPlan`].
     pub preparations: Vec<CandidatePreparationPlan>,
     pub contexts: BTreeMap<String, ConstructContext>,
     pub checkpoints: BTreeMap<String, ConstructionCheckpoint>,

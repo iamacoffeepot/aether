@@ -22,6 +22,7 @@ use alloc::vec::Vec;
 
 use serde::{Deserialize, Serialize};
 
+use super::coordination_pre_red_verify::CoordinationPolicyPreRedVerify;
 use super::{
     CandidatePreparationPlan, CompatibilityPreviewPlan, CompatibilityPreviewRecord, CompositionContractTemplate,
     ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
@@ -50,7 +51,11 @@ impl From<CoordinationPolicyPreCoalesce> for CoordinationPolicy {
     /// inventing a zero hold here would keep the per-member runs the field
     /// exists to stop.
     fn from(prior: CoordinationPolicyPreCoalesce) -> Self {
-        Self {
+        // Chained through the next era's frozen shape rather than filling
+        // today's fields directly: each era decides exactly the field it
+        // introduced, so a third change adds one hop instead of another copy
+        // of every decision before it.
+        Self::from(CoordinationPolicyPreRedVerify {
             verification: prior.verification,
             eager_integration: prior.eager_integration,
             max_run_members: prior.max_run_members,
@@ -60,7 +65,7 @@ impl From<CoordinationPolicyPreCoalesce> for CoordinationPolicy {
             reservation_millis: prior.reservation_millis,
             host_class: prior.host_class,
             coalesce_millis: None,
-        }
+        })
     }
 }
 

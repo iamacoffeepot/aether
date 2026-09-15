@@ -46,10 +46,10 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
-    CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
-    DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce,
-    RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic,
-    VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
+    CancelDispatchPayload, CancelLanePayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch,
+    Digest, DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride,
+    Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord,
+    Topic, VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
     sized_wall_clock_secs,
 };
 use aether_bloomery_git::command;
@@ -225,12 +225,21 @@ impl TrackedHandle {
 /// states the fact.
 ///
 /// Every dispatched stage — member, `AggregateVerify`, `AggregateReview`, and
-/// the `Study` reader — is `ExecutorFault`. A deadline is a host observation
-/// that rendered no judgment: the child was cancelled before it judged the
-/// subject, which is the same fact as a missing evidence file or a
-/// signal-killed process. The empty verifier set is required, not optional — a
+/// the `Study` reader — reaches no judgment: the child was cancelled before it
+/// judged the subject. The empty verifier set is required, not optional — a
 /// timeout cannot know which verifier would have failed, and naming one would
 /// dispatch a repair lap.
+///
+/// `cause` is what separates the two verdicts, and it is the only thing that
+/// does (ADR-0218 §Amendment: low tolerance). A
+/// [`TerminationCause::Deadline`] expiry is
+/// [`StageVerdict::DeadlineExpiry`]: the lane had its whole sealed allowance
+/// and did not finish, which is an answer about the work. A
+/// [`TerminationCause::HeartbeatSilence`] termination is `ExecutorFault`, the
+/// same fact as a missing evidence file or a signal-killed process: a silent
+/// lane is a host that stopped reporting, and the member is owed its budget.
+/// The distinction is carried on the verdict rather than inferred downstream
+/// from timing, because the reducer is pure and cannot see a clock.
 ///
 /// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
 /// order never terminates. The stages that reach it are never dispatched to an
@@ -240,7 +249,11 @@ impl TrackedHandle {
 /// one and none can expire. A wildcard reads a stage that later becomes
 /// dispatchable into that group silently; naming every variant makes it a
 /// compile error instead.
-fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
+fn timeout_verdict(stage: StageId, cause: TerminationCause) -> Option<(StageVerdict, VerifyFailureSet)> {
+    let verdict = match cause {
+        TerminationCause::Deadline => StageVerdict::DeadlineExpiry,
+        TerminationCause::HeartbeatSilence => StageVerdict::ExecutorFault,
+    };
     match stage {
         StageId::Verify
         | StageId::Construct
@@ -258,7 +271,7 @@ fn timeout_verdict(stage: StageId) -> Option<(StageVerdict, VerifyFailureSet)> {
         // never-dispatched group below. It has one attempt and no budget, so
         // the fault this admits is the whole account of the read: the bloom is
         // already landed, and what expires with the order is its study.
-        | StageId::Study => Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        | StageId::Study => Some((verdict, VerifyFailureSet::EMPTY)),
         StageId::Sketch | StageId::Approve | StageId::Review | StageId::Integrate | StageId::Land => None,
     }
 }
@@ -407,11 +420,16 @@ fn running_progress(status: &ExecutionStatus) -> Option<u64> {
 }
 
 /// Why a synthesised failed attempt is being admitted for a still-pending
-/// order. Both causes reuse the same cancel → timeout-record → intake path;
-/// the distinction is the log line, not a new journal variant.
+/// order. Both causes reuse the same cancel → timeout-record → intake path and
+/// produce the same [`TimeoutRecord`]; what differs is the verdict
+/// [`timeout_verdict`] stamps, because only one of them is an answer about the
+/// work (ADR-0218 §Amendment: low tolerance).
 #[derive(Clone, Copy)]
 enum TerminationCause {
+    /// The order crossed the deadline its sealed `wall_clock_secs` bought it.
     Deadline,
+    /// The lane stopped reporting progress for longer than the host's silence
+    /// threshold, which is a statement about the host rather than the work.
     HeartbeatSilence,
 }
 
@@ -553,7 +571,7 @@ fn terminate_live_order(
         );
         return None;
     };
-    let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage) else {
+    let Some((verdict, failed_verifiers)) = timeout_verdict(record.stage, cause) else {
         warn_deferred_timeout(tracked, &record, deadline);
         return None;
     };
@@ -717,6 +735,20 @@ fn drain_dispatch_topics(
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
+        }
+    }
+    // Cancel the one lane an operator stopped from inside admin mode
+    // (ADR-0219), under the same discipline and for the same reason: a cancel
+    // starts nothing, so no handle is tracked and no backoff is folded.
+    match drain_and_cancel_lane(store, executor) {
+        Ok(Some(sequence)) => {
+            if let Err(error) = store.ack_topic(Topic::CancelLane, sequence) {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane cancel ack failed; entries re-drive");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane cancel drain failed");
         }
     }
     // Replay the attempts whose parked questions were answered (#3664),
@@ -1508,6 +1540,78 @@ fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &dyn ExecutorPort) -
     Ok(ack_through)
 }
 
+/// Drain [`Topic::CancelLane`] and cancel exactly the named nonce (ADR-0219).
+///
+/// The nonce-scoped sibling of [`drain_and_cancel`], and narrow on purpose: a
+/// withdrawal retires every order its member holds, while an admin cancellation
+/// stops one lap of a member that is staying, so cancelling the workpiece's
+/// other outstanding orders would be a withdrawal nobody asked for.
+///
+/// The resolved order is checked against the payload's workpiece before the
+/// kill. A nonce the operator read off a stale board can name an order that has
+/// since been consumed and re-minted for a sibling, and a cancel that trusted
+/// the nonce alone would stop that sibling's lane instead. A nonce that no
+/// longer resolves is acked rather than re-driven: the lap it named is already
+/// over, which is the outcome the operator asked for.
+///
+/// Returns the highest contiguously-processed outbox sequence to ack, under
+/// [`drain_and_cancel`]'s own policy — a decode failure or an unreached
+/// executor stops the prefix so the entry re-drains rather than leaving a lane
+/// burning.
+fn drain_and_cancel_lane(store: &mut dyn StoreBackend, executor: &dyn ExecutorPort) -> rusqlite::Result<Option<u64>> {
+    let entries = store.drain_topic(Topic::CancelLane)?;
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<CancelLanePayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "lane cancel outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match cancel_named_lane(store, executor, &payload, entry.sequence) {
+            Ok(()) => ack_through = Some(entry.sequence),
+            Err(CancelStop::Store(error)) => return Err(error),
+            Err(CancelStop::Unreached | CancelStop::InFlight) => break,
+        }
+    }
+    Ok(ack_through)
+}
+
+/// Cancel and consume the one order `payload` names, if it is still the order
+/// the operator saw.
+fn cancel_named_lane(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    payload: &CancelLanePayload,
+    sequence: u64,
+) -> Result<(), CancelStop> {
+    let Some(order) = store.lookup_order(&payload.nonce).map_err(CancelStop::Store)? else {
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %payload.nonce,
+            "admin lane cancel named an order that is already gone; nothing to stop",
+        );
+        return Ok(());
+    };
+    let names_lane = DispatchRecord::from_stored(&order)
+        .is_some_and(|record| record.bloom.0 == payload.bloom && record.workpiece == payload.workpiece);
+    if !names_lane {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %payload.nonce,
+            workpiece = %payload.workpiece.0,
+            "admin lane cancel named an order belonging to something else; refusing to stop it",
+        );
+        return Ok(());
+    }
+
+    cancel_and_consume_order(store, executor, &payload.nonce, sequence, &payload.workpiece.0)
+}
+
 /// Turn one sweep of the live construct lanes' working trees into admissible
 /// facts (ADR-0204).
 ///
@@ -2082,12 +2186,12 @@ fn drain_and_dispatch(
 
 /// Drain the aggregate-review topic and submit each entry through the executor
 /// under a bloom-level order record (ADR-0153): the `review.critic` lane run
-/// against the integrated head, its task context composed from the whole
+/// against the integrated head, its task context composed from the live
 /// membership's persisted work orders — the sealed intent the critic judges
 /// the integrated diff against. Same ack-prefix / park / backoff semantics as
 /// [`drain_and_dispatch`]; the returned handles ride the same intake cycle,
 /// and the intake routes the verdict by the record's `AggregateReview` stage.
-/// Compose the aggregate-review task prompt (ADR-0153): the whole membership's
+/// Compose the aggregate-review task prompt (ADR-0153): the live membership's
 /// persisted work orders — the sealed intent the critic judges the integrated
 /// diff against — plus the roll's framing. The first roll instructs the
 /// attribution convention the findings decomposition parses back (each finding
@@ -2102,12 +2206,12 @@ fn compose_aggregate_task(
 ) -> rusqlite::Result<Option<String>> {
     use core::fmt::Write;
 
-    let orders = store.list_dispatch_descriptions(payload.bloom.as_bytes())?;
+    let orders = live_member_orders(store, payload.bloom.as_bytes(), sequence)?;
     if orders.is_empty() {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",
             sequence,
-            "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
+            "no live work-order descriptions for the reviewed bloom; assembling a subject-only prompt",
         );
     }
     let frozen = if matches!(payload.pass, ReviewPass::DeltaConfirm) {
@@ -2154,6 +2258,43 @@ fn compose_aggregate_task(
         }
     }
     Ok(Some(task))
+}
+
+/// The bloom's *live* members' work orders: the persisted roster minus every
+/// member an operator withdrew while the bloom walked (#5327).
+///
+/// A `dispatch_description` row is written when a member is first dispatched
+/// and never removed, so the roster names the sealed membership rather than
+/// what the composed tree carries. A withdrawn member produced no claim and
+/// contributed no candidate to the fold, so rendering its order as a `## Task`
+/// section asks the critic for a verdict on work that is provably absent — and
+/// the critic answers the only way it can, by failing the composition for
+/// orders that were never in it (bloom 0f16e207 failed on three).
+///
+/// `active_membership` is the live set: the withdrawal's `ReleaseMembership`
+/// deletes that one member's row while the bloom keeps walking, and nothing
+/// else removes one before the land releases them all. The drain has already
+/// established that this bloom holds membership, so an empty answer here means
+/// the members left, not an unpopulated table.
+fn live_member_orders(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    sequence: u64,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut live = Vec::new();
+    for (workpiece, description) in store.list_dispatch_descriptions(bloom)? {
+        if store.holds_member_membership(bloom, &workpiece)? {
+            live.push((workpiece, description));
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = workpiece.as_str(),
+            "member left the bloom before the fold; its work order is not an obligation of the composed tree",
+        );
+    }
+    Ok(live)
 }
 
 fn drain_and_dispatch_aggregate(
@@ -3780,6 +3921,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         match drive_shared_runs(
             store,
             state.artifacts.as_mut(),
+            source.as_ref(),
             &executor,
             claims,
             &state.host_class,

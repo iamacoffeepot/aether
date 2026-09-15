@@ -12,21 +12,22 @@ use crate::reduce::{
     Decision, Decisions, Event, Fact, FoldedIntegration, Outcome, RecordedRead, RecordedRefusal, StageProgress,
 };
 use crate::values::{
-    Adjudication, AgentProfile, BaseReceipt, BaseVerdict, CandidatePreparationPlan, CandidateRef, CompatibilityPreview,
-    CompatibilityPreviewPlan, CompatibilityPreviewRecord, CompositionContractTemplate, CompositionFinding,
-    CompositionInput, CompositionPlan, ConfigRegistry, ConstructContext, ConstructionAdmission, ConstructionCheckpoint,
-    ContextualAttemptDispatch, ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic,
-    CoordinationPolicy, CoordinationState, DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence,
-    EvidenceKind, ExecutionLimits, FailureScope, GenerationMember, Harness, LandingReceipt, LaneEntrypoint,
-    MemberCandidate, MemberContractPin, MemberDependency, MemberPin, MemberVerifyLatency, MemberVerifyOutcome,
-    MemberVerifyRequest, NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease,
-    OrphanClaimReleaseCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest,
-    PrecheckDiagnostic, PrecheckMember, PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState,
-    PreparedCandidate, ReasoningEffort, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel,
-    SharedRunDispatch, SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan,
-    SharedRunRecord, SpendQuiesce, StableHeadReservation, StageBinding, StageCatalog, SurvivorGroup, ToolPolicy,
-    Transformation, VerificationContract, VerificationMode, VerificationObligation, VerifyFailure, VerifyFailureSet,
-    VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal, WithdrawalCause,
+    Adjudication, AdminAct, AdminActKind, AdminNote, AgentProfile, BaseReceipt, BaseVerdict, CandidatePreparationPlan,
+    CandidateRef, CompatibilityPreview, CompatibilityPreviewPlan, CompatibilityPreviewRecord,
+    CompositionContractTemplate, CompositionFinding, CompositionInput, CompositionPlan, ConfigRegistry,
+    ConstructContext, ConstructionAdmission, ConstructionCheckpoint, ContextualAttemptDispatch,
+    ContextualInvocationTemplate, ContextualResolutionClaim, CoordinationDiagnostic, CoordinationPolicy,
+    CoordinationState, DeclaredEvidence, DeclaredLanes, DeclaredVerifiers, Disposition, Evidence, EvidenceKind,
+    ExecutionLimits, FailureScope, GenerationMember, Harness, LandingReceipt, LaneEntrypoint, MemberCandidate,
+    MemberContractPin, MemberDependency, MemberPin, MemberVerifyLatency, MemberVerifyOutcome, MemberVerifyRequest,
+    NetworkProfile, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest, PrecheckDiagnostic, PrecheckMember,
+    PrecheckNode, PrecheckPlan, PrecheckPolicy, PrecheckResult, PrecheckState, PreparedCandidate, ReasoningEffort,
+    RedVerify, ResolutionClaim, ResolutionProof, ResolvedBloom, ResolvedModel, SharedRunDispatch, SharedRunExecution,
+    SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord, SpendQuiesce, StableHeadReservation,
+    StageBinding, StageCatalog, SurvivorGroup, ToolPolicy, Transformation, VerificationContract, VerificationMode,
+    VerificationObligation, VerifyFailure, VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge,
+    Withdrawal, WithdrawalCause,
 };
 
 use super::digest;
@@ -175,6 +176,7 @@ fn coordination_state(
         movement_budget: 2,
         reservation_millis: 30_000,
         coalesce_millis: None,
+        red_verify: RedVerify::Refine,
         host_class: "fixture".into(),
     };
     let template = CompositionContractTemplate {
@@ -977,6 +979,50 @@ fn execution_records(bloom: BloomId, successor: BloomId, workpiece: &WorkpieceId
     ]
 }
 
+/// Every admin-mode row (ADR-0219), so the completeness walk freezes each
+/// [`AdminActKind`] shape rather than only the `Decision` tags that carry them.
+///
+/// One act per payload-carrying kind, because the fixture's whole job is to
+/// pin the *fields* behind a discriminant: `Entered` and `Exited` carry none,
+/// and the six below each carry a shape a later edit could silently move.
+fn admin_records(bloom: BloomId, workpiece: WorkpieceId) -> Vec<Decision> {
+    let note = AdminNote {
+        reason: "the review named members the operator had already withdrawn".into(),
+        operator: "iamacoffeepot".into(),
+    };
+    let candidate = CandidateRef { tree: digest(74), checkout: digest(75) };
+    let restored = CandidateRef { tree: digest(76), checkout: digest(77) };
+    let kinds = [
+        AdminActKind::Entered,
+        AdminActKind::LaneCancelled { workpiece: workpiece.clone(), nonce: "dispatch-7265".into() },
+        AdminActKind::CandidateSet { workpiece: workpiece.clone(), candidate },
+        AdminActKind::Rerun { workpiece: workpiece.clone(), stage: StageId::AggregateReview, now: true },
+        AdminActKind::Waived {
+            gate: StageId::AggregateReview,
+            findings: vec![digest(78)],
+            acknowledged_unverified: false,
+        },
+        AdminActKind::LapDropped {
+            workpiece: workpiece.clone(),
+            nonce: "dispatch-7265".into(),
+            discarded: candidate,
+            restored,
+        },
+        AdminActKind::LandedOnWaiver { head: digest(79), waivers: vec![digest(78)] },
+        AdminActKind::Exited,
+    ];
+
+    once(Decision::RecordAdminMode { bloom, admin: Some(note.clone()) })
+        .chain(
+            kinds
+                .into_iter()
+                .map(|kind| Decision::RecordAdminAct { bloom, act: AdminAct { kind, note: note.clone() } }),
+        )
+        .chain(once(Decision::CancelLane { bloom, workpiece, nonce: "dispatch-7265".into() }))
+        .chain(once(Decision::RecordAdminMode { bloom, admin: None }))
+        .collect()
+}
+
 /// Representative [`Decisions`] value whose wire bytes the golden fixture pins.
 ///
 /// This is the one vocabulary the fixture command and the golden guards share.
@@ -1002,8 +1048,12 @@ pub fn representative() -> Decisions {
     effects.extend(proposal_records());
     effects.push(dispatch_study(bloom));
     effects.push(Decision::RecordPipelineManifest { bloom, manifest: pipeline_manifest() });
+    // The non-default disposition, so the fixture freezes a discriminant the
+    // enum's `Default` would not reach on its own.
+    effects.push(Decision::RecordRedVerify { bloom, red_verify: RedVerify::Refine });
     effects.extend(precheck_records(bloom));
     effects.extend(coordination_records(bloom));
+    effects.extend(admin_records(bloom, WorkpieceId("alpha".into())));
 
     Decisions { outcome: Outcome::Sealed(bloom), effects }
 }

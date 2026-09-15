@@ -19,6 +19,7 @@
 //! the reducer enforces the same rule over its projection so seal decisions
 //! are correct before the store transaction commits.
 
+mod admin;
 mod aggregate_verify;
 mod attempt;
 mod base_verify;
@@ -27,6 +28,7 @@ mod composition;
 mod coordination;
 mod decision;
 pub(crate) mod decisions_v1;
+mod eject;
 mod error;
 mod event;
 mod evidence;
@@ -63,7 +65,7 @@ mod withdraw;
 pub use crate::persisted::decode_recorded_decisions;
 pub use decision::Decision;
 pub use error::{
-    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
+    AdjudicationError, AdminError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, BaseReverifyError, CoordinationError, FoldConflictError, GrantAttemptsError,
     HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
@@ -86,8 +88,12 @@ pub use why::why_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
 
+use admin::{
+    reduce_admin_cancel_lane, reduce_admin_drop_lap, reduce_admin_enter, reduce_admin_exit, reduce_admin_rerun,
+    reduce_admin_set_candidate, reduce_admin_waive,
+};
 use aggregate_verify::reduce_aggregate_verify_completed;
-use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
+use attempt::{reduce_attempt_completed, reduce_member_deadline_expired, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use coordination::{
     IntegrationConflict, reduce_candidate_prepared, reduce_checkpoint_observed, reduce_compatibility_previewed,
@@ -125,28 +131,20 @@ use withdraw::reduce_withdraw;
 fn reduce_coordination_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
     match fact {
         Fact::IntegrationAdvanced { bloom, plan, head } => reduce_integration_advanced(snapshot, bloom, *plan, head),
-        Fact::IntegrationAppendConflicted {
-            bloom,
-            plan,
-            generation,
-            expected_parent,
-            input,
-            at,
-            evidence,
-            observed_at_unix_millis,
-        } => reduce_integration_conflicted(
-            snapshot,
-            IntegrationConflict {
-                bloom,
-                plan: *plan,
-                generation: *generation,
-                expected_parent: *expected_parent,
-                input,
-                at: *at,
-                evidence,
-                observed_at_unix_millis: *observed_at_unix_millis,
-            },
-        ),
+        Fact::IntegrationAppendConflicted { bloom, plan, generation, expected_parent, input, at, evidence, .. } => {
+            reduce_integration_conflicted(
+                snapshot,
+                IntegrationConflict {
+                    bloom,
+                    plan: *plan,
+                    generation: *generation,
+                    expected_parent: *expected_parent,
+                    input,
+                    at: *at,
+                    evidence,
+                },
+            )
+        }
         Fact::IntegrationAppendRefused { bloom, plan, generation, expected_parent, detail } => {
             reduce_integration_refused(snapshot, bloom, *plan, *generation, *expected_parent, *detail)
         }
@@ -189,9 +187,14 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
             reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
         }
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
-        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers }
-        | Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
-            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
+        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers, findings } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers, findings)
+        }
+        // A containment refusal is the same red verdict reaching the same arm;
+        // its own payload is the violating paths, and the lane files those as
+        // findings on the bloom's channel rather than on the fact (ADR-0209).
+        Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers, "")
         }
         Fact::AggregateReviewExecutorFault { bloom, evidence } => {
             reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)
@@ -201,6 +204,9 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         }
         Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
             reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
+        }
+        Fact::MemberDeadlineExpired { bloom, workpiece, stage, evidence } => {
+            reduce_member_deadline_expired(snapshot, bloom, workpiece, *stage, evidence)
         }
         Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
@@ -267,6 +273,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         | Fact::FoldConflict { .. }
         | Fact::VerifyHostFault { .. }
         | Fact::MemberExecutorFault { .. }
+        | Fact::MemberDeadlineExpired { .. }
         | Fact::FoldRefused { .. }
         | Fact::BaseVerifyCompleted { .. }
         | Fact::CompositionNarrowed { .. }
@@ -338,6 +345,13 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::SurfaceGranted { .. } => {
             Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
         }
+        Fact::AdminEnter { bloom, note } => reduce_admin_enter(snapshot, bloom, note),
+        Fact::AdminExit { bloom, note } => reduce_admin_exit(snapshot, bloom, note),
+        Fact::AdminCancelLane { bloom, cancel } => reduce_admin_cancel_lane(snapshot, bloom, cancel),
+        Fact::AdminSetCandidate { bloom, set } => reduce_admin_set_candidate(snapshot, bloom, set),
+        Fact::AdminRerun { bloom, rerun } => reduce_admin_rerun(snapshot, bloom, rerun),
+        Fact::AdminWaive { bloom, waiver } => reduce_admin_waive(snapshot, bloom, waiver),
+        Fact::AdminDropLap { bloom, drop } => reduce_admin_drop_lap(snapshot, bloom, drop),
     };
     schedule_precheck(snapshot, coordination::schedule(snapshot, decisions))
 }

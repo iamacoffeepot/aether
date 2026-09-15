@@ -696,9 +696,23 @@ fn replica_topic_age(live: &LiveState<'_>) -> Vec<String> {
         .collect()
 }
 
-fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> {
+/// Every member the estate has left standing: at a non-terminal stage, in a
+/// bloom that is running, carrying none of the [`Excuse`]s that explain a
+/// still cursor, with no pending dispatch and no lane in flight.
+///
+/// The set [`Invariant::NonterminalMemberHasLaneOrDispatch`] reports, named
+/// separately because the doctor reactor acts on it as well as alerting on it
+/// (#5969): a member that stays in this set across a full poll interval is one
+/// the host lost a dispatch for, and the reactor re-dispatches it. Alerting and
+/// acting must read the same members, or the doctor would re-dispatch something
+/// it never reported — or report something it silently left standing.
+#[must_use]
+pub fn undispatched_members(live: &LiveState<'_>) -> Vec<(BloomId, WorkpieceId)> {
+    if live.lanes_running {
+        return Vec::new();
+    }
     let pending: BTreeSet<&str> = live.outstanding.iter().map(|open| open.workpiece).collect();
-    let mut divergences = Vec::new();
+    let mut standing = Vec::new();
     for (bloom, record) in &live.snapshot.blooms {
         if record.status != BloomStatus::Sealed
             || record.operator_hold.is_some()
@@ -715,17 +729,26 @@ fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> 
             if Excuse::ALL.iter().copied().any(|excuse| member_carries_excuse(excuse, live, bloom, record, workpiece)) {
                 continue;
             }
-            if pending.contains(workpiece.0.as_str()) || live.lanes_running {
+            if pending.contains(workpiece.0.as_str()) {
                 continue;
             }
-            divergences.push(format!(
+            standing.push((*bloom, workpiece.clone()));
+        }
+    }
+    standing
+}
+
+fn nonterminal_member_has_lane_or_dispatch(live: &LiveState<'_>) -> Vec<String> {
+    undispatched_members(live)
+        .into_iter()
+        .map(|(bloom, workpiece)| {
+            format!(
                 "member {} on bloom {} is at a non-terminal stage with no live lane and no pending dispatch",
                 workpiece.0,
                 hex_of(&bloom.0)
-            ));
-        }
-    }
-    divergences
+            )
+        })
+        .collect()
 }
 
 fn member_carries_excuse(

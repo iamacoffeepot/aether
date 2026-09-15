@@ -25,9 +25,9 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes,
     CoordinationPolicy, DependencyError, EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride,
-    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs,
-    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, resolve_member_dependencies,
+    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, RedVerify, ResolutionClaim,
+    ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -141,13 +141,13 @@ pub(super) fn reduce_seal(
     }
     // Record the catalog and the lane vocabulary admission resolved so the fold
     // reads the record, not a later binary's compiled copies (#4944, ADR-0215).
-    record_admitted_line(bloom, &catalog, &manifest, &mut effects);
+    record_admitted_line(bloom, &catalog, &manifest, coordination_policy.as_ref(), &mut effects);
     let proven = enqueue_base_verify_if_needed(
         snapshot,
         spec.base(),
         &catalog,
         &manifest,
-        coordination_policy.is_some(),
+        coordination_policy.as_ref().is_some_and(CoordinationPolicy::coordinates),
         &mut effects,
     );
     effects.extend(ready_entries(
@@ -253,10 +253,19 @@ fn record_admitted_line(
     bloom: BloomId,
     catalog: &StageCatalog,
     manifest: &PipelineManifest,
+    policy: Option<&CoordinationPolicy>,
     effects: &mut Vec<Decision>,
 ) {
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
     effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
+    // Recorded unconditionally, including for a bloom that sealed no policy at
+    // all: the disposition governs every bloom's red verdicts, so leaving the
+    // row out for the majority would make the fold's default the authority
+    // instead of the seal's decision (ADR-0218 §Amendment: low tolerance).
+    effects.push(Decision::RecordRedVerify {
+        bloom,
+        red_verify: policy.map_or_else(RedVerify::default, |policy| policy.red_verify),
+    });
 }
 
 /// Record a cross-member declared-surface overlap the seal door observed
@@ -648,13 +657,13 @@ pub(super) fn reduce_supersede(
     for member in successor.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
-    record_admitted_line(successor_id, &catalog, &manifest, &mut effects);
+    record_admitted_line(successor_id, &catalog, &manifest, coordination_policy.as_ref(), &mut effects);
     let proven = enqueue_base_verify_if_needed(
         snapshot,
         successor.base(),
         &catalog,
         &manifest,
-        coordination_policy.is_some(),
+        coordination_policy.as_ref().is_some_and(CoordinationPolicy::coordinates),
         &mut effects,
     );
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —
@@ -969,8 +978,8 @@ mod tests {
     use crate::values::{
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy,
         Evidence, EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
-        ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible, VerificationMode,
-        VerifyGateSet,
+        RedVerify, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
+        VerificationMode, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -1006,8 +1015,29 @@ mod tests {
             movement_budget: 1,
             reservation_millis: 1_000,
             coalesce_millis: None,
+            red_verify: RedVerify::Refine,
             host_class: String::from("test"),
         }
+    }
+
+    /// A policy that coordinates nothing: one physical run per member, no
+    /// partial head. All it states is the red-verify disposition.
+    fn disposition_only_policy() -> CoordinationPolicy {
+        CoordinationPolicy {
+            verification: VerificationMode::Standalone,
+            eager_integration: false,
+            max_run_members: 1,
+            max_serial_requests: 1,
+            ..coordinated_policy()
+        }
+    }
+
+    fn seal_under(policy: &CoordinationPolicy, revision: u8) -> (BloomSpec, ResolvedConfigs) {
+        let mut configs = compiled_resolved();
+        configs.insert(policy.address(), CoordinationPolicy::NAME, to_vec(policy).expect("policy encodes"), None);
+        let mut draft = draft(revision);
+        draft.configs.insert::<CoordinationPolicy>(policy.address());
+        (draft.seal(), configs)
     }
 
     fn coordinated_seal(revision: u8, base: Digest, workpiece: &str) -> (BloomSpec, ResolvedConfigs) {
@@ -2083,6 +2113,60 @@ mod tests {
         assert!(matches!(decisions.outcome, Outcome::Sealed(_)));
         assert!(decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })));
         assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+    }
+
+    // The plausible bug: every valid policy installs coordination state, so a
+    // bloom that sealed one only to state `RedVerify::Refine` is routed through
+    // the shared-run machinery — where a standalone red verdict comes back
+    // unattributed and the repair lap the disposition selects never happens.
+    #[test]
+    fn a_policy_that_coordinates_nothing_seals_its_disposition_and_no_state() {
+        let (spec, configs) = seal_under(&disposition_only_policy(), 1);
+        let decided = reduce(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &event("disposition-only-seal", Fact::Seal(spec.clone())),
+            &configs,
+            &SpendWindow::default(),
+        );
+
+        assert_eq!(decided.outcome, Outcome::Sealed(spec.id()));
+        assert!(
+            decided
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::RecordRedVerify { red_verify, .. } if *red_verify == RedVerify::Refine)),
+            "the disposition the policy was sealed for reaches the record: {:?}",
+            decided.effects,
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })),
+            "a policy that coordinates nothing carries no state: {:?}",
+            decided.effects,
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "so the member enters Construct the way an unpoliced bloom's does: {:?}",
+            decided.effects,
+        );
+    }
+
+    // The other half: a policy that does coordinate still installs its state,
+    // so the predicate cannot be read as "no policy ever coordinates".
+    #[test]
+    fn a_coordinating_policy_still_seals_its_state() {
+        let (spec, configs) = seal_under(&coordinated_policy(), 1);
+        let decided = reduce(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &event("coordinated-seal", Fact::Seal(spec)),
+            &configs,
+            &SpendWindow::default(),
+        );
+
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })),
+            "{:?}",
+            decided.effects,
+        );
     }
 
     #[test]

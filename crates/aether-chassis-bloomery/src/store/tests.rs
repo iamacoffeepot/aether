@@ -9,8 +9,9 @@
 
 use super::commission::{CommissionBackend, RevisionEvidence};
 use super::runtime::{
-    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, JournalWrite, OrderLifecycle, OutstandingOrder,
-    ProofFactWrite, RecordOutcome, ScopeRunOpen, SealOutcome, SqliteStore, StoreBackend,
+    AppendOutcome, CANDIDATE_HASH_OCCASION_SEAL, CommitOutcome, IntakeRefusalRow, JournalWrite, OrderLifecycle,
+    OutstandingOrder, ProofFactWrite, RecordOutcome, SCHEMA_VERSION, ScopeRunOpen, SealOutcome, SqliteStore,
+    StoreBackend,
 };
 use aether_bloomery::persisted::DECISIONS;
 use aether_bloomery::{
@@ -18,6 +19,20 @@ use aether_bloomery::{
     Statement, Topic, ViewDocument, WorkpieceId, decode_row, encode_row,
 };
 use aether_data::Kind;
+
+/// Assert an opened store is stamped at the version this binary writes.
+///
+/// Every migration test ends this way — the point of a migration is that the
+/// store arrives at the current schema — so the assertion is named once rather
+/// than spelled out, and pinned to the const rather than to a literal that
+/// every bump would have to chase.
+fn assert_stamped_current(store: &SqliteStore) {
+    assert_eq!(
+        store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),
+        SCHEMA_VERSION,
+        "the open stamps the current schema",
+    );
+}
 
 fn memory() -> SqliteStore {
     SqliteStore::open(":memory:").unwrap()
@@ -1537,6 +1552,64 @@ fn list_live_orders_includes_a_bloom_less_base_verify_and_drops_submit_intents()
 }
 
 #[test]
+fn a_cancelled_order_leaves_the_board_but_stays_ignored() {
+    // A doomed lane is dropped without faulting it: the order is gone from the
+    // live set, the cancellation is recorded, and a later lookup finds nothing
+    // to admit.
+    let mut store = memory();
+    store.record_order(&order("dispatch-9")).unwrap();
+    assert!(store.cancel_order("dispatch-9", "doomed lane", "eve").unwrap());
+    assert!(store.lookup_order("dispatch-9").unwrap().is_none(), "the board no longer holds the nonce");
+    assert!(store.is_order_cancelled("dispatch-9").unwrap(), "the dispatch entry is marked cancelled");
+    assert!(store.list_live_orders().unwrap().is_empty());
+    assert!(!store.cancel_order("dispatch-unknown", "doomed lane", "eve").unwrap());
+    assert!(store.is_order_cancelled("dispatch-unknown").unwrap());
+}
+
+fn refusal_against(placed: &OutstandingOrder, text: &str) -> IntakeRefusalRow {
+    IntakeRefusalRow {
+        bloom: placed.bloom.clone(),
+        workpiece: placed.workpiece.clone(),
+        nonce: placed.nonce.clone(),
+        stage: placed.stage.clone(),
+        displayed_digest: placed.displayed_digest.clone(),
+        deadline_unix_millis: placed.deadline_unix_millis,
+        refusal: text.to_owned(),
+    }
+}
+
+#[test]
+fn a_refused_order_stays_live_and_carries_its_blocker_until_the_next_one_lands() {
+    // The join is the point: an intake refusal is not a row an operator goes
+    // looking for, it is an attribute of the order still sitting on the board.
+    // The refused order must stay live *and* name the block, a second refusal
+    // must replace the first rather than accumulate, and a consumed order must
+    // leave no stale blocker behind.
+    let mut store = memory();
+    let placed = order("dispatch-7");
+    store.record_order(&placed).unwrap();
+    store.record_intake_refusal(&refusal_against(&placed, "DigestMismatch { displayed, claimed }")).unwrap();
+
+    let held = store
+        .list_live_orders()
+        .unwrap()
+        .into_iter()
+        .find(|order| order.nonce == "dispatch-7")
+        .expect("the refused order stays live");
+    assert!(held.refusal.contains("DigestMismatch"), "the live order carries its blocker");
+    assert!(!held.displayed.is_empty(), "the displayed digest rides along");
+    assert!(held.deadline_unix_millis > 0, "the deadline rides along");
+
+    store.record_intake_refusal(&refusal_against(&placed, "OutOfLineStage(Study)")).unwrap();
+    let live = store.list_live_orders().unwrap();
+    assert_eq!(live.len(), 1, "one standing refusal per member, not a growing pile");
+    assert!(live[0].refusal.contains("OutOfLineStage"), "the later refusal replaces the earlier one");
+
+    store.clear_intake_refusal(&placed.bloom, &placed.workpiece).unwrap();
+    assert!(store.list_live_orders().unwrap()[0].refusal.is_empty(), "a consumed order leaves no blocker behind");
+}
+
+#[test]
 fn construct_session_records_and_supersedes_per_member() {
     // The handle a same-member refine resumes is keyed like findings, not like
     // a nonce — a later construct capture must replace the previous session
@@ -1713,7 +1786,7 @@ fn a_v11_store_gains_an_empty_scope_verify_ledger() {
         .query_row("SELECT count(*) FROM scope_verify_reports", [], |row| row.get(0))
         .expect("the ledger exists after migration");
     assert_eq!(reports, 0, "migration invents no reports");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
 }
 
 #[test]
@@ -1745,7 +1818,7 @@ fn a_v15_store_gains_an_empty_candidate_hash_journal() {
         .query_row("SELECT count(*) FROM candidate_hash", [], |row| row.get(0))
         .expect("the journal exists after migration");
     assert_eq!(hashes, 0, "migration invents no hashes");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
 }
 
 /// A workpiece shaped the way a `scope.fill` lane emits one: no predecessor,
@@ -1868,7 +1941,7 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v20 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
 
     let rows = store.list_scope_runs("wp-v20").unwrap();
     assert_eq!(rows.len(), 1);
@@ -1893,6 +1966,46 @@ fn a_v20_store_gains_an_unpinned_scope_run_column() {
     assert_eq!(rows.len(), 2);
     assert_eq!(rows[1].instructions.as_deref(), Some(b"pin".as_slice()));
     assert_eq!(rows[1].model_override.as_deref(), Some(b"override".as_slice()));
+}
+
+#[test]
+fn a_v26_store_gains_the_stopped_order_tables() {
+    // Version 27 adds operator_cancelled_orders and intake_refusals. A store
+    // already stamped 26 (every live journal before #5969) has neither, and
+    // both are on the boot path: intake reads the cancellation tombstone on
+    // every unknown nonce, and `GET /view` left-joins the refusals onto the
+    // live orders. Skipping the step the way 5945's did would fail the first
+    // upload and the first view with "no such table".
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("v26-stopped-orders.db").to_str().unwrap().to_owned();
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE journal (
+             sequence        INTEGER PRIMARY KEY AUTOINCREMENT,
+             idempotency_key TEXT NOT NULL UNIQUE,
+             event           BLOB NOT NULL,
+             decisions       BLOB,
+             decider         TEXT,
+             decisions_schema TEXT
+         );
+         PRAGMA user_version = 26;",
+    )
+    .unwrap();
+    drop(conn);
+
+    let mut store = SqliteStore::open(&path).expect("a v26 store migrates");
+    assert_stamped_current(&store);
+
+    let placed = order("dispatch-v26");
+    store.record_order(&placed).unwrap();
+    store.record_intake_refusal(&refusal_against(&placed, "DigestMismatch { displayed, claimed }")).unwrap();
+    assert!(
+        store.list_live_orders().unwrap()[0].refusal.contains("DigestMismatch"),
+        "the migrated store joins a refusal onto its live order"
+    );
+
+    assert!(store.cancel_order("dispatch-v26", "doomed lane", "eve").unwrap());
+    assert!(store.is_order_cancelled("dispatch-v26").unwrap(), "the migrated store holds the cancellation tombstone");
 }
 
 #[test]
@@ -1954,7 +2067,7 @@ fn a_v25_store_gains_a_nullable_scope_run_seat_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v25 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
 
     let rows = store.list_scope_runs("wp-v25").unwrap();
     assert_eq!(rows.len(), 1);
@@ -2039,7 +2152,7 @@ fn a_v21_store_gains_a_nullable_prompt_manifest_column() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v21 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
     let found = store.lookup_order("n-v21").unwrap().expect("the pre-column row survives");
     assert!(found.prompt_manifest.is_none(), "migration invents no retained manifest");
 }
@@ -2106,7 +2219,7 @@ fn a_v22_store_gains_the_empty_shared_run_tables() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v22 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
     assert!(store.lookup_order("n-v22").unwrap().is_some(), "the pre-projection order row survives");
     for table in ["shared_runs", "shared_run_members", "shared_run_steps", "shared_member_verification_queue"] {
         assert_eq!(
@@ -2129,7 +2242,7 @@ mod schema_digest_migration {
     use aether_data::Kind;
     use aether_data::wire::to_vec;
 
-    use super::{SqliteStore, StoreBackend, write};
+    use super::{SqliteStore, StoreBackend, assert_stamped_current, write};
     use crate::store::{StoreConfigError, resolve_config};
 
     fn v16_journal_and_config() -> &'static str {
@@ -2184,7 +2297,7 @@ mod schema_digest_migration {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v16 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+        assert_stamped_current(&store);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 2);
         let v2 = journal.iter().find(|row| row.idempotency_key == "v2").unwrap();
@@ -2332,7 +2445,7 @@ fn a_null_stamped_outbox_row_still_decodes_positionally_after_migration() {
     drop(conn);
 
     let mut store = SqliteStore::open(&path).expect("a v17 store migrates");
-    assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+    assert_stamped_current(&store);
     let entries = store.drain_outbox(Some(Topic::ViewDocument.as_str())).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].payload_schema, None, "migration invents no stamp");
@@ -2360,7 +2473,7 @@ mod outbox_results {
     use aether_bloomery::{Decisions, Digest, Event, Fact, IdempotencyKey, Outcome};
     use aether_data::wire::to_vec;
 
-    use super::{SqliteStore, StoreBackend, memory, write};
+    use super::{SqliteStore, StoreBackend, assert_stamped_current, memory, write};
 
     fn observe(key: &str, head: u8) -> Event {
         Event {
@@ -2576,7 +2689,7 @@ mod outbox_results {
         drop(conn);
 
         let mut store = SqliteStore::open(&path).expect("a v18 store migrates");
-        assert_eq!(store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(), 26);
+        assert_stamped_current(&store);
         let journal = store.replay_journal().unwrap();
         assert_eq!(journal.len(), 1);
         assert_eq!(journal[0].idempotency_key, "v18-journal");
@@ -2677,7 +2790,7 @@ fn check_store_refuses_a_current_stamp_missing_the_scope_run_seat_column() {
     store.conn.execute_batch("ALTER TABLE scope_runs DROP COLUMN model_override;").unwrap();
     assert_eq!(
         store.conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0)).unwrap(),
-        26,
+        SCHEMA_VERSION,
         "the copy is stamped current, so open performs no repair"
     );
     drop(store);

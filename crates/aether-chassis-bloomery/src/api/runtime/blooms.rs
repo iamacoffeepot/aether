@@ -5,7 +5,9 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    Adjudication, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
+    Adjudication, AdminCancelLaneRequest, AdminCandidate, AdminDropLapRequest, AdminLaneCancel, AdminLapDrop,
+    AdminNote, AdminRerun, AdminRerunRequest, AdminSessionRequest, AdminSetCandidateRequest, AdminWaiveRequest,
+    AdminWaiver, Admit, AdmitResult, AuthorityDoor, BloomId, BloomView, CandidateRef, Digest, Disposition, Event,
     Evidence, EvidenceKind, Fact, IdempotencyKey, OperatorHold, OperatorRepair, Outcome, Query, QueryResult,
     QuerySelector, StageId, Statement, SuppressionDisposition, SurfacePathRequest, ViewDocument, WhyDocument,
     Withdrawal, WithdrawalCause, WorkpieceId, digest_of,
@@ -15,6 +17,7 @@ use aether_http::HttpServerResponse;
 use aether_substrate::actor::native::NativeCtx;
 
 use serde::Serialize;
+use serde::de::DeserializeOwned;
 
 use super::hex::{self, digest_from_hex, hex_encode};
 use super::response::{error_response, json};
@@ -207,15 +210,15 @@ impl ApiCapabilityState {
         })
     }
 
-    /// `POST /blooms/{id}/members/{workpiece}/repair` — hand the wedged
+    /// `POST /blooms/{id}/members/{workpiece}/repair` — hand a non-terminal
     /// `{workpiece}` the candidate the operator pushed to its candidate ref, and
     /// let the ordinary gates judge it (#4957).
     ///
     /// The path names the workpiece for the reason the grant body does: the
-    /// reducer refuses one that is not wedged, so a stale read cannot act. The
-    /// reserved composition id is accepted here too — a composition whose weave
-    /// repair wedged is repaired the same way a member is, by someone supplying
-    /// the candidate its own lane could not.
+    /// reducer judges the candidate now, and the wedge is no longer the gate.
+    /// The reserved composition id is accepted here too — a composition whose
+    /// weave repair wedged is repaired the same way a member is, by someone
+    /// supplying the candidate its own lane could not.
     ///
     /// Journal-first and gate-preserving: the appended fact is the whole effect,
     /// and the reducer re-enters the workpiece at `Verify`, so the mechanical
@@ -329,6 +332,197 @@ impl ApiCapabilityState {
             idempotency_key: IdempotencyKey(key),
             fact: Fact::MemberExecutorFault { bloom, workpiece: WorkpieceId(workpiece.to_owned()), stage, evidence },
         })
+    }
+
+    /// `POST /blooms/{id}/admin/enter` — take the `{id}` bloom out of the
+    /// machine's hands (ADR-0219).
+    ///
+    /// Journal-first like its siblings: the route appends `Fact::AdminEnter`
+    /// and nothing else. From there the reducer sets the session flag, raises
+    /// the ordinary operator brake beside it unless one is already up, and the
+    /// six repair doors below become admissible — while an executor fault
+    /// stops costing the bloom anything, which is what makes reading a broken
+    /// one free.
+    pub(super) fn admin_enter(id: &str, body: &[u8]) -> Routed {
+        Self::admin_session(id, body, "enter", |bloom, note| Fact::AdminEnter { bloom, note })
+    }
+
+    /// `POST /blooms/{id}/admin/exit` — hand the `{id}` bloom back (ADR-0219).
+    ///
+    /// The reducer clears the flag, releases the brake, re-derives every
+    /// dispatch the session swallowed from the cursor it is sitting at *now*,
+    /// and finishes the composite-gate join a waiver completed — the one thing
+    /// an ordinary release never owes, because a waived gate leaves no verdict
+    /// to arrive and resolve the fold.
+    pub(super) fn admin_exit(id: &str, body: &[u8]) -> Routed {
+        Self::admin_session(id, body, "exit", |bloom, note| Fact::AdminExit { bloom, note })
+    }
+
+    /// The shared body of the two session doors: parse, refuse a body that says
+    /// nothing, and admit the fact `edge` builds.
+    ///
+    /// Written once for the reason [`Self::brake`] is written once — the two
+    /// edges differ in exactly one expression — and the route name is threaded
+    /// into the default idempotency key so an enter and an exit stating
+    /// identical words stay distinct acts.
+    fn admin_session(id: &str, body: &[u8], route: &str, edge: impl FnOnce(BloomId, AdminNote) -> Fact) -> Routed {
+        let bloom = match digest_from_hex(id) {
+            Some(digest) => BloomId(digest),
+            None => return Routed::Reply(error_response(400, "bloom id is not a 32-byte hex bloom id")),
+        };
+        let request: AdminSessionRequest = match hex::from_slice(body) {
+            Ok(request) => request,
+            Err(error) => return Routed::Reply(error_response(400, &format!("invalid admin {route} body: {error}"))),
+        };
+        let AdminSessionRequest { reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let note = AdminNote { reason, operator };
+        let key = idempotency_key.unwrap_or_else(|| admin_key(route, bloom, digest_of(&note)));
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: edge(bloom, note) })
+    }
+
+    /// `POST /blooms/{id}/admin/cancel-lane` — stop one running dispatch
+    /// without charging anyone for it (ADR-0219).
+    ///
+    /// The nonce is forwarded rather than resolved here: the outstanding-order
+    /// registry lives in the store, and the executor drain that actually kills
+    /// the lane re-reads it there and refuses a nonce whose order belongs to
+    /// something other than the named bloom and workpiece. Checking it twice
+    /// against a read this route would have to defer for would not make the
+    /// kill any safer — the order can be consumed and re-minted between the two
+    /// reads either way.
+    pub(super) fn admin_cancel_lane(id: &str, body: &[u8]) -> Routed {
+        let (bloom, request) = match admin_body::<AdminCancelLaneRequest>(id, body, "cancel-lane") {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let AdminCancelLaneRequest { workpiece, nonce, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let cancel = AdminLaneCancel { workpiece, nonce, note: AdminNote { reason, operator } };
+        let key = idempotency_key.unwrap_or_else(|| admin_key("cancel-lane", bloom, digest_of(&cancel)));
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdminCancelLane { bloom, cancel } })
+    }
+
+    /// `POST /blooms/{id}/admin/set-candidate` — hand a workpiece a candidate
+    /// and let the ordinary gates judge it on exit (ADR-0219).
+    ///
+    /// The repair route's candidate resolution verbatim, including the derived
+    /// source's ref push and both correspondence rows; what it drops is the
+    /// wedged precondition, which is the whole point of the door.
+    pub(super) fn admin_set_candidate(&self, id: &str, body: &[u8]) -> Routed {
+        let (bloom, request) = match admin_body::<AdminSetCandidateRequest>(id, body, "set-candidate") {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let AdminSetCandidateRequest {
+            workpiece,
+            candidate,
+            from_commit,
+            from_worktree,
+            reason,
+            operator,
+            idempotency_key,
+        } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+        let resolved = match resolve_repair_candidate(self, candidate, from_commit, from_worktree) {
+            Ok(resolved) => resolved,
+            Err(response) => return Routed::Reply(response),
+        };
+
+        let set = AdminCandidate {
+            workpiece: workpiece.clone(),
+            candidate: resolved.candidate,
+            note: AdminNote { reason, operator },
+        };
+        let key = idempotency_key.unwrap_or_else(|| admin_key("set-candidate", bloom, digest_of(&set)));
+        let event = Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdminSetCandidate { bloom, set } };
+
+        #[cfg(feature = "github")]
+        if let Some(commit_hex) = resolved.publication {
+            return match to_vec(&event) {
+                Ok(bytes) => Routed::RepairAdmit {
+                    request: Admit { event: bytes },
+                    publication: Box::new(RepairPublication { bloom, workpiece: workpiece.0, commit_hex }),
+                },
+                Err(error) => Routed::Reply(error_response(500, &format!("event encode failed: {error}"))),
+            };
+        }
+        admit(&event)
+    }
+
+    /// `POST /blooms/{id}/admin/rerun` — run one stage again on the candidate
+    /// the workpiece already holds (ADR-0219).
+    pub(super) fn admin_rerun(id: &str, body: &[u8]) -> Routed {
+        let (bloom, request) = match admin_body::<AdminRerunRequest>(id, body, "rerun") {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let AdminRerunRequest { workpiece, stage, now, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let rerun = AdminRerun { workpiece, stage, now, note: AdminNote { reason, operator } };
+        let key = idempotency_key.unwrap_or_else(|| admin_key("rerun", bloom, digest_of(&rerun)));
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdminRerun { bloom, rerun } })
+    }
+
+    /// `POST /blooms/{id}/admin/waive` — void a red verdict's findings so the
+    /// gate counts as passed for landing (ADR-0219).
+    ///
+    /// The two things this route decides for itself are what it can see in the
+    /// request: a body that says nothing, and a waiver that names no finding.
+    /// Whether the named digests are findings *this bloom raised* is the
+    /// reducer's, because only the record knows.
+    pub(super) fn admin_waive(id: &str, body: &[u8]) -> Routed {
+        let (bloom, request) = match admin_body::<AdminWaiveRequest>(id, body, "waive") {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let AdminWaiveRequest { gate, findings, acknowledged_unverified, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+        if findings.is_empty() {
+            return Routed::Reply(error_response(
+                422,
+                "a waiver must name the verdict findings it voids; there is no \"waive whatever is open\" spelling",
+            ));
+        }
+
+        let waiver = AdminWaiver { gate, findings, acknowledged_unverified, note: AdminNote { reason, operator } };
+        let key = idempotency_key.unwrap_or_else(|| admin_key("waive", bloom, digest_of(&waiver)));
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdminWaive { bloom, waiver } })
+    }
+
+    /// `POST /blooms/{id}/admin/drop-lap` — discard a completed lap's captured
+    /// candidate (ADR-0219).
+    pub(super) fn admin_drop_lap(id: &str, body: &[u8]) -> Routed {
+        let (bloom, request) = match admin_body::<AdminDropLapRequest>(id, body, "drop-lap") {
+            Ok(parsed) => parsed,
+            Err(response) => return Routed::Reply(response),
+        };
+        let AdminDropLapRequest { workpiece, nonce, reason, operator, idempotency_key } = request;
+        if let Some(refusal) = unstated(&reason, &operator) {
+            return Routed::Reply(refusal);
+        }
+
+        let drop = AdminLapDrop { workpiece, nonce, note: AdminNote { reason, operator } };
+        let key = idempotency_key.unwrap_or_else(|| admin_key("drop-lap", bloom, digest_of(&drop)));
+
+        admit(&Event { idempotency_key: IdempotencyKey(key), fact: Fact::AdminDropLap { bloom, drop } })
     }
 
     /// `POST /blooms/{id}/hold` — freeze the `{id}` bloom's dispatch (#4976).
@@ -792,6 +986,30 @@ fn derive_repair_candidate(
     }
 }
 
+/// The bloom id and decoded body one admin act's route starts from, or the
+/// `400` the request earns.
+///
+/// Five of the six act routes open with exactly these two steps and differ only
+/// in the body type, so they share the parse rather than each spelling out the
+/// same two matches under a different route name.
+fn admin_body<T: DeserializeOwned>(id: &str, body: &[u8], route: &str) -> Result<(BloomId, T), HttpServerResponse> {
+    let Some(digest) = digest_from_hex(id) else {
+        return Err(error_response(400, "bloom id is not a 32-byte hex bloom id"));
+    };
+    hex::from_slice(body)
+        .map(|request| (BloomId(digest), request))
+        .map_err(|error| error_response(400, &format!("invalid admin {route} body: {error}")))
+}
+
+/// The default admit key one admin act resends under.
+///
+/// The route name is in the key alongside the request's own content digest, so
+/// two acts stating identical words at different doors — a cancel and a drop of
+/// the same nonce, say — stay distinct acts rather than deduplicating into one.
+fn admin_key(route: &str, bloom: BloomId, request: Digest) -> String {
+    format!("aether.bloomery.admin.{route}:{}:{}", hex_encode(bloom.0.as_bytes()), hex_encode(request.as_bytes()))
+}
+
 /// The `422` a manager-override body earns by saying nothing (#4957), or `None`
 /// when it states both.
 ///
@@ -864,15 +1082,18 @@ pub(super) fn query_response(
 ) -> HttpServerResponse {
     match result {
         QueryResult::Document { document } => match from_bytes::<ViewDocument>(&document) {
-            Ok(document) => json(
-                200,
-                &ViewWithDoctor {
-                    surface_alerts: surface_alerts(&document),
-                    document: &document,
-                    doctor,
-                    orders: order_alerts(orders),
-                },
-            ),
+            Ok(mut document) => {
+                overlay_intake_refusals(&mut document, orders);
+                json(
+                    200,
+                    &ViewWithDoctor {
+                        surface_alerts: surface_alerts(&document),
+                        document: &document,
+                        doctor,
+                        orders: order_alerts(orders),
+                    },
+                )
+            }
             Err(error) => error_response(500, &format!("view document decode failed: {error}")),
         },
         QueryResult::Bloom { view } => match from_bytes::<BloomView>(&view) {
@@ -927,13 +1148,18 @@ struct ViewWithDoctor<'a> {
 
 /// One live outstanding order flattened onto `/view`: which bloom (zero for a
 /// bloom-less workspace stage), which workpiece (empty for a bloom-wide or
-/// workspace stage), and which stage the host is actually running.
+/// workspace stage), which stage the host is actually running, the displayed
+/// digest the evidence must bind to, and the absolute deadline.
 #[derive(Serialize)]
 struct OrderAlert {
     nonce: String,
     bloom: Digest,
     workpiece: String,
     stage: StageId,
+    displayed: Digest,
+    deadline_unix_millis: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    blocker: Option<String>,
 }
 
 fn order_alerts(orders: &[LiveOrder]) -> Vec<OrderAlert> {
@@ -945,6 +1171,9 @@ fn order_alerts(orders: &[LiveOrder]) -> Vec<OrderAlert> {
                 bloom: Digest::from_slice(&order.bloom)?,
                 workpiece: order.workpiece.clone(),
                 stage: from_bytes(&order.stage).ok()?,
+                displayed: Digest::from_slice(&order.displayed).unwrap_or_else(|| Digest::from_bytes([0; 32])),
+                deadline_unix_millis: order.deadline_unix_millis,
+                blocker: (!order.refusal.is_empty()).then(|| order.refusal.clone()),
             })
         })
         .collect()
@@ -971,6 +1200,26 @@ struct SurfaceAlert<'a> {
     requests: u32,
     /// The requested paths, each with its one-line reason.
     paths: &'a [SurfacePathRequest],
+}
+
+/// Stamp each member carrying a live order with an intake refusal as blocked by
+/// it. The reducer projection knows nothing of the host-side refusal table, so
+/// the overlay joins the live orders (which already left-join the refusals) by
+/// bloom digest and workpiece.
+fn overlay_intake_refusals(document: &mut ViewDocument, orders: &[LiveOrder]) {
+    for bloom in &mut document.blooms {
+        let bloom_bytes = bloom.id.0.as_bytes();
+        for member in &mut bloom.members {
+            member.intake_refusal = orders
+                .iter()
+                .find(|order| {
+                    !order.refusal.is_empty()
+                        && order.bloom.as_slice() == bloom_bytes.as_slice()
+                        && order.workpiece == member.workpiece.0
+                })
+                .map(|order| order.refusal.clone());
+        }
+    }
 }
 
 /// Walk the decoded document for members awaiting a surface amendment, in
@@ -1133,6 +1382,9 @@ mod tests {
             bloom: vec![0; 32],
             workpiece: String::new(),
             stage: to_vec(&StageId::BaseVerify).unwrap(),
+            displayed: vec![1; 32],
+            deadline_unix_millis: 1_700_000_000_000,
+            refusal: String::new(),
         }];
         let result = QueryResult::Document { document: to_vec(&document).unwrap() };
         let response = query_response(result, None, &orders);

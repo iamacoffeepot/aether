@@ -92,8 +92,34 @@ pub(super) fn reduce_withdraw(
     let mut leaving: Vec<Withdrawal> = withdrawals.to_vec();
     leaving.extend(stranded.into_iter().map(|(dependent, ancestor)| cascaded(withdrawals, dependent, &ancestor)));
 
+    depart(snapshot, record, bloom, leaving, Vec::new())
+}
+
+/// The effects and outcome of `leaving` this bloom, appended to `effects`.
+///
+/// Every member exit runs through here — an operator's `xtask bloom withdraw`,
+/// a cascaded dependent, and the low-tolerance ejections a red or
+/// wall-clock-killed `Verify` produces (ADR-0218 §Amendment: low tolerance).
+/// One definition, because the interesting half is not the per-member effect
+/// quad but what the *bloom* owes afterwards: an emptied bloom must stop
+/// holding the one-active-bloom-per-mainline slot, and an exit that completed
+/// the claim set must dispatch the fold nothing else will. A second copy of
+/// that reasoning is a bloom that lands under one door and hangs under the
+/// other.
+///
+/// The refusal ladder is deliberately *not* here. An operator request is
+/// checked against [`named_refusal`] because an operator can name a member that
+/// is resolved, already gone, or not in the bloom at all; a reducer-authored
+/// ejection is derived from a cursor the caller has already validated, so it
+/// has nothing left to refuse.
+pub(super) fn depart(
+    snapshot: &Snapshot,
+    record: &BloomRecord,
+    bloom: &BloomId,
+    leaving: Vec<Withdrawal>,
+    mut effects: Vec<Decision>,
+) -> Decisions {
     let departed: BTreeSet<&WorkpieceId> = leaving.iter().map(|withdrawal| &withdrawal.workpiece).collect();
-    let mut effects = Vec::new();
     for withdrawal in &leaving {
         let workpiece = withdrawal.workpiece.clone();
         effects.push(Decision::RecordWithdrawal { bloom: *bloom, withdrawal: withdrawal.clone() });

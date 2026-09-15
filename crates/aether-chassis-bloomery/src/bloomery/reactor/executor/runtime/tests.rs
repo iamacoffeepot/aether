@@ -18,11 +18,12 @@ use aether_bloomery::testing::digest;
 use aether_bloomery::{
     Admit, AgentSelection, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId, CandidateRef,
     Conclusion, ConfigKind, ConfigRegistry, Digest, DispatchPayload, EvidenceRef, ExecutionStatus, ExecutorBackend,
-    Fact, Harness, LaneObservation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce, Observation, PathOrigin,
-    Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass, SCOPE_REVISION_SCHEMA,
-    SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence, SourceSnapshot,
-    StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic, Transformation, VerifyFailure,
-    VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description, split_lane_identity,
+    Fact, Harness, LaneObservation, MembershipMutation, ModelOverride, ModelProcessInstructions, NamedPath, Nonce,
+    Observation, PathOrigin, Provenance, RETROSPECT_READ_COMMAND, ReasoningEffort, RedispatchPayload, ReviewPass,
+    SCOPE_REVISION_SCHEMA, SCOPE_VERIFY_SCHEMA, ScopeRevision, ScopeRouting, ScopeVerifyInput, SharedCorrespondence,
+    SourceSnapshot, StageCatalog, StageId, StageOverride, Statement, StudyPayload, TimeoutRecord, Topic,
+    Transformation, VerifyFailure, VerifyFailureSet, WorkHandle, WorkOrder, WorkpieceId, pin_workpiece_description,
+    split_lane_identity,
 };
 use aether_bloomery_github::fixture::FakeGithub;
 use aether_bloomery_github::{
@@ -38,10 +39,11 @@ use super::scope_freeze::ScopeFreeze;
 use super::strand::{readopt_stranded_dispatches, retire_accounted_orders};
 use super::{
     BACKOFF_CAP, BaseSnapshotPort, COMPOSITION_REFINE_ORDER, CandidatePush, Clocks, ExecutorReactorState,
-    GitCandidatePush, NameEvidenceClaims, Stores, TickClock, TrackedHandle, admitted_candidate_pushes, backoff_delay,
-    candidate_push_at, default_candidate_push, dispatch_origin, drain_and_cancel, fold_drain_backoff, is_silent,
-    is_stale, journal_publications, next_backoff, observe_heartbeat, seed_dispatches, seed_tracked,
-    select_stale_handles, silence_from, timeout_verdict,
+    GitCandidatePush, NameEvidenceClaims, Stores, TerminationCause, TickClock, TrackedHandle,
+    admitted_candidate_pushes, backoff_delay, candidate_push_at, default_candidate_push, dispatch_origin,
+    drain_and_cancel, drain_and_cancel_lane, fold_drain_backoff, is_silent, is_stale, journal_publications,
+    next_backoff, observe_heartbeat, seed_dispatches, seed_tracked, select_stale_handles, silence_from,
+    timeout_verdict,
 };
 use crate::artifacts::{ArtifactsCapabilityState, GetResult};
 use crate::bloomery::executor::local::testing::FixedRunner;
@@ -535,8 +537,9 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
         configs: authorized_over(&mut store, ConfigRegistry::default()),
     };
     // A queued review belongs to a live bloom; the drain reads its membership to
-    // tell a live plan from a retired one (#4640).
-    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned()]).unwrap();
+    // tell a live plan from a retired one (#4640), and reads it per member to
+    // tell a live work order from a withdrawn member's (bloom 0f16e207).
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-a".to_owned(), "wp-b".to_owned()]).unwrap();
     let sequence = store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
 
     let (handles, ack_through, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
@@ -561,6 +564,64 @@ fn drain_and_dispatch_aggregate_submits_a_bloom_level_review_order() {
     assert_eq!(stored.workpiece, "", "a bloom-level order has no member axis");
     assert_eq!(stored.displayed_digest, digest(30).as_bytes().to_vec(), "the verdict must bind the integrated tree");
     assert_eq!(stored.bloom, bloom.0.as_bytes().to_vec());
+}
+
+// Tripwire (bloom 0f16e207): a `dispatch_description` row is written at
+// dispatch and never removed, so the roster still names a member an operator
+// withdrew mid-walk. That member produced no claim and contributed no candidate
+// to the fold, so rendering its `## Task` section asks the critic to judge work
+// that is provably absent — which is exactly what it did, failing the
+// composition for three orders that were never in the tree. The withdrawal's
+// `ReleaseMembership` is what the composition reads: no `active_membership`
+// row, no obligation.
+#[test]
+fn a_withdrawn_members_work_order_is_not_an_obligation_of_the_reviewed_fold() {
+    let mut store = SqliteStore::open(":memory:").unwrap();
+    let backend = Arc::new(CapturingBackend::default());
+    let shell = ExecutorShell::new(Arc::clone(&backend));
+    let bloom = BloomId(digest(1));
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-live", "build the widget").unwrap();
+    store.record_dispatch_description(bloom.0.as_bytes(), "wp-gone", "wire the widget").unwrap();
+    let payload = AggregateReviewPayload {
+        profile: StageCatalog::profile_of(StageId::AggregateReview),
+        bloom: bloom.0,
+        transformation: Transformation::for_aggregate_review(
+            &StageCatalog::binding_of(StageId::AggregateReview),
+            digest(30),
+            digest(40),
+            digest(50),
+        ),
+        pass: ReviewPass::Full,
+        configs: authorized_over(&mut store, ConfigRegistry::default()),
+    };
+    // Both sealed; then the withdrawal releases one member's row while the
+    // bloom keeps walking, exactly as `Decision::ReleaseMembership` projects.
+    store.claim_seal(payload.bloom.as_bytes(), &["wp-live".to_owned(), "wp-gone".to_owned()]).unwrap();
+    store
+        .commit(
+            &JournalWrite {
+                idempotency_key: "withdraw-wp-gone",
+                event: b"withdrawn",
+                decisions: b"decided",
+                decider: "test-build",
+            },
+            &[MembershipMutation { workpiece: "wp-gone".to_owned(), bloom: bloom.0.as_bytes().to_vec() }],
+            &[],
+            &[],
+        )
+        .unwrap();
+    store.enqueue_topic(Topic::AggregateReview, &to_vec(&payload).unwrap(), None).unwrap();
+
+    let (handles, _ack, _transient) = drain_and_dispatch_aggregate(&mut store, &shell, NOW_UNIX_MILLIS).unwrap();
+    assert_eq!(handles.len(), 1);
+
+    let orders = backend.orders();
+    let description = orders[0].transformation.description.as_deref().unwrap();
+    assert!(description.contains("## Task — wp-live"), "the live member is still the critic's subject: {description}");
+    assert!(
+        !description.contains("wp-gone") && !description.contains("wire the widget"),
+        "a withdrawn member's work order must not be rendered as an obligation: {description}",
+    );
 }
 
 // ADR-0153 — the second aggregate roll is the delta-confirm: its prompt frames
@@ -1473,12 +1534,25 @@ fn a_timeout_is_an_executor_fault_on_every_dispatched_stage() {
         StageId::Study,
     ] {
         assert_eq!(
-            timeout_verdict(stage),
+            timeout_verdict(stage, TerminationCause::Deadline),
+            Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
+            "{stage:?} must expire on its wall clock with no invented verifier",
+        );
+        // Tripwire (ADR-0218 §Amendment: low tolerance): a lane the host
+        // stopped hearing from is not a lane that used its allowance, and the
+        // two must not share a verdict — one ejects the member and the other
+        // keeps its budget.
+        assert_eq!(
+            timeout_verdict(stage, TerminationCause::HeartbeatSilence),
             Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-            "{stage:?} must expire as a host fault with no invented verifier",
+            "{stage:?} must terminate a silent lane as a host fault",
         );
     }
-    assert_eq!(timeout_verdict(StageId::Integrate), None, "a stage no executor runs cannot expire");
+    assert_eq!(
+        timeout_verdict(StageId::Integrate, TerminationCause::Deadline),
+        None,
+        "a stage no executor runs cannot expire"
+    );
 }
 
 #[test]
@@ -1506,8 +1580,8 @@ fn an_overdue_scope_order_terminates_once() {
     let verdict = rows.iter().find(|row| row.kind == "verdict" && row.ordinal == opened.ordinal);
     assert_eq!(
         verdict.and_then(|row| row.verdict.as_deref()),
-        Some("ExecutorFault"),
-        "the fault is recorded on the run ledger",
+        Some("DeadlineExpiry"),
+        "the expiry is recorded on the run ledger",
     );
     assert!(
         tick(&mut store, &shell, &mut tracked, AT_THE_DEADLINE + 60_000).is_empty(),
@@ -1534,13 +1608,13 @@ fn an_order_that_outlives_its_sealed_limit_is_cancelled_as_a_host_fault() {
 
     assert_eq!(backend.cancelled(), vec![nonce], "the hung run is reclaimed");
     assert_eq!(
-        timeout_verdict(StageId::Construct),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "the producer classifies the deadline as a host fault",
+        timeout_verdict(StageId::Construct, TerminationCause::Deadline),
+        Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
+        "the producer classifies the deadline as an expiry, not a host fault",
     );
-    // Intake admits a dispatched member-stage ExecutorFault as a member
-    // machinery fault and redispatches the cancelled order. The cancel and
-    // the verdict are this test's surface; admission is not.
+    // Intake admits a dispatched member-stage expiry as a member machinery
+    // fact and redispatches the cancelled order. The cancel and the verdict
+    // are this test's surface; admission is not.
     let _ = admits;
 }
 
@@ -1647,13 +1721,13 @@ fn a_restart_neither_extends_nor_resets_a_deadline() {
     assert!(tracked.is_empty(), "the consumed order is no longer tracked");
     assert_eq!(admits.len(), 1, "the expired order admits a host fault rather than deferring");
     match from_bytes::<aether_bloomery::Event>(&admits[0].event).unwrap().fact {
-        Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
+        Fact::MemberDeadlineExpired { bloom, workpiece, stage, evidence } => {
             assert_eq!(bloom, BloomId(digest(1)));
             assert_eq!(workpiece.0, "wp-hung");
             assert_eq!(stage, StageId::Construct);
             assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
         }
-        other => panic!("expected a Fact::MemberExecutorFault, got {other:?}"),
+        other => panic!("expected a Fact::MemberDeadlineExpired, got {other:?}"),
     }
 
     assert!(
@@ -1688,11 +1762,12 @@ fn a_cancel_that_faults_leaves_the_expired_order_live_to_retry() {
 #[test]
 fn a_verify_timeout_names_no_verifier_it_cannot_know() {
     // A timeout cannot know which verifier would have failed, and inventing
-    // one spends a repair roll. ExecutorFault carries the empty set; that is
-    // the producer contract, independent of whether intake yet admits it.
+    // one spends a repair roll. The expiry verdict carries the empty set; that
+    // is the producer contract, independent of what the reducer then does with
+    // the member (ADR-0218 §Amendment: low tolerance).
     assert_eq!(
-        timeout_verdict(StageId::Verify),
-        Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
+        timeout_verdict(StageId::Verify, TerminationCause::Deadline),
+        Some((StageVerdict::DeadlineExpiry, VerifyFailureSet::EMPTY)),
         "a Verify deadline names no verifier and is not a candidate failure",
     );
 }
@@ -1889,9 +1964,9 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     assert_eq!(store.list_outstanding_nonces().unwrap().len(), 2, "both orders survive the blip");
 
     // The transport recovers on the next tick: the finished lane admits its own
-    // passing verdict, and only the genuinely silent one times out — as the
-    // member machinery fault #5091 admits, not a failing attempt that would
-    // spend the work budget.
+    // passing verdict, and only the order still running past its deadline
+    // expires — as the member-stage expiry the sweep admits, not a failing
+    // attempt that would spend the work budget.
     let admits = tick(&mut store, &working, &mut tracked, AT_THE_DEADLINE);
 
     let mut passed = false;
@@ -1899,17 +1974,17 @@ fn a_cycle_that_faulted_partway_does_not_expire_the_handles_it_never_inspected()
     for admit in &admits {
         match from_bytes::<aether_bloomery::Event>(&admit.event).unwrap().fact {
             Fact::AttemptCompleted { passed: true, .. } => passed = true,
-            Fact::MemberExecutorFault { workpiece, stage, evidence, .. } => {
+            Fact::MemberDeadlineExpired { workpiece, stage, evidence, .. } => {
                 assert_eq!(workpiece.0, "wp-silent");
                 assert_eq!(stage, StageId::Construct);
                 assert_eq!(evidence.kind, aether_bloomery::EvidenceKind::ExecutorFault);
                 silent_fault = true;
             }
-            other => panic!("expected a passing attempt or a silent-order machinery fault, got {other:?}"),
+            other => panic!("expected a passing attempt or an expired-order fact, got {other:?}"),
         }
     }
     assert!(passed, "the finished lane keeps its own verdict");
-    assert!(silent_fault, "the silent timeout is a host fault, not a second attempt");
+    assert!(silent_fault, "the overdue order expires, rather than admitting a second attempt");
     assert_eq!(admits.len(), 2);
 }
 
@@ -3539,6 +3614,7 @@ fn an_unconfigured_shell_refuses_actions_lanes_naming_the_missing_knobs() {
         prompt_manifest: None,
         physical_run: None,
         release_physical_run: true,
+        selected_gates: Vec::new(),
     };
     let refusal = shell.submit(&order).expect_err("a verify lane routes to Actions, which is unconfigured");
     let rendered = refusal.to_string();
@@ -3566,6 +3642,7 @@ fn an_unconfigured_actions_refusal_is_permanent_so_the_drain_parks_it() {
             prompt_manifest: None,
             physical_run: None,
             release_physical_run: true,
+            selected_gates: Vec::new(),
         })
         .expect_err("the stub refuses every submit");
 
@@ -4042,9 +4119,9 @@ fn progress_extends_only_the_silence_window() {
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + 2 * SILENCE_MILLIS);
     assert_eq!(backend.cancelled(), vec![nonce], "the same stamp left to go quiet reaches the threshold");
     assert_eq!(
-        timeout_verdict(StageId::Construct),
+        timeout_verdict(StageId::Construct, TerminationCause::HeartbeatSilence),
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "silence uses the same host-fault verdict a deadline does",
+        "silence keeps the host-fault verdict",
     );
 }
 
@@ -4146,12 +4223,13 @@ fn a_duplicate_silence_tick_cancels_once() {
 }
 
 #[test]
-fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
-    // #5091 owns the machinery counter; this issue only reports the host
-    // observation through the deadline reaper's existing failed-attempt
-    // admission. A silence fault must therefore be the same verdict a
-    // timeout is — so when #5091 remounts the classification, both causes
-    // move together — and must not invent a second retry authority here.
+fn a_silence_fault_reports_a_host_fault_where_a_timeout_reports_an_expiry() {
+    // A silent lane and an expired one share the whole cancel → timeout-record
+    // → intake path and differ in exactly one place: the verdict
+    // (ADR-0218 §Amendment: low tolerance). A lane that used its full sealed
+    // allowance has answered about its own work and its member is ejected; a
+    // lane the host stopped hearing from has not, and keeps its budget. Neither
+    // invents a second retry authority here.
     let mut store = SqliteStore::open(":memory:").unwrap();
     let backend = HeartbeatBackend::new();
     let shell = heartbeat_shell(&backend);
@@ -4161,9 +4239,9 @@ fn a_silence_fault_is_the_same_host_fault_a_timeout_is() {
 
     let _ = tick_silent(&mut store, &shell, &mut tracked, NOW_UNIX_MILLIS + SILENCE_MILLIS);
     assert_eq!(
-        timeout_verdict(StageId::Construct),
+        timeout_verdict(StageId::Construct, TerminationCause::HeartbeatSilence),
         Some((StageVerdict::ExecutorFault, VerifyFailureSet::EMPTY)),
-        "silence retries the same host-fault path a timeout would",
+        "silence stays the host-fault path",
     );
     assert_eq!(backend.cancelled(), vec![nonce]);
 }
@@ -4377,9 +4455,9 @@ mod offloaded_adapter_calls {
 
     use aether_bloomery::testing::digest;
     use aether_bloomery::{
-        BloomId, CancelDispatchPayload, ConfigRegistry, EvidenceRef, ExecutionStatus, ExecutorBackend,
-        MembershipMutation, Nonce, ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation, WorkHandle,
-        WorkOrder, WorkpieceId,
+        BloomId, CancelDispatchPayload, CancelLanePayload, ConfigRegistry, EvidenceRef, ExecutionStatus,
+        ExecutorBackend, MembershipMutation, Nonce, ObservedLaneWrites, StageCatalog, StageId, Topic, Transformation,
+        WorkHandle, WorkOrder, WorkpieceId,
     };
     use aether_data::wire::to_vec;
     use aether_data::{MailId, MailboxId, Source};
@@ -4390,8 +4468,8 @@ mod offloaded_adapter_calls {
     use super::super::offload::{AdapterOffload, MAX_IN_FLIGHT};
     use super::{
         CandidatePush, CapturingBackend, NOW_UNIX_MILLIS, NameEvidenceClaims, RecordingPush, Stores, drain_and_cancel,
-        drain_and_dispatch, drain_and_dispatch_aggregate_verify, enqueue_aggregate_verify, enqueue_construct_dispatch,
-        pull_and_admit, tick_clock_at, track,
+        drain_and_cancel_lane, drain_and_dispatch, drain_and_dispatch_aggregate_verify, enqueue_aggregate_verify,
+        enqueue_construct_dispatch, pull_and_admit, tick_clock_at, track,
     };
     use crate::bloomery::outbox::TopicOutbox;
     use crate::bloomery::{ExecutorPort, ExecutorPortError, ExecutorShell, Settled};
@@ -4671,6 +4749,54 @@ mod offloaded_adapter_calls {
             lifecycle: OrderLifecycle::Submitted,
             prompt_manifest: None,
         }
+    }
+
+    /// An admin lane cancel must settle whether or not the lane is still there,
+    /// and must never reach past the one nonce it names (ADR-0219).
+    ///
+    /// Both halves come from the live incident. A model process that died
+    /// without writing its evidence leaves an order the board still lists and a
+    /// lane that is already gone; a cancel that stopped its ack prefix on the
+    /// missing handle would re-drive that entry every tick forever, and the
+    /// operator would be told the act succeeded while nothing settled. And the
+    /// nonce is what the operator read off a board — if it has since been
+    /// consumed and re-minted for a sibling, cancelling on the nonce alone
+    /// would stop that sibling's lane instead.
+    #[test]
+    fn an_admin_lane_cancel_settles_a_gone_lane_and_spares_a_sibling() {
+        let mut store = SqliteStore::open(":memory:").unwrap();
+        let bloom = BloomId(digest(1));
+        let backend = Arc::new(CapturingBackend::default());
+        let shell = ExecutorShell::new(Arc::clone(&backend));
+
+        store.record_order(&live_order("n-live", bloom, "wp-live", u64::MAX / 2)).unwrap();
+        for (nonce, workpiece) in [("n-gone", "wp-gone"), ("n-live", "wp-typo")] {
+            store
+                .enqueue_topic(
+                    Topic::CancelLane,
+                    &to_vec(&CancelLanePayload {
+                        bloom: bloom.0,
+                        workpiece: WorkpieceId(workpiece.to_owned()),
+                        nonce: nonce.to_owned(),
+                    })
+                    .unwrap(),
+                    None,
+                )
+                .unwrap();
+        }
+
+        let acked = drain_and_cancel_lane(&mut store, &shell).unwrap();
+
+        assert!(acked.is_some(), "both entries settle rather than re-driving a lane nobody can reach");
+        assert!(
+            backend.cancelled().is_empty(),
+            "neither a gone order nor a sibling's is killed, got {:?}",
+            backend.cancelled(),
+        );
+        assert!(
+            store.lookup_order("n-live").unwrap().is_some(),
+            "the sibling's order is still outstanding: a mistyped nonce settles nothing",
+        );
     }
 
     /// The remaining #5564 failure: a submit a worker holds must not count as a

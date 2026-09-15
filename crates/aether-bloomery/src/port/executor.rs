@@ -21,8 +21,8 @@ use alloc::vec::Vec;
 use crate::digest::Digest;
 use crate::ids::Nonce;
 use crate::values::{
-    CandidateRef, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest, SurfaceRequest,
-    Transformation, VerifyFailureSet,
+    CandidateRef, CarriedCoverage, CompositionParents, RetrospectClaim, StudyCall, StudyCost, SuppressionRequest,
+    SurfaceRequest, Transformation, VerifyFailureSet,
 };
 
 /// A fully-resolved unit of work to dispatch. The [`Transformation`] already
@@ -51,6 +51,21 @@ pub struct WorkOrder {
     pub physical_run: Option<Digest>,
     /// Release the retained physical lane after this order settles.
     pub release_physical_run: bool,
+    /// Gates this dispatch's umbrella narrows its fan-out to (ADR-0218
+    /// amendment) — the backend renders each as a `--gate` on the lane argv.
+    ///
+    /// Empty is the whole fan-out, which is what every dispatch but an
+    /// attribution probe names: a member Verify, a fold's aggregate verify and
+    /// a base run each answer a complete gate obligation. A probe asks one
+    /// check and reads one check, so running the rest buys minutes of clippy,
+    /// docs and test for a question none of them answers.
+    ///
+    /// Not a [`Transformation`] field: the selection is not a second sealed
+    /// fact a receipt could be checked against, it is the probe's own
+    /// `BatchCheck` restated for the lane. Derived at submit time from the
+    /// step's durable descriptor, it cannot disagree with the check the sealed
+    /// contract named — a stored copy could.
+    pub selected_gates: Vec<String>,
 }
 
 /// What `submit` returns and `cancel` / `inspect` / `stream_evidence` take.
@@ -255,6 +270,14 @@ pub struct LaneObservation {
     pub duration_millis: Option<u64>,
     /// Per-gate wall-clock receipts from `evidence.json` `gates`.
     pub gates: Vec<EvidenceGateTiming>,
+    /// The coverage claim a re-verify made about the gates it did *not* run,
+    /// from `evidence.json` `carried` (ADR-0200's 2026-09-15 amendment).
+    ///
+    /// `None` from a run that carried nothing, which is every first verify and
+    /// every lane whose host stated no carry. `Some` is a claim the admission
+    /// door judges against the shared delta table before the receipt stands:
+    /// an unsound claim is an incomplete receipt, not a pass.
+    pub carried: Option<CarriedCoverage>,
 }
 
 /// One umbrella member's wall-clock share, copied off `evidence.json`.

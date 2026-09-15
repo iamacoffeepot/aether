@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::Duration;
 
-use aether_bloomery::CoordinationPolicy;
+use aether_bloomery::{CoordinationPolicy, RedVerify, VerificationMode};
 use aether_chassis_bloomery::bloomery::mock_lane::LaneScript;
 
 use roots::FixtureRoots;
@@ -76,6 +76,10 @@ const POLL: Duration = Duration::from_millis(20);
 /// In-process socket read timeout, set well clear of the step budget so a slow
 /// tick reports the budget rather than an io timeout.
 const SOCKET_READ_TIMEOUT: Duration = Duration::from_mins(2);
+
+/// The execution class a harness-sealed policy names, and the class the cell
+/// configures its own host as, so a contextual proof's host binding resolves.
+const HARNESS_HOST_CLASS: &str = "harness";
 
 /// `GithubConnectionConfig::shared_fixture` is a process-global `OnceLock`.
 /// A second fixture-backend start in this process would share the first
@@ -367,6 +371,38 @@ impl HarnessBuilder {
         self
     }
 
+    /// Seal the opt-in repair-lap disposition ([`RedVerify::Refine`]) and
+    /// nothing else (ADR-0218 §Amendment: low tolerance).
+    ///
+    /// A bloom that seals no policy answers a red member `Verify` by ejecting
+    /// the member — the operator's standing instruction, and what a scenario
+    /// about anything other than the repair loop wants. A scenario whose
+    /// subject *is* that loop (the findings that steer the next construct, the
+    /// roll ledger, the wedge at the retry ceiling) needs the member to stay in
+    /// the line, and the disposition is only sealable through a
+    /// [`CoordinationPolicy`]. So this seals the smallest valid one: standalone
+    /// verification, no eager integration, one member to a run, no coalescing
+    /// hold. What changes against an unpoliced bloom is what a red `Verify`
+    /// does to its member; the rest of coordination is off.
+    ///
+    /// A scenario that wants shared verification *and* the repair loop states
+    /// both on its own policy through [`coordination`](Self::coordination).
+    #[must_use]
+    pub fn refining(self) -> Self {
+        self.coordination(CoordinationPolicy {
+            red_verify: RedVerify::Refine,
+            verification: VerificationMode::Standalone,
+            eager_integration: false,
+            max_run_members: 1,
+            max_serial_requests: 1,
+            max_attribution_probes: 0,
+            movement_budget: 0,
+            reservation_millis: 0,
+            host_class: HARNESS_HOST_CLASS.to_owned(),
+            coalesce_millis: Some(0),
+        })
+    }
+
     /// Cap local model-lane children (`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`).
     ///
     /// Unset keeps the compiled default. A scenario that splits model lanes from
@@ -458,6 +494,16 @@ impl FixtureHarness {
         Self { inner: HarnessBuilder::fixture().poll_interval_secs(poll_interval_secs).start(client_name) }
     }
 
+    /// Boot like [`start`](Self::start) over blooms that seal the opt-in
+    /// repair-lap disposition — see [`HarnessBuilder::refining`].
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    #[must_use]
+    pub fn start_refining(client_name: &str) -> Self {
+        Self { inner: HarnessBuilder::fixture().refining().start(client_name) }
+    }
+
     /// Boot like [`start`](Self::start) with the bloom-level reader enabled
     /// (ADR-0216 §4) — for a scenario whose subject is the read itself.
     ///
@@ -506,6 +552,16 @@ impl LaneHarness {
     #[must_use]
     pub fn start_with(script: &LaneScript, workpiece: &str) -> Self {
         Self { inner: HarnessBuilder::lane(script).workpiece(workpiece).start("lane-boundary-harness") }
+    }
+
+    /// [`start`](Self::start) over a bloom that seals the opt-in repair-lap
+    /// disposition — see [`HarnessBuilder::refining`].
+    ///
+    /// # Panics
+    /// As [`start`](Self::start).
+    #[must_use]
+    pub fn start_refining(script: &LaneScript) -> Self {
+        Self { inner: HarnessBuilder::lane(script).refining().start("lane-boundary-harness") }
     }
 
     /// [`start`](Self::start) over a bloom that seals a stage catalog binding

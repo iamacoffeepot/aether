@@ -55,6 +55,7 @@ pub struct NotifyReactorState {
     sink: Option<Arc<dyn WebhookSink>>,
     store: Option<SqliteStore>,
     milestones: bool,
+    progress: bool,
     control_mailbox: MailboxId,
     mailer: Arc<Mailer>,
     self_mailbox: MailboxId,
@@ -73,6 +74,7 @@ impl NotifyReactorState {
         sink: Option<Arc<dyn WebhookSink>>,
         store: Option<SqliteStore>,
         milestones: bool,
+        progress: bool,
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
     ) -> Self {
@@ -80,6 +82,7 @@ impl NotifyReactorState {
             sink,
             store,
             milestones,
+            progress,
             control_mailbox: <ControlCore as Addressable>::resolve(0, ()),
             mailer,
             self_mailbox,
@@ -97,10 +100,10 @@ pub struct Delivered {
     pub forgotten: u32,
     /// Keys recorded without posting because this was the first mount.
     pub seeded: u32,
-    /// Milestone keys recorded without posting because this coordinator has
-    /// not been asked for milestones. Recorded rather than skipped, so
-    /// enabling the knob starts the stream forward instead of replaying every
-    /// standing milestone at once.
+    /// Milestone and progress keys recorded without posting because this
+    /// coordinator has not been asked for them. Recorded rather than skipped,
+    /// so enabling either knob starts its stream forward instead of replaying
+    /// every standing key at once.
     pub suppressed: u32,
     /// Whether the pass stopped early on a failing endpoint. The unposted keys
     /// stay unrecorded, so the next tick re-derives and retries them.
@@ -116,11 +119,12 @@ pub const SEED_MARKER_KEY: &str = "aether.bloomery.notify.seeded";
 /// Post every condition in `view` the ledger has not already reported, and
 /// forget every recorded key whose condition has cleared.
 ///
-/// `milestones` selects the volume: `false` posts [`Volume::Loud`] events only,
-/// `true` posts those plus the quiet milestones. It gates the *POST*, never
-/// the ledger — a suppressed milestone is still recorded, so the knob changes
-/// what the channel says from now on and never replays what it stayed quiet
-/// about.
+/// `milestones` and `progress` select the volumes: `false` posts
+/// [`Volume::Loud`] events only, `true` posts those plus the quiet milestones
+/// and the step-by-step progress lines respectively. Each gates the *POST*,
+/// never the ledger — a suppressed key is still recorded, so either knob
+/// changes what the channel says from now on and never replays what it stayed
+/// quiet about.
 ///
 /// Stops at the first failing POST rather than running the whole set: a
 /// refusing or rate-limited endpoint refuses the next message too, and the
@@ -143,6 +147,7 @@ pub fn deliver(
     sink: &dyn WebhookSink,
     view: &ViewDocument,
     milestones: bool,
+    progress: bool,
     now_unix_millis: u64,
 ) -> rusqlite::Result<Delivered> {
     let events = notify_events(view);
@@ -163,7 +168,12 @@ pub fn deliver(
     }
 
     for event in events.iter().filter(|event| !recorded.iter().any(|key| key == &event.key)) {
-        if event.volume == Volume::Milestone && !milestones {
+        let gated = match event.volume {
+            Volume::Loud => false,
+            Volume::Milestone => !milestones,
+            Volume::Progress => !progress,
+        };
+        if gated {
             store.record_notification(&event.key, now_unix_millis)?;
             report.suppressed += 1;
             continue;
@@ -218,6 +228,7 @@ impl NativeActor for NotifyReactorCapability {
                 sink: None,
                 store: None,
                 milestones: config.milestones,
+                progress: config.progress,
                 control_mailbox,
                 mailer,
                 self_mailbox,
@@ -239,12 +250,14 @@ impl NativeActor for NotifyReactorCapability {
             target: "aether_chassis_bloomery::notify",
             poll_interval_secs = config.poll_interval_secs,
             milestones = config.milestones,
+            progress = config.progress,
             "notification reactor mounted; posting transitions to the configured webhook",
         );
         Ok(NotifyReactorState {
             sink: Some(sink),
             store: Some(store),
             milestones: config.milestones,
+            progress: config.progress,
             control_mailbox,
             mailer,
             self_mailbox,
@@ -283,6 +296,7 @@ impl NativeActor for NotifyReactorCapability {
             return;
         };
         let milestones = state.milestones;
+        let progress = state.progress;
         let Some(store) = state.store.as_mut() else {
             return;
         };
@@ -310,7 +324,7 @@ impl NativeActor for NotifyReactorCapability {
             return;
         };
 
-        match deliver(store, sink.as_ref(), &view, milestones, now_unix_millis()) {
+        match deliver(store, sink.as_ref(), &view, milestones, progress, now_unix_millis()) {
             Ok(report) if report.posted > 0 || report.forgotten > 0 || report.seeded > 0 || report.suppressed > 0 => {
                 tracing::info!(
                     target: "aether_chassis_bloomery::notify",
