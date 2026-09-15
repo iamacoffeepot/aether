@@ -212,9 +212,10 @@ fn seal_proposal(
 /// short-circuit this copies. Returns whether the base is already green, which
 /// is what ready entry dispatches consult.
 ///
-/// Coordinated blooms accept a green receipt when its tree is the tree this
-/// checkout already resolves to. A host receipt that spelled that identity as
-/// `tree: base` matches through the same rule.
+/// Coordinated blooms refuse a green checkout-as-tree receipt (`tree == base`)
+/// unless a real tree for that base is already on record under the same gate
+/// set; their immutable contexts require the exact tree a host receipt binds,
+/// so a legacy receipt refreshes once through a fresh `verify.base`.
 fn enqueue_base_verify_if_needed(
     snapshot: &Snapshot,
     base: Digest,
@@ -231,9 +232,14 @@ fn enqueue_base_verify_if_needed(
         if !require_exact_tree {
             return true;
         }
-        let resolved = snapshot.base_trees.get(&base).copied().unwrap_or(base);
-        let bound = snapshot.base_trees.get(&receipt.tree).copied().unwrap_or(receipt.tree);
-        if bound == resolved || receipt.tree == receipt.base {
+        if receipt.tree != receipt.base {
+            return true;
+        }
+        let proven_tree_on_record = snapshot
+            .base_receipts
+            .values()
+            .any(|other| other.base == base && other.tree != base && other.gate_set == gate_set && other.is_green());
+        if proven_tree_on_record {
             return true;
         }
     }
@@ -979,7 +985,7 @@ mod tests {
         BaseReceipt, BaseVerdict, BloomDraft, BloomSpec, CandidateRef, ConfigKind, ConfigRegistry, CoordinationPolicy,
         Evidence, EvidenceKind, Forecast, MemberDependency, Membership, OperatorProposal, PIPELINE_MANIFEST_PATH,
         RedVerify, ResolutionClaim, ResolvedConfigs, SpendCeiling, SpendQuiesce, SpendWindow, Unproducible,
-        VerificationMode, VerifyGateSet,
+        VerificationMode, VerifyFailureSet, VerifyGateSet,
     };
 
     fn digest(seed: u8) -> Digest {
@@ -2070,13 +2076,73 @@ mod tests {
         assert!(bloom.progress.contains_key(&wp("wp-a")), "the cursor is still seeded");
     }
 
-    // The plausible bug: a coordinated seal treats a green host receipt that
-    // spelled the resolved tree as `tree: base` as a checkout-as-tree leftover
-    // and re-dispatches `verify.base` for a tree already on record.
+    // The plausible bug: under `require_exact_tree` the receipt lookup is keyed
+    // by `base_trees[base]`, so comparing the resolved trees is a tautology
+    // and any green receipt admits — a legacy checkout-as-tree receipt then
+    // seeds coordinated contexts with the checkout digest as the tree.
     #[test]
-    fn coordinated_seals_accept_a_host_tree_as_base_spelling_that_is_the_resolved_tree() {
-        let (spec, configs) = coordinated_seal(1, digest(0), "wp");
+    fn coordinated_seals_refresh_a_legacy_base_receipt_once_before_construct() {
+        let (first, configs) = coordinated_seal(1, digest(0), "wp");
         let snapshot = Snapshot::new(digest(0)).with_green_base(digest(0));
+        let seal = event("coordinated-seal", Fact::Seal(first.clone()));
+        let decisions = reduce(&snapshot, &seal, &configs, &SpendWindow::default());
+        assert_eq!(decisions.outcome, Outcome::Sealed(first.id()));
+        assert_eq!(
+            decisions.effects.iter().filter(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })).count(),
+            1,
+        );
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+        let snapshot = snapshot.apply(&seal, &decisions, &configs);
+
+        let completion = event(
+            "exact-base",
+            Fact::BaseVerifyCompleted {
+                base: digest(0),
+                tree: digest(90),
+                passed: true,
+                evidence: Evidence { subject: digest(90), kind: EvidenceKind::VerificationResult, detail: digest(91) },
+                failed: VerifyFailureSet::EMPTY,
+            },
+        );
+        let decisions = reduce(&snapshot, &completion, &configs, &SpendWindow::default());
+        assert!(decisions.effects.iter().any(|effect| {
+            matches!(effect, Decision::QueueConstructionAdmission { dispatch }
+                if dispatch.context.bloom_base == CandidateRef { tree: digest(90), checkout: digest(0) })
+        }));
+        let mut snapshot = snapshot.apply(&completion, &decisions, &configs);
+        snapshot.blooms.get_mut(&first.id()).expect("first bloom").status = BloomStatus::Withdrawn;
+
+        let (second, _) = coordinated_seal(2, digest(0), "another");
+        let decisions = reduce(
+            &snapshot,
+            &event("second-coordinated-seal", Fact::Seal(second.clone())),
+            &configs,
+            &SpendWindow::default(),
+        );
+        assert_eq!(decisions.outcome, Outcome::Sealed(second.id()));
+        assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })));
+        assert!(decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+    }
+
+    // The plausible bug: a coordinated seal treats a green host receipt that
+    // spelled the checkout as `tree: base` as a legacy leftover even though
+    // the landed fold tree for that base is already on record, and
+    // re-dispatches `verify.base` for a head the landing already proved.
+    #[test]
+    fn coordinated_seals_accept_a_host_tree_spelling_when_a_fold_tree_is_on_record() {
+        let (spec, configs) = coordinated_seal(1, digest(0), "wp");
+        let mut snapshot = Snapshot::new(digest(0));
+        stamp_green_receipt(&mut snapshot, digest(0), digest(100));
+        let host_spelling = BaseReceipt {
+            base: digest(0),
+            tree: digest(0),
+            gate_set: VerifyGateSet::base().digest(),
+            verdict: BaseVerdict::Green {
+                evidence: Evidence { subject: digest(0), kind: EvidenceKind::VerificationResult, detail: digest(1) },
+            },
+        };
+        snapshot.base_trees.insert(digest(0), digest(0));
+        snapshot.base_receipts.insert(host_spelling.verified(), host_spelling);
         let decisions =
             reduce(&snapshot, &event("coordinated-seal", Fact::Seal(spec.clone())), &configs, &SpendWindow::default());
         assert_eq!(decisions.outcome, Outcome::Sealed(spec.id()));
