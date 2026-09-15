@@ -79,7 +79,7 @@ fn rejected(error: CoordinationError) -> Decisions {
     Decisions::rejected(Outcome::CoordinationRejected(error))
 }
 
-fn accepted(bloom: BloomId, subject: Digest, effects: Vec<Decision>) -> Decisions {
+pub(super) fn accepted(bloom: BloomId, subject: Digest, effects: Vec<Decision>) -> Decisions {
     Decisions { outcome: Outcome::CoordinationAdvanced { bloom, subject }, effects }
 }
 
@@ -1881,12 +1881,12 @@ fn blocked_members(
             MemberVerifyOutcome::HostFault { .. } => {
                 blocked.extend(run.plan.requests.iter().map(|request| request.member.workpiece.clone()));
             }
+            // A parked member names no failure and joins no survivor group, so
+            // it blocks nothing behind it — the same standing as a pass.
             MemberVerifyOutcome::PassedStandalone { .. }
             | MemberVerifyOutcome::PassedIn { .. }
-            | MemberVerifyOutcome::Survived { .. } => {}
-            // A parked member names no failure and joins no survivor group, so
-            // it blocks nothing behind it.
-            MemberVerifyOutcome::AwaitingSuppression { .. } => {}
+            | MemberVerifyOutcome::Survived { .. }
+            | MemberVerifyOutcome::AwaitingSuppression { .. } => {}
         }
     }
     loop {
@@ -2088,11 +2088,11 @@ fn validates_immutable_run_outcome(
             run.plan.mode == SharedRunMode::Contextual
                 && run.node.as_ref().is_some_and(|current| current.digest() == *node)
         }
-        MemberVerifyOutcome::Pending { .. } => true,
-        // A hold parks rather than proves: the reducer's apply arm requires
-        // the journaled hold beside it, so validation only checks the shape
-        // the host can vouch for — the request is this run's own.
-        MemberVerifyOutcome::AwaitingSuppression { .. } => true,
+        // A hold parks rather than proves, the way a pending outcome reports
+        // rather than proves: the reducer's apply arm requires the journaled
+        // hold beside it, so validation only checks the shape the host can
+        // vouch for — the request is this run's own.
+        MemberVerifyOutcome::Pending { .. } | MemberVerifyOutcome::AwaitingSuppression { .. } => true,
     }
 }
 

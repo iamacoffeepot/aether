@@ -5,9 +5,12 @@
 //! answer arrives later, from a person, and this is what it does to the member.
 
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate};
-use super::{BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionDispositionError};
+use super::{
+    BloomRecord, BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionDispositionError,
+};
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{CandidateRef, SuppressionDisposition, SuppressionVerdict, VerifyFailure, VerifyFailureSet, Wedge};
 
@@ -73,22 +76,9 @@ pub(super) fn reduce_suppression_disposition(
     // answer is still recorded and the hold still clears, but inventing a
     // verify for a member the coordinator no longer names would strand it.
     if disposition.verdict == SuppressionVerdict::Granted && snapshot.awaiting_suppression(bloom, workpiece).is_some() {
-        let mut effects = alloc::vec![];
-        if let Some(state) = record.coordination.as_deref()
-            && !state.claims.contains_key(&workpiece.0)
-            && let Some(request) = state
-                .requests
-                .iter()
-                .find(|request| {
-                    request.member.workpiece == *workpiece && super::coordination::exact_request(record, state, request)
-                })
-                .cloned()
-        {
-            effects.push(Decision::QueueMemberVerification { request: Box::new(request) });
-        }
         return Decisions {
             outcome: Outcome::SuppressionAnswered { bloom: *bloom, workpiece: workpiece.clone(), reopened: false },
-            effects,
+            effects: resume_held_member(record, workpiece),
         };
     }
 
@@ -173,6 +163,31 @@ pub(super) fn reduce_suppression_disposition(
     }
 }
 
+/// What a grant on a member parked awaiting sign-off owes (issue 6032): the
+/// coordinated request its held run settled from, re-queued untouched, so the
+/// member resumes from the step it was on and the siblings that already
+/// integrated are not re-verified.
+///
+/// Empty in three cases, each of which would strand the member rather than
+/// resume it: no coordination owns the line, the member already holds a claim
+/// (it resolved some other way and needs no resume), or the request is no
+/// longer exact because the line moved under the park. The answer is still
+/// recorded and the hold still clears in all of them.
+fn resume_held_member(record: &BloomRecord, workpiece: &WorkpieceId) -> Vec<Decision> {
+    let Some(state) = record.coordination.as_deref().filter(|state| !state.claims.contains_key(&workpiece.0)) else {
+        return alloc::vec![];
+    };
+
+    state
+        .requests
+        .iter()
+        .find(|request| {
+            request.member.workpiece == *workpiece && super::coordination::exact_request(record, state, request)
+        })
+        .map(|request| alloc::vec![Decision::QueueMemberVerification { request: Box::new(request.clone()) }])
+        .unwrap_or_default()
+}
+
 /// Which of the three well-formedness rules a disposition broke, in declaration
 /// order, so the door tells the caller the first thing wrong with it.
 fn malformed(disposition: &SuppressionDisposition) -> SuppressionDispositionError {
@@ -194,7 +209,8 @@ mod tests {
     use crate::reduce::{Decision, Fact, Outcome, Snapshot, SuppressionDispositionError};
     use crate::testing::{digest, draft, event, membership, step, workpiece};
     use crate::values::{
-        CandidateRef, Evidence, EvidenceKind, SuppressionDisposition, SuppressionVerdict, VerifyFailure,
+        CandidateRef, Evidence, EvidenceKind, SuppressionDisposition, SuppressionRequest, SuppressionVerdict,
+        VerifyFailure,
     };
 
     fn answer(verdict: SuppressionVerdict) -> SuppressionDisposition {
@@ -280,7 +296,7 @@ mod tests {
                         kind: EvidenceKind::VerificationResult,
                         detail: digest(81),
                     },
-                    requests: crate::values::SuppressionRequest::normalize(vec![(
+                    requests: SuppressionRequest::normalize(vec![(
                         "crates/a/src/lib.rs".to_string(),
                         4,
                         "allow(dead_code)".to_string(),

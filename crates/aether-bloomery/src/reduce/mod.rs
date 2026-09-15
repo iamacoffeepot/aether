@@ -325,10 +325,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
             reduce_precheck_prepared(snapshot, bloom, *plan, preparation)
         }
         Fact::RequestPrecheck { bloom, node } => reduce_request_precheck(snapshot, bloom, *node),
-        Fact::ProofReused { bloom, closure, .. } => Decisions {
-            outcome: Outcome::CoordinationAdvanced { bloom: *bloom, subject: *closure },
-            effects: Vec::new(),
-        },
+        Fact::ProofReused { bloom, closure, .. } => coordination::accepted(*bloom, *closure, Vec::new()),
         fact @ (Fact::IntegrationAdvanced { .. }
         | Fact::IntegrationAppendConflicted { .. }
         | Fact::IntegrationAppendRefused { .. }

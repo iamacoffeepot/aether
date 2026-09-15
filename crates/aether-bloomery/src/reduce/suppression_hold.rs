@@ -5,10 +5,11 @@
 //! lane's stated requests covering every finding (issue 6032). The member
 //! parks awaiting a reviewer's sign-off: its cursor does not move, no attempt
 //! and no repair roll is spent, and nothing is dispatched — the remedy is a
-//! person answering through [`Fact::SuppressionDisposition`], and another lap
+//! person answering through [`Fact::SuppressionDisposition`](crate::Fact::SuppressionDisposition), and another lap
 //! or probe would reproduce the same question verbatim.
 
 use super::{BloomStatus, Decision, Decisions, Outcome, Snapshot, StageProgress, SuppressionHoldError};
+use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{Evidence, SuppressionRequest};
 
@@ -71,7 +72,7 @@ pub(super) fn reduce_suppression_hold(
 /// The tree the member's current lap judges: its captured candidate, or the
 /// scope revision before it has produced one — the same binding a Verify
 /// verdict is admitted against.
-fn member_subject(scope_revision: crate::digest::Digest, cursor: &StageProgress) -> crate::digest::Digest {
+fn member_subject(scope_revision: Digest, cursor: &StageProgress) -> Digest {
     cursor.candidate.map_or(scope_revision, |candidate| candidate.tree)
 }
 
@@ -261,9 +262,9 @@ mod tests {
                 },
             ),
         );
-        assert!(snapshot.blooms.get(&bloom).is_some(), "the bloom walks on with its sibling");
+        assert!(snapshot.blooms.contains_key(&bloom), "the bloom walks on with its sibling");
         assert!(
-            snapshot.blooms[&bloom].progress.get(&workpiece("alpha")).is_none(),
+            !snapshot.blooms[&bloom].progress.contains_key(&workpiece("alpha")),
             "the sealed eject-on-red disposition withdrew the member"
         );
 
