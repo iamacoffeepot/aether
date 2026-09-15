@@ -6,7 +6,6 @@ use alloc::vec::Vec;
 use super::composition::reduce_composition_attempt;
 use super::coordination::carried_head_pin;
 use super::eject::{eject, ejection_reason};
-use super::integrate::claim_effects;
 use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
 use super::{
@@ -16,8 +15,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, RedVerify, ResolutionClaim, StageBinding,
-    StageCatalog, Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, RedVerify, StageBinding, StageCatalog,
+    Transformation, VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -129,6 +128,17 @@ pub(super) fn move_effects_with_checkpoint(
         transformation.diff_base = Some(proved.candidate.checkout);
         transformation.inputs.push(proved.proof);
     }
+    // The member's judge is shown what the compiler said (ADR-0221). Its range
+    // is the member's own construct base, already named by
+    // `Transformation::for_member_stage`, so the verify receipt rides only as a
+    // second input — the pinned artifact the lane reads the failed-and-passed
+    // gate set and the verify findings out of. Without it the judge re-derives
+    // by eye what a green receipt already states.
+    if progress.stage == StageId::Review
+        && let Some(proved) = sealed.proved
+    {
+        transformation.inputs.push(proved.proof);
+    }
     let candidate = if progress.stage == StageId::Construct {
         None
     } else {
@@ -237,6 +247,19 @@ impl<'a> SealedLine<'a> {
     /// a proved predecessor reads as a single chained expression instead of a
     /// branch that rebuilds the line: `None` is the ordinary line, unchanged.
     pub(super) fn proving_delta_from(mut self, proved: Option<ProvedPredecessor>) -> Self {
+        self.proved = proved;
+        self
+    }
+
+    /// The same line, read as a `Review` standing on the verify receipt that
+    /// green-lit the candidate it judges (ADR-0221).
+    ///
+    /// The same field as [`proving_delta_from`](Self::proving_delta_from) and
+    /// deliberately: both name the proof this dispatch stands on, and the stage
+    /// being dispatched is what decides whether that proof moves the range (a
+    /// delta-confirm `Verify`) or only rides as an input the lane reads (a
+    /// `Review`). Named apart so a call site states which of the two it means.
+    pub(super) fn judging_after(mut self, proved: Option<ProvedPredecessor>) -> Self {
         self.proved = proved;
         self
     }
@@ -465,7 +488,7 @@ pub(super) fn reduce_attempt_completed(
     };
     let effects = alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }];
     if let Some(next) = next.filter(|_| passed) {
-        return advance_after_pass(snapshot, record, next, &ctx, effects);
+        return advance_after_pass(record, next, evidence.detail, &ctx, effects);
     }
     retry_or_wedge(record, stage, &ctx, evidence, effects)
 }
@@ -730,10 +753,13 @@ struct CompletionCtx<'a> {
     construct_checkpoint_base: Option<Digest>,
 }
 
+/// `verified_by` is the completing attempt's own evidence digest — the receipt
+/// a passing `Verify` just produced, which the `Review` it advances into reads
+/// (ADR-0221). Meaningless for every other advance, and ignored there.
 fn advance_after_pass(
-    snapshot: &Snapshot,
     record: &BloomRecord,
     next: StageId,
+    verified_by: Digest,
     ctx: &CompletionCtx<'_>,
     mut effects: Vec<Decision>,
 ) -> Decisions {
@@ -756,21 +782,27 @@ fn advance_after_pass(
     // The member may be advancing onto a tree this bloom already proved
     // (#4891) — a repair lap that changed nothing the tree records hands
     // back the candidate its last verify passed. Pass by identity: the
-    // member lands on the claim a dispatched pass would have produced,
-    // carrying the same verdict, and the mechanical lane never runs.
+    // mechanical lane never runs, and the member skips straight to the judge
+    // its line still owes (ADR-0221) carrying the receipt it reused. It is the
+    // *compiler* that has nothing left to say about this tree; the review has
+    // not run over it, so this is a shortcut past one stage and never past the
+    // line's terminus.
     if let Some((current, proof)) = candidate
         .filter(|_| next == StageId::Verify)
         .and_then(|current| record.verify_proof_for(StageId::Verify, current.tree).map(|proof| (current, proof)))
     {
-        let claim = ResolutionClaim {
-            workpiece: workpiece.clone(),
-            scope_revision: member.scope_revision,
-            candidate: current.tree,
-            evidence: proof.evidence.clone(),
-        };
-        let reuse = reuse_of(bloom, StageId::Verify, proof);
-        effects.push(Decision::AdvanceStage { bloom, workpiece: workpiece.clone(), progress });
-        effects.extend(claim_effects(snapshot, record, bloom, &claim, Some(reuse)));
+        let judging = StageProgress { stage: StageId::Review, ..progress };
+        effects.push(reuse_of(bloom, StageId::Verify, proof));
+        effects.extend(move_effects_with_checkpoint(
+            bloom,
+            workpiece,
+            member.scope_revision,
+            &judging,
+            (DispatchTargets { subject: current.tree, checkout: current.checkout }, None),
+            Some(current.tree),
+            SealedLine::of(record, member)
+                .judging_after(Some(ProvedPredecessor { candidate: current, proof: proof.evidence.detail })),
+        ));
         return Decisions {
             outcome: Outcome::VerifyReused { bloom, workpiece: workpiece.clone(), proof: proof.evidence.detail },
             effects,
@@ -782,6 +814,16 @@ fn advance_after_pass(
     } else {
         candidate.map(|current| current.tree)
     };
+    // A Verify that passed is the one advance whose proof the next stage reads
+    // (ADR-0221): `Review` is handed the receipt that green-lit the very tree it
+    // is about to judge, which is the completion this arm holds and nothing
+    // downstream can re-derive.
+    let sealed = SealedLine::of(record, member);
+    let sealed = if next == StageId::Review {
+        sealed.judging_after(candidate.map(|current| ProvedPredecessor { candidate: current, proof: verified_by }))
+    } else {
+        sealed.proving_delta_from(delta_confirm_predecessor(record, cursor, next))
+    };
     effects.extend(move_effects_with_checkpoint(
         bloom,
         workpiece,
@@ -789,7 +831,7 @@ fn advance_after_pass(
         &progress,
         (targets, construct_checkpoint_base),
         displayed,
-        SealedLine::of(record, member).proving_delta_from(delta_confirm_predecessor(record, cursor, next)),
+        sealed,
     ));
     Decisions {
         outcome: Outcome::AttemptAdvanced { bloom, workpiece: workpiece.clone(), from: cursor.stage, to: next },
@@ -1053,7 +1095,7 @@ mod tests {
     use crate::reduce::{Event, Fact, GrantAttemptsError, Outcome};
     use crate::values::{
         BloomDraft, BloomSpec, ContextualResolutionClaim, CoordinationPolicy, EvidenceKind, MemberPin, Membership,
-        OperatorHold, ResolutionProof, VerificationMode, VerifyProof,
+        OperatorHold, ResolutionClaim, ResolutionProof, VerificationMode, VerifyProof,
     };
 
     fn digest(seed: u8) -> Digest {

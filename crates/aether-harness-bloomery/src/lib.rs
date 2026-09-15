@@ -31,7 +31,8 @@ pub mod support;
 
 pub use cells::{FixtureHarness, LaneHarness};
 pub use harness::drive::{
-    REVIEW_NOTE, captured, draft, failed, faulted, member, member_with, narrowed, passed, read, reviewed, verdict,
+    REVIEW_NOTE, captured, draft, failed, faulted, found, member, member_with, narrowed, passed, read, reviewed,
+    verdict,
 };
 pub use harness::{
     Backend, BloomeryHarness, CoordinatorKind, HarnessBuilder, HarnessRoots, Lane, Reader, ScenarioHarness, digest,

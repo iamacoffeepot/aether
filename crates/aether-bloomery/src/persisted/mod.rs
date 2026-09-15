@@ -522,6 +522,27 @@ pub const DECISIONS_RESCUE_ADMIN_DIGEST: Digest =
 pub const EVENT_RESCUE_ADMIN_DIGEST: Digest =
     Digest::pinned("7765f5ee28b4ac779ac5a7e0205c037fd0a91fe238a1f71023adf60037ff33cd");
 
+/// Journal schema immediately before ADR-0221 appended the member-`Review`
+/// decision vocabulary.
+///
+/// Copied verbatim from the `decisions` line the ledger carried as current
+/// before this slice — `cb23090e24674178e173da9037c2036449db4939af7bbdb1abd5138dcff404a1`
+/// — never recomputed from live code (#5500). The upcast is the identity:
+/// `Outcome::ReviewFailedRejected` is appended past every prior outcome, so no
+/// discriminant a row of that era could hold has moved.
+pub const DECISIONS_PRE_MEMBER_REVIEW_DIGEST: Digest =
+    Digest::pinned("cb23090e24674178e173da9037c2036449db4939af7bbdb1abd5138dcff404a1");
+
+/// Event schema immediately before ADR-0221 appended `Fact::ReviewFailed`.
+///
+/// Copied verbatim from the `event` line the ledger carried as current before
+/// this slice — `76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4`
+/// — the same way and for the same reason. The identity upcast again: the fact
+/// is appended past `Fact::AdminDropLap`, the last fact ADR-0219 appended, and
+/// no field moved inside a prior variant.
+pub const EVENT_PRE_MEMBER_REVIEW_DIGEST: Digest =
+    Digest::pinned("76e2d5e11f808c0fb338900a0f0f43e01587aaff2c9c17fb325010bbb8f35fe4");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -878,6 +899,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_MEMBER_REVIEW_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -898,6 +920,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_RESCUE_ADMIN_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_MEMBER_REVIEW_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

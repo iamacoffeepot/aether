@@ -688,7 +688,7 @@ fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> E
 /// Whether `stage` is a dispatched member gate that ADR-0195 gives an
 /// executor-fault lifecycle.
 fn admits_member_executor_fault(stage: StageId) -> bool {
-    stage == StageId::Verify || admits_as_attempt_completed(stage)
+    matches!(stage, StageId::Verify | StageId::Review) || admits_as_attempt_completed(stage)
 }
 
 /// Whether a claimed verdict says the lane reached no judgment about its
@@ -817,6 +817,57 @@ fn study_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evi
 /// umbrella's `environment` stamp) folds here too rather than through the
 /// member-fault arm: `verdict_passed` is false for it, so the base stays
 /// unproven and the day-level alert is raised, which is the same thing an
+/// Route one member *gate* verdict to its fact: the mechanical `Verify` and the
+/// `Review` that judges what it passed.
+///
+/// One door for the two rather than two arms in [`admit_uploaded`]'s ladder,
+/// because the pair is one question — which gate did this member just clear,
+/// and does clearing it resolve the member — and the ladder is the one place in
+/// this module that has to stay readable end to end.
+fn member_gate_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    if record.stage == StageId::Review {
+        review_event(record, upload, evidence)
+    } else {
+        verify_event(record, upload, evidence)
+    }
+}
+
+/// The terminal member-`Review` facts (ADR-0221): a pass mints the member's
+/// [`ResolutionClaim`] — the same claim a passing `Verify` used to mint one
+/// stage earlier, carrying the same candidate and the same binding the
+/// reducer's `reduce_integrate` re-checks — and a finding admits as
+/// [`Fact::ReviewFailed`] so the reducer can route it through the bloom's
+/// sealed `RedVerify` disposition with the judge's prose in hand.
+///
+/// The judge's own evidence is what the claim carries, not the verify receipt
+/// behind it. Both bind the same candidate tree, and the claim's job is to say
+/// which verdict let the candidate through — which, at this terminus, is this
+/// one.
+fn review_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
+    if verdict_passed(upload.verdict) {
+        let claim = ResolutionClaim {
+            workpiece: record.workpiece.clone(),
+            scope_revision: record.scope_revision,
+            candidate: record.candidate,
+            evidence,
+        };
+        return Event {
+            idempotency_key: AdmissionKey::Integrate.of(&record.nonce.0),
+            fact: Fact::Integrate { bloom: record.bloom, claim },
+        };
+    }
+
+    Event {
+        idempotency_key: AdmissionKey::ReviewFailed.of(&record.nonce.0),
+        fact: Fact::ReviewFailed {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            evidence,
+            findings: upload.observation.findings.clone().unwrap_or_default(),
+        },
+    }
+}
+
 /// operator has to act on (#5384).
 fn base_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     Event {
@@ -862,15 +913,21 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
         };
     }
     if verdict_passed(upload.verdict) {
-        let claim = ResolutionClaim {
-            workpiece: record.workpiece.clone(),
-            scope_revision: record.scope_revision,
-            candidate: record.candidate,
-            evidence,
-        };
+        // A green member Verify advances rather than resolves (ADR-0221): the
+        // compiler has spoken and the judge has not, so the claim is minted one
+        // stage later by `review_event`. The lane carries no capture — the
+        // candidate it judged is the one the cursor already holds — so the
+        // advance names none and the member rides its own candidate into Review.
         return Event {
-            idempotency_key: AdmissionKey::Integrate.of(&record.nonce.0),
-            fact: Fact::Integrate { bloom: record.bloom, claim },
+            idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
+            fact: Fact::AttemptCompleted {
+                bloom: record.bloom,
+                workpiece: record.workpiece.clone(),
+                stage: StageId::Verify,
+                passed: true,
+                evidence,
+                candidate: None,
+            },
         };
     }
     // Same admission key as a candidate failure so the dispatch is still
@@ -1164,8 +1221,8 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
         member_deadline_expired_event(&record, evidence)
     } else if reached_no_verdict(upload.verdict) && admits_member_executor_fault(record.stage) {
         member_executor_fault_event(&record, evidence)
-    } else if record.stage == StageId::Verify {
-        verify_event(&record, upload, evidence)
+    } else if matches!(record.stage, StageId::Verify | StageId::Review) {
+        member_gate_event(&record, upload, evidence)
     } else if admits_as_attempt_completed(record.stage) {
         Event {
             idempotency_key: AdmissionKey::Attempt.of(&record.nonce.0),
@@ -1345,6 +1402,16 @@ fn persist_consumed(
         // A member Verify that narrowed carries the work order for the
         // composition it minted, not for the member that produced the verdict.
         persist_narrowed_work_order(store, record, upload)?;
+    } else if record.stage == StageId::Review && !reached_no_verdict(upload.verdict) {
+        // The same row the mechanical gate writes, one stage later (ADR-0221):
+        // it is what `repair_finding` hands the repair lap as its work order,
+        // and what the ejection reason quotes. A pass clears it, so a member
+        // that folds leaves no stale finding behind for a later lap to repair.
+        if verdict_passed(upload.verdict) {
+            store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
+        } else if let Some(findings) = &upload.observation.findings {
+            store.record_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0, findings)?;
+        }
     } else if record.stage == StageId::AggregateVerify {
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && !aggregate_review_faulted(upload) {

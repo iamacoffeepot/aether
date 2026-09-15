@@ -4157,9 +4157,9 @@ fn a_repeated_machinery_grant_needs_a_fresh_key_and_refuses_live_work() {
 }
 
 // ADR-0149 §The line — an attempt completion is refused when it does not name the
-// member's current cursor stage, when it names the terminal `Verify` with a
+// member's current cursor stage, when it names the terminal `Review` with a
 // *passing* verdict (which integrates through `Fact::Integrate`, never completes
-// here), for a non-member, and for an unknown bloom.
+// here, ADR-0221), for a non-member, and for an unknown bloom.
 #[test]
 fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
     let base = Snapshot::new(digest(1)).with_green_base(digest(1));
@@ -4193,22 +4193,26 @@ fn attempt_completion_refuses_mismatch_terminal_non_member_and_unknown() {
         Outcome::VerifyFailedRejected(VerifyFailedError::StageMismatch { expected: StageId::Construct }),
     ));
 
-    // A passing terminal Verify never completes here — it integrates through
-    // Fact::Integrate.
+    // A passing terminal Review never completes here — it integrates through
+    // Fact::Integrate (ADR-0221). Checked before the cursor comparison, so it
+    // reads as the mis-route it is rather than as a stage mismatch.
     let terminal =
-        reduce(&snapshot, &completion("t", "wp", StageId::Verify), &compiled_resolved(), &SpendWindow::default());
+        reduce(&snapshot, &completion("t", "wp", StageId::Review), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(
         terminal.outcome,
-        Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Verify)),
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Review)),
     ));
 
-    // A passing Review is off the dispatched line entirely (ADR-0153) and reads
-    // as the same terminal mis-route.
-    let off_line =
-        reduce(&snapshot, &completion("r", "wp", StageId::Review), &compiled_resolved(), &SpendWindow::default());
+    // A passing Verify is on the line now, so it is no longer a mis-route — it
+    // is simply not the stage this member's cursor stands at.
+    let off_cursor =
+        reduce(&snapshot, &completion("r", "wp", StageId::Verify), &compiled_resolved(), &SpendWindow::default());
     assert!(matches!(
-        off_line.outcome,
-        Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(StageId::Review)),
+        off_cursor.outcome,
+        Outcome::AttemptCompletedRejected(AttemptCompletedError::StageMismatch {
+            expected: StageId::Construct,
+            got: StageId::Verify,
+        }),
     ));
 
     // A non-member workpiece.
@@ -4274,9 +4278,13 @@ proptest! {
                 Outcome::AttemptAdvanced { from, to, .. } => {
                     prop_assert_eq!(from, cursor.stage);
                     prop_assert_eq!(to, new.stage);
-                    // The only passing advances are Construct → Verify and the
-                    // repair Refine → Verify delta-confirm.
-                    prop_assert!(matches!((from, to), (StageId::Construct | StageId::Refine, StageId::Verify)));
+                    // The only passing advances are Construct → Verify, the
+                    // repair Refine → Verify delta-confirm, and the line's own
+                    // Verify → Review terminus (ADR-0221).
+                    prop_assert!(matches!(
+                        (from, to),
+                        (StageId::Construct | StageId::Refine, StageId::Verify) | (StageId::Verify, StageId::Review)
+                    ));
                 }
                 Outcome::RefineReentered { .. } => {
                     prop_assert_eq!(cursor.stage, StageId::Verify, "only a failing Verify re-enters");
@@ -4290,7 +4298,10 @@ proptest! {
                     break;
                 }
                 Outcome::AttemptCompletedRejected(AttemptCompletedError::TerminalStage(_)) => {
-                    prop_assert!(passed && cursor.stage == StageId::Verify);
+                    // The terminus is a mis-route in either direction: a pass
+                    // integrates through `Fact::Integrate` and a finding
+                    // carries its prose through `Fact::ReviewFailed`.
+                    prop_assert_eq!(cursor.stage, StageId::Review);
                     prop_assert_eq!(new, cursor, "a rejected terminal mis-route leaves the cursor untouched");
                 }
                 other => return Err(TestCaseError::fail(format!("unexpected outcome {other:?}"))),
@@ -5302,11 +5313,12 @@ fn a_hand_moved_head_still_pays_its_base_verify() {
 }
 
 // #4891 — the memo is keyed by content, not by position, so it answers any
-// verify aimed at a proven tree. The live case: an aggregate review sends a
-// member back into Refine, the repair lap changes nothing the tree records (an
-// amended commit message leaves the same tree), and the member's terminal Verify
-// would otherwise re-pay the whole mechanical run for the verdict it already
-// holds. It integrates on that verdict instead.
+// verify aimed at a proven tree. The live case: a review sends a member back
+// into Refine, the repair lap changes nothing the tree records (an amended
+// commit message leaves the same tree), and the member's Verify would otherwise
+// re-pay the whole mechanical run for the verdict it already holds. It skips
+// straight to the judge on that verdict instead (ADR-0221): what the memo
+// answers is the *compiler's* question, and the line's terminus is still owed.
 #[test]
 fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
@@ -5368,15 +5380,21 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     );
 
     assert_eq!(repaired.outcome, Outcome::VerifyReused { bloom, workpiece: workpiece("wp"), proof: digest(60) });
+    let dispatched = repaired
+        .effects
+        .iter()
+        .find_map(|effect| match effect {
+            Decision::DispatchAttempt { stage, transformation, .. } => Some((*stage, transformation.clone())),
+            _ => None,
+        })
+        .expect("the reuse still owes the member its judge");
+    assert_eq!(dispatched.0, StageId::Review, "the mechanical lane does not re-run over a tree it has already passed");
     assert!(
-        !repaired.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
-        "the mechanical lane does not re-run over a tree it has already passed",
+        dispatched.1.inputs.contains(&digest(60)),
+        "the judge is handed the receipt the reuse stood on, not left to re-derive it",
     );
     let record = after.blooms.get(&bloom).unwrap();
-    let claim = record.claims.get(&workpiece("wp")).expect("passing by identity integrates the member");
-    assert_eq!(claim.candidate, digest(100));
-    assert_eq!(claim.evidence.detail, digest(60), "the claim carries the verdict it stood on, not a fresh one");
-    assert_eq!(record.progress.get(&workpiece("wp")).unwrap().stage, StageId::Verify, "the cursor still lands there");
+    assert_eq!(record.progress.get(&workpiece("wp")).unwrap().stage, StageId::Review, "the cursor lands at the judge");
     assert_eq!(record.verify_reuses.last().unwrap().stage, StageId::Verify);
 }
 

@@ -161,6 +161,7 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::Land { bloom, .. }
         | Fact::AdoptAnswer { bloom, .. }
         | Fact::AttemptCompleted { bloom, .. }
+        | Fact::ReviewFailed { bloom, .. }
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
         | Fact::PrecheckPrepared { bloom, .. }

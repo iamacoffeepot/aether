@@ -327,9 +327,16 @@ fn scripted_bloom_reaches_landed_and_advances_mainline() {
 // the ejected member's integration. And `Withdrawal` gains a third cause, which
 // moves the decisions column's own schema — as does the seal's new
 // `Decision::RecordRedVerify`, which every seal now decides. Recomputed.
+// Repinned for ADR-0221: `Review` rejoins `MEMBER_LINE` as the member terminus
+// and its binding's consumed tag moves with it, so the compiled catalog the
+// seal decides by value — `Decision::RecordStageCatalog` — moves, and the
+// decisions column's own schema moves with `Outcome::ReviewFailedRejected`.
+// The scripted journal is unchanged and still reaches Landed: it drives a
+// `Fact::Integrate` directly rather than walking a green Verify into a Review.
+// An intended, coordinated break, recomputed.
 const GOLDEN_DECISION_DIGEST: [u8; 32] = [
-    0xde, 0x30, 0x5d, 0x02, 0x28, 0x2a, 0x85, 0x92, 0x95, 0x62, 0xdc, 0x86, 0x22, 0x09, 0xa0, 0xb5, 0x87, 0xeb, 0xa6,
-    0x2a, 0x3d, 0x64, 0x98, 0x06, 0x5d, 0x4a, 0x79, 0x39, 0xc4, 0x65, 0x89, 0x5d,
+    0xde, 0x57, 0xb0, 0x7f, 0x0f, 0x83, 0xa5, 0xf8, 0x2a, 0x3b, 0x9a, 0x2b, 0x8f, 0x07, 0x40, 0x17, 0x7f, 0xfb, 0x2a,
+    0x57, 0x6c, 0xc0, 0x68, 0xd7, 0x7b, 0x66, 0x6b, 0xb6, 0x11, 0x98, 0x94, 0x01,
 ];
 
 #[test]

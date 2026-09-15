@@ -610,8 +610,14 @@ fn member_lines(view: &ViewDocument, bloom: DigestHex, workpiece: &str) -> Vec<L
     lines
 }
 
+/// Link the member's live gate transcript — the mechanical `Verify` or the
+/// `Review` that judges what it passed (ADR-0221). Both are gates a person
+/// reads a transcript of when a member stops moving; a construct lane's
+/// transcript is reached from its own row.
 fn push_verify_transcript(lines: &mut Vec<Line>, view: &ViewDocument, bloom: DigestHex, workpiece: &str) {
-    let Some(order) = view.order_for(bloom, workpiece).filter(|order| order.stage == StageId::Verify) else {
+    let Some(order) =
+        view.order_for(bloom, workpiece).filter(|order| matches!(order.stage, StageId::Verify | StageId::Review))
+    else {
         return;
     };
     lines.push(Line {

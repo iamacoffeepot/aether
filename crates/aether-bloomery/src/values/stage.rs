@@ -457,23 +457,26 @@ impl StageCatalog {
     }
 
     /// The per-member stage line a sealed bloom's members walk (ADR-0149 §The
-    /// line, ADR-0153): the dispatched sub-sequence `Construct → Verify`. Its
-    /// head [`entry_stage`](Self::entry_stage) is the stage a member enters at
-    /// seal; passing its terminal `Verify` produces the member's
-    /// [`ResolutionClaim`](crate::values::ResolutionClaim) — the verification
-    /// evidence binds the exact candidate tree — which folds into the existing
-    /// integrate path rather than dispatching a further attempt. `Refine` is off
-    /// the standing line: the repair re-entry, dispatched only when a failing
-    /// `Verify` routes into it, its pass returning to `Verify` for the
-    /// delta-confirm. `Reconcile` is off the standing line the same way
-    /// (ADR-0189): dispatched by a fold-conflict fact, not by line progression,
-    /// its pass returning to `Verify` so the reconciled candidate replaces the
-    /// member's resolution. `Review` binds no dispatched member stage (the model
-    /// review runs once per bloom at `AggregateReview`, ADR-0153); it stays in
-    /// [`StageId`] for wire stability. The bloom-level tail (`Integrate` /
-    /// `AggregateVerify` / `AggregateReview` / `Land` / `Study`) is the coarse
-    /// lifecycle the reducer already owns — never a dispatched per-member stage.
-    pub const MEMBER_LINE: &'static [StageId] = &[StageId::Construct, StageId::Verify];
+    /// line, ADR-0221): the dispatched sub-sequence `Construct → Verify →
+    /// Review`. Its head [`entry_stage`](Self::entry_stage) is the stage a
+    /// member enters at seal; passing its terminal `Review` produces the
+    /// member's [`ResolutionClaim`](crate::values::ResolutionClaim) — the
+    /// verification evidence binds the exact candidate tree — which folds into
+    /// the existing integrate path rather than dispatching a further attempt.
+    /// `Verify` is the mechanical gate ahead of it: passing it advances to
+    /// `Review` instead of integrating, so every candidate that folds has been
+    /// both compiled and judged (ADR-0221 supersedes ADR-0153's member-line
+    /// terminus). `Refine` is off the standing line: the repair re-entry,
+    /// dispatched when a failing `Verify` or a failing `Review` routes into it,
+    /// its pass returning to `Verify` for the delta-confirm and on to `Review`
+    /// from there. `Reconcile` is off the standing line the same way (ADR-0189):
+    /// dispatched by a fold-conflict fact, not by line progression, its pass
+    /// returning to `Verify` so the reconciled candidate replaces the member's
+    /// resolution. The bloom-level tail (`Integrate` / `AggregateVerify` /
+    /// `AggregateReview` / `Land` / `Study`) is the coarse lifecycle the reducer
+    /// already owns — never a dispatched per-member stage; `AggregateReview`
+    /// stays the product-level judge over the folded tree (ADR-0153), unchanged.
+    pub const MEMBER_LINE: &'static [StageId] = &[StageId::Construct, StageId::Verify, StageId::Review];
 
     /// The stage a sealed bloom's members enter the line at — the head of
     /// [`MEMBER_LINE`](Self::MEMBER_LINE), `Construct`.
@@ -483,8 +486,8 @@ impl StageCatalog {
     }
 
     /// The stage a member advances to after `stage`'s completion gate passes, or
-    /// `None` at the per-member terminus (`Verify`) — a passing `Verify` integrates
-    /// the member instead of dispatching a successor (ADR-0153). `None` for any
+    /// `None` at the per-member terminus (`Review`) — a passing `Review` integrates
+    /// the member instead of dispatching a successor (ADR-0221). `None` for any
     /// stage outside [`MEMBER_LINE`](Self::MEMBER_LINE): the repair-only `Refine`
     /// and the fold-conflict `Reconcile` route back to `Verify` in the reducer,
     /// not through the line walk, and the bloom-level tail is not a dispatched
@@ -697,7 +700,17 @@ impl StageCatalog {
             StageId::Reconcile => {
                 (&["bloom.candidate"], &["bloom.candidate"], CONSTRUCT_IMPLEMENT_COMMAND, "conflict-resolved", 2, 3_600)
             }
-            StageId::Review => (&["bloom.candidate"], &["bloom.review_rollup"], "review", "review-approved", 2, 3_600),
+            // Review is the member line's terminus (ADR-0221): the model judge
+            // over one member's own candidate, ahead of the fold. It consumes
+            // `bloom.verify_evidence` rather than `bloom.candidate` because the
+            // compiler has already spoken by the time it runs and the judge is
+            // shown what it said — the tag is what makes that ordering readable
+            // in the catalog rather than only in the reducer's line walk. An
+            // hour, like the other model stages: judging is authoring prose, not
+            // running a gate, so `GATE_WALL_CLOCK_SECS` is not its ceiling.
+            StageId::Review => {
+                (&["bloom.verify_evidence"], &["bloom.review_rollup"], "review", "review-approved", 2, 3_600)
+            }
             StageId::Integrate => {
                 (&["bloom.candidate"], &["bloom.integration"], "integrate", "integration-checkpoint", 2, 3_600)
             }
@@ -1005,9 +1018,17 @@ impl Transformation {
     /// Actions): the mechanical `Verify` lane runs zero-egress
     /// ([`NetworkProfile::None`]); the model-driven `Construct` / `Refine` lanes
     /// reach the model API under a restricted egress allowlist, never full
-    /// network. The `Review` lane keeps its `review.critic` command for the
-    /// bloom-level `AggregateReview` position that dispatches it (ADR-0153) — it
-    /// is no longer a standing member stage.
+    /// network. The `Review` lane runs the same `review.critic` command the
+    /// bloom-level `AggregateReview` position runs, at member scope (ADR-0221):
+    /// one judge over one member's own candidate, before it folds.
+    ///
+    /// `Review` names a [`diff_base`](Self::diff_base) for the reason
+    /// [`for_aggregate_review`](Self::for_aggregate_review) does: by the time it
+    /// runs the candidate is committed, so the diff to judge is the range
+    /// `base..checkout`, and a critic left to read the working tree sees a clean
+    /// checkout and judges an empty candidate (#4723). `base` is the member's own
+    /// construct base, the same range its `Verify` narrowed against — a dependent
+    /// spliced onto an ancestor is judged only on the files it changed.
     ///
     /// `binding` is the sealed catalog's resolved binding for the stage being
     /// dispatched — it names the stage *and* carries its authored
@@ -1061,7 +1082,7 @@ impl Transformation {
             // keeps a cold start from looking seeded (#5052). The
             // whole-bloom aggregate verify is built by
             // `for_aggregate_verify`, not this constructor.
-            diff_base: matches!(binding.stage, StageId::Verify).then_some(base),
+            diff_base: matches!(binding.stage, StageId::Verify | StageId::Review).then_some(base),
             outputs: alloc::vec![String::from(RESULT_RECORD_OUTPUT)],
             image: String::from(image),
             limits: ExecutionLimits { wall_clock_secs: binding.wall_clock_secs },
@@ -1557,9 +1578,14 @@ mod tests {
     // one worth stating is that it is the first that *shortens* a stage, and
     // the shortening is the enforcement — a gate past fifteen minutes is
     // cancelled and its member ejected rather than re-run.
+    // Repinned again for ADR-0221 — `Review` rejoins `MEMBER_LINE` as its
+    // terminus and its binding consumes `bloom.verify_evidence` instead of
+    // `bloom.candidate`, so the Review binding's tags move and the line with
+    // them. An intended catalog edit: the digest is what makes it one that had
+    // to be argued for rather than one that slid in.
     const GOLDEN_LINE_DIGEST: [u8; 32] = [
-        0x4f, 0x7d, 0xc5, 0xfd, 0x78, 0xaa, 0xc3, 0xe3, 0xda, 0xcd, 0xca, 0xa0, 0x39, 0x1b, 0x30, 0xe7, 0x14, 0xe4,
-        0x87, 0xf7, 0x2b, 0xec, 0x04, 0x32, 0x7f, 0xd8, 0xb3, 0xf1, 0x6e, 0xba, 0x2d, 0x5c,
+        235, 252, 240, 27, 50, 56, 27, 191, 134, 90, 7, 78, 209, 238, 247, 81, 8, 210, 187, 204, 163, 1, 6, 119, 111,
+        72, 194, 228, 9, 156, 97, 24,
     ];
 
     // Tripwire: every command a stage dispatches is classified by exactly one of
@@ -1724,23 +1750,23 @@ mod tests {
         );
     }
 
-    // ADR-0153 — the per-member line is the linear sub-sequence
-    // Construct → Verify, entered at Construct and terminating (no successor) at
-    // Verify; Refine and Review are off the standing line (repair re-entry and
-    // the aggregate-position lane respectively). Tripwire: a reordered, dropped,
-    // or re-grown member-line stage breaks the dispatched progression the
-    // reducer walks.
+    // ADR-0221 — the per-member line is the linear sub-sequence
+    // Construct → Verify → Review, entered at Construct and terminating (no
+    // successor) at Review; Refine and Reconcile are off the standing line
+    // (repair re-entry and fold-conflict repair). Tripwire: a reordered,
+    // dropped, or re-grown member-line stage breaks the dispatched progression
+    // the reducer walks — and a `Verify` that answers `None` here is the
+    // regression that folds an unjudged candidate.
     #[test]
-    fn member_line_is_construct_verify() {
+    fn member_line_is_construct_verify_review() {
         assert_eq!(StageCatalog::entry_stage(), StageId::Construct);
         assert_eq!(StageCatalog::next_member_stage(StageId::Construct), Some(StageId::Verify));
-        assert_eq!(StageCatalog::next_member_stage(StageId::Verify), None, "Verify is the per-member terminus");
-        // The repair-only Refine, the fold-conflict Reconcile, and the
-        // aggregate-position Review are not on the standing line; neither is a
-        // bloom-level tail stage.
+        assert_eq!(StageCatalog::next_member_stage(StageId::Verify), Some(StageId::Review));
+        assert_eq!(StageCatalog::next_member_stage(StageId::Review), None, "Review is the per-member terminus");
+        // The repair-only Refine and the fold-conflict Reconcile are not on the
+        // standing line; neither is a bloom-level tail stage.
         assert_eq!(StageCatalog::next_member_stage(StageId::Refine), None);
         assert_eq!(StageCatalog::next_member_stage(StageId::Reconcile), None);
-        assert_eq!(StageCatalog::next_member_stage(StageId::Review), None);
         assert_eq!(StageCatalog::next_member_stage(StageId::Integrate), None);
     }
 
@@ -1827,12 +1853,14 @@ mod tests {
         let checkout = Digest::from_bytes([9; 32]);
         let base = Digest::from_bytes([5; 32]);
 
-        assert_eq!(
-            Transformation::for_member_stage(&binding(StageId::Verify), subject, checkout, base).diff_base,
-            Some(base),
-            "the member verify's candidate is the committed range its narrowing reads",
-        );
-        for stage in [StageId::Construct, StageId::Refine, StageId::Review] {
+        for stage in [StageId::Verify, StageId::Review] {
+            assert_eq!(
+                Transformation::for_member_stage(&binding(stage), subject, checkout, base).diff_base,
+                Some(base),
+                "{stage:?} judges a captured candidate, so it names the committed range (ADR-0221)",
+            );
+        }
+        for stage in [StageId::Construct, StageId::Refine] {
             assert_eq!(
                 Transformation::for_member_stage(&binding(stage), subject, checkout, base).diff_base,
                 None,

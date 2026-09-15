@@ -1437,6 +1437,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::Land { bloom, .. }
         | Fact::AdoptAnswer { bloom, .. }
         | Fact::AttemptCompleted { bloom, .. }
+        | Fact::ReviewFailed { bloom, .. }
         | Fact::AggregateReviewCompleted { bloom, .. }
         | Fact::AggregateVerifyCompleted { bloom, .. }
         | Fact::PrecheckPrepared { bloom, .. }

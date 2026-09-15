@@ -1045,6 +1045,32 @@ pub enum Fact {
         /// Which lap, and on whose word.
         drop: AdminLapDrop,
     },
+    /// A dispatched member `Review` judged one candidate and found against it
+    /// (ADR-0221) — the model's verdict at the member line's terminus, before
+    /// the candidate folds.
+    ///
+    /// Its own fact rather than a failing
+    /// [`Fact::AttemptCompleted`](Self::AttemptCompleted), for the reason
+    /// [`Fact::VerifyFailed`](Self::VerifyFailed) is its own: the reducer routes
+    /// it through the bloom's sealed `RedVerify` disposition, and both arms of
+    /// that route need the judge's prose — the ejection composes it into the
+    /// member's departure reason, the repair arm hands it to the lap as the work
+    /// order. An `AttemptCompleted` carries no channel for it.
+    ///
+    /// Appended past [`Fact::AdminDropLap`](Self::AdminDropLap) so every prior
+    /// fact retains its wire discriminant.
+    ReviewFailed {
+        /// The bloom whose member was judged.
+        bloom: BloomId,
+        /// The member whose current cursor must be terminal `Review`.
+        workpiece: WorkpieceId,
+        /// The verdict evidence, bound to the member's current candidate tree.
+        evidence: Evidence,
+        /// The judge's findings against this candidate, or empty when it wrote
+        /// none. Advisory prose exactly as ADR-0178 requires, never an
+        /// accounting input: the repair ledger counts laps, not sentences.
+        findings: String,
+    },
 }
 
 impl Fact {

@@ -92,6 +92,10 @@ pub enum AdmissionKey {
     StudyCompleted,
     /// A speculative aggregate run or its final-fold join, accounted once.
     PrecheckCompleted,
+    /// A member `Review` that found against its candidate (ADR-0221). Its own
+    /// key rather than sharing [`Self::VerifyFailed`]'s, so an operator reading
+    /// the journal sees which gate refused the member without opening the fact.
+    ReviewFailed,
 }
 
 impl AdmissionKey {
@@ -99,7 +103,7 @@ impl AdmissionKey {
     /// of these is the durable statement that the dispatch reached the
     /// reducer as a verdict. [`Self::Study`] is deliberately absent: it
     /// rides the same nonce but must not satisfy the strand check.
-    pub const ALL: [Self; 14] = [
+    pub const ALL: [Self; 15] = [
         Self::Attempt,
         Self::Integrate,
         Self::VerifyFailed,
@@ -114,6 +118,7 @@ impl AdmissionKey {
         Self::Scope,
         Self::StudyCompleted,
         Self::PrecheckCompleted,
+        Self::ReviewFailed,
     ];
 
     /// The key's stable prefix — the half of the key that is not the nonce.
@@ -135,6 +140,7 @@ impl AdmissionKey {
             Self::Scope => "aether.bloomery.scope",
             Self::StudyCompleted => "aether.bloomery.study_completed",
             Self::PrecheckCompleted => "aether.bloomery.precheck_completed",
+            Self::ReviewFailed => "aether.bloomery.review_failed",
         }
     }
 

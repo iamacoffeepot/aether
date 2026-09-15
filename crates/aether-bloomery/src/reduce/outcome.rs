@@ -880,6 +880,12 @@ pub enum Outcome {
     },
     /// An admin fact was refused (ADR-0219).
     AdminRejected(AdminError),
+    /// A member-`Review` verdict was refused (ADR-0221). Carries
+    /// [`VerifyFailedError`] rather than a parallel set: the three admissions a
+    /// review verdict must clear are the three a verify verdict must clear, and
+    /// a second spelling would make an operator learn two names for one
+    /// refusal. Appended so every prior outcome keeps its wire discriminant.
+    ReviewFailedRejected(VerifyFailedError),
 }
 
 impl Outcome {

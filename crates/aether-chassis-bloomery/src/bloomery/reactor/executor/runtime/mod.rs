@@ -243,10 +243,8 @@ impl TrackedHandle {
 ///
 /// Exhaustive over [`StageId`] rather than wildcarded. `None` here means the
 /// order never terminates. The stages that reach it are never dispatched to an
-/// executor at all — the pre-line stages, the per-member `Review` the member
-/// walk does not enter (`StageCatalog::MEMBER_LINE` ends at `Verify`), and the
-/// bloom-level positions the coordinator performs itself — so no order carries
-/// one and none can expire. A wildcard reads a stage that later becomes
+/// executor at all — the pre-line stages and the bloom-level positions the
+/// coordinator performs itself — so no order carries one and none can expire. A wildcard reads a stage that later becomes
 /// dispatchable into that group silently; naming every variant makes it a
 /// compile error instead.
 fn timeout_verdict(stage: StageId, cause: TerminationCause) -> Option<(StageVerdict, VerifyFailureSet)> {
@@ -262,6 +260,11 @@ fn timeout_verdict(stage: StageId, cause: TerminationCause) -> Option<(StageVerd
         | StageId::AggregateVerify
         | StageId::BaseVerify
         | StageId::AggregateReview
+        // The member line's own judge (ADR-0221). It is a dispatched model
+        // lane like every other, so an overrun has to expire: left unnamed
+        // here the order outlives every sweep and the member waits forever on
+        // a child that is already gone.
+        | StageId::Review
         // A scoping run is dispatched too (ADR-0208), so an overdue one must
         // terminate: without an arm here `terminate_live_order` cancels the
         // child and bails, the registry row survives, and every later sweep
@@ -272,7 +275,7 @@ fn timeout_verdict(stage: StageId, cause: TerminationCause) -> Option<(StageVerd
         // the fault this admits is the whole account of the read: the bloom is
         // already landed, and what expires with the order is its study.
         | StageId::Study => Some((verdict, VerifyFailureSet::EMPTY)),
-        StageId::Sketch | StageId::Approve | StageId::Review | StageId::Integrate | StageId::Land => None,
+        StageId::Sketch | StageId::Approve | StageId::Integrate | StageId::Land => None,
     }
 }
 

@@ -1,6 +1,6 @@
 # ADR-0153: Whole-bloom review
 
-- **Status:** Accepted
+- **Status:** Accepted; §The member line ends at Verify superseded by ADR-0221
 - **Date:** 2026-07-18
 
 ## Context
@@ -14,6 +14,13 @@ What remains wrong is the review's *position*. A per-member model review judges 
 ## Decision
 
 ### The member line ends at Verify
+
+> **Superseded by ADR-0221 (2026-09-15).** The member line is
+> `Construct → Verify → Review` again: a passing `Verify` advances, and a passing
+> `Review` is what mints the `ResolutionClaim`. The rest of this decision — the
+> aggregate position, the findings freeze/route/confirm loop, the two-pass
+> ceiling, the park to the owner — stands unchanged.
+
 
 The dispatched member line becomes **Construct → Verify**. A passing Verify is the member's terminal gate: it mints the member's `ResolutionClaim` — the verification evidence already binds the exact candidate tree, which is precisely what `reduce_integrate` re-checks — and the member integrates. The per-member model Review is removed from the line; `Refine` also leaves the standing line and becomes what #3659 already made it in practice: the **repair re-entry**, dispatched only when a gate fails and a directed fix is the thing that can change the next verdict. A failing Verify within its budget re-enters Refine (carrying the mechanical failure output through the findings channel) and the Refine pass returns to Verify for the delta-confirm; the re-entry ceiling wedges the member as today. Members are cheap again: one model construction, mechanical gating, model repair only on failure.
 

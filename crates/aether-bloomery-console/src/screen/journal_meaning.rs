@@ -121,6 +121,7 @@ fn is_lane_fact(fact: &str) -> bool {
             | "ConstructionCheckpointObserved"
             | "LaneWritesObserved"
             | "VerifyFailed"
+            | "ReviewFailed"
             | "AggregateVerifyCompleted"
             | "AggregateReviewCompleted"
             | "MemberExecutorFault"

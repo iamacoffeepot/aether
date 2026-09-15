@@ -40,6 +40,7 @@ mod integrate;
 mod land;
 mod landing;
 mod lease;
+mod member_review;
 mod narrowing;
 mod observe;
 mod operator;
@@ -110,6 +111,7 @@ use integrate::{reduce_integrate, reduce_resolve};
 use land::reduce_land;
 use landing::reduce_landing_rejected;
 use lease::reduce_lane_writes_observed;
+use member_review::reduce_review_failed;
 use narrowing::reduce_composition_narrowed;
 use observe::{reduce_observe_mainline, reduce_observe_mainline_diverged};
 use operator::{reduce_operator_adjudication, reduce_operator_repair};
@@ -202,6 +204,9 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         Fact::FoldConflict { bloom, workpiece, checkpoint, head, evidence } => {
             reduce_fold_conflict(snapshot, bloom, workpiece, *checkpoint, *head, evidence)
         }
+        Fact::ReviewFailed { bloom, workpiece, evidence, findings } => {
+            reduce_review_failed(snapshot, bloom, workpiece, evidence, findings)
+        }
         Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
             reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
         }
@@ -268,6 +273,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         | Fact::AggregateVerifyCompleted { .. }
         | Fact::LandingRejected { .. }
         | Fact::VerifyFailed { .. }
+        | Fact::ReviewFailed { .. }
         | Fact::ContainmentRefused { .. }
         | Fact::AggregateReviewExecutorFault { .. }
         | Fact::FoldConflict { .. }

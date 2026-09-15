@@ -92,6 +92,19 @@ pub fn reviewed(order: &OutstandingOrder) -> ScriptedUpload {
     ScriptedUpload { notes: Some(REVIEW_NOTE.to_owned()), ..passed(order) }
 }
 
+/// A judge that found against the candidate it read, carrying the prose it
+/// wrote (ADR-0221).
+///
+/// The failing half of [`reviewed`]. `findings` is what the reducer composes
+/// into an ejected member's departure reason and what the repair lap is handed
+/// as its work order, so a scenario about either has to script real text: an
+/// empty string is a judge that refused without saying why, which is a
+/// different case.
+#[must_use]
+pub fn found(order: &OutstandingOrder, findings: &str) -> ScriptedUpload {
+    ScriptedUpload { findings: Some(findings.to_owned()), ..verdict(order, ScriptedVerdict::ReviewFinding) }
+}
+
 /// A failing mechanical verdict naming `failed`.
 #[must_use]
 pub fn failed(order: &OutstandingOrder, failed: VerifyFailureSet) -> ScriptedUpload {

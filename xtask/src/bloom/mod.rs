@@ -188,8 +188,9 @@ struct RetryArgs {
     /// The stage to run again. Defaults to wherever the member is sitting;
     /// naming a different one is refused rather than applied, so a retry aimed
     /// from a stale read of the board does not spend a roll on the wrong stage.
-    /// Naming `Verify` is accepted when the member holds a candidate, moving a
-    /// reconciled capture onto its verify without another construct lap.
+    /// Naming `Verify` or `Review` is accepted when the member holds a
+    /// candidate, moving a reconciled capture onto its gate without another
+    /// construct lap.
     #[arg(long)]
     stage: Option<String>,
 
@@ -565,8 +566,15 @@ fn run_retry(client: &Client<'_>, args: &RetryArgs) -> Result<String> {
     let stage = match &args.stage {
         None => cursor.stage,
         Some(named) if named.eq_ignore_ascii_case(&format!("{:?}", cursor.stage)) => cursor.stage,
+        // The two member gates a held candidate can be re-run at without the
+        // cursor already standing there (ADR-0221): the mechanical one, and the
+        // judge behind it. Both judge a candidate that exists, which is what
+        // `cursor.candidate.is_some()` is asking.
         Some(named) if named.eq_ignore_ascii_case("Verify") && cursor.candidate.is_some() => {
             aether_bloomery::StageId::Verify
+        }
+        Some(named) if named.eq_ignore_ascii_case("Review") && cursor.candidate.is_some() => {
+            aether_bloomery::StageId::Review
         }
         Some(named) => {
             bail!("{} is at {:?}, not {named}", args.workpiece, cursor.stage);
