@@ -27,6 +27,7 @@ pub(super) const VALUE_TAKING_FLAGS: &[&str] = &[
     "--out",
     "--nonce",
     "--diff-base",
+    "--gate",
     "--subject",
     "--harness",
     "--model",

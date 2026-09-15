@@ -153,6 +153,13 @@ pub struct TransformArgs {
     /// arm prepares as it does off Actions. Refused on every other command.
     #[arg(long)]
     prepared: bool,
+    /// Gates the umbrella narrows its fan-out to — an ADR-0218 attribution
+    /// probe names the one check it asked for, so a `verify.suppress` question
+    /// buys a scanner rather than the clippy, docs and test builds it never
+    /// reads. Repeatable; absent is the position's complete member list.
+    /// Refused on every command but the three umbrellas.
+    #[arg(long = "gate", value_name = "GATE")]
+    gate: Vec<String>,
 }
 
 /// Who reads an evidence channel and what they do with it. Declared once; both
@@ -394,12 +401,28 @@ struct Evidence {
     /// needs to judge the carry against the one shared table, and to refuse it
     /// as an incomplete receipt when it does not stand.
     carried: Vec<Carried>,
+    /// The gates this umbrella actually fanned out to, when something narrowed
+    /// it (ADR-0218 amendment).
+    ///
+    /// Absent is the position's complete member list, so a reader tells "this
+    /// run answered the whole gate obligation" from "this run answered one
+    /// check" by whether the key is there at all — the same presence-driven
+    /// reading the channels use. Present, it is exactly what ran, which is
+    /// what makes `gates` and `failed_verifiers` beside it readable as a
+    /// subset rather than as a full report with gates missing.
+    ///
+    /// The two narrowings that produce it are one pipeline (see
+    /// `verify::run_verify_check`): the `--gate` selection an attribution probe
+    /// states, and the delta carry above. A gate `carried` names is therefore
+    /// never in here, and a gate the selection excluded is in neither — that
+    /// run neither answered for it nor claims an earlier receipt did.
+    selected_gates: Option<Vec<String>>,
     channels: Channels,
 }
 
 impl Serialize for Evidence {
     fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        let mut state = serializer.serialize_struct("Evidence", 17)?;
+        let mut state = serializer.serialize_struct("Evidence", 18)?;
         state.serialize_field("command", &self.command)?;
         state.serialize_field("nonce", &self.nonce)?;
         state.serialize_field("status", &self.status)?;
@@ -432,6 +455,9 @@ impl Serialize for Evidence {
         }
         if !self.carried.is_empty() {
             state.serialize_field("carried", &self.carried)?;
+        }
+        if let Some(selected) = &self.selected_gates {
+            state.serialize_field("selected_gates", selected)?;
         }
         self.channels.serialize_into(&mut state, ChannelKind::Flakes)?;
         self.channels.serialize_into(&mut state, ChannelKind::InheritedFailures)?;
@@ -488,6 +514,14 @@ impl Evidence {
         self
     }
 
+    /// Name the gates this run was narrowed to, when it was narrowed at all.
+    /// An empty selection is a no-op so a full fan-out cannot stamp an empty
+    /// array that reads as "this run was told to run nothing".
+    fn with_selection(mut self, selected: Vec<String>) -> Self {
+        self.selected_gates = (!selected.is_empty()).then_some(selected);
+        self
+    }
+
     fn with_channels(mut self, channels: impl IntoIterator<Item = EvidenceChannel>) -> Self {
         for channel in channels {
             self.channels.set(channel);
@@ -518,8 +552,11 @@ fn build_evidence(
         duration_millis: None,
         gates: None,
         // The single-command path runs the one gate it names, so there is
-        // nothing to carry and nothing a receipt could stand in for.
+        // nothing to carry and nothing a receipt could stand in for — and
+        // nothing to narrow either: `--gate` is refused here, so the arm that
+        // ran is the arm the command id names.
         carried: Vec::new(),
+        selected_gates: None,
         // The single-command path discriminates nothing: only the umbrella
         // resolves a closure, so only the umbrella can report against one —
         // and only `verify.suppress` can state a request, which `run_single`
@@ -544,6 +581,7 @@ fn build_evidence(
 /// and failed.
 pub fn run(args: &TransformArgs) -> Result<()> {
     reject_test_schedule(args)?;
+    reject_gate_selection(args)?;
     if args.command == REVIEW_REPORT {
         return review_mcp::serve(&args.out);
     }
@@ -603,6 +641,20 @@ fn reject_test_schedule(args: &TransformArgs) -> Result<()> {
     let command = args.command.as_str();
     let used = flags.join(", ");
     bail!("{command} does not take {used}; those scheduling inputs belong to verify.test")
+}
+
+/// Refuse `--gate` on everything but the three umbrellas.
+///
+/// The selection narrows a fan-out, and only an umbrella has one. A single
+/// verify arm *is* one gate: honouring a selection there would let a run be
+/// told to be a gate it already is, or — worse — a gate it is not, and answer
+/// under the command id it was invoked with either way.
+fn reject_gate_selection(args: &TransformArgs) -> Result<()> {
+    if args.gate.is_empty() || Position::of(&args.command).is_some() {
+        return Ok(());
+    }
+    let command = args.command.as_str();
+    bail!("{command} does not take --gate; a gate selection narrows an umbrella's fan-out")
 }
 
 /// Serialize `evidence` to `<out>/evidence.json` — the one write both model

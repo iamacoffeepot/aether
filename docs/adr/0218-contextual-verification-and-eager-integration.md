@@ -546,3 +546,41 @@ narrower range buys is the case where the merge is narrower than the change —
 common, because a conflict is usually a few files, but not guaranteed. The
 amendment removes the *re-authoring*, which was unconditional; it makes the
 re-proving conditional rather than free.
+
+## Amendment: a probe runs the check it asks for (2026-09-15)
+
+An attribution probe names exactly one check — `BatchProbeRequest.check` — and
+reads exactly one check back. It nonetheless materialized as an unqualified
+`verify.check`, and the umbrella fans out to every gate the position declares,
+so each probe paid for clippy, docs and test to answer a question none of them
+reports on. Measured on bloom `0f16e207`: run `84DB66FF` planned nine probes
+asking only `verify.suppress` — a scanner that answers in under a second — and
+each ran clippy for 46 to 185 s, docs for 19 to 140 s and test for 49 to 366 s,
+4 to 6 minutes per probe and 37.6 minutes for the batch. Run `A05DA0B9` asked
+`verify.docs` five times and ran clippy and test behind each of them, 21 minutes.
+
+A work order therefore carries a **gate selection**: the gates its umbrella
+fans out to, empty for the whole fan-out. The lane reads it as one `--gate <id>`
+per gate; only the selected gates spawn, the host is preflighted for their
+prerequisites alone, and `evidence.json` records `selected_gates` beside
+`gates`, `failed_verifiers` and the mask derived from them — which then describe
+exactly what ran. A gate that was not selected appears nowhere in the receipt,
+so it can never be read as passed, and a selection naming a gate the position
+does not fan out to is refused rather than filtered to an empty run.
+
+The selection is not a sealed fact. It is not a `Transformation` field and no
+receipt is checked against it: it is the probe's own `BatchCheck` restated for
+the lane, derived at submit time from the step's durable descriptor, so it
+cannot name a check the sealed contract did not ask about — a stored second copy
+could. Only a probe step narrows. The contextual full node and `verify.member`
+select nothing and keep every gate, which is what preserves "subset and baseline
+probes cannot pose as full-node reports" and "ledger admission accepts only
+exact gate obligations declared by the sealed contract": a narrowed run answers
+a subset of the obligation and is admitted only as the probe receipt it is.
+Per-gate observation documents are already written per spawned gate, so a
+narrowed probe's own check reports exactly as before and the gates that did not
+run contribute nothing rather than contributing an absence.
+
+Slot warmth is untouched: the probe runs in the same slot, against the same
+per-gate target directories, under the same sccache keys. What changes is how
+many of those gates it starts.

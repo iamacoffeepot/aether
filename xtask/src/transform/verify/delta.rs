@@ -309,30 +309,49 @@ impl Selection {
 /// Resolve what this invocation runs, from the host's stated carry and the
 /// delta it implies.
 ///
+/// `run_list` is what the umbrella owes *after* the argv `--gate` narrowing, so
+/// a gate the caller excluded never reaches this decision: it is neither run
+/// nor carried, because this invocation makes no claim about it at all.
+///
 /// A gate is carried only when all three hold: the receipt was green on it, the
-/// delta cannot reach it, and the position's run list names it. Anything the
-/// host asked to skip past that still runs — [`VERIFY_GATES_ENV`] narrows a
-/// run, it never excuses a gate no receipt has judged.
+/// delta cannot reach it, and nobody named it. Anything the host asked to skip
+/// past that still runs — [`VERIFY_GATES_ENV`] narrows a run, it never excuses
+/// a gate no receipt has judged.
+///
+/// `demanded` is the argv selection, folded in beside [`VERIFY_GATES_ENV`]'s
+/// list because the two channels say the same thing: a caller that *named* a
+/// gate wants that gate's verdict from this run. An attribution probe asks one
+/// check and reads one check, so carrying the one gate it asked for would hand
+/// it back a receipt in place of the answer it was dispatched to compute.
 #[allow(clippy::disallowed_methods)] // aether-suppression-request: the lane reads its per-invocation carry from the dispatch's environment (ADR-0200 amendment), which is the channel the executor states it on; there is no cap config here
-pub(super) fn resolve(run_list: &[&'static str]) -> Selection {
+pub(super) fn resolve(run_list: &[&'static str], demanded: &[String]) -> Selection {
     let Some(proved) = env::var(VERIFY_PROVED_ENV).ok().as_deref().and_then(Proved::parse) else {
         return Selection::everything(run_list);
     };
     let requested = env::var(VERIFY_GATES_ENV).ok();
+    let named = requested
+        .iter()
+        .flat_map(|list| list.split(','))
+        .chain(demanded.iter().map(String::as_str))
+        .map(str::trim)
+        .filter(|gate| !gate.is_empty())
+        .collect::<Vec<&str>>();
 
-    select(run_list, &proved, requested.as_deref(), &diff_since(&proved.tree))
+    select(run_list, &proved, &named, &diff_since(&proved.tree))
 }
 
-/// The pure half of [`resolve`]: the same decision over stated inputs.
-fn select(run_list: &[&'static str], proved: &Proved, requested: Option<&str>, delta: &Delta) -> Selection {
+/// The pure half of [`resolve`]: the same decision over stated inputs, with
+/// `named` the gates both selection channels asked for by name.
+fn select(run_list: &[&'static str], proved: &Proved, named: &[&str], delta: &Delta) -> Selection {
     let (invalidated, carryable) = split(run_list, delta);
     let classes = delta.classes().iter().map(|class| class.as_str().to_owned()).collect::<Vec<_>>();
     let mut run = invalidated;
     let mut carried = Vec::new();
     for id in carryable {
-        // A gate the host explicitly listed runs whatever the receipt says: the
-        // selection narrows a run, and a caller that named a gate wants it.
-        let demanded = requested.is_some_and(|list| list.split(',').any(|gate| gate.trim() == id));
+        // A gate either channel explicitly listed runs whatever the receipt
+        // says: the selection narrows a run, and a caller that named a gate
+        // wants it.
+        let demanded = named.contains(&id);
         if proved.green.iter().any(|gate| gate == id) && !demanded {
             carried.push(Carried {
                 gate: id.to_owned(),
@@ -576,7 +595,7 @@ mod tests {
         let selection = select(
             &FOLD,
             &proved(&["verify.clippy", "verify.docs", "verify.test", "verify.dup", "verify.deps", "verify.lock"]),
-            None,
+            &[],
             &classify(COMMENT_DELTA),
         );
 
@@ -596,7 +615,7 @@ mod tests {
     /// to not produce.
     #[test]
     fn a_gate_the_delta_reaches_runs_even_when_the_receipt_was_green() {
-        let selection = select(&FOLD, &proved(&FOLD), None, &classify(COMMENT_DELTA));
+        let selection = select(&FOLD, &proved(&FOLD), &[], &classify(COMMENT_DELTA));
 
         assert!(selection.run.contains(&"verify.clippy"));
         assert!(!selection.carried.iter().any(|entry| entry.gate == "verify.clippy"));
@@ -606,7 +625,7 @@ mod tests {
     /// it: the re-verify runs it, which is the point of the re-verify.
     #[test]
     fn a_gate_the_receipt_failed_is_never_carried() {
-        let selection = select(&FOLD, &proved(&["verify.test"]), None, &classify(COMMENT_DELTA));
+        let selection = select(&FOLD, &proved(&["verify.test"]), &[], &classify(COMMENT_DELTA));
 
         assert!(selection.run.contains(&"verify.docs"), "docs was red in the receipt, so it runs");
         assert_eq!(selection.carried.iter().map(|entry| entry.gate.as_str()).collect::<Vec<_>>(), vec!["verify.test"]);
@@ -619,12 +638,27 @@ mod tests {
     fn an_explicit_selection_narrows_but_never_excuses() {
         let green = proved(&["verify.docs", "verify.test", "verify.deps", "verify.lock"]);
 
-        let demanded = select(&FOLD, &green, Some("verify.fmt,verify.test"), &classify(COMMENT_DELTA));
+        let demanded = select(&FOLD, &green, &["verify.fmt", "verify.test"], &classify(COMMENT_DELTA));
         assert!(demanded.run.contains(&"verify.test"), "a listed gate runs");
 
-        let unbacked = select(&FOLD, &proved(&[]), Some("verify.fmt"), &classify(COMMENT_DELTA));
+        let unbacked = select(&FOLD, &proved(&[]), &["verify.fmt"], &classify(COMMENT_DELTA));
         assert_eq!(unbacked.run, FOLD.to_vec(), "an omission no receipt backs is not an omission");
         assert!(unbacked.carried.is_empty());
+    }
+
+    /// Tripwire for the merged pipeline: an attribution probe arrives here with
+    /// its run list already filtered to the one gate it asked for, and that gate
+    /// named in `demanded`. Carrying it would answer the probe with the receipt
+    /// it was dispatched to re-compute — a run that spawned nothing, timed
+    /// nothing, and stated a verdict about a check it never ran.
+    #[test]
+    fn the_one_gate_a_probe_asked_for_is_never_carried_out_from_under_it() {
+        let asked = ["verify.suppress"];
+
+        let selection = select(&asked, &proved(&asked), &["verify.suppress"], &classify(""));
+
+        assert_eq!(selection.run, asked.to_vec());
+        assert!(selection.carried.is_empty(), "the probe's own gate is its answer, not a carry");
     }
 
     /// A delta that reaches everything carries nothing however green the
@@ -633,7 +667,7 @@ mod tests {
     fn a_code_delta_carries_nothing() {
         let diff = "diff --git a/crates/aether-fs/src/lib.rs b/crates/aether-fs/src/lib.rs\n@@ -1,1 +1,1 @@\n-let a = 1;\n+let a = 2;\n";
 
-        let selection = select(&FOLD, &proved(&FOLD), None, &classify(diff));
+        let selection = select(&FOLD, &proved(&FOLD), &[], &classify(diff));
 
         assert_eq!(selection.run, FOLD.to_vec());
         assert!(selection.carried.is_empty());

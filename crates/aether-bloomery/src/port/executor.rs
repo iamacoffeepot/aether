@@ -51,6 +51,21 @@ pub struct WorkOrder {
     pub physical_run: Option<Digest>,
     /// Release the retained physical lane after this order settles.
     pub release_physical_run: bool,
+    /// Gates this dispatch's umbrella narrows its fan-out to (ADR-0218
+    /// amendment) — the backend renders each as a `--gate` on the lane argv.
+    ///
+    /// Empty is the whole fan-out, which is what every dispatch but an
+    /// attribution probe names: a member Verify, a fold's aggregate verify and
+    /// a base run each answer a complete gate obligation. A probe asks one
+    /// check and reads one check, so running the rest buys minutes of clippy,
+    /// docs and test for a question none of them answers.
+    ///
+    /// Not a [`Transformation`] field: the selection is not a second sealed
+    /// fact a receipt could be checked against, it is the probe's own
+    /// `BatchCheck` restated for the lane. Derived at submit time from the
+    /// step's durable descriptor, it cannot disagree with the check the sealed
+    /// contract named — a stored copy could.
+    pub selected_gates: Vec<String>,
 }
 
 /// What `submit` returns and `cancel` / `inspect` / `stream_evidence` take.

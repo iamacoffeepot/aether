@@ -496,7 +496,7 @@ fn append_work_order_args(
 }
 
 /// The argv tail after the lane program: command, `--out`, `--nonce`, and the
-/// optional range / model / seeded flags.
+/// optional range / gate-selection / model / seeded flags.
 ///
 /// A Construct checkpoint is `--seeded <checkout>` and never `--diff-base`
 /// (#5052): the marker on the work order is provenance, not a range the
@@ -507,6 +507,11 @@ fn work_order_args(spec: &RunSpec<'_>, checkout: &str, diff_base: Option<&str>) 
     task_argv::push_value_flag(&mut args, "--nonce", spec.nonce);
     if let Some(diff_base) = diff_base {
         task_argv::push_value_flag(&mut args, "--diff-base", diff_base);
+    }
+    // One flag per gate the umbrella was narrowed to (ADR-0218 amendment).
+    // Empty adds nothing, so an unnarrowed lane's argv is exactly what it was.
+    for gate in spec.selected_gates {
+        task_argv::push_value_flag(&mut args, "--gate", gate.as_str());
     }
     if is_model_lane(spec.command) {
         task_argv::push_value_flag(&mut args, "--subject", checkout);
@@ -1199,6 +1204,36 @@ mod tests {
     }
 
     #[test]
+    fn a_narrowed_umbrella_names_each_selected_gate_on_the_lane_argv() {
+        // Tripwire for the ADR-0218 amendment: the selection reaches the lane
+        // CLI as `--gate <id>` per gate, beside the range it already names. A
+        // selection dropped here leaves the lane running the full fan-out —
+        // which is what bloom 0f16e207 measured (runs 84DB66FF / A05DA0B9):
+        // fourteen single-check probes, 58 minutes of clippy, docs and test.
+        let evidence = Path::new("/tmp/evidence");
+        let worktree = Path::new("/tmp/slot");
+        let target = Path::new("/tmp/target");
+        let checkout = "abc123def456";
+        let selection = [String::from("verify.suppress")];
+
+        let mut probe = spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target);
+        probe.selected_gates = &selection;
+        let args = work_order_args(&probe, checkout, Some("base000")).expect("work-order args assemble");
+
+        assert!(args.windows(2).any(|pair| pair == ["--gate", "verify.suppress"]), "the gate is named: {args:?}");
+        assert_eq!(args.iter().filter(|arg| *arg == "--gate").count(), 1, "one flag per selected gate: {args:?}");
+        assert!(args.windows(2).any(|pair| pair == ["--diff-base", "base000"]), "the range still rides too: {args:?}");
+
+        let full = work_order_args(
+            &spec("verify.check", checkout, Some("base000"), None, evidence, worktree, target),
+            checkout,
+            Some("base000"),
+        )
+        .expect("work-order args assemble");
+        assert!(!full.iter().any(|arg| arg == "--gate"), "an unnarrowed umbrella names no gate: {full:?}");
+    }
+
+    #[test]
     fn a_reader_dispatch_names_the_bloom_and_the_receipt() {
         // Tripwire: the reader's prompt context slots are `--bloom` and
         // `--receipt`. Dropping them here leaves the lane with an empty
@@ -1261,6 +1296,7 @@ mod tests {
             instruction_bundle: None,
             instruction_bundle_digest: None,
             deadline_unix_millis: None,
+            selected_gates: &[],
         }
     }
 
