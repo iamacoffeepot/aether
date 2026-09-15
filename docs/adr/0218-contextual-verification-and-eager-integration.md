@@ -138,6 +138,11 @@ A normal single-run receipt retains its ordinary completion meaning. Reusable
 ledger facts additionally need independent observations; the host does not
 repeat every successful suite merely to populate that ledger.
 
+**Amended by [ADR-0200's single-run contextual-green amendment](0200-verification-is-a-ledger-of-proof-facts.md#amendment-a-single-green-contextual-run-is-a-fact-2026-09-15-5986)**
+(#5948, #5986): a single passing contextual run now records one green fact per
+declared gate at the exact contextual address. The independent-observations
+rule above keeps its full force for member, aggregate, and sweep facts.
+
 A fully settled contextual run may also answer the aggregate position for
 the same selected head, coverage, and complete sealed contract. The reducer
 derives this authority from its retained ordered requests and matching

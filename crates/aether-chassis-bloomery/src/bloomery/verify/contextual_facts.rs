@@ -1,4 +1,15 @@
 //! Exact-input contextual facts in the existing ADR-0200 ledger.
+//!
+//! Two independent runs remain the only constructor for member, aggregate,
+//! and sweep facts. The one exception is ADR-0200's single-run
+//! contextual-green amendment (#5948): [`record_green_contextual_facts`]
+//! records one fact per declared gate from a single passing contextual run,
+//! because waiting for a second suite meant nothing was ever recorded. The
+//! bound is the address — [`contextual_fact_key`], the exact candidate,
+//! ordered coverage, and complete contract, on the contract's host class — so
+//! one observation can never charge another tree; a later red still runs and
+//! attributes through probes, and [`reuse_contextual_proof`] journals every
+//! reuse as `Fact::ProofReused`.
 
 use aether_bloomery::digest::{ContentAddressed, digest_of};
 use aether_bloomery::{CandidateRef, CompositionContract, Digest, MemberPin, SharedRunNode};
@@ -418,8 +429,9 @@ pub fn record_contextual_facts(
 }
 
 /// Record one green fact per declared gate from a contextual run that already
-/// passed. A second suite is not required; that wait is why a green shared run
-/// never populated the ledger (#5948).
+/// passed (ADR-0200's single-run contextual-green amendment). A second suite
+/// is not required; that wait is why a green shared run never populated the
+/// ledger (#5948).
 ///
 /// # Errors
 /// The host class does not match the sealed contract, or the proof ledger

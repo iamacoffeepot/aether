@@ -4,6 +4,7 @@
 - **Date:** 2026-08-17
 - **Amended:** 2026-09-09 — status: implemented on `main`; proof facts are written on one path, `crates/aether-chassis-bloomery/src/bloomery/verify/facts.rs`, keyed by `(closure_key, test, host_class)` behind flake discrimination (#5142).
 - **Amended:** 2026-09-15 — gates invalidate by delta class; a re-verify runs the gates its delta can reach and carries the rest from the earlier receipt (see [Amendment: gates invalidate by delta class (2026-09-15)](#amendment-gates-invalidate-by-delta-class-2026-09-15)).
+- **Amended:** 2026-09-15 — a single passing contextual run records one green fact per declared gate (#5948, #5986; see [Amendment: a single green contextual run is a fact (2026-09-15, #5986)](#amendment-a-single-green-contextual-run-is-a-fact-2026-09-15-5986)).
 
 ## Context
 
@@ -118,6 +119,44 @@ The carry needs both halves and neither side can invent the other's: the lane kn
 A receipt whose coverage says "ran these, carried those from receipt `R` over tree `T`" is admitted only when `R` is on record for exactly `T` and every carried gate is one the stated classes cannot affect per the table. Otherwise the receipt is refused as incomplete and the full umbrella is dispatched. The lane errs the same way: an unreadable diff, an unparsed hunk, a binary file, or a path outside the inert allowlist is `code`, which invalidates everything and reduces the run to the umbrella that existed before this amendment.
 
 This changes nothing about a member's first verify — there is no prior receipt, so everything runs — and nothing about the contextual step 0 of a shared run.
+
+## Amendment: a single green contextual run is a fact (2026-09-15, #5986)
+
+Commit 7fa229469 (#5948) admits one exception to the integrity rule above —
+only flake-discriminated results become facts — and to the rejected alternative
+below that trusts single runner results. `record_green_contextual_facts`
+(`crates/aether-chassis-bloomery/src/bloomery/verify/contextual_facts.rs`)
+records one green fact per declared gate from a single passing contextual run,
+through `DiscriminatedFacts::from_green_run`, and `reuse_contextual_proof` lets
+a later shared run over the same inputs skip physical work on that observation.
+The exception exists because waiting for a second suite meant production
+recorded nothing at all.
+
+The bound is the address. A contextual fact is keyed by `contextual_fact_key` —
+the exact candidate tree and checkout, the ordered member coverage, and the
+complete composition contract — for the gates the sealed contract declares, on
+the contract's host class, and it answers only those inputs: any mismatch of
+node, contract, host class, or gate set is a cache miss, and the latest row per
+gate must be green or reuse refuses. A single observation therefore cannot
+charge a different tree, member, or contract; the most a flaky green can do is
+skip re-execution of the identical inputs it already passed once.
+
+What bounds that residue is re-execution everywhere else. A later red over
+overlapping coverage still runs and still attributes through probes that
+execute the check — no recorded green excuses a red run — and the two-run
+`record_contextual_facts` path still stands beside the single-run one, so a
+later red observation at the same address supersedes the green and disables
+reuse. The sweep and the roll keep their own discriminated proof at their own
+addresses rather than revisiting recorded rows: the sweep converts only unknown
+addresses with two-run discrimination, and the roll holds the day until its
+coverage is green. Every reuse is journaled as `Fact::ProofReused`, naming the
+gate, the contextual closure key, and the producing dispatch, so a run that did
+no physical work reads as one.
+
+Marking single-run facts provisional so they cannot be reused was considered
+and rejected: it re-creates the production state #5948 was landed to end,
+where nothing was ever recorded. ADR-0218's contextual-proof section points
+here.
 
 ## Consequences
 

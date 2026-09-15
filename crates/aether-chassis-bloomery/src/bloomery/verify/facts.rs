@@ -1,10 +1,17 @@
 //! Discriminated proof facts and the only path that writes them (ADR-0200).
 //!
 //! A runner report is not a fact. [`discriminate`] keeps only tests that
-//! agreed across two independent runs. A green contextual shared run is the
-//! other admitted source: [`DiscriminatedFacts::from_green_run`] records one
-//! fact per declared gate so a single pass can populate the ledger (#5948).
-//! [`record_proof_facts`] persists those and will not accept a raw report.
+//! agreed across two independent runs, and two runs remain the only
+//! constructor for member, aggregate, and sweep facts. The one exception is
+//! ADR-0200's single-run contextual-green amendment (#5948):
+//! [`DiscriminatedFacts::from_green_run`] records one fact per declared gate
+//! from a single passing contextual run, because waiting for a second suite
+//! meant nothing was ever recorded. The bound is the address — the exact
+//! candidate, ordered coverage, and complete contract, on the contract's host
+//! class — so one observation can never charge another tree; a later red still
+//! runs and attributes through probes, and every reuse is journaled as
+//! `Fact::ProofReused`. [`record_proof_facts`] persists those and will not
+//! accept a raw report.
 
 use std::collections::BTreeMap;
 
