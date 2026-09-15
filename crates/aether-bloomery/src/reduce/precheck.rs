@@ -784,7 +784,7 @@ mod tests {
     use crate::reduce::coordination;
     use crate::reduce::reduce as reduce_event;
     use crate::testing::{claim, compiled_resolved, digest, draft, event, membership, workpiece};
-    use crate::values::config_address;
+    use crate::values::{RedVerify, config_address};
     use crate::{
         CompositionPlan, Fact, IntegrationHead, MemberContractPin, MemberVerifyOutcome, MemberVerifyRequest,
         OperatorHold, ResolvedConfigs, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord,
@@ -846,7 +846,7 @@ mod tests {
                 movement_budget: 3,
                 reservation_millis: 30_000,
                 coalesce_millis: None,
-                red_verify: crate::RedVerify::Refine,
+                red_verify: RedVerify::Refine,
                 host_class: "test".to_owned(),
             }),
         )
@@ -1537,6 +1537,9 @@ mod tests {
         let record = snapshot.blooms.get_mut(&bloom).expect("fixture record");
         record.integration =
             Some(super::super::FoldedIntegration { tree: node.tree, head: digest(99), lineage: vec![] });
+        // The re-weave this case follows runs only for a bloom that sealed it
+        // (ADR-0218 §Amendment: low tolerance).
+        record.red_verify = RedVerify::Refine;
         let state = record.precheck.as_mut().expect("fixture pre-check state");
         state.final_join = Some(node.clone());
         state.promoted = true;
@@ -1590,6 +1593,9 @@ mod tests {
         let record = snapshot.blooms.get_mut(&bloom).expect("fixture record");
         record.integration =
             Some(super::super::FoldedIntegration { tree: node.tree, head: digest(99), lineage: vec![] });
+        // The re-weave this case follows runs only for a bloom that sealed it
+        // (ADR-0218 §Amendment: low tolerance).
+        record.red_verify = RedVerify::Refine;
         let state = record.precheck.as_mut().expect("fixture pre-check state");
         state.final_join = Some(node.clone());
         state.promoted = true;
@@ -1611,6 +1617,9 @@ mod tests {
         let record = snapshot.blooms.get_mut(&bloom).expect("fixture record");
         record.integration =
             Some(super::super::FoldedIntegration { tree: node.tree, head: digest(99), lineage: vec![] });
+        // The re-weave this case follows runs only for a bloom that sealed it
+        // (ADR-0218 §Amendment: low tolerance).
+        record.red_verify = RedVerify::Refine;
         let state = record.precheck.as_mut().expect("fixture pre-check state");
         state.final_join = Some(node.clone());
         state.promoted = true;

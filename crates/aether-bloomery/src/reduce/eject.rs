@@ -41,9 +41,17 @@ const EJECTING_DECIDER: &str = "bloomery";
 /// are comparable on sight.
 pub(super) fn ejection_reason(cause: &str, failed: VerifyFailureSet, evidence: &Evidence, findings: &str) -> String {
     let named: Vec<String> = failed.iter().map(|failure| failure.as_str().to_string()).collect();
-    let verifiers = if named.is_empty() { String::new() } else { format!(" ({})", named.join(", ")) };
+    let verifiers = if named.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", named.join(", "))
+    };
     let findings = findings.trim();
-    let observed = if findings.is_empty() { String::new() } else { format!(" Findings: {findings}") };
+    let observed = if findings.is_empty() {
+        String::new()
+    } else {
+        format!(" Findings: {findings}")
+    };
 
     format!(
         "{cause}{verifiers}. The bloom's sealed disposition ejects on a verify that does not go green, so no \

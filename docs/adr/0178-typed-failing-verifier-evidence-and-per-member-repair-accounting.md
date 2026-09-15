@@ -82,3 +82,11 @@ When repeat accounting exhausts the budget, the stored `Wedge`, reducer outcome,
 - **Reset seen identities on `GrantAttempts`** — a grant adds bounded numeric headroom; erasing history would redefine a known repeat as a first failure and add hidden forgiveness.
 - **Carry each missing executable or target as an identity** — host-specific strings would make the accounting vocabulary unbounded and allow novelty to extend the loop.
 - **Treat preflight as `ExecutorFault` under ADR-0176** — ADR-0176 deliberately admits that verdict only for `AggregateReview` in V1. Extending it to member Verify is a separate lifecycle decision.
+
+## Amendment: the repair lap is opt-in (2026-09-15)
+
+The accounting above decides how many repair laps a failing member gets. [ADR-0218](0218-contextual-verification-and-eager-integration.md) §Amendment: low tolerance decides *whether* it gets one: a bloom's sealed `red_verify` disposition defaults to `Eject`, and an ejected member is withdrawn rather than sent to `Refine`.
+
+Nothing in the vocabulary or the accounting changes. `VerifyFailure`, `VerifyFailureSet`, the repeated-set rule, the seen-set cursor, the grant behaviour, and the wedge projection are exactly as ratified, and they are what a bloom that seals `Refine` runs. What an ejecting bloom does is reach none of them: a departure spends no roll, adds no identity to the seen set, and records no wedge, because every one of those counters exists to bound a next lap that is not coming.
+
+The typed set is not discarded by ejecting — it is what the departure is *about*. `Fact::VerifyFailed` gains a `findings` field so the reducer can name both the identities and the prose in the withdrawal's reason; the prose remains advisory and is never an accounting input, which is this record's rule and is unchanged.

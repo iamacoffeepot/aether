@@ -974,6 +974,7 @@ fn a_failing_aggregate_verify_repairs_the_weave_then_parks_at_the_ceiling() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
     let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
     let (snapshot, _) =
@@ -2468,6 +2469,111 @@ fn attempt_evidence() -> Evidence {
 
 fn verifier_set(failures: &[VerifyFailure]) -> VerifyFailureSet {
     failures.iter().copied().collect()
+}
+
+// The low-tolerance rule (ADR-0218 §Amendment, 2026-09-15). The plausible bugs
+// are all "the eject happened, but…": a departure that still dispatches the
+// repair lap it was supposed to replace, one that spends a roll or a verifier
+// identity against a member that is no longer in the line, or one that leaves
+// nothing behind for the person who has to pick the candidate up.
+#[test]
+fn a_red_verify_ejects_the_member_and_dispatches_no_repair() {
+    let (snapshot, bloom) = at_verify("wp");
+    // `at_verify` puts the bloom on the repair loop; this case is the default.
+    let mut snapshot = snapshot;
+    snapshot.blooms.get_mut(&bloom).expect("sealed").red_verify = RedVerify::Eject;
+
+    let failed = event(
+        "verify-red",
+        Fact::VerifyFailed {
+            bloom,
+            workpiece: workpiece("wp"),
+            evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
+            failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+            findings: String::from("wp/src/lib.rs:12 needless_borrow"),
+        },
+    );
+    let (after, decided) = step(&snapshot, &failed);
+
+    assert!(matches!(decided.outcome, Outcome::MembersWithdrawn { terminal: true, .. }), "{:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { .. } | Decision::AdvanceStage { .. } | Decision::RecordWedge { .. }
+        )),
+        "an ejection reaches none of the attempt vocabulary: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).expect("the bloom is still in the snapshot");
+    let departure = record.withdrawn.get(&workpiece("wp")).expect("the member left");
+    assert_eq!(departure.cause, WithdrawalCause::Verify);
+    // Everything the person picking the candidate up needs, in the one field
+    // the GitHub mirror renders: which gate said no, where the full output is,
+    // and what it actually said.
+    assert!(departure.reason.contains("verify.clippy"), "{}", departure.reason);
+    assert!(departure.reason.contains(&digest(71).to_hex()), "{}", departure.reason);
+    assert!(departure.reason.contains("needless_borrow"), "{}", departure.reason);
+    assert!(
+        !record.progress.contains_key(&workpiece("wp")),
+        "an ejected member sits at no stage, so nothing later dispatches it",
+    );
+}
+
+// The other half of the knob: a bloom that seals `Refine` keeps ADR-0153's
+// loop. Without this, `Eject` could be unconditional and nothing would notice.
+#[test]
+fn a_bloom_that_sealed_refine_still_repairs_a_red_verify() {
+    let (snapshot, bloom) = at_verify("wp");
+    let (_, decided) = step(
+        &snapshot,
+        &verify_failed("verify-red", bloom, "wp", digest(10), 71, verifier_set(&[VerifyFailure::Clippy])),
+    );
+
+    assert!(matches!(decided.outcome, Outcome::RefineReentered { rolls: 0, .. }), "{:?}", decided.outcome);
+}
+
+// The whole-bloom half. A red fold implicates no member, so there is nobody to
+// eject — the plausible bug is that it therefore falls through to the ADR-0191
+// re-weave and spends a paid lap on a combination no verdict has accepted.
+#[test]
+fn a_red_aggregate_verify_parks_the_bloom_under_a_hold_without_re_weaving() {
+    let base = Snapshot::new(digest(1)).with_green_base(digest(1));
+    let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
+    let bloom = spec.id();
+    let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let (snapshot, _) = step(&snapshot, &event("i-a", Fact::Integrate { bloom, claim: claim("alpha", 10, 100) }));
+    let (snapshot, _) = step(&snapshot, &event("i-b", Fact::Integrate { bloom, claim: claim("beta", 11, 101) }));
+    let (snapshot, _) =
+        step(&snapshot, &event("r1", Fact::Resolve { bloom, tree: digest(40), head: digest(41), lineage: vec![] }));
+
+    let (after, decided) = step(
+        &snapshot,
+        &event(
+            "fold-red",
+            Fact::AggregateVerifyCompleted {
+                bloom,
+                passed: false,
+                evidence: Evidence { subject: digest(40), kind: EvidenceKind::VerificationResult, detail: digest(52) },
+            },
+        ),
+    );
+
+    assert!(matches!(decided.outcome, Outcome::AggregateVerifyParked { rolls: 1, .. }), "{:?}", decided.outcome);
+    assert!(
+        !decided.effects.iter().any(|effect| matches!(
+            effect,
+            Decision::DispatchAttempt { .. } | Decision::DispatchAggregateVerify { .. }
+        )),
+        "a parked fold dispatches nothing further: {:?}",
+        decided.effects,
+    );
+
+    let record = after.blooms.get(&bloom).expect("the bloom is still in the snapshot");
+    let hold = record.operator_hold.as_ref().expect("the park raises an operator hold");
+    assert!(hold.reason.contains(&digest(40).to_hex()), "the hold names the fold: {}", hold.reason);
+    assert!(hold.reason.contains(&digest(52).to_hex()), "and its evidence: {}", hold.reason);
+    assert_eq!(record.claims.len(), 2, "every member's resolution stands — the fold is what did not build");
 }
 
 fn verify_failed(

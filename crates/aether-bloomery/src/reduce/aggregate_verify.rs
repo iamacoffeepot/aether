@@ -7,6 +7,7 @@
 //! together do not. Without this gate the landing CI is what discovers that,
 //! downstream of the point where the bloom can still route it back to an owner.
 
+use alloc::borrow::ToOwned as _;
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,10 +21,15 @@ use super::{AggregateVerifyError, BloomRecord, BloomStatus, Decision, Decisions,
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId};
 use crate::reads;
-use crate::values::{Evidence, Transformation};
+use crate::values::{Evidence, OperatorHold, RedVerify, Transformation};
 
 /// Fallback when a sealed catalog binds no retry budget: one attempt, then the ceiling.
 pub(super) const DEFAULT_RETRY_BUDGET: u32 = 1;
+
+/// Who a reducer-authored operator hold records as the decider — the same
+/// answer a reducer-authored ejection records, and for the same reason: the
+/// coordinator acted on the disposition a bloom sealed.
+const HOLDING_DECIDER: &str = "bloomery";
 
 /// Whether `rolls` has reached the stage's park ceiling.
 ///
@@ -262,6 +268,16 @@ pub(super) fn reduce_aggregate_verify_completed(
         return Decisions { outcome: Outcome::Resolved(resolved), effects };
     }
 
+    // Low tolerance (ADR-0218 §Amendment): a red fold has no single member to
+    // eject, so the bloom stops here rather than buying a re-weave. Parked on
+    // the first red instead of at the catalog ceiling below, and parked *under
+    // an operator hold* rather than only on the question channel: the hold is
+    // what stops every other dispatch this bloom would otherwise go on making
+    // while nobody is looking at the fold that did not build.
+    if record.red_verify == RedVerify::Eject {
+        return parked_on_the_fold(record, *bloom, integration.tree, evidence, rolls, effects);
+    }
+
     if at_park_ceiling(record, StageId::AggregateVerify, rolls) {
         // The budget is spent on a fold that still does not build. The fold
         // stays held as the owner's decision context — the same bloom-scope park
@@ -295,4 +311,49 @@ pub(super) fn reduce_aggregate_verify_completed(
     effects.extend(repair.effects);
 
     Decisions { outcome: repair.outcome, effects }
+}
+
+/// Park a bloom whose fold did not build, under an operator hold naming the
+/// aggregate and what the gate said (ADR-0218 §Amendment: low tolerance).
+///
+/// The member-side rule of the amendment ejects, and this is its whole-bloom
+/// counterpart: there is no member to eject, because a fold that does not
+/// build is a statement about the combination rather than about any one
+/// contribution. So the bloom stops instead, with three things recorded
+/// together — the finding on the composition's channel, the question that
+/// holds the fold as the owner's decision context, and the hold that makes
+/// "why did nothing else go out" answerable without reading the journal.
+///
+/// Nothing is dispatched. That is the point: the ADR-0191 re-weave is a paid
+/// lap on a combination no verdict has yet accepted, and the amendment's whole
+/// claim is that a person reading the findings is the faster path.
+fn parked_on_the_fold(
+    record: &BloomRecord,
+    bloom: BloomId,
+    tree: Digest,
+    evidence: &Evidence,
+    rolls: u32,
+    mut effects: Vec<Decision>,
+) -> Decisions {
+    effects.push(finding_of(bloom, tree, evidence, &[]));
+    effects.push(Decision::RecordReviewPark { bloom, question: Some(evidence.detail) });
+    // An already-held bloom keeps the hold it has: the operator's own words
+    // outrank a machine-authored sentence, and `reduce_operator_hold` refuses a
+    // second hold for the same reason.
+    if record.operator_hold.is_none() {
+        effects.push(Decision::RecordOperatorHold {
+            bloom,
+            hold: OperatorHold {
+                reason: format!(
+                    "the aggregate verify over fold {} came back red and the bloom's sealed disposition does not \
+                     re-weave; read its findings under evidence {} and release the hold once the fold is answered",
+                    tree.to_hex(),
+                    evidence.detail.to_hex()
+                ),
+                operator: HOLDING_DECIDER.to_owned(),
+            },
+        });
+    }
+
+    Decisions { outcome: Outcome::AggregateVerifyParked { bloom, rolls, question: evidence.detail }, effects }
 }
