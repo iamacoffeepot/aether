@@ -1305,6 +1305,7 @@ mod tests {
                 name: "claim_refs_name_active_blooms".into(),
                 statement: "every ref under refs/bloomery/claims/ names a bloom currently Sealed or Resolved — never Landed, never unknown".into(),
                 passed: false,
+                pending: false,
                 divergences: vec!["refs/bloomery/claims/issue-5175 held by Landed bloom ab".into()],
             }],
         };

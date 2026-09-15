@@ -49,6 +49,10 @@ pub struct DoctorReactorState {
     replica_passes: BTreeMap<u64, u32>,
     surface_seen: BTreeMap<(BloomId, WorkpieceId), Instant>,
     unresolved_head_seen: Option<(String, Instant)>,
+    /// First sighting of the current live daily sha. The head checks read its
+    /// age as the lag budget (#6025): a young sha the pointers still miss is
+    /// a ref that moved, an old one an observer that stopped.
+    observe_head_seen: Option<(String, Instant)>,
     /// Members seen with no live lane and no pending dispatch, by first
     /// sighting. A member still undispatched a full poll interval later is
     /// re-dispatched: the interval is what separates a handoff between two
@@ -106,6 +110,7 @@ impl NativeActor for DoctorReactorCapability {
             replica_passes: BTreeMap::new(),
             surface_seen: BTreeMap::new(),
             unresolved_head_seen: None,
+            observe_head_seen: None,
             undispatched_seen: BTreeMap::new(),
             poll_interval: interval,
             mailer,
@@ -162,6 +167,8 @@ impl NativeActor for DoctorReactorCapability {
             replica_passes: &mut state.replica_passes,
             surface_seen: &mut state.surface_seen,
             unresolved_head_seen: &mut state.unresolved_head_seen,
+            observe_head_seen: &mut state.observe_head_seen,
+            observe_interval: poll_interval,
             now,
         }) {
             Ok(DoctorPass { report, standing }) => {
@@ -202,6 +209,10 @@ struct CollectRequest<'a> {
     replica_passes: &'a mut BTreeMap<u64, u32>,
     surface_seen: &'a mut BTreeMap<(BloomId, WorkpieceId), Instant>,
     unresolved_head_seen: &'a mut Option<(String, Instant)>,
+    observe_head_seen: &'a mut Option<(String, Instant)>,
+    /// This reactor's poll interval: the observe cadence the lag budget is
+    /// measured against (#6025).
+    observe_interval: Duration,
     now: Instant,
 }
 
@@ -248,6 +259,7 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
     let (actual_head, actual_head_sha) = actual_daily_head(request.source, request.correspondence);
     let unresolved_head_age =
         observe_unresolved_head(actual_head, actual_head_sha.as_deref(), request.unresolved_head_seen, request.now);
+    let last_observe_age = observe_actual_head(actual_head_sha.as_deref(), request.observe_head_seen, request.now);
     let started_refs: Vec<&str> = request.started_nonces.iter().map(String::as_str).collect();
     let pairs = request.correspondence.as_ref().map_or_else(Vec::new, |store| match store.pairs() {
         Ok(pairs) => pairs,
@@ -289,6 +301,8 @@ fn collect_and_evaluate(request: &mut CollectRequest<'_>) -> rusqlite::Result<Do
         lanes_running: request.lanes_running,
         evidence_nonces: &evidence_refs,
         unresolved_head_age,
+        observe_interval: request.observe_interval,
+        last_observe_age,
         candidate_ref_trees: &candidate_ref_trees,
         known_flakes: &known_flakes,
     };
@@ -591,12 +605,33 @@ fn observe_unresolved_head(
         *seen = None;
         return None;
     };
+    Some(sighted_age(sha, seen, now))
+}
+
+/// Age the live daily sha this process has seen, resolved or not (#6025).
+/// The head checks read it as the lag budget: a mismatch against a young sha
+/// is a ref that moved, against an old one an observer that stopped. A missed
+/// read keeps the previous sighting rather than granting a fresh budget, and
+/// a different sha restarts it — the same first-sighting rule as
+/// [`observe_unresolved_head`], without its clearing, because an unreadable
+/// ref is not evidence the observer caught up.
+fn observe_actual_head(
+    actual_head_sha: Option<&str>,
+    seen: &mut Option<(String, Instant)>,
+    now: Instant,
+) -> Option<Duration> {
+    actual_head_sha.map(|sha| sighted_age(sha, seen, now))
+}
+
+/// First-sighting age of one live sha: seen for the first time starts now,
+/// seen before keeps its first sighting.
+fn sighted_age(sha: &str, seen: &mut Option<(String, Instant)>, now: Instant) -> Duration {
     let first = match seen {
         Some((prev, first)) if prev == sha => *first,
         _ => now,
     };
     *seen = Some((sha.to_owned(), first));
-    Some(now.saturating_duration_since(first))
+    now.saturating_duration_since(first)
 }
 
 fn observe_replica(
@@ -679,6 +714,19 @@ mod tests {
                 name: name.into(),
                 statement: "the property held".into(),
                 passed: false,
+                pending: false,
+                divergences: vec![divergence.into()],
+            }],
+        }
+    }
+
+    fn waiting(name: &str, divergence: &str) -> DoctorReport {
+        DoctorReport {
+            checks: vec![CheckResult {
+                name: name.into(),
+                statement: "the property held".into(),
+                passed: false,
+                pending: true,
                 divergences: vec![divergence.into()],
             }],
         }
@@ -690,6 +738,7 @@ mod tests {
                 name: name.into(),
                 statement: "the property held".into(),
                 passed: true,
+                pending: false,
                 divergences: Vec::new(),
             }],
         }
@@ -710,5 +759,19 @@ mod tests {
             "a clean pass is not an alert"
         );
         assert!(alert_and_advance(&mut last, &first), "a dirty set after a clean pass is newly loud again");
+    }
+
+    #[test]
+    fn a_pending_check_never_alerts_and_never_dirties_the_fingerprint() {
+        // #6025: the wait is not a violation, so the alert path must not see
+        // it — neither as a post, nor as a fingerprint change that would
+        // swallow or invent the next real alert.
+        let mut last = String::new();
+        let waiting = waiting("observed_head_equals_daily_head", "observed aa != actual bb");
+        assert!(!alert_and_advance(&mut last, &waiting), "a waiting pass is not an alert");
+        assert!(last.is_empty(), "a waiting pass leaves no fingerprint: {last:?}");
+        assert!(!alert_and_advance(&mut last, &waiting), "a stable wait stays silent");
+        let violated = dirty("observed_head_equals_daily_head", "observed aa != actual bb");
+        assert!(alert_and_advance(&mut last, &violated), "the same lag past its budget is newly loud");
     }
 }
