@@ -11,11 +11,15 @@
 //! [`crate::grade`] takes: the evidence log holds
 //! digests, not columns. An unresolvable record, or a resolved one that does
 //! not grade its evidence's subject or name its own bloom, contributes zero
-//! and raises the unaccounted count — which is, since every dispatch whose
-//! harness session log survived is priced at lane exit whatever the outcome
-//! (issue 6029), the count of dispatches with no session log at all. A record
-//! whose priced column is zero raises the unpriced count, so a fleet nobody
-//! has authored rates for is distinguishable from a cheap one.
+//! and raises the unaccounted count — and so does a resolved row whose token
+//! columns are all zero, because no model turn runs without spending a token
+//! and zeroes mean no session log stands behind the dispatch at all. Since
+//! every dispatch whose harness session log survived is priced at lane exit
+//! whatever the outcome (issue 6029), that count is the count of dispatches
+//! with no session log at all. A row with measured tokens whose priced column
+//! is zero raises the unpriced count instead, so a fleet nobody has authored
+//! rates for is distinguishable both from a cheap one and from a dispatch that
+//! left no log.
 
 use crate::digest::Digest;
 use crate::reduce::Snapshot;
@@ -38,10 +42,14 @@ pub fn measure(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyReco
             }
             match source(&evidence.detail) {
                 Some(study) if study.grades(&evidence.subject) && study.bloom == *id => {
-                    let cost = study.cost.cost_micro_usd;
-                    bloom_total = bloom_total.saturating_add(cost);
-                    if cost == 0 {
-                        spend.unpriced_records = spend.unpriced_records.saturating_add(1);
+                    if study.cost.has_measured_tokens() {
+                        let cost = study.cost.cost_micro_usd;
+                        bloom_total = bloom_total.saturating_add(cost);
+                        if cost == 0 {
+                            spend.unpriced_records = spend.unpriced_records.saturating_add(1);
+                        }
+                    } else {
+                        spend.unaccounted_dispatches = spend.unaccounted_dispatches.saturating_add(1);
                     }
                 }
                 _ => spend.unaccounted_dispatches = spend.unaccounted_dispatches.saturating_add(1),
@@ -70,8 +78,16 @@ mod tests {
         BloomId(digest(seed))
     }
 
+    // One measured token: the row stands for a dispatch whose session log was
+    // read. A tokenless row is a different shape — see
+    // `a_tokenless_row_is_unaccounted_not_unpriced` — so the shared helper
+    // never builds one by accident.
     fn record(bloom_id: BloomId, subject: Digest, cost_micro_usd: u64) -> StudyRecord {
-        StudyRecord { bloom: bloom_id, subject, cost: StudyCost { cost_micro_usd, ..StudyCost::default() } }
+        StudyRecord {
+            bloom: bloom_id,
+            subject,
+            cost: StudyCost { cost_micro_usd, input_tokens: 1, ..StudyCost::default() },
+        }
     }
 
     fn snapshot_with(bloom: BloomId, evidence: Vec<Evidence>) -> Snapshot {
@@ -131,6 +147,26 @@ mod tests {
         assert_eq!(spend.total_micro_usd, 0);
         assert_eq!(spend.unpriced_records, 1);
         assert_eq!(spend.unaccounted_dispatches, 0);
+        assert_eq!(spend.per_bloom.get(&bloom), Some(&0));
+    }
+
+    // The plausible bug: a resolved row with no measured tokens is treated as
+    // an unpriced model (total stays zero, unpriced goes up), so a dispatch
+    // that left no session log at all reads as a fleet nobody authored rates
+    // for rather than as the accounting gap it is (issue 6029).
+    #[test]
+    fn a_tokenless_row_is_unaccounted_not_unpriced() {
+        let bloom = bloom_id(1);
+        let subject = digest(2);
+        let snapshot =
+            snapshot_with(bloom, vec![Evidence { subject, kind: EvidenceKind::StudyRecord, detail: digest(3) }]);
+
+        let row = StudyRecord { bloom, subject, cost: StudyCost::default() };
+        assert!(!row.cost.has_measured_tokens(), "the fixture row carries no token the log could have measured");
+        let spend = measure(&snapshot, |_| Some(row));
+        assert_eq!(spend.total_micro_usd, 0);
+        assert_eq!(spend.unaccounted_dispatches, 1, "no session log behind the row means unaccounted");
+        assert_eq!(spend.unpriced_records, 0, "unpriced is for measured tokens the table priced at nothing");
         assert_eq!(spend.per_bloom.get(&bloom), Some(&0));
     }
 

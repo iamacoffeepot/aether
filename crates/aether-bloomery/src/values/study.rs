@@ -60,6 +60,25 @@ pub struct StudyCost {
     pub output_tokens: u64,
 }
 
+impl StudyCost {
+    /// Whether any token column is nonzero — whether a harness session log
+    /// stands behind this row at all.
+    ///
+    /// An all-zero row is unmeasured, not free: no model turn runs without
+    /// spending a token, so zeroes mean no log was ever read, never that the
+    /// attempt cost nothing. The spend projection counts such a row as an
+    /// unaccounted dispatch rather than an unpriced one (issue 6029).
+    #[must_use]
+    pub fn has_measured_tokens(self) -> bool {
+        self.input_tokens > 0
+            || self.cache_write_tokens > 0
+            || self.cache_write_1h_tokens > 0
+            || self.cache_write_5m_tokens > 0
+            || self.cache_read_tokens > 0
+            || self.output_tokens > 0
+    }
+}
+
 /// One model call's token columns — the unit a long-context band selects on.
 ///
 /// The dispatch-aggregate [`StudyCost`] cannot choose a band: a 23-turn lap

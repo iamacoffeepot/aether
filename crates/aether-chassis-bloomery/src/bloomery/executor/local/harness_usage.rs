@@ -67,27 +67,24 @@ pub fn recover_from_transcript(transcript: &str, session_root_override: Option<&
 /// stream id off the first record (a run that dies early still names its
 /// session, so a partial run's tokens stay recoverable), else the terminal
 /// result's handle, else the init record's.
+///
+/// A line that does not parse is skipped rather than ending the search: the
+/// transcript this reads is the one a killed lane left, so its last line is
+/// routinely a half-written record, and a fatal read there would lose the id
+/// the earlier lines already named.
 pub fn session_id_from_transcript(transcript: &str) -> Option<String> {
-    for line in transcript.lines() {
-        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        if let Some(id) = event.pointer("/stream/id").and_then(serde_json::Value::as_str) {
-            return Some(id.to_owned());
-        }
-    }
-    for line in transcript.lines() {
-        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        if event.pointer("/type").and_then(serde_json::Value::as_str) == Some("result")
-            && let Some(id) = event.pointer("/session_id").and_then(serde_json::Value::as_str)
-        {
-            return Some(id.to_owned());
-        }
-    }
-    transcript.lines().find_map(|line| {
-        let event = serde_json::from_str::<serde_json::Value>(line).ok()?;
-        (event.pointer("/subtype").and_then(serde_json::Value::as_str) == Some("init"))
-            .then(|| event.pointer("/session_id")?.as_str().map(str::to_owned))
-            .flatten()
-    })
+    let events = || transcript.lines().filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok());
+    let tagged = |pointer: &'static str, tag: &'static str| {
+        events().find_map(move |event| {
+            (event.pointer(pointer).and_then(serde_json::Value::as_str) == Some(tag))
+                .then(|| event.pointer("/session_id")?.as_str().map(str::to_owned))
+                .flatten()
+        })
+    };
+    events()
+        .find_map(|event| event.pointer("/stream/id").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .or_else(|| tagged("/type", "result"))
+        .or_else(|| tagged("/subtype", "init"))
 }
 
 /// Total the tokens Muse recorded for `session`, across the run and every
@@ -388,6 +385,25 @@ mod tests {
         assert_eq!(usage.cost.output_tokens, 33);
         assert_eq!(usage.cost.turns, 1);
         assert_eq!(usage.cost.duration_millis, 2055);
+    }
+
+    // The plausible bug: a half-written last line — the ordinary tail of a
+    // transcript whose lane was killed mid-write — ends the session search, so
+    // the very runs this recovery exists for lose the id their earlier lines
+    // already named.
+    #[test]
+    fn a_half_written_tail_does_not_lose_the_session_the_transcript_named() {
+        let transcript = concat!(
+            "{\"type\":\"system\",\"subtype\":\"init\",\"session_id\":\"9c1d-truncated\"}\n",
+            "{\"type\":\"assistant\",\"message\":{\"model\":\"claude-opus-4-8\",\"content\":[],\"usage\":{",
+            "\"input_tokens\":100,\"output_tokens\":12}}}\n",
+            "{\"type\":\"assist",
+        );
+
+        assert_eq!(session_id_from_transcript(transcript).as_deref(), Some("9c1d-truncated"));
+        let usage = recover_from_transcript(transcript, None).expect("the parsed turns are still measured");
+        assert_eq!(usage.cost.input_tokens, 100);
+        assert_eq!(usage.cost.output_tokens, 12);
     }
 
     // The plausible bug: recovery invents a zero usage for a transcript that
