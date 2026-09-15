@@ -290,7 +290,7 @@ impl ScenarioHarness {
     /// open takes the single write lock, and a scenario reopens the store on
     /// every poll of every `pump_until` — at that rate a migrating open spends
     /// the budget queuing for the lock rather than watching the world move
-    /// through it (iamacoffeepot/aether#6081).
+    /// through it (iamacoffeepot/aether#6078).
     ///
     /// # Panics
     /// The store could not be opened inside the step budget.

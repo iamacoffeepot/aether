@@ -1324,7 +1324,7 @@ impl SqliteStore {
     /// the coordinator's writes, and ahead of its next ones. Under host
     /// contention that is enough to stall the world the observer is waiting
     /// on, which is how a scenario that settles in a second blows a thirty
-    /// second budget on a loaded box (iamacoffeepot/aether#6081). A holder
+    /// second budget on a loaded box (iamacoffeepot/aether#6078). A holder
     /// opened this journal at boot from this same build, so an observer beside
     /// it has nothing to bring forward.
     ///

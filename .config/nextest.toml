@@ -7,7 +7,7 @@
 # rather than the world: a scenario that settles in 1.3s on a quiet host blows a
 # 30s `pump_until` budget under the crowd, and the ejection that follows is
 # charged to whichever bloom member the shared run named
-# (iamacoffeepot/aether#6081). The cap is the width these binaries actually
+# (iamacoffeepot/aether#6078). The cap is the width these binaries actually
 # want — each is already internally parallel — not a serialization: the suite
 # stays concurrent, it just stops competing with itself.
 [test-groups]

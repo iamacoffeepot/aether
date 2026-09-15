@@ -11,7 +11,7 @@
 //! so SQLite returns rather than waits. A connection opened through
 //! `SqliteStore::open_with_busy_timeout` therefore reports "database is locked"
 //! the instant the coordinator is mid-write, having waited none of the timeout
-//! it was given (iamacoffeepot/aether#6081).
+//! it was given (iamacoffeepot/aether#6078).
 //!
 //! `IMMEDIATE` takes the write lock at `BEGIN`, before any snapshot exists,
 //! which is the one place the busy handler does apply — so a writer that raced
