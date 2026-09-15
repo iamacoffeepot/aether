@@ -160,11 +160,15 @@ fn three_ready_siblings_share_one_run_when_the_hold_covers_the_spread() {
     let constructs = park_constructs(&mut harness);
 
     release_construct(&mut harness, &constructs, FIRST);
-    harness.pump_until("the first candidate queues while siblings are still constructing", |harness| {
-        queued_verifies(harness) == 1
+    // The hold is journaled by the scheduler's proposal pass, which is a later
+    // tick than the one that queues the request — so it is waited for, not
+    // snapshotted after a wait for something else (iamacoffeepot/aether#6078).
+    // A coordinator that never holds still fails here, on this budget, naming
+    // the wait it did not journal.
+    harness.pump_until("the first candidate queues and its wait is journaled", |harness| {
+        queued_verifies(harness) == 1 && hold_facts(harness) >= 1
     });
     assert!(shared_run_members(&harness).is_empty(), "a sibling construct in flight must hold the first request");
-    assert!(hold_facts(&harness) >= 1, "the hold is journaled so a ready request's wait is visible");
 
     release_construct(&mut harness, &constructs, SECOND);
     harness.pump_until("the second candidate joins the held queue", |harness| queued_verifies(harness) == 2);

@@ -5,10 +5,10 @@
 //! `insert_commission` selects the id before inserting it, `write_revision`
 //! loads the head before advancing it, the session pool reads its row before
 //! marking the lease — so a deferred transaction is holding a read snapshot by
-//! the time it asks for the write lock, and SQLite refuses *that* upgrade with
+//! the time it asks for the write lock, and `SQLite` refuses *that* upgrade with
 //! an immediate `SQLITE_BUSY`. The refusal deliberately skips the busy handler:
 //! two connections each waiting to upgrade their own snapshot would deadlock,
-//! so SQLite returns rather than waits. A connection opened through
+//! so `SQLite` returns rather than waits. A connection opened through
 //! `SqliteStore::open_with_busy_timeout` therefore reports "database is locked"
 //! the instant the coordinator is mid-write, having waited none of the timeout
 //! it was given (iamacoffeepot/aether#6078).
@@ -29,7 +29,7 @@ use rusqlite::{Connection, Transaction, TransactionBehavior};
 /// # Errors
 /// The `BEGIN IMMEDIATE` could not be issued — including a `SQLITE_BUSY` that
 /// outlasted the connection's busy timeout.
-pub(crate) fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
+pub fn begin(conn: &mut Connection) -> rusqlite::Result<Transaction<'_>> {
     conn.transaction_with_behavior(TransactionBehavior::Immediate)
 }
 
@@ -66,6 +66,9 @@ mod tests {
     /// Hold the write lock for `hold`, on a connection of its own.
     fn hold_the_write_lock(path: &str, id: &str, hold: Duration) -> thread::JoinHandle<()> {
         let (path, id) = (path.to_owned(), id.to_owned());
+        // Infra thread: the holder exists only to occupy `SQLite`'s write lock for a
+        // fixed span, which is a property of the connection, not of any actor's mail.
+        #[allow(clippy::disallowed_methods, reason = "a fixture that holds a file lock, outside the mail umbrella")]
         thread::spawn(move || {
             let mut holder = connect(&path);
             let txn = begin(&mut holder).expect("the holder takes the write lock");
@@ -92,7 +95,7 @@ mod tests {
         thread::sleep(Duration::from_millis(100));
         let mut deferred = connect(path);
         let refused = read_then_write(&mut deferred, "deferred", false);
-        assert!(refused.is_err(), "a deferred read-then-write is refused the upgrade rather than waiting: {refused:?}",);
+        assert!(refused.is_err(), "a deferred read-then-write is refused the upgrade rather than waiting: {refused:?}");
         holder.join().expect("the holder thread finishes");
 
         let holder = hold_the_write_lock(path, "holder-immediate", Duration::from_millis(400));
