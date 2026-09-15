@@ -329,6 +329,7 @@ impl Default for CommissionProjection {
             recorded_issue: None,
             title: String::new(),
             scope: None,
+            intent_text: None,
         }
     }
 }

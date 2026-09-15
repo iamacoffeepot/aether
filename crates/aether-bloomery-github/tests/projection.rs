@@ -380,6 +380,7 @@ fn commission(workpiece: &str, recorded_issue: Option<u64>) -> CommissionProject
         recorded_issue,
         title: String::new(),
         scope: None,
+        intent_text: None,
     }
 }
 
@@ -522,16 +523,19 @@ fn a_titled_commission_is_distinguishable_in_an_issue_list() {
 }
 
 #[test]
-fn a_section_heading_falls_back_to_a_title_the_gate_accepts() {
+fn a_section_heading_falls_back_to_a_readable_title_the_gate_accepts() {
     // Tripwire: #5373, #5374, and #5375 opened as `Description — open` and
     // immediately received `invalid-title` from `.github/workflows/issue-labels.yml`.
+    // #6022 supersedes the old floor here: a non-conventional heading keeps
+    // its words under a conventional prefix instead of collapsing to the id
+    // floor, so commissions stay distinguishable in an issue list.
     let projection = GithubProjection::new(FakeGithub::new());
     let mut open = commission("wp-5379", None);
     open.title = "Description".to_owned();
 
     let number = projection.project_commission(&open).expect("create").expect("owns a replica");
     let title = projection.client().issue_title(number).expect("the replica exists");
-    assert_eq!(title, commission_floor_title("wp-5379"));
+    assert_eq!(title, "chore(bloomery): description");
     assert!(issue_title_is_valid(&title), "{title}");
 }
 
@@ -602,6 +606,35 @@ fn a_stray_replica_is_retired_onto_its_source_issue() {
         1,
         "a second projection adds no further retirement comment"
     );
+}
+
+#[test]
+fn a_retrospect_shaped_commission_mirrors_its_finding_text() {
+    // #6022 (#6020): a mirrored commission with an intent but no scope
+    // revision rendered as bookkeeping only — banner, Workpiece, Approval,
+    // State, Scope: none, and none of the finding text. The replica reads
+    // like an issue a person would file: the verbatim intent, then the
+    // footer — under a readable title instead of the id floor.
+    let projection = GithubProjection::new(FakeGithub::new());
+    let mut open = commission("retrospect-eb725152c84c", None);
+    open.scope_revision = None;
+    open.approval_signer = None;
+    open.title = "A leak in the landing path".to_owned();
+    open.intent_text = Some("# A leak in the landing path\n\nThe reader saw it and will not fix it.\n".to_owned());
+
+    let number = projection.project_commission(&open).expect("create").expect("owns a replica");
+    let title = projection.client().issue_title(number).expect("the replica exists");
+    let body = projection.client().issue_body(number).expect("the replica exists");
+    assert_eq!(title, "chore(bloomery): a leak in the landing path");
+    assert!(issue_title_is_valid(&title), "{title}");
+    assert!(
+        body.contains("# A leak in the landing path\n\nThe reader saw it and will not fix it.\n"),
+        "the finding text: {body}",
+    );
+    assert!(!body.contains("Scope: _none_"), "no bookkeeping placeholder: {body}");
+    assert!(body.contains("- Approval: _none_"), "the footer still states the missing approval: {body}");
+    assert!(body.contains("- State: open"), "the footer still states the lifecycle: {body}");
+    assert!(!body.contains(&short_hex(&open.intent)), "the intent digest is not the body: {body}");
 }
 
 #[test]

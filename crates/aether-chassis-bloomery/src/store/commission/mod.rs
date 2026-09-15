@@ -939,8 +939,11 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
     };
     // Read out of the stored intent bytes rather than carried on the head row:
     // the head is an index, and a title recomputed from the bytes cannot drift
-    // from the intent the commission was created with.
-    let title = load_statement(conn, head.intent)?.and_then(|intent| intent_title(&intent.words)).unwrap_or_default();
+    // from the intent the commission was created with. The mirror text rides
+    // the same read; words that are not UTF-8 project as no text.
+    let words = load_statement(conn, head.intent)?.map(|intent| intent.words);
+    let title = words.as_deref().and_then(intent_title).unwrap_or_default();
+    let intent_text = words.and_then(|words| String::from_utf8(words).ok());
     let scope = match head.current_revision {
         Some(digest) => Some(load_revision(conn, digest)?.ok_or(CommissionError::MalformedCanonical)?.render()),
         None => None,
@@ -956,6 +959,7 @@ fn snapshot_projection(conn: &Connection, id: &str) -> Result<Vec<u8>, Commissio
             recorded_issue,
             title,
             scope,
+            intent_text,
         },
         Some(CommissionProjection::NAME),
     )
