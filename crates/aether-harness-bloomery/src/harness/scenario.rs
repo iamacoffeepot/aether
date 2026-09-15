@@ -473,6 +473,23 @@ impl ScenarioHarness {
     /// first revision could not be written.
     #[must_use]
     pub fn author_scope_revision(&self, workpiece: &str, surface: &[&str]) -> Digest {
+        // The middling band, so a scenario that is not about size dispatches
+        // under exactly the wall clock its catalog authored (#5998).
+        self.author_sized_scope_revision(workpiece, surface, "M")
+    }
+
+    /// [`author_scope_revision`](Self::author_scope_revision) with the scoped
+    /// size line stated rather than defaulted.
+    ///
+    /// The size band is what a stage's dispatched wall clock resolves at
+    /// (#5998), so a scenario about the limit has to be able to say which band
+    /// its member was routed into.
+    ///
+    /// # Panics
+    /// The commission store could not be opened, or the commission and its
+    /// first revision could not be written.
+    #[must_use]
+    pub fn author_sized_scope_revision(&self, workpiece: &str, surface: &[&str], size: &str) -> Digest {
         let mut store = self.open_store();
         let workpiece = WorkpieceId(workpiece.to_owned());
         let intent = Statement {
@@ -495,7 +512,7 @@ impl ScenarioHarness {
             plan: String::from("1. run the scripted lane"),
             declared_surface: surface.iter().map(|glob| (*glob).to_owned()).collect(),
             dogfood_brief: String::new(),
-            routing: ScopeRouting { size: String::from("S"), model: String::new() },
+            routing: ScopeRouting { size: size.to_owned(), model: String::new() },
             dependencies: Vec::new(),
             description: String::new(),
             implements: Vec::new(),

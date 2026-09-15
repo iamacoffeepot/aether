@@ -47,9 +47,10 @@ use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
     CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
-    DispatchPayload, Event, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce, RedispatchPayload,
-    ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic, VerifyFailureSet,
-    WorkHandle, WorkpieceId, normalize_write_paths, pin_workpiece_description,
+    DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce,
+    RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic,
+    VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
+    sized_wall_clock_secs,
 };
 use aether_bloomery_git::command;
 use aether_bloomery_github::{GitObjectId, candidate_ref_name, member_checkpoint_ref_name, short_hex};
@@ -424,6 +425,7 @@ fn expire_overdue_orders(
     tracked: &mut Vec<TrackedHandle>,
     unobserved: &[Nonce],
     now_unix_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     let expired = match store.list_expired_orders(now_unix_millis) {
@@ -447,9 +449,15 @@ fn expire_overdue_orders(
         if unobserved.iter().any(|nonce| nonce.0 == order.nonce) {
             continue;
         }
-        if let Some(admit) =
-            terminate_live_order(store, artifacts.as_deref_mut(), executor, tracked, &order, TerminationCause::Deadline)
-        {
+        if let Some(admit) = terminate_live_order(
+            store,
+            artifacts.as_deref_mut(),
+            executor,
+            tracked,
+            &order,
+            TerminationCause::Deadline,
+            captures,
+        ) {
             admits.push(admit);
         }
     }
@@ -493,6 +501,7 @@ fn terminate_live_order(
     tracked: &mut Vec<TrackedHandle>,
     order: &OutstandingOrder,
     cause: TerminationCause,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Option<Admit> {
     let deadline = order.deadline_unix_millis;
     let nonce = Nonce(order.nonce.clone());
@@ -529,6 +538,12 @@ fn terminate_live_order(
             return None;
         }
     }
+    // What the cancelled lane had built, if it was a construct and left a dirty
+    // tree (#5998). Collected straight after the cancel that captured it,
+    // before anything below can decline to terminate the order: the capture is
+    // read once per nonce, and a read that never happens loses the tree the
+    // cancel went out of its way to keep.
+    let kept_tree = executor.cancelled_capture(&WorkHandle::new(nonce.clone()));
     let Some(record) = DispatchRecord::from_stored(order) else {
         latch_unterminable(tracked, &nonce);
         tracing::error!(
@@ -563,6 +578,22 @@ fn terminate_live_order(
         detail,
         observation: LaneObservation { failed_verifiers, ..LaneObservation::default() },
     };
+    // The captured tree is published as a host effect rather than carried on
+    // the observation (#5998). A cancelled member admits
+    // `Fact::MemberExecutorFault` (ADR-0195), whose payload has no candidate
+    // slot — and giving it one is a journal migration, not an incidental edit:
+    // the `event` and `decisions` schema digests, every pinned upcast, and the
+    // golden fixtures that freeze them all move. So what the ref buys today is
+    // that the work exists and is named, rather than being reset with the lane
+    // slot; a retry lap resuming from it automatically is the half that waits
+    // on that migration.
+    if let Some(candidate) = kept_tree.filter(|_| record.stage == StageId::Construct) {
+        captures.push(CancelledCapture {
+            bloom: BloomId(record.bloom.0),
+            workpiece: record.workpiece.clone(),
+            candidate,
+        });
+    }
     match admit_uploaded(store, &upload) {
         Ok(AdmitDecision::Admitted(admission)) => {
             warn_terminated(cause, &record, deadline);
@@ -713,6 +744,7 @@ fn expire_silent_orders(
     pending: &[PendingObservation],
     unobserved: &[Nonce],
     silence_millis: u64,
+    captures: &mut Vec<CancelledCapture>,
 ) -> Vec<Admit> {
     let Stores { store, mut artifacts } = stores;
     record_observed_heartbeats(tracked, pending, store);
@@ -768,6 +800,7 @@ fn expire_silent_orders(
             tracked,
             &order,
             TerminationCause::HeartbeatSilence,
+            captures,
         ) {
             admits.push(admit);
         }
@@ -1052,6 +1085,38 @@ fn shared_member_advisory(
     Ok(findings)
 }
 
+/// The size band the member's sealed scope revision routed this work into.
+///
+/// [`WorkpieceSize::Medium`] whenever the revision cannot be read — a row that
+/// is not there, a store that will not answer. That is the band every member
+/// ran under before the bands existed, so a dispatch that cannot see a size
+/// runs exactly as it did; giving it the longest band instead would let an
+/// unreadable revision buy a stuck lane twice the slot.
+fn member_size(store: &mut dyn StoreBackend, record: &DispatchRecord, sequence: u64) -> WorkpieceSize {
+    match store.load_revision(record.scope_revision) {
+        Ok(Some(revision)) => WorkpieceSize::of_line(&revision.routing.size),
+        Ok(None) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                "no scope revision stored for the dispatched member; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+        Err(error) => {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence,
+                workpiece = %record.workpiece.0,
+                %error,
+                "the dispatched member's scope revision would not load; running its stage's middling size band",
+            );
+            WorkpieceSize::Medium
+        }
+    }
+}
+
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
@@ -1074,6 +1139,21 @@ fn overlay_member_advisory(
     let model_override =
         resolve_config::<ModelOverride>(store, ConfigScopes::bloom_wide(&record.configs))?.unwrap_or_default();
     record.transformation.model = Some(dispatch_model(record.stage, &record.profile, &model_override));
+
+    // And the size band the member's scope routed it into (#5998), on the same
+    // channel and for the same reason: the catalog authors one limit per stage,
+    // which is the middling band, and the size line lives in the sealed scope
+    // revision — a value the reducer names by digest and never reads. An hour
+    // is half of what a size L member needs and three times what a size S one
+    // does, so a flat limit either cancels finished work or lets a stuck lane
+    // hold a slot.
+    record.transformation.limits = ExecutionLimits {
+        wall_clock_secs: sized_wall_clock_secs(
+            record.stage,
+            record.transformation.limits.wall_clock_secs,
+            member_size(store, record, sequence),
+        ),
+    };
 
     // A failing verdict's persisted findings ride the same advisory channel as
     // their own labeled section (#3656, ADR-0153), so a Refine re-entry's prompt
@@ -2906,6 +2986,48 @@ pub fn candidate_push_at(refuse: bool, repo: impl Into<PathBuf>, remote: impl In
     }
 }
 
+/// A tree a cancelled construct lane left behind, waiting to be published to
+/// its member-checkpoint ref (#5998).
+///
+/// Its own value rather than a `LaneObservation` field because the cancel's
+/// admitted fact cannot carry it — see [`terminate_live_order`].
+struct CancelledCapture {
+    /// The bloom the cancelled member belongs to.
+    bloom: BloomId,
+    /// The member whose checkpoint ref the capture lands on.
+    workpiece: WorkpieceId,
+    /// The captured tree and its capture commit.
+    candidate: CandidateRef,
+}
+
+/// Name each cancelled construct capture's publication, so the tree a lane had
+/// built when its limit passed is reachable at a named ref rather than reset
+/// with the lane slot behind it (#5998).
+///
+/// The same ref and the same best-effort posture
+/// [`admitted_candidate_pushes`] gives a failing construct's capture: a push
+/// that does not answer leaves the commit local to the coordinator's own
+/// repository, which is still one lookup better than a checkout that was
+/// cleaned.
+fn cancelled_capture_pushes(
+    captures: &[CancelledCapture],
+    correspondence: Option<&SharedCorrespondence>,
+) -> Vec<PendingPublish> {
+    captures
+        .iter()
+        .filter_map(|capture| {
+            let commit = resolve_capture_commit(correspondence, &capture.workpiece, &capture.candidate)?;
+            Some(PendingPublish {
+                bloom: BloomId(capture.bloom.0),
+                workpiece: capture.workpiece.clone(),
+                target_ref: member_checkpoint_ref_name(&capture.bloom, &capture.workpiece.0),
+                commit_hex: commit.to_hex(),
+                kind: "cancelled member checkpoint",
+            })
+        })
+        .collect()
+}
+
 /// Name the bloom ref each admitted capture publishes to (ADR-0152). A passing
 /// construct, refine or reconcile goes to [`candidate_ref_name`]; a failing
 /// construct that still captured work goes to [`member_checkpoint_ref_name`].
@@ -3287,6 +3409,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // evidence, spending a retry to hide a transport blip. A deferred sweep
     // costs one poll interval and the transport re-drives; a wrong sweep
     // destroys the attempt.
+    let mut captures = Vec::new();
     let timed_out = if completion_was_observed {
         expire_overdue_orders(
             Stores { store, artifacts: artifacts.as_deref_mut() },
@@ -3294,6 +3417,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             tracked,
             &report.unobserved,
             deadline_unix_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3312,6 +3436,7 @@ fn pull_and_admit<Now: FnMut() -> u64>(
             &report.pending,
             &report.unobserved,
             clock.heartbeat_silence_millis,
+            &mut captures,
         )
     } else {
         Vec::new()
@@ -3332,9 +3457,11 @@ fn pull_and_admit<Now: FnMut() -> u64>(
     // that must fetch it, so it wants to be reachable on the hosted repo as
     // soon as the push answers (ADR-0152). Refused Construct captures ride the
     // same member checkpoint arm so a bookkeeping refusal never discards the
-    // tree the lane built (#5968).
+    // tree the lane built (#5968), and a cancelled lane's capture publishes the
+    // same way so a lane stopped at its limit keeps its tree (#5998).
     let mut publications = admitted_candidate_pushes(&sink.0, correspondence);
     publications.extend(refused_checkpoint_pushes(&report.refused_checkpoints, correspondence));
+    publications.extend(cancelled_capture_pushes(&captures, correspondence));
 
     let admits = sink.0.into_iter().map(|admission| admission.admit).chain(timed_out).chain(silenced).collect();
     (admits, publications)

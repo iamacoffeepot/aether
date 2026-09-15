@@ -70,7 +70,7 @@ const LOCKFILE_PATH: &str = "Cargo.lock";
 
 /// The crate set a member of the umbrella compiles over.
 #[derive(Debug, PartialEq, Eq)]
-pub(super) enum Scope {
+pub(in crate::transform) enum Scope {
     /// Every workspace crate, for the stated reason.
     Workspace {
         /// Why the closure was not trusted — or not asked for — stated in the
@@ -161,6 +161,25 @@ impl Scope {
     /// deciding how much of the tree the gate looks at.
     pub(super) fn resolve(diff_base: Option<&str>) -> Self {
         Self::compute(diff_base)
+            .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
+    }
+
+    /// The scope a stated set of changed paths computes, with the same
+    /// fail-open totality [`Self::resolve`] has.
+    ///
+    /// The seam the construct lane's own lint bar resolves its crate set
+    /// through (#6000). That lane owns an uncommitted tree, so it names its
+    /// diff from `git status` rather than from a committed range — but the
+    /// question it then asks of those paths has to be the one the gate asks of
+    /// the candidate's, or the bar reports a clean candidate the gate calls red
+    /// on the first compile. One entry point past the git read, so the two
+    /// cannot drift into two closures.
+    pub(in crate::transform) fn of_changed(changed: &[String]) -> Self {
+        if changed.is_empty() {
+            return Self::workspace("the diff names no changed path, so there is no candidate to narrow by");
+        }
+
+        Self::over_changed(changed)
             .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
     }
 
@@ -354,7 +373,7 @@ impl Scope {
     /// compile, and a member that reached a command under it anyway must run
     /// the stated workspace argv rather than one with `--workspace` traded for
     /// no `-p` at all, which cargo reads as the whole workspace regardless.
-    pub(super) fn packages(&self) -> Option<&[String]> {
+    pub(in crate::transform) fn packages(&self) -> Option<&[String]> {
         match self {
             Self::Workspace { .. } | Self::Outside { .. } => None,
             Self::Closure { packages, .. } => Some(packages),
@@ -407,7 +426,7 @@ impl Scope {
     /// feature-poor — and an item the missing feature gates is then an unused
     /// one. Judging that is a member door red on a tree the base door passed
     /// minutes earlier, which is the failure this predicate exists to stop.
-    pub(super) fn judges(&self, package: &str) -> bool {
+    pub(in crate::transform) fn judges(&self, package: &str) -> bool {
         match self {
             Self::Workspace { .. } | Self::Outside { .. } => true,
             Self::Closure { packages, .. } => packages.iter().any(|name| name == package),
@@ -420,7 +439,7 @@ impl Scope {
     /// Both halves, because only the pair makes a wrong closure visible. A
     /// selection that silently lost a crate reads as an ordinary pass unless
     /// the run states which crates it declined to look at.
-    pub(super) fn receipt(&self) -> String {
+    pub(in crate::transform) fn receipt(&self) -> String {
         match self {
             Self::Workspace { reason } => format!("verify scope: every workspace crate — {reason}\n"),
             Self::Closure { packages, skipped, wasm_needed, lock, note } => {

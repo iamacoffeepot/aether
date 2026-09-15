@@ -420,6 +420,24 @@ pub trait ExecutorBackend {
     /// leaves the order live. "No run resolves for the nonce" is not one of them.
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error>;
 
+    /// The tree a construct lane this backend cancelled left behind, captured
+    /// before its checkout was handed to the next dispatch (#5998).
+    ///
+    /// A lane cancelled at its sealed execution limit has usually built for the
+    /// better part of that limit, and the slot release behind the cancel resets
+    /// the checkout — so without this the work is gone. Read once per nonce,
+    /// after a cancel this backend answered `Ok`: the caller publishes it to the
+    /// member's checkpoint ref as a host effect, which is what makes an hour of
+    /// building reachable instead of reset.
+    ///
+    /// `None` is the ordinary answer: a backend that captures nothing (the
+    /// zero-secret Actions lane), a handle that named no construct run, a run
+    /// whose tree was clean, and a capture that failed all say it.
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        let _ = handle;
+        None
+    }
+
     /// Stream the references to the evidence the run uploaded, filtered to the
     /// order's nonce.
     ///

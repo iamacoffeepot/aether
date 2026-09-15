@@ -132,6 +132,16 @@ pub trait ExecutorPort {
     /// Cancel the run the handle resolves to. Idempotent (ADR-0177).
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>>;
 
+    /// The tree a construct lane the backend just cancelled left behind
+    /// (#5998) — see [`aether_bloomery::ExecutorBackend::cancelled_capture`]. A registry read,
+    /// never offloaded: the capture itself already happened inside the cancel
+    /// the worker answered, so this is the answer being collected rather than
+    /// work being asked for.
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        let _ = handle;
+        None
+    }
+
     /// Release a retained warm lane after cancellation or retirement.
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
         let _ = physical_run;
@@ -197,6 +207,10 @@ impl ExecutorPort for ExecutorShell {
 
     fn cancel(&self, handle: &WorkHandle) -> Settled<Result<(), ExecutorPortError>> {
         Settled::Answered(self.backend.cancel(handle))
+    }
+
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        self.backend.cancelled_capture(handle)
     }
 
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {

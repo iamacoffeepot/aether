@@ -104,7 +104,7 @@ fn assemble_scope_prompt(
     run_dir: &Path,
     setter: &str,
 ) -> String {
-    let mut prompt = assemble_construct_prompt(bundle, &bundle.scope, subject, task, None);
+    let mut prompt = assemble_construct_prompt(bundle, &bundle.scope, subject, task, None, None);
     prompt.push_str(&emission_section(bundle, run_dir, setter));
     prompt
 }
@@ -433,7 +433,7 @@ mod tests {
         let mut bundle = fixture_bundle();
         bundle.conventions = conventions::section(include_str!("../lane_context.md"));
         bundle.scope_emission = "Fill each authored field via cargo xtask scope set.".to_owned();
-        let construct = assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None);
+        let construct = assemble_construct_prompt(&bundle, &bundle.construct, subject, task, None, None);
         let run = Path::new("/run/scope-nonce-test");
         let scope = assemble_scope_prompt(&bundle, subject, task, run, "cargo xtask");
         let prefix_len = construct.bytes().zip(scope.bytes()).take_while(|(a, b)| a == b).count();

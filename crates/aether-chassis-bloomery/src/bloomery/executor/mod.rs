@@ -34,7 +34,7 @@ use std::fmt;
 use std::sync::Arc;
 
 use aether_bloomery::{
-    BackendId, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
+    BackendId, CandidateRef, Digest, EvidenceRef, ExecutionStatus, ExecutorBackend, ObservedConstructionCheckpoint,
     ObservedLaneWrites, SharedCorrespondence, WorkHandle, WorkOrder,
 };
 use aether_bloomery_github::{ActionsExecutor, ExecutorError, GithubError, LaneWorkflows};
@@ -206,6 +206,10 @@ where
 
     fn cancel(&self, handle: &WorkHandle) -> Result<(), Self::Error> {
         self.0.cancel(handle).map_err(Into::into)
+    }
+
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        self.0.cancelled_capture(handle)
     }
 
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {

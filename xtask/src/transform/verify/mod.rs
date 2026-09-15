@@ -4,7 +4,7 @@ mod lockfile;
 mod memo;
 mod nextest;
 mod observations;
-mod scope;
+pub(super) mod scope;
 mod symbols;
 mod tools;
 mod triage;
@@ -705,6 +705,17 @@ pub(in crate::transform) fn judged_findings(stdout: &str, judge: &impl Judge) ->
     diagnostics(stdout).filter(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(judge)).count()
 }
 
+/// How many of those diagnostics are errors rather than warnings.
+///
+/// The construct lane's bar reads this to tell a candidate that does not
+/// compile from one that compiles with lint residue (#6000): the first has
+/// nothing further to learn from a clippy pass over the same crates — clippy
+/// compiles the same units and restates the same errors — so the bar spends
+/// the rest of its budget on the repair turn instead.
+pub(in crate::transform) fn judged_errors(stdout: &str, judge: &impl Judge) -> usize {
+    diagnostics(stdout).filter(|diagnostic| diagnostic.is_error() && diagnostic.judged_under(judge)).count()
+}
+
 /// Which packages a clippy verdict is answerable for.
 ///
 /// The umbrella answers with the [`Scope`] it resolved from the candidate's
@@ -745,6 +756,11 @@ impl Diagnostic {
     /// counting those fails every candidate that has any diagnostic context.
     fn is_finding(&self) -> bool {
         self.level == "warning" || self.level == "error"
+    }
+
+    /// Whether this message is one the build did not survive.
+    fn is_error(&self) -> bool {
+        self.level == "error"
     }
 
     /// Whether `scope` is answerable for this message — see [`Scope::judges`].

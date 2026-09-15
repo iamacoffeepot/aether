@@ -327,6 +327,11 @@ pub(super) struct OrderIdentity {
     pub(super) candidate: Option<Digest>,
     /// That frozen scope revision, which is what tells the two apart.
     pub(super) scope_revision: Option<Digest>,
+    /// The absolute wall-clock instant this order is cancelled at, in Unix
+    /// milliseconds — the deadline minted from the sealed limit when the
+    /// dispatch was recorded (ADR-0177). The lane is told it, so it can plan to
+    /// leave a candidate before it (#5998).
+    pub(super) deadline_unix_millis: u64,
 }
 
 impl OrderIdentity {
@@ -483,6 +488,11 @@ struct PendingRun {
     // Authorized instruction-bundle bytes a model lane consumes (ADR-0214).
     instruction_bundle: Option<Vec<u8>>,
     instruction_bundle_digest: Option<String>,
+    // When this order is cancelled, in Unix milliseconds — the deadline the
+    // dispatch was recorded with, not `now + limit`: a dispatch that waited for
+    // a lane slot launches with less of its limit left than it was sealed
+    // (#5998). `None` for a store-less backend, which has no order row.
+    deadline_unix_millis: Option<u64>,
 }
 
 impl PendingRun {
@@ -520,6 +530,7 @@ impl PendingRun {
             entrypoint: self.entrypoint.clone(),
             instruction_bundle: self.instruction_bundle.as_deref(),
             instruction_bundle_digest: self.instruction_bundle_digest.as_deref(),
+            deadline_unix_millis: self.deadline_unix_millis,
         }
     }
 }
@@ -556,6 +567,10 @@ struct Registry {
     // start can overlap after enqueue; a set would drop the nonce when the
     // first guard ended. Not a lane slot — omitted from `occupied`.
     submitting: HashMap<String, usize>,
+    // Trees cancelled construct lanes left behind, captured before their slots
+    // were released (#5998). Read once per nonce by `cancelled_capture`, which
+    // is the reactor collecting the answer to the cancel it just made.
+    cancelled_captures: HashMap<String, CandidateRef>,
 }
 
 impl Registry {
@@ -1314,6 +1329,9 @@ impl LocalExecutor {
                 .instruction_bundle
                 .as_ref()
                 .map(|bytes| config_address(ModelProcessInstructions::NAME, bytes).to_hex()),
+            deadline_unix_millis: is_model_lane
+                .then(|| identity.as_ref().map(|order| order.deadline_unix_millis))
+                .flatten(),
         })
     }
 
@@ -1723,6 +1741,7 @@ impl LocalExecutor {
             stage,
             candidate: Digest::from_slice(&order.candidate),
             scope_revision: Digest::from_slice(&order.scope_revision),
+            deadline_unix_millis: order.deadline_unix_millis,
         })
     }
 
@@ -2238,6 +2257,29 @@ impl LocalExecutor {
         } else {
             self.capture_partial(&worktree_dir, nonce, message)
         }
+    }
+
+    /// Capture a cancelled construct lane's tree and hold it for the reactor's
+    /// [`cancelled_capture`](ExecutorBackend::cancelled_capture) read (#5998).
+    ///
+    /// Best-effort in every direction: a non-construct run, a run whose slot
+    /// this process could not recover (no `worktree_dir`), a clean tree, and a
+    /// git that will not commit all leave nothing behind, and the cancel
+    /// proceeds either way. Losing the tree is the status quo; losing the
+    /// cancel would leave a child burning wall clock.
+    fn retain_cancelled_capture(&self, nonce: &Nonce, run: &Run) {
+        if !run.gates.is_construct {
+            return;
+        }
+        let Some(candidate) = self.construct_capture(run.worktree_dir.clone(), nonce, false, None) else {
+            return;
+        };
+
+        tracing::info!(
+            nonce = %nonce.0,
+            "local executor backend: captured the cancelled construct lane's tree as a member checkpoint",
+        );
+        self.lock().cancelled_captures.insert(nonce.0.clone(), candidate);
     }
 
     fn fail_closed_host_fault(
@@ -3451,6 +3493,15 @@ impl ExecutorBackend for LocalExecutor {
 
         match reservation.run_mut().process.kill() {
             Ok(()) => {
+                // The child is dead and its tree is still on disk, but the slot
+                // release below hands that checkout to the next dispatch, which
+                // resets it. A construct cancelled at its sealed limit has
+                // usually built for most of that limit, so capture the tree here
+                // — the same capture a failing construct's tree gets, landing in
+                // the same member-checkpoint ref the retry lap resumes from
+                // (#5998). After the kill so the capture cannot race the child's
+                // last write, and before the release so it cannot race the reset.
+                self.retain_cancelled_capture(&handle.nonce, reservation.run_mut());
                 if let Some(slot) = reservation.slot() {
                     quarantine::clear(&self.base_dir, slot);
                 }
@@ -3482,6 +3533,13 @@ impl ExecutorBackend for LocalExecutor {
         // The eviction above freed a lane slot; hand it to whatever is waiting.
         self.pump();
         Ok(())
+    }
+
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<CandidateRef> {
+        // Removed rather than read: the reactor threads it onto exactly one
+        // timeout's observation, and a capture left behind would ride a later
+        // cancel of the same nonce as if that run had produced it.
+        self.lock().cancelled_captures.remove(&handle.nonce.0)
     }
 
     #[allow(clippy::significant_drop_tightening, reason = "run is a &mut reborrow; the guard must outlive it")]

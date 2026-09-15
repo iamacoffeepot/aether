@@ -109,6 +109,13 @@ pub struct RunSpec<'a> {
     pub instruction_bundle: Option<&'a [u8]>,
     /// Content address of those bytes, so the lane can assert what it read.
     pub instruction_bundle_digest: Option<&'a str>,
+    /// When the coordinator cancels this dispatch, in Unix milliseconds — the
+    /// absolute instant the order row carries, so a lane that waited for a slot
+    /// is told the time it actually has rather than the limit it was sealed
+    /// with (#5998). Reaches the child as
+    /// [`aether_bloomery::EXECUTION_DEADLINE_ENV`] rather than as a flag. `None`
+    /// on a mechanical lane and on a store-less backend.
+    pub deadline_unix_millis: Option<u64>,
 }
 
 /// A running (or finished) transform child — the lifecycle the backend maps onto

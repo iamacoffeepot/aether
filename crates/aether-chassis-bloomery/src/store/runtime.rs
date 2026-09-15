@@ -537,7 +537,7 @@ pub struct JournalWrite<'a> {
 /// conversion on unknown values, re-closing the open set through the back
 /// door. The typed edge for the reducer's own topics is
 /// [`TopicOutbox`](crate::bloomery::TopicOutbox).
-pub trait StoreBackend: Send {
+pub trait StoreBackend: Send + CommissionBackend {
     /// Record an outstanding work order at its nonce (the evidence-intake
     /// registry write side, #3502). Idempotent: a nonce already outstanding is
     /// a [`RecordOutcome::Duplicate`] no-op, never a second row.

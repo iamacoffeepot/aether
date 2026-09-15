@@ -153,6 +153,15 @@ impl ExecutorBackend for RoutingExecutor {
         Ok(())
     }
 
+    fn cancelled_capture(&self, handle: &WorkHandle) -> Option<aether_bloomery::CandidateRef> {
+        // The routing record survives a cancel, so the capture is collected
+        // from the same lane the cancel reached rather than from the fallback.
+        match self.lane_of(&handle.nonce.0) {
+            Lane::Actions => self.actions.cancelled_capture(handle),
+            Lane::Local => self.local.cancelled_capture(handle),
+        }
+    }
+
     fn release_physical_run(&self, physical_run: &Digest) -> Result<(), Self::Error> {
         self.local.release_physical_run(physical_run)?;
         Ok(())
