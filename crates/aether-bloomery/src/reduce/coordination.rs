@@ -124,6 +124,12 @@ pub(super) fn initialized_effects(
     if !policy.is_valid() {
         return Err(CoordinationError::InvalidPolicy);
     }
+    // A policy that coordinates nothing is still a sealed policy — its
+    // dispositions were read at the admitted line — but it has no state to
+    // carry. See [`CoordinationPolicy::coordinates`].
+    if !policy.coordinates() {
+        return Ok(Vec::new());
+    }
     let bloom = spec.id();
     let base = CandidateRef {
         tree: snapshot.base_trees.get(&spec.base()).copied().unwrap_or_else(|| spec.base()),

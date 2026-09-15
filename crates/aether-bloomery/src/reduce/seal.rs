@@ -147,7 +147,7 @@ pub(super) fn reduce_seal(
         spec.base(),
         &catalog,
         &manifest,
-        coordination_policy.is_some(),
+        coordination_policy.as_ref().is_some_and(CoordinationPolicy::coordinates),
         &mut effects,
     );
     effects.extend(ready_entries(
@@ -663,7 +663,7 @@ pub(super) fn reduce_supersede(
         successor.base(),
         &catalog,
         &manifest,
-        coordination_policy.is_some(),
+        coordination_policy.as_ref().is_some_and(CoordinationPolicy::coordinates),
         &mut effects,
     );
     // An edgeless supersede of a graph bloom keeps the remaining subgraph —

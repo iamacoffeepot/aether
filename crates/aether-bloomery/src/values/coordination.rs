@@ -153,6 +153,24 @@ impl CoordinationPolicy {
             && self.host_class.bytes().all(|byte| byte.is_ascii_graphic())
     }
 
+    /// Whether this policy asks for coordination at all.
+    ///
+    /// A policy that keeps one physical run per member and advances no partial
+    /// head coordinates nothing: it describes the legacy reducer's own
+    /// behaviour. Sealing coordination state for it would route every member
+    /// verification through the shared-run machinery to arrive at the same
+    /// single physical run, so the seal leaves the state off and the bloom runs
+    /// the line it would have run with no policy at all.
+    ///
+    /// What such a policy is *for* is the dispositions it carries beside the
+    /// resource bounds — [`Self::red_verify`] above all, which governs every
+    /// bloom's red verdicts and so has to be statable by a bloom that
+    /// coordinates nothing (ADR-0218 §Amendment: low tolerance).
+    #[must_use]
+    pub fn coordinates(&self) -> bool {
+        self.eager_integration || self.verification != VerificationMode::Standalone
+    }
+
     /// The coalescing hold the scheduler applies, in milliseconds.
     ///
     /// Absent is [`DEFAULT_COALESCE_MILLIS`]. Zero disables the hold.
