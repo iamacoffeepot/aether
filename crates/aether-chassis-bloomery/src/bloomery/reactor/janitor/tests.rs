@@ -197,6 +197,7 @@ pub fn policy(retention_days: u64, budget_bytes: u64) -> JanitorPolicy {
         lane_target_budget_bytes: budget_bytes,
         target_scan_interval_secs: 300,
         evidence_retention_days: retention_days,
+        lane_snapshot_keep: 3,
     }
 }
 

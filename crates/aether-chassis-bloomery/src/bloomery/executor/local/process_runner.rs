@@ -275,6 +275,15 @@ impl TransformRunner for ProcessTransformRunner {
         // mark the file skip-worktree so the edit neither shows as a candidate nor
         // can be committed.
         neutralize_hooks(spec.worktree_dir)?;
+        // Bring the slot's cargo target directory to the base this dispatch
+        // stands on before anything in the lane builds (#6047). A slot whose
+        // last build was a stranger's tree is a cold build the day head has
+        // already paid for once; cloning the published snapshot for this
+        // checkout's nearest published ancestor makes every lane warm against
+        // the day instead of against whoever held the slot last. Best-effort
+        // and silent about a miss: the store is an optimization, and a
+        // dispatch that cannot be warmed runs on whatever the slot had.
+        warm_slot_target(spec, &self.repo);
         // The reset above scrubbed untracked state, the symlink included; put
         // the slot's target pairing back before anything in the lane builds,
         // and keep it out of the subject's git view so a candidate capture
@@ -596,6 +605,40 @@ fn export_execution_deadline(lane: &mut Command, spec: &RunSpec<'_>) {
     if let Some(deadline_unix_millis) = spec.deadline_unix_millis {
         lane.env(aether_bloomery::EXECUTION_DEADLINE_ENV, deadline_unix_millis.to_string());
     }
+}
+
+/// Clone this dispatch's base snapshot into its slot target, recording what
+/// happened beside the dispatch's evidence.
+///
+/// Runs after the checkout reset and before the `target` symlink, which is
+/// the one window where the slot's target directory is idle and named: the
+/// dispatch holds the slot, and nothing in the lane has opened the build
+/// directory yet. A host with no store configured records nothing and does
+/// nothing.
+fn warm_slot_target(spec: &RunSpec<'_>, repo: &Path) {
+    let Some(store) = spec.warm_from else {
+        return;
+    };
+    let warmth = store.warm(repo, spec.target_dir, spec.checkout_hex);
+    if let Some(detail) = warmth.detail.as_deref() {
+        tracing::debug!(
+            target: "aether_chassis_bloomery::executor",
+            slot_target = %spec.target_dir.display(),
+            checkout = spec.checkout_hex,
+            detail,
+            "snapshot store: this dispatch starts on the warmth its slot already had",
+        );
+    } else {
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            slot_target = %spec.target_dir.display(),
+            base = warmth.base.as_deref().unwrap_or_default(),
+            cloned = warmth.cloned,
+            clone_millis = warmth.clone_millis,
+            "snapshot store: slot warmed against this dispatch's base",
+        );
+    }
+    warmth.record(spec.evidence_dir);
 }
 
 fn export_build_env(lane: &mut Command, spec: &RunSpec<'_>) {
@@ -1282,6 +1325,7 @@ mod tests {
             judged_tree_hex: None,
             worktree_dir,
             target_dir,
+            warm_from: None,
             build_jobs: 1,
             evidence_dir,
             nonce: "n-1",

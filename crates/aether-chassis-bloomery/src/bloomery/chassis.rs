@@ -315,6 +315,7 @@ fn janitor_setup(
         lane_target_budget_bytes: coordinator.lane_target_budget_bytes,
         target_scan_interval_secs: coordinator.lane_target_scan_interval_secs,
         evidence_retention_days: coordinator.evidence_retention_days,
+        lane_snapshot_keep: coordinator.lane_snapshot_keep,
         archive_base: coordinator.archive_base.clone(),
         poll_interval_secs,
         repo: repo.display().to_string(),
