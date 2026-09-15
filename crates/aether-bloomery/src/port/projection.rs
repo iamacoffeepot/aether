@@ -24,8 +24,8 @@ use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::reduce::{BloomStatus, RecordedRefusal};
 use crate::values::{
-    CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold, PrecheckState,
-    ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
+    AdminAct, CandidateRef, CompositionFinding, CoordinationState, Evidence, LandingReceipt, OperatorHold,
+    PrecheckState, ResolutionClaim, SpendQuiesce, SurfacePathRequest, VerifyFailureSet, Wedge,
 };
 
 /// The self-contained render input a reconcile pushes outward: the current
@@ -59,6 +59,25 @@ pub struct ViewDocument {
     /// A red whole-workspace base receipt, when one is holding the day
     /// (ADR-0200).
     pub base_alert: Option<BaseAlertView>,
+}
+
+/// One bloom's open admin session as the outward view carries it (ADR-0219):
+/// who has it, why, and what they have done so far.
+///
+/// The acts themselves rather than a count, because the question an operator
+/// asks of an open session is "what has already been done to this bloom" and
+/// answering it from the journal would mean a second read keyed by a fact
+/// vocabulary the board does not otherwise speak. A session is short-lived and
+/// its log is a handful of rows. What outlives it is carried separately, on
+/// [`BloomView::waivers`].
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct AdminView {
+    /// Who opened the session.
+    pub operator: String,
+    /// Why, in their own words.
+    pub reason: String,
+    /// Every act journaled inside it, in admission order.
+    pub acts: Vec<AdminAct>,
 }
 
 /// The day-level stop a red base receipt raises: which tree failed, and which
@@ -176,6 +195,26 @@ pub struct BloomView {
     /// proof freshness, and physical-run identity are derived from here.
     #[serde(default)]
     pub coordination: Option<CoordinationState>,
+    /// The admin session open on this bloom (ADR-0219); `None` while the
+    /// machine is running it.
+    ///
+    /// Beside [`Self::operator_hold`] rather than folded into it, because they
+    /// answer different questions and an operator reading a stopped bloom needs
+    /// both: the hold says nothing is being dispatched, and this says a person
+    /// is in there changing things. Without it an admin session and an ordinary
+    /// brake render identically, and the console would paint HOLD over a bloom
+    /// nobody should touch.
+    #[serde(default)]
+    pub admin: Option<AdminView>,
+    /// Every verdict artifact an admin waiver voided on this bloom (ADR-0219),
+    /// in the order the waivers were journaled.
+    ///
+    /// Outlives [`Self::admin`] on purpose: the session closes and the waiver
+    /// is still the reason this bloom landed, so a reader after the fact can
+    /// still see which red verdicts a person stood in for. Empty for every
+    /// bloom nobody waived anything on.
+    #[serde(default)]
+    pub waivers: Vec<Digest>,
 }
 
 impl BloomView {

@@ -6,6 +6,7 @@
 //! DAG is built from; they are plain data — no I/O, no engine boot, no
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
+mod admin;
 mod adr;
 mod api;
 mod approval;
@@ -48,17 +49,22 @@ mod verify;
 mod verify_delta;
 mod workpiece_builder;
 
+pub use admin::{
+    AdminAct, AdminActKind, AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver,
+};
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use api::{
-    AdjudicateRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView,
-    BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView, CommissionApprovalView,
-    CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
-    CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
-    DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView,
-    ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView,
-    ProposeRequest, ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest,
-    ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest,
-    SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
+    AdjudicateRequest, AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest,
+    AdminSetCandidateRequest, AdminWaiveRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView,
+    ArchiveRecordView, BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView,
+    CommissionApprovalView, CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView,
+    CommissionShowView, CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView,
+    CreateCommissionRequest, DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView,
+    DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry,
+    JournalView, MemberProjection, OutcomeView, ProposeRequest, ReleaseAcceptedView, ReleaseRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,

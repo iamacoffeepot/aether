@@ -9,7 +9,7 @@
 use aether_bloomery::Digest;
 use anyhow::{Result, bail};
 
-pub use aether_bloomery_rest::{from_slice, to_vec};
+pub use aether_bloomery_rest::{from_slice, from_value, to_vec};
 
 /// Lowercase-hex-encode bytes.
 pub fn encode(bytes: &[u8]) -> String {

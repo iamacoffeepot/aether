@@ -298,6 +298,15 @@ pub(super) fn reduce_aggregate_review_executor_fault(
         Err(refusal) => return Decisions::rejected(Outcome::AggregateReviewRejected(refusal)),
     };
 
+    // ADR-0219 hook, the bloom-level twin of the one in
+    // `reduce_member_executor_fault`: inside an admin session the critic's
+    // fault is recorded and charged to nobody, because the operator is the one
+    // moving the fold and a spent roll would wedge the gate they are about to
+    // re-run.
+    if super::admin::absorbs_faults(record) {
+        return super::admin::absorbed_fault(*bloom, None, evidence);
+    }
+
     // The same rule the `RecordEvidence` fold applies, read here so the ceiling
     // decides against the count the record will actually reach.
     let fault = AggregateReviewFault::next(record.aggregate_fault.as_ref(), integration.tree, evidence.detail);

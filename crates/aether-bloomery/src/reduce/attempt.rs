@@ -563,6 +563,15 @@ pub(super) fn reduce_member_executor_fault(
         }));
     }
 
+    // ADR-0219 hook. A host that cannot run is the expected condition while an
+    // operator is repairing the bloom by hand, so a fault inside an admin
+    // session files its evidence and stops — charging one would wedge the very
+    // member the operator is fixing. Placed after the binding checks so a
+    // malformed fault is still refused as a malformed fault.
+    if super::admin::absorbs_faults(record) {
+        return super::admin::absorbed_fault(*bloom, Some(workpiece), evidence);
+    }
+
     let rolls = match snapshot.member_machinery(bloom, workpiece) {
         Some(fault) if fault.stage == stage => fault.rolls.saturating_add(1),
         _ => 1,

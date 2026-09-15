@@ -81,6 +81,8 @@ fn one_bloom(id: BloomId, members: Vec<MemberView>) -> ViewDocument {
         narrowed_compositions: Vec::new(),
         precheck: None,
         coordination: None,
+        admin: None,
+        waivers: Vec::new(),
     };
     ViewDocument {
         mainline: digest(0),

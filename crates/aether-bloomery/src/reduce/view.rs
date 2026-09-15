@@ -6,12 +6,12 @@ use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
+    AdminView, AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView,
+    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
     PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
-use crate::values::{Question, VerifyGateSet, Withdrawal, WithdrawalCause};
+use crate::values::{AdminAct, Question, VerifyGateSet, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
 /// `Snapshot -> ViewDocument` projection the reconcile port pushes outward
@@ -74,6 +74,8 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 narrowed_compositions: narrowed_composition_views(record, snapshot),
                 precheck: record.precheck.clone(),
                 coordination: record.coordination.as_deref().cloned(),
+                admin: admin_view(record),
+                waivers: record.admin_acts.iter().flat_map(AdminAct::waived).copied().collect(),
             }
         })
         .collect();
@@ -84,6 +86,21 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         blooms,
         base_alert: base_alert_of(snapshot),
     }
+}
+
+/// The open admin session as the board renders it (ADR-0219), or `None` while
+/// the machine is running the bloom.
+///
+/// The whole act log rides on the open session, so `admin status` answers
+/// "what has already been done to this bloom" from the projection rather than
+/// from a second journal read. It goes when the session closes; what a closed
+/// session leaves behind is [`BloomView::waivers`].
+fn admin_view(record: &BloomRecord) -> Option<AdminView> {
+    record.admin.as_ref().map(|note| AdminView {
+        operator: note.operator.clone(),
+        reason: note.reason.clone(),
+        acts: record.admin_acts.clone(),
+    })
 }
 
 /// The red receipt whose base is the sealed bloom's base, or — with no sealed
@@ -600,6 +617,8 @@ mod tests {
             narrowed_compositions: Vec::new(),
             precheck: None,
             coordination: None,
+            admin: None,
+            waivers: Vec::new(),
         }
     }
 

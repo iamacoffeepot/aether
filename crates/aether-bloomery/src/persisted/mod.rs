@@ -449,6 +449,34 @@ pub const COORDINATION_POLICY_PRE_RED_VERIFY_DIGEST: Digest =
 /// would make that peek read some other variant's bytes.
 const VERIFY_FAILED: u32 = 13;
 
+/// Journal schema immediately before ADR-0219 appended the admin-mode
+/// decisions and outcomes.
+///
+/// Copied verbatim from the `decisions` line the ledger carried as current at
+/// `11458f211` — `1b8233855963497886706f4c0964aafd2d144d374f4c091fab18ae894838f9ff`,
+/// the shape the low-tolerance slice left current, which is what every row
+/// written between that slice and this one bears. Never recomputed from live
+/// code (#5500), and distinct from [`DECISIONS_PRE_RED_VERIFY_DIGEST`]: the two
+/// appends landed in sequence, so each names the shape it displaced rather than
+/// a shared ancestor. `RecordAdminMode`, `RecordAdminAct`, and `CancelLane` are
+/// appended past every prior decision — `RecordRedVerify` included — and the
+/// four admin outcomes past every prior outcome, so no discriminant a row of
+/// that era could hold has moved.
+pub const DECISIONS_PRE_ADMIN_DIGEST: Digest =
+    Digest::pinned("1b8233855963497886706f4c0964aafd2d144d374f4c091fab18ae894838f9ff");
+
+/// Event schema immediately before ADR-0219 appended the seven admin facts.
+///
+/// Copied verbatim from the `event` line the ledger carried as current at
+/// `11458f211` — `522b232b40b9e1092a3e547a352b81f9d65105d2dc09b0676d5efcdc31e26dd7`,
+/// the same way and for the same reason. Every admin fact is appended past
+/// `MemberDeadlineExpired`, the last fact the low-tolerance slice appended, so
+/// this upcast is the identity where
+/// [`EVENT_PRE_RED_VERIFY_DIGEST`] — a field appended *inside*
+/// `Fact::VerifyFailed` — is not.
+pub const EVENT_PRE_ADMIN_DIGEST: Digest =
+    Digest::pinned("522b232b40b9e1092a3e547a352b81f9d65105d2dc09b0676d5efcdc31e26dd7");
+
 /// The stamp on sealed model-process instruction bundles written before
 /// ADR-0216 appended `retrospect` and `retrospect_finding_contract`.
 pub const MODEL_PROCESS_INSTRUCTIONS_PRE_READER_DIGEST: Digest =
@@ -484,6 +512,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_coordination,
             upcast_decisions_pre_coalesce,
             upcast_decisions_pre_red_verify,
+            upcast_decisions_pre_admin,
         ],
     )
 }
@@ -699,6 +728,19 @@ fn reshape_coordination_policy_pre_red_verify(bytes: &[u8]) -> Result<Vec<u8>, W
     to_vec(&CoordinationPolicy::from(from_bytes::<CoordinationPolicyPreRedVerify>(bytes)?))
 }
 
+/// Pre-admin-mode decision rows carry the same wire layout today's decoder
+/// reads: the three decisions and four outcomes ADR-0219 adds are appended past
+/// every prior discriminant, `RecordRedVerify` included.
+fn upcast_decisions_pre_admin(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-admin-mode event rows carry the same wire layout today's decoder reads:
+/// the seven admin facts are appended past `MemberDeadlineExpired`.
+fn upcast_event_pre_admin(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -727,6 +769,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_proof_reused,
             upcast_event_pre_coalesce,
             upcast_event_pre_red_verify,
+            upcast_event_pre_admin,
         ],
     )
 }
@@ -747,6 +790,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_COORDINATION_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COALESCE_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_RED_VERIFY_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_ADMIN_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -765,6 +809,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_PROOF_REUSED_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_COALESCE_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_RED_VERIFY_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

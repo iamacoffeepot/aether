@@ -19,6 +19,7 @@
 //! the reducer enforces the same rule over its projection so seal decisions
 //! are correct before the store transaction commits.
 
+mod admin;
 mod aggregate_verify;
 mod attempt;
 mod base_verify;
@@ -64,7 +65,7 @@ mod withdraw;
 pub use crate::persisted::decode_recorded_decisions;
 pub use decision::Decision;
 pub use error::{
-    AdjudicationError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
+    AdjudicationError, AdminError, AdmitEvidenceError, AdoptAnswerError, AggregateReviewError, AggregateVerifyError,
     AttemptCompletedError, BaseMismatch, BaseReverifyError, CoordinationError, FoldConflictError, GrantAttemptsError,
     HostFaultError, IntegrateError, LandError, LandingRejectedError, LeaseObservationError, MemberExecutorFaultError,
     NarrowCompositionError, OperatorHoldError, OperatorRepairError, OrphanClaimReleaseError, PrecheckError,
@@ -87,6 +88,10 @@ pub use why::why_of;
 
 use crate::values::{ResolvedConfigs, SpendWindow};
 
+use admin::{
+    reduce_admin_cancel_lane, reduce_admin_drop_lap, reduce_admin_enter, reduce_admin_exit, reduce_admin_rerun,
+    reduce_admin_set_candidate, reduce_admin_waive,
+};
 use aggregate_verify::reduce_aggregate_verify_completed;
 use attempt::{reduce_attempt_completed, reduce_member_deadline_expired, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
@@ -340,6 +345,13 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         Fact::SurfaceGranted { .. } => {
             Decisions::rejected(Outcome::SurfaceGrantRejected(SurfaceRequestedError::GrantRetired))
         }
+        Fact::AdminEnter { bloom, note } => reduce_admin_enter(snapshot, bloom, note),
+        Fact::AdminExit { bloom, note } => reduce_admin_exit(snapshot, bloom, note),
+        Fact::AdminCancelLane { bloom, cancel } => reduce_admin_cancel_lane(snapshot, bloom, cancel),
+        Fact::AdminSetCandidate { bloom, set } => reduce_admin_set_candidate(snapshot, bloom, set),
+        Fact::AdminRerun { bloom, rerun } => reduce_admin_rerun(snapshot, bloom, rerun),
+        Fact::AdminWaive { bloom, waiver } => reduce_admin_waive(snapshot, bloom, waiver),
+        Fact::AdminDropLap { bloom, drop } => reduce_admin_drop_lap(snapshot, bloom, drop),
     };
     schedule_precheck(snapshot, coordination::schedule(snapshot, decisions))
 }

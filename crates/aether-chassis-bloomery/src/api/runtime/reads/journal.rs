@@ -149,7 +149,14 @@ fn fact_blooms(fact: &Fact) -> Vec<BloomId> {
         | Fact::SurfaceGranted { bloom, .. }
         | Fact::StudyCompleted { bloom, .. }
         | Fact::ProofReused { bloom, .. }
-        | Fact::HoldSharedRunCoalesce { bloom, .. } => vec![*bloom],
+        | Fact::HoldSharedRunCoalesce { bloom, .. }
+        | Fact::AdminEnter { bloom, .. }
+        | Fact::AdminExit { bloom, .. }
+        | Fact::AdminCancelLane { bloom, .. }
+        | Fact::AdminSetCandidate { bloom, .. }
+        | Fact::AdminRerun { bloom, .. }
+        | Fact::AdminWaive { bloom, .. }
+        | Fact::AdminDropLap { bloom, .. } => vec![*bloom],
         Fact::ObserveMainline { .. }
         | Fact::ObserveMainlineDiverged { .. }
         | Fact::SurfaceOverlap { .. }

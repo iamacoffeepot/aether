@@ -934,3 +934,59 @@ pub enum CoordinationError {
     ReservationMismatch,
     ReservationNotExpired,
 }
+
+/// Why an admin-mode fact was refused (ADR-0219).
+///
+/// The ladder is checked in declaration order at every admin door, so the first
+/// thing wrong with a request is the thing the operator is told about — and the
+/// three that every door shares lead it, because a request that names no bloom,
+/// no reason, or no operator is malformed before anything about the act itself
+/// matters.
+#[derive(aether_data::Schema, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum AdminError {
+    /// No bloom with this id, or one past the point of being worked on. Only a
+    /// `Sealed` or `Resolved` bloom still has a line an operator can repair.
+    UnknownOrInactiveBloom,
+    /// The request states no reason. Refused rather than defaulted: an admin
+    /// act is an act no verdict produced, so a record of it that says nothing
+    /// is the whole failure.
+    BlankReason,
+    /// The request names no operator, so the record would not say who decided.
+    BlankOperator,
+    /// The bloom is already in admin mode. Refused for the reason a second
+    /// operator hold is: it would journal a fact that changed nothing and
+    /// overwrite the reason the first one recorded.
+    AlreadyInAdmin,
+    /// The bloom is not in admin mode. Every act below the session doors is
+    /// refused here — that is what makes admin mode a window rather than a set
+    /// of seven independent overrides.
+    NotInAdmin,
+    /// The request names a workpiece that is neither a member of the bloom nor
+    /// the reserved composition id.
+    NotAWorkpiece(WorkpieceId),
+    /// The workpiece holds no cursor, so there is no position to act from.
+    NoCursor(WorkpieceId),
+    /// The workpiece has no displaced candidate to revert to — nothing this
+    /// bloom recorded says what it held before the lap being dropped.
+    NoLapToDrop(WorkpieceId),
+    /// The waiver names a digest that is not an open finding on this bloom and
+    /// is not its bloom-scope park's question. A waiver cannot void what was
+    /// never raised.
+    UnknownFinding(Digest),
+    /// The waiver names no finding. Refused rather than treated as a no-op:
+    /// there is deliberately no "waive whatever is open" spelling at the
+    /// reducer, because the set has to be what the operator actually read.
+    NoFindings,
+    /// The waiver is over a mechanical gate and the request did not
+    /// acknowledge that landing it lands code no gate proved.
+    UnacknowledgedVerifyWaiver(StageId),
+    /// The record cannot honestly run the workpiece from the named stage — a
+    /// member asked for an aggregate gate, the composition asked for a member
+    /// stage, or a stage outside the runnable set.
+    StageNotRunnable(StageId),
+    /// A member's sealed approval does not bind its own subject. The ADR-0181
+    /// line the two override doors re-check, re-checked here for the same
+    /// reason: admin mode may spend budgets and close findings, and a member
+    /// above `auto` still needs its signed statement.
+    UnapprovedMember(WorkpieceId),
+}

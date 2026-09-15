@@ -55,7 +55,7 @@ use crate::values::{
 /// convert "I read the findings" into "the approval was not needed". The
 /// re-check makes that unrepresentable: an override may spend retry budgets and
 /// close findings, and a member above `auto` still needs its signed statement.
-fn unapproved_member(record: &BloomRecord) -> Option<&WorkpieceId> {
+pub(super) fn unapproved_member(record: &BloomRecord) -> Option<&WorkpieceId> {
     record
         .spec
         .members()
