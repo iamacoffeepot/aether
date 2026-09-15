@@ -12,7 +12,7 @@ use aether_bloomery::{
     ContextualResolutionClaim, CoordinationPolicy, CoordinationState, Decision, Digest, Evidence, EvidenceKind,
     ExecutionLimits, Fact, GenerationMember, Harness, IntegrationHead, MemberContractPin, MemberPin,
     MemberVerifyOutcome, MemberVerifyRequest, NetworkProfile, Nonce, Outcome, PreparedCandidate, ReasoningEffort,
-    ResolutionProof, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord, Snapshot,
+    RedVerify, ResolutionProof, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunRecord, Snapshot,
     SpendWindow, StageCatalog, StageId, ToolPolicy, Transformation, VerificationContract, VerificationMode,
     VerificationObligation, construction_nonce_digest, reduce,
 };
@@ -73,6 +73,7 @@ fn coordination_state(spec: &BloomSpec) -> CoordinationState {
         movement_budget: 2,
         reservation_millis: 1_000,
         coalesce_millis: None,
+        red_verify: RedVerify::Refine,
         host_class: String::from("linux-x86_64"),
     };
     let template = CompositionContractTemplate {

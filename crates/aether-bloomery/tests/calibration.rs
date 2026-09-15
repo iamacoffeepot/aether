@@ -16,8 +16,9 @@ use aether_data::wire::to_vec;
 use aether_bloomery::{
     AgentSelection, BloomId, CalibrationLedger, CandidateRef, CapabilityCell, CapabilityLedger, ConfigKind, Decision,
     Decisions, Digest, Event, Evidence, EvidenceKind, Fact, Harness, ModelOverride, Outcome, PipelineManifest,
-    ReasoningEffort, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId, StageOverride,
-    StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, VerifyGateSet, reduce,
+    ReasoningEffort, RedVerify, ResolvedConfigs, SealError, Snapshot, SpendWindow, StageCatalog, StageId,
+    StageOverride, StoreClass, StudyCost, StudyRecord, Unproducible, VerifyFailure, VerifyFailureSet, VerifyGateSet,
+    reduce,
 };
 use common::{claim, compiled_resolved, digest, draft_with_member_override, event, membership, workpiece};
 
@@ -67,6 +68,11 @@ impl Journal {
         };
         let mut journal = Self { snapshot, ledger: CalibrationLedger::default(), configs, bloom };
         journal.admit(&event("seal", Fact::Seal(spec)));
+        // The repair loop these cases measure runs only for a bloom that sealed
+        // it (ADR-0218 §Amendment: low tolerance): the default disposition
+        // ejects a member whose Verify came back red, and an ejected member
+        // calibrates no Refine lane because no repair lap is dispatched.
+        journal.snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
         journal
     }
 
@@ -111,6 +117,7 @@ impl Journal {
                     detail: digest(91),
                 },
                 failed_verifiers: failed.iter().copied().collect(),
+                findings: String::new(),
             },
         ))
     }

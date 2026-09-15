@@ -293,6 +293,17 @@ pub enum Fact {
         evidence: Evidence,
         /// The nonempty, canonical verifier identities that failed together.
         failed_verifiers: VerifyFailureSet,
+        /// The lane's human-readable findings, or empty when it wrote none.
+        ///
+        /// Carried for the reason [`Fact::VerifyHostFault`] carries its own:
+        /// the reducer authors the member's departure reason when the bloom's
+        /// sealed disposition ejects on red (ADR-0218 §Amendment: low
+        /// tolerance), and a reason that named only an evidence digest would
+        /// send whoever picks the candidate up back to the journal for the one
+        /// sentence they need. Never an accounting input — ADR-0178's rule that
+        /// findings are advisory prose is unchanged, and the repeat ledger still
+        /// reads `failed_verifiers` alone.
+        findings: String,
     },
     /// An operator authorized releasing one orphaned claim ref (ADR-0179).
     ///

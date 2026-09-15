@@ -844,6 +844,7 @@ fn verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Ev
                 workpiece: record.workpiece.clone(),
                 evidence,
                 failed_verifiers: upload.observation.failed_verifiers,
+                findings: upload.observation.findings.clone().unwrap_or_default(),
             }
         },
     }

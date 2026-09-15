@@ -846,6 +846,7 @@ mod tests {
                 movement_budget: 3,
                 reservation_millis: 30_000,
                 coalesce_millis: None,
+                red_verify: crate::RedVerify::Refine,
                 host_class: "test".to_owned(),
             }),
         )

@@ -22,8 +22,8 @@ use aether_bloomery::{
     Fact, GrantAttemptsError, HostFaultError, KeyId, LandError, LandingRejectedError, Membership,
     ORPHAN_CLAIM_RELEASE_WORDS, Observation, OperatorHold, OperatorHoldError, OperatorRepair, OperatorRepairError,
     OrphanClaimRelease, OrphanClaimReleaseCompletion, OrphanClaimReleaseError, Outcome, Provenance, Question,
-    ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow, StageCatalog,
-    StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
+    RedVerify, ResolutionClaim, ResolveError, ResolvedConfigs, SealError, SignatureEnvelope, Snapshot, SpendWindow,
+    StageCatalog, StageId, StageProgress, Statement, SupersedeError, Unproducible, VerifyFailedError, VerifyFailure,
     VerifyFailureSet, Withdrawal, WithdrawalCause, grade, reduce,
 };
 use aether_bloomery::{BloomRecord, WorkpieceId};
@@ -2485,6 +2485,7 @@ fn verify_failed(
             workpiece: workpiece(member),
             evidence: Evidence { subject, kind: EvidenceKind::VerificationResult, detail: digest(detail) },
             failed_verifiers,
+            findings: String::new(),
         },
     )
 }
@@ -2510,11 +2511,35 @@ fn containment_refused(
     )
 }
 
+/// A one-member bloom sitting at terminal `Verify`, on the ADR-0153 repair
+/// loop.
+///
+/// The disposition is planted rather than sealed through the config registry
+/// (ADR-0218 §Amendment: low tolerance): the default ejects a member whose
+/// Verify came back red, and every case below this line is about what the
+/// repair loop does with one — the roll ledger, the seen set, the wedge at the
+/// ceiling, the grant that re-opens it. Sealing a real coordination policy
+/// would also switch on shared verification, which is a different line.
+/// Put a sealed bloom on the ADR-0153 repair loop.
+///
+/// The default disposition ejects a member whose `Verify` came back red
+/// (ADR-0218 §Amendment: low tolerance), so every case about what the repair
+/// loop does with one — the roll ledger, the seen set, the wedge at its
+/// ceiling, the grant that re-opens it — has to say so. Set on the record
+/// rather than sealed through the config registry because sealing a real
+/// coordination policy also switches on shared verification, which queues the
+/// member's work instead of dispatching it: a different line entirely.
+fn on_repair_loop(mut snapshot: Snapshot, bloom: BloomId) -> Snapshot {
+    snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
+    snapshot
+}
+
 fn at_verify(member: &str) -> (Snapshot, BloomId) {
     let base = Snapshot::new(digest(1)).with_green_base(digest(1));
     let spec = draft(1, vec![membership(member, 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, _) = step(
         &snapshot,
         &event(
@@ -2926,6 +2951,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     // Construct passes with a capture, then Verify fails with none (mechanical
     // lanes carry no capture) — the candidate rides the cursor into the Refine
@@ -2954,6 +2980,7 @@ fn a_failing_capture_is_discarded_and_the_retry_targets_the_prior_candidate() {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: first.tree, kind: EvidenceKind::VerificationResult, detail: digest(80) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -3003,6 +3030,7 @@ fn verifier_failure_accounting_uses_per_member_union_and_intersection() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let pass = |key: &str, member: &str, stage: StageId, subject: Digest| {
         event(
             key,
@@ -3085,6 +3113,7 @@ fn an_unjudged_verify_redispatches_verify_while_a_named_failure_still_refines() 
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let candidate = CandidateRef { tree: digest(30), checkout: digest(31) };
     let (snapshot, _) = step(
         &snapshot,
@@ -3288,6 +3317,7 @@ fn repeated_verify_failure_wedges_at_budget_with_exact_terminal_set() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let pass = |key: &str, stage: StageId| {
         event(
             key,
@@ -3418,6 +3448,7 @@ fn a_grant_on_a_verify_wedge_resumes_at_refine_with_its_candidate() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     let completion = |key: &str, stage: StageId, candidate: Option<CandidateRef>| {
         event(
@@ -3511,6 +3542,7 @@ fn a_successor_starts_with_fresh_verifier_history() {
     let predecessor_spec = draft(1, vec![membership("wp", 10)]).seal();
     let predecessor = predecessor_spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(predecessor_spec)));
+    let snapshot = on_repair_loop(snapshot, predecessor);
     let construct = event(
         "construct",
         Fact::AttemptCompleted {
@@ -4063,7 +4095,8 @@ proptest! {
         let base = Snapshot::new(digest(1)).with_green_base(digest(1));
         let spec = draft(1, vec![membership("wp", 10)]).seal();
         let bloom = spec.id();
-        let (mut snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+        let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+        let mut snapshot = on_repair_loop(snapshot, bloom);
 
         for (i, passed) in passes.into_iter().enumerate() {
             let cursor = snapshot.blooms.get(&bloom).unwrap().progress.get(&workpiece("wp")).copied().unwrap();
@@ -4414,6 +4447,7 @@ mod sealed_catalog {
             .expect("sealing dispatches the entry stage");
 
         let mut snapshot = Snapshot::new(digest(1)).with_green_base(digest(1)).apply(&seal, &decided, &configs);
+        snapshot = super::on_repair_loop(snapshot, bloom);
         let construct_pass = event(
             "construct-pass",
             Fact::AttemptCompleted {
@@ -4435,6 +4469,7 @@ mod sealed_catalog {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(10), kind: EvidenceKind::VerificationResult, detail: digest(71) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         );
         let decided = reduce(&snapshot, &verify_failed, &configs, &SpendWindow::default());
@@ -5134,6 +5169,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
     let bloom = spec.id();
     let candidate = CandidateRef { tree: digest(100), checkout: digest(102) };
     let (snapshot, _) = step(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let (snapshot, constructed) = step(
         &snapshot,
         &event(
@@ -5166,6 +5202,7 @@ fn a_repair_lap_that_leaves_the_tree_unchanged_reuses_its_verify_verdict() {
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(100), kind: EvidenceKind::VerificationResult, detail: digest(70) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -5783,6 +5820,7 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
     let fail = |key: &str| {
         event(
             key,
@@ -5879,6 +5917,7 @@ fn an_operator_repair_re_enters_a_wedged_member_at_verify_with_the_gates_intact(
                 workpiece: workpiece("wp"),
                 evidence: Evidence { subject: digest(60), kind: EvidenceKind::VerificationResult, detail: digest(62) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Clippy),
+                findings: String::new(),
             },
         ),
     );
@@ -6340,6 +6379,7 @@ fn no_fact_family_dispatches_a_member_of_a_held_bloom() {
     let spec = draft(1, vec![membership("alpha", 10), membership("beta", 11)]).seal();
     let bloom = spec.id();
     let (sealed, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let sealed = on_repair_loop(sealed, bloom);
     // A member at terminal Verify holding a candidate and a sibling still on its
     // first `Construct` attempt — between them, the position every dispatching
     // member fact below acts from.
@@ -6730,6 +6770,7 @@ fn a_repeat_over_one_tree_records_an_anomaly_that_survives_its_repair_lap() {
     let spec = draft(1, vec![membership("wp", 10)]).seal();
     let bloom = spec.id();
     let (snapshot, _) = step(&base, &event("seal", Fact::Seal(spec)));
+    let snapshot = on_repair_loop(snapshot, bloom);
 
     let captured = CandidateRef { tree: digest(21), checkout: digest(22) };
     let pass = |key: &str, stage: StageId| {

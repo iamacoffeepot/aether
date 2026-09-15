@@ -850,12 +850,13 @@ fn stale_composition_waiters_are_not_resumed() {
                 workpiece: workpiece("epsilon"),
                 evidence: Evidence { subject: digest(24), kind: EvidenceKind::VerificationResult, detail: digest(61) },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Test),
+                findings: String::new(),
             },
         ),
     );
     assert!(
-        matches!(&failed.outcome, Outcome::RefineReentered { .. }),
-        "epsilon left Verify for Refine: {:?}",
+        matches!(&failed.outcome, Outcome::MembersWithdrawn { .. }),
+        "epsilon's red verify ejected it under the default disposition: {:?}",
         failed.outcome,
     );
 
@@ -871,10 +872,9 @@ fn stale_composition_waiters_are_not_resumed() {
     let record = after.blooms.get(&bloom).expect("the sealed bloom is still in the snapshot");
     assert!(record.withdrawn.contains_key(&workpiece("gamma")), "the withdrawn waiter stays withdrawn");
     assert!(record.claims.contains_key(&workpiece("delta")), "the resolved waiter keeps its claim");
-    assert_eq!(
-        record.progress.get(&workpiece("epsilon")).map(|progress| progress.stage),
-        Some(StageId::Refine),
-        "the non-Verify waiter is not pulled back to Verify",
+    assert!(
+        !record.progress.contains_key(&workpiece("epsilon")),
+        "the waiter whose red verify ejected it has no cursor to be pulled back to Verify",
     );
     assert_eq!(
         record.progress.get(&workpiece("zeta")).map(|progress| progress.candidate),

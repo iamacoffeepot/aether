@@ -25,9 +25,9 @@ use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
     BaseReceipt, BaseVerdict, BloomSpec, CandidateRef, ConfigKind, ConfigResolveError, ConfigScopes,
     CoordinationPolicy, DependencyError, EvidenceKind, MemberCandidate, MemberDependency, Membership, ModelOverride,
-    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, ResolutionClaim, ResolvedConfigs,
-    SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, resolve_member_dependencies,
+    OperatorProposal, PIPELINE_MANIFEST_PATH, PipelineManifest, PrecheckPolicy, RedVerify, ResolutionClaim,
+    ResolvedConfigs, SpendCeiling, SpendWindow, StageCatalog, Transformation, Unproducible, VerifyFailureSet,
+    VerifyGateSet, VerifyProof, resolve_member_dependencies,
 };
 
 pub(super) fn reduce_seal(
@@ -141,7 +141,7 @@ pub(super) fn reduce_seal(
     }
     // Record the catalog and the lane vocabulary admission resolved so the fold
     // reads the record, not a later binary's compiled copies (#4944, ADR-0215).
-    record_admitted_line(bloom, &catalog, &manifest, &mut effects);
+    record_admitted_line(bloom, &catalog, &manifest, coordination_policy.as_ref(), &mut effects);
     let proven = enqueue_base_verify_if_needed(
         snapshot,
         spec.base(),
@@ -253,10 +253,19 @@ fn record_admitted_line(
     bloom: BloomId,
     catalog: &StageCatalog,
     manifest: &PipelineManifest,
+    policy: Option<&CoordinationPolicy>,
     effects: &mut Vec<Decision>,
 ) {
     effects.push(Decision::RecordStageCatalog { bloom, catalog: catalog.clone() });
     effects.push(Decision::RecordPipelineManifest { bloom, manifest: manifest.clone() });
+    // Recorded unconditionally, including for a bloom that sealed no policy at
+    // all: the disposition governs every bloom's red verdicts, so leaving the
+    // row out for the majority would make the fold's default the authority
+    // instead of the seal's decision (ADR-0218 §Amendment: low tolerance).
+    effects.push(Decision::RecordRedVerify {
+        bloom,
+        red_verify: policy.map_or_else(RedVerify::default, |policy| policy.red_verify),
+    });
 }
 
 /// Record a cross-member declared-surface overlap the seal door observed
@@ -648,7 +657,7 @@ pub(super) fn reduce_supersede(
     for member in successor.members() {
         effects.push(Decision::ClaimMembership { workpiece: member.workpiece.clone(), bloom: successor_id });
     }
-    record_admitted_line(successor_id, &catalog, &manifest, &mut effects);
+    record_admitted_line(successor_id, &catalog, &manifest, coordination_policy.as_ref(), &mut effects);
     let proven = enqueue_base_verify_if_needed(
         snapshot,
         successor.base(),
@@ -1006,6 +1015,7 @@ mod tests {
             movement_budget: 1,
             reservation_millis: 1_000,
             coalesce_millis: None,
+            red_verify: crate::RedVerify::Refine,
             host_class: String::from("test"),
         }
     }

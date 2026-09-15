@@ -4,7 +4,7 @@
 mod common;
 
 use aether_bloomery::{
-    BloomDraft, ConfigKind, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest,
+    BloomDraft, ConfigKind, ConfigRegistry, Event, Evidence, EvidenceKind, Fact, Outcome, PipelineManifest, RedVerify,
     ResolvedConfigs, Snapshot, SpendWindow, StageId, VerifyFailure, VerifyFailureSet, VerifyGateSet,
     decode_recorded_event, reduce,
 };
@@ -59,6 +59,12 @@ fn replaying_appended_verifier_rows_charges_the_same_rolls_as_the_live_fold() {
     let seal = event("seal", Fact::Seal(spec));
     fold(&mut live, &seal);
     fold(&mut replayed, &replay(&seal));
+    // The roll ledger this case compares across live and replayed folds is the
+    // repair loop's, which the default disposition no longer runs (ADR-0218
+    // §Amendment: low tolerance).
+    for snapshot in [&mut live, &mut replayed] {
+        snapshot.blooms.get_mut(&bloom).expect("the seal folded").red_verify = RedVerify::Refine;
+    }
 
     let construct = event(
         "construct",
@@ -86,6 +92,7 @@ fn replaying_appended_verifier_rows_charges_the_same_rolls_as_the_live_fold() {
                     detail: digest(detail),
                 },
                 failed_verifiers: VerifyFailureSet::one(failed),
+                findings: String::new(),
             },
         )
     };

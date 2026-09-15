@@ -444,6 +444,7 @@ impl Topic {
             // vocabulary its base declared, are folded onto the bloom record.
             // Nothing is dispatched from either.
             | Decision::RecordStageCatalog { .. }
+            | Decision::RecordRedVerify { .. }
             | Decision::RecordPipelineManifest { .. }
             // Snapshot-only: the composition's findings channel is a record an
             // operator and the weave repair read, and the repair reaches the

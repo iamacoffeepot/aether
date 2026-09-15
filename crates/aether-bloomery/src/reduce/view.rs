@@ -223,6 +223,7 @@ fn withdrawn_view(withdrawal: &Withdrawal) -> WithdrawnView {
     let (cause, depends_on) = match &withdrawal.cause {
         WithdrawalCause::Operator => ("operator", None),
         WithdrawalCause::Dependency { on } => ("dependency", Some(on.clone())),
+        WithdrawalCause::Verify => ("verify", None),
     };
     WithdrawnView {
         cause: cause.into(),

@@ -71,6 +71,28 @@ pub enum VerificationMode {
     Contextual,
 }
 
+/// What a bloom does with a member whose `Verify` came back red, or whose
+/// `Verify` the host killed at its sealed wall clock (ADR-0218 §Amendment: low
+/// tolerance).
+///
+/// The choice is between spending another paid lap on the member and handing it
+/// to a person. A repair lap costs a model's construct budget plus a fresh full
+/// verify, and on 2026-09-15 bloom `0f16e207` spent that twice over on members
+/// that still had not gone green; the candidate is already on a ref, so ejecting
+/// loses no work and a person — or an agent a person dispatches — picks the
+/// candidate up with the verdict that stopped it attached.
+#[derive(aether_data::Schema, Clone, Copy, Default, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub enum RedVerify {
+    /// Withdraw the member from the bloom, carrying the failed verifiers and
+    /// the findings as its reason, and dispatch no repair. The default, and
+    /// what a policy sealed before this field existed reads as.
+    #[default]
+    Eject,
+    /// Spend a repair roll and re-enter `Refine` — the ADR-0153 loop, bounded
+    /// by the sealed `Verify` retry budget and the ADR-0178 accounting.
+    Refine,
+}
+
 /// Default coalescing hold when [`CoordinationPolicy::coalesce_millis`] is
 /// absent: two minutes, long enough for sibling constructs that finish a
 /// minute apart to share one run, short enough that a stuck sibling does not
@@ -105,6 +127,14 @@ pub struct CoordinationPolicy {
     /// in flight. `None` is [`DEFAULT_COALESCE_MILLIS`]. `Some(0)` proposes
     /// as soon as a request is ready — the behaviour before this field existed.
     pub coalesce_millis: Option<u64>,
+    /// What a red or wall-clock-killed member `Verify` does to the member.
+    ///
+    /// [`RedVerify::Eject`] by default, and a policy sealed before this field
+    /// existed upcasts to `Eject` rather than to the `Refine` it ran under: the
+    /// upcast is the operator's standing instruction, not an archaeological
+    /// reconstruction of one, and the instruction is that a bloom stops
+    /// spending laps on members that have not gone green.
+    pub red_verify: RedVerify,
 }
 
 impl CoordinationPolicy {

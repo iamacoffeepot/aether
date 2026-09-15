@@ -27,6 +27,7 @@ mod composition;
 mod coordination;
 mod decision;
 pub(crate) mod decisions_v1;
+mod eject;
 mod error;
 mod event;
 mod evidence;
@@ -189,9 +190,14 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
             reduce_aggregate_verify_completed(snapshot, bloom, *passed, evidence)
         }
         Fact::LandingRejected { bloom, evidence } => reduce_landing_rejected(snapshot, bloom, evidence),
-        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers }
-        | Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
-            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers)
+        Fact::VerifyFailed { bloom, workpiece, evidence, failed_verifiers, findings } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers, findings)
+        }
+        // A containment refusal is the same red verdict reaching the same arm;
+        // its own payload is the violating paths, and the lane files those as
+        // findings on the bloom's channel rather than on the fact (ADR-0209).
+        Fact::ContainmentRefused { bloom, workpiece, evidence, failed_verifiers, violating_paths: _ } => {
+            reduce_verify_failed(snapshot, bloom, workpiece, evidence, *failed_verifiers, "")
         }
         Fact::AggregateReviewExecutorFault { bloom, evidence } => {
             reduce_aggregate_review_executor_fault(snapshot, bloom, evidence)

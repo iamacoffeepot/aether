@@ -3317,6 +3317,7 @@ mod tests {
             movement_budget: 2,
             reservation_millis: 1_000,
             coalesce_millis: None,
+            red_verify: crate::RedVerify::Refine,
             host_class: String::from("test-host"),
         }
     }

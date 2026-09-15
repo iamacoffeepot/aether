@@ -114,6 +114,7 @@ fn a_rejected_verify_failed_at_construct_leaves_the_surface_hold() {
                     detail: digest(82),
                 },
                 failed_verifiers: VerifyFailureSet::one(VerifyFailure::Fmt),
+                findings: String::new(),
             },
         ),
     );
