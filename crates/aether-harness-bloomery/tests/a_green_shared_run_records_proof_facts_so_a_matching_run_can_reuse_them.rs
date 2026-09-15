@@ -31,6 +31,7 @@ const SECOND: &str = "wp-b";
 
 fn eager_contextual_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Contextual,
         eager_integration: true,
         max_run_members: 1,

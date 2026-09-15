@@ -43,6 +43,7 @@ const OWN: &str = "crates/example-b/src/lib.rs";
 /// scheduler wait for them.
 fn eager_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Standalone,
         eager_integration: true,
         max_run_members: 1,

@@ -52,6 +52,7 @@ crates/example-a/src/contextual.rs:1 — ignore — #[ignore = \"scripted\"]
 
 fn coalescing_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Contextual,
         eager_integration: true,
         max_run_members: 2,

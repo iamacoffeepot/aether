@@ -40,6 +40,7 @@ const FOLLOWING_SHARED: &str = "pub fn shared() -> u8 {\n    22\n}\n";
 /// composition that verified both at once would hide exactly that.
 fn eager_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Standalone,
         eager_integration: true,
         max_run_members: 1,

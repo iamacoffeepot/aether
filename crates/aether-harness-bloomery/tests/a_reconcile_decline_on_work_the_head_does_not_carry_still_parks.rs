@@ -40,6 +40,7 @@ const COLLIDING_SHARED: &str = "pub fn shared() -> u8 {\n    33\n}\n";
 /// pass is its own append.
 fn eager_policy() -> CoordinationPolicy {
     CoordinationPolicy {
+        red_verify: aether_bloomery::RedVerify::Refine,
         verification: VerificationMode::Standalone,
         eager_integration: true,
         max_run_members: 1,
