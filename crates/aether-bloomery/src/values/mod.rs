@@ -6,6 +6,7 @@
 //! DAG is built from; they are plain data — no I/O, no engine boot, no
 //! GitHub types — and are content-addressed the same way (`digest_of`).
 
+mod admin;
 mod adr;
 mod api;
 mod approval;
@@ -47,6 +48,9 @@ mod verify;
 mod verify_delta;
 mod workpiece_builder;
 
+pub use admin::{
+    AdminAct, AdminActKind, AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver,
+};
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use api::{
     AdjudicateRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView,

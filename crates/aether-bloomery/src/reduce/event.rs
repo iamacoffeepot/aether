@@ -10,9 +10,10 @@ use super::gate::RecordedRefusal;
 use crate::digest::Digest;
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReverify, BloomSpec, CandidatePreparation, CandidateRef, CompatibilityPreview, CompositionInput,
-    CompositionParents, ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead,
-    MemberDependency, OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
+    Adjudication, AdminCandidate, AdminLaneCancel, AdminLapDrop, AdminNote, AdminRerun, AdminWaiver, BaseReverify,
+    BloomSpec, CandidatePreparation, CandidateRef, CompatibilityPreview, CompositionInput, CompositionParents,
+    ConfigRegistry, ConstructionAdmission, ConstructionCheckpoint, Evidence, IntegrationHead, MemberDependency,
+    OperatorHold, OperatorProposal, OperatorRepair, OrphanClaimRelease, OrphanClaimReleaseCompletion,
     PartialHeadRepairCompletion, PrecheckCompletion, PrecheckPreparation, ResolutionClaim, SharedRunCompletion,
     SharedRunPlan, SharedRunPreparation, StableHeadReservation, Statement, SuppressionDisposition, SurfaceRequest,
     VerifyFailureSet, Withdrawal,
@@ -934,6 +935,73 @@ pub enum Fact {
     /// Appended past [`Fact::ProofReused`] so every prior fact keeps its wire
     /// discriminant.
     HoldSharedRunCoalesce { bloom: BloomId, until_unix_millis: u64, waiting_for: Vec<WorkpieceId> },
+    /// An operator opened an admin session on a bloom (ADR-0219).
+    ///
+    /// The brake plus a flag. While it is open the reducer dispatches nothing
+    /// for the bloom — it records an [`OperatorHold`] alongside, so the one
+    /// dispatch choke #4976 built is the one that holds here too — an executor
+    /// fault charges no budget, and the six acts below are accepted.
+    ///
+    /// Appended past [`Fact::HoldSharedRunCoalesce`] so every prior fact keeps
+    /// its wire discriminant; the same is true of each admin fact after it.
+    AdminEnter {
+        /// The bloom being taken out of the machine's hands.
+        bloom: BloomId,
+        /// Who, and why.
+        note: AdminNote,
+    },
+    /// An operator closed an admin session (ADR-0219).
+    ///
+    /// Clears the flag, releases the brake, and re-derives what is due from the
+    /// cursors as they now stand — the release path #4976 already owns — plus
+    /// the landing a waived gate left nothing to dispatch.
+    AdminExit {
+        /// The bloom being handed back.
+        bloom: BloomId,
+        /// Who, and why.
+        note: AdminNote,
+    },
+    /// An operator cancelled a running dispatch from inside admin mode
+    /// (ADR-0219), charging nobody for it.
+    AdminCancelLane {
+        /// The bloom the lane was dispatched under.
+        bloom: BloomId,
+        /// Which lane, and on whose word.
+        cancel: AdminLaneCancel,
+    },
+    /// An operator handed a workpiece a candidate from inside admin mode
+    /// (ADR-0219) — the repair door without its wedge precondition.
+    AdminSetCandidate {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// The candidate, its workpiece, and on whose word.
+        set: AdminCandidate,
+    },
+    /// An operator asked for one stage to run again (ADR-0219).
+    AdminRerun {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// Which stage of which workpiece, and on whose word.
+        rerun: AdminRerun,
+    },
+    /// An operator voided a red verdict's findings (ADR-0219).
+    ///
+    /// Recorded as an operator adjudication over the named evidence — never as
+    /// a synthesized green verdict — plus the admin act that says a person made
+    /// the call.
+    AdminWaive {
+        /// The bloom whose gate is being waived.
+        bloom: BloomId,
+        /// Which findings, at which gate, and on whose word.
+        waiver: AdminWaiver,
+    },
+    /// An operator discarded a completed lap's captured candidate (ADR-0219).
+    AdminDropLap {
+        /// The bloom the workpiece belongs to.
+        bloom: BloomId,
+        /// Which lap, and on whose word.
+        drop: AdminLapDrop,
+    },
 }
 
 impl Fact {

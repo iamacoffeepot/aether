@@ -398,6 +398,27 @@ pub const DECISIONS_PRE_COALESCE_DIGEST: Digest =
 pub const EVENT_PRE_COALESCE_DIGEST: Digest =
     Digest::pinned("9e55e67bebd4cc5e421e61d07e352c0535f9ba09548c207cb353649b97df1f1c");
 
+/// Journal schema immediately before ADR-0219 appended the admin-mode
+/// decisions and outcomes.
+///
+/// Copied verbatim from the `decisions` line the ledger carried as current at
+/// `7605d9195` — `b67ebb69993a150cbafd49a46c36360665d2e8adf50be79ddd345b2cc2323782`.
+/// Never recomputed from live code (#5500). `RecordAdminMode`,
+/// `RecordAdminAct`, and `CancelLane` are appended past every prior decision
+/// and the four admin outcomes past every prior outcome, so no discriminant a
+/// row of that era could hold has moved.
+pub const DECISIONS_PRE_ADMIN_DIGEST: Digest =
+    Digest::pinned("b67ebb69993a150cbafd49a46c36360665d2e8adf50be79ddd345b2cc2323782");
+
+/// Event schema immediately before ADR-0219 appended the seven admin facts.
+///
+/// Copied verbatim from the `event` line the ledger carried as current at
+/// `7605d9195` — `37e4b124a8f78eb6d8397ce3881f199322b8873653d7bb168b133bcbb0db70c3`,
+/// the same way and for the same reason. Every admin fact is appended past
+/// `HoldSharedRunCoalesce`.
+pub const EVENT_PRE_ADMIN_DIGEST: Digest =
+    Digest::pinned("37e4b124a8f78eb6d8397ce3881f199322b8873653d7bb168b133bcbb0db70c3");
+
 /// Sealed [`CoordinationPolicy`] schema immediately before `coalesce_millis`.
 ///
 /// Copied from the `aether.bloomery.coordination_policy` line the ledger
@@ -445,6 +466,7 @@ pub fn decode_recorded_decisions(bytes: &[u8], schema: Option<&[u8]>) -> Result<
             upcast_decisions_pre_precheck,
             upcast_decisions_pre_coordination,
             upcast_decisions_pre_coalesce,
+            upcast_decisions_pre_admin,
         ],
     )
 }
@@ -583,6 +605,19 @@ fn upcast_event_pre_coalesce(bytes: &[u8]) -> Result<Event, WireError> {
     from_bytes(bytes)
 }
 
+/// Pre-admin-mode decision rows carry the same wire layout today's decoder
+/// reads: the three decisions and four outcomes ADR-0219 adds are appended past
+/// every prior discriminant.
+fn upcast_decisions_pre_admin(bytes: &[u8]) -> Result<Decisions, WireError> {
+    from_bytes(bytes)
+}
+
+/// Pre-admin-mode event rows carry the same wire layout today's decoder reads:
+/// the seven admin facts are appended past `HoldSharedRunCoalesce`.
+fn upcast_event_pre_admin(bytes: &[u8]) -> Result<Event, WireError> {
+    from_bytes(bytes)
+}
+
 /// Pre-ADR-0216 bundles carry seventeen fields where today's decoder reads
 /// nineteen, so the row is decoded through its frozen shape and re-encoded
 /// with both reader fields empty.
@@ -610,6 +645,7 @@ pub fn decode_recorded_event(bytes: &[u8], schema: Option<&[u8]>) -> Result<Even
             upcast_event_pre_preparation_conflict,
             upcast_event_pre_proof_reused,
             upcast_event_pre_coalesce,
+            upcast_event_pre_admin,
         ],
     )
 }
@@ -629,6 +665,7 @@ pub static DECISIONS: PersistedKind = PersistedKind {
         PersistedUpcast { digest: DECISIONS_PRE_PRECHECK_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COORDINATION_DIGEST, reshape: None },
         PersistedUpcast { digest: DECISIONS_PRE_COALESCE_DIGEST, reshape: None },
+        PersistedUpcast { digest: DECISIONS_PRE_ADMIN_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };
@@ -646,6 +683,7 @@ pub static EVENT: PersistedKind = PersistedKind {
         PersistedUpcast { digest: EVENT_PRE_PREPARATION_CONFLICT_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_PROOF_REUSED_DIGEST, reshape: None },
         PersistedUpcast { digest: EVENT_PRE_COALESCE_DIGEST, reshape: None },
+        PersistedUpcast { digest: EVENT_PRE_ADMIN_DIGEST, reshape: None },
     ],
     current: OnceLock::new(),
 };

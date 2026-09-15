@@ -18,11 +18,11 @@ use super::{Decision, Decisions, Event, Fact, Outcome};
 use crate::digest::{Digest, digest_of};
 use crate::ids::{BloomId, IdempotencyKey, StageId, WorkpieceId};
 use crate::values::{
-    Adjudication, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents, ConfigScopes,
-    CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold, OperatorProposal,
-    OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim, ResolvedConfigs,
-    SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree, VerifyFailureSet, VerifyGateSet,
-    VerifyProof, VerifyReuse, Wedge, Withdrawal,
+    Adjudication, AdminAct, AdminNote, BaseReceipt, BloomSpec, CandidateRef, CompositionFinding, CompositionParents,
+    ConfigScopes, CoordinationState, DispatchKey, Evidence, EvidenceKind, MemberDependency, OperatorHold,
+    OperatorProposal, OperatorRepair, OrphanClaimReleaseRecord, PipelineManifest, PrecheckState, ResolutionClaim,
+    ResolvedConfigs, SpendQuiesce, StageCatalog, SuppressionDisposition, SurfaceRequest, VerifiedTree,
+    VerifyFailureSet, VerifyGateSet, VerifyProof, VerifyReuse, Wedge, Withdrawal,
 };
 // Only [`Snapshot::with_green_base`] names it, and that door is behind the same cfg.
 // A plain import would be an unused one on a lib-scoped build, where the fixture
@@ -755,6 +755,41 @@ pub struct BloomRecord {
     /// that predates the field.
     #[serde(default)]
     pub withdrawn: BTreeMap<WorkpieceId, Withdrawal>,
+    /// The admin session currently open on this bloom (ADR-0219), or `None`
+    /// while the machine is running it.
+    ///
+    /// Distinct from [`operator_hold`](Self::operator_hold), which an admin
+    /// session raises beside this flag and which is what actually withholds
+    /// dispatch: a hold says "stop spending", and this says "a person is
+    /// working on it". That second statement is what makes an executor fault
+    /// free and the seven admin doors open, neither of which a brake can
+    /// express. Journal-derived from [`Decision::RecordAdminMode`] and
+    /// replay-rebuilt; defaulted so a journal written before admin mode existed
+    /// still decodes.
+    #[serde(default)]
+    pub admin: Option<AdminNote>,
+    /// Every admin act journaled against this bloom (ADR-0219), in admission
+    /// order — what an operator did by hand, why, and on whose word.
+    ///
+    /// Recorded for the reason [`operator_repairs`](Self::operator_repairs) is:
+    /// the movements an admin act makes are ordinary decisions, indistinguish-
+    /// able in the record from a lane's, so without this row nothing would say
+    /// a person made them. It is also where a waiver lives, which is what the
+    /// landing reads to say it stands on one. Journal-derived from
+    /// [`Decision::RecordAdminAct`]; defaulted like its sibling.
+    #[serde(default)]
+    pub admin_acts: Vec<AdminAct>,
+    /// The candidate each workpiece held before the one it holds now — the
+    /// one-deep undo `admin drop-lap` reverts to (ADR-0219).
+    ///
+    /// Folded off the cursor rather than decided, the way the fold-round table
+    /// is folded off its fact: it is an account of what the cursor displaced,
+    /// and no decision carries it. One deep, deliberately — the question it
+    /// answers is "undo the lap that just finished", and a deeper history would
+    /// invite an operator to walk a bloom backwards through work its gates have
+    /// already judged.
+    #[serde(default)]
+    pub displaced_candidates: BTreeMap<WorkpieceId, CandidateRef>,
     /// Optional journal-derived aggregate pre-check scheduler state.
     #[serde(default)]
     pub precheck: Option<PrecheckState>,
@@ -1825,6 +1860,11 @@ impl Snapshot {
             | Decision::RecordOperatorRelease { .. }
             | Decision::DeferDispatch { .. }
             | Decision::DeferAggregate { .. } => self.apply_operator_hold_effect(effect),
+            Decision::RecordAdminMode { .. } | Decision::RecordAdminAct { .. } => self.apply_admin_effect(effect),
+            // Snapshot-inert for the reason `CancelDispatch` is: what a lane
+            // cancellation does happens at the executor, and the record of it
+            // is the admin act journaled beside this row.
+            Decision::CancelLane { .. } => {}
             Decision::RecordSpendQuiesce { quiesce } => {
                 self.spend_quiesce.clone_from(quiesce);
             }
@@ -1868,6 +1908,16 @@ impl Snapshot {
             return;
         };
         let was_wedged = if let Some(record) = self.blooms.get_mut(bloom) {
+            // The candidate this move displaces, kept one deep so `admin
+            // drop-lap` has a revert target it did not have to be told
+            // (ADR-0219). Only a real replacement is recorded: a move that
+            // carries the same candidate forward displaced nothing, and one
+            // that clears it (a Construct re-entry) is not a lap to undo.
+            if let Some(displaced) = record.progress.get(workpiece).and_then(|prior| prior.candidate)
+                && progress.candidate.is_some_and(|current| current != displaced)
+            {
+                record.displaced_candidates.insert(workpiece.clone(), displaced);
+            }
             record.progress.insert(workpiece.clone(), *progress);
             // A moving cursor is a member that is dispatching again, so it
             // is by definition no longer wedged. This is the only way out
@@ -2004,6 +2054,28 @@ impl Snapshot {
             Decision::DeferAggregate { bloom, stage } => {
                 if let Some(record) = self.blooms.get_mut(bloom) {
                     record.deferred_aggregates.insert(*stage);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Fold the two decisions that write a bloom's admin session (ADR-0219).
+    ///
+    /// Split out of [`apply_effect`](Self::apply_effect) for the reason its
+    /// siblings are: the flag and the log are one mechanism, and a session that
+    /// recorded acts without opening, or opened without recording, would each
+    /// look correct alone.
+    fn apply_admin_effect(&mut self, effect: &Decision) {
+        match effect {
+            Decision::RecordAdminMode { bloom, admin } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.admin.clone_from(admin);
+                }
+            }
+            Decision::RecordAdminAct { bloom, act } => {
+                if let Some(record) = self.blooms.get_mut(bloom) {
+                    record.admin_acts.push(act.clone());
                 }
             }
             _ => {}
@@ -2343,6 +2415,9 @@ impl BloomRecord {
             host_faults: BTreeMap::new(),
             vehicles: BTreeMap::new(),
             withdrawn: BTreeMap::new(),
+            admin: None,
+            admin_acts: Vec::new(),
+            displaced_candidates: BTreeMap::new(),
             precheck: None,
             coordination: None,
             superseded_by: None,

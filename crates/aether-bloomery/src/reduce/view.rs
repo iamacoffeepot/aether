@@ -6,12 +6,12 @@ use super::{AwaitingSurface, BloomRecord, BloomStatus, LeaseEviction, Snapshot};
 use crate::digest::Digest;
 use crate::ids::{StageId, WorkpieceId};
 use crate::port::{
-    AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView, ExecutorFaultView,
-    HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
+    AdminView, AwaitingSurfaceView, BaseAlertView, BloomView, CompositionCursorView, CompositionView,
+    ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MemberView, NarrowedCompositionView,
     PendingDecisionView, ReviewParkView, ViewDocument, WedgeCause, WithdrawnView,
 };
 use crate::values::BaseVerdict;
-use crate::values::{Question, VerifyGateSet, Withdrawal, WithdrawalCause};
+use crate::values::{AdminAct, Question, VerifyGateSet, Withdrawal, WithdrawalCause};
 
 /// Assemble a self-contained [`ViewDocument`] from a snapshot — the pure
 /// `Snapshot -> ViewDocument` projection the reconcile port pushes outward
@@ -74,6 +74,8 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
                 narrowed_compositions: narrowed_composition_views(record, snapshot),
                 precheck: record.precheck.clone(),
                 coordination: record.coordination.as_deref().cloned(),
+                admin: admin_view(record),
+                waivers: record.admin_acts.iter().flat_map(AdminAct::waived).copied().collect(),
             }
         })
         .collect();
@@ -84,6 +86,20 @@ pub fn view_of(snapshot: &Snapshot, resolve_question: impl Fn(&Digest) -> Option
         blooms,
         base_alert: base_alert_of(snapshot),
     }
+}
+
+/// The open admin session as the board renders it (ADR-0219), or `None` while
+/// the machine is running the bloom.
+///
+/// The count is saturating rather than exact past `u32::MAX` for the reason
+/// every other count on this document is: a projection that can panic on a
+/// long-lived record is a projection that takes the board down.
+fn admin_view(record: &BloomRecord) -> Option<AdminView> {
+    record.admin.as_ref().map(|note| AdminView {
+        operator: note.operator.clone(),
+        reason: note.reason.clone(),
+        acts: u32::try_from(record.admin_acts.len()).unwrap_or(u32::MAX),
+    })
 }
 
 /// The red receipt whose base is the sealed bloom's base, or — with no sealed
@@ -599,6 +615,8 @@ mod tests {
             narrowed_compositions: Vec::new(),
             precheck: None,
             coordination: None,
+            admin: None,
+            waivers: Vec::new(),
         }
     }
 
