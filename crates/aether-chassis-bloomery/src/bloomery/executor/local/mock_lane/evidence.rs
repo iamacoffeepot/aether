@@ -25,7 +25,7 @@ use aether_bloomery::{
 };
 use serde_json::{Value, json};
 
-use super::script::LaneMode;
+use super::script::{LaneMode, VerifyReport};
 
 /// The file a passing construct run writes into the scratch worktree, so the
 /// coordinator's `git status --porcelain` sees a candidate to capture.
@@ -110,13 +110,20 @@ fn environment_findings() -> String {
 /// `nonce` is stamped into the evidence the way the real lanes stamp theirs.
 #[must_use]
 pub fn outcome(command: &str, nonce: &str, mode: LaneMode) -> Outcome {
-    outcome_for(command, nonce, mode, None)
+    outcome_for(command, nonce, mode, None, None)
 }
 
 /// [`outcome`], with the `--subject` the coordinator displayed so
-/// [`LaneMode::WrongSubject`] can bind a different digest.
+/// [`LaneMode::WrongSubject`] can bind a different digest, and the gate and
+/// findings a failing mechanical verify reports when the script named them.
 #[must_use]
-pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+pub fn outcome_for(
+    command: &str,
+    nonce: &str,
+    mode: LaneMode,
+    subject: Option<&str>,
+    report: Option<&VerifyReport>,
+) -> Outcome {
     let evidence_nonce = if mode == LaneMode::MismatchedNonce {
         "mismatched-nonce"
     } else {
@@ -168,7 +175,7 @@ pub fn outcome_for(command: &str, nonce: &str, mode: LaneMode, subject: Option<&
     if mode == LaneMode::Environment {
         return verify_environment_outcome(command, evidence_nonce);
     }
-    verify_outcome(command, evidence_nonce, mode, subject)
+    verify_outcome(command, evidence_nonce, mode, subject, report)
 }
 
 fn evidence_bytes(value: &Value) -> Vec<u8> {
@@ -373,7 +380,13 @@ fn verify_environment_outcome(command: &str, evidence_nonce: &str) -> Outcome {
     }
 }
 
-fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: Option<&str>) -> Outcome {
+fn verify_outcome(
+    command: &str,
+    evidence_nonce: &str,
+    mode: LaneMode,
+    subject: Option<&str>,
+    report: Option<&VerifyReport>,
+) -> Outcome {
     let passed = authored_pass(mode) || mode == LaneMode::ConcludesWithoutWriting;
     let umbrella = command == VERIFY_CHECK_COMMAND || command == VERIFY_BASE_COMMAND;
     let mut evidence = json!({
@@ -389,13 +402,17 @@ fn verify_outcome(command: &str, evidence_nonce: &str, mode: LaneMode, subject: 
         ],
     });
     if !passed && let Some(object) = evidence.as_object_mut() {
-        let failure = if umbrella {
+        let canned = if umbrella {
             VerifyFailure::Test
         } else {
             VerifyFailure::Clippy
         };
-        object.insert("failed_verifiers".to_owned(), json!(VerifyFailureSet::one(failure)));
-        object.insert("findings".to_owned(), Value::String(verify_findings(command)));
+        let (failed, findings) = report.map_or_else(
+            || (json!(VerifyFailureSet::one(canned)), verify_findings(command)),
+            |report| (json!([report.gate]), report.findings.clone()),
+        );
+        object.insert("failed_verifiers".to_owned(), failed);
+        object.insert("findings".to_owned(), Value::String(findings));
     }
     stamp_claimed_subject(&mut evidence, mode, subject);
     Outcome {

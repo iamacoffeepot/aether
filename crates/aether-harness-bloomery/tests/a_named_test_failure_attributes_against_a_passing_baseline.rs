@@ -56,16 +56,18 @@ struct ProbePreparation {
 #[test]
 fn a_named_test_failure_attributes_against_a_passing_baseline() {
     let authority = Repo::with_formatted_example_project();
-    // Occurrence 0 is the contextual candidate, 1–2 are the green baseline
-    // pair, 3 is the second independent full-set receipt. Baselines now share
-    // `verify.check` with the candidate (#5944), so they consume occurrences.
-    let script = LaneScript::all_passing()
-        .then(VERIFY_CHECK_COMMAND, LaneMode::Fail)
-        .then(VERIFY_CHECK_COMMAND, LaneMode::Pass)
-        .then(VERIFY_CHECK_COMMAND, LaneMode::Pass)
-        .then(VERIFY_CHECK_COMMAND, LaneMode::Fail);
+    // Occurrence 0 is the contextual candidate and 1 is the green baseline.
+    // Baselines share `verify.check` with the candidate (#5944), so they
+    // consume occurrences; one apiece since an experiment stopped taking two
+    // invocations (ADR-0218, amended 2026-09-15).
+    let script =
+        LaneScript::all_passing().then(VERIFY_CHECK_COMMAND, LaneMode::Fail).then(VERIFY_CHECK_COMMAND, LaneMode::Pass);
     let mut harness = HarnessBuilder::local_authority(&authority)
         .coordination(contextual_policy())
+        // Two prover slots, stated rather than measured: the base verify keeps
+        // one warm, so a host whose measured ceiling is one (cores / 8) never
+        // frees a slot for the contextual run this scenario is about.
+        .max_concurrent_provers(2)
         .script(&script)
         .start("named-test-attribution");
     let scope = harness.author_scope_revision(MEMBER, &["mock-lane-candidate.txt"]);
@@ -115,8 +117,8 @@ fn a_named_test_failure_attributes_against_a_passing_baseline() {
     );
     assert_eq!(
         baseline_probes.len(),
-        2,
-        "the one experiment still takes the two independent receipts discrimination demands: {baseline_probes:?}"
+        1,
+        "one experiment is one invocation since ADR-0218's 2026-09-15 amendment: {baseline_probes:?}"
     );
     assert!(
         matches!(baseline.iter().next(), Some(BatchCheck::Test { id, .. }) if id.contains("named_failure")),

@@ -3780,6 +3780,7 @@ fn run_dispatch_cycle(state: &mut ExecutorReactorState, ctx: &mut NativeCtx<'_>)
         match drive_shared_runs(
             store,
             state.artifacts.as_mut(),
+            source.as_ref(),
             &executor,
             claims,
             &state.host_class,
