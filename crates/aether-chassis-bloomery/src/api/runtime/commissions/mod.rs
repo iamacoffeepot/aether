@@ -8,8 +8,8 @@
 
 use aether_actor::Manual;
 use aether_bloomery::{
-    AuthorityDoor, CommissionStatus, Digest, Observation, Provenance, ScopeRevision, ScopeVerifyReport, Statement,
-    WorkpieceId, digest_of,
+    AgentProfile, AuthorityDoor, CommissionStatus, Digest, Observation, Provenance, ScopeRevision, ScopeVerifyReport,
+    Statement, WorkpieceId, digest_of,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
@@ -710,7 +710,11 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
             approvals,
             scope_verify,
             current_unreadable,
+            scope_model_override,
+            scope_seat,
         } => {
+            let scope_model_override = *scope_model_override;
+            let scope_seat = *scope_seat;
             let Ok(intent) = digest_of_bytes(&intent) else {
                 return error_response(500, "stored intent digest is not 32 bytes");
             };
@@ -718,6 +722,13 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                 Some(bytes) => match digest_of_bytes(&bytes) {
                     Ok(digest) => Some(digest),
                     Err(response) => return response,
+                },
+                None => None,
+            };
+            let scope_model_override = match scope_model_override {
+                Some(bytes) => match digest_of_bytes(&bytes) {
+                    Ok(digest) => Some(digest),
+                    Err(_) => return error_response(500, "stored scope-run override digest is not 32 bytes"),
                 },
                 None => None,
             };
@@ -748,6 +759,8 @@ pub(super) fn show_response(result: LoadCommissionResult) -> HttpServerResponse 
                     current_unreadable,
                     approvals: decoded,
                     scope_verify,
+                    scope_model_override,
+                    scope_seat,
                 },
             )
         }
@@ -784,13 +797,46 @@ fn head_view(listed: ListedCommission) -> Result<CommissionHeadView, HttpServerR
     })
 }
 
+/// The journal line a scope-run open leaves: the digest the run resolved its
+/// seat from and the harness and model that seat dispatches. The console's
+/// coordinator-log screen reads this back, so the message itself names the
+/// seat rather than leaving it in a structured field the log renderer drops.
+fn scope_run_opened_line(ordinal: u64, seat: &AgentProfile, model_override: Option<Digest>) -> String {
+    let seat = format!("{} {}", seat.harness.as_str(), seat.model);
+    model_override.map_or_else(
+        || format!("scope run {ordinal} opened under {seat}"),
+        |digest| format!("scope run {ordinal} opened under {seat} (override {digest})"),
+    )
+}
+
 /// Render [`EnqueueScopeRunResult`].
 pub(super) fn scope_run_response(result: EnqueueScopeRunResult) -> HttpServerResponse {
     match result {
-        EnqueueScopeRunResult::Ok { id, ordinal, sequence, subject } => match digest_of_bytes(&subject) {
-            Ok(subject) => json(201, &ScopeRunOpenedView { id: WorkpieceId(id), ordinal, sequence, subject }),
-            Err(response) => response,
-        },
+        EnqueueScopeRunResult::Ok { id, ordinal, sequence, subject, model_override, seat } => {
+            let model_override = *model_override;
+            let seat = *seat;
+            match digest_of_bytes(&subject) {
+                Ok(subject) => {
+                    let model_override = model_override.and_then(|bytes| Digest::from_slice(&bytes));
+                    if let Some(seat) = &seat {
+                        tracing::info!(
+                            target: "aether_chassis_bloomery::api",
+                            commission = %id,
+                            ordinal,
+                            harness = %seat.harness.as_str(),
+                            model = %seat.model.as_str(),
+                            "{}",
+                            scope_run_opened_line(ordinal, seat, model_override)
+                        );
+                    }
+                    json(
+                        201,
+                        &ScopeRunOpenedView { id: WorkpieceId(id), ordinal, sequence, subject, model_override, seat },
+                    )
+                }
+                Err(response) => response,
+            }
+        }
         EnqueueScopeRunResult::Missing { id } => error_response(404, &format!("no commission named {id}")),
         EnqueueScopeRunResult::NotOpen => error_response(409, "commission is not open"),
         EnqueueScopeRunResult::AlreadyInFlight { ordinal } => {

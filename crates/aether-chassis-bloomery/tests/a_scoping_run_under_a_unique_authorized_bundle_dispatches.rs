@@ -16,10 +16,12 @@
 //! that pin as the instruction slot.
 
 use aether_bloomery::{
-    BloomId, ConfigKind, ConfigRegistry, Digest, ModelProcessInstructions, Nonce, Observation, Provenance, SlotRole,
-    StageCatalog, StageId, Statement, Transformation, WorkpieceId,
+    BloomId, ConfigKind, ConfigRegistry, Digest, ModelOverride, ModelProcessInstructions, Nonce, Observation,
+    Provenance, SlotRole, StageCatalog, StageId, Statement, Transformation, WorkpieceId,
 };
-use aether_chassis_bloomery::bloomery::{DispatchRecord, admit_model_dispatch, open_scope_run, reference_instructions};
+use aether_chassis_bloomery::bloomery::{
+    DispatchRecord, admit_model_dispatch, open_scope_run_with_override, reference_instructions,
+};
 use aether_chassis_bloomery::store::{CommissionBackend, StoreBackend};
 use aether_harness_bloomery::{HarnessBuilder, HarnessRoots};
 
@@ -38,8 +40,16 @@ fn a_scoping_run_under_a_unique_authorized_bundle_dispatches_that_bundle() {
     let mut store = harness.commission_store();
     let intent_digest = store.create(&commission, &intent).expect("the commission is created");
     let base = harness.view().mainline;
-    open_scope_run(&mut store, &commission, intent_digest, base, "scope sketch")
-        .expect("the run opens with the host pin");
+    open_scope_run_with_override(
+        &mut store,
+        &commission,
+        intent_digest,
+        base,
+        "scope sketch",
+        &ModelOverride::default(),
+        None,
+    )
+    .expect("the run opens with the host pin");
 
     let rows = store.list_scope_runs(&commission.0).expect("the run ledger reads");
     let pin = rows

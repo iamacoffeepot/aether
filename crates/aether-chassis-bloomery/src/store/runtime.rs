@@ -33,10 +33,10 @@ use aether_actor::runtime;
 // inward for its `StoreCapability` handlers (issue #3497).
 use aether_bloomery::persisted::{DECISIONS, EVENT, kind_named};
 use aether_bloomery::{
-    CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord, LoadConfigs,
-    LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, ModelOverride, OutboxPayload, ReplayJournal,
-    ReplayJournalResult, ScopeRevision, StageCatalog, Statement, StoreClass, SuppressionRequest, Topic, WorkpieceId,
-    decode_config, decode_recorded_decisions, decode_recorded_event, schema_digest,
+    AgentProfile, CommissionStatus, Commit, CommitResult, ConfigRecord, Decision, Digest, Event, JournalRecord,
+    LoadConfigs, LoadConfigsResult, MembershipMutation, MetricDispatch, MetricsLedger, ModelOverride, OutboxPayload,
+    ReplayJournal, ReplayJournalResult, ScopeRevision, StageCatalog, Statement, StoreClass, SuppressionRequest, Topic,
+    WorkpieceId, decode_config, decode_recorded_decisions, decode_recorded_event, schema_digest,
 };
 use aether_data::wire::{from_bytes, to_vec};
 use aether_kinds::descriptors;
@@ -47,7 +47,7 @@ use std::iter::repeat_n;
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::bloomery::{ScopeRunRefusal, open_scope_run_with_override};
+use crate::bloomery::{ScopeRunRefusal, open_scope_run_with_override, scope_seat};
 
 use rusqlite::Connection;
 use rusqlite::OptionalExtension;
@@ -5179,6 +5179,11 @@ impl NativeActor for StoreCapability {
                     Ok(approvals) => approvals,
                     Err(error) => return LoadCommissionResult::Err { error },
                 };
+                let scope_runs = match state.backend.list_scope_runs(&mail.id) {
+                    Ok(rows) => rows,
+                    Err(error) => return LoadCommissionResult::Err { error: error.to_string() },
+                };
+                let (scope_model_override, scope_seat) = latest_scope_seat(&mut state.backend, &scope_runs);
                 LoadCommissionResult::Ok {
                     id: view.head.id.0,
                     intent: view.head.intent.as_bytes().to_vec(),
@@ -5189,6 +5194,8 @@ impl NativeActor for StoreCapability {
                     approvals,
                     scope_verify: view.scope_verify.map(|report| report.to_canonical()),
                     current_unreadable: view.current_unreadable.map(|error| error.to_string()),
+                    scope_model_override: Box::new(scope_model_override),
+                    scope_seat: Box::new(scope_seat),
                 }
             }
             Err(error) => LoadCommissionResult::Err { error: error.to_string() },
@@ -5332,6 +5339,8 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
             ordinal: opened.ordinal,
             sequence: opened.sequence,
             subject: opened.subject.as_bytes().to_vec(),
+            model_override: Box::new(mail.model_override),
+            seat: Box::new(Some(opened.seat)),
         },
         Err(ScopeRunRefusal::AlreadyInFlight { ordinal }) => EnqueueScopeRunResult::AlreadyInFlight { ordinal },
         Err(ScopeRunRefusal::AlreadyFrozen) => EnqueueScopeRunResult::AlreadyFrozen,
@@ -5347,7 +5356,9 @@ fn enqueue_scope_run_mail(store: &mut SqliteStore, mail: EnqueueScopeRun) -> Enq
 /// digest that is not 32 bytes, names no stored config, names one filed under
 /// another kind, decodes as no `ModelOverride`, or keys a stage no dispatch
 /// resolves, refuses as [`EnqueueScopeRunResult::UnknownModelOverride`] — a
-/// `400`, never a lane on a seat nobody chose.
+/// `400`, never a lane on a seat nobody chose. A store fault reading the
+/// configs table is the coordinator's failure, not the caller's mistake, so
+/// it answers as [`EnqueueScopeRunResult::Err`] — a `500`.
 fn scope_run_override(store: &mut SqliteStore, digest: Option<&[u8]>) -> Result<ModelOverride, EnqueueScopeRunResult> {
     let Some(bytes) = digest else {
         return Ok(ModelOverride::default());
@@ -5358,7 +5369,7 @@ fn scope_run_override(store: &mut SqliteStore, digest: Option<&[u8]>) -> Result<
     };
     let stored = store
         .lookup_config(bytes)
-        .map_err(|error| unknown(format!("model override lookup failed: {error}")))?
+        .map_err(|error| EnqueueScopeRunResult::Err { error: format!("model override lookup failed: {error}") })?
         .ok_or_else(|| unknown(format!("no stored model override at {address}")))?;
     let model_override = decode_config::<ModelOverride>(&stored.0, &stored.1, stored.2.as_deref())
         .map_err(|error| unknown(format!("stored config at {address} is no model override: {error}")))?;
@@ -5366,6 +5377,30 @@ fn scope_run_override(store: &mut SqliteStore, digest: Option<&[u8]>) -> Result<
         .validate(&StageCatalog::line())
         .map_err(|error| unknown(format!("stored model override at {address} keys no dispatched seat: {error:?}")))?;
     Ok(model_override)
+}
+
+/// The digest and seat the commission's latest scoping run dispatched under
+/// (issue 6018) — what the show route renders so the console names the model
+/// that filled the workpiece.
+///
+/// Reads the `enqueued` rows' `model_override` digests back: a run that named
+/// no digest dispatched the compiled calibration, and a digest the store can
+/// no longer resolve degrades to its bytes with no seat rather than failing
+/// the show — the same way an unreadable revision tip stays a commission.
+fn latest_scope_seat(store: &mut SqliteStore, rows: &[ScopeRunRow]) -> (Option<Vec<u8>>, Option<AgentProfile>) {
+    let Some(enqueued) = rows.iter().filter(|row| row.kind == "enqueued").max_by_key(|row| row.ordinal) else {
+        return (None, None);
+    };
+    let Some(bytes) = enqueued.model_override.clone() else {
+        return (None, Some(scope_seat(&ModelOverride::default())));
+    };
+    let seat = store
+        .lookup_config(&bytes)
+        .ok()
+        .flatten()
+        .and_then(|stored| decode_config::<ModelOverride>(&stored.0, &stored.1, stored.2.as_deref()).ok())
+        .map(|model_override| scope_seat(&model_override));
+    (Some(bytes), seat)
 }
 
 fn write_revision_error(error: CommissionError) -> WriteScopeRevisionResult {
@@ -5534,6 +5569,24 @@ mod tests {
                 Err(EnqueueScopeRunResult::UnknownModelOverride { .. })
             ),
             "an override keying a stage no dispatch resolves refuses"
+        );
+    }
+
+    #[test]
+    fn a_config_store_fault_is_a_500_not_an_unknown_override() {
+        // The plausible bug: every lookup failure reads as
+        // `UnknownModelOverride`, so a faulted configs table reports a store
+        // fault as the caller's mistake (HTTP 400) instead of the
+        // coordinator's failure (HTTP 500).
+        let mut store = SqliteStore::open(":memory:").expect("memory store");
+        let digest = Digest::from_bytes([0x77; 32]);
+        store.conn.execute_batch("DROP TABLE config;").expect("break the configs table");
+        assert!(
+            matches!(
+                scope_run_override(&mut store, Some(digest.as_bytes())),
+                Err(EnqueueScopeRunResult::Err { error }) if error.contains("model override lookup failed"),
+            ),
+            "a store fault answers Err, never UnknownModelOverride",
         );
     }
 

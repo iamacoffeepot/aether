@@ -14,7 +14,9 @@ mod crates;
 pub(crate) mod import;
 pub(crate) mod scope;
 
+use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::fmt::Write as _;
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -22,12 +24,14 @@ use std::path::{Path, PathBuf};
 use aether_bloomery::{
     CancelCommissionRequest, CommissionApprovalView, CommissionCancelledView, CommissionCreatedView,
     CommissionReopenedView, CommissionShowView, CommissionsView, CreateCommissionRequest, DEFAULT_HTTP_PORT, Digest,
-    KeyId, Observation, OperatorKey, Provenance, ReopenCommissionRequest, RevisionEvidence, ScopeRevision,
-    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SignatureEnvelope, Statement, ViewDocument,
-    WorkpieceId, WriteRevisionRequest, digest_of, signed_approval,
+    KeyId, ModelOverride, Observation, OperatorKey, Provenance, ReopenCommissionRequest, RevisionEvidence,
+    ScopeRevision, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SignatureEnvelope, Statement,
+    ViewDocument, WorkpieceId, WriteRevisionRequest, digest_of, signed_approval,
 };
+use aether_data::Kind;
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use serde::Deserialize;
 
 use client::ControlApi;
 use scope::load_revision;
@@ -70,6 +74,18 @@ enum Command {
     ScopeRun {
         /// Workpiece id whose commission is scoped.
         id: String,
+        /// Named bundle from the checked-in profiles file. Resolves to a
+        /// model-override digest through `POST /configs` — the same path
+        /// `xtask bloom scope-run --profile` resolves through — and the run
+        /// carries that digest as its seat. Takes exactly one of this and
+        /// `--model-override`.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Explicit model-override config digest (64 hex). Names the run's
+        /// seat directly instead of resolving `--profile`; takes exactly one
+        /// of the two.
+        #[arg(long = "model-override", value_parser = parse_model_override)]
+        model_override: Option<Digest>,
     },
     /// Parse a managed-heading scope file and write the canonical revision.
     Scope {
@@ -196,7 +212,7 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
     let api = ControlApi { port: cli.http_port, token: cli.token };
     match cli.command {
         Command::Create { id, intent_file } => create(&api, &id, &intent_file),
-        Command::ScopeRun { id } => open_scope_run(&api, &id),
+        Command::ScopeRun { id, profile, model_override } => open_scope_run(&api, &id, profile, model_override),
         Command::Scope { id, file, approval_policy } => write_scope(&api, &id, &file, &approval_policy),
         Command::Approve { id, scope, envelope, seed_file, signer } => {
             approve(&api, &id, &scope, envelope.as_deref(), seed_file.as_deref(), &signer)
@@ -219,14 +235,120 @@ fn dispatch(cli: CommissionCli) -> Result<String> {
     }
 }
 
-fn open_scope_run(api: &ControlApi, id: &str) -> Result<String> {
+fn open_scope_run(
+    api: &ControlApi,
+    id: &str,
+    profile: Option<String>,
+    model_override: Option<Digest>,
+) -> Result<String> {
+    // The seat composes before any read: a flag refusal must not spend the
+    // operator's attention on a view, and an unknown profile never reaches
+    // the coordinator to file a run on the compiled seat.
+    if profile.is_some() && model_override.is_some() {
+        bail!("scope-run takes --profile or --model-override, not both");
+    }
+    let (profile, model_override) = match (profile, model_override) {
+        (Some(name), None) => (Some(name.clone()), Some(resolve_profile(api, &name)?)),
+        (None, Some(digest)) => (None, Some(digest)),
+        (None, None) => (None, None),
+        (Some(_), Some(_)) => unreachable!("scope-run refuses --profile with --model-override above"),
+    };
     let view: ViewDocument = api.get_json("/view")?;
     let opened: ScopeRunOpenedView = api.send_json(
         "POST",
         &format!("/commissions/{id}/scope-runs"),
-        &ScopeRunRequest { base: view.mainline, profile: None, model_override: None },
+        &scope_run_request(view.mainline, profile, model_override),
     )?;
-    Ok(format!("{} ordinal {} sequence {} subject {}\n", opened.id, opened.ordinal, opened.sequence, opened.subject))
+    Ok(render_opened(&opened))
+}
+
+/// The scope-run request body: the observed mainline plus the run's seat, so
+/// the flags the operator named are what the door resolves.
+fn scope_run_request(base: Digest, profile: Option<String>, model_override: Option<Digest>) -> ScopeRunRequest {
+    ScopeRunRequest { base, profile, model_override }
+}
+
+/// The opened run as the operator reads it: the run's address, then the seat
+/// it dispatched under, so a named seat is visible where it was filed.
+fn render_opened(opened: &ScopeRunOpenedView) -> String {
+    let mut line =
+        format!("{} ordinal {} sequence {} subject {}", opened.id, opened.ordinal, opened.sequence, opened.subject);
+    if let Some(seat) = &opened.seat {
+        write!(line, " seat {} {}", seat.harness.as_str(), seat.model).expect("writing to a String is infallible");
+    }
+    line.push('\n');
+    line
+}
+
+/// Parse a `--model-override` digest: 64 hex characters naming a stored
+/// `ModelOverride` config.
+fn parse_model_override(raw: &str) -> Result<Digest, String> {
+    Digest::from_hex(raw).ok_or_else(|| "model override must be 64 hex characters".to_owned())
+}
+
+/// Resolve a `--profile` name to its model-override digest through the
+/// shipped profiles file and `POST /configs` — the same path `xtask bloom
+/// scope-run --profile` resolves through, so both CLIs file the run on the
+/// same seat for the same name.
+fn resolve_profile(api: &ControlApi, name: &str) -> Result<Digest> {
+    author_model_override(api, &expand_profile(name)?)
+}
+
+/// Expand a profile name to its model-override value from the shipped
+/// profiles file, embedded so this CLI names a seat without a checkout
+/// beside it.
+fn expand_profile(name: &str) -> Result<serde_json::Value> {
+    let file: ProfilesFile = toml::from_str(SHIPPED_PROFILES).context("parse the shipped profiles file")?;
+    let Some(spec) = file.profiles.get(name) else {
+        let mut known: Vec<&str> = file.profiles.keys().map(String::as_str).collect();
+        known.sort_unstable();
+        bail!("unknown profile `{name}`: known profiles: {}", known.join(", "));
+    };
+    let Some(bundle) = spec.model_override.as_deref() else {
+        bail!("profile `{name}` names no model override");
+    };
+    let Some(override_) = file.model_overrides.get(bundle) else {
+        bail!("profile `{name}` references unknown model override `{bundle}`");
+    };
+    serde_json::to_value(override_).context("encode the profile's model override")
+}
+
+/// Author one model-override value through `POST /configs` and return the
+/// address the run carries as its seat.
+fn author_model_override(api: &ControlApi, value: &serde_json::Value) -> Result<Digest> {
+    let authored: AuthoredConfig =
+        api.send_json("POST", "/configs", &serde_json::json!({ "kind": ModelOverride::NAME, "value": value }))?;
+    Ok(authored.digest)
+}
+
+/// The profiles file both CLIs resolve `--profile` through, embedded so the
+/// commission CLI names a seat without a checkout beside it.
+const SHIPPED_PROFILES: &str = include_str!("../../../../xtask/src/bloom/profiles.toml");
+
+/// The shipped profiles file's shape, reduced to what a scope-run seat
+/// needs: the profile names and their model-override bundles.
+#[derive(Deserialize)]
+struct ProfilesFile {
+    /// Named model-override bundles keyed by the profile specs below.
+    #[serde(default)]
+    model_overrides: BTreeMap<String, ModelOverride>,
+    /// Named seat profiles.
+    #[serde(default)]
+    profiles: BTreeMap<String, ProfileSpec>,
+}
+
+/// One seat profile: the model-override bundle it resolves to.
+#[derive(Deserialize)]
+struct ProfileSpec {
+    /// The bundle name, or `None` when the profile carries no seat.
+    model_override: Option<String>,
+}
+
+/// A `POST /configs` reply: the address to carry as the run's seat.
+#[derive(Deserialize)]
+struct AuthoredConfig {
+    /// The content address the run carries as its seat.
+    digest: Digest,
 }
 
 fn create(api: &ControlApi, id: &str, intent_file: &Path) -> Result<String> {
@@ -514,9 +636,98 @@ mod tests {
         let cli = CommissionCli::try_parse_from(["bloomery-commission", "scope-run", "issue-1"])
             .unwrap_or_else(|error| panic!("scope-run must parse: {error}"));
         match cli.command {
-            Command::ScopeRun { id } => assert_eq!(id, "issue-1"),
+            Command::ScopeRun { id, profile, model_override } => {
+                assert_eq!(id, "issue-1");
+                assert_eq!(profile, None, "no seat without a flag");
+                assert_eq!(model_override, None, "no digest without a flag");
+            }
             other => panic!("expected scope-run, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn scope_run_takes_a_profile_or_an_explicit_override() {
+        // The same seat spellings `xtask bloom scope-run` takes: a profile
+        // name to resolve, or a digest that already is the seat.
+        let cli =
+            CommissionCli::try_parse_from(["bloomery-commission", "scope-run", "issue-1", "--profile", "opus-high"])
+                .unwrap_or_else(|error| panic!("scope-run --profile must parse: {error}"));
+        match cli.command {
+            Command::ScopeRun { profile, model_override, .. } => {
+                assert_eq!(profile.as_deref(), Some("opus-high"));
+                assert_eq!(model_override, None);
+            }
+            other => panic!("expected scope-run, got {other:?}"),
+        }
+
+        let digest = "aa".repeat(32);
+        let cli =
+            CommissionCli::try_parse_from(["bloomery-commission", "scope-run", "issue-1", "--model-override", &digest])
+                .unwrap_or_else(|error| panic!("scope-run --model-override must parse: {error}"));
+        match cli.command {
+            Command::ScopeRun { profile, model_override, .. } => {
+                assert_eq!(profile, None);
+                assert_eq!(model_override, Some(Digest::from_hex(&digest).expect("the flag parsed hex")));
+            }
+            other => panic!("expected scope-run, got {other:?}"),
+        }
+
+        assert!(
+            CommissionCli::try_parse_from(["bloomery-commission", "scope-run", "issue-1", "--model-override", "nope"])
+                .is_err(),
+            "a non-hex digest is a parse failure, not a seat",
+        );
+    }
+
+    #[test]
+    fn scope_run_with_both_seats_is_refused_before_any_http() {
+        // The profile name would misdescribe an explicitly named digest, so
+        // the pair is refused locally before any coordinator read — the same
+        // one-of-two `xtask bloom scope-run` enforces.
+        match super::run([
+            "bloomery-commission",
+            "scope-run",
+            "issue-1",
+            "--profile",
+            "opus-high",
+            "--model-override",
+            &"aa".repeat(32),
+        ]) {
+            Ok(output) => panic!("both seat spellings must be refused, got {output}"),
+            Err(error) => {
+                assert!(error.to_string().contains("not both"), "the refusal names the conflict: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn scope_run_profile_expands_through_the_shipped_file() {
+        // The seat resolves through the same file `xtask bloom scope-run
+        // --profile` reads: the checked-in bundle, not a name the
+        // coordinator would have to guess at.
+        let value = super::expand_profile("opus-high").expect("a shipped profile expands");
+        assert_eq!(value["agent"]["model"], "claude-opus-5", "the bundle is the filed seat: {value}");
+        match super::expand_profile("no-such-profile") {
+            Ok(_) => panic!("an unknown profile must not expand"),
+            Err(error) => {
+                let message = error.to_string();
+                assert!(
+                    message.contains("known profiles") && message.contains("opus-high"),
+                    "the refusal lists what would have worked: {message}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn scope_run_request_carries_the_seat_flags_to_the_door() {
+        // The flags the operator named are what the door resolves: a request
+        // that dropped either would file the run on a seat nobody chose.
+        let digest = Digest::from_bytes([0xdd; 32]);
+        let body = super::scope_run_request(digest, Some("opus-high".to_owned()), Some(digest));
+        assert_eq!(body.base, digest);
+        assert_eq!(body.profile.as_deref(), Some("opus-high"));
+        assert_eq!(body.model_override, Some(digest));
     }
 
     #[test]

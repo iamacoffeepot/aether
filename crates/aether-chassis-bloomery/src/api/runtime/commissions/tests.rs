@@ -1,15 +1,16 @@
 //! Auth, refusal mapping, and response-status tests for commission routes.
 
 use aether_bloomery::{
-    ApprovalPolicy, ApprovalRule, Digest, KeyId, SCOPE_REVISION_SCHEMA, ScopeRevision, ScopeRouting, Tier, WorkpieceId,
-    digest_of, signed_cancel,
+    AgentProfile, ApprovalPolicy, ApprovalRule, Digest, Harness, KeyId, ReasoningEffort, SCOPE_REVISION_SCHEMA,
+    ScopeRevision, ScopeRouting, Tier, ToolPolicy, WorkpieceId, digest_of, signed_cancel,
 };
 use aether_data::wire::from_bytes;
 use aether_http::{HttpHeader, HttpServerRequest, HttpServerResponse};
 
 use super::{
     approval_response, authorize, auto_approval_write, cancel_request, cancel_response, create_response, list_response,
-    query_status, reopen_request, reopen_response, revision_response, scope_run_response, show_response,
+    query_status, reopen_request, reopen_response, revision_response, scope_run_opened_line, scope_run_response,
+    show_response,
 };
 use crate::api::dto::{CancelCommissionRequest, ReopenCommissionRequest};
 use crate::store::{
@@ -113,6 +114,8 @@ fn every_route_result_has_a_success_status() {
             ordinal: 1,
             sequence: 1,
             subject: digest.clone(),
+            model_override: Box::new(None),
+            seat: Box::new(None),
         })
         .status,
         201
@@ -128,6 +131,8 @@ fn every_route_result_has_a_success_status() {
             approvals: Vec::new(),
             scope_verify: None,
             current_unreadable: None,
+            scope_model_override: Box::new(None),
+            scope_seat: Box::new(None),
         })
         .status,
         200
@@ -142,6 +147,75 @@ fn every_route_result_has_a_success_status() {
         400
     );
     assert_eq!(show_response(LoadCommissionResult::Missing { id: "wp-1".to_owned() }).status, 404);
+}
+
+fn grok_seat() -> AgentProfile {
+    AgentProfile {
+        harness: Harness::Grok,
+        model: "grok-4.6".to_owned(),
+        effort: ReasoningEffort::High,
+        tools: ToolPolicy::Full,
+    }
+}
+
+#[test]
+fn a_seated_scope_run_echoes_its_digest_and_seat_on_the_opened_view() {
+    // The plausible bug: the door returns the run's address but drops the
+    // seat that resolved it, so nothing outside tests reads the override
+    // back and the journal names the line's calibration instead of the
+    // model that actually filled the workpiece.
+    let digest = Digest::from_bytes([0xc1; 32]);
+    let response = scope_run_response(EnqueueScopeRunResult::Ok {
+        id: "wp-1".to_owned(),
+        ordinal: 1,
+        sequence: 7,
+        subject: vec![9; 32],
+        model_override: Box::new(Some(digest.as_bytes().to_vec())),
+        seat: Box::new(Some(grok_seat())),
+    });
+    assert_eq!(response.status, 201);
+    let body: serde_json::Value = serde_json::from_slice(&response.body).expect("the opened view is JSON");
+    assert_eq!(body["id"], "wp-1", "the run is still addressed: {body}");
+    assert_eq!(body["model_override"], format!("{digest}"), "the digest rides for the record: {body}");
+    assert_eq!(body["seat"]["harness"], "Grok", "the resolved harness rides: {body}");
+    assert_eq!(body["seat"]["model"], "grok-4.6", "the resolved model rides: {body}");
+
+    let line = scope_run_opened_line(1, &grok_seat(), Some(digest));
+    assert!(
+        line.contains("grok") && line.contains("grok-4.6") && line.contains(&format!("{digest}")),
+        "the journal line names the seat and the digest: {line}",
+    );
+    let plain = scope_run_opened_line(2, &grok_seat(), None);
+    assert!(
+        plain.contains("grok-4.6") && !plain.contains("override"),
+        "a seatless run names its seat and no digest: {plain}",
+    );
+}
+
+#[test]
+fn a_showed_commission_names_its_latest_scope_seat() {
+    // The console's commission screen renders this: a show that dropped the
+    // seat would leave the operator reading the revision while the model
+    // that wrote it stays invisible.
+    let digest = Digest::from_bytes([0xc1; 32]);
+    let response = show_response(LoadCommissionResult::Ok {
+        id: "wp-1".to_owned(),
+        intent: vec![7; 32],
+        current_revision: None,
+        current_ordinal: None,
+        status: "open".to_owned(),
+        current: None,
+        approvals: Vec::new(),
+        scope_verify: None,
+        current_unreadable: None,
+        scope_model_override: Box::new(Some(digest.as_bytes().to_vec())),
+        scope_seat: Box::new(Some(grok_seat())),
+    });
+    assert_eq!(response.status, 200);
+    let body: serde_json::Value = serde_json::from_slice(&response.body).expect("the show view is JSON");
+    assert_eq!(body["scope_model_override"], format!("{digest}"), "the digest rides: {body}");
+    assert_eq!(body["scope_seat"]["harness"], "Grok", "the seat rides: {body}");
+    assert_eq!(body["scope_seat"]["model"], "grok-4.6", "the model rides: {body}");
 }
 
 #[test]
@@ -160,6 +234,8 @@ fn an_unreadable_current_revision_is_shown_not_a_500() {
         approvals: Vec::new(),
         scope_verify: None,
         current_unreadable: Some("canonical commission bytes are malformed".to_owned()),
+        scope_model_override: Box::new(None),
+        scope_seat: Box::new(None),
     });
     let from_bytes = show_response(LoadCommissionResult::Ok {
         id: "wp-1".to_owned(),
@@ -171,6 +247,8 @@ fn an_unreadable_current_revision_is_shown_not_a_500() {
         approvals: Vec::new(),
         scope_verify: None,
         current_unreadable: None,
+        scope_model_override: Box::new(None),
+        scope_seat: Box::new(None),
     });
     assert_eq!(marked.status, 200, "a store-marked unreadable tip is still a commission: {}", error_text(&marked));
     assert_eq!(
@@ -313,6 +391,8 @@ fn loaded_open(id: &str, revision: &ScopeRevision) -> LoadCommissionResult {
         approvals: Vec::new(),
         scope_verify: None,
         current_unreadable: None,
+        scope_model_override: Box::new(None),
+        scope_seat: Box::new(None),
     }
 }
 
@@ -405,6 +485,8 @@ fn a_commission_with_nothing_to_approve_is_refused() {
         approvals: Vec::new(),
         scope_verify: None,
         current_unreadable: None,
+        scope_model_override: Box::new(None),
+        scope_seat: Box::new(None),
     };
     let unscoped = LoadCommissionResult::Ok {
         id: "wp-1".to_owned(),
@@ -416,6 +498,8 @@ fn a_commission_with_nothing_to_approve_is_refused() {
         approvals: Vec::new(),
         scope_verify: None,
         current_unreadable: None,
+        scope_model_override: Box::new(None),
+        scope_seat: Box::new(None),
     };
 
     assert_eq!(refused_auto(auto_approval_write(Some(&ladder()), &id, landed)).status, 422, "a closed commission");

@@ -182,6 +182,20 @@ pub enum LoadCommissionResult {
         /// tip is absent or readable. Trailing so an already-journaled `Ok`
         /// keeps its meaning: the head is still the commission.
         current_unreadable: Option<String>,
+        /// The `ModelOverride` config digest the latest scoping run resolved
+        /// its seat from (issue 6018). `None` when no run has opened yet, or
+        /// when the latest run dispatched the compiled calibration. Trailing
+        /// so an already-journaled `Ok` keeps its meaning. Boxed so the seat
+        /// echo does not inflate the reply past the large-variant ceiling.
+        #[serde(default)]
+        scope_model_override: Box<Option<Vec<u8>>>,
+        /// The seat the latest scoping run dispatched under (issue 6018).
+        /// `None` when no run has opened yet, or when the override digest on
+        /// the run names nothing the show path can still resolve. Trailing
+        /// alongside [`Self::Ok::scope_model_override`], boxed for the same
+        /// reason.
+        #[serde(default)]
+        scope_seat: Box<Option<aether_bloomery::AgentProfile>>,
     },
     /// No commission exists under this workpiece id.
     Missing {
@@ -391,6 +405,18 @@ pub enum EnqueueScopeRunResult {
         /// The run's content-addressed subject.
         #[serde(with = "aether_data::bytes")]
         subject: Vec<u8>,
+        /// The `ModelOverride` config digest the run resolved its seat from
+        /// (issue 6018). Trailing append: `None` is a run that dispatched the
+        /// compiled calibration without naming one. Boxed so the seat echo
+        /// does not inflate every reply past the large-variant ceiling.
+        #[serde(default)]
+        model_override: Box<Option<Vec<u8>>>,
+        /// The seat the run dispatches under (issue 6018): its override
+        /// resolved over the compiled line's Scope calibration. Trailing
+        /// append alongside [`Self::Ok::model_override`], boxed for the
+        /// same reason.
+        #[serde(default)]
+        seat: Box<Option<aether_bloomery::AgentProfile>>,
     },
     /// No commission exists under this workpiece id.
     Missing {
