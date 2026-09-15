@@ -74,8 +74,8 @@ pub enum StageVerdict {
     /// naming a subject nothing judged — and it is the **fact** intake builds
     /// that carries the distinction (`Fact::MemberDeadlineExpired`). Giving the
     /// evidence kind its own variant would move the schema of every projected
-    /// view row that embeds an [`Evidence`](crate::Evidence), which the frozen
-    /// prior-shape view decoders cannot read.
+    /// view row that embeds an [`Evidence`], which the frozen prior-shape view
+    /// decoders cannot read.
     ///
     /// Appended past [`Self::SurfaceRequested`] so the prior verdicts'
     /// discriminants are unchanged.

@@ -230,9 +230,10 @@ pub(super) fn reduce_admin_exit(snapshot: &Snapshot, bloom: &BloomId, note: &Adm
 /// to arrive because a person stood in for it.
 ///
 /// The [`AdminActKind::LandedOnWaiver`] row is the land record ADR-0219 asks
-/// for. It rides the admin log rather than the [`LandingReceipt`] itself, which
-/// sits inside `Decision::EmitReceipt` in the frozen decision mirrors and so
-/// cannot gain a field without freezing a full copy of every one of them.
+/// for. It rides the admin log rather than the
+/// [`LandingReceipt`](crate::LandingReceipt) itself, which sits inside
+/// `Decision::EmitReceipt` in the frozen decision mirrors and so cannot gain a
+/// field without freezing a full copy of every one of them.
 fn owed_landing(record: &BloomRecord, bloom: BloomId, note: &AdminNote, effects: &mut Vec<Decision>) -> bool {
     if record.status != BloomStatus::Sealed {
         return false;

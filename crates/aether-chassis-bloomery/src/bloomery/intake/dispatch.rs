@@ -92,7 +92,7 @@ impl DispatchRecord {
     /// The whole fan-out, always: a record is a *stage*, and every stage a
     /// record dispatches answers a complete gate obligation. Only an ADR-0218
     /// attribution probe narrows, and it does so at the submit that knows it is
-    /// one — see [`dispatch_shared_and_record`].
+    /// one — see `dispatch_shared_and_record`.
     #[must_use]
     pub fn to_order(&self) -> WorkOrder {
         WorkOrder {

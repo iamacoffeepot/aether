@@ -75,7 +75,7 @@ pub struct BatchProbeRequest {
     /// to survive is caught upstream by the gate's own same-input replay
     /// (`replayed_flakes`, #5999) and a second whole `verify.check` costs four
     /// to six minutes to re-derive an answer already held. The field stays,
-    /// and [`validate_inputs`] still admits a one, so a journal carrying
+    /// and `validate_inputs` still admits a one, so a journal carrying
     /// repetition-1 receipts from before the amendment still replays.
     pub repetition: u8,
 }

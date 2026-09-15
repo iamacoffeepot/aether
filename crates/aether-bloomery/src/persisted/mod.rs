@@ -833,7 +833,7 @@ fn reshape_instructions_pre_reader(bytes: &[u8]) -> Result<Vec<u8>, WireError> {
 ///
 /// The array is positional against [`PersistedKind::upcasts`], so the repeated
 /// entry is deliberate: the first eight registered shapes — every one before
-/// `Fact::VerifyFailed::findings` — share [`upcast_event_pre_findings`], and the
+/// `Fact::VerifyFailed::findings` — share `upcast_event_pre_findings`, and the
 /// two after it read their own way.
 ///
 /// # Errors
