@@ -26,6 +26,8 @@ use std::time::Duration;
 use aether_bloomery::{BackendObjectId, Correspondence, CorrespondenceError, Digest};
 use rusqlite::Connection;
 
+use super::write_txn;
+
 /// The correspondence table, applied idempotently on open. Coexists with the
 /// [`StoreCapability`](super::StoreCapability) tables in the same file.
 const MIGRATIONS: &str = "\
@@ -75,7 +77,7 @@ impl SqliteCorrespondence {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         conn.busy_timeout(busy_timeout)?;
-        let transaction = conn.transaction()?;
+        let transaction = write_txn::begin(&mut conn)?;
         transaction.execute_batch(MIGRATIONS)?;
         let legacy_exists = transaction.query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'git_correspondence')",

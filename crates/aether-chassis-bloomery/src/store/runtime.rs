@@ -54,6 +54,8 @@ use rusqlite::OptionalExtension;
 use rusqlite::TransactionBehavior;
 use rusqlite::ffi::{Error as SqliteFfiError, SQLITE_ERROR};
 
+use super::write_txn;
+
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -1307,6 +1309,36 @@ impl SqliteStore {
     pub fn open_with_busy_timeout(path: &str, busy_timeout: Duration) -> rusqlite::Result<Self> {
         let mut conn = connect_with_busy_timeout(path, busy_timeout)?;
         migrate(&mut conn)?;
+        Ok(Self { conn, holds_journal: false })
+    }
+
+    /// [`open_with_busy_timeout`](Self::open_with_busy_timeout) against a
+    /// journal a live holder already migrated, so the open runs no migration.
+    ///
+    /// [`migrate`] is unconditional by design and opens `BEGIN IMMEDIATE` to
+    /// re-issue its idempotent DDL, which takes the journal's single write
+    /// lock. That is the right cost once per process and the wrong cost for an
+    /// observer that reopens the journal on every poll: a scenario harness
+    /// re-reads outstanding orders and the commission store tens of times a
+    /// second, and each of those opens then queues for the write lock — behind
+    /// the coordinator's writes, and ahead of its next ones. Under host
+    /// contention that is enough to stall the world the observer is waiting
+    /// on, which is how a scenario that settles in a second blows a thirty
+    /// second budget on a loaded box (iamacoffeepot/aether#6078). A holder
+    /// opened this journal at boot from this same build, so an observer beside
+    /// it has nothing to bring forward.
+    ///
+    /// Not for an operator tool that may be the first to touch a journal —
+    /// that is what the migrating open is for.
+    ///
+    /// # Errors
+    /// The connection could not be opened or its pragmas could not be set.
+    pub fn open_observer(path: &str, busy_timeout: Duration) -> rusqlite::Result<Self> {
+        let conn = connect_with_busy_timeout(path, busy_timeout)?;
+        // `migrate` ends by turning this on; it is per-connection, and the
+        // commission tables' REFERENCES are enforced for this handle's writes
+        // too (ADR-0199).
+        conn.pragma_update(None, "foreign_keys", "ON")?;
         Ok(Self { conn, holds_journal: false })
     }
 
@@ -3027,7 +3059,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn mark_queued_member_verifications_scheduled(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize> {
-        let transaction = self.conn.transaction()?;
+        let transaction = write_txn::begin(&mut self.conn)?;
         let mut removed = 0;
         for request in requests {
             removed += transaction.execute(
@@ -3040,7 +3072,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn record_member_verification_proposal(&mut self, requests: &[Vec<u8>], proposal: &[u8]) -> rusqlite::Result<()> {
-        let transaction = self.conn.transaction()?;
+        let transaction = write_txn::begin(&mut self.conn)?;
         for request in requests {
             let existing: Option<Vec<u8>> = transaction.query_row(
                 "SELECT proposal FROM shared_member_verification_queue WHERE request = ?1",
@@ -3061,7 +3093,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn clear_member_verification_proposal(&mut self, requests: &[Vec<u8>]) -> rusqlite::Result<usize> {
-        let transaction = self.conn.transaction()?;
+        let transaction = write_txn::begin(&mut self.conn)?;
         let mut cleared = 0;
         for request in requests {
             cleared += transaction.execute(
@@ -3340,7 +3372,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn record_shared_run_proof_reuse(&mut self, run: &[u8], reuse: &[u8]) -> rusqlite::Result<bool> {
-        let transaction = self.conn.transaction()?;
+        let transaction = write_txn::begin(&mut self.conn)?;
         let changed = transaction.execute(
             "INSERT OR IGNORE INTO shared_run_proof_reuse (run, reuse) VALUES (?1, ?2)",
             rusqlite::params![run, reuse],
@@ -3481,7 +3513,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn set_authorized_instructions(&mut self, digests: &[Vec<u8>]) -> rusqlite::Result<()> {
-        let transaction = self.conn.transaction()?;
+        let transaction = write_txn::begin(&mut self.conn)?;
         transaction.execute("DELETE FROM authorized_instructions", [])?;
         for digest in digests {
             transaction.execute(
@@ -3578,7 +3610,7 @@ impl StoreBackend for SqliteStore {
         // member's current ask, and a partial replacement would leave a
         // reviewer looking at a request the candidate no longer carries beside
         // one it does.
-        let write = self.conn.transaction()?;
+        let write = write_txn::begin(&mut self.conn)?;
         write.execute(
             "DELETE FROM suppression_request WHERE bloom = ?1 AND workpiece = ?2",
             rusqlite::params![bloom, workpiece],
@@ -3815,7 +3847,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn record_member_dependencies(&mut self, bloom: &[u8], edges: &[(String, String)]) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         tx.execute("DELETE FROM member_dependency WHERE bloom = ?1", rusqlite::params![bloom])?;
         for (member, depends_on) in edges {
             tx.execute(
@@ -3891,7 +3923,7 @@ impl StoreBackend for SqliteStore {
         claims: &[MembershipMutation],
         outbox: &[OutboxPayload],
     ) -> rusqlite::Result<CommitOutcome> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         let recorded = recorded_column(now_unix_millis());
         let event_digest = EVENT.current_digest();
         let decisions_digest = DECISIONS.current_digest();
@@ -3988,7 +4020,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn claim_seal(&mut self, bloom: &[u8], members: &[String]) -> rusqlite::Result<SealOutcome> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         for workpiece in members {
             let insert = tx.execute(
                 "INSERT INTO active_membership (workpiece, bloom) VALUES (?1, ?2)",
@@ -4009,7 +4041,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn supersede(&mut self, predecessor: &[u8], successor: &[u8], members: &[String]) -> rusqlite::Result<SealOutcome> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         tx.execute("DELETE FROM active_membership WHERE bloom = ?1", rusqlite::params![predecessor])?;
         for workpiece in members {
             let insert = tx.execute(
@@ -4134,7 +4166,7 @@ impl StoreBackend for SqliteStore {
         let encoded = events.iter().map(encode_outbox_result).collect::<rusqlite::Result<Vec<_>>>()?;
         let sequence_column = outbox_sequence_column(sequence)?;
 
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         let (found_topic, delivered) = load_outbox_row(&tx, sequence_column)?
             .ok_or_else(|| sqlite_fail(format!("outbox sequence {sequence} does not exist")))?;
         if found_topic != topic {
@@ -4258,7 +4290,7 @@ impl StoreBackend for SqliteStore {
         if facts.is_empty() {
             return Ok(0);
         }
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         let mut appended = 0;
         {
             let mut stmt = tx.prepare(
@@ -4339,7 +4371,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn persist_metrics(&mut self, ledger: &MetricsLedger) -> rusqlite::Result<()> {
-        let tx = self.conn.transaction()?;
+        let tx = write_txn::begin(&mut self.conn)?;
         for row in ledger.dispatch_rows() {
             let payload = encode_metric(&row)?;
             // Preserve a host nonce the evidence join already wrote. A rebuild
@@ -4629,7 +4661,7 @@ impl StoreBackend for SqliteStore {
     }
 
     fn enqueue_scope_run(&mut self, run: &ScopeRunOpen<'_>) -> rusqlite::Result<u64> {
-        let write = self.conn.transaction()?;
+        let write = write_txn::begin(&mut self.conn)?;
         write.execute(
             "INSERT INTO scope_runs (commission, ordinal, kind, intent, base, subject, instructions, model_override) \
              VALUES (?1, ?2, 'enqueued', ?3, ?4, ?5, ?6, ?7)",

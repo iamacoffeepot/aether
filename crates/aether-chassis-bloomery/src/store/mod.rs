@@ -90,6 +90,11 @@ use aether_actor::actor;
 #[actor(singleton, root)]
 pub struct StoreCapability;
 
+// How a transaction that is going to write begins: `IMMEDIATE`, so the busy
+// handler a connection was given is actually reachable.
+#[cfg(any(feature = "runtime", feature = "correspondence"))]
+pub(crate) mod write_txn;
+
 #[cfg(feature = "correspondence")]
 mod correspondence;
 #[cfg(feature = "correspondence")]

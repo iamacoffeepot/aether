@@ -15,6 +15,7 @@ use aether_data::wire::to_vec;
 use rusqlite::{Connection, OptionalExtension, Transaction};
 
 use super::SqliteStore;
+use super::write_txn;
 
 #[cfg(test)]
 mod tests;
@@ -250,7 +251,7 @@ fn propose(conn: &mut Connection, adr: &Adr) -> Result<Digest, AdrError> {
         return Err(AdrError::MalformedCanonical);
     }
     let digest = digest_of(&decoded);
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     if let Some(existing) = load_digest_for_number(&txn, decoded.number)? {
         if existing == digest {
             txn.commit()?;
@@ -284,7 +285,7 @@ fn propose(conn: &mut Connection, adr: &Adr) -> Result<Digest, AdrError> {
 }
 
 fn mark_provisional(conn: &mut Connection, adr: Digest) -> Result<Digest, AdrError> {
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let current = current_status(&txn, adr)?.ok_or(AdrError::Missing)?;
     if current != AdrStatus::Proposed {
         return Err(AdrError::WrongStatus { current });
@@ -332,7 +333,7 @@ fn accept(
         return Err(AdrError::Unverified);
     }
 
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let current = current_status(&txn, adr)?.ok_or(AdrError::Missing)?;
     if current != AdrStatus::Provisional {
         return Err(AdrError::WrongStatus { current });
@@ -357,7 +358,7 @@ fn supersede(conn: &mut Connection, adr: Digest, successor: Digest) -> Result<Di
     if successor == adr {
         return Err(AdrError::BadSuccessor);
     }
-    let txn = conn.transaction()?;
+    let txn = write_txn::begin(conn)?;
     let current = current_status(&txn, adr)?.ok_or(AdrError::Missing)?;
     if current != AdrStatus::Provisional {
         return Err(AdrError::WrongStatus { current });

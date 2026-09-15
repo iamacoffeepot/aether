@@ -159,18 +159,19 @@ fn completed_plans(harness: &ScenarioHarness) -> Vec<Digest> {
     })
 }
 
-fn first_completed_run(harness: &ScenarioHarness) -> SharedRunRow {
+/// The completed run this scenario is about: the *contextual* one, whose plan
+/// carries the composition whose contract names the gates.
+///
+/// Named rather than taken as "the first completed run": a standalone run can
+/// settle first, and a scenario that read it would fail on the missing
+/// composition instead of waiting for the run it came for
+/// (iamacoffeepot/aether#6078).
+fn completed_contextual_run(harness: &ScenarioHarness) -> Option<SharedRunRow> {
     let completed = completed_plans(harness);
-    harness
-        .commission_store()
-        .list_shared_runs()
-        .expect("shared runs read")
-        .into_iter()
-        .find(|row| {
-            from_bytes::<SharedRunDispatch>(&row.dispatch)
-                .is_ok_and(|dispatch| completed.contains(&dispatch.plan.digest()))
-        })
-        .expect("the completed shared run is retained")
+    harness.commission_store().list_shared_runs().expect("shared runs read").into_iter().find(|row| {
+        from_bytes::<SharedRunDispatch>(&row.dispatch)
+            .is_ok_and(|dispatch| completed.contains(&dispatch.plan.digest()) && dispatch.plan.composition.is_some())
+    })
 }
 
 #[test]
@@ -193,9 +194,10 @@ fn a_green_shared_run_records_proof_facts_so_a_matching_run_can_reuse_them() {
 
     harness
         .pump_until("both members are proposed before either prepares", |harness| proposed_plans(harness).len() == 2);
-    harness.pump_until("a shared run completes green", |harness| !completed_plans(harness).is_empty());
+    harness
+        .pump_until("a contextual shared run completes green", |harness| completed_contextual_run(harness).is_some());
 
-    let first_run = first_completed_run(&harness);
+    let first_run = completed_contextual_run(&harness).expect("the contextual run completed");
     let first_dispatch = from_bytes::<SharedRunDispatch>(&first_run.dispatch).expect("completed dispatch decodes");
     let declared = first_dispatch
         .plan

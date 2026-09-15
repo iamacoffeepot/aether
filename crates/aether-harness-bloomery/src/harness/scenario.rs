@@ -285,11 +285,18 @@ impl ScenarioHarness {
     /// that never completes still fails on its own budget, naming what it was
     /// waiting for.
     ///
+    /// Observer-side, so the open runs no migration: the coordinator this
+    /// harness booted holds the journal and migrated it at boot. A migrating
+    /// open takes the single write lock, and a scenario reopens the store on
+    /// every poll of every `pump_until` — at that rate a migrating open spends
+    /// the budget queuing for the lock rather than watching the world move
+    /// through it (iamacoffeepot/aether#6078).
+    ///
     /// # Panics
     /// The store could not be opened inside the step budget.
     #[track_caller]
     fn open_store(&self) -> SqliteStore {
-        SqliteStore::open_with_busy_timeout(&self.store_path, self.step_budget).expect("the coordinator's store opens")
+        SqliteStore::open_observer(&self.store_path, self.step_budget).expect("the coordinator's store opens")
     }
 
     /// [`open_store`](Self::open_store) for the correspondence over the same

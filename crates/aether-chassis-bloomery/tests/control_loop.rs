@@ -780,14 +780,22 @@ fn calibration_until_measured(stream: &mut TcpStream, cid_base: u64, control: Ma
     let mut cid = cid_base;
     loop {
         let read = Query { selector: QuerySelector::Calibration };
-        let document = match call::<_, QueryResult>(stream, cid, control, &read) {
+        match call::<_, QueryResult>(stream, cid, control, &read) {
             QueryResult::Calibration { document } => {
-                from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes")
+                let document = from_bytes::<CalibrationDocument>(&document).expect("calibration document decodes");
+                if !document.ledger.cells.is_empty() || Instant::now() >= deadline {
+                    return document;
+                }
+            }
+            // The read landed inside the boot window: the core refuses it rather
+            // than answering off the empty boot snapshot, so it is one more lap
+            // of the very wait this helper exists to run — the same arm
+            // `query_until_blooms` carries, and the one whose absence here made
+            // this scenario fail on a loaded host (iamacoffeepot/aether#6078).
+            QueryResult::Err { .. } => {
+                assert!(Instant::now() < deadline, "the calibration read stayed refused for the whole budget");
             }
             other => panic!("expected a calibration reply, got {other:?}"),
-        };
-        if !document.ledger.cells.is_empty() || Instant::now() >= deadline {
-            return document;
         }
         cid += 1;
         thread::sleep(Duration::from_millis(100));
