@@ -2527,8 +2527,7 @@ fn a_red_verify_ejects_the_member_and_dispatches_no_repair() {
 // that has already had its whole allowance.
 #[test]
 fn a_verify_the_host_killed_at_the_wall_clock_ejects_while_a_host_fault_retries() {
-    let (snapshot, bloom) = at_verify("wp");
-    let mut ejecting = snapshot.clone();
+    let (mut ejecting, bloom) = at_verify("wp");
     ejecting.blooms.get_mut(&bloom).expect("sealed").red_verify = RedVerify::Eject;
 
     let evidence = Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(72) };
