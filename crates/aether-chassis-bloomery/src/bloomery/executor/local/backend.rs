@@ -689,6 +689,36 @@ impl Registry {
         self.leases.remove(&physical_run?)
     }
 
+    // Retain `physical_run`'s slot as a lease, freeing whatever slot the key
+    // already held. A `HashMap::insert` alone drops the displaced index on the
+    // floor: it leaves `slots`, so nothing can ever hand it out again, and the
+    // pool shrinks by one for the life of the process.
+    fn park_lease(&mut self, physical_run: Digest, slot: usize) {
+        if let Some(displaced) = self.leases.insert(physical_run, slot)
+            && displaced != slot
+        {
+            self.slots.remove(&displaced);
+        }
+    }
+
+    // Drop every lease whose physical run is absent from `live`, handing each
+    // slot back. The durable store's open runs are the whole truth about which
+    // retentions are still owed, so anything else here is a retention nobody
+    // will ever come back for.
+    fn reconcile_leases(&mut self, live: &HashSet<Digest>) -> Vec<(Digest, usize)> {
+        let stale = self
+            .leases
+            .iter()
+            .filter(|(physical_run, _)| !live.contains(*physical_run))
+            .map(|(physical_run, slot)| (*physical_run, *slot))
+            .collect::<Vec<_>>();
+        for (physical_run, slot) in &stale {
+            self.leases.remove(physical_run);
+            self.slots.remove(slot);
+        }
+        stale
+    }
+
     fn tracks(&self, nonce: &str) -> bool {
         self.runs.contains_key(nonce)
             || self.cancelling.contains_key(nonce)
@@ -1201,7 +1231,7 @@ impl LocalExecutor {
             return;
         };
         if let (Some(physical_run), false, Some(slot)) = (run.lease, run.release_lease, run.slot) {
-            registry.leases.insert(physical_run, slot);
+            registry.park_lease(physical_run, slot);
         } else {
             registry.release_slot(run.slot);
         }
@@ -3308,6 +3338,26 @@ impl ExecutorBackend for LocalExecutor {
         Ok(())
     }
 
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        let live = live.iter().copied().collect::<HashSet<_>>();
+        let stale = {
+            let mut registry = self.lock();
+            registry.reconcile_leases(&live)
+        };
+        for (physical_run, slot) in &stale {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                run = %physical_run.to_hex(),
+                slot,
+                "retained lane belonged to no open shared run; its slot is back in the pool",
+            );
+        }
+        if !stale.is_empty() {
+            self.pump();
+        }
+        Ok(())
+    }
+
     fn retain_partial_head_repair(
         &self,
         plan: &Digest,
@@ -4419,7 +4469,50 @@ mod tests {
 
     use aether_bloomery::{RETROSPECT_READ_COMMAND, SCOPE_FILL_COMMAND};
 
-    use super::{LaneGates, contextual_observation_bundle, parse_notes, usable_target_base};
+    use std::collections::HashSet;
+
+    use aether_bloomery::Digest;
+
+    use super::{LaneGates, Registry, contextual_observation_bundle, parse_notes, usable_target_base};
+
+    // Tripwire: `occupied` counts leases against the prover ceiling, so a
+    // reconcile that frees a live run's retention would hand its slot to a
+    // second dispatch building in the same checkout, and one that keeps a dead
+    // run's retention shrinks the pool for the life of the process — the
+    // fifteen-minute stall of #6053. The set the reconcile is given is the
+    // store's open runs; everything else is the answer being decided here.
+    #[test]
+    fn reconciling_retentions_frees_only_the_runs_the_store_no_longer_holds() {
+        let live = Digest::of_wire_bytes(b"live");
+        let dead = Digest::of_wire_bytes(b"dead");
+        let mut registry = Registry::default();
+        registry.park_lease(live, 0);
+        registry.park_lease(dead, 1);
+        registry.slots.insert(0);
+        registry.slots.insert(1);
+
+        assert_eq!(registry.reconcile_leases(&HashSet::from([live])), vec![(dead, 1)]);
+        assert_eq!(registry.leases.len(), 1, "the open run keeps the lane it is between steps of");
+        assert_eq!(registry.slots, HashSet::from([0]), "and only the dead run's slot returns to the pool");
+
+        assert!(registry.reconcile_leases(&HashSet::from([live])).is_empty(), "a second pass frees nothing twice");
+    }
+
+    // Tripwire: a step retiring onto a key that already holds a different slot
+    // used to drop the displaced index — out of `leases` by the insert, never
+    // out of `slots` — so the pool silently lost a lane per collision.
+    #[test]
+    fn parking_a_retention_over_another_hands_the_displaced_slot_back() {
+        let run = Digest::of_wire_bytes(b"run");
+        let mut registry = Registry::default();
+        registry.slots.insert(0);
+        registry.slots.insert(1);
+        registry.park_lease(run, 0);
+        registry.park_lease(run, 1);
+
+        assert_eq!(registry.leases.get(&run), Some(&1));
+        assert_eq!(registry.slots, HashSet::from([1]), "the slot the second retention displaced is free again");
+    }
 
     // Tripwire: the review lane writes its operator notes under the evidence's
     // top-level `notes`, and intake reads that channel to tell a critic that

@@ -208,16 +208,23 @@ pub(super) fn drain_shared_dispatches(
             .iter()
             .enumerate()
             .map(|(ordinal, request)| {
-                let queued = store.queued_member_verification(request.digest().as_bytes())?.map_or_else(
-                    || (now_unix_millis, logical_deadline(now_unix_millis, request)),
-                    |row| (row.queued_unix_millis, row.deadline_unix_millis),
-                );
+                // Queued when the member first asked to be proven, so latency
+                // still spans every attempt; due `wall_clock_secs` from *now*,
+                // because the sealed limit bounds the run, not the wait in
+                // front of it. Inheriting the queue row's deadline handed a
+                // serial run whatever budget the wait had already spent, and a
+                // request that outwaited its own clock produced a run with no
+                // eligible member at all: no step, no outcome, and a silent
+                // completion (#6053).
+                let queued_unix_millis = store
+                    .queued_member_verification(request.digest().as_bytes())?
+                    .map_or(now_unix_millis, |row| row.queued_unix_millis);
                 Ok(SharedRunMemberRow {
                     run: run.as_bytes().to_vec(),
                     request: request.digest().as_bytes().to_vec(),
                     ordinal: u32::try_from(ordinal).unwrap_or(u32::MAX),
-                    queued_unix_millis: queued.0,
-                    deadline_unix_millis: queued.1,
+                    queued_unix_millis,
+                    deadline_unix_millis: logical_deadline(now_unix_millis, request),
                     cancelled: false,
                     outcome: None,
                     latency_millis: None,
@@ -1632,6 +1639,66 @@ fn fold_serial_receipts(
     Ok(())
 }
 
+/// Record a host fault for every serial member whose own deadline passed
+/// without a step ever running for it.
+///
+/// [`next_initial_step`] will not start a member the clock has already run out
+/// on, so without this the run reaches its terminal scan with that member
+/// outcome-less and completes carrying an empty `outcomes` and the request in
+/// `unfinished` — a physical run that answered nothing about the member it was
+/// for, and a member left in `Verify` with no order and no diagnostic (#6053).
+/// [`MemberVerifyOutcome::HostFault`] is what the coordination reducer already
+/// understands for "the machinery, not the candidate, is why this did not
+/// settle": it re-queues inside the stage's retry budget and records a
+/// `CoordinationDiagnostic` once the budget is out. Cancelled members are the
+/// deliberate case and keep their own path.
+fn expire_unrun_serial_members(
+    store: &mut dyn StoreBackend,
+    row: &SharedRunRow,
+    dispatch: &SharedRunDispatch,
+    now_unix_millis: u64,
+) -> rusqlite::Result<()> {
+    let stepped =
+        store.shared_run_steps(&row.run)?.into_iter().filter_map(|step| step.request).collect::<BTreeSet<_>>();
+    for member in store.shared_run_members(&row.run)? {
+        // A member with a step of its own is answered for by that step: either
+        // its receipt is already folded, or `submit_step` writes the expiry
+        // receipt itself. Only a member no step was ever recorded for can reach
+        // the terminal scan with nothing said about it.
+        if member.cancelled
+            || member.outcome.is_some()
+            || stepped.contains(&member.request)
+            || member.deadline_unix_millis > now_unix_millis
+        {
+            continue;
+        }
+        let Some(request) =
+            dispatch.plan.requests.iter().find(|request| member.request.as_slice() == request.digest().as_bytes())
+        else {
+            continue;
+        };
+        let detail = Digest::of_wire_bytes(format!("expired:{}:{}", row.nonce, member.deadline_unix_millis).as_bytes());
+        let outcome = MemberVerifyOutcome::HostFault {
+            request: request.digest(),
+            evidence: Evidence { subject: request.member.candidate.tree, kind: EvidenceKind::ExecutorFault, detail },
+        };
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            nonce = %row.nonce,
+            workpiece = %request.member.workpiece.0,
+            deadline_unix_millis = member.deadline_unix_millis,
+            "shared-run member never started inside its execution limit; recorded as a host fault",
+        );
+        store.record_shared_run_member_outcome(
+            &row.run,
+            &member.request,
+            &to_vec(&outcome).map_err(|error| rusqlite::Error::InvalidParameterName(error.to_string()))?,
+            now_unix_millis.saturating_sub(member.queued_unix_millis),
+        )?;
+    }
+    Ok(())
+}
+
 fn derive_batch_members(requests: &[(&MemberPin, bool)], inputs: &[CompositionInput]) -> Vec<BatchMember> {
     let mut atomic = BTreeMap::<WorkpieceId, BTreeSet<WorkpieceId>>::new();
     for input in inputs {
@@ -2414,6 +2481,7 @@ fn finish_if_terminal(
     }
 
     fold_serial_receipts(store, row, dispatch, now_unix_millis)?;
+    expire_unrun_serial_members(store, row, dispatch, now_unix_millis)?;
     let members = store.shared_run_members(&row.run)?;
     if members
         .iter()
@@ -2635,6 +2703,18 @@ fn materialize_physical_charge(
     Ok(true)
 }
 
+/// Ask the executor to hand back the lane this terminal run retained.
+///
+/// Asked once, while the run is still uncharged, and never twice in one turn:
+/// the offloading port hands a call's answer to whichever caller asks for it
+/// first, so a second ask in the same turn reads [`Settled::InFlight`] and
+/// [`replay_completion`] — which gates the run's move to
+/// [`SharedRunLifecycle::Completed`] on a settled release — would never see an
+/// answer at all. What that leaves open is a release wanted on a round too
+/// busy to start it: the want is dropped when the round closes and this site
+/// has stopped asking. [`ExecutorPort::reconcile_physical_run_leases`] is the
+/// backstop for exactly that, so the retention is collected on a later turn
+/// rather than standing for the life of the process (#6053).
 fn release_terminal_physical_run(executor: &dyn ExecutorPort, row: &SharedRunRow) -> rusqlite::Result<bool> {
     let run = Digest::from_slice(&row.run)
         .ok_or_else(|| rusqlite::Error::InvalidParameterName("shared run identity is not a digest".to_owned()))?;
@@ -2717,7 +2797,20 @@ pub(super) fn drive_shared_runs(
 ) -> rusqlite::Result<Vec<Admit>> {
     let mut admits = Vec::new();
     let mut artifacts = artifacts;
-    for row in store.list_open_shared_runs()? {
+    let open = store.list_open_shared_runs()?;
+    // Before anything else this turn: a retained lane the store no longer has
+    // an open run for is a slot nobody will come back for, and it counts
+    // against the prover ceiling until it is handed back. Reconciling from the
+    // open set makes a missed release a one-turn delay rather than a stall that
+    // only a restart clears (#6053) — and the first turn after a boot is
+    // exactly the same reconciliation, so a process that came up holding
+    // nothing is the ordinary case of this rule, not an exception to it.
+    if let Err(error) = executor
+        .reconcile_physical_run_leases(&open.iter().filter_map(|row| Digest::from_slice(&row.run)).collect::<Vec<_>>())
+    {
+        tracing::warn!(%error, "retained-lane reconciliation will retry next turn");
+    }
+    for row in open {
         if row.lifecycle == SharedRunLifecycle::Preparing {
             continue;
         }

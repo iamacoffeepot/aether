@@ -167,6 +167,11 @@ impl ExecutorBackend for RoutingExecutor {
         Ok(())
     }
 
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), Self::Error> {
+        self.local.reconcile_physical_run_leases(live)?;
+        Ok(())
+    }
+
     fn retain_partial_head_repair(
         &self,
         plan: &Digest,

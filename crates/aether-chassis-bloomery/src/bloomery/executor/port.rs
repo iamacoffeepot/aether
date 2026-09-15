@@ -148,6 +148,16 @@ pub trait ExecutorPort {
         Settled::Answered(Ok(()))
     }
 
+    /// Release every retained warm lane whose physical run is not in `live` —
+    /// see [`aether_bloomery::ExecutorBackend::reconcile_physical_run_leases`].
+    /// A registry read and a local free, never offloaded: nothing here blocks,
+    /// and a retention the durable store no longer owns must not have to wait
+    /// on a worker round trip to stop counting against the pool.
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), ExecutorPortError> {
+        let _ = live;
+        Ok(())
+    }
+
     /// Retain a captured partial-head repair under its plan-owned Git ref
     /// before the reducer can observe the repaired candidate.
     fn retain_partial_head_repair(
@@ -215,6 +225,10 @@ impl ExecutorPort for ExecutorShell {
 
     fn release_physical_run(&self, physical_run: &Digest) -> Settled<Result<(), ExecutorPortError>> {
         Settled::Answered(self.backend.release_physical_run(physical_run))
+    }
+
+    fn reconcile_physical_run_leases(&self, live: &[Digest]) -> Result<(), ExecutorPortError> {
+        self.backend.reconcile_physical_run_leases(live)
     }
 
     fn retain_partial_head_repair(
