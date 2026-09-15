@@ -44,6 +44,7 @@ mod suppression;
 mod surface;
 mod timeout;
 mod verify;
+mod verify_delta;
 mod workpiece_builder;
 
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
@@ -143,6 +144,10 @@ pub use suppression::{SuppressionDisposition, SuppressionRequest, SuppressionVer
 pub use surface::{SurfacePathRequest, SurfaceRequest};
 pub use timeout::TimeoutRecord;
 pub use verify::{DeclaredIdentity, MAX_VERIFIER_IDENTITY_BYTES, VerifyFailure, VerifyFailureSet};
+pub use verify_delta::{
+    CarriedCoverage, CarriedGate, CarryRefusal, DELTA_GATES, DeltaClass, VERIFY_GATES_ENV, VERIFY_PROVED_ENV,
+    carryable, invalidated_by,
+};
 pub use workpiece_builder::{FIELD_ENTRY_SCHEMA, FieldEntry, WorkpieceBuilder, WorkpieceRefusal};
 
 use alloc::string::String;

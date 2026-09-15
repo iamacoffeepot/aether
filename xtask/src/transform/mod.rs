@@ -62,7 +62,7 @@ use crate::transform::review::REVIEW_CRITIC;
 use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
 use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Excused, Position, SuppressionRequest};
+use crate::transform::verify::{Carried, Excused, Position, SuppressionRequest};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
@@ -382,6 +382,18 @@ struct Evidence {
     /// Absent on the single-command path — the record *is* that one gate — and
     /// on a preflight-refused run that executed none.
     gates: Option<Vec<GateTiming>>,
+    /// The gates this run did not execute because an earlier receipt already
+    /// judged them over a tree the delta cannot have moved for them (ADR-0200
+    /// amendment of 2026-09-15).
+    ///
+    /// Named rather than implied by absence. `failed_verifiers` says which
+    /// gates were red and `gates` says which ones ran; a gate missing from both
+    /// with nothing said about it would read as a silent pass. Each entry names
+    /// the receipt it carries, the tree that receipt proved, and the delta
+    /// classes the lane read — everything the coordinator's admission door
+    /// needs to judge the carry against the one shared table, and to refuse it
+    /// as an incomplete receipt when it does not stand.
+    carried: Vec<Carried>,
     channels: Channels,
 }
 
@@ -417,6 +429,9 @@ impl Serialize for Evidence {
         }
         if let Some(gates) = &self.gates {
             state.serialize_field("gates", gates)?;
+        }
+        if !self.carried.is_empty() {
+            state.serialize_field("carried", &self.carried)?;
         }
         self.channels.serialize_into(&mut state, ChannelKind::Flakes)?;
         self.channels.serialize_into(&mut state, ChannelKind::InheritedFailures)?;
@@ -465,6 +480,14 @@ impl Evidence {
         self
     }
 
+    /// Record the gates this run carried from an earlier receipt rather than
+    /// executing. Empty leaves the key off the envelope, so a run that carried
+    /// nothing keeps the shape every reader already parses.
+    fn with_carried(mut self, carried: Vec<Carried>) -> Self {
+        self.carried = carried;
+        self
+    }
+
     fn with_channels(mut self, channels: impl IntoIterator<Item = EvidenceChannel>) -> Self {
         for channel in channels {
             self.channels.set(channel);
@@ -494,6 +517,9 @@ fn build_evidence(
         peak_resident_bytes: None,
         duration_millis: None,
         gates: None,
+        // The single-command path runs the one gate it names, so there is
+        // nothing to carry and nothing a receipt could stand in for.
+        carried: Vec::new(),
         // The single-command path discriminates nothing: only the umbrella
         // resolves a closure, so only the umbrella can report against one —
         // and only `verify.suppress` can state a request, which `run_single`
@@ -682,7 +708,7 @@ impl Measurements {
 #[cfg(test)]
 mod tests {
     use super::{
-        ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs, build_evidence,
+        Carried, ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs, build_evidence,
         interned_mask_bits, reject_test_schedule,
         verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
     };
@@ -783,6 +809,50 @@ mod tests {
         assert_eq!(umbrella["gates"][0]["command"], "verify.fmt");
         assert_eq!(umbrella["gates"][1]["prepare_millis"], 50);
         assert!(umbrella.get("prepare_millis").is_none(), "the umbrella has no prepare of its own");
+    }
+
+    /// A carried gate has to be visible as neither run nor passed: it is absent
+    /// from `gates` because nothing timed it and absent from `failed_verifiers`
+    /// because nothing failed, and without its own key the envelope would say
+    /// nothing at all about it. Tripwire for the ADR-0200 amendment's ledger
+    /// honesty — a reader that cannot see the carry cannot refuse it.
+    #[test]
+    fn a_carried_gate_names_the_receipt_it_stands_on() {
+        let carried = Carried {
+            gate: "verify.test".into(),
+            receipt: "abc".into(),
+            tree: "def".into(),
+            classes: vec!["comment".into()],
+        };
+
+        let umbrella = serde_json::to_value(
+            build_evidence("verify.check", None, true, Some(0), "verify.scope.log".into(), None, None)
+                .with_gates(vec![GateTiming {
+                    command: "verify.fmt".into(),
+                    duration_millis: 10,
+                    prepare_millis: None,
+                }])
+                .with_carried(vec![carried]),
+        )
+        .expect("umbrella serializes");
+
+        assert_eq!(umbrella["carried"][0]["gate"], "verify.test");
+        assert_eq!(umbrella["carried"][0]["receipt"], "abc");
+        assert_eq!(umbrella["carried"][0]["tree"], "def");
+        assert_eq!(umbrella["carried"][0]["classes"][0], "comment");
+        assert_eq!(umbrella["gates"].as_array().expect("gates is an array").len(), 1, "a carried gate is not timed");
+        assert!(umbrella.get("failed_verifiers").is_none(), "a carried gate is not a failure either");
+    }
+
+    /// A run that carried nothing keeps the envelope every reader already
+    /// parses, rather than growing an empty array at a new key.
+    #[test]
+    fn a_run_that_carried_nothing_omits_the_key() {
+        let plain =
+            serde_json::to_value(build_evidence("verify.check", None, true, Some(0), String::new(), None, None))
+                .expect("evidence serializes");
+
+        assert!(plain.get("carried").is_none());
     }
 
     #[test]
