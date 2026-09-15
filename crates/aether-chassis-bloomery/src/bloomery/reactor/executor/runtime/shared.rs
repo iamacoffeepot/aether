@@ -1997,9 +1997,25 @@ fn contextual_outcomes(
                     detail: evidence.first().copied().unwrap_or(receipt.evidence.detail),
                 },
             },
-            Some(BatchFailure::Unknown { evidence, .. }) => MemberVerifyOutcome::Pending {
+            // An attribution that never resolved who owed the failure is a
+            // *failure* of this member's request, not a request the run did
+            // not reach (ADR-0218 §Amendment: low tolerance). It used to be
+            // `Pending`, which re-queued the member for another physical run —
+            // and the probe budget that produced the `Unknown` is exactly the
+            // thing a re-run spends again. `Unattributed` is the scope the
+            // reducer ejects on, so the set leaves the bloom together rather
+            // than waiting outside the survivor group for an answer nobody is
+            // computing.
+            Some(BatchFailure::Unknown { evidence, check, .. }) => MemberVerifyOutcome::Failed {
                 request: request_id,
-                observation: evidence.first().copied().unwrap_or(receipt.evidence.detail),
+                scope: FailureScope::Unattributed {
+                    evidence: evidence.first().copied().unwrap_or(receipt.evidence.detail),
+                },
+                failures: contextual_failures(receipt, from_ref(check)),
+                evidence: scoped_evidence(
+                    &receipt.evidence,
+                    evidence.first().copied().unwrap_or(receipt.evidence.detail),
+                ),
             },
             None if report.survivors.contains(&request.member.workpiece) => {
                 MemberVerifyOutcome::Survived { request: request_id, node, observation: receipt.evidence.detail }

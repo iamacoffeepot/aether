@@ -7,11 +7,14 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::cmp::min;
 use core::mem::take;
+use core::slice::from_ref;
 
 use super::aggregate_verify::at_park_ceiling;
 use super::attempt::{DispatchTargets, SealedLine, move_effects_with_candidate, stage_binding};
 use super::boundary::EventBoundary;
+use super::eject::ejection_reason;
 use super::gate::AGGREGATE_VERIFY_GATE;
+use super::withdraw::depart;
 use super::{BloomRecord, BloomStatus, CoordinationError, Decision, Decisions, Outcome, Snapshot, StageProgress};
 use crate::digest::{ContentAddressed, Digest, digest_of};
 use crate::ids::{BloomId, StageId, WorkpieceId};
@@ -24,11 +27,11 @@ use crate::values::{
     CoordinationState, Evidence, EvidenceKind, FailureScope, GenerationMember, IntegrationAppendPlan, IntegrationHead,
     MemberCandidate, MemberContractPin, MemberPin, MemberVerifyLatency, MemberVerifyOutcome, MemberVerifyRequest,
     OperatorHold, PartialHeadRepairCompletion, PartialHeadRepairDispatch, PartialHeadRepairPlan, PipelineManifest,
-    PreparedCandidate, ResolutionClaim, ResolutionProof, SharedRunCompletion, SharedRunDispatch, SharedRunExecution,
-    SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation, SharedRunRecord,
-    StableHeadReservation, StageCatalog, SurvivorGroup, Transformation, VERIFY_CHECK_COMMAND, VERIFY_MEMBER_COMMAND,
-    VerificationContract, VerificationMode, VerificationObligation, VerifyFailureSet, VerifyGateSet, Wedge,
-    host_class_digest, verification_environment_digest,
+    PreparedCandidate, RedVerify, ResolutionClaim, ResolutionProof, SharedRunCompletion, SharedRunDispatch,
+    SharedRunExecution, SharedRunMode, SharedRunNode, SharedRunPhase, SharedRunPlan, SharedRunPreparation,
+    SharedRunRecord, StableHeadReservation, StageCatalog, SurvivorGroup, Transformation, VERIFY_CHECK_COMMAND,
+    VERIFY_MEMBER_COMMAND, VerificationContract, VerificationMode, VerificationObligation, VerifyFailureSet,
+    VerifyGateSet, Wedge, Withdrawal, WithdrawalCause, host_class_digest, verification_environment_digest,
 };
 
 #[derive(serde::Serialize)]
@@ -2316,9 +2319,62 @@ fn apply_failed_outcome(
                     .map(|member| member.workpiece.clone()),
             );
         }
+        // An interaction nobody else in this completion was blamed for, and an
+        // attribution that never resolved at all, both leave a set of members
+        // outside the survivor group with no repair anyone is going to
+        // dispatch. Under the `Eject` disposition the set leaves instead
+        // (ADR-0218 §Amendment: low tolerance); under `Refine` this stays the
+        // no-op it has always been, and the scheduler re-proposes them.
+        FailureScope::Interaction { members, .. } if context.record.red_verify == RedVerify::Eject => {
+            eject_contextual(context, members, failures, &evidence, effects);
+        }
+        FailureScope::Unattributed { .. } if context.record.red_verify == RedVerify::Eject => {
+            eject_contextual(context, from_ref(&request.member), failures, &evidence, effects);
+        }
         FailureScope::Interaction { .. } | FailureScope::Unattributed { .. } => {}
     }
     Ok(())
+}
+
+/// Withdraw every member of one unresolved contextual failure.
+///
+/// One [`depart`] over the whole set rather than one per member: what the
+/// remainder arithmetic answers — is the bloom empty now, did this complete the
+/// claim set — is a question about the set leaving together, and asking it once
+/// per member would answer it against a record that has not seen the siblings
+/// yet.
+///
+/// A member already gone is filtered out rather than refused. Two failure
+/// scopes in one completion can name the same member, and a second withdrawal
+/// of a member that has left is the one thing the operator door refuses
+/// outright.
+fn eject_contextual(
+    context: &SharedCompletionContext<'_>,
+    members: &[MemberPin],
+    failures: VerifyFailureSet,
+    evidence: &Evidence,
+    effects: &mut Vec<Decision>,
+) {
+    let leaving: Vec<Withdrawal> = members
+        .iter()
+        .filter(|member| !context.record.withdrawn.contains_key(&member.workpiece))
+        .map(|member| Withdrawal {
+            workpiece: member.workpiece.clone(),
+            cause: WithdrawalCause::Verify,
+            reason: ejection_reason(
+                "its shared verification never resolved which member owed the failure",
+                failures,
+                evidence,
+                "",
+            ),
+            operator: String::from("bloomery"),
+        })
+        .collect();
+    if leaving.is_empty() {
+        return;
+    }
+
+    effects.extend(depart(context.snapshot, context.record, &context.bloom, leaving, Vec::new()).effects);
 }
 
 /// Re-queue unfinished requests so the scheduler can propose them against the
