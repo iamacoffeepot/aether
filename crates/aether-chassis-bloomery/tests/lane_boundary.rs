@@ -269,7 +269,11 @@ fn a_bloom_that_fails_verification_twice_still_resolves() {
     // Refine re-entry across three separate lane processes. The script is
     // consumed through an on-disk ledger precisely so this works: each dispatch
     // is a fresh process that must read the *next* step, not the first.
-    let mut harness = LaneHarness::start(
+    //
+    // Sealed refining, because re-entry is the subject: the default ejects a
+    // member on its first red Verify and there is no second failure to survive
+    // (ADR-0218 §Amendment: low tolerance).
+    let mut harness = LaneHarness::start_refining(
         &LaneScript::all_passing()
             .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
             .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail),
@@ -291,7 +295,11 @@ fn a_candidate_that_does_not_build_steers_its_repair_lap_with_the_diagnostics() 
     // through the coordinator's persistence, into the next child's `--task` —
     // a path that exists entirely below the spawn seam, so nothing above it can
     // observe whether it is connected.
-    let mut harness = LaneHarness::start(&LaneScript::all_passing().then(VERIFY_MEMBER_COMMAND, LaneMode::Fail));
+    //
+    // Sealed refining: the lap the findings have to steer only exists under
+    // that disposition (ADR-0218 §Amendment: low tolerance).
+    let mut harness =
+        LaneHarness::start_refining(&LaneScript::all_passing().then(VERIFY_MEMBER_COMMAND, LaneMode::Fail));
 
     harness.settle("the member resolves after its repair lap", |bloom| {
         bloom.members.first().is_some_and(|member| member.resolution.is_some())
@@ -316,7 +324,9 @@ fn a_member_whose_verification_never_passes_wedges_with_recorded_evidence() {
     // Four Clippy failures reach Verify's three-repeat ceiling: the first is
     // novel and free, then each recurrence spends one repair roll. Keep every
     // Refine run passing so this wedges at Verify, not at the repair stage.
-    let mut harness = LaneHarness::start(
+    // Sealed refining: a ceiling is only reachable by a member the bloom keeps
+    // spending laps on (ADR-0218 §Amendment: low tolerance).
+    let mut harness = LaneHarness::start_refining(
         &LaneScript::all_passing()
             .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
             .then(VERIFY_MEMBER_COMMAND, LaneMode::Fail)
