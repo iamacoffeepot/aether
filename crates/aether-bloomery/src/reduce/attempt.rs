@@ -5,6 +5,7 @@ use alloc::vec::Vec;
 
 use super::composition::reduce_composition_attempt;
 use super::coordination::carried_head_pin;
+use super::eject::{eject, ejection_reason};
 use super::integrate::claim_effects;
 use super::splice::member_construct_base;
 use super::verify_memo::reuse_of;
@@ -15,8 +16,8 @@ use super::{
 use crate::digest::Digest;
 use crate::ids::{BloomId, StageId, WorkpieceId};
 use crate::values::{
-    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, ResolutionClaim, StageBinding, StageCatalog,
-    Transformation, VerifyFailureSet, Wedge,
+    CandidateRef, ConfigRegistry, Evidence, EvidenceKind, Membership, RedVerify, ResolutionClaim, StageBinding,
+    StageCatalog, Transformation, VerifyFailureSet, Wedge,
 };
 
 /// The move-and-dispatch effect pair every cursor move of
@@ -428,6 +429,47 @@ pub(super) fn reduce_attempt_completed(
 /// current stage and, while the sealed stage budget allows, redispatches the
 /// *same* artifact under a fresh order through [`reconcile_or_line_targets`].
 /// At the ceiling it records a wedge whose cause the projection reads as
+/// Reduce one admitted member-stage deadline expiry
+/// ([`Fact::MemberDeadlineExpired`](crate::Fact::MemberDeadlineExpired)).
+///
+/// One question, then a delegation. A `Verify` the host cancelled at its sealed
+/// wall clock had its whole allowance and did not finish, which is the member's
+/// own answer about its own work, so a bloom on the `Eject` disposition
+/// withdraws it (ADR-0218 §Amendment: low tolerance). Everything else — another
+/// stage, or a bloom that sealed `Refine` — is the machinery ledger's, and goes
+/// to [`reduce_member_executor_fault`] unchanged, because an expiry that is not
+/// being acted on is exactly a fault that reached no verdict.
+///
+/// Delegating rather than inlining keeps the fault's retry accounting in one
+/// place: the guards, the series, the budget and the wedge are decided once, and
+/// an expiry cannot drift into a second copy of them.
+pub(super) fn reduce_member_deadline_expired(
+    snapshot: &Snapshot,
+    bloom: &BloomId,
+    workpiece: &WorkpieceId,
+    stage: StageId,
+    evidence: &Evidence,
+) -> Decisions {
+    let ejecting = snapshot.blooms.get(bloom).is_some_and(|record| {
+        record.status == BloomStatus::Sealed
+            && record.red_verify == RedVerify::Eject
+            && record.progress.get(workpiece).is_some_and(|cursor| cursor.stage == stage)
+    });
+    if !(ejecting && stage == StageId::Verify) {
+        return reduce_member_executor_fault(snapshot, bloom, workpiece, stage, evidence);
+    }
+    let record = snapshot.blooms.get(bloom).expect("the ejecting check read this record");
+
+    eject(
+        snapshot,
+        record,
+        bloom,
+        workpiece,
+        &ejection_reason("its verify exceeded the sealed wall clock", VerifyFailureSet::EMPTY, evidence, ""),
+        alloc::vec![Decision::RecordEvidence { bloom: *bloom, evidence: evidence.clone() }],
+    )
+}
+
 /// machinery.
 pub(super) fn reduce_member_executor_fault(
     snapshot: &Snapshot,
@@ -1232,7 +1274,7 @@ mod tests {
                 movement_budget: 2,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
-                red_verify: crate::RedVerify::Refine,
+                red_verify: RedVerify::Refine,
                 host_class: String::from("test-host"),
             }),
         )

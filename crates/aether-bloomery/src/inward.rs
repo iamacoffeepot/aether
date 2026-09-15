@@ -61,6 +61,25 @@ pub enum StageVerdict {
     /// evidence rather than inside its kind. Appended past [`Self::Declined`]
     /// so the prior verdicts' discriminants are unchanged.
     SurfaceRequested,
+    /// The host cancelled the dispatched lane at its sealed wall clock
+    /// (ADR-0177, ADR-0218 §Amendment: low tolerance).
+    ///
+    /// Distinct from [`Self::ExecutorFault`], which it is otherwise identical
+    /// to: an expiry and a host fault both reach no verdict, but only one of
+    /// them is about work that had its full sealed allowance and did not
+    /// finish.
+    ///
+    /// Normalizes to the same [`EvidenceKind::ExecutorFault`] its sibling does,
+    /// and deliberately so: the *evidence* is identical — a `TimeoutRecord`
+    /// naming a subject nothing judged — and it is the **fact** intake builds
+    /// that carries the distinction (`Fact::MemberDeadlineExpired`). Giving the
+    /// evidence kind its own variant would move the schema of every projected
+    /// view row that embeds an [`Evidence`](crate::Evidence), which the frozen
+    /// prior-shape view decoders cannot read.
+    ///
+    /// Appended past [`Self::SurfaceRequested`] so the prior verdicts'
+    /// discriminants are unchanged.
+    DeadlineExpiry,
 }
 
 impl StageVerdict {
@@ -70,7 +89,11 @@ impl StageVerdict {
             Self::VerificationPassed | Self::VerificationFailed => EvidenceKind::VerificationResult,
             Self::ReviewFinding => EvidenceKind::ReviewFinding,
             Self::Parked => EvidenceKind::Question,
-            Self::ExecutorFault => EvidenceKind::ExecutorFault,
+            // Deliberately the same kind: both say the lane reached no
+            // judgment, and the distinction between them rides on the fact
+            // intake builds rather than on the evidence, which every projected
+            // view row embeds (see `Self::DeadlineExpiry`).
+            Self::ExecutorFault | Self::DeadlineExpiry => EvidenceKind::ExecutorFault,
             Self::Declined | Self::SurfaceRequested => EvidenceKind::ConstructDeclined,
         }
     }
@@ -209,6 +232,7 @@ mod tests {
             (StageVerdict::ReviewFinding, EvidenceKind::ReviewFinding),
             (StageVerdict::Parked, EvidenceKind::Question),
             (StageVerdict::ExecutorFault, EvidenceKind::ExecutorFault),
+            (StageVerdict::DeadlineExpiry, EvidenceKind::ExecutorFault),
             (StageVerdict::Declined, EvidenceKind::ConstructDeclined),
             (StageVerdict::SurfaceRequested, EvidenceKind::ConstructDeclined),
         ];

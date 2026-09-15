@@ -1466,6 +1466,7 @@ fn event_bloom(event: &Event) -> Option<BloomId> {
         | Fact::ResumeHostFault { bloom, .. }
         | Fact::SpliceAssembled { bloom, .. }
         | Fact::MemberExecutorFault { bloom, .. }
+        | Fact::MemberDeadlineExpired { bloom, .. }
         | Fact::FoldRefused { bloom, .. }
         | Fact::ContainmentRefused { bloom, .. }
         | Fact::SurfaceRequested { bloom, .. }
@@ -1563,6 +1564,7 @@ fn collect_decision_blooms(effect: &Decision, into: &mut BTreeSet<BloomId>) {
         | Decision::RecordVerifyProof { bloom, .. }
         | Decision::RecordVerifyReuse { bloom, .. }
         | Decision::RecordStageCatalog { bloom, .. }
+        | Decision::RecordRedVerify { bloom, .. }
         | Decision::RecordPipelineManifest { bloom, .. }
         | Decision::RecordCompositionFinding { bloom, .. }
         | Decision::RecordAdjudication { bloom, .. }
@@ -1823,6 +1825,7 @@ fn outbox_payload_bytes(effect: &Decision) -> Result<Option<Vec<u8>>, WireError>
         | Decision::AdvanceMainline { .. }
         | Decision::RecordObservation { .. }
         | Decision::RecordStageCatalog { .. }
+        | Decision::RecordRedVerify { .. }
         | Decision::RecordPipelineManifest { .. }
         | Decision::RecordCompositionFinding { .. }
         | Decision::RecordAdjudication { .. }

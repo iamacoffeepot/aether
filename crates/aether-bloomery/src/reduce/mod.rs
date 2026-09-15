@@ -88,7 +88,7 @@ pub use why::why_of;
 use crate::values::{ResolvedConfigs, SpendWindow};
 
 use aggregate_verify::reduce_aggregate_verify_completed;
-use attempt::{reduce_attempt_completed, reduce_member_executor_fault};
+use attempt::{reduce_attempt_completed, reduce_member_deadline_expired, reduce_member_executor_fault};
 use base_verify::{reduce_base_reverify, reduce_base_verify_completed};
 use coordination::{
     IntegrationConflict, reduce_candidate_prepared, reduce_checkpoint_observed, reduce_compatibility_previewed,
@@ -208,6 +208,9 @@ fn reduce_completion_fact(snapshot: &Snapshot, fact: &Fact) -> Decisions {
         Fact::VerifyHostFault { bloom, workpiece, evidence, findings } => {
             reduce_verify_host_fault(snapshot, bloom, workpiece, evidence, findings)
         }
+        Fact::MemberDeadlineExpired { bloom, workpiece, stage, evidence } => {
+            reduce_member_deadline_expired(snapshot, bloom, workpiece, *stage, evidence)
+        }
         Fact::MemberExecutorFault { bloom, workpiece, stage, evidence } => {
             reduce_member_executor_fault(snapshot, bloom, workpiece, *stage, evidence)
         }
@@ -273,6 +276,7 @@ pub fn reduce(snapshot: &Snapshot, event: &Event, configs: &ResolvedConfigs, spe
         | Fact::FoldConflict { .. }
         | Fact::VerifyHostFault { .. }
         | Fact::MemberExecutorFault { .. }
+        | Fact::MemberDeadlineExpired { .. }
         | Fact::FoldRefused { .. }
         | Fact::BaseVerifyCompleted { .. }
         | Fact::CompositionNarrowed { .. }

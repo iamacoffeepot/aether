@@ -99,4 +99,5 @@ enum StageVerdictDef {
     ExecutorFault,
     Declined,
     SurfaceRequested,
+    DeadlineExpiry,
 }

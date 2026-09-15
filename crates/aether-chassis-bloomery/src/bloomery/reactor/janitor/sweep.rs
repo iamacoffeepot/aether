@@ -1069,8 +1069,8 @@ mod preview_tests {
     use aether_bloomery::{
         AgentProfile, CandidateRef, CompositionContractTemplate, ConfigRegistry, ContextualInvocationTemplate,
         CoordinationPolicy, CoordinationState, ExecutionLimits, Harness, NetworkProfile, PartialHeadRepairDispatch,
-        PartialHeadRepairPayload, PartialHeadRepairPlan, PrecheckPlan, ReasoningEffort, ToolPolicy, Transformation,
-        VerificationMode,
+        PartialHeadRepairPayload, PartialHeadRepairPlan, PrecheckPlan, ReasoningEffort, RedVerify, ToolPolicy,
+        Transformation, VerificationMode,
     };
     use aether_data::wire::to_vec;
 
@@ -1211,6 +1211,7 @@ mod preview_tests {
                 movement_budget: 1,
                 reservation_millis: 1_000,
                 coalesce_millis: None,
+                red_verify: RedVerify::Refine,
                 host_class: String::from("test"),
             },
             CompositionContractTemplate {

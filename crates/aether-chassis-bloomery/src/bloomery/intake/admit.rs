@@ -596,7 +596,7 @@ fn reviewed_nothing(upload: &UploadedEvidence) -> bool {
 /// places that branch on it, so the fact the admission files and the findings it
 /// persists cannot disagree about what happened.
 fn aggregate_review_faulted(upload: &UploadedEvidence) -> bool {
-    upload.verdict == StageVerdict::ExecutorFault || reviewed_nothing(upload)
+    reached_no_verdict(upload.verdict) || reviewed_nothing(upload)
 }
 
 /// Re-kind an empty verdict's evidence as the fault the admission files it as.
@@ -639,6 +639,25 @@ fn aggregate_review_executor_fault_event(record: &DispatchRecord, evidence: Evid
 /// The idempotency key is its own, so a replayed fault is a no-op against the
 /// journal rather than colliding with the completion key a later real verdict
 /// on the same order would carry.
+/// The admission event for a member stage the host cancelled at its sealed wall
+/// clock (ADR-0177, ADR-0218 §Amendment: low tolerance) — the narrow sibling of
+/// [`member_executor_fault_event`].
+///
+/// Same evidence, same shape, different fact: only the reducer decides what an
+/// expiry costs the member, and it can only decide it if intake says which of
+/// the two the sweep observed.
+fn member_deadline_expired_event(record: &DispatchRecord, evidence: Evidence) -> Event {
+    Event {
+        idempotency_key: AdmissionKey::MemberDeadlineExpired.of(&record.nonce.0),
+        fact: Fact::MemberDeadlineExpired {
+            bloom: record.bloom,
+            workpiece: record.workpiece.clone(),
+            stage: record.stage,
+            evidence,
+        },
+    }
+}
+
 fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> Event {
     Event {
         idempotency_key: AdmissionKey::MemberExecutorFault.of(&record.nonce.0),
@@ -655,6 +674,20 @@ fn member_executor_fault_event(record: &DispatchRecord, evidence: Evidence) -> E
 /// executor-fault lifecycle.
 fn admits_member_executor_fault(stage: StageId) -> bool {
     stage == StageId::Verify || admits_as_attempt_completed(stage)
+}
+
+/// Whether a claimed verdict says the lane reached no judgment about its
+/// subject at all.
+///
+/// Two verdicts do — [`StageVerdict::ExecutorFault`] and
+/// [`StageVerdict::DeadlineExpiry`] — and everything in this module that asks
+/// "did this run render a verdict" has to accept both. They differ only in what
+/// the *reducer* does with the member afterwards (ADR-0218 §Amendment: low
+/// tolerance); at intake they are one shape, and asking for one of them by name
+/// is how an expiry would silently start refusing at a boundary that had always
+/// admitted its sibling.
+fn reached_no_verdict(verdict: StageVerdict) -> bool {
+    matches!(verdict, StageVerdict::ExecutorFault | StageVerdict::DeadlineExpiry)
 }
 
 /// Whether a claimed [`StageVerdict::ExecutorFault`] has a fact to become.
@@ -727,7 +760,7 @@ fn thread_triage_note(
 /// so the stage ladder in [`admit_uploaded`] reads as one arm per stage.
 fn aggregate_verify_event(record: &DispatchRecord, upload: &UploadedEvidence, evidence: Evidence) -> Event {
     if record.is_precheck() {
-        let completion = if upload.verdict == StageVerdict::ExecutorFault {
+        let completion = if reached_no_verdict(upload.verdict) {
             aether_bloomery::PrecheckCompletion::HostFault(evidence)
         } else if verdict_passed(upload.verdict) {
             aether_bloomery::PrecheckCompletion::Passed(evidence)
@@ -869,7 +902,7 @@ fn out_of_stage_refusal(record: &DispatchRecord, upload: &UploadedEvidence) -> O
     // A fault claimed against a stage with no fact to carry it is refused
     // rather than routed — see [`admits_executor_fault`] for the three that
     // have one.
-    if upload.verdict == StageVerdict::ExecutorFault && !admits_executor_fault(stage) && !record.is_precheck() {
+    if reached_no_verdict(upload.verdict) && !admits_executor_fault(stage) && !record.is_precheck() {
         return Some(IntakeRefusal::ExecutorFaultOutOfStage(stage));
     }
     // ADR-0207's two decline verdicts belong to the construct family alone.
@@ -1041,7 +1074,9 @@ pub fn admit_uploaded(store: &mut dyn StoreBackend, upload: &UploadedEvidence) -
             idempotency_key: AdmissionKey::Park.of(&record.nonce.0),
             fact: Fact::AdmitEvidence { bloom: record.bloom, evidence },
         }
-    } else if upload.verdict == StageVerdict::ExecutorFault && admits_member_executor_fault(record.stage) {
+    } else if upload.verdict == StageVerdict::DeadlineExpiry && admits_member_executor_fault(record.stage) {
+        member_deadline_expired_event(&record, evidence)
+    } else if reached_no_verdict(upload.verdict) && admits_member_executor_fault(record.stage) {
         member_executor_fault_event(&record, evidence)
     } else if record.stage == StageId::Verify {
         verify_event(&record, upload, evidence)
@@ -1139,7 +1174,7 @@ fn persist_precheck_findings(
     upload: &UploadedEvidence,
 ) -> rusqlite::Result<()> {
     if !verdict_passed(upload.verdict)
-        && upload.verdict != StageVerdict::ExecutorFault
+        && !reached_no_verdict(upload.verdict)
         && let Some(findings) = &upload.observation.findings
         && !findings.trim().is_empty()
     {
@@ -1201,7 +1236,7 @@ fn persist_consumed(
             thread_triage_note(store, record, &finding, named)?;
         }
     }
-    if record.stage == StageId::Verify && upload.verdict != StageVerdict::ExecutorFault {
+    if record.stage == StageId::Verify && !reached_no_verdict(upload.verdict) {
         if verdict_passed(upload.verdict) {
             store.clear_review_findings(record.bloom.0.as_bytes(), &record.workpiece.0)?;
         } else if let Some(findings) = &upload.observation.findings {
@@ -1225,7 +1260,7 @@ fn persist_consumed(
         persist_aggregate_verify_findings(store, record, upload)?;
     } else if record.stage == StageId::AggregateReview && !aggregate_review_faulted(upload) {
         persist_aggregate_findings(store, record, upload, aggregate_findings)?;
-    } else if record.stage == StageId::Study && upload.verdict != StageVerdict::ExecutorFault {
+    } else if record.stage == StageId::Study && !reached_no_verdict(upload.verdict) {
         // A faulted read reached no verdict, so whatever rode its observation is
         // not a judgement about anything — the same reason an aggregate review's
         // fault writes no findings and clears none.

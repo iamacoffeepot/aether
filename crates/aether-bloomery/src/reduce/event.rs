@@ -945,6 +945,38 @@ pub enum Fact {
     /// Appended past [`Fact::ProofReused`] so every prior fact keeps its wire
     /// discriminant.
     HoldSharedRunCoalesce { bloom: BloomId, until_unix_millis: u64, waiting_for: Vec<WorkpieceId> },
+    /// A dispatched member stage the host **cancelled at its sealed wall
+    /// clock** (ADR-0177, ADR-0218 §Amendment: low tolerance).
+    ///
+    /// The narrow sibling of [`Fact::MemberExecutorFault`], carrying the same
+    /// four fields and the same evidence shape. What separates them is the one
+    /// thing the reducer cannot otherwise know: whether the lane had its whole
+    /// sealed allowance. A `Verify` that did, and did not finish, has answered
+    /// about its own work, so a bloom on the `Eject` disposition withdraws the
+    /// member; every other stage, and a bloom on `Refine`, reaches the
+    /// machinery ledger exactly as an executor fault does.
+    ///
+    /// Its own fact rather than a field on `MemberExecutorFault` or a new
+    /// [`EvidenceKind`](crate::EvidenceKind): a field appended inside an
+    /// existing variant re-encodes every historical row of it, and an evidence
+    /// kind is embedded in every projected view row, whose frozen prior-shape
+    /// decoders cannot read a widened enum. A tail-appended fact costs neither.
+    ///
+    /// Appended past [`Fact::HoldSharedRunCoalesce`] so the prior facts' wire
+    /// discriminants are unchanged.
+    MemberDeadlineExpired {
+        /// The bloom whose member ran out of time.
+        bloom: BloomId,
+        /// The member sitting at the named stage.
+        workpiece: WorkpieceId,
+        /// The stage the expired order dispatched — must be the member's
+        /// current cursor stage.
+        stage: StageId,
+        /// The expiry evidence, bound to the member's current subject. Its
+        /// `detail` names the deterministic
+        /// [`TimeoutRecord`](crate::TimeoutRecord) the sweep stored.
+        evidence: Evidence,
+    },
 }
 
 impl Fact {

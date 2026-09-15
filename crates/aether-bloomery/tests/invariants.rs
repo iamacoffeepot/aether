@@ -2520,6 +2520,45 @@ fn a_red_verify_ejects_the_member_and_dispatches_no_repair() {
     );
 }
 
+// The wall-clock half. The plausible bug is the one the amendment had to be
+// written around: an expiry and a host fault arrive as the same evidence, so a
+// reducer that told them apart by anything other than the fact intake built
+// would either eject a member whose host fell over, or keep re-running a gate
+// that has already had its whole allowance.
+#[test]
+fn a_verify_the_host_killed_at_the_wall_clock_ejects_while_a_host_fault_retries() {
+    let (snapshot, bloom) = at_verify("wp");
+    let mut ejecting = snapshot.clone();
+    ejecting.blooms.get_mut(&bloom).expect("sealed").red_verify = RedVerify::Eject;
+
+    let evidence = Evidence { subject: digest(10), kind: EvidenceKind::ExecutorFault, detail: digest(72) };
+    let expired = event(
+        "verify-expired",
+        Fact::MemberDeadlineExpired {
+            bloom,
+            workpiece: workpiece("wp"),
+            stage: StageId::Verify,
+            evidence: evidence.clone(),
+        },
+    );
+
+    let (after, decided) = step(&ejecting, &expired);
+    assert!(matches!(decided.outcome, Outcome::MembersWithdrawn { .. }), "{:?}", decided.outcome);
+    let departure = after.blooms[&bloom].withdrawn.get(&workpiece("wp")).expect("the member left");
+    assert!(departure.reason.contains("exceeded the sealed wall clock"), "{}", departure.reason);
+
+    // The same evidence under the fault fact keeps the member: a host that
+    // could not carry the lane to a verdict is not the member's doing.
+    let faulted = event(
+        "verify-faulted",
+        Fact::MemberExecutorFault { bloom, workpiece: workpiece("wp"), stage: StageId::Verify, evidence },
+    );
+    assert!(
+        matches!(step(&ejecting, &faulted).1.outcome, Outcome::MachineryRetried { .. }),
+        "a host fault keeps its retry budget",
+    );
+}
+
 // The other half of the knob: a bloom that seals `Refine` keeps ADR-0153's
 // loop. Without this, `Eject` could be unconditional and nothing would notice.
 #[test]
