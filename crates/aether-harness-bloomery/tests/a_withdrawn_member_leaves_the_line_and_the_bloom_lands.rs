@@ -16,7 +16,7 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::{BloomStatus, Outcome, SealError, WorkpieceId};
-use aether_harness_bloomery::{FixtureHarness, OperatorMove, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, OperatorMove, captured, digest, passed, reviewed};
 
 const SURVIVOR: &str = "wp-0";
 const LEAVING: &str = "wp-1";
@@ -60,6 +60,12 @@ fn a_withdrawn_member_leaves_the_line_and_the_bloom_lands() {
     let verify = harness.await_order();
     assert_eq!(verify.workpiece, SURVIVOR, "the withdrawn member dispatches nothing further");
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    assert_eq!(member_review.workpiece, SURVIVOR, "the withdrawn member is judged by nobody");
+    harness.upload_admitted(&reviewed(&member_review));
 
     harness.land_the_fold(bloom);
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed, "the fold of the survivors lands");

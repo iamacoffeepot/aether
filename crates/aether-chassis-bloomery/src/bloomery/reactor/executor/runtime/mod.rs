@@ -1152,12 +1152,22 @@ fn member_size(store: &mut dyn StoreBackend, record: &DispatchRecord, sequence: 
     }
 }
 
+/// Overlay the host-resolved half of one dispatched **member model lane**: the
+/// effective model, the size band's wall clock, and the advisory work order.
+///
+/// Keyed on the lane being a model lane rather than on the construct command
+/// (ADR-0221). The member line has two of them now — `construct.implement` and
+/// the `review.critic` at its terminus — and a judge dispatched without this
+/// overlay is the worst of both: it runs on the runner's ambient default
+/// instead of the seat the bloom sealed for `Review`, and it judges a candidate
+/// with no commission in front of it. A mechanical lane still returns
+/// immediately: it forks no model and reads no work order.
 fn overlay_member_advisory(
     store: &mut dyn StoreBackend,
     record: &mut DispatchRecord,
     sequence: u64,
 ) -> Result<(), StoreConfigError> {
-    if record.transformation.command != CONSTRUCT_IMPLEMENT_COMMAND {
+    if !aether_bloomery::is_model_lane(&record.transformation.command) {
         return Ok(());
     }
     let (bloom, workpiece) = (record.bloom.0.as_bytes().to_vec(), record.workpiece.0.clone());
@@ -1214,7 +1224,7 @@ fn overlay_member_advisory(
             target: "aether_chassis_bloomery::executor",
             sequence,
             workpiece = %workpiece,
-            "no work-order description persisted for the dispatched construct member; assembling a subject-only prompt",
+            "no work-order description persisted for the dispatched member model lane; assembling a subject-only prompt",
         );
     }
 

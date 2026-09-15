@@ -15,7 +15,7 @@
 
 use aether_bloomery::{BloomStatus, LandingReceipt, StageId, Transformation};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, faulted, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, faulted, passed, reviewed};
 
 const MEMBER: &str = "wp-0";
 
@@ -33,6 +33,11 @@ fn a_landed_bloom_is_read_and_a_faulted_read_does_not_hold_it() {
 
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
 
     harness.land_the_fold(bloom);
     let landed = harness.view().mainline;

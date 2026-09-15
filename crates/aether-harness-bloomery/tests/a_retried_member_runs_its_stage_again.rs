@@ -13,7 +13,7 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::{Digest, Evidence, EvidenceKind, Fact, Outcome, StageId, WorkpieceId};
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 const MEMBER: &str = "wp";
 
@@ -76,9 +76,20 @@ fn a_retried_member_runs_its_stage_again_on_the_candidate_it_holds() {
         Some(candidate.tree),
         "the fresh order is aimed at the same tree",
     );
+    let fresh_nonce = fresh[0].nonce.clone();
 
-    // The retried stage answers and the member resolves on it.
+    // The retried stage answers and carries the member on down the line — to
+    // the judge at its terminus, which is what resolves it (ADR-0221).
     harness.upload_admitted(&passed(fresh[0]));
+    harness.pump_until("the re-run stage advances the member", |harness| {
+        harness.orders().iter().any(|order| order.nonce != verify.nonce && order.nonce != fresh_nonce)
+    });
+    let review = harness
+        .orders()
+        .into_iter()
+        .find(|order| order.nonce != verify.nonce && order.nonce != fresh_nonce)
+        .expect("the re-run stage dispatched the member's judge");
+    harness.upload_admitted(&reviewed(&review));
     assert!(
         harness.bloom(bloom).members[0].resolution.is_some(),
         "the stage the operator re-ran is the one that carries the member forward",

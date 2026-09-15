@@ -26,7 +26,7 @@
 
 use aether_bloomery::{BloomStatus, StageId};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 const MEMBER: &str = "wp-0";
 
@@ -41,6 +41,11 @@ fn a_review_that_reports_nothing_is_refused_at_intake() {
 
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
 
     // Both bloom-level gates go out over the same fold. The compiler's pass is
     // a real verdict; the critic's is the empty one — `passed` carries no

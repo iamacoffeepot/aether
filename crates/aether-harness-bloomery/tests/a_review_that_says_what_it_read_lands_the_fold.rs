@@ -33,6 +33,11 @@ fn a_review_that_says_what_it_read_lands_the_fold() {
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
 
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
+
     harness.integrate_tick();
     let gates = harness.await_orders(2);
     for order in &gates {

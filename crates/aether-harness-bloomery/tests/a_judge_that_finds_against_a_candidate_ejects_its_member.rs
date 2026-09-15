@@ -63,12 +63,13 @@ fn a_judge_that_finds_against_a_candidate_ejects_its_member() {
     assert_eq!(member.machinery_rolls, 0, "an ejection charges no machinery roll: {member:?}");
     harness.pump_until("the ejection dispatches nothing further", |harness| harness.orders().is_empty());
 
-    // And the candidate is left behind rather than discarded — the member's own
-    // record still names the tree the judge read, which is what makes it
-    // findable by whoever picks it up.
-    assert_eq!(
-        member.cursor.as_ref().and_then(|cursor| cursor.candidate).map(|held| held.tree),
-        Some(candidate.tree),
-        "the candidate stays on its ref: {member:?}",
+    // And the sentence says where the work went. A withdrawal retires the
+    // member's cursor, so the record itself no longer names the tree — which is
+    // exactly why the reason has to, and why it is the thing pinned here: it is
+    // what a person reads out of the GitHub mirror with no journal at hand.
+    assert!(
+        withdrawn.reason.contains("left on its ref"),
+        "the departure says the candidate was kept, not discarded: {}",
+        withdrawn.reason
     );
 }

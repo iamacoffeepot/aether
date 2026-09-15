@@ -32,7 +32,7 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::store::{CommissionBackend, CommissionError, CommissionHead};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, member, passed, read};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, member, passed, read, reviewed};
 use serde_json::Value;
 
 const FIRST: &str = "wp-0";
@@ -163,6 +163,11 @@ fn walk_to_landing(harness: &mut FixtureHarness, bloom: BloomId, workpiece: &str
 
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
     harness.land_the_fold(bloom);
 }
 

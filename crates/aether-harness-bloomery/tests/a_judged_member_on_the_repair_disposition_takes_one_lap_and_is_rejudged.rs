@@ -19,7 +19,7 @@
 
 #![allow(clippy::unwrap_used)]
 
-use aether_bloomery::StageId;
+use aether_bloomery::{StageId, Transformation};
 use aether_chassis_bloomery::store::{OutstandingOrder, StoreBackend};
 use aether_data::wire::from_bytes;
 use aether_harness_bloomery::{FixtureHarness, captured, digest, found, passed, reviewed};
@@ -68,6 +68,15 @@ fn a_judged_member_on_the_repair_disposition_takes_one_lap_and_is_rejudged() {
         .expect("the findings row reads back")
         .expect("a red judge files what it found against the member it judged");
     assert!(steer.contains(FINDINGS), "the lap is steered by the judge's own words, got {steer}");
+
+    // And the row reaches the lane, not just the store: the dispatched work
+    // order carries the finding in its own `## Findings` section, which is what
+    // a construct lane reads. Without this the lap is a fresh construct against
+    // the same commission and reproduces the candidate the judge refused.
+    let order: Transformation =
+        from_bytes(&refine.transformation).expect("a recorded order carries its transformation");
+    let task = order.description.unwrap_or_default();
+    assert!(task.contains(FINDINGS), "the repair lane is handed the finding it is repairing, got {task}");
 
     // The lap produces a new tree, which goes back through the compiler before
     // it reaches the judge again.

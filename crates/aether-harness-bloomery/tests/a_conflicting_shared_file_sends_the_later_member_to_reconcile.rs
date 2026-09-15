@@ -16,7 +16,7 @@
 use aether_bloomery::{BloomId, Fact, Outcome, StageId, Transformation, WorkpieceId};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
@@ -71,6 +71,13 @@ fn a_conflicting_shared_file_sends_the_later_member_to_reconcile() {
     let verifies = harness.await_orders(2);
     harness.upload_admitted(&passed(named(&verifies, FIRST)));
     harness.upload_admitted(&passed(named(&verifies, SECOND)));
+
+    // Both candidates clear the judge at the line's terminus (ADR-0221); it is
+    // the resolution that follows, not the green verify, that offers them to
+    // the fold.
+    let reviews = harness.await_orders(2);
+    harness.upload_admitted(&reviewed(named(&reviews, FIRST)));
+    harness.upload_admitted(&reviewed(named(&reviews, SECOND)));
 
     // The hunks overlap after all, so the later member's candidate does not
     // merge onto the tree the earlier one folded.

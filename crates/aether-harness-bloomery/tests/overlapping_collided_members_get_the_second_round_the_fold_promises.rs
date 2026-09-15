@@ -30,7 +30,7 @@ use aether_bloomery::{
 };
 use aether_chassis_bloomery::store::{OutstandingOrder, StoreBackend};
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
@@ -105,14 +105,18 @@ fn await_named(harness: &mut FixtureHarness, workpiece: &str, stage: StageId) ->
     }
 }
 
-/// Answer one member's authoring lap with a tree of its own, then pass the
-/// Verify it advances to.
+/// Answer one member's authoring lap with a tree of its own, then walk it
+/// through both gates the line ends in — the compiler, then the judge
+/// (ADR-0221).
 fn author_and_verify(harness: &mut FixtureHarness, bloom: BloomId, order: &OutstandingOrder, seed: u8) {
     let candidate = harness.seed_capture(bloom, &order.workpiece, digest(seed), digest(seed.wrapping_add(1)));
     harness.upload_admitted(&captured(order, candidate));
 
     let verify = await_named(harness, &order.workpiece, StageId::Verify);
     harness.upload_admitted(&passed(&verify));
+
+    let review = await_named(harness, &order.workpiece, StageId::Review);
+    harness.upload_admitted(&reviewed(&review));
 }
 
 #[test]
@@ -134,6 +138,13 @@ fn overlapping_collided_members_get_the_second_round_the_fold_promises() {
     let verifies = harness.await_orders(3);
     for workpiece in MEMBERS {
         harness.upload_admitted(&passed(named(&verifies, workpiece)));
+    }
+
+    // Each green candidate is judged before it is offered to the fold
+    // (ADR-0221); the collision below is between candidates that cleared both.
+    let reviews = harness.await_orders(3);
+    for workpiece in MEMBERS {
+        harness.upload_admitted(&reviewed(named(&reviews, workpiece)));
     }
 
     // The hunks really do overlap, so both later members collide with the fold

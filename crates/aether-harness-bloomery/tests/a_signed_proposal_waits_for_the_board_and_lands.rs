@@ -8,7 +8,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_bloomery::{BloomStatus, Outcome, StageId};
-use aether_harness_bloomery::{FixtureHarness, OperatorMove, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, OperatorMove, captured, digest, passed, reviewed};
 
 const MEMBER: &str = "wp-0";
 
@@ -47,6 +47,12 @@ fn a_signed_proposal_waits_for_the_board_and_lands() {
     let verify = harness.await_order();
     assert_eq!(verify.workpiece, MEMBER);
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
+
     harness.land_the_fold(bloom);
     assert_eq!(harness.bloom(bloom).status, BloomStatus::Landed);
     let member_head = harness.view().mainline;

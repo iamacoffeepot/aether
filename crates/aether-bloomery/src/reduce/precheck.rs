@@ -25,7 +25,13 @@ fn candidates_of(record: &BloomRecord) -> BTreeMap<WorkpieceId, CandidateRef> {
         let candidate = record
             .progress
             .get(&member.workpiece)
-            .filter(|progress| progress.stage == StageId::Verify)
+            // Either member gate: a candidate at `Verify` is one the compiler
+            // has yet to answer for and a candidate at `Review` is one it
+            // already passed (ADR-0221). Both are trees the speculative fold
+            // can stand on, and dropping the second would narrow the pre-check
+            // set to exactly the candidates with the *weaker* evidence behind
+            // them.
+            .filter(|progress| matches!(progress.stage, StageId::Verify | StageId::Review))
             .and_then(|progress| progress.candidate)
             .or_else(|| {
                 let claim = record.claims.get(&member.workpiece)?;
@@ -127,7 +133,7 @@ pub(super) fn initialized_effects(
                 candidates.insert(workpiece.clone(), *vehicle);
             }
             Decision::AdvanceStage { bloom: owner, workpiece, progress }
-                if *owner == bloom && progress.stage == StageId::Verify =>
+                if *owner == bloom && matches!(progress.stage, StageId::Verify | StageId::Review) =>
             {
                 if let Some(candidate) = progress.candidate {
                     candidates.insert(workpiece.clone(), candidate);

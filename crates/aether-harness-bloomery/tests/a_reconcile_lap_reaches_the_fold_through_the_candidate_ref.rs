@@ -24,7 +24,7 @@
 use aether_bloomery::{BloomStatus, StageId};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, passed, reviewed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
@@ -64,6 +64,12 @@ fn a_reconcile_lap_reaches_the_fold_through_the_candidate_ref() {
     let verifies = harness.await_orders(2);
     harness.upload_admitted(&passed(named(&verifies, FIRST)));
     harness.upload_admitted(&passed(named(&verifies, SECOND)));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves each member (ADR-0221).
+    let reviews = harness.await_orders(2);
+    harness.upload_admitted(&reviewed(named(&reviews, FIRST)));
+    harness.upload_admitted(&reviewed(named(&reviews, SECOND)));
 
     // The hunks overlap, so the later member's candidate does not merge onto the
     // tree the earlier one folded, and it takes an ADR-0189 lap.

@@ -12,7 +12,7 @@
 use aether_bloomery::{BloomStatus, Fact, Outcome, StageId, Transformation};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, member, passed};
+use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, member, passed, reviewed};
 
 const FIRST: &str = "wp-0";
 const SECOND: &str = "wp-1";
@@ -42,6 +42,10 @@ fn a_supersede_adopted_member_that_collides_reconciles_back_to_verify() {
     let verifies = harness.await_orders(2);
     harness.upload_admitted(&passed(named(&verifies, FIRST)));
     harness.upload_admitted(&passed(named(&verifies, SECOND)));
+
+    let reviews = harness.await_orders(2);
+    harness.upload_admitted(&reviewed(named(&reviews, FIRST)));
+    harness.upload_admitted(&reviewed(named(&reviews, SECOND)));
 
     // Same workpieces and scope revisions so claims inherit, but a distinct
     // approval detail so the successor spec is not the predecessor's content
@@ -85,6 +89,12 @@ fn a_supersede_adopted_member_that_collides_reconciles_back_to_verify() {
         "a completed Reconcile on an inherited claim returns to Verify, not Construct"
     );
     harness.upload_admitted(&passed(&next));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
+
     Oracle::check(&harness.view(), harness.doctor().as_ref(), &harness.outstanding())
         .unwrap_or_else(|violation| panic!("{violation}"));
 }

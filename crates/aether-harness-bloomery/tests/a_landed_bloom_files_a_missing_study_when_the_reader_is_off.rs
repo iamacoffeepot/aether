@@ -20,7 +20,7 @@
 #![allow(clippy::unwrap_used)]
 
 use aether_bloomery::BloomStatus;
-use aether_harness_bloomery::{FixtureHarness, captured, digest, passed};
+use aether_harness_bloomery::{FixtureHarness, captured, digest, passed, reviewed};
 
 const MEMBER: &str = "wp-0";
 
@@ -37,6 +37,11 @@ fn a_landed_bloom_files_a_missing_study_when_the_reader_is_off() {
 
     let verify = harness.await_order();
     harness.upload_admitted(&passed(&verify));
+
+    // The line's terminus: a green Verify advances to the judge, and it is the
+    // passing judgement that resolves the member (ADR-0221).
+    let member_review = harness.await_order();
+    harness.upload_admitted(&reviewed(&member_review));
 
     harness.land_the_fold(bloom);
 

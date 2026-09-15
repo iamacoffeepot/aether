@@ -22,7 +22,7 @@
 use aether_bloomery::{StageId, WorkpieceId};
 use aether_chassis_bloomery::store::OutstandingOrder;
 use aether_data::wire::from_bytes;
-use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, narrowed, passed};
+use aether_harness_bloomery::{FixtureHarness, Oracle, captured, digest, narrowed, passed, reviewed};
 
 /// The member that added the caller, in `xtask`.
 const CALLER: &str = "wp-0";
@@ -62,6 +62,12 @@ fn a_fold_two_candidates_refuse_narrows_to_a_composition_over_them() {
     let verifies = harness.await_orders(3);
     harness.upload_admitted(&passed(named(&verifies, CALLER)));
     harness.upload_admitted(&passed(named(&verifies, DEFINITION)));
+
+    // And each is judged before it folds (ADR-0221): the collision this
+    // scenario is about is between two candidates that cleared both gates.
+    let reviews = harness.await_orders(2);
+    harness.upload_admitted(&reviewed(named(&reviews, CALLER)));
+    harness.upload_admitted(&reviewed(named(&reviews, DEFINITION)));
 
     // The third member is verified on the fold that now holds both, and the
     // tree refuses to build. The diagnostic names two files, both of them in
