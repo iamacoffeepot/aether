@@ -330,6 +330,26 @@ pub struct BloomView {
     /// Optional shared verification and eager-head state.
     #[serde(default)]
     pub coordination: Option<CoordinationView>,
+    /// The admin session open on this bloom (ADR-0219). Absent when the
+    /// coordinator predates the field or nobody is inside the bloom.
+    #[serde(default)]
+    pub admin: Option<AdminSessionView>,
+    /// Verdict artifacts an operator voided on this bloom (ADR-0219). Absent
+    /// from an older coordinator and empty when nothing was waived; it outlives
+    /// the session, so a landed bloom still shows what a person stood in for.
+    #[serde(default)]
+    pub waivers: Vec<DigestHex>,
+}
+
+/// The open admin session on a bloom, when the coordinator serves it.
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct AdminSessionView {
+    #[serde(default)]
+    pub operator: String,
+    #[serde(default)]
+    pub reason: String,
+    #[serde(default)]
+    pub acts: u32,
 }
 
 /// Only the pre-check fields the board renders. The full state remains in the

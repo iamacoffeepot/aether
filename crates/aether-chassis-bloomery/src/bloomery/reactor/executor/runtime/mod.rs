@@ -46,10 +46,10 @@ use aether_actor::Addressable;
 use aether_actor::runtime;
 use aether_bloomery::{
     Admit, AdmitResult, AggregateReviewPayload, AggregateVerifyPayload, BaseVerifyPayload, BloomId,
-    CancelDispatchPayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch, Digest,
-    DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride, Nonce,
-    RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord, Topic,
-    VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
+    CancelDispatchPayload, CancelLanePayload, CandidateRef, ConfigRegistry, ConfigScopes, ContextualAttemptDispatch,
+    Digest, DispatchPayload, Event, ExecutionLimits, ExecutionStatus, Fact, LaneObservation, MemberPin, ModelOverride,
+    Nonce, RedispatchPayload, ReviewPass, SharedCorrespondence, SourceSnapshot, StageId, StageVerdict, TimeoutRecord,
+    Topic, VerifyFailureSet, WorkHandle, WorkpieceId, WorkpieceSize, normalize_write_paths, pin_workpiece_description,
     sized_wall_clock_secs,
 };
 use aether_bloomery_git::command;
@@ -717,6 +717,20 @@ fn drain_dispatch_topics(
         Ok(None) => {}
         Err(error) => {
             tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "cancel drain failed");
+        }
+    }
+    // Cancel the one lane an operator stopped from inside admin mode
+    // (ADR-0219), under the same discipline and for the same reason: a cancel
+    // starts nothing, so no handle is tracked and no backoff is folded.
+    match drain_and_cancel_lane(store, executor) {
+        Ok(Some(sequence)) => {
+            if let Err(error) = store.ack_topic(Topic::CancelLane, sequence) {
+                tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane cancel ack failed; entries re-drive");
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            tracing::warn!(target: "aether_chassis_bloomery::executor", %error, "lane cancel drain failed");
         }
     }
     // Replay the attempts whose parked questions were answered (#3664),
@@ -1506,6 +1520,78 @@ fn drain_and_cancel(store: &mut dyn StoreBackend, executor: &dyn ExecutorPort) -
         }
     }
     Ok(ack_through)
+}
+
+/// Drain [`Topic::CancelLane`] and cancel exactly the named nonce (ADR-0219).
+///
+/// The nonce-scoped sibling of [`drain_and_cancel`], and narrow on purpose: a
+/// withdrawal retires every order its member holds, while an admin cancellation
+/// stops one lap of a member that is staying, so cancelling the workpiece's
+/// other outstanding orders would be a withdrawal nobody asked for.
+///
+/// The resolved order is checked against the payload's workpiece before the
+/// kill. A nonce the operator read off a stale board can name an order that has
+/// since been consumed and re-minted for a sibling, and a cancel that trusted
+/// the nonce alone would stop that sibling's lane instead. A nonce that no
+/// longer resolves is acked rather than re-driven: the lap it named is already
+/// over, which is the outcome the operator asked for.
+///
+/// Returns the highest contiguously-processed outbox sequence to ack, under
+/// [`drain_and_cancel`]'s own policy — a decode failure or an unreached
+/// executor stops the prefix so the entry re-drains rather than leaving a lane
+/// burning.
+fn drain_and_cancel_lane(store: &mut dyn StoreBackend, executor: &dyn ExecutorPort) -> rusqlite::Result<Option<u64>> {
+    let entries = store.drain_topic(Topic::CancelLane)?;
+    let mut ack_through = None;
+    for entry in entries {
+        let Ok(payload) = from_bytes::<CancelLanePayload>(&entry.payload) else {
+            tracing::warn!(
+                target: "aether_chassis_bloomery::executor",
+                sequence = entry.sequence,
+                "lane cancel outbox entry did not decode; stopping the ack prefix to re-drain",
+            );
+            break;
+        };
+        match cancel_named_lane(store, executor, &payload, entry.sequence) {
+            Ok(()) => ack_through = Some(entry.sequence),
+            Err(CancelStop::Store(error)) => return Err(error),
+            Err(CancelStop::Unreached | CancelStop::InFlight) => break,
+        }
+    }
+    Ok(ack_through)
+}
+
+/// Cancel and consume the one order `payload` names, if it is still the order
+/// the operator saw.
+fn cancel_named_lane(
+    store: &mut dyn StoreBackend,
+    executor: &dyn ExecutorPort,
+    payload: &CancelLanePayload,
+    sequence: u64,
+) -> Result<(), CancelStop> {
+    let Some(order) = store.lookup_order(&payload.nonce).map_err(CancelStop::Store)? else {
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %payload.nonce,
+            "admin lane cancel named an order that is already gone; nothing to stop",
+        );
+        return Ok(());
+    };
+    let names_lane = DispatchRecord::from_stored(&order)
+        .is_some_and(|record| record.bloom.0 == payload.bloom && record.workpiece == payload.workpiece);
+    if !names_lane {
+        tracing::warn!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            nonce = %payload.nonce,
+            workpiece = %payload.workpiece.0,
+            "admin lane cancel named an order belonging to something else; refusing to stop it",
+        );
+        return Ok(());
+    }
+
+    cancel_and_consume_order(store, executor, &payload.nonce, sequence, &payload.workpiece.0)
 }
 
 /// Turn one sweep of the live construct lanes' working trees into admissible

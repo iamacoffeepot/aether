@@ -165,8 +165,25 @@ fn push_bloom_events(events: &mut Vec<NotifyEvent>, bloom: &BloomView) {
             ),
         ));
     }
-    if let Some(hold) = &bloom.operator_hold {
+    // The session leads the brake it raised. A bloom in admin mode is also
+    // held, so reporting only the hold would tell an operator the bloom is
+    // frozen and not that somebody is inside it moving its cursors — which is
+    // the one thing another operator needs to know before touching it. The act
+    // count is in the key, so each act is its own transition: an operator who
+    // was told the session opened is owed the news that it is still going.
+    if let Some(admin) = &bloom.admin {
+        events.push(NotifyEvent::loud(
+            format!("admin:{id}:{}", admin.acts),
+            format!("admin  bloom {id} is in admin mode ({}): {}", admin.operator, admin.reason),
+        ));
+    } else if let Some(hold) = &bloom.operator_hold {
         events.push(NotifyEvent::loud(format!("hold:{id}"), format!("hold  bloom {id} is frozen: {}", hold.reason)));
+    }
+    if !bloom.waivers.is_empty() {
+        events.push(NotifyEvent::loud(
+            format!("waiver:{id}:{}", bloom.waivers.len()),
+            format!("waiver  bloom {id} stands on {} operator-voided verdict(s)", bloom.waivers.len()),
+        ));
     }
     if let Some(composition) = &bloom.composition {
         if !composition.findings.is_empty() {

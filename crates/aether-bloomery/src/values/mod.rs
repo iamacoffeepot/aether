@@ -53,15 +53,17 @@ pub use admin::{
 };
 pub use adr::{ADR_SCHEMA, ADR_TRANSITION_SCHEMA, Adr, AdrStatus, AdrTransition, AdrValueError};
 pub use api::{
-    AdjudicateRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView, ArchiveRecordView,
-    BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView, CommissionApprovalView,
-    CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView, CommissionShowView,
-    CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView, CreateCommissionRequest,
-    DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView, DraftPatch, DraftView, DraftsView,
-    ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry, JournalView, MemberProjection, OutcomeView,
-    ProposeRequest, ReleaseAcceptedView, ReleaseRequest, ReopenCommissionRequest, RepairRequest, RetryRequest,
-    ReverifyBaseRequest, RevisionEvidence, ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest,
-    SupersedeRequest, SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
+    AdjudicateRequest, AdminCancelLaneRequest, AdminDropLapRequest, AdminRerunRequest, AdminSessionRequest,
+    AdminSetCandidateRequest, AdminWaiveRequest, AdrTouch, ArchiveFailureView, ArchiveListView, ArchivePassView,
+    ArchiveRecordView, BloomDispatchView, BloomDispatchesView, CancelCommissionRequest, ClaimRefView, ClaimsView,
+    CommissionApprovalView, CommissionCancelledView, CommissionCreatedView, CommissionHeadView, CommissionReopenedView,
+    CommissionShowView, CommissionsView, Completeness, CoordinatorLogEntry, CoordinatorLogsView,
+    CreateCommissionRequest, DEFAULT_HTTP_PORT, DispatchEvidenceView, DispatchFilePage, DispatchProcessView,
+    DraftPatch, DraftView, DraftsView, ErrorView, GrantRequest, HTTP_READ_TIMEOUT, HoldRequest, JournalEntry,
+    JournalView, MemberProjection, OutcomeView, ProposeRequest, ReleaseAcceptedView, ReleaseRequest,
+    ReopenCommissionRequest, RepairRequest, RetryRequest, ReverifyBaseRequest, RevisionEvidence,
+    ScopeRevisionWrittenView, ScopeRunOpenedView, ScopeRunRequest, SealRequest, SupersedeRequest,
+    SuppressionAnswerRequest, WithdrawRequest, WorkpiecesView, WriteRevisionRequest, http_success,
 };
 pub use approval::{
     ApprovalPolicy, ApprovalRule, SurfacePattern, Tier, TierVerdict, gate_widening, path_in_surface, surface_additions,
