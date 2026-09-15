@@ -2082,12 +2082,12 @@ fn drain_and_dispatch(
 
 /// Drain the aggregate-review topic and submit each entry through the executor
 /// under a bloom-level order record (ADR-0153): the `review.critic` lane run
-/// against the integrated head, its task context composed from the whole
+/// against the integrated head, its task context composed from the live
 /// membership's persisted work orders — the sealed intent the critic judges
 /// the integrated diff against. Same ack-prefix / park / backoff semantics as
 /// [`drain_and_dispatch`]; the returned handles ride the same intake cycle,
 /// and the intake routes the verdict by the record's `AggregateReview` stage.
-/// Compose the aggregate-review task prompt (ADR-0153): the whole membership's
+/// Compose the aggregate-review task prompt (ADR-0153): the live membership's
 /// persisted work orders — the sealed intent the critic judges the integrated
 /// diff against — plus the roll's framing. The first roll instructs the
 /// attribution convention the findings decomposition parses back (each finding
@@ -2102,12 +2102,12 @@ fn compose_aggregate_task(
 ) -> rusqlite::Result<Option<String>> {
     use core::fmt::Write;
 
-    let orders = store.list_dispatch_descriptions(payload.bloom.as_bytes())?;
+    let orders = live_member_orders(store, payload.bloom.as_bytes(), sequence)?;
     if orders.is_empty() {
         tracing::warn!(
             target: "aether_chassis_bloomery::executor",
             sequence,
-            "no work-order descriptions persisted for the reviewed bloom; assembling a subject-only prompt",
+            "no live work-order descriptions for the reviewed bloom; assembling a subject-only prompt",
         );
     }
     let frozen = if matches!(payload.pass, ReviewPass::DeltaConfirm) {
@@ -2154,6 +2154,43 @@ fn compose_aggregate_task(
         }
     }
     Ok(Some(task))
+}
+
+/// The bloom's *live* members' work orders: the persisted roster minus every
+/// member an operator withdrew while the bloom walked (#5327).
+///
+/// A `dispatch_description` row is written when a member is first dispatched
+/// and never removed, so the roster names the sealed membership rather than
+/// what the composed tree carries. A withdrawn member produced no claim and
+/// contributed no candidate to the fold, so rendering its order as a `## Task`
+/// section asks the critic for a verdict on work that is provably absent — and
+/// the critic answers the only way it can, by failing the composition for
+/// orders that were never in it (bloom 0f16e207 failed on three).
+///
+/// `active_membership` is the live set: the withdrawal's `ReleaseMembership`
+/// deletes that one member's row while the bloom keeps walking, and nothing
+/// else removes one before the land releases them all. The drain has already
+/// established that this bloom holds membership, so an empty answer here means
+/// the members left, not an unpopulated table.
+fn live_member_orders(
+    store: &mut dyn StoreBackend,
+    bloom: &[u8],
+    sequence: u64,
+) -> rusqlite::Result<Vec<(String, String)>> {
+    let mut live = Vec::new();
+    for (workpiece, description) in store.list_dispatch_descriptions(bloom)? {
+        if store.holds_member_membership(bloom, &workpiece)? {
+            live.push((workpiece, description));
+            continue;
+        }
+        tracing::info!(
+            target: "aether_chassis_bloomery::executor",
+            sequence,
+            workpiece = workpiece.as_str(),
+            "member left the bloom before the fold; its work order is not an obligation of the composed tree",
+        );
+    }
+    Ok(live)
 }
 
 fn drain_and_dispatch_aggregate(

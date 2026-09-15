@@ -344,10 +344,21 @@ fn unreadable(address: Digest, why: &str) -> PipelineManifest {
 }
 
 /// Decompose a failing aggregate verdict's findings against the bloom's
-/// persisted work-order roster — exactly the workpiece ids the critic's
-/// `## Task — {workpiece}` prompt sections named, so the tag vocabulary is
-/// self-consistent with what the critic was shown. `None` for a passing
+/// persisted work-order roster — the workpiece ids the critic's
+/// `## Task — {workpiece}` prompt sections named. `None` for a passing
 /// verdict or one carrying no findings.
+///
+/// The roster is deliberately the *whole* persisted one, including members an
+/// operator withdrew, even though the prompt now renders only the live ones
+/// (`live_member_orders`). The two are not the same question. This one is
+/// vocabulary: a tag the roster does not know leaves its block unattributed,
+/// which makes the decomposition incomplete and empties the implication — and
+/// an empty implication is the fail-closed over-route the reducer answers by
+/// refusing nothing and re-weaving the whole seam. Keeping a withdrawn id
+/// readable here means a stale in-flight verdict that still names one arrives
+/// at the reducer *labelled*, which is what lets the reducer drop it as a
+/// judgment about work the fold never carried (bloom 0f16e207). Attribution
+/// here, routing there.
 fn aggregate_decomposition(
     store: &mut dyn StoreBackend,
     record: &DispatchRecord,
