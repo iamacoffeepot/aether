@@ -26,9 +26,9 @@ use alloc::vec::Vec;
 use serde::{Deserialize, Serialize};
 
 use crate::digest::Digest;
-use crate::ids::BloomId;
+use crate::ids::{BloomId, StageId};
 use crate::reduce::Snapshot;
-use crate::values::{EvidenceKind, Forecast, StudyRecord};
+use crate::values::{DispatchKey, EvidenceKind, Forecast, StudyRecord, WithdrawalCause};
 
 /// A forecast grade for one bloom: the token and worker-second actuals summed
 /// from its admitted study records, the retry actual read off its dispatch ledger,
@@ -70,6 +70,28 @@ pub struct BloomGrade {
     pub worker_secs_delta: i64,
     /// `actual_retries − predicted_retries` (positive overshot the forecast).
     pub retries_delta: i64,
+    /// The bloom's sealed members whose work was actually judged — the
+    /// denominator of the send-back rate.
+    ///
+    /// Counted off the sealed member list rather than off the dispatch ledger,
+    /// so a member that never dispatched at all still sits in the denominator; a
+    /// member withdrawn for a cause other than its own verdict is dropped from
+    /// it, because its work was never judged. The synthetic composition
+    /// workpiece is not a sealed member and is on neither side. See
+    /// [`send_back_counts`].
+    #[serde(default)]
+    pub graded_members: u32,
+    /// How many of [`graded_members`](Self::graded_members) had their work
+    /// refused — sent back for a repair lap under the `Refine` disposition, or
+    /// withdrawn on their own red verdict under `Eject`. See
+    /// [`send_back_counts`] for how each is recognized.
+    ///
+    /// The send-back rate is this over `graded_members`. Both halves are counts
+    /// rather than a ratio because a [`BloomGrade`] is `Eq` and
+    /// content-addressable, which a float is not — and because the numerator and
+    /// the denominator answer different questions on their own.
+    #[serde(default)]
+    pub sent_back_members: u32,
 }
 
 /// The signed over/under delta `actual − predicted`, computed on the unsigned
@@ -83,6 +105,53 @@ fn delta(actual: u64, predicted: u64) -> i64 {
     } else {
         -i64::try_from(predicted - actual).unwrap_or(i64::MAX)
     }
+}
+
+/// `(graded_members, sent_back_members)` for one bloom — the two halves of its
+/// send-back rate.
+///
+/// Both halves walk the sealed member list, so the composition workpiece is on
+/// neither side: it is not a member, and a seam repair is not a member's work
+/// coming back. The denominator drops a member withdrawn for a cause other than
+/// its own verdict — an operator's call, or an ancestor's withdrawal stranding
+/// it — because that member's work was never judged, and counting it would read
+/// a cancelled bloom as a bloom whose work was good.
+///
+/// The numerator has to recognize both sealed dispositions of a red verify
+/// (`RedVerify`), because they leave different traces and a fold that knew only
+/// one would report zero for every bloom sealed on the other:
+///
+/// - Under `Refine` the member re-enters that stage, which it reaches by no
+///   other road, so its slot appears in the dispatch ledger keyed at `Refine`.
+///   The ledger is the right witness rather than the member's own cursor: it is
+///   journal-derived, nothing inside a bloom's life clears it, and a grant or a
+///   stage advance rewinds the cursor (ADR-0180).
+/// - Under `Eject` — the default — there is no repair lap at all: the member
+///   withdraws carrying `WithdrawalCause::Verify` (ADR-0218 §Amendment: low
+///   tolerance).
+///
+/// A member counts once either way, however many laps it then spends.
+/// [`actual_retries`](BloomGrade::actual_retries) already measures how often
+/// work came back; this measures how much of it did.
+fn send_back_counts(record: &crate::BloomRecord) -> (u32, u32) {
+    let judged = || {
+        record.spec.members().iter().filter(|member| {
+            record.withdrawn.get(&member.workpiece).is_none_or(|withdrawal| withdrawal.cause == WithdrawalCause::Verify)
+        })
+    };
+    let sent_back = judged()
+        .filter(|member| {
+            record
+                .dispatches
+                .contains_key(&DispatchKey::Member { workpiece: member.workpiece.clone(), stage: StageId::Refine })
+                || record
+                    .withdrawn
+                    .get(&member.workpiece)
+                    .is_some_and(|withdrawal| withdrawal.cause == WithdrawalCause::Verify)
+        })
+        .count();
+
+    (u32::try_from(judged().count()).unwrap_or(u32::MAX), u32::try_from(sent_back).unwrap_or(u32::MAX))
 }
 
 /// The per-bloom forecast grade for every bloom the snapshot knows.
@@ -141,6 +210,7 @@ pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord
             // once contributes nothing (ADR-0180).
             let actual_retries =
                 record.dispatches.values().fold(0u32, |retries, count| retries.saturating_add(count.saturating_sub(1)));
+            let (graded_members, sent_back_members) = send_back_counts(record);
             BloomGrade {
                 bloom: *id,
                 forecast,
@@ -150,6 +220,8 @@ pub fn grade(snapshot: &Snapshot, source: impl Fn(&Digest) -> Option<StudyRecord
                 token_delta: delta(actual_tokens, forecast.predicted_tokens),
                 worker_secs_delta: delta(actual_worker_secs, forecast.predicted_worker_secs),
                 retries_delta: i64::from(actual_retries) - i64::from(forecast.predicted_retries),
+                graded_members,
+                sent_back_members,
             }
         })
         .collect();

@@ -14,12 +14,16 @@
 mod common;
 
 use std::collections::BTreeMap;
+use std::iter::once;
 
 use aether_bloomery::{
-    BloomId, Digest, Evidence, EvidenceKind, Fact, Forecast, Membership, Snapshot, StageId, StudyCost, StudyRecord,
-    grade,
+    BloomDraft, BloomId, CandidateRef, CoordinationPolicy, Digest, DispatchKey, Event, Evidence, EvidenceKind, Fact,
+    Forecast, Membership, RedVerify, ResolvedConfigs, Snapshot, SpendWindow, StageId, StudyCost, StudyRecord,
+    VerifyFailure, WithdrawalCause, config_address, grade, reduce,
 };
-use common::{digest, draft, event, membership, step, workpiece};
+use aether_data::Kind;
+use aether_data::wire::to_vec;
+use common::{compiled_manifest, digest, draft, event, membership, step, workpiece};
 
 /// A study record carrying the graded cost columns, bound to the given bloom
 /// and subject.
@@ -201,4 +205,133 @@ fn unresolvable_study_artifacts_leave_the_ledger_retries_standing() {
         "nothing resolved, so no tokens or worker seconds"
     );
     assert_eq!(graded.actual_retries, 1, "the one re-dispatch stands, independent of how many records were logged");
+}
+
+/// Complete one member's attempt at `stage`, capturing `candidate` — the
+/// terminal-Verify cursor a failing verdict needs a tree to bind against.
+fn captured(bloom: BloomId, member: &str, stage: StageId, tree: u8, detail: u8) -> Fact {
+    Fact::AttemptCompleted {
+        bloom,
+        workpiece: workpiece(member),
+        stage,
+        passed: true,
+        evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(detail) },
+        candidate: Some(CandidateRef { tree: digest(tree), checkout: digest(tree + 1) }),
+    }
+}
+
+/// A failing terminal-Verify verdict over `member`'s captured tree.
+fn verify_failed(bloom: BloomId, member: &str, tree: u8, detail: u8) -> Fact {
+    Fact::VerifyFailed {
+        bloom,
+        workpiece: workpiece(member),
+        evidence: Evidence { subject: digest(tree), kind: EvidenceKind::VerificationResult, detail: digest(detail) },
+        failed_verifiers: once(VerifyFailure::Clippy).collect(),
+        findings: String::new(),
+    }
+}
+
+/// Seal a bloom whose sealed [`CoordinationPolicy`] repairs a red verify rather
+/// than ejecting on it, with the [`ResolvedConfigs`] that produce it.
+///
+/// `Eject` is the default disposition (ADR-0218 §Amendment: low tolerance), so
+/// a bloom that re-enters `Refine` at all is one that sealed the policy — which
+/// means the resolved registry has to carry it, and `step` cannot: it resolves
+/// the compiled vocabulary and nothing else.
+fn sealed_refining(members: Vec<Membership>) -> (Snapshot, BloomId, ResolvedConfigs) {
+    let (mut configs, mut resolved) = compiled_manifest();
+    let policy = CoordinationPolicy {
+        red_verify: RedVerify::Refine,
+        max_run_members: 1,
+        max_serial_requests: 1,
+        host_class: String::from("study-report-test"),
+        ..CoordinationPolicy::default()
+    };
+    let bytes = to_vec(&policy).expect("the policy encodes");
+    let address = config_address(CoordinationPolicy::NAME, &bytes);
+    configs.insert::<CoordinationPolicy>(address);
+    resolved.insert(address, CoordinationPolicy::NAME, bytes, None);
+
+    let spec = BloomDraft { proposals: members, base: digest(1), configs, ..BloomDraft::default() }.seal();
+    let bloom = spec.id();
+    let snapshot =
+        step_with(&Snapshot::new(digest(1)).with_green_base(digest(1)), &event("seal", Fact::Seal(spec)), &resolved);
+    (snapshot, bloom, resolved)
+}
+
+/// `step`, over a registry this test sealed rather than the compiled one.
+fn step_with(snapshot: &Snapshot, event: &Event, resolved: &ResolvedConfigs) -> Snapshot {
+    let decisions = reduce(snapshot, event, resolved, &SpendWindow::default());
+    snapshot.apply(event, &decisions, resolved)
+}
+
+// The send-back axis (#6068) under the default `Eject` disposition: a member
+// whose terminal Verify comes back red withdraws carrying
+// `WithdrawalCause::Verify`, and that withdrawal is what marks it as sent back.
+// The member that captured a candidate and was never refused is not.
+//
+// The denominator is the members whose work was *judged*, which is why the
+// ejected member stays in it: dropping every withdrawn member — the filter the
+// three resolution folds in `reduce::integrate` use, and the obvious one to
+// copy — makes the numerator and the denominator move together and reports this
+// bloom as 0 of 1 clean.
+#[test]
+fn an_ejected_member_is_counted_as_sent_back_and_stays_in_the_denominator() {
+    let (snapshot, bloom) = sealed_with(Forecast::default(), vec![membership("wp-a", 10), membership("wp-b", 11)]);
+
+    let mut snapshot = step(&snapshot, &event("construct-a", captured(bloom, "wp-a", StageId::Construct, 100, 90))).0;
+    snapshot = step(&snapshot, &event("verify-a-red", verify_failed(bloom, "wp-a", 100, 91))).0;
+    snapshot = step(&snapshot, &event("construct-b", captured(bloom, "wp-b", StageId::Construct, 110, 94))).0;
+
+    let record = snapshot.blooms.get(&bloom).expect("the sealed bloom is in the snapshot");
+    assert_eq!(
+        record.withdrawn.get(&workpiece("wp-a")).map(|withdrawal| withdrawal.cause.clone()),
+        Some(WithdrawalCause::Verify),
+        "the default disposition ejects on red, so this is the trace the numerator has to read",
+    );
+
+    let graded = grade(&snapshot, |_: &Digest| None).blooms[0];
+    assert_eq!(graded.graded_members, 2, "the ejected member's work was judged, so it stays in the denominator");
+    assert_eq!(graded.sent_back_members, 1, "the ejection is the send-back; the untouched member is not one");
+}
+
+// The same axis under the `Refine` disposition, which leaves an entirely
+// different trace: no withdrawal at all, and a `Refine` slot in the dispatch
+// ledger instead.
+//
+// Tripwire for the shape this axis must not take. `actual_retries`, computed
+// three lines above it in the same fold, sums the ledger's values — and summing
+// them here reports 2 for the one member that spent two repair laps. The second
+// red verify is in the fixture for exactly that reason: the numerator counts
+// members whose work came back, never the laps they then spent, which is the
+// axis `actual_retries` already owns.
+#[test]
+fn a_refined_member_counts_once_however_many_repair_laps_it_spends() {
+    let (snapshot, bloom, resolved) = sealed_refining(vec![membership("wp-a", 10), membership("wp-b", 11)]);
+
+    let mut snapshot =
+        step_with(&snapshot, &event("construct-a", captured(bloom, "wp-a", StageId::Construct, 100, 90)), &resolved);
+    snapshot = step_with(&snapshot, &event("verify-a-red", verify_failed(bloom, "wp-a", 100, 91)), &resolved);
+    snapshot = step_with(&snapshot, &event("refine-a", captured(bloom, "wp-a", StageId::Refine, 102, 92)), &resolved);
+    snapshot = step_with(&snapshot, &event("verify-a-red-2", verify_failed(bloom, "wp-a", 102, 93)), &resolved);
+    snapshot =
+        step_with(&snapshot, &event("construct-b", captured(bloom, "wp-b", StageId::Construct, 110, 94)), &resolved);
+
+    let record = snapshot.blooms.get(&bloom).expect("the sealed bloom is in the snapshot");
+    assert!(record.withdrawn.is_empty(), "the Refine disposition repairs rather than ejects, so nothing withdrew");
+    assert!(
+        record
+            .dispatches
+            .get(&DispatchKey::Member { workpiece: workpiece("wp-a"), stage: StageId::Refine })
+            .is_some_and(|laps| *laps > 1),
+        "the fixture has to spend more than one repair lap or it cannot tell a member count from a lap count: {:?}",
+        record.dispatches,
+    );
+
+    let graded = grade(&snapshot, |_: &Digest| None).blooms[0];
+    assert_eq!(graded.graded_members, 2, "both members are live and judged");
+    assert_eq!(
+        graded.sent_back_members, 1,
+        "one member's work came back, twice over; the numerator counts members refused, not the laps they spent",
+    );
 }
