@@ -38,6 +38,7 @@ pub use projection::{
     CompositionView, ExecutorFaultView, HostFaultView, LandingBlock, LeaseEvictionView, LeaseView, MAX_TITLE_CHARS,
     MemberView, MemberWhy, NarrowedCompositionView, PendingDecisionView, ProjectedReceipt, ProjectionBackend,
     ReviewParkView, TransitionWhy, ViewDocument, WedgeCause, WhyDocument, WhyState, WithdrawnView, intent_title,
+    readable_title,
 };
 pub use row::{POSITIONAL_ROW_SCHEMA, RowSchemaError, decode_row, encode_row};
 pub use source::{

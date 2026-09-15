@@ -22,7 +22,7 @@
 //! surprise: the whole point of a content address is that both ends compute the
 //! same one.
 
-mod bundle;
+pub mod bundle;
 
 use std::fs;
 use std::path::PathBuf;
@@ -94,5 +94,65 @@ pub fn run(client: &Client<'_>, args: &InstructionsArgs) -> Result<String> {
          coordinator; seal blooms that pin it (ADR-0214)"
             .to_owned(),
     );
-    Ok(lines.join("\n"))
+    // Every printed line ends with a newline, the last one included: without it
+    // the next line a script writes lands on the same line and an anchored
+    // grep misses a successful record.
+    Ok(format!("{}\n", lines.join("\n")))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::env;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::process;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use aether_bloomery::ModelProcessInstructions;
+    use aether_data::Kind;
+
+    use super::{InstructionsArgs, run};
+    use crate::bloom::Endpoint;
+    use crate::bloom::client::Client;
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    fn scratch_out() -> PathBuf {
+        env::temp_dir().join(format!(
+            "aether-instructions-out-{}-{}",
+            process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
+
+    // `record` stays off, so the client never sends a request and the port is unreached.
+    fn assemble(out: Option<PathBuf>) -> String {
+        let endpoint = Endpoint { host: "127.0.0.1".to_owned(), port: 1, token: None };
+        let client = Client::new(&endpoint);
+        run(&client, &InstructionsArgs { out, record: false }).expect("the checked-in bundle assembles")
+    }
+
+    // A record that printed its last line without a trailing newline broke an
+    // anchored build-log grep on a success. The join already separates interior
+    // lines; this pins the final one.
+    #[test]
+    fn every_printed_line_ends_with_a_newline() {
+        let output = assemble(None);
+
+        assert!(output.ends_with('\n'), "the last line ends with a newline: {output:?}");
+        assert!(!output.ends_with("\n\n"), "no extra blank line: {output:?}");
+    }
+
+    // Same pin through `--out`: the body is written and the printed lines —
+    // the address line and the `wrote` line — still end with a newline each.
+    #[test]
+    fn out_still_ends_with_a_newline() {
+        let path = scratch_out();
+        let output = assemble(Some(path.clone()));
+        let body = fs::read_to_string(&path).expect("the POST body is written");
+        let _ = fs::remove_file(&path);
+
+        assert!(output.ends_with('\n'), "the last line ends with a newline: {output:?}");
+        assert!(body.contains(ModelProcessInstructions::NAME), "the written body names the bundle kind");
+    }
 }

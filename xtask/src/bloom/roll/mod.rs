@@ -21,7 +21,9 @@ mod shell;
 mod sync;
 
 use std::env;
+use std::fmt::Write as _;
 
+use aether_bloomery::ConfigKind;
 use aether_bloomery_git::DayCoverage;
 use anyhow::{Result, anyhow, bail};
 use clap::Args;
@@ -30,6 +32,7 @@ use self::day::Day;
 use self::shell::{Repo, Shell};
 use crate::bloom::client::Client;
 use crate::bloom::dto::ViewDocument;
+use crate::bloom::instructions::bundle;
 
 /// The branch the day syncs back onto. Bloomery's mainline moves day to day;
 /// what it returns to does not.
@@ -38,6 +41,11 @@ const MAIN: &str = "main";
 /// The coordinator's own setting for the fleet repository, and the roll's
 /// fallback when `--repo` names none.
 const AUTHORITY_REPO: &str = "AETHER_BLOOMERY_AUTHORITY_REPO";
+
+/// The coordinator's own setting for the instruction bundles it authorizes as
+/// model-process policy (ADR-0214), which the hand-off compares the freshly
+/// assembled bundle address against.
+const AUTHORIZED_INSTRUCTIONS: &str = "AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS";
 
 /// Drive one ADR-0186 day roll.
 #[derive(Args, Debug)]
@@ -79,12 +87,27 @@ pub fn run(client: &Client<'_>, args: &RollArgs) -> Result<String> {
 }
 
 fn roll(view: &ViewDocument, shell: &impl Shell, coverage: &DayCoverage, args: &RollArgs) -> Result<String> {
+    roll_with_authorization(view, shell, coverage, args, configured_authorized_instructions().as_deref())
+}
+
+/// The roll pipeline with the operator's authorized-bundle knob supplied by the
+/// caller, so tests drive each hand-off shape with an explicit value instead
+/// of process environment.
+fn roll_with_authorization(
+    view: &ViewDocument,
+    shell: &impl Shell,
+    coverage: &DayCoverage,
+    args: &RollArgs,
+    authorized: Option<&str>,
+) -> Result<String> {
     let from = sync_from(&args.from)?;
     let repo = Repo::new(authority_repo(args.repo.as_deref(), configured_authority_repo())?);
     preconditions::screen(view, shell, &repo, &args.date, &args.remote)?;
     let synced = sync::merge(shell, &repo, &args.remote, &from, coverage, args.replay)?;
     cut::create(shell, &repo, &args.remote, &args.date)?;
-    Ok(handoff(&args.date, &synced))
+    // After the screen, never before: resolving the bundle reads the checkout
+    // but writes nothing, and a refused roll must not have moved anything.
+    Ok(handoff(&args.date, &synced, authorized, &bundle_address_hex()))
 }
 
 /// The fleet repository every roll `git` runs against, from `--repo` or the
@@ -113,6 +136,32 @@ fn configured_authority_repo() -> Option<String> {
     env::var(AUTHORITY_REPO).ok().map(|path| path.trim().to_owned()).filter(|path| !path.is_empty())
 }
 
+/// `AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS`, or nothing.
+///
+/// Operator tooling reading the coordinator's own authorized-bundle setting, the way
+/// `configured_authority_repo` reads its repository setting — not cap config,
+/// which is what `clippy.toml` disallows the direct read to protect.
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: xtask reads the coordinator's own repository setting; not cap config
+fn configured_authorized_instructions() -> Option<String> {
+    env::var(AUTHORIZED_INSTRUCTIONS).ok().map(|value| value.trim().to_owned()).filter(|value| !value.is_empty())
+}
+
+/// The content address of the instruction bundle assembled from this checkout's
+/// own instruction sources — the same [`bundle::imported`] and address the
+/// `instructions` verb prints, so the hand-off compares what the operator would
+/// record against what the coordinator authorizes.
+fn bundle_address_hex() -> String {
+    bundle::imported().address().to_hex()
+}
+
+/// Whether the operator's authorized-bundle knob already names `bundle_hex`.
+///
+/// The knob is a comma-separated list so a rotation can authorize the outgoing
+/// and incoming bundles at once; naming the bundle anywhere in the list counts.
+fn authorizes_bundle(authorized: &str, bundle_hex: &str) -> bool {
+    authorized.split(',').map(str::trim).any(|entry| entry == bundle_hex)
+}
+
 /// The day branch the sync-back runs from, normalized to the bare branch name
 /// `git` takes.
 ///
@@ -130,16 +179,31 @@ fn sync_from(named: &str) -> Result<String> {
     Ok(branch.strip_prefix("heads/").unwrap_or(branch).to_owned())
 }
 
-/// The two steps the command cannot perform, printed verbatim.
+/// The steps the command cannot perform, printed verbatim.
 ///
 /// The mainline ref is boot configuration on the host, outside this repository
 /// and outside this process, so the roll ends by handing the operator the exact
-/// line to set rather than editing an environment file it does not own.
-fn handoff(day: &Day, synced: &str) -> String {
-    format!(
+/// lines to set rather than editing an environment file it does not own.
+///
+/// The sewn batch can move the instruction-bundle address, so the hand-off
+/// compares the freshly assembled bundle against the operator's
+/// `AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS`: a knob naming another address
+/// gains a third step — re-record the bundle and repoint before the restart,
+/// or the deploy leaves every model dispatch refusing — while an unset knob
+/// gains a one-line notice printing the address. A knob that already names the
+/// bundle changes nothing.
+fn handoff(day: &Day, synced: &str, authorized: Option<&str>, bundle_hex: &str) -> String {
+    let authorized = authorized.map(str::trim).filter(|value| !value.is_empty());
+    let stale = authorized.is_some_and(|value| !authorizes_bundle(value, bundle_hex));
+    let steps = if stale {
+        "three"
+    } else {
+        "two"
+    };
+    let mut handoff = format!(
         "synced the day onto main as {synced} and rolled onto {branch}.\n\
          \n\
-         two steps stay host-side, because the coordinator's mainline ref is boot configuration\n\
+         {steps} steps stay host-side, because the coordinator's mainline ref is boot configuration\n\
          outside this repository:\n\
          \n\
          \x20 1. repoint the coordinator's boot environment:\n\
@@ -151,7 +215,26 @@ fn handoff(day: &Day, synced: &str) -> String {
          \x20    CARGO_TARGET_DIR leaves the unit on yesterday's binary and says nothing.\n",
         branch = day.branch(),
         mainline_ref = day.mainline_ref(),
-    )
+    );
+
+    if stale {
+        let _ = write!(
+            handoff,
+            "\n\
+             \x20 3. re-record the moved instruction bundle and repoint its authorization before the restart:\n\
+             \n\
+             \x20      cargo xtask bloom instructions --record\n\
+             \x20      AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS={bundle_hex}\n"
+        );
+    } else if authorized.is_none() {
+        let _ = write!(
+            handoff,
+            "\n\
+             notice: AETHER_BLOOMERY_AUTHORIZED_INSTRUCTIONS is unset; the instruction bundle at {bundle_hex} stays \
+             unauthorized until it is recorded and named there.\n"
+        );
+    }
+    handoff
 }
 
 #[cfg(test)]
@@ -162,9 +245,39 @@ mod tests {
     use super::shell::fake::Fake;
     use aether_bloomery_git::DayCoverage;
 
-    use super::{AUTHORITY_REPO, Day, RollArgs, authority_repo, roll, sync_from};
+    use super::{
+        AUTHORITY_REPO, AUTHORIZED_INSTRUCTIONS, Day, RollArgs, authority_repo, bundle_address_hex,
+        roll_with_authorization, sync_from,
+    };
     use crate::bloom::dto::{ViewDocument, test_bloom, test_member, test_view};
     use aether_bloomery::Digest;
+
+    /// Roll a drained day with the operator's authorized-bundle knob reading as
+    /// `authorized`.
+    fn drained_roll(authorized: Option<&str>) -> String {
+        roll_with_authorization(
+            &drained_view(),
+            &green(),
+            &DayCoverage::green(),
+            &args("bloomery/daily/2026-08-14"),
+            authorized,
+        )
+        .expect("a drained day rolls")
+    }
+
+    /// A knob value that names any address but the bundle's: the real address
+    /// with its first nibble flipped.
+    fn other_address(bundle_hex: &str) -> String {
+        let (first, rest) = bundle_hex.split_at(1);
+        format!(
+            "{}{rest}",
+            if first == "0" {
+                "1"
+            } else {
+                "0"
+            }
+        )
+    }
 
     fn drained_view() -> ViewDocument {
         test_view(
@@ -205,8 +318,14 @@ mod tests {
     fn a_green_roll_advances_fleet_main_before_it_cuts_tomorrow() {
         let shell = green();
 
-        roll(&drained_view(), &shell, &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
-            .expect("a drained day rolls");
+        roll_with_authorization(
+            &drained_view(),
+            &shell,
+            &DayCoverage::green(),
+            &args("bloomery/daily/2026-08-14"),
+            None,
+        )
+        .expect("a drained day rolls");
 
         let calls = shell.calls();
         let advanced = calls.iter().position(|line| line.contains("update-ref")).expect("the day advances onto main");
@@ -226,14 +345,72 @@ mod tests {
     // ref for a day.
     #[test]
     fn the_handoff_prints_the_repoint_line_verbatim() {
-        let handoff = roll(&drained_view(), &green(), &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
-            .expect("a drained day rolls");
+        let handoff = drained_roll(None);
 
         assert!(
             handoff.contains("AETHER_BLOOMERY_MAINLINE_REF=refs/heads/bloomery/daily/2026-08-15"),
             "the repoint line is pasteable: {handoff}"
         );
         assert!(handoff.contains("restart"), "the restart is named rather than skipped: {handoff}");
+    }
+
+    // A knob that already names this bundle changes nothing: the hand-off is
+    // the two host-side steps, with no instruction-bundle aside. The knob is a
+    // comma-separated list, so a rotation naming the bundle alongside the
+    // outgoing one counts as naming it.
+    #[test]
+    fn the_handoff_stays_two_steps_when_the_knob_names_this_bundle() {
+        let bundle_hex = bundle_address_hex();
+        let rotated = format!("{},{}", other_address(&bundle_hex), bundle_hex);
+
+        for authorized in [bundle_hex, rotated] {
+            let handoff = drained_roll(Some(&authorized));
+
+            assert!(handoff.contains("two steps stay host-side"), "still two steps: {handoff}");
+            assert!(
+                handoff.contains("AETHER_BLOOMERY_MAINLINE_REF=refs/heads/bloomery/daily/2026-08-15"),
+                "the repoint line is pasteable: {handoff}"
+            );
+            assert!(
+                !handoff.contains(AUTHORIZED_INSTRUCTIONS),
+                "no bundle aside when the knob already names it: {handoff}"
+            );
+        }
+    }
+
+    // Tripwire: the sewn batch moves the bundle address, and a deploy that
+    // follows a hand-off naming only the mainline repoint leaves the
+    // authorization on the old address, refusing every model dispatch. A knob
+    // naming another address gains the re-record as a third step, before the
+    // restart.
+    #[test]
+    fn the_handoff_adds_a_record_step_when_the_knob_names_another_bundle() {
+        let bundle_hex = bundle_address_hex();
+        let handoff = drained_roll(Some(&other_address(&bundle_hex)));
+
+        assert!(handoff.contains("three steps stay host-side"), "the third step is counted: {handoff}");
+        assert!(handoff.contains("cargo xtask bloom instructions --record"), "the re-record is named: {handoff}");
+        assert!(
+            handoff.contains(&format!("{AUTHORIZED_INSTRUCTIONS}={bundle_hex}")),
+            "the new address is printed pasteable: {handoff}"
+        );
+        assert!(handoff.contains("restart"), "the restart still follows the repoint: {handoff}");
+    }
+
+    // An unset knob cannot be stale, but the operator still needs the address
+    // the sewn batch moved to: a one-line notice prints it.
+    #[test]
+    fn the_handoff_notices_an_unset_authorization_with_the_bundle_address() {
+        let handoff = drained_roll(None);
+        let bundle_hex = bundle_address_hex();
+
+        assert!(handoff.contains("two steps stay host-side"), "still two steps: {handoff}");
+        assert!(handoff.contains(AUTHORIZED_INSTRUCTIONS), "the knob is named even when unset: {handoff}");
+        assert!(handoff.contains(&bundle_hex), "the bundle address is printed: {handoff}");
+        assert!(
+            handoff.lines().any(|line| line.contains(AUTHORIZED_INSTRUCTIONS) && line.contains(&bundle_hex)),
+            "the notice is one line: {handoff}"
+        );
     }
 
     // Tripwire: a refused roll has moved nothing. The screen runs against the
@@ -247,7 +424,7 @@ mod tests {
         view.blooms[0].status = BloomStatus::Sealed;
         let shell = green();
 
-        roll(&view, &shell, &DayCoverage::green(), &args("bloomery/daily/2026-08-14"))
+        roll_with_authorization(&view, &shell, &DayCoverage::green(), &args("bloomery/daily/2026-08-14"), None)
             .expect_err("an undrained day is refused");
 
         let calls = shell.calls();
@@ -263,11 +440,12 @@ mod tests {
     fn a_held_coverage_map_is_a_nonzero_refusal() {
         let shell = green();
 
-        let refusal = roll(
+        let refusal = roll_with_authorization(
             &drained_view(),
             &shell,
             &DayCoverage::hold("red test crate::day_head"),
             &args("bloomery/daily/2026-08-14"),
+            None,
         )
         .expect_err("a non-green map refuses the roll")
         .to_string();

@@ -270,6 +270,7 @@ pub use port::WorkOrder;
 pub use port::decode_row;
 pub use port::encode_row;
 pub use port::intent_title;
+pub use port::readable_title;
 pub use reduce::AGGREGATE_REVIEW_GATE;
 pub use reduce::AGGREGATE_VERIFY_GATE;
 pub use reduce::AdjudicationError;

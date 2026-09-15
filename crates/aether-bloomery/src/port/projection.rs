@@ -716,6 +716,16 @@ pub struct CommissionProjection {
     /// revision yet. Trailing optional so a queued row that predates the
     /// field decodes as none.
     pub scope: Option<String>,
+    /// The intent statement's words as UTF-8, when they are UTF-8.
+    ///
+    /// The adapter renders this verbatim so a commission with an intent but
+    /// no scope revision still mirrors something a person would file, rather
+    /// than bookkeeping only. `None` when the stored words are not UTF-8.
+    /// Trailing optional so a queued stamped row that predates the field
+    /// decodes with it absent, for the same reason [`Self::scope`] is: the
+    /// storage shape keys records by field name, so missing records read as
+    /// none rather than shifting the bytes that follow.
+    pub intent_text: Option<String>,
 }
 
 /// The first markdown heading of an intent statement's words, or `None`.
@@ -744,6 +754,28 @@ pub fn intent_title(words: &[u8]) -> Option<String> {
 /// GitHub refuses an issue title past 256; this leaves room for the ` — status`
 /// suffix beside it with margin, and a heading this long is a paragraph anyway.
 pub const MAX_TITLE_CHARS: usize = 180;
+
+/// A readable replica title from an intent heading the issue-title gate would
+/// refuse: `chore(bloomery): ` followed by the heading with its first
+/// character lowercased, capped so the whole stays within [`MAX_TITLE_CHARS`].
+///
+/// A sentence is not a name, but a lowercased one under a conventional prefix
+/// still reads as one in an issue list — which the id floor does not. The
+/// caller decides validity and reserves the floor for an intent with no
+/// heading at all; an empty heading here yields the bare prefix, which no
+/// gate accepts, so the caller must not pass one.
+#[must_use]
+pub fn readable_title(heading: &str) -> String {
+    const PREFIX: &str = "chore(bloomery): ";
+    let mut lowered = String::with_capacity(heading.len() + PREFIX.len());
+    let mut chars = heading.chars();
+    if let Some(first) = chars.next() {
+        lowered.extend(first.to_lowercase());
+    }
+    lowered.extend(chars);
+    let title = format!("{PREFIX}{lowered}");
+    title.chars().take(MAX_TITLE_CHARS).collect()
+}
 
 /// A landing receipt together with the landed bloom's membership — the whole
 /// render input a receipt projection needs.
@@ -798,7 +830,7 @@ pub trait ProjectionBackend {
 mod tests {
     use alloc::string::ToString;
 
-    use super::{MAX_TITLE_CHARS, intent_title};
+    use super::{MAX_TITLE_CHARS, intent_title, readable_title};
 
     #[test]
     fn the_first_heading_names_the_commission() {
@@ -837,5 +869,40 @@ mod tests {
     #[test]
     fn intent_bytes_that_are_not_text_have_no_title() {
         assert_eq!(intent_title(&[0xff, 0xfe, b'#', b' ', b'x']), None);
+    }
+
+    #[test]
+    fn a_refused_heading_reads_as_a_conventional_title() {
+        // The plausible bug: a retrospect reader's finding heading ("a leak")
+        // is not conventional-commit shaped, so the replica fell back to the
+        // id floor and every retrospect commission was indistinguishable in an
+        // issue list. The fallback keeps the heading under a conventional
+        // prefix instead.
+        assert_eq!(readable_title("A leak in the landing path"), "chore(bloomery): a leak in the landing path");
+        assert_eq!(
+            readable_title("already lowercase"),
+            "chore(bloomery): already lowercase",
+            "a heading that starts lowercase gains only the prefix",
+        );
+    }
+
+    #[test]
+    fn a_long_refused_heading_is_capped_with_the_prefix_inside_the_cap() {
+        // The prefix is part of the title the gate measures, so the cap covers
+        // the whole rather than the heading — and slicing bytes out of a
+        // multi-byte heading would panic.
+        let title = readable_title(&"é".repeat(MAX_TITLE_CHARS * 2));
+
+        assert_eq!(title.chars().count(), MAX_TITLE_CHARS);
+        let Some(stripped) = title.strip_prefix("chore(bloomery): ") else {
+            panic!("the cap keeps the prefix: {title}");
+        };
+        assert!(stripped.chars().all(|character| character == 'é'), "the capped tail is whole characters: {title}");
+    }
+
+    #[test]
+    fn a_refused_heading_lowercases_only_its_first_character() {
+        assert_eq!(readable_title("Refactor WEEKLY Jobs"), "chore(bloomery): refactor WEEKLY Jobs");
+        assert_eq!(readable_title("Élan vital"), "chore(bloomery): élan vital");
     }
 }

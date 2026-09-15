@@ -115,6 +115,11 @@ mod check;
 #[cfg(feature = "runtime")]
 pub use check::{StoreCheck, check_store};
 
+#[cfg(feature = "runtime")]
+mod read_everything;
+#[cfg(feature = "runtime")]
+pub use read_everything::ReadTally;
+
 // The advisory claim one coordinator generation takes on a journal, checked
 // before the schema migrations so a refused open never writes.
 #[cfg(feature = "runtime")]
@@ -132,6 +137,9 @@ pub use runtime::{
     ScopeRunRow, ScopeVerdictRow, SealOutcome, SharedRunLifecycle, SharedRunMemberRow, SharedRunRow, SharedRunStepRow,
     SqliteStore, StoreBackend, StoreCapabilityState, StudyRow, now_unix_millis,
 };
+
+#[cfg(all(test, feature = "runtime"))]
+mod schema;
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests;
