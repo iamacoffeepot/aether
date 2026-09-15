@@ -1,5 +1,7 @@
 mod closure;
+mod inputs;
 mod lockfile;
+mod memo;
 mod nextest;
 mod observations;
 mod scope;
@@ -32,6 +34,7 @@ use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
+use crate::transform::verify::memo::Memo;
 use crate::transform::verify::scope::Scope;
 pub(super) use crate::transform::verify::triage::Excused;
 use crate::transform::verify::triage::ReplayVerdict;
@@ -1274,6 +1277,20 @@ struct Captured {
     code: Option<i32>,
 }
 
+/// What a failing member's triage decides against, beyond the run itself.
+///
+/// The two travel together because neither is usable alone: the base is the
+/// commit a repeating test is asked about, and the memo is what an earlier step
+/// already concluded about that same test at that same commit. A run with no
+/// base has nothing to ask and nothing to cite.
+#[derive(Clone, Copy)]
+struct TriageInputs<'a> {
+    /// The work order's diff base, or `None` for a run that names none.
+    base: Option<&'a str>,
+    /// Triage outcomes earlier steps recorded for this gate and this input.
+    memo: &'a Memo,
+}
+
 /// How the umbrella obtains one member's captured output.
 ///
 /// `scope` rides the call rather than the runner because it is a property of
@@ -1283,14 +1300,17 @@ struct Captured {
 trait MemberRunner {
     fn run(&mut self, invocation: &VerifyInvocation, scope: &Scope, diff_base: Option<&str>) -> Result<Captured>;
 
-    /// Replay one named test — the unit the per-test triage decides on.
+    /// Replay one named test against the same input, on the candidate's own
+    /// tree — the unit the per-test triage decides on.
+    fn replay(&mut self, invocation: &VerifyInvocation, test: &str) -> Result<Captured>;
+
+    /// Run every named test at `base`, in one checkout and one invocation.
     ///
-    /// `at` is the commit to run it at, or `None` for the candidate's own tree.
-    /// The default spelling is the whole member again, which is what a runner
-    /// with no narrower form can honestly offer; the spawning runner overrides
-    /// it with a filtered invocation, and a scripted one in tests answers from
-    /// its script.
-    fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured>;
+    /// A set rather than a test because the cost is per invocation, not per
+    /// name: the base is a checkout plus a cold build of the closure at that
+    /// commit, and asking it once per failing test paid for that build once per
+    /// test (#5979). The per-test verdicts are read back out of the one log.
+    fn replay_at_base(&mut self, invocation: &VerifyInvocation, tests: &[String], base: &str) -> Result<Captured>;
 }
 
 /// The runner the lane uses: spawn the member's own command, through the host's
@@ -1333,13 +1353,18 @@ impl MemberRunner for SpawnRunner<'_> {
         Ok(Captured { stdout: output.stdout, stderr: self.peak.take_report(output.stderr), code: output.status.code() })
     }
 
-    fn replay(&mut self, invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> Result<Captured> {
-        let Some(base) = at else {
-            return self.spawn_one(invocation, test, None, &replay_notices(test, None));
-        };
-        let prepare = self.should_prepare(invocation, replay_package(test));
+    fn replay(&mut self, invocation: &VerifyInvocation, test: &str) -> Result<Captured> {
+        let tests = [test.to_owned()];
+        self.spawn_set(invocation, &tests, None, &replay_notices(&tests, None))
+    }
+
+    fn replay_at_base(&mut self, invocation: &VerifyInvocation, tests: &[String], base: &str) -> Result<Captured> {
+        // One prepare for the tree, decided over the whole set: a checkout
+        // whose wasm any of the replayed packages reads must have it built, and
+        // one that none of them reads must not pay for the cross-build.
+        let prepare = tests.iter().any(|test| self.should_prepare(invocation, replay_package(test)));
         let path = self.base_checkout(invocation, base, prepare)?.to_path_buf();
-        self.spawn_one(invocation, test, Some(&path), &replay_notices(test, invocation.prepare.map(|_| prepare)))
+        self.spawn_set(invocation, tests, Some(&path), &replay_notices(tests, invocation.prepare.map(|_| prepare)))
     }
 }
 
@@ -1436,7 +1461,7 @@ impl<'a> SpawnRunner<'a> {
         }
     }
 
-    /// Spawn `invocation` narrowed to the one `test`, optionally in `at`.
+    /// Spawn `invocation` narrowed to exactly `tests`, optionally in `at`.
     ///
     /// `PROPTEST_CASES=1` is what replays a property test's *own* counterexample
     /// rather than a fresh sample: proptest runs every case persisted in the
@@ -1445,15 +1470,15 @@ impl<'a> SpawnRunner<'a> {
     /// at one keeps the replay about the recorded input, which is the whole
     /// point of step 1 — a different dice roll is not evidence about this
     /// failure either way.
-    fn spawn_one(
+    fn spawn_set(
         &self,
         invocation: &VerifyInvocation,
-        test: &str,
+        tests: &[String],
         at: Option<&Path>,
         notices: &[String],
     ) -> Result<Captured> {
-        let output =
-            run_captured(self.replay_command(invocation, test, at)).with_context(|| format!("replay {test}"))?;
+        let output = run_captured(self.replay_command(invocation, tests, at))
+            .with_context(|| format!("replay {}", tests.join(", ")))?;
         let mut stderr = notices.join("\n").into_bytes();
         if !stderr.is_empty() {
             stderr.push(b'\n');
@@ -1462,13 +1487,13 @@ impl<'a> SpawnRunner<'a> {
         Ok(Captured { stdout: output.stdout, stderr, code: output.status.code() })
     }
 
-    /// The command a one-test replay actually dispatches: narrowed argv, the
-    /// same compiler cache the candidate run uses, and a fresh target directory
+    /// The command a replay actually dispatches: narrowed argv, the same
+    /// compiler cache the candidate run uses, and a fresh target directory
     /// when it runs in a base checkout.
-    fn replay_command(&self, invocation: &VerifyInvocation, test: &str, at: Option<&Path>) -> Command {
+    fn replay_command(&self, invocation: &VerifyInvocation, tests: &[String], at: Option<&Path>) -> Command {
         let mut command = self.peak.command(invocation.program);
         command
-            .args(replay_args(invocation, test))
+            .args(replay_args(invocation, tests))
             .envs(invocation.env.iter().copied())
             .envs(CI_BUILD_ENV.iter().copied())
             .env("PROPTEST_CASES", "1");
@@ -1494,16 +1519,26 @@ impl<'a> SpawnRunner<'a> {
     }
 }
 
-/// The nextest filterset selecting exactly one test.
+/// The nextest filterset selecting exactly `tests` and nothing else.
 ///
 /// The key a failing run reports is the `binary-id test_name` pair, and nextest
 /// addresses the two halves separately — filtering on the test name alone would
 /// re-run a same-named test in every binary that has one, which is not the same
-/// input.
-fn nextest_filter(test: &str) -> String {
+/// input. A set is the union of those pairs, so one invocation runs the whole
+/// repeating set and still runs nothing else.
+fn nextest_filter(tests: &[String]) -> String {
+    let selected: Vec<String> = tests.iter().map(|test| one_test_filter(test)).collect();
+    if selected.is_empty() {
+        return String::from("none()");
+    }
+    selected.join(" or ")
+}
+
+/// The filterset half selecting one `binary-id test_name` key.
+fn one_test_filter(test: &str) -> String {
     let mut halves = test.split_whitespace();
     match (halves.next(), halves.next()) {
-        (Some(binary), Some(name)) => format!("binary_id(={binary}) and test(={name})"),
+        (Some(binary), Some(name)) => format!("(binary_id(={binary}) and test(={name}))"),
         (Some(name), None) => format!("test(={name})"),
         _ => String::from("none()"),
     }
@@ -1522,36 +1557,64 @@ fn replay_package(test: &str) -> Option<&str> {
     binary.split("::").next().filter(|package| !package.is_empty())
 }
 
-/// The argv a one-test replay dispatches: the invocation's stated argv, narrowed
-/// to the failing test's own package when the binary-id names one, plus the
-/// nextest filter that selects that test.
+/// The argv a replay dispatches: the invocation's stated argv, narrowed to the
+/// failing tests' own packages when every binary-id names one, plus the nextest
+/// filter that selects exactly those tests.
 ///
 /// Mirrors [`VerifyInvocation::scheduled_args`]: `--workspace` is dropped rather
 /// than left beside `-p`, because cargo treats the pair as the whole workspace.
-/// An unresolvable binary id keeps the unnarrowed argv — building too much is
-/// slow, building the wrong crate is a [`ReplayVerdict::Unreached`].
-fn replay_args(invocation: &VerifyInvocation, test: &str) -> Vec<String> {
+/// An unresolvable binary id anywhere in the set keeps the unnarrowed argv —
+/// building too much is slow, building the wrong crate is a
+/// [`ReplayVerdict::Unreached`] for every test in the invocation.
+fn replay_args(invocation: &VerifyInvocation, tests: &[String]) -> Vec<String> {
     let stated = || invocation.args.iter().map(|arg| (*arg).to_owned());
-    let mut args: Vec<String> = replay_package(test).map_or_else(
+    let mut args: Vec<String> = replay_packages(tests).map_or_else(
         || stated().collect(),
-        |package| stated().filter(|arg| arg != "--workspace").chain(["-p".to_owned(), package.to_owned()]).collect(),
+        |packages| {
+            stated()
+                .filter(|arg| arg != "--workspace")
+                .chain(packages.iter().flat_map(|package| ["-p".to_owned(), (*package).to_owned()]))
+                .collect()
+        },
     );
-    args.extend(["-E".to_owned(), nextest_filter(test)]);
+    args.extend(["-E".to_owned(), nextest_filter(tests)]);
     args
+}
+
+/// The distinct packages `tests` live in, or `None` when any one of them names
+/// no resolvable package — in which case nothing is narrowed, because the
+/// invocation runs them together and a missing `-p` is a test that never runs.
+fn replay_packages(tests: &[String]) -> Option<BTreeSet<&str>> {
+    if tests.is_empty() {
+        // No `-p` at all reads to cargo as the whole workspace, which is the
+        // opposite of what an empty selection asks for.
+        return None;
+    }
+    tests.iter().map(|test| replay_package(test)).collect()
 }
 
 /// Notices a replay writes into its captured log so a skip or an unnarrowed
 /// fallback is diagnosable after the fact.
-fn replay_notices(test: &str, prepared: Option<bool>) -> Vec<String> {
+fn replay_notices(tests: &[String], prepared: Option<bool>) -> Vec<String> {
     let mut notices = Vec::new();
-    if replay_package(test).is_none() {
-        notices.push(format!("replay: could not resolve a package from `{test}`; keeping the unnarrowed argv"));
+    let packages = replay_packages(tests);
+    if packages.is_none() {
+        notices.push(format!(
+            "replay: could not resolve a package from every key in `{}`; keeping the unnarrowed argv",
+            tests.join(", "),
+        ));
+    }
+    if tests.len() > 1 {
+        notices.push(format!("replay: {} tests in one invocation: {}", tests.len(), tests.join(", ")));
     }
     if let Some(running) = prepared {
-        let package = replay_package(test).unwrap_or(if running {
-            "the unnarrowed workspace"
-        } else {
-            "this package"
+        let named = packages.map(|packages| packages.into_iter().collect::<Vec<&str>>().join(", "));
+        let package = named.unwrap_or_else(|| {
+            String::from(if running {
+                "the unnarrowed workspace"
+            } else {
+                "these packages"
+            })
         });
         let action = if running {
             "running the component-wasm prepare"
@@ -1772,16 +1835,22 @@ fn classify_failures(
 /// workspace at the base commit, which is minutes. A reader comparing the last
 /// line to the member's reported wall-clock has no way to tell that work from a
 /// gate that stopped, and this is what tells them.
-fn triage_notice(id: &str, tests: usize, base: Option<&str>) -> String {
+fn triage_notice(id: &str, tests: usize, base: Option<&str>, reuse: &triage::Reuse) -> String {
     let replays = base.map_or_else(
         || String::from("replayed against the same input"),
-        |base| format!("replayed against the same input, then run at the work order's base {base}"),
+        |base| {
+            format!(
+                "replayed against the same input, and the ones that repeated then run together at the work \
+                 order's base {base} in one invocation"
+            )
+        },
     );
     format!(
         "\n\n{id}: {tests} failing {} triaged after the run above — each {replays}. Those replays are \
          separate builds whose output is not captured here, so this member's reported wall-clock runs well \
-         past the last line above.\n",
+         past the last line above.{}\n",
         nextest::tests_word(tests),
+        reuse.notice(),
     )
 }
 
@@ -1851,9 +1920,10 @@ fn run_member_discriminated(
     invocation: &VerifyInvocation,
     scope: &Scope,
     closure: Option<&Closure>,
-    diff_base: Option<&str>,
+    triage_inputs: TriageInputs<'_>,
     runner: &mut dyn MemberRunner,
 ) -> Result<MemberRun> {
+    let diff_base = triage_inputs.base;
     let (outcome, log, exit_code) = run_member(id, invocation, scope, diff_base, runner)?;
     let Some(classified) = classify_failures(id, outcome, &log, closure) else {
         let mut run = MemberRun::plain(id, outcome, log, exit_code);
@@ -1870,7 +1940,7 @@ fn run_member_discriminated(
         let triaged_tests = classified.candidate_tests().len();
         // A storm-shaped run takes a member-scope shortcut first — see
         // [`triage_shaped`] for the diagnosis and both of its verdicts.
-        let triaged = triage_shaped(id, invocation, scope, closure, diff_base, runner, &classified)?;
+        let triaged = triage_shaped(id, invocation, scope, closure, triage_inputs, runner, &classified)?;
 
         let kept = classified.retaining(&triaged.findings);
         let outcome = if kept.has_candidate_failures() {
@@ -1885,7 +1955,7 @@ fn run_member_discriminated(
         return Ok(MemberRun {
             id: id.to_owned(),
             outcome,
-            log: [log, triage_notice(id, triaged_tests, diff_base).into_bytes()].concat(),
+            log: [log, triage_notice(id, triaged_tests, diff_base, &triaged.reuse).into_bytes()].concat(),
             exit_code: if outcome.passed() {
                 0
             } else {
@@ -1963,24 +2033,24 @@ fn run_member_discriminated(
 /// as a pile of flakes and handing the gate a false green.
 ///
 /// Below the threshold, every failure takes the per-test path directly.
-/// Replays print a numbered heartbeat either way, so a tail is never silent.
+/// Every triage step prints a heartbeat either way, so a tail is never silent.
 fn triage_shaped(
     id: &str,
     invocation: &VerifyInvocation,
     scope: &Scope,
     closure: Option<&Closure>,
-    diff_base: Option<&str>,
+    triage_inputs: TriageInputs<'_>,
     runner: &mut dyn MemberRunner,
     classified: &nextest::ClassifiedRun,
 ) -> Result<triage::Triage> {
+    let TriageInputs { base: diff_base, memo } = triage_inputs;
     let candidates = classified.candidate_tests();
     if candidates.len() <= STORM_TRIAGE_THRESHOLD {
-        let mut replays = 0usize;
-        return triage::triage(classified, diff_base, |test, at| {
-            replays += 1;
-            eprintln!("verify.triage: replay {replays} (of {} candidate failures): {test}", candidates.len());
-            timed_replay(id, invocation, runner, test, at)
-        });
+        let mut reuse = triage::Reuse::default();
+        let mut triaged =
+            triage::triage(classified, diff_base, |ask| answer(id, invocation, runner, memo, &mut reuse, ask))?;
+        triaged.reuse = reuse;
+        return Ok(triaged);
     }
     eprintln!(
         "verify.triage: {} candidate failures is storm-shaped; one whole-member re-run replaces {} serial replays",
@@ -1993,6 +2063,7 @@ fn triage_shaped(
         .unwrap_or_default();
     let (still_failing, cleared): (Vec<String>, Vec<String>) =
         candidates.into_iter().partition(|test| repeated.contains(test));
+    let mut reuse = triage::Reuse::default();
     let mut triaged = if still_failing.len() > STORM_TRIAGE_THRESHOLD {
         eprintln!(
             "verify.triage: {} of the failures repeated on the whole-member re-run — still storm-shaped, so the \
@@ -2004,13 +2075,9 @@ fn triage_shaped(
         triage::Triage { findings: still_failing.into_iter().collect(), ..triage::Triage::default() }
     } else {
         let kept = classified.retaining(&repeated);
-        let mut replays = 0usize;
-        triage::triage(&kept, diff_base, |test, at| {
-            replays += 1;
-            eprintln!("verify.triage: replay {replays} (of {} repeated tests): {test}", still_failing.len());
-            timed_replay(id, invocation, runner, test, at)
-        })?
+        triage::triage(&kept, diff_base, |ask| answer(id, invocation, runner, memo, &mut reuse, ask))?
     };
+    triaged.reuse = reuse;
     triaged.flakes.extend(cleared.into_iter().map(|test| Excused {
         test,
         replayed: "a whole-member re-run on the settled host".to_owned(),
@@ -2019,21 +2086,123 @@ fn triage_shaped(
     Ok(triaged)
 }
 
-/// Run one named test and return the verdict, the ledger label, and the spawn's
-/// wall-clock. The duration is the interval the gate receipt otherwise swallows
-/// inside its own timer — a base replay is a cold build, and without this it is
-/// one opaque share of `verify.test`.
-fn timed_replay(
+/// Answer one triage step: cite what an earlier step already recorded for the
+/// same triple, and run what is left (#5979).
+///
+/// The citation happens here rather than inside the runner because it is a
+/// statement about evidence, not a way of obtaining a capture: a runner that
+/// answered a spawn with a synthesized log would put a run in the record that
+/// never happened. What this returns is a verdict carrying the ledger label
+/// that says where it came from.
+///
+/// A base ask is one invocation over whatever the memo did not answer, so a
+/// repeating set of four whose three are cited costs one build of one test
+/// rather than four builds of the base.
+fn answer(
     id: &str,
     invocation: &VerifyInvocation,
     runner: &mut dyn MemberRunner,
-    test: &str,
-    at: Option<&str>,
-) -> Result<(ReplayVerdict, String, u64)> {
-    let started = Instant::now();
-    let captured = runner.replay(invocation, test, at)?;
-    let (verdict, replayed) = replay_verdict(id, invocation, test, at, &captured);
-    Ok((verdict, replayed, elapsed_millis(started)))
+    memo: &Memo,
+    reuse: &mut triage::Reuse,
+    ask: triage::Ask<'_>,
+) -> Result<triage::Answers> {
+    match ask {
+        triage::Ask::SameInput(test) => {
+            if let Some(verdict) = memo.recall(test, None) {
+                reuse.cite(test, None);
+                return Ok(cited(test, verdict, "an earlier step's replay against the same input"));
+            }
+            reuse.ran += 1;
+            eprintln!("verify.triage: replaying {test} against the same input");
+            let started = Instant::now();
+            let captured = runner.replay(invocation, test)?;
+            let (verdict, label) = replay_verdict(id, invocation, test, &captured);
+            Ok(triage::Answers::from([(
+                test.to_owned(),
+                triage::Outcome { verdict, label, duration_millis: Some(elapsed_millis(started)) },
+            )]))
+        }
+        triage::Ask::AtBase { tests, base } => {
+            let mut answers = triage::Answers::new();
+            let mut unanswered: Vec<String> = Vec::new();
+            for test in tests {
+                match memo.recall(test, Some(base)) {
+                    Some(verdict) => {
+                        reuse.cite(test, Some(base));
+                        answers.extend(cited(test, verdict, &format!("{base}, where an earlier step ran it")));
+                    }
+                    None => unanswered.push(test.clone()),
+                }
+            }
+            if unanswered.is_empty() {
+                eprintln!("verify.triage: every base outcome was already recorded; no base checkout was opened");
+                return Ok(answers);
+            }
+
+            reuse.ran += 1;
+            eprintln!(
+                "verify.triage: one run at the base {base} over {} of {} repeating {}",
+                unanswered.len(),
+                tests.len(),
+                nextest::tests_word(tests.len()),
+            );
+            let started = Instant::now();
+            let captured = runner.replay_at_base(invocation, &unanswered, base)?;
+            let duration_millis = Some(elapsed_millis(started));
+            let verdicts = base_verdicts(id, invocation, &unanswered, &captured);
+            answers.extend(unanswered.into_iter().map(|test| {
+                let verdict = verdicts.get(&test).copied().unwrap_or(ReplayVerdict::Unreached);
+                (test, triage::Outcome { verdict, label: base.to_owned(), duration_millis })
+            }));
+            Ok(answers)
+        }
+    }
+}
+
+/// One answer taken from the record rather than from a run.
+fn cited(test: &str, verdict: ReplayVerdict, source: &str) -> triage::Answers {
+    triage::Answers::from([(
+        test.to_owned(),
+        triage::Outcome { verdict, label: format!("{source} (cited, not re-run)"), duration_millis: None },
+    )])
+}
+
+/// Read one base invocation's captured output as a verdict per test it ran.
+///
+/// [`replay_verdict`]'s rule, applied name by name rather than to the one test
+/// an invocation was about: a run that executed and named a test among its
+/// failures says that test was already red at the base, and a run that executed
+/// and did not name it says the same silence a green run gives. A run that
+/// could not compute anything at all — a base that would not build, a process
+/// killed — says nothing about any of them, and every name in it stays a
+/// finding.
+fn base_verdicts(
+    id: &str,
+    invocation: &VerifyInvocation,
+    tests: &[String],
+    captured: &Captured,
+) -> BTreeMap<String, ReplayVerdict> {
+    let outcome = member_outcome(invocation, true, captured.code);
+    if !matches!(outcome, MemberOutcome::Passed | MemberOutcome::Failed) {
+        return tests.iter().map(|test| (test.clone(), ReplayVerdict::Unreached)).collect();
+    }
+
+    let mut log = captured.stdout.clone();
+    log.extend_from_slice(&captured.stderr);
+    let failed: BTreeSet<String> = classify_failures(id, outcome, &log, None)
+        .map(|red| red.candidate_tests().into_iter().collect())
+        .unwrap_or_default();
+    tests
+        .iter()
+        .map(|test| {
+            let verdict = if failed.contains(test) {
+                ReplayVerdict::Repeated
+            } else {
+                ReplayVerdict::Cleared
+            };
+            (test.clone(), verdict)
+        })
+        .collect()
 }
 
 /// Read one replay's captured output as a verdict about the one test it was
@@ -2046,14 +2215,8 @@ fn timed_replay(
 /// is `Unreached`. `Unreached` never excuses: a triage step that did not happen
 /// is not evidence, and reading it as one would pass a candidate on the
 /// strength of a run that never judged it.
-fn replay_verdict(
-    id: &str,
-    invocation: &VerifyInvocation,
-    test: &str,
-    at: Option<&str>,
-    captured: &Captured,
-) -> (ReplayVerdict, String) {
-    let label = at.map_or_else(|| replay_label(captured), ToOwned::to_owned);
+fn replay_verdict(id: &str, invocation: &VerifyInvocation, test: &str, captured: &Captured) -> (ReplayVerdict, String) {
+    let label = replay_label(captured);
     let mut log = captured.stdout.clone();
     log.extend_from_slice(&captured.stderr);
     let outcome = member_outcome(invocation, true, captured.code);
@@ -2754,6 +2917,10 @@ struct GatePass<'a> {
     closure: Option<&'a Closure>,
     cache: Option<&'a CompilerCache>,
     peak: &'a PeakMemory,
+    /// The candidate input every triage outcome of this pass is keyed by, or
+    /// `None` when the tree has no single identity to key by — see
+    /// [`memo::candidate_input`].
+    input: Option<&'a str>,
 }
 
 /// Run one umbrella member and write its log, returning what it said and what
@@ -2764,7 +2931,7 @@ struct GatePass<'a> {
 /// and a gate's receipt covers exactly the work done under its identity however
 /// many gates are in flight.
 fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTiming)> {
-    let GatePass { args, full, logs, scope, closure, cache, peak } = *pass;
+    let GatePass { args, full, logs, scope, closure, cache, peak, input } = *pass;
     let invocation = verify_command(id).expect("verify_check_members ids all resolve via verify_command");
     // The member's own prerequisite, run immediately before it rather than once
     // up front: it belongs to this member, and a member that is one day removed
@@ -2790,6 +2957,10 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
     } else {
         let (prepare_failure, prepare_millis) = run_timed_prepare(id, &invocation, scope, cache, peak, false)?;
         let mut runner = SpawnRunner::new(id, cache, peak);
+        // Read before the member runs, so the triage that follows a failure is
+        // deciding against what earlier steps recorded rather than against the
+        // file this run is in the middle of writing.
+        let memo = Memo::open(logs, id, input);
         let run = match prepare_failure {
             Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
             None => run_member_discriminated(
@@ -2797,8 +2968,8 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
                 &invocation,
                 scope,
                 closure,
-                member_diff_base(id, args.diff_base.as_deref(), full),
-                &mut observations::ObservingRunner::new(&mut runner, id, args.nonce.as_deref(), logs),
+                TriageInputs { base: member_diff_base(id, args.diff_base.as_deref(), full), memo: &memo },
+                &mut observations::ObservingRunner::new(&mut runner, id, args.nonce.as_deref(), logs, input),
             )?,
         };
         runner.close_base();
@@ -2876,8 +3047,22 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
     // directory (see `BUILD_LANE_MEMBERS`), so no member shares cargo's
     // artifact lock with another and none waits on one. The read-only members
     // ran beside the compiles before; now everything runs beside everything.
-    let pass =
-        GatePass { args, full, logs, scope: &scope, closure: closure.as_ref(), cache: cache.as_ref(), peak: &peak };
+    //
+    // The triage input is resolved once for the pass, before any member
+    // compiles or prepares: `verify.test`'s own pre-build writes into the
+    // tree, and an input read after it would describe a tree no other step
+    // stood on.
+    let input = memo::candidate_input();
+    let pass = GatePass {
+        args,
+        full,
+        logs,
+        scope: &scope,
+        closure: closure.as_ref(),
+        cache: cache.as_ref(),
+        peak: &peak,
+        input: input.as_deref(),
+    };
     let members = position.members();
     let mut completed = fan_out(&members, |id| run_gate(id, &pass))?;
 
@@ -2916,8 +3101,8 @@ fn check_pass(args: &TransformArgs, logs: &Path, position: Position) -> Result<C
 mod tests {
     use super::{
         BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
-        MemberRunner, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, VERIFY_BASE, VERIFY_CHECK,
-        VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
+        MemberRunner, Memo, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, TriageInputs, VERIFY_BASE,
+        VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
         effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
         fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
         member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
@@ -2925,11 +3110,11 @@ mod tests {
         run_timed_prepare, spawnable_runs, umbrella_status, unjudged_notice, verify_check_members, verify_command,
         verify_findings, workflow,
     };
-    use std::iter;
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
     use std::time::Duration;
+    use std::{env, fs, iter, process};
 
     use crate::cargo::WASM_TARGET;
     use crate::transform::GateTiming;
@@ -2966,9 +3151,11 @@ mod tests {
         scripted: Vec<Captured>,
         runs: usize,
         replays: Vec<Captured>,
-        /// Every `(test, base)` the triage asked about, in order — what a test
+        /// Every `(tests, base)` the triage asked about, in order — what a test
         /// asserts the triage actually did rather than only what it concluded.
-        replayed: Vec<(String, Option<String>)>,
+        /// The first half is a set because one base invocation answers the
+        /// whole repeating set (#5979).
+        replayed: Vec<(Vec<String>, Option<String>)>,
     }
 
     impl ScriptedRunner {
@@ -3014,12 +3201,34 @@ mod tests {
         /// the failure repeating. That is the direction that keeps a finding a
         /// finding, so a test that says nothing about replays is not silently
         /// excusing anything.
-        fn replay(&mut self, _invocation: &VerifyInvocation, test: &str, at: Option<&str>) -> anyhow::Result<Captured> {
-            self.replayed.push((test.to_owned(), at.map(ToOwned::to_owned)));
+        fn replay(&mut self, _invocation: &VerifyInvocation, test: &str) -> anyhow::Result<Captured> {
+            Ok(self.answer(vec![test.to_owned()], None))
+        }
+
+        fn replay_at_base(
+            &mut self,
+            _invocation: &VerifyInvocation,
+            tests: &[String],
+            base: &str,
+        ) -> anyhow::Result<Captured> {
+            Ok(self.answer(tests.to_vec(), Some(base.to_owned())))
+        }
+    }
+
+    impl ScriptedRunner {
+        /// The next scripted capture, recorded against what was asked for.
+        fn answer(&mut self, tests: Vec<String>, at: Option<String>) -> Captured {
+            self.replayed.push((tests, at));
             let scripted = self.replays.get(self.replayed.len() - 1);
             let last_run = self.scripted.get(self.runs.saturating_sub(1)).expect("a replay follows a run");
-            Ok(cloned(scripted.unwrap_or(last_run)))
+            cloned(scripted.unwrap_or(last_run))
         }
+    }
+
+    /// The triage inputs of a step with nothing recalled — the cold shape every
+    /// first verify of a candidate has.
+    fn cold(base: Option<&str>) -> TriageInputs<'_> {
+        TriageInputs { base, memo: Memo::none() }
     }
 
     /// A nextest log reporting `failures` as failing tests, in the shape the
@@ -3301,6 +3510,7 @@ mod tests {
             skipped: vec![String::from("aether-render")],
             wasm_needed,
             lock: None,
+            note: None,
         }
     }
 
@@ -3362,8 +3572,10 @@ mod tests {
         // directory. The package is the binary-id half, not the member's
         // closure: the closure can be several crates, the test lives in one.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
-        let test = "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary";
-        let args = replay_args(&invocation, test);
+        let tests =
+            ["aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary"
+                .to_owned()];
+        let args = replay_args(&invocation, &tests);
 
         assert!(
             !args.iter().any(|arg| arg == "--workspace"),
@@ -3384,6 +3596,29 @@ mod tests {
     }
 
     #[test]
+    fn a_base_run_over_several_packages_selects_each_one_and_no_other_test() {
+        // Tripwire for the batched base run's argv (#5979). One invocation now
+        // carries several names, and both halves can go wrong quietly: a
+        // missing `-p` leaves a test's crate unbuilt, so it never runs and its
+        // silence reads as "not red at the base", while a filter that widened
+        // past the named pairs would run a whole suite at the base for the
+        // price of the answer to two tests.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let tests = ["aether-math::suite one".to_owned(), "aether-render::suite two".to_owned()];
+
+        let args = replay_args(&invocation, &tests);
+
+        let packages: Vec<&str> = args.windows(2).filter(|pair| pair[0] == "-p").map(|pair| pair[1].as_str()).collect();
+        assert_eq!(packages, ["aether-math", "aether-render"], "every named test's crate is built: {args:?}");
+        let filter = args.last().expect("the filterset is the last argument");
+        assert_eq!(
+            filter,
+            "(binary_id(=aether-math::suite) and test(=one)) or (binary_id(=aether-render::suite) and test(=two))",
+            "the filterset is the union of the two keys and nothing else",
+        );
+    }
+
+    #[test]
     fn a_base_replay_exports_the_compiler_cache() {
         // The base checkout is a new path with no cargo fingerprints. sccache
         // keys by content, so it is the cache that can hit there — and it used
@@ -3394,7 +3629,8 @@ mod tests {
         let runner = SpawnRunner::new("verify.test", Some(&cache), &peak);
         let command = runner.replay_command(
             &invocation,
-            "aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary",
+            &["aether-chassis-hub::fleetharness_binary_store fleetharness_uploads_lists_and_dedups_a_real_binary"
+                .to_owned()],
             Some(Path::new("/tmp/aether-verify-base")),
         );
 
@@ -4431,7 +4667,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
-            None,
+            cold(None),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4470,7 +4706,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
-            None,
+            cold(None),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4503,7 +4739,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             Some(&closure::Closure::of(&["aether-render"])),
-            None,
+            cold(None),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4544,13 +4780,14 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &[(&passing_run(), 0)],
         );
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(runner.runs, 1, "the whole member is never re-run: the triage replays one test");
         assert_eq!(
             runner.replayed,
-            vec![("aether-component::replace_drop_reply_routing".to_owned(), None)],
+            vec![(vec!["aether-component::replace_drop_reply_routing".to_owned()], None)],
             "and it replays exactly the failing test, on the candidate's own tree",
         );
         assert_eq!(run.outcome, MemberOutcome::Passed);
@@ -4577,8 +4814,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             failing_proptest_run("aether-harness-bloomery::generated a_generated_scenario_never_silences_a_member");
         let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(runner.runs, 1, "the whole member earns no recheck");
         assert_eq!(run.outcome, MemberOutcome::Failed);
@@ -4605,7 +4843,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             None,
-            Some("deadbeef"),
+            cold(Some("deadbeef")),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4613,8 +4851,8 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         assert_eq!(
             runner.replayed,
             vec![
-                ("aether-component::fleetharness_asset_window".to_owned(), None),
-                ("aether-component::fleetharness_asset_window".to_owned(), Some("deadbeef".to_owned())),
+                (vec!["aether-component::fleetharness_asset_window".to_owned()], None),
+                (vec!["aether-component::fleetharness_asset_window".to_owned()], Some("deadbeef".to_owned())),
             ],
             "the same-input replay comes first, and only a repeat earns the base run",
         );
@@ -4634,6 +4872,103 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     }
 
     #[test]
+    fn a_failing_set_asks_the_base_once_rather_than_once_per_test() {
+        // Acceptance for #5979's first half. Each base question used to be its
+        // own checkout, its own cold build of the closure at that commit, and
+        // its own nextest invocation — four failing names measured at eleven of
+        // a step's eighteen minutes, 641 sccache misses rebuilding one commit
+        // four times. The decision stays per test; the work becomes one run.
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::suite one", "aether-component::suite two"]);
+        let mut runner =
+            ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100), (&failing, 100), (&failing, 100)]);
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            cold(Some("deadbeef")),
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert_eq!(
+            runner.replayed,
+            vec![
+                (vec!["aether-component::suite one".to_owned()], None),
+                (vec!["aether-component::suite two".to_owned()], None),
+                (
+                    vec!["aether-component::suite one".to_owned(), "aether-component::suite two".to_owned()],
+                    Some("deadbeef".to_owned()),
+                ),
+            ],
+            "each test is replayed against its own input, and the repeating set asks the base together",
+        );
+        assert_eq!(run.inherited().len(), 2, "both were red at the base, read per test out of the one run");
+        assert!(run.findings().is_none());
+    }
+
+    #[test]
+    fn an_outcome_an_earlier_step_recorded_is_cited_rather_than_run_again() {
+        // Acceptance for #5979's second half. The measured shape: a contextual
+        // verify triages four names, and the coordinator then re-verifies the
+        // implicated member alone on the same head — same tests, same input,
+        // same base, and the gate spent 640 of 815 seconds deriving the answer
+        // the previous step had already written into its observations.
+        let root = env::temp_dir().join(format!("aether-verify-cited-{}", process::id()));
+        let _ = fs::remove_dir_all(&root);
+        let earlier = root.join("n-1-evidence");
+        let ours = root.join("n-2-evidence");
+        for directory in [&earlier, &ours] {
+            fs::create_dir_all(directory).expect("create the evidence directory");
+        }
+        fs::write(
+            earlier.join("verify.test.observations.json"),
+            "{\"protocol\": 1, \"gate\": \"verify.test\", \"input\": \"headsha\", \"invocations\": [\
+             {\"invocation\": \"dig-1\", \"at\": null, \"test\": \"aether-component::suite one\", \
+             \"outcomes\": {\"test:aether-component::suite one\": \"failed\"}},\
+             {\"invocation\": \"dig-2\", \"at\": \"deadbeef\", \"test\": null, \
+             \"outcomes\": {\"test:aether-component::suite one\": \"failed\"}}]}",
+        )
+        .expect("write the earlier step's observations");
+
+        let invocation = verify_command("verify.test").expect("verify.test mapped");
+        let failing = failing_run(&["aether-component::suite one"]);
+        let mut runner = ScriptedRunner::new(&[(&failing, 100)]);
+        let memo = Memo::open(&ours, "verify.test", Some("headsha"));
+
+        let run = run_member_discriminated(
+            "verify.test",
+            &invocation,
+            &Scope::resolve(None),
+            None,
+            TriageInputs { base: Some("deadbeef"), memo: &memo },
+            &mut runner,
+        )
+        .expect("the policy runs");
+
+        assert!(runner.replayed.is_empty(), "no replay and no base checkout: both outcomes were already recorded");
+        assert_eq!(
+            run.outcome,
+            MemberOutcome::Passed,
+            "the recorded outcomes excuse the failure the same way a run would"
+        );
+        assert_eq!(run.inherited().len(), 1, "and the excusal is still recorded");
+        assert!(run.inherited()[0].replayed.contains("cited"), "naming where it came from: {:?}", run.inherited()[0]);
+        assert!(
+            run.observation().expect("the citation is on the receipt channel").contains("already recorded"),
+            "the operator reading the evidence sees the memo hit rather than a gate that went quiet",
+        );
+        assert!(
+            String::from_utf8_lossy(&run.log).contains("cited from an earlier step"),
+            "and the member's own log accounts for the triage it did not spend",
+        );
+
+        let _ = fs::remove_dir_all(&root);
+    }
+
+    #[test]
     fn a_test_red_only_on_the_candidate_is_the_one_case_that_becomes_a_finding() {
         // Acceptance 3 (FIX-4b): it repeats against the same input and the base
         // is green, so the candidate is why. Nothing excuses it.
@@ -4646,7 +4981,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             None,
-            Some("deadbeef"),
+            cold(Some("deadbeef")),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4676,7 +5011,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             None,
-            Some("deadbeef"),
+            cold(Some("deadbeef")),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4705,7 +5040,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &invocation,
             &Scope::resolve(None),
             None,
-            Some("deadbeef"),
+            cold(Some("deadbeef")),
             &mut runner,
         )
         .expect("the policy runs");
@@ -4728,8 +5063,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
             &[(&persists, 100), (&passing_run(), 0)],
         );
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(run.outcome, MemberOutcome::Failed);
         let findings = run.findings().expect("the persistent failure is handed to the repair lap");
@@ -4759,8 +5095,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut runner = ScriptedRunner::new(&[(&failing, 100), (&failing, 100)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(runner.runs, 2, "the storm earns exactly one whole-member re-run");
         assert!(runner.replayed.is_empty(), "and a set still storm-shaped after it earns no per-test replays");
@@ -4781,8 +5118,9 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let failing = failing_run(&names.iter().map(String::as_str).collect::<Vec<_>>());
         let mut runner = ScriptedRunner::new(&[(&failing, 100), (&passing_run(), 0)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(runner.runs, 2, "one whole-member re-run answers for the whole set");
         assert!(runner.replayed.is_empty(), "with no replay per casualty");
@@ -4802,11 +5140,13 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         let survivors = failing_run(&[&names[0], &names[1]]);
         let mut runner = ScriptedRunner::new(&[(&failing, 100), (&survivors, 100)]);
 
-        let run = run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, None, &mut runner)
-            .expect("the policy runs");
+        let run =
+            run_member_discriminated("verify.test", &invocation, &Scope::resolve(None), None, cold(None), &mut runner)
+                .expect("the policy runs");
 
         assert_eq!(runner.runs, 2);
-        let replayed: Vec<&str> = runner.replayed.iter().map(|(test, _)| test.as_str()).collect();
+        let replayed: Vec<&str> =
+            runner.replayed.iter().flat_map(|(tests, _)| tests.iter().map(String::as_str)).collect();
         assert_eq!(replayed.len(), 2, "only the survivors are replayed per test");
         assert!(replayed.contains(&names[0].as_str()) && replayed.contains(&names[1].as_str()));
         assert_eq!(run.outcome, MemberOutcome::Failed);
