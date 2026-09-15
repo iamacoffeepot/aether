@@ -48,8 +48,11 @@ its default. Two of them decide whether the arrangement holds up:
 
 Two host ceilings decide how much work this machine runs at once, and they are
 not interchangeable. **`AETHER_BLOOMERY_MAX_CONCURRENT_LANES`** is the
-model-lane pool (construct, review, scope, the bloom-level reader): network-bound,
-cheap to scale sideways. **`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`** is the
+model-lane pool (construct, review, scope, the bloom-level reader): each lane
+holds a slot — a checkout plus its slot target dir — and builds under bounded
+cargo jobs (`AETHER_BLOOMERY_LANE_BUILD_JOBS`, eight by default), so raising
+this ceiling spends disk and build load, not just network.
+**`AETHER_BLOOMERY_MAX_CONCURRENT_PROVERS`** is the
 `verify.*` pool (`verify.base`, member verify, shared runs, aggregate verify):
 build-bound. Size the prove ceiling to **one concurrent build per eight host
 cores** — the measured width of one `-j8` rustc, the same number

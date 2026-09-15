@@ -265,9 +265,12 @@ pub struct CoordinatorConfig {
     #[config(env = "AETHER_BLOOMERY_LANE_PROGRAM", default = "")]
     pub local_lane_program: String,
     /// How many local *model* lane children the executor backend may run at once
-    /// — construct, review, scope, and the bloom-level reader. Network-bound:
-    /// twenty writers are cheap, and a running prove does not take one of these
-    /// slots (ADR-0200).
+    /// — construct, review, scope, and the bloom-level reader. A lane is not
+    /// cheap to scale sideways: each dispatch holds a slot — a checkout plus
+    /// its slot target dir ([`lane_target_base`](Self::lane_target_base)) —
+    /// and builds under [`lane_build_jobs`](Self::lane_build_jobs) cargo jobs,
+    /// so this ceiling prices disk and build load. A running prove does not
+    /// take one of these slots (ADR-0200).
     ///
     /// Dispatches past the ceiling wait in submission order and start as running
     /// lanes finish — a queue, never a refusal: every dispatch acks as submitted

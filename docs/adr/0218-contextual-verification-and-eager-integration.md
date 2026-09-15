@@ -44,8 +44,9 @@ supplies its configured class; shared work refuses a mismatch. There is no
 implicit execution class for an enabled policy.
 
 Ready requests are coalesced when a prover can serve them. There is no
-deliberate wait for an arrival and no two-member ceiling. A running plan is
-immutable; subsequent arrivals belong to the next plan. A warm serial lease
+two-member ceiling (§Amendment: shared runs wait for siblings qualifies the
+arrival wait). A running plan is immutable; subsequent arrivals belong to
+the next plan. A warm serial lease
 retains one existing private slot target while running each member's own
 tree and gates. Admission is reassessed between requests, preserving service
 for older work and each order's original deadline.
@@ -817,3 +818,34 @@ leaves and is re-scoped into a later bloom, which is more human attention per
 member and fewer members landed per bloom. That trade is the decision: a lap is
 only worth its price when the bloom can tell that the next one will converge, and
 nothing in the journal has ever been able to tell that.
+
+## Amendment: shared runs wait for siblings (2026-09-15, #6027)
+
+A ready contextual request waits for sibling constructs still in flight before
+the scheduler proposes its shared run. The decision's "no deliberate wait for
+an arrival" is retired: a plan proposed the moment its first request is ready
+verifies one member alone, and a sibling construct finishing a minute later
+then pays for a second whole run over nearly the same tree.
+
+The hold triggers only where waiting can change the plan: contextual
+verification, a selected plan that is not a complete survivor group, idle
+prover capacity, and at least one sibling construct still in flight — queued
+or admitted construction on a workpiece outside the selected plan. Warm serial
+and standalone requests never hold, and a plan the survivors already fixed
+proposes at once.
+
+`CoordinationPolicy::coalesce_millis` bounds the wait. `None` is
+`DEFAULT_COALESCE_MILLIS` (two minutes, long enough for sibling constructs
+that finish a minute apart to share one run, short enough that a stuck
+sibling does not park a ready request until its deadline). `Some(0)` proposes
+as soon as a request is ready — the behaviour before this field existed — and
+`Some(n)` waits up to `n` millis from the earliest queued request. The hold
+is capped at the request deadline: it ends at the earlier of the queued time
+plus the bound and the selected requests' earliest deadline, and there is no
+hold at all once that instant has passed.
+
+While the hold stands the scheduler journals
+`Fact::HoldSharedRunCoalesce { bloom, until_unix_millis, waiting_for }`,
+naming the bloom, the instant the hold lifts, and the in-flight sibling
+workpieces it is waiting for — so "why did nothing go out" is answerable
+without re-deriving the scheduler's state.
