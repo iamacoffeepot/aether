@@ -1020,6 +1020,26 @@ mod tests {
         }
     }
 
+    /// A policy that coordinates nothing: one physical run per member, no
+    /// partial head. All it states is the red-verify disposition.
+    fn disposition_only_policy() -> CoordinationPolicy {
+        CoordinationPolicy {
+            verification: VerificationMode::Standalone,
+            eager_integration: false,
+            max_run_members: 1,
+            max_serial_requests: 1,
+            ..coordinated_policy()
+        }
+    }
+
+    fn seal_under(policy: &CoordinationPolicy, revision: u8) -> (BloomSpec, ResolvedConfigs) {
+        let mut configs = compiled_resolved();
+        configs.insert(policy.address(), CoordinationPolicy::NAME, to_vec(policy).expect("policy encodes"), None);
+        let mut draft = draft(revision);
+        draft.configs.insert::<CoordinationPolicy>(policy.address());
+        (draft.seal(), configs)
+    }
+
     fn coordinated_seal(revision: u8, base: Digest, workpiece: &str) -> (BloomSpec, ResolvedConfigs) {
         let policy = coordinated_policy();
         let mut configs = compiled_resolved();
@@ -2093,6 +2113,60 @@ mod tests {
         assert!(matches!(decisions.outcome, Outcome::Sealed(_)));
         assert!(decisions.effects.iter().any(|effect| matches!(effect, Decision::DispatchBaseVerify { .. })));
         assert!(!decisions.effects.iter().any(|effect| matches!(effect, Decision::QueueConstructionAdmission { .. })));
+    }
+
+    // The plausible bug: every valid policy installs coordination state, so a
+    // bloom that sealed one only to state `RedVerify::Refine` is routed through
+    // the shared-run machinery — where a standalone red verdict comes back
+    // unattributed and the repair lap the disposition selects never happens.
+    #[test]
+    fn a_policy_that_coordinates_nothing_seals_its_disposition_and_no_state() {
+        let (spec, configs) = seal_under(&disposition_only_policy(), 1);
+        let decided = reduce(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &event("disposition-only-seal", Fact::Seal(spec.clone())),
+            &configs,
+            &SpendWindow::default(),
+        );
+
+        assert_eq!(decided.outcome, Outcome::Sealed(spec.id()));
+        assert!(
+            decided
+                .effects
+                .iter()
+                .any(|effect| matches!(effect, Decision::RecordRedVerify { red_verify, .. } if *red_verify == RedVerify::Refine)),
+            "the disposition the policy was sealed for reaches the record: {:?}",
+            decided.effects,
+        );
+        assert!(
+            !decided.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })),
+            "a policy that coordinates nothing carries no state: {:?}",
+            decided.effects,
+        );
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::DispatchAttempt { .. })),
+            "so the member enters Construct the way an unpoliced bloom's does: {:?}",
+            decided.effects,
+        );
+    }
+
+    // The other half: a policy that does coordinate still installs its state,
+    // so the predicate cannot be read as "no policy ever coordinates".
+    #[test]
+    fn a_coordinating_policy_still_seals_its_state() {
+        let (spec, configs) = seal_under(&coordinated_policy(), 1);
+        let decided = reduce(
+            &Snapshot::new(digest(0)).with_green_base(digest(0)),
+            &event("coordinated-seal", Fact::Seal(spec)),
+            &configs,
+            &SpendWindow::default(),
+        );
+
+        assert!(
+            decided.effects.iter().any(|effect| matches!(effect, Decision::RecordCoordinationState { .. })),
+            "{:?}",
+            decided.effects,
+        );
     }
 
     #[test]
