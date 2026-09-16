@@ -1,16 +1,16 @@
-//! Portable `Entry::decode` without the `SQLite` store.
+//! Portable `Entry::decode` without the journal store.
 
-use aether_bloomery_journal::{DecodeError, Entry, Seq};
+use aether_bloomery_kinds::{DecodeError, Entry, Seq};
 use aether_data::{Invariant, Kind, Storage, StorageData, StorageError};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.journal.note")]
+#[kind(name = "test.kinds.note")]
 struct Note {
     text: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.journal.other")]
+#[kind(name = "test.kinds.other")]
 struct Other {
     n: u64,
 }
@@ -38,13 +38,13 @@ impl ShortName {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.journal.checked_name")]
+#[kind(name = "test.kinds.checked_name")]
 struct PlainName {
     name: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.journal.checked_name")]
+#[kind(name = "test.kinds.checked_name")]
 struct CheckedName {
     name: ShortName,
 }
@@ -69,11 +69,11 @@ fn decode_round_trips_a_supplied_entry() {
 fn decode_refuses_a_different_kind_name() {
     let entry = encoded_entry(&Note { text: "hello".to_owned() });
     let error = entry.decode::<Other>().expect_err("other kind must be refused");
-    assert_eq!(error.to_string(), "entry kind \"test.journal.note\" is not \"test.journal.other\"");
+    assert_eq!(error.to_string(), "entry kind \"test.kinds.note\" is not \"test.kinds.other\"");
     match error {
         DecodeError::KindMismatch { expected, actual } => {
-            assert_eq!(expected, "test.journal.other");
-            assert_eq!(actual, "test.journal.note");
+            assert_eq!(expected, "test.kinds.other");
+            assert_eq!(actual, "test.kinds.note");
         }
         DecodeError::Storage(other) => panic!("expected KindMismatch, got Storage({other:?})"),
     }
