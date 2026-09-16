@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Journal, Seq};
-use aether_bloomery_kinds::{ExecutorName, Name, Node, ProgramNameMoved, Transition};
+use aether_bloomery_kinds::{ExecutorName, Name, Node, ProgramHeadMoved, Transition};
 use aether_bloomery_program::{Applied, Executors, apply, declaration, digest, named};
 use aether_data::Kind;
 use common::{FixedClock, Trim, TrimExecutor, TrimInput, TrimResult};
@@ -47,7 +47,7 @@ fn apply_trims_files_records_a_transition_and_names_fold_after_program_named() -
     assert!(named(&journal)?.is_empty());
     let mut named_batch = Batch::new();
     named_batch.push_event(
-        &ProgramNameMoved { name: aether_bloomery_kinds::ProgramName::new("trim")?, program: digest::<Trim>() },
+        &ProgramHeadMoved { name: aether_bloomery_kinds::ProgramName::new("trim")?, program: digest::<Trim>() },
         None,
     )?;
     journal.append(journal.head()?, &named_batch)?;

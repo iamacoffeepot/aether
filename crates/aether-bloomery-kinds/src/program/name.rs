@@ -1,13 +1,8 @@
 //! Validated dotted names for programs and executors.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
-
-use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
-use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{Citations, Cites, LabelNode, Schema, SchemaType, StorageLeaves};
 
 const NAME_MAX_BYTES: usize = 128;
 
@@ -45,7 +40,7 @@ fn valid_segment(segment: &str) -> bool {
 }
 
 macro_rules! dotted_name {
-    ($Name:ident, $Error:ident, $kind:literal) => {
+    ($Name:ident, $Error:ident) => {
         /// Why construction refused a string.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum $Error {
@@ -79,6 +74,12 @@ macro_rules! dotted_name {
             }
         }
 
+        impl aether_data::Invariant for $Error {
+            fn reason(&self) -> &'static str {
+                Self::reason(*self)
+            }
+        }
+
         impl fmt::Display for $Error {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
                 f.write_str(self.reason())
@@ -89,7 +90,8 @@ macro_rules! dotted_name {
 
         /// Validated dotted name. Two types so a program name and an executor
         /// name cannot be swapped in a record.
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, aether_data::Storage)]
+        #[storage(validate)]
         pub struct $Name(String);
 
         impl $Name {
@@ -100,7 +102,7 @@ macro_rules! dotted_name {
             /// The matching error names which rule failed.
             pub fn new(value: impl Into<String>) -> Result<Self, $Error> {
                 let value = value.into();
-                parse_dotted_name(&value).map_err($Error::from_rule)?;
+                Self::check(&value)?;
                 Ok(Self(value))
             }
 
@@ -109,62 +111,16 @@ macro_rules! dotted_name {
             pub fn as_str(&self) -> &str {
                 &self.0
             }
-        }
 
-        impl Schema for $Name {
-            const SCHEMA: SchemaType = <String as Schema>::SCHEMA;
-            const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::", stringify!($Name)));
-            const LABEL_NODE: LabelNode = <String as Schema>::LABEL_NODE;
-        }
-
-        impl StorageLeaves for $Name {
-            fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-                self.0.contribute(carry, depth, sink)
+            fn check(value: &str) -> Result<(), $Error> {
+                parse_dotted_name(value).map_err($Error::from_rule)
             }
-
-            fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-                Self::new(<String as StorageLeaves>::assemble(carry, depth, source)?)
-                    .map_err(|error| StorageError::Invariant { kind: $kind, reason: error.reason() })
-            }
-
-            fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
-                <String as StorageLeaves>::is_absent(carry, depth, source)
-            }
-        }
-
-        impl WireEncode for $Name {
-            fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
-                self.0.encode(out)
-            }
-        }
-
-        impl<'de> WireDecode<'de> for $Name {
-            fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
-                Self::new(String::decode(cursor)?).map_err(|error| WireError::Message(error.reason().into()))
-            }
-        }
-
-        impl StorageElement for $Name {
-            const TAGGED: bool = <String as StorageElement>::TAGGED;
-
-            fn contribute_element(&self, depth: u32, out: &mut Vec<u8>) -> Result<(), StorageError> {
-                self.0.contribute_element(depth, out)
-            }
-
-            fn assemble_element(depth: u32, cursor: &mut &[u8]) -> Result<Self, StorageError> {
-                Self::new(String::assemble_element(depth, cursor)?)
-                    .map_err(|error| StorageError::Invariant { kind: $kind, reason: error.reason() })
-            }
-        }
-
-        impl Cites for $Name {
-            fn cites(&self, _sink: &mut Citations) {}
         }
     };
 }
 
-dotted_name!(ProgramName, ProgramNameError, "ProgramName");
-dotted_name!(ExecutorName, ExecutorNameError, "ExecutorName");
+dotted_name!(ProgramName, ProgramNameError);
+dotted_name!(ExecutorName, ExecutorNameError);
 
 #[cfg(test)]
 mod tests {

@@ -1,13 +1,9 @@
 //! The name of one entry in a directory. Valid by construction.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
 
-use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
-use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
-use aether_data::{Citations, Cites, LabelNode, Schema, SchemaType, StorageLeaves};
 use unicode_normalization::is_nfc;
 
 const NAME_MAX_BYTES: usize = 255;
@@ -60,6 +56,12 @@ impl NameError {
     }
 }
 
+impl aether_data::Invariant for NameError {
+    fn reason(&self) -> &'static str {
+        Self::reason(*self)
+    }
+}
+
 impl fmt::Display for NameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.reason())
@@ -71,7 +73,8 @@ impl StdError for NameError {}
 /// One directory entry name. These are our rules, not Unix's: a tree is
 /// something models and humans read, so a name that is not text is refused
 /// at the boundary.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, aether_data::Storage)]
+#[storage(validate)]
 pub struct Name(String);
 
 impl Name {
@@ -82,6 +85,17 @@ impl Name {
     /// [`NameError`] names which rule failed.
     pub fn new(value: impl Into<String>) -> Result<Self, NameError> {
         let value = value.into();
+        Self::check(&value)?;
+        Ok(Self(value))
+    }
+
+    /// Borrow the name as a string.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(value: &str) -> Result<(), NameError> {
         if value.is_empty() {
             return Err(NameError::Empty);
         }
@@ -91,28 +105,22 @@ impl Name {
         if value == "." || value == ".." {
             return Err(NameError::Dot);
         }
-        if has_trailing_dot_or_edge_whitespace(&value) {
+        if has_trailing_dot_or_edge_whitespace(value) {
             return Err(NameError::TrailingDotOrSpace);
         }
         if let Some(error) = value.chars().find_map(char_error) {
             return Err(error);
         }
-        if is_device_name(&value) {
+        if is_device_name(value) {
             return Err(NameError::Device);
         }
         if value.eq_ignore_ascii_case(".git") {
             return Err(NameError::Git);
         }
-        if !is_nfc(&value) {
+        if !is_nfc(value) {
             return Err(NameError::NotNfc);
         }
-        Ok(Self(value))
-    }
-
-    /// Borrow the name as a string.
-    #[must_use]
-    pub fn as_str(&self) -> &str {
-        &self.0
+        Ok(())
     }
 }
 
@@ -167,62 +175,6 @@ fn is_device_name(value: &str) -> bool {
             | "LPT8"
             | "LPT9"
     )
-}
-
-fn invariant(error: NameError) -> StorageError {
-    StorageError::Invariant { kind: "Name", reason: error.reason() }
-}
-
-fn wire_error(error: NameError) -> WireError {
-    WireError::Message(error.reason().into())
-}
-
-impl Schema for Name {
-    const SCHEMA: SchemaType = <String as Schema>::SCHEMA;
-    const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::Name"));
-    const LABEL_NODE: LabelNode = <String as Schema>::LABEL_NODE;
-}
-
-impl StorageLeaves for Name {
-    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        self.0.contribute(carry, depth, sink)
-    }
-
-    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        Self::new(<String as StorageLeaves>::assemble(carry, depth, source)?).map_err(invariant)
-    }
-
-    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
-        <String as StorageLeaves>::is_absent(carry, depth, source)
-    }
-}
-
-impl WireEncode for Name {
-    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
-        self.0.encode(out)
-    }
-}
-
-impl<'de> WireDecode<'de> for Name {
-    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
-        Self::new(String::decode(cursor)?).map_err(wire_error)
-    }
-}
-
-impl StorageElement for Name {
-    const TAGGED: bool = <String as StorageElement>::TAGGED;
-
-    fn contribute_element(&self, depth: u32, out: &mut Vec<u8>) -> Result<(), StorageError> {
-        self.0.contribute_element(depth, out)
-    }
-
-    fn assemble_element(depth: u32, cursor: &mut &[u8]) -> Result<Self, StorageError> {
-        Self::new(String::assemble_element(depth, cursor)?).map_err(invariant)
-    }
-}
-
-impl Cites for Name {
-    fn cites(&self, _sink: &mut Citations) {}
 }
 
 #[cfg(test)]

@@ -70,7 +70,7 @@ fn refusal_and_panic_each_write_one_fault_and_no_extra_artifacts() -> Result<(),
     assert_eq!(entries[0].kind, Fault::NAME);
     let fault = Journal::decode::<Fault>(&entries[0])?;
     match fault.reason {
-        FaultReason::Panicked { message } => assert!(message.contains("trim panicked")),
+        FaultReason::Panicked { message } => assert!(message.as_str().contains("trim panicked")),
         other => panic!("expected Panicked, got {other:?}"),
     }
     assert_eq!(journal.head()?, Seq(before.0 + 1));

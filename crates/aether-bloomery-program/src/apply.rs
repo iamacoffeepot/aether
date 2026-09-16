@@ -6,7 +6,7 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use aether_bloomery_journal::{AppendError, Batch, BatchError, GetError, Journal, JournalError, Seq, split_artifact};
-use aether_bloomery_kinds::{Digest, ExecutorName, Fault, FaultReason, Ref, Transition};
+use aether_bloomery_kinds::{Detail, Digest, ExecutorName, Fault, FaultReason, Ref, Transition};
 use aether_data::{KindId, StorageError};
 
 use crate::execute::Refusal;
@@ -159,7 +159,7 @@ pub fn apply(
         }
         Ok(Some(ErasedOutcome::Refused(refusal))) => {
             let reason = match refusal {
-                Refusal::Refused(text) => FaultReason::refused(text),
+                Refusal::Refused(text) => FaultReason::Refused { reason: Detail::new(text) },
                 Refusal::InputMissing => FaultReason::InputMissing,
                 Refusal::InputDecode => FaultReason::InputDecode,
             };
@@ -174,7 +174,7 @@ pub fn apply(
                 program,
                 input,
                 executor_name,
-                FaultReason::panicked(message),
+                FaultReason::Panicked { message: Detail::new(message) },
                 cause,
             )?))
         }

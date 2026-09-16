@@ -17,8 +17,8 @@ mod tree;
 pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes};
 pub use digest::Digest;
 pub use program::{
-    ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramName, ProgramNameError,
-    ProgramNameMoved, Transition,
+    Detail, DetailError, ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramHeadMoved,
+    ProgramName, ProgramNameError, Transition,
 };
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};
