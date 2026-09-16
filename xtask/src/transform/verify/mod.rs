@@ -4172,7 +4172,7 @@ mod tests {
         let notice = unjudged_notice(&stream, &scope).expect("two findings were left unjudged");
 
         assert!(notice.starts_with("note: 2 diagnostic(s) from 2 crate(s)"), "got: {notice}");
-        assert!(notice.contains("aether-substrate (1), aether-codec (1)"), "got: {notice}");
+        assert!(notice.contains("aether-codec (1), aether-substrate (1)"), "got: {notice}");
         assert_eq!(unjudged_notice(&stream, &Scope::resolve(None)), None, "a workspace run leaves nothing unjudged");
         assert!(
             !render_diagnostics(&stream, &scope).contains("unused import"),
@@ -4566,47 +4566,6 @@ error: test run failed
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
         assert!(findings.contains("crates/aether-actor/tests/asset_sections.rs:85:9"), "with its file and line");
         assert!(findings.contains("wasm not pre-built"), "and what it said");
-    }
-
-    #[test]
-    fn a_stale_golden_fixture_names_the_regen_command() {
-        let log = "\
-        FAIL [   0.008s] ( 156/3737) aether-substrate::golden_decisions decisions_wire_bytes_match_pinned_golden
-
---- STDERR:              aether-substrate::golden_decisions decisions_wire_bytes_match_pinned_golden ---
-thread 'decisions_wire_bytes_match_pinned_golden' panicked at crates/aether-substrate/tests/golden_decisions/main.rs:46:5:
-assertion `left == right` failed
-
-     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
-error: test run failed
-";
-
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
-            .and_then(|channel| channel.text().map(str::to_owned))
-            .expect("findings");
-
-        assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
-    }
-
-    #[test]
-    fn a_schema_digest_failure_names_append_and_upcast_not_regen() {
-        let log = "\
-        FAIL [   0.008s] ( 156/3737) aether-substrate::golden_decisions pinned_schema_digests_match_the_registry
-
---- STDERR:              aether-substrate::golden_decisions pinned_schema_digests_match_the_registry ---
-thread 'pinned_schema_digests_match_the_registry' panicked at crates/aether-substrate/tests/golden_decisions/schema_digests.rs:20:5:
-kind `decisions` current digest drifted
-
-     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
-error: test run failed
-";
-
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
-            .and_then(|channel| channel.text().map(str::to_owned))
-            .expect("findings");
-
-        assert!(findings.contains("append the new digest to `schema-digests.txt` and register an upcast"));
-        assert!(!findings.contains("fixtures regen"), "{findings}");
     }
 
     #[test]

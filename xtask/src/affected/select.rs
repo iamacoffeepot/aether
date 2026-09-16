@@ -200,14 +200,15 @@ mod tests {
         let no_wasm_sources = BTreeSet::new();
         let no_wasm_consumers = BTreeSet::new();
 
-        // A leaf-crate change selects that crate but not the engine
-        // packages it tests — the payoff case this tool exists for. An
-        // inverted or over-wide closure shows up here.
-        let leaf =
-            select(&graph, &strings(&["crates/aether-harness-fleet/src/lib.rs"]), &no_wasm_sources, &no_wasm_consumers)
-                .expect("select over leaf change");
+        // A leaf-crate change selects that crate but not the engine packages it
+        // is built on — the payoff case this tool exists for. An inverted or
+        // over-wide closure shows up here. `aether-mcp` is the crisp shape: no
+        // workspace crate depends on it, and it dev-depends on
+        // `aether-substrate`, so an inverted walk names that dependency.
+        let leaf = select(&graph, &strings(&["crates/aether-mcp/src/rpc.rs"]), &no_wasm_sources, &no_wasm_consumers)
+            .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
-        assert!(leaf.packages.contains("aether-harness-fleet"), "changed crate must be selected");
+        assert!(leaf.packages.contains("aether-mcp"), "changed crate must be selected");
         assert!(!leaf.packages.contains("aether-substrate"), "a leaf's own dependency is not its dependent");
 
         // A path matching no package and no rule must fall back to the

@@ -21,7 +21,6 @@ aether.ping
 aether.pong
 aether.rpc.test.deferred_echo_reply
 aether.rpc.test.echo_reply
-aether.store.record_config
 aether.test.inventory_handlers.reply
 aether.test_fixtures.count_report
 aether.test_fixtures.fs_context_demux_report
