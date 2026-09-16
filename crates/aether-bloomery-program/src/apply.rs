@@ -12,7 +12,7 @@ use aether_data::{KindId, StorageError};
 use crate::execute::Refusal;
 use crate::kinds;
 use crate::read::ReadError;
-use crate::registry::Executors;
+use crate::registry::{ErasedOutcome, Executors};
 
 /// Outcome of a successful apply: one event landed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,7 +142,7 @@ pub fn apply(
     let outcome = catch_unwind(AssertUnwindSafe(|| executors.execute(&program_digest, &input, journal)));
     match outcome {
         Ok(None) => Err(ApplyError::NoExecutor),
-        Ok(Some(Ok((mut batch, result)))) => {
+        Ok(Some(ErasedOutcome::Executed(mut batch, result))) => {
             // Execution<P> stages a result whose prefix is P::Result::ID, and
             // declaration.result is that same id. A runtime branch here would
             // imply the type did not hold; debug_assert is the check, not a
@@ -157,7 +157,7 @@ pub fn apply(
             batch.push_event(&Transition { program, input, result, executor: executor_name }, cause)?;
             Ok(Applied::Transition(append_retry(journal, &batch)?))
         }
-        Ok(Some(Err(refusal))) => {
+        Ok(Some(ErasedOutcome::Refused(refusal))) => {
             let reason = match refusal {
                 Refusal::Refused(text) => FaultReason::refused(text),
                 Refusal::InputMissing => FaultReason::InputMissing,
@@ -165,6 +165,7 @@ pub fn apply(
             };
             Ok(Applied::Fault(append_fault(journal, &declaration, program, input, executor_name, reason, cause)?))
         }
+        Ok(Some(ErasedOutcome::Store(error))) => Err(ApplyError::Read(error)),
         Err(payload) => {
             let message = panic_message(payload.as_ref());
             Ok(Applied::Fault(append_fault(

@@ -100,3 +100,27 @@ fn wrong_input_kind_is_refused_before_any_attempt() -> Result<(), Box<dyn Error>
     assert_eq!(journal.head()?, before);
     Ok(())
 }
+
+#[test]
+fn a_missing_input_is_a_fault_and_writes_nothing_else() -> Result<(), Box<dyn Error>> {
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(1)))?;
+    let mut batch = Batch::new();
+    batch.stage_encoded(&declaration::<Trim>())?;
+    journal.append(Seq(0), &batch)?;
+    let before = journal.head()?;
+    let missing = aether_bloomery_kinds::Digest::from_bytes([9; 32]);
+
+    let mut executors = Executors::new();
+    executors.register::<Trim, _>(ExecutorName::new("in_process")?, common::TrimExecutor);
+    let applied = apply(&mut journal, &executors, digest::<Trim>(), missing, None)?;
+    let Applied::Fault(_) = applied else {
+        panic!("expected Fault, got {applied:?}");
+    };
+    let entries = journal.read(before, 16)?;
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].kind, Fault::NAME);
+    let fault = Journal::decode::<Fault>(&entries[0])?;
+    assert_eq!(fault.reason, FaultReason::InputMissing);
+    assert_eq!(journal.head()?, Seq(before.0 + 1));
+    Ok(())
+}

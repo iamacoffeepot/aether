@@ -1,14 +1,15 @@
-//! Events that name a program and that record one execution of it.
+//! Events that bind a name to a program and that record one execution of it.
 
 use crate::program::Program;
 use crate::program::name::{ExecutorName, ProgramName};
 use crate::{Digest, Ref};
 
-/// The mutable handle. "trim" now means declaration X. The current value of a
-/// name is the fold of these in seq order; the last one wins.
+/// From this seq on, `name` means `program`. First binding, rebinding after a
+/// signature change, and pointing back at an older declaration are all this
+/// one event. The fold takes the last per name.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "bloomery.program.named")]
-pub struct ProgramNamed {
+#[kind(name = "bloomery.program.name_moved")]
+pub struct ProgramNameMoved {
     pub name: ProgramName,
     pub program: Ref<Program>,
 }

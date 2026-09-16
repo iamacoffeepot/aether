@@ -1,11 +1,13 @@
-//! Last write wins, including across a page boundary of one.
+//! Last write wins, including across a page boundary of 256.
 
 use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Clock, Journal, Seq};
-use aether_bloomery_kinds::{Mode, OpaqueBytes, ProgramName, ProgramNamed};
+use aether_bloomery_kinds::{Mode, OpaqueBytes, ProgramName, ProgramNameMoved};
 use aether_bloomery_program::named;
 use aether_data::Kind;
+
+const PAGE: usize = 256;
 
 struct FixedClock(u64);
 
@@ -35,9 +37,14 @@ fn named_keeps_the_last_program_per_name_across_pages() -> Result<(), Box<dyn Er
     let a_ref = batch.stage_encoded(&a)?;
     let b_ref = batch.stage_encoded(&b)?;
     let c_ref = batch.stage_encoded(&c)?;
-    batch.push_event(&ProgramNamed { name: ProgramName::new("trim")?, program: a_ref }, None)?;
-    batch.push_event(&ProgramNamed { name: ProgramName::new("trim")?, program: b_ref }, None)?;
-    batch.push_event(&ProgramNamed { name: ProgramName::new("hash")?, program: c_ref }, None)?;
+    let filler = batch.stage_encoded(&program("fill", "page filler")?)?;
+    for index in 0..PAGE {
+        let name = ProgramName::new(format!("f{index:03}"))?;
+        batch.push_event(&ProgramNameMoved { name, program: filler }, None)?;
+    }
+    batch.push_event(&ProgramNameMoved { name: ProgramName::new("trim")?, program: a_ref }, None)?;
+    batch.push_event(&ProgramNameMoved { name: ProgramName::new("trim")?, program: b_ref }, None)?;
+    batch.push_event(&ProgramNameMoved { name: ProgramName::new("hash")?, program: c_ref }, None)?;
     journal.append(Seq(0), &batch)?;
 
     let names = named(&journal)?;

@@ -41,14 +41,16 @@ impl Executors {
         self.entries.iter().filter(move |entry| entry.program == *program).map(|entry| &entry.name)
     }
 
-    pub(crate) fn execute(
-        &self,
-        program: &Digest,
-        input: &Digest,
-        store: &dyn ReadArtifacts,
-    ) -> Option<Result<(Batch, Digest), Refusal>> {
+    pub(crate) fn execute(&self, program: &Digest, input: &Digest, store: &dyn ReadArtifacts) -> Option<ErasedOutcome> {
         Some(self.entries.iter().find(|entry| entry.program == *program)?.erased.execute(input, store))
     }
+}
+
+/// Three-way result of an erased execute. Store failures are not refusals.
+pub enum ErasedOutcome {
+    Executed(Batch, Digest),
+    Refused(Refusal),
+    Store(ReadError),
 }
 
 impl Default for Executors {
@@ -58,7 +60,7 @@ impl Default for Executors {
 }
 
 trait Erased {
-    fn execute(&self, input: &Digest, store: &dyn ReadArtifacts) -> Result<(Batch, Digest), Refusal>;
+    fn execute(&self, input: &Digest, store: &dyn ReadArtifacts) -> ErasedOutcome;
 }
 
 struct Typed<P, E> {
@@ -67,15 +69,21 @@ struct Typed<P, E> {
 }
 
 impl<P: Program, E: Execute<P>> Erased for Typed<P, E> {
-    fn execute(&self, input: &Digest, store: &dyn ReadArtifacts) -> Result<(Batch, Digest), Refusal> {
+    fn execute(&self, input: &Digest, store: &dyn ReadArtifacts) -> ErasedOutcome {
         let input = match store.get::<P::Input>(input) {
-            Ok(None) => return Err(Refusal::InputMissing),
+            Ok(None) => return ErasedOutcome::Refused(Refusal::InputMissing),
             Ok(Some(value)) => value,
             Err(ReadError::Get(GetError::Decode(_) | GetError::PrefixMismatch { .. })) => {
-                return Err(Refusal::InputDecode);
+                return ErasedOutcome::Refused(Refusal::InputDecode);
             }
-            Err(_) => return Err(Refusal::InputDecode),
+            Err(error) => return ErasedOutcome::Store(error),
         };
-        self.executor.execute(input, store).map(super::staging::Execution::into_erased)
+        match self.executor.execute(input, store) {
+            Ok(execution) => {
+                let (batch, digest) = execution.into_erased();
+                ErasedOutcome::Executed(batch, digest)
+            }
+            Err(refusal) => ErasedOutcome::Refused(refusal),
+        }
     }
 }
