@@ -1,17 +1,30 @@
 //! Append-only, single-writer log of typed events, backed by `SQLite`.
 //!
-//! The journal records [`aether_data::Storage`] kinds and content-addressed
-//! artifacts. It never deletes, rewrites, reorders, compacts, migrates, folds
-//! views, or runs reactors. See ADR-0220.
+//! Two layers, and the split is the point:
+//!
+//! - **The store stays raw.** The `artifacts` table is content-addressed
+//!   (`digest` = `sha256(bytes)`) and knows nothing about kinds.
+//! - **An artifact is an abstraction above the store:** a blob whose bytes
+//!   are an eight-byte [`aether_data::KindId`] prefix followed by a payload.
+//!   The digest covers the kind, so a digest names one kind and one payload.
+//!
+//! Events are [`aether_data::Storage`] kinds. The only write is a [`Batch`] of
+//! staged artifacts plus events; [`Journal::append`] is the only judge.
+//! Citations are typed [`Ref`] values collected by a derive-emitted walk.
+//! See ADR-0220.
 
 mod artifact;
+mod batch;
 mod clock;
 mod draft;
 mod entry;
 mod journal;
+mod reference;
 
-pub use artifact::Digest;
+pub use artifact::{Digest, OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, split_artifact};
+pub use batch::{Batch, BatchError};
 pub use clock::{Clock, SystemClock};
 pub use draft::{Draft, DraftError};
 pub use entry::{Entry, Seq};
-pub use journal::{AppendError, DecodeError, Journal, JournalError};
+pub use journal::{AppendError, DecodeError, GetError, Journal, JournalError};
+pub use reference::Ref;

@@ -4,8 +4,16 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Draft, Journal, Seq};
+use aether_bloomery_journal::{Batch, Draft, Journal, Seq};
 use common::FixedClock;
+
+fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
+    let mut batch = Batch::new();
+    for draft in drafts {
+        batch.push_draft(draft);
+    }
+    batch
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -22,7 +30,7 @@ impl Note {
 #[test]
 fn read_with_a_short_limit_returns_that_many_ascending_and_past_the_head_is_empty() -> Result<(), Box<dyn Error>> {
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
-    journal.append(Seq(0), &[Note::draft("a"), Note::draft("b"), Note::draft("c")])?;
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("a"), Note::draft("b"), Note::draft("c")]))?;
 
     let page = journal.read(Seq(0), 2)?;
     assert_eq!(page.len(), 2);

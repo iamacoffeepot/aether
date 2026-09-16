@@ -181,11 +181,19 @@ struct Point {
     y: u32,
 }
 
+impl aether_data::Cites for Point {
+    fn cites(&self, _sink: &mut aether_data::Citations) {}
+}
+
 #[derive(Debug, PartialEq, aether_data::Schema)]
 struct PointWide {
     x: u32,
     y: u32,
     z: u32,
+}
+
+impl aether_data::Cites for PointWide {
+    fn cites(&self, _sink: &mut aether_data::Citations) {}
 }
 
 #[derive(Debug, PartialEq, aether_data::Storage)]

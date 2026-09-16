@@ -4,8 +4,16 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Draft, Journal, Seq};
+use aether_bloomery_journal::{Batch, Draft, Journal, Seq};
 use common::FixedClock;
+
+fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
+    let mut batch = Batch::new();
+    for draft in drafts {
+        batch.push_draft(draft);
+    }
+    batch
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -26,7 +34,7 @@ fn a_file_backed_journal_closed_and_reopened_at_the_same_path_reports_the_same_h
 
     {
         let mut journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
-        journal.append(Seq(0), &[Note::draft("persist")])?;
+        journal.append(Seq(0), &batch_from_drafts([Note::draft("persist")]))?;
         assert_eq!(journal.head()?, Seq(1));
     }
 

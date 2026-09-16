@@ -63,7 +63,7 @@ pub use name_inventory::{
     id_for_name, name_entries, root_entries, template_entries,
 };
 pub use schema::*;
-pub use storage::{Storage, StorageData, StorageError, StorageLeaves, UnknownField};
+pub use storage::{Citation, Citations, Cites, Storage, StorageData, StorageError, StorageLeaves, UnknownField};
 pub use tagged_id::{Tag, with_tag};
 pub use transform::{InvokeFn, TransformError};
 #[cfg(not(target_arch = "wasm32"))]
@@ -510,11 +510,12 @@ pub mod __derive_runtime {
     pub use crate::hash::{fnv1a_64_fold, storage_kind_id_from_name};
     pub use crate::schema::{EnumVariant, KindLabels, LabelCell, LabelNode, NamedField, SchemaType, VariantLabel};
     pub use crate::storage::{
-        BYTES_SCHEMA, RecordReader, RecordWriter, Storage, StorageData, StorageElement, StorageError, StorageLeaves,
-        U64_SCHEMA, UNIT_SCHEMA, UnknownField, VARIANT_LEAF, assemble_bytes, assemble_bytes_with_aliases,
-        assemble_positional_element, assemble_tagged_element, assemble_with_aliases, assert_unique_storage_leaves,
-        bytes_absent, contribute_bytes, contribute_positional_element, contribute_tagged_element, decode_derived,
-        encode_derived, field_path_root, fold_index_segment, fold_path_segment, terminate_field_hash, variant_hash,
+        BYTES_SCHEMA, Citations, Cites, RecordReader, RecordWriter, Storage, StorageData, StorageElement, StorageError,
+        StorageLeaves, U64_SCHEMA, UNIT_SCHEMA, UnknownField, VARIANT_LEAF, assemble_bytes,
+        assemble_bytes_with_aliases, assemble_positional_element, assemble_tagged_element, assemble_with_aliases,
+        assert_unique_storage_leaves, bytes_absent, contribute_bytes, contribute_positional_element,
+        contribute_tagged_element, decode_derived, encode_derived, field_path_root, fold_index_segment,
+        fold_path_segment, terminate_field_hash, variant_hash,
     };
     use crate::wire;
     pub use crate::wire::{WireDecode, WireEncode, decode_bytes, encode_bytes};

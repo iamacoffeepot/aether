@@ -4,8 +4,16 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Draft, Journal, Seq};
+use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
 use common::FixedClock;
+
+fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
+    let mut batch = Batch::new();
+    for draft in drafts {
+        batch.push_draft(draft);
+    }
+    batch
+}
 
 const STAMP_MILLIS: u64 = 1_700_000_000_000;
 
@@ -33,13 +41,13 @@ struct TooLong {
 #[test]
 fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write() -> Result<(), Box<dyn Error>> {
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
-    journal.append(Seq(0), &[Note::draft("first")])?;
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("first")]))?;
     let before = journal.read(Seq(0), 16)?;
 
-    let error = journal.append(Seq(0), &[Note::draft("stale")]).expect_err("stale fence must fail");
+    let error = journal.append(Seq(0), &batch_from_drafts([Note::draft("stale")])).expect_err("stale fence must fail");
     match error {
         AppendError::HeadMoved { actual } => assert_eq!(actual, Seq(1)),
-        AppendError::Journal(other) => panic!("expected HeadMoved, got Journal({other:?})"),
+        other => panic!("expected HeadMoved, got {other:?}"),
     }
     assert_eq!(journal.head()?, Seq(1));
     assert_eq!(journal.read(Seq(0), 16)?, before);
@@ -49,7 +57,7 @@ fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write
 #[test]
 fn a_three_draft_batch_on_an_empty_journal_returns_the_range_and_stamps_the_clock() -> Result<(), Box<dyn Error>> {
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
-    let range = journal.append(Seq(0), &[Note::draft("a"), Note::draft("b"), Note::draft("c")])?;
+    let range = journal.append(Seq(0), &batch_from_drafts([Note::draft("a"), Note::draft("b"), Note::draft("c")]))?;
     assert_eq!(range, Seq(1)..Seq(4));
     assert_eq!(journal.head()?, Seq(3));
 
@@ -72,11 +80,11 @@ fn a_batch_that_fails_midway_on_the_kind_length_check_leaves_head_and_count_unch
     // 257-byte name; the first insert would succeed, then the CHECK fails, and
     // the transaction rolls back.
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
-    journal.append(Seq(0), &[Note::draft("kept")])?;
+    journal.append(Seq(0), &batch_from_drafts([Note::draft("kept")]))?;
     let before_head = journal.head()?;
     let before_count = journal.read(Seq(0), 16)?.len();
 
-    let batch = [Note::draft("would-be-second"), Draft::of(&TooLong { n: 1 }, None)?];
+    let batch = batch_from_drafts([Note::draft("would-be-second"), Draft::of(&TooLong { n: 1 }, None)?]);
     assert!(journal.append(Seq(1), &batch).is_err());
     assert_eq!(journal.head()?, before_head);
     assert_eq!(journal.read(Seq(0), 16)?.len(), before_count);
