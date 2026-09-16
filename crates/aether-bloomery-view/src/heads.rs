@@ -1,14 +1,13 @@
 //! Cursor-bearing fold: last move per `(target KindId, name)`.
 
-use std::collections::BTreeMap;
-use std::error::Error;
-use std::fmt;
-
-use aether_bloomery_journal::{DecodeError, Entry, Journal, Seq};
+use alloc::collections::BTreeMap;
+use core::error::Error;
+use core::fmt;
 
 use crate::view::View;
 use aether_bloomery_kinds::{
-    Digest, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
+    DecodeError, Digest, Entry, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
+    Seq,
 };
 use aether_data::Kind;
 
@@ -186,10 +185,10 @@ fn seq_error(cursor: Seq, expected: Seq, actual: Seq) -> HeadFoldError {
 
 fn binding_from(entry: &Entry) -> Result<Option<(RecordedHead, Digest)>, HeadFoldError> {
     if entry.kind == RecordedHeadMove::NAME {
-        let event = Journal::decode::<RecordedHeadMove>(entry)?;
+        let event = entry.decode::<RecordedHeadMove>()?;
         Ok(Some((event.head().clone(), event.to())))
     } else if entry.kind == ProgramHeadMoved::NAME {
-        let event = Journal::decode::<ProgramHeadMoved>(entry)?;
+        let event = entry.decode::<ProgramHeadMoved>()?;
         Ok(Some((RecordedHead::new(Program::ID, event.name.as_str())?, event.program.digest())))
     } else {
         Ok(None)

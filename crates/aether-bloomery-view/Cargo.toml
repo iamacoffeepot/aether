@@ -4,10 +4,9 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Lazy native journal views, borrowed tuple injection, and the typed last-move Heads fold (ADR-0220)."
+description = "Typed last-move Heads fold over supplied journal entries (ADR-0220)."
 
 [dependencies]
-aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 

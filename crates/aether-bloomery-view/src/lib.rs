@@ -1,36 +1,26 @@
-//! Lazy native views over a contiguous journal prefix.
+//! Views over a contiguous journal prefix.
 //!
-//! [`Heads`] is the typed last-move fold. [`ViewRegistry`] caches one instance
-//! per native [`std::any::TypeId`], catches each selected view up to an exact
-//! sequence, and injects immutable references into a synchronous callback:
+//! [`Heads`] is the typed last-move fold. A [`View`] consumes every entry in a
+//! batch, including kinds it ignores. There is no `Clone` / `Send` / `Sync`
+//! bound. This crate is `no_std` + `alloc` and does not own a journal: callers
+//! supply entries, and the owner of the fold enforces cursor and failure
+//! handling.
 //!
 //! ```
-//! use aether_bloomery_journal::{Journal, Seq, SystemClock};
-//! use aether_bloomery_view::{Heads, ViewRegistry};
+//! use aether_bloomery_kinds::Seq;
+//! use aether_bloomery_view::Heads;
 //!
-//! # fn main() -> Result<(), Box<dyn std::error::Error>> {
-//! let journal = Journal::open_in_memory_with_clock(Box::new(SystemClock))?;
-//! let mut registry = ViewRegistry::new(journal);
-//! let cursor = registry.views::<Heads>().at(Seq(0)).with(|heads| heads.cursor())?;
-//! assert_eq!(cursor, Seq(0));
-//! # Ok(())
-//! # }
+//! let heads = Heads::new();
+//! assert_eq!(heads.cursor(), Seq(0));
 //! ```
-//!
-//! `views` and `at` do no replay. Existing program execution appends through
-//! [`ViewRegistry::journal_mut`]; successful cached state is reused on the
-//! next request.
 
+#![no_std]
 #![forbid(unsafe_code)]
 
-mod error;
+extern crate alloc;
+
 mod heads;
-mod registry;
-mod selection;
 mod view;
 
-pub use error::ViewError;
 pub use heads::{HeadFoldError, Heads};
-pub use registry::{Positioned, Unpositioned, ViewRegistry, Views};
-pub use selection::ViewSelection;
 pub use view::View;

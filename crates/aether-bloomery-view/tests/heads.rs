@@ -2,11 +2,11 @@
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Clock, Entry, Journal, Seq};
 use aether_bloomery_kinds::{
-    Digest, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove, Ref, Tree,
+    Digest, Entry, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove,
+    Ref, Seq, Tree,
 };
-use aether_bloomery_view::{HeadFoldError, Heads};
+use aether_bloomery_view::{HeadFoldError, Heads, View};
 use aether_data::{Kind, Storage, StorageData};
 
 const PAGE: usize = 256;
@@ -15,14 +15,6 @@ const PAGE: usize = 256;
 #[kind(name = "test.bloomery.view.note")]
 struct Note {
     n: u64,
-}
-
-struct FixedClock(u64);
-
-impl Clock for FixedClock {
-    fn now_millis(&self) -> u64 {
-        self.0
-    }
 }
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
@@ -63,20 +55,6 @@ fn program(name: &str, intent: &str) -> Result<Program, Box<dyn Error>> {
         mode: Mode::Pure,
         intent: intent.into(),
     })
-}
-
-fn fold_pages(journal: &Journal, page: usize) -> Result<Heads, Box<dyn Error>> {
-    let mut heads = Heads::new();
-    loop {
-        let entries = journal.read(heads.cursor(), page)?;
-        if entries.is_empty() {
-            break;
-        }
-        for entry in entries {
-            heads.apply(&entry)?;
-        }
-    }
-    Ok(heads)
 }
 
 #[test]
@@ -227,39 +205,40 @@ fn malformed_historical_and_generic_events_fail_visibly() {
 }
 
 #[test]
-fn incremental_fold_across_pages_matches_rebuild_from_zero() -> Result<(), Box<dyn Error>> {
-    // Bug: last-write-wins is applied per page, or incremental apply diverges from a fresh fold of the same prefix.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(1)))?;
-    let a = program("trim", "first")?;
-    let b = program("trim", "second")?;
-    let c = program("hash", "third")?;
-    let mut batch = Batch::new();
-    let a_ref = batch.stage_encoded(&a)?;
-    let b_ref = batch.stage_encoded(&b)?;
-    let c_ref = batch.stage_encoded(&c)?;
-    let filler = batch.stage_encoded(&program("fill", "page filler")?)?;
+fn incremental_fold_across_chunks_matches_rebuild_from_zero() -> Result<(), Box<dyn Error>> {
+    // Bug: last-write-wins is applied per chunk, or incremental apply diverges from a fresh fold of the same prefix.
+    let filler = digest_ref::<Program>(9);
+    let first = digest_ref::<Program>(1);
+    let second = digest_ref::<Program>(2);
+    let hash_to = digest_ref::<Program>(3);
+    let mut entries = Vec::new();
     for index in 0..PAGE {
         let name = format!("f{index:03}");
-        batch.push_event(&RecordedHeadMove::new(RecordedHead::new(Program::ID, name)?, filler.digest()), None)?;
+        let seq = u64::try_from(index)? + 1;
+        entries.push(entry_for(seq, &RecordedHeadMove::new(RecordedHead::new(Program::ID, name)?, filler.digest()))?);
     }
-    batch.push_event(&Head::<Program>::new("trim").move_to(a_ref), None)?;
-    batch.push_event(&Head::<Program>::new("trim").move_to(b_ref), None)?;
-    batch.push_event(&Head::<Program>::new("hash").move_to(c_ref), None)?;
-    journal.append(Seq(0), &batch)?;
+    let after_fill = u64::try_from(PAGE)? + 1;
+    entries.push(moved(after_fill, "trim", first)?);
+    entries.push(moved(after_fill + 1, "trim", second)?);
+    entries.push(moved(after_fill + 2, "hash", hash_to)?);
 
-    let paged = fold_pages(&journal, PAGE)?;
-    let rebuilt = fold_pages(&journal, 1)?;
+    let mut chunked = Heads::new();
+    for chunk in entries.chunks(PAGE) {
+        chunked.advance(chunk)?;
+    }
+    let mut rebuilt = Heads::new();
+    rebuilt.advance(&entries)?;
+
     let trim = Head::<Program>::new("trim");
     let hash = Head::<Program>::new("hash");
     let fill = Head::<Program>::new("f000");
-
-    assert_eq!(paged.cursor(), Seq(u64::try_from(PAGE)? + 3));
-    assert_eq!(paged.get(&trim), Some(b_ref));
-    assert_eq!(paged.get(&hash), Some(c_ref));
-    assert_eq!(paged.get(&fill), Some(filler));
-    assert_eq!(paged.cursor(), rebuilt.cursor());
-    assert_eq!(paged.get(&trim), rebuilt.get(&trim));
-    assert_eq!(paged.get(&hash), rebuilt.get(&hash));
-    assert_eq!(paged.get(&fill), rebuilt.get(&fill));
+    assert_eq!(chunked.cursor(), Seq(u64::try_from(PAGE)? + 3));
+    assert_eq!(chunked.get(&trim), Some(second));
+    assert_eq!(chunked.get(&hash), Some(hash_to));
+    assert_eq!(chunked.get(&fill), Some(filler));
+    assert_eq!(chunked.cursor(), rebuilt.cursor());
+    assert_eq!(chunked.get(&trim), rebuilt.get(&trim));
+    assert_eq!(chunked.get(&hash), rebuilt.get(&hash));
+    assert_eq!(chunked.get(&fill), rebuilt.get(&fill));
     Ok(())
 }
