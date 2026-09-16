@@ -10,7 +10,7 @@
 
 use std::fmt;
 
-use aether_data::wire::{WireDecode, WireEncode};
+use aether_data::wire::WireDecode;
 use aether_data::{Kind, KindId};
 
 use crate::journal::JournalError;
@@ -68,17 +68,10 @@ impl Kind for Utf8Text {
     const ID: KindId = aether_data::storage_kind_id_from_name(Self::NAME);
 }
 
-/// Eight-byte little-endian [`KindId`] prefix. Reuses [`WireEncode`].
+/// Eight-byte little-endian [`KindId`] prefix. Same layout [`KindId`]'s wire encoding writes.
 #[must_use]
 pub fn artifact_prefix(kind: KindId) -> [u8; 8] {
-    let mut out = Vec::with_capacity(8);
-    if kind.encode(&mut out).is_err() {
-        return [0; 8];
-    }
-    let mut prefix = [0u8; 8];
-    let n = out.len().min(prefix.len());
-    prefix[..n].copy_from_slice(&out[..n]);
-    prefix
+    kind.0.to_le_bytes()
 }
 
 /// Prefix plus payload. The store hashes this whole blob.

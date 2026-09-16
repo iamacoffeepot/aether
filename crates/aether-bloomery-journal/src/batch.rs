@@ -1,5 +1,6 @@
 //! The only write: staged artifacts plus events, judged together by `append`.
 
+use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
@@ -20,6 +21,7 @@ pub struct Staged {
 /// Staged blobs plus encoded events. `append` is the only judge.
 pub struct Batch {
     pub(crate) staged: Vec<Staged>,
+    seen: HashSet<Digest>,
     pub(crate) events: Vec<Draft>,
 }
 
@@ -27,7 +29,7 @@ impl Batch {
     /// Empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self { staged: Vec::new(), events: Vec::new() }
+        Self { staged: Vec::new(), seen: HashSet::new(), events: Vec::new() }
     }
 
     /// Stage `payload` as [`OpaqueBytes`]. Identical blob bytes in one batch are one entry.
@@ -75,7 +77,7 @@ impl Batch {
 
     fn insert_blob(&mut self, bytes: Vec<u8>, citations: Vec<Citation>) -> Digest {
         let digest = hash_bytes(&bytes);
-        if !self.staged.iter().any(|staged| staged.digest == digest) {
+        if self.seen.insert(digest) {
             self.staged.push(Staged { digest, bytes, citations });
         }
         digest
