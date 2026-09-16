@@ -1,0 +1,18 @@
+[package]
+name = "aether-bloomery-program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Program declarations, in-process executors, and the driver that records transitions and faults."
+
+[dependencies]
+aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[lints]
+workspace = true
