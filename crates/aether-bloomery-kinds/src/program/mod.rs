@@ -14,8 +14,8 @@ use alloc::string::String;
 
 use aether_data::KindId;
 
-pub use events::{ProgramNameMoved, Transition};
-pub use fault::{Fault, FaultReason};
+pub use events::{ProgramHeadMoved, Transition};
+pub use fault::{Detail, DetailError, Fault, FaultReason};
 pub use mode::Mode;
 pub use name::{ExecutorName, ExecutorNameError, ProgramName, ProgramNameError};
 

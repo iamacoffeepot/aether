@@ -3,9 +3,10 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    Digest, ExecutorName, Fault, FaultReason, Mode, OpaqueBytes, Program, ProgramName, Ref, Transition, Utf8Text,
-    artifact_digest,
+    Detail, Digest, ExecutorName, Fault, FaultReason, Mode, OpaqueBytes, Program, ProgramName, Ref, Transition,
+    Utf8Text, artifact_digest,
 };
+use aether_data::StorageError;
 use aether_data::{Kind, Storage, StorageData};
 
 fn fixture_program() -> Program {
@@ -66,20 +67,55 @@ fn fixture_pins() -> Result<Pins, Box<dyn Error>> {
 fn the_canonical_encoding_of_one_fixed_fault_is_pinned() -> Result<(), Box<dyn Error>> {
     // Tripwire: the canonical encoding of a Fault with a Refused reason, and the
     // digest it would take as an artifact. Pins Digest, ExecutorName, Ref<Program>,
-    // and the hand-written FaultReason leaves so a later Storage derive swap is
-    // byte-identical.
+    // and FaultReason/Detail leaves so a later codec change is byte-identical.
     let pins = fixture_pins()?;
     let fault = Fault {
         program: pins.program,
         input: pins.input,
         executor: pins.executor,
-        reason: FaultReason::Refused { reason: "no".into() },
+        reason: FaultReason::Refused { reason: Detail::new("no") },
     };
     let payload = Fault::encode_storage(&StorageData::from_value(fault))?;
     let digest = artifact_digest(Fault::ID, &payload);
     assert_eq!(payload, TRIPWIRE_FAULT_PAYLOAD, "payload={payload:?}");
     assert_eq!(digest.as_bytes(), &TRIPWIRE_FAULT_DIGEST, "digest={digest}");
     Ok(())
+}
+
+#[test]
+fn decode_refuses_an_over_cap_fault_detail() -> Result<(), Box<dyn Error>> {
+    // Catches a decode path that truncates over-cap stored text instead of
+    // refusing. The twin puts a raw String in the Detail field position.
+    #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+    enum TwinReason {
+        InputMissing,
+        InputDecode,
+        Refused { reason: String },
+        Panicked { message: String },
+        TimedOut { after_millis: u64 },
+        Crashed { stderr_tail: String },
+    }
+
+    #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+    #[kind(name = "bloomery.fault")]
+    struct TwinFault {
+        program: Ref<Program>,
+        input: Digest,
+        executor: ExecutorName,
+        reason: TwinReason,
+    }
+
+    let pins = fixture_pins()?;
+    let bytes = TwinFault::encode_storage(&StorageData::from_value(TwinFault {
+        program: pins.program,
+        input: pins.input,
+        executor: pins.executor,
+        reason: TwinReason::Refused { reason: "a".repeat(Detail::MAX_BYTES + 1) },
+    }))?;
+    match Fault::decode_storage(&bytes) {
+        Err(StorageError::Invariant { kind: "Detail", reason: "too-long" }) => Ok(()),
+        other => panic!("expected Detail too-long invariant, got {other:?}"),
+    }
 }
 
 #[test]

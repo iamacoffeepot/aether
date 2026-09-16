@@ -4,12 +4,12 @@ use crate::program::Program;
 use crate::program::name::{ExecutorName, ProgramName};
 use crate::{Digest, Ref};
 
-/// From this seq on, `name` means `program`. First binding, rebinding after a
-/// signature change, and pointing back at an older declaration are all this
-/// one event. The fold takes the last per name.
+/// Points the head string `name` at a declaration. Last move wins. First
+/// binding, rebinding after a signature change, and pointing back at an
+/// older declaration are all this one event.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "bloomery.program.name_moved")]
-pub struct ProgramNameMoved {
+#[kind(name = "bloomery.program.head_moved")]
+pub struct ProgramHeadMoved {
     pub name: ProgramName,
     pub program: Ref<Program>,
 }

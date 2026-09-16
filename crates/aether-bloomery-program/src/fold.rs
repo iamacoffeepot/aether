@@ -1,11 +1,11 @@
-//! The name fold: last `ProgramNameMoved` per name in seq order.
+//! The name fold: last `ProgramHeadMoved` per name in seq order.
 
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::fmt;
 
 use aether_bloomery_journal::{DecodeError, Journal, JournalError, Seq};
-use aether_bloomery_kinds::{ProgramName, ProgramNameMoved, Ref};
+use aether_bloomery_kinds::{ProgramHeadMoved, ProgramName, Ref};
 use aether_data::Kind;
 
 use crate::kinds;
@@ -17,7 +17,7 @@ const PAGE: usize = 256;
 pub enum FoldError {
     /// Backend failure.
     Journal(JournalError),
-    /// A `ProgramNameMoved` entry did not decode.
+    /// A `ProgramHeadMoved` entry did not decode.
     Decode(DecodeError),
 }
 
@@ -51,7 +51,7 @@ impl From<DecodeError> for FoldError {
     }
 }
 
-/// Current program for every name: the last [`ProgramNameMoved`] per name in seq order.
+/// Current program for every name: the last [`ProgramHeadMoved`] per name in seq order.
 ///
 /// # Errors
 ///
@@ -65,8 +65,8 @@ pub fn named(journal: &Journal) -> Result<BTreeMap<ProgramName, Ref<kinds::Progr
             return Ok(names);
         }
         for entry in page {
-            if entry.kind == ProgramNameMoved::NAME {
-                let event = Journal::decode::<ProgramNameMoved>(&entry)?;
+            if entry.kind == ProgramHeadMoved::NAME {
+                let event = Journal::decode::<ProgramHeadMoved>(&entry)?;
                 names.insert(event.name, event.program);
             }
             since = entry.seq;

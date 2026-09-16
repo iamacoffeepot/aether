@@ -163,7 +163,7 @@ Fault rules:
 2. Whatever the wrapped thing did (tests failed, compiler errored) is a result, expressed in the result kind.
 3. Faults are about the attempt, never the subject. The reason set is closed.
 4. An executor may return only `Refused`, `InputMissing`, `InputDecode`. The driver assigns the rest from outside. Executors never write events.
-5. A fault carries no blobs. Bounded inline detail only; `String` fields are capped at 4096 bytes by a validated constructor on `FaultReason` (`FaultReason::refused(text)` truncates, never refuses).
+5. A fault carries no blobs. Bounded inline detail only; text is a `Detail`. Truncation happens in `Detail::new` (cut at the last char boundary at or before 4096 bytes); decode of a stored blob past the cap refuses.
 6. One fault per attempt. A retry is a new event.
 7. Faults are never memoized and say nothing about purity.
 8. If a fault seems to need structure, the declaration's result kind is wrong. Faults are never widened.

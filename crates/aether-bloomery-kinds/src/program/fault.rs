@@ -7,27 +7,80 @@
 //! 3. Faults are about the attempt, never the subject. The reason set is closed.
 //! 4. An executor may return only `Refused`, `InputMissing`, `InputDecode`. The
 //!    driver assigns the rest from outside. Executors never write events.
-//! 5. A fault carries no blobs. Bounded inline detail only; `String` fields are
-//!    capped at 4096 bytes by a validated constructor on `FaultReason`
-//!    (`FaultReason::refused(text)` truncates, never refuses).
+//! 5. A fault carries no blobs. Bounded inline detail only; text is a
+//!    [`Detail`]. Truncation happens in [`Detail::new`]; decode of a stored
+//!    blob past the cap refuses.
 //! 6. One fault per attempt. A retry is a new event.
 //! 7. Faults are never memoized and say nothing about purity.
 //! 8. If a fault seems to need structure, the declaration's result kind is
 //!    wrong. Faults are never widened.
 
-use alloc::borrow::Cow;
 use alloc::string::String;
-
-use aether_data::storage::{
-    RecordReader, RecordWriter, StorageError, UNIT_SCHEMA, VARIANT_LEAF, fold_path_segment, variant_hash,
-};
-use aether_data::{Citations, Cites, NamedField, Schema, SchemaType, StorageLeaves};
+use core::error::Error as StdError;
+use core::fmt;
 
 use crate::program::Program;
 use crate::program::name::ExecutorName;
 use crate::{Digest, Ref};
 
-const DETAIL_MAX_BYTES: usize = 4096;
+/// Why [`Detail`] decode refused a stored blob.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailError {
+    /// The stored text was longer than [`Detail::MAX_BYTES`].
+    TooLong,
+}
+
+impl aether_data::Invariant for DetailError {
+    fn reason(&self) -> &'static str {
+        "too-long"
+    }
+}
+
+impl fmt::Display for DetailError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(aether_data::Invariant::reason(self))
+    }
+}
+
+impl StdError for DetailError {}
+
+/// Bounded inline fault text. At most 4096 bytes; a constructor input past
+/// the cap is cut at the last char boundary at or before it.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[storage(validate)]
+pub struct Detail(String);
+
+impl Detail {
+    pub const MAX_BYTES: usize = 4096;
+
+    /// The one constructor. Never refuses: fault text is bounded, not rejected.
+    #[must_use]
+    pub fn new(text: impl AsRef<str>) -> Self {
+        let text = text.as_ref();
+        if text.len() <= Self::MAX_BYTES {
+            return Self(String::from(text));
+        }
+        let mut end = Self::MAX_BYTES;
+        while end > 0 && !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        Self(String::from(&text[..end]))
+    }
+
+    /// Borrow the bounded text.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn check(text: &str) -> Result<(), DetailError> {
+        if text.len() > Self::MAX_BYTES {
+            Err(DetailError::TooLong)
+        } else {
+            Ok(())
+        }
+    }
+}
 
 /// An attempt that ended without an execution. Written only by the driver.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -40,152 +93,34 @@ pub struct Fault {
 }
 
 /// Closed set of reasons an attempt produced no execution.
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Schema)]
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 pub enum FaultReason {
     /// The input digest names nothing in the store.
     InputMissing,
     /// The input blob had the declared kind but did not decode.
     InputDecode,
     /// The executor declined to attempt. Bounded reason.
-    Refused { reason: String },
+    Refused { reason: Detail },
     /// The executor panicked. Caught by the driver.
-    Panicked { message: String },
+    Panicked { message: Detail },
     /// Reserved: the driver enforces no timeout in this brick.
     TimedOut { after_millis: u64 },
     /// Reserved: no out-of-process executor exists in this brick.
-    Crashed { stderr_tail: String },
+    Crashed { stderr_tail: Detail },
 }
 
-impl FaultReason {
-    /// Decline with a bounded reason. Truncates at 4096 bytes; never refuses.
-    #[must_use]
-    pub fn refused(text: impl AsRef<str>) -> Self {
-        Self::Refused { reason: cap_detail(text.as_ref()) }
-    }
+#[cfg(test)]
+mod tests {
+    use super::Detail;
 
-    /// A panic caught by the driver. Truncates at 4096 bytes.
-    #[must_use]
-    pub fn panicked(message: impl AsRef<str>) -> Self {
-        Self::Panicked { message: cap_detail(message.as_ref()) }
-    }
-
-    /// Reserved timeout reason.
-    #[must_use]
-    pub fn timed_out(after_millis: u64) -> Self {
-        Self::TimedOut { after_millis }
-    }
-
-    /// Reserved crash reason. Truncates at 4096 bytes.
-    #[must_use]
-    pub fn crashed(stderr_tail: impl AsRef<str>) -> Self {
-        Self::Crashed { stderr_tail: cap_detail(stderr_tail.as_ref()) }
-    }
-
-    fn capped(self) -> Self {
-        match self {
-            Self::Refused { reason } => Self::Refused { reason: cap_detail(&reason) },
-            Self::Panicked { message } => Self::Panicked { message: cap_detail(&message) },
-            Self::Crashed { stderr_tail } => Self::Crashed { stderr_tail: cap_detail(&stderr_tail) },
-            other => other,
-        }
-    }
-}
-
-fn cap_detail(text: &str) -> String {
-    if text.len() <= DETAIL_MAX_BYTES {
-        return String::from(text);
-    }
-    let mut end = DETAIL_MAX_BYTES;
-    while end > 0 && !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    String::from(&text[..end])
-}
-
-impl Cites for FaultReason {
-    fn cites(&self, _sink: &mut Citations) {}
-}
-
-const REFUSED_FIELDS: &[NamedField] = &[NamedField { name: Cow::Borrowed("reason"), ty: <String as Schema>::SCHEMA }];
-const PANICKED_FIELDS: &[NamedField] = &[NamedField { name: Cow::Borrowed("message"), ty: <String as Schema>::SCHEMA }];
-const TIMED_OUT_FIELDS: &[NamedField] =
-    &[NamedField { name: Cow::Borrowed("after_millis"), ty: <u64 as Schema>::SCHEMA }];
-const CRASHED_FIELDS: &[NamedField] =
-    &[NamedField { name: Cow::Borrowed("stderr_tail"), ty: <String as Schema>::SCHEMA }];
-
-const REFUSED_SCHEMA: SchemaType = SchemaType::Struct { fields: Cow::Borrowed(REFUSED_FIELDS), repr_c: false };
-const PANICKED_SCHEMA: SchemaType = SchemaType::Struct { fields: Cow::Borrowed(PANICKED_FIELDS), repr_c: false };
-const TIMED_OUT_SCHEMA: SchemaType = SchemaType::Struct { fields: Cow::Borrowed(TIMED_OUT_FIELDS), repr_c: false };
-const CRASHED_SCHEMA: SchemaType = SchemaType::Struct { fields: Cow::Borrowed(CRASHED_FIELDS), repr_c: false };
-
-impl StorageLeaves for FaultReason {
-    fn contribute(&self, carry: u64, depth: u32, sink: &mut RecordWriter) -> Result<(), StorageError> {
-        let disc = match self {
-            Self::InputMissing => variant_hash("InputMissing", &UNIT_SCHEMA),
-            Self::InputDecode => variant_hash("InputDecode", &UNIT_SCHEMA),
-            Self::Refused { .. } => variant_hash("Refused", &REFUSED_SCHEMA),
-            Self::Panicked { .. } => variant_hash("Panicked", &PANICKED_SCHEMA),
-            Self::TimedOut { .. } => variant_hash("TimedOut", &TIMED_OUT_SCHEMA),
-            Self::Crashed { .. } => variant_hash("Crashed", &CRASHED_SCHEMA),
-        };
-        let var_carry = fold_path_segment(carry, VARIANT_LEAF.as_bytes(), depth);
-        u64::contribute(&disc, var_carry, depth + 1, sink)?;
-        match self {
-            Self::InputMissing | Self::InputDecode => Ok(()),
-            Self::Refused { reason } => {
-                let body = fold_path_segment(carry, b"Refused", depth);
-                let field = fold_path_segment(body, b"reason", depth + 1);
-                String::contribute(&cap_detail(reason), field, depth + 2, sink)
-            }
-            Self::Panicked { message } => {
-                let body = fold_path_segment(carry, b"Panicked", depth);
-                let field = fold_path_segment(body, b"message", depth + 1);
-                String::contribute(&cap_detail(message), field, depth + 2, sink)
-            }
-            Self::TimedOut { after_millis } => {
-                let body = fold_path_segment(carry, b"TimedOut", depth);
-                let field = fold_path_segment(body, b"after_millis", depth + 1);
-                u64::contribute(after_millis, field, depth + 2, sink)
-            }
-            Self::Crashed { stderr_tail } => {
-                let body = fold_path_segment(carry, b"Crashed", depth);
-                let field = fold_path_segment(body, b"stderr_tail", depth + 1);
-                String::contribute(&cap_detail(stderr_tail), field, depth + 2, sink)
-            }
-        }
-    }
-
-    fn assemble(carry: u64, depth: u32, source: &mut RecordReader) -> Result<Self, StorageError> {
-        let var_carry = fold_path_segment(carry, VARIANT_LEAF.as_bytes(), depth);
-        let disc = u64::assemble(var_carry, depth + 1, source)?;
-        let value = if disc == variant_hash("InputMissing", &UNIT_SCHEMA) {
-            Self::InputMissing
-        } else if disc == variant_hash("InputDecode", &UNIT_SCHEMA) {
-            Self::InputDecode
-        } else if disc == variant_hash("Refused", &REFUSED_SCHEMA) {
-            let body = fold_path_segment(carry, b"Refused", depth);
-            let field = fold_path_segment(body, b"reason", depth + 1);
-            Self::Refused { reason: String::assemble(field, depth + 2, source)? }
-        } else if disc == variant_hash("Panicked", &PANICKED_SCHEMA) {
-            let body = fold_path_segment(carry, b"Panicked", depth);
-            let field = fold_path_segment(body, b"message", depth + 1);
-            Self::Panicked { message: String::assemble(field, depth + 2, source)? }
-        } else if disc == variant_hash("TimedOut", &TIMED_OUT_SCHEMA) {
-            let body = fold_path_segment(carry, b"TimedOut", depth);
-            let field = fold_path_segment(body, b"after_millis", depth + 1);
-            Self::TimedOut { after_millis: u64::assemble(field, depth + 2, source)? }
-        } else if disc == variant_hash("Crashed", &CRASHED_SCHEMA) {
-            let body = fold_path_segment(carry, b"Crashed", depth);
-            let field = fold_path_segment(body, b"stderr_tail", depth + 1);
-            Self::Crashed { stderr_tail: String::assemble(field, depth + 2, source)? }
-        } else {
-            return Err(StorageError::UnknownVariant { hash: disc });
-        };
-        Ok(value.capped())
-    }
-
-    fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
-        let var_carry = fold_path_segment(carry, VARIANT_LEAF.as_bytes(), depth);
-        u64::is_absent(var_carry, depth + 1, source)
+    #[test]
+    fn new_cuts_inside_a_multibyte_char_at_the_cap() {
+        let mut text = "a".repeat(Detail::MAX_BYTES - 2);
+        text.push('\u{4e2d}');
+        assert_eq!(text.len(), Detail::MAX_BYTES + 1);
+        let detail = Detail::new(&text);
+        assert!(detail.as_str().len() <= Detail::MAX_BYTES);
+        assert!(detail.as_str().is_char_boundary(detail.as_str().len()));
+        assert_eq!(detail.as_str(), "a".repeat(Detail::MAX_BYTES - 2));
     }
 }
