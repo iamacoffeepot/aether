@@ -1,4 +1,4 @@
-//! Typed and recorded head names: checked const symbols and owned runtime identities.
+//! Typed and recorded head names: checked const heads and owned runtime identities.
 
 use alloc::borrow::Cow;
 use alloc::string::String;
@@ -16,13 +16,14 @@ use super::HeadMoved;
 
 const MAX_BYTES: usize = 128;
 const KIND_MISMATCH: &str = "kind-mismatch";
+const INVARIANT_KIND: &str = "Head";
 
-/// Why a symbol name was refused.
+/// Why a head name was refused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SymbolError {
+pub enum HeadNameError {
     /// The string was empty.
     Empty,
-    /// The string was longer than [`Symbol::MAX_BYTES`].
+    /// The string was longer than [`Head::MAX_BYTES`].
     TooLong,
     /// The string contained a character for which [`char::is_whitespace`] is true.
     Whitespace,
@@ -30,7 +31,7 @@ pub enum SymbolError {
     Control,
 }
 
-impl SymbolError {
+impl HeadNameError {
     pub(super) const fn reason(self) -> &'static str {
         match self {
             Self::Empty => "empty",
@@ -41,58 +42,58 @@ impl SymbolError {
     }
 }
 
-impl aether_data::Invariant for SymbolError {
+impl aether_data::Invariant for HeadNameError {
     fn reason(&self) -> &'static str {
         Self::reason(*self)
     }
 }
 
-impl fmt::Display for SymbolError {
+impl fmt::Display for HeadNameError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.reason())
     }
 }
 
-impl StdError for SymbolError {}
+impl StdError for HeadNameError {}
 
 /// Typed head name `(K::ID, name)`. Declare it as a `const` or `static`.
 ///
 /// The name is 1–128 UTF-8 bytes with no whitespace or control. Bytes are
 /// preserved exactly. Equality, hashing, and ordering are case-sensitive and
-/// normalization-free. Punctuation has no special semantics. A symbol is not
+/// normalization-free. Punctuation has no special semantics. A head is not
 /// a [`crate::ProgramName`], not a citation, and not a captured current value.
 ///
 /// ```
-/// use aether_bloomery_kinds::{Program, Symbol, Tree};
+/// use aether_bloomery_kinds::{Head, Program, Tree};
 ///
-/// const MAIN: Symbol<Tree> = Symbol::new("main");
-/// static BUILD: Symbol<Program> = Symbol::new("build");
+/// const MAIN: Head<Tree> = Head::new("main");
+/// static BUILD: Head<Program> = Head::new("build");
 /// assert_eq!(MAIN.as_str(), "main");
 /// assert_eq!(BUILD.as_str(), "build");
 /// ```
 ///
 /// ```compile_fail
-/// use aether_bloomery_kinds::{Symbol, Tree};
-/// const _: Symbol<Tree> = Symbol::new("");
+/// use aether_bloomery_kinds::{Head, Tree};
+/// const _: Head<Tree> = Head::new("");
 /// ```
 ///
 /// ```compile_fail
-/// use aether_bloomery_kinds::{Symbol, Tree};
-/// const _: Symbol<Tree> = Symbol::new(" ");
+/// use aether_bloomery_kinds::{Head, Tree};
+/// const _: Head<Tree> = Head::new(" ");
 /// ```
 ///
 /// ```compile_fail
-/// use aether_bloomery_kinds::{Symbol, Tree};
-/// const _: Symbol<Tree> = Symbol::new("\n");
+/// use aether_bloomery_kinds::{Head, Tree};
+/// const _: Head<Tree> = Head::new("\n");
 /// ```
 ///
 /// ```compile_fail
-/// use aether_bloomery_kinds::{Symbol, Tree};
-/// const _: Symbol<Tree> = Symbol::new(
+/// use aether_bloomery_kinds::{Head, Tree};
+/// const _: Head<Tree> = Head::new(
 ///     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 /// );
 /// ```
-pub struct Symbol<K> {
+pub struct Head<K> {
     name: Cow<'static, str>,
     _kind: PhantomData<fn() -> K>,
 }
@@ -100,25 +101,25 @@ pub struct Symbol<K> {
 /// Runtime head identity: a kind plus a validated name.
 ///
 /// Journal and index decoding use this form. Construction checks the name
-/// with the same rules as [`Symbol::new`].
+/// with the same rules as [`Head::new`].
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct RecordedSymbol {
+pub struct RecordedHead {
     kind: KindId,
     name: String,
 }
 
-impl<K> Symbol<K> {
+impl<K> Head<K> {
     /// Maximum accepted UTF-8 byte length, inclusive.
     pub const MAX_BYTES: usize = MAX_BYTES;
 
-    /// Borrow the symbol as a string.
+    /// Borrow the head name as a string.
     #[must_use]
     pub fn as_str(&self) -> &str {
         self.name.as_ref()
     }
 }
 
-impl<K: Kind> Symbol<K> {
+impl<K: Kind> Head<K> {
     /// Accept a `'static` name, borrowing the literal.
     ///
     /// # Panics
@@ -132,29 +133,29 @@ impl<K: Kind> Symbol<K> {
     pub const fn new(name: &'static str) -> Self {
         if let Err(error) = check(name) {
             match error {
-                SymbolError::Empty => panic!("empty"),
-                SymbolError::TooLong => panic!("too-long"),
-                SymbolError::Whitespace => panic!("whitespace"),
-                SymbolError::Control => panic!("control"),
+                HeadNameError::Empty => panic!("empty"),
+                HeadNameError::TooLong => panic!("too-long"),
+                HeadNameError::Whitespace => panic!("whitespace"),
+                HeadNameError::Control => panic!("control"),
             }
         }
         Self { name: Cow::Borrowed(name), _kind: PhantomData }
     }
 
-    /// Kind this symbol names, `K::ID`.
+    /// Kind this head names, `K::ID`.
     #[must_use]
     pub const fn kind(&self) -> KindId {
         K::ID
     }
 
-    /// Point this symbol at `to`. The result is the typed move event.
+    /// Point this head at `to`. The result is the typed move event.
     ///
     /// A mismatched target kind is rejected at compile time:
     ///
     /// ```compile_fail
-    /// use aether_bloomery_kinds::{Digest, Program, Ref, Symbol, Tree};
+    /// use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
     ///
-    /// const MAIN: Symbol<Tree> = Symbol::new("main");
+    /// const MAIN: Head<Tree> = Head::new("main");
     /// let program = Ref::<Program>::from_digest(Digest::from_bytes([0; 32]));
     /// let _ = MAIN.move_to(program);
     /// ```
@@ -162,9 +163,9 @@ impl<K: Kind> Symbol<K> {
     /// The same-kind call compiles:
     ///
     /// ```
-    /// use aether_bloomery_kinds::{Digest, Ref, Symbol, Tree};
+    /// use aether_bloomery_kinds::{Digest, Head, Ref, Tree};
     ///
-    /// const MAIN: Symbol<Tree> = Symbol::new("main");
+    /// const MAIN: Head<Tree> = Head::new("main");
     /// let tree = Ref::<Tree>::from_digest(Digest::from_bytes([0; 32]));
     /// let _event = MAIN.move_to(tree);
     /// ```
@@ -173,15 +174,15 @@ impl<K: Kind> Symbol<K> {
         HeadMoved::from_parts(self.clone(), to)
     }
 
-    pub(super) fn from_recorded(recorded: RecordedSymbol) -> Result<Self, StorageError> {
+    pub(super) fn from_recorded(recorded: RecordedHead) -> Result<Self, StorageError> {
         if recorded.kind != K::ID {
-            return Err(symbol_kind_mismatch());
+            return Err(head_kind_mismatch());
         }
         Ok(Self { name: Cow::Owned(recorded.name), _kind: PhantomData })
     }
 }
 
-impl RecordedSymbol {
+impl RecordedHead {
     /// Maximum accepted UTF-8 byte length, inclusive.
     pub const MAX_BYTES: usize = MAX_BYTES;
 
@@ -190,10 +191,10 @@ impl RecordedSymbol {
     ///
     /// # Errors
     ///
-    /// [`SymbolError`] names which rule failed. Length is checked before
+    /// [`HeadNameError`] names which rule failed. Length is checked before
     /// characters. A character that is both control and whitespace is
-    /// [`SymbolError::Control`].
-    pub fn new(kind: KindId, name: impl Into<String>) -> Result<Self, SymbolError> {
+    /// [`HeadNameError::Control`].
+    pub fn new(kind: KindId, name: impl Into<String>) -> Result<Self, HeadNameError> {
         let name = name.into();
         check(&name)?;
         Ok(Self { kind, name })
@@ -212,78 +213,78 @@ impl RecordedSymbol {
     }
 }
 
-impl<K: Kind> From<&Symbol<K>> for RecordedSymbol {
-    fn from(symbol: &Symbol<K>) -> Self {
-        Self { kind: K::ID, name: String::from(symbol.as_str()) }
+impl<K: Kind> From<&Head<K>> for RecordedHead {
+    fn from(head: &Head<K>) -> Self {
+        Self { kind: K::ID, name: String::from(head.as_str()) }
     }
 }
 
-impl<K> Clone for Symbol<K> {
+impl<K> Clone for Head<K> {
     fn clone(&self) -> Self {
         Self { name: self.name.clone(), _kind: PhantomData }
     }
 }
 
-impl<K> PartialEq for Symbol<K> {
+impl<K> PartialEq for Head<K> {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
     }
 }
 
-impl<K> Eq for Symbol<K> {}
+impl<K> Eq for Head<K> {}
 
-impl<K> PartialOrd for Symbol<K> {
+impl<K> PartialOrd for Head<K> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
 
-impl<K> Ord for Symbol<K> {
+impl<K> Ord for Head<K> {
     fn cmp(&self, other: &Self) -> Ordering {
         self.name.cmp(&other.name)
     }
 }
 
-impl<K> Hash for Symbol<K> {
+impl<K> Hash for Head<K> {
     fn hash<H: Hasher>(&self, state: &mut H) {
         self.name.hash(state);
     }
 }
 
-impl<K> fmt::Debug for Symbol<K> {
+impl<K> fmt::Debug for Head<K> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_tuple("Symbol").field(&self.as_str()).finish()
+        f.debug_tuple("Head").field(&self.as_str()).finish()
     }
 }
 
-pub(super) const fn check(value: &str) -> Result<(), SymbolError> {
+pub(super) const fn check(value: &str) -> Result<(), HeadNameError> {
     if value.is_empty() {
-        return Err(SymbolError::Empty);
+        return Err(HeadNameError::Empty);
     }
     if value.len() > MAX_BYTES {
-        return Err(SymbolError::TooLong);
+        return Err(HeadNameError::TooLong);
     }
     let bytes = value.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
         let (ch, next) = next_scalar(bytes, i);
         if ch.is_control() {
-            return Err(SymbolError::Control);
+            return Err(HeadNameError::Control);
         }
         if ch.is_whitespace() {
-            return Err(SymbolError::Whitespace);
+            return Err(HeadNameError::Whitespace);
         }
         i = next;
     }
     Ok(())
 }
 
-pub(super) fn symbol_storage_err(error: SymbolError) -> StorageError {
-    StorageError::Invariant { kind: "Symbol", reason: error.reason() }
+pub(super) fn head_storage_err(error: HeadNameError) -> StorageError {
+    StorageError::Invariant { kind: INVARIANT_KIND, reason: error.reason() }
 }
 
-pub(super) fn symbol_kind_mismatch() -> StorageError {
-    StorageError::Invariant { kind: "Symbol", reason: KIND_MISMATCH }
+pub(super) fn head_kind_mismatch() -> StorageError {
+    StorageError::Invariant { kind: INVARIANT_KIND, reason: KIND_MISMATCH }
 }
 
 /// Decode one Unicode scalar from already-valid UTF-8 `str` bytes.
@@ -324,21 +325,21 @@ mod tests {
 
     use crate::{Program, Tree};
 
-    use super::{RecordedSymbol, Symbol, SymbolError, check, next_scalar};
+    use super::{Head, HeadNameError, RecordedHead, check, next_scalar};
 
-    fn check_by_chars(value: &str) -> Result<(), SymbolError> {
+    fn check_by_chars(value: &str) -> Result<(), HeadNameError> {
         if value.is_empty() {
-            return Err(SymbolError::Empty);
+            return Err(HeadNameError::Empty);
         }
-        if value.len() > Symbol::<Tree>::MAX_BYTES {
-            return Err(SymbolError::TooLong);
+        if value.len() > Head::<Tree>::MAX_BYTES {
+            return Err(HeadNameError::TooLong);
         }
         for ch in value.chars() {
             if ch.is_control() {
-                return Err(SymbolError::Control);
+                return Err(HeadNameError::Control);
             }
             if ch.is_whitespace() {
-                return Err(SymbolError::Whitespace);
+                return Err(HeadNameError::Whitespace);
             }
         }
         Ok(())
@@ -348,8 +349,8 @@ mod tests {
     fn const_and_static_declarations_borrow_the_literal() {
         // Catches a constructor that forced an owned String, so a const/static
         // declaration could not compile, or that stored a different spelling.
-        const MAIN: Symbol<Tree> = Symbol::new("main");
-        static BUILD: Symbol<Program> = Symbol::new("build");
+        const MAIN: Head<Tree> = Head::new("main");
+        static BUILD: Head<Program> = Head::new("build");
         assert_eq!(MAIN.as_str(), "main");
         assert_eq!(MAIN.kind(), Tree::ID);
         assert_eq!(BUILD.as_str(), "build");
@@ -357,44 +358,44 @@ mod tests {
     }
 
     #[test]
-    fn a_static_symbol_is_sync_when_k_is_not() {
+    fn a_static_head_is_sync_when_k_is_not() {
         // Catches PhantomData<K> instead of PhantomData<fn() -> K>, which would
-        // require K: Sync for a static Symbol.
+        // require K: Sync for a static Head.
         struct NotSync(PhantomData<Cell<u8>>);
         impl Kind for NotSync {
-            const NAME: &'static str = "test.bloomery.symbol.not_sync";
+            const NAME: &'static str = "test.bloomery.head.not_sync";
             const ID: KindId = aether_data::storage_kind_id_from_name(Self::NAME);
         }
-        static SYMBOL: Symbol<NotSync> = Symbol::new("main");
+        static HEAD: Head<NotSync> = Head::new("main");
         fn needs_sync<T: Sync>(_: &T) {}
-        needs_sync(&SYMBOL);
-        assert_eq!(SYMBOL.as_str(), "main");
+        needs_sync(&HEAD);
+        assert_eq!(HEAD.as_str(), "main");
     }
 
     #[test]
     fn each_rule_refuses_and_accepts_its_neighbour() {
         // Catches a check that swapped reasons, skipped a predicate, or
         // accepted the empty string.
-        let too_long = "a".repeat(Symbol::<Tree>::MAX_BYTES + 1);
-        let max_len = "a".repeat(Symbol::<Tree>::MAX_BYTES);
+        let too_long = "a".repeat(Head::<Tree>::MAX_BYTES + 1);
+        let max_len = "a".repeat(Head::<Tree>::MAX_BYTES);
         let cases = [
-            ("", SymbolError::Empty, "a"),
-            (too_long.as_str(), SymbolError::TooLong, max_len.as_str()),
-            (" main", SymbolError::Whitespace, "main"),
-            ("main ", SymbolError::Whitespace, "main"),
-            ("a\u{00A0}b", SymbolError::Whitespace, "ab"),
-            ("a\u{3000}b", SymbolError::Whitespace, "ab"),
-            ("a\u{2028}b", SymbolError::Whitespace, "ab"),
-            ("a\nb", SymbolError::Control, "ab"),
-            ("a\0b", SymbolError::Control, "ab"),
-            ("a\u{007F}b", SymbolError::Control, "ab"),
-            ("a\u{0080}b", SymbolError::Control, "ab"),
-            ("a\u{009F}b", SymbolError::Control, "ab"),
+            ("", HeadNameError::Empty, "a"),
+            (too_long.as_str(), HeadNameError::TooLong, max_len.as_str()),
+            (" main", HeadNameError::Whitespace, "main"),
+            ("main ", HeadNameError::Whitespace, "main"),
+            ("a\u{00A0}b", HeadNameError::Whitespace, "ab"),
+            ("a\u{3000}b", HeadNameError::Whitespace, "ab"),
+            ("a\u{2028}b", HeadNameError::Whitespace, "ab"),
+            ("a\nb", HeadNameError::Control, "ab"),
+            ("a\0b", HeadNameError::Control, "ab"),
+            ("a\u{007F}b", HeadNameError::Control, "ab"),
+            ("a\u{0080}b", HeadNameError::Control, "ab"),
+            ("a\u{009F}b", HeadNameError::Control, "ab"),
         ];
         for (reject, error, accept) in cases {
-            assert_eq!(RecordedSymbol::new(Tree::ID, reject).map(|_| ()), Err(error), "reject {reject:?}");
+            assert_eq!(RecordedHead::new(Tree::ID, reject).map(|_| ()), Err(error), "reject {reject:?}");
             assert_eq!(
-                RecordedSymbol::new(Tree::ID, accept).expect("accepted neighbour").as_str(),
+                RecordedHead::new(Tree::ID, accept).expect("accepted neighbour").as_str(),
                 accept,
                 "accept {accept:?}"
             );
@@ -407,34 +408,34 @@ mod tests {
         // would be treated like 64 ASCII bytes, and 64 × 'é' plus one more
         // byte would sneak under a 128-character cap.
         let max = "é".repeat(64);
-        assert_eq!(max.len(), Symbol::<Tree>::MAX_BYTES);
+        assert_eq!(max.len(), Head::<Tree>::MAX_BYTES);
         assert_eq!(max.chars().count(), 64);
-        assert_eq!(RecordedSymbol::new(Tree::ID, max.as_str()).expect("128 bytes").as_str(), max);
+        assert_eq!(RecordedHead::new(Tree::ID, max.as_str()).expect("128 bytes").as_str(), max);
 
         let mut over = max;
         over.push('a');
-        assert_eq!(over.len(), Symbol::<Tree>::MAX_BYTES + 1);
-        assert_eq!(RecordedSymbol::new(Tree::ID, over.as_str()).map(|_| ()), Err(SymbolError::TooLong));
+        assert_eq!(over.len(), Head::<Tree>::MAX_BYTES + 1);
+        assert_eq!(RecordedHead::new(Tree::ID, over.as_str()).map(|_| ()), Err(HeadNameError::TooLong));
     }
 
     #[test]
     fn length_is_checked_before_characters() {
         // Catches a scan that reported whitespace or control on an
         // over-long input instead of too-long.
-        let spaces = " ".repeat(Symbol::<Tree>::MAX_BYTES + 1);
-        assert_eq!(RecordedSymbol::new(Tree::ID, spaces.as_str()).map(|_| ()), Err(SymbolError::TooLong));
-        let tabs = "\t".repeat(Symbol::<Tree>::MAX_BYTES + 1);
-        assert_eq!(RecordedSymbol::new(Tree::ID, tabs.as_str()).map(|_| ()), Err(SymbolError::TooLong));
+        let spaces = " ".repeat(Head::<Tree>::MAX_BYTES + 1);
+        assert_eq!(RecordedHead::new(Tree::ID, spaces.as_str()).map(|_| ()), Err(HeadNameError::TooLong));
+        let tabs = "\t".repeat(Head::<Tree>::MAX_BYTES + 1);
+        assert_eq!(RecordedHead::new(Tree::ID, tabs.as_str()).map(|_| ()), Err(HeadNameError::TooLong));
     }
 
     #[test]
     fn a_character_that_is_both_control_and_whitespace_is_control() {
         // Catches a check that tested whitespace first and reported tab
         // or newline as whitespace.
-        assert_eq!(RecordedSymbol::new(Tree::ID, "\t").map(|_| ()), Err(SymbolError::Control));
-        assert_eq!(RecordedSymbol::new(Tree::ID, "\n").map(|_| ()), Err(SymbolError::Control));
-        assert_eq!(RecordedSymbol::new(Tree::ID, "\u{0085}").map(|_| ()), Err(SymbolError::Control));
-        assert_eq!(RecordedSymbol::new(Tree::ID, " ").map(|_| ()), Err(SymbolError::Whitespace));
+        assert_eq!(RecordedHead::new(Tree::ID, "\t").map(|_| ()), Err(HeadNameError::Control));
+        assert_eq!(RecordedHead::new(Tree::ID, "\n").map(|_| ()), Err(HeadNameError::Control));
+        assert_eq!(RecordedHead::new(Tree::ID, "\u{0085}").map(|_| ()), Err(HeadNameError::Control));
+        assert_eq!(RecordedHead::new(Tree::ID, " ").map(|_| ()), Err(HeadNameError::Whitespace));
     }
 
     #[test]
@@ -442,18 +443,15 @@ mod tests {
         // Catches a wrapper that folded case, NFC-normalized, or treated
         // punctuation as a path or filesystem restriction.
         for accept in ["main/head", "a.b", "foo-bar", "foo:bar", "foo_bar", "foo*bar", "Main"] {
-            assert_eq!(
-                RecordedSymbol::new(Tree::ID, accept).expect("punctuation and case are allowed").as_str(),
-                accept
-            );
+            assert_eq!(RecordedHead::new(Tree::ID, accept).expect("punctuation and case are allowed").as_str(), accept);
         }
-        let upper = RecordedSymbol::new(Tree::ID, "Main").expect("case is allowed");
-        let lower = RecordedSymbol::new(Tree::ID, "main").expect("case is allowed");
+        let upper = RecordedHead::new(Tree::ID, "Main").expect("case is allowed");
+        let lower = RecordedHead::new(Tree::ID, "main").expect("case is allowed");
         assert_ne!(upper, lower);
         assert!(upper < lower);
 
-        let composed = RecordedSymbol::new(Tree::ID, "\u{00E9}").expect("composed spelling");
-        let decomposed = RecordedSymbol::new(Tree::ID, "e\u{0301}").expect("decomposed spelling");
+        let composed = RecordedHead::new(Tree::ID, "\u{00E9}").expect("composed spelling");
+        let decomposed = RecordedHead::new(Tree::ID, "e\u{0301}").expect("decomposed spelling");
         assert_ne!(composed, decomposed);
         assert_eq!(composed.as_str(), "\u{00E9}");
         assert_eq!(decomposed.as_str(), "e\u{0301}");
@@ -489,7 +487,7 @@ mod tests {
         // Catches the const UTF-8 walk disagreeing with str::chars on width,
         // control, or whitespace, so a name accepted at decode would panic
         // in a const initializer, or the reverse.
-        let too_long = "a".repeat(Symbol::<Tree>::MAX_BYTES + 1);
+        let too_long = "a".repeat(Head::<Tree>::MAX_BYTES + 1);
         let samples = [
             "",
             "main",
@@ -515,10 +513,10 @@ mod tests {
     fn tree_and_program_may_share_the_text_main() {
         // Catches a global text-uniqueness rule that forbade independent
         // (Tree, "main") and (Program, "main") identities.
-        const TREE: Symbol<Tree> = Symbol::new("main");
-        const PROGRAM: Symbol<Program> = Symbol::new("main");
+        const TREE: Head<Tree> = Head::new("main");
+        const PROGRAM: Head<Program> = Head::new("main");
         assert_eq!(TREE.as_str(), PROGRAM.as_str());
         assert_ne!(TREE.kind(), PROGRAM.kind());
-        assert_ne!(RecordedSymbol::from(&TREE), RecordedSymbol::from(&PROGRAM));
+        assert_ne!(RecordedHead::from(&TREE), RecordedHead::from(&PROGRAM));
     }
 }

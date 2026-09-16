@@ -13,7 +13,7 @@
 //! Citations are typed [`Ref`] values collected by a derive-emitted walk.
 //! The one recognized exception is `bloomery.head_moved`: `append` decodes
 //! that kind from the draft as [`aether_bloomery_kinds::RecordedHeadMove`]
-//! and verifies that its destination exists with the recorded symbol's
+//! and verifies that its destination exists with the recorded head's
 //! eight-byte prefix. A missing citation walk cannot stand in for that
 //! check. See ADR-0220.
 //!

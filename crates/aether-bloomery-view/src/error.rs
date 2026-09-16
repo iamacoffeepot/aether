@@ -7,6 +7,7 @@ use std::ops::Range;
 use aether_bloomery_journal::{JournalError, Seq};
 
 /// Failure to bind, preflight, construct, or catch a view up to a target.
+#[derive(Debug)]
 pub enum ViewError {
     /// The owned journal was replaced with a different allocation.
     Binding,
@@ -99,65 +100,6 @@ pub enum ViewError {
         /// Cursor the view reported.
         actual: Seq,
     },
-}
-
-impl fmt::Debug for ViewError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::Binding => write!(f, "Binding"),
-            Self::Head(error) => f.debug_tuple("Head").field(error).finish(),
-            Self::BeyondHead { target, head } => {
-                f.debug_struct("BeyondHead").field("target", target).field("head", head).finish()
-            }
-            Self::Behind { view, target, cursor } => {
-                f.debug_struct("Behind").field("view", view).field("target", target).field("cursor", cursor).finish()
-            }
-            Self::Poisoned { view, last_trusted_cursor } => f
-                .debug_struct("Poisoned")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .finish(),
-            Self::NonzeroEmpty { view, cursor } => {
-                f.debug_struct("NonzeroEmpty").field("view", view).field("cursor", cursor).finish()
-            }
-            Self::Read { view, last_trusted_cursor, attempted, source } => f
-                .debug_struct("Read")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .field("attempted", attempted)
-                .field("source", source)
-                .finish(),
-            Self::Exhausted { view, last_trusted_cursor, target } => f
-                .debug_struct("Exhausted")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .field("target", target)
-                .finish(),
-            Self::InvalidRange { view, last_trusted_cursor, attempted, expected, actual } => f
-                .debug_struct("InvalidRange")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .field("attempted", attempted)
-                .field("expected", expected)
-                .field("actual", actual)
-                .finish(),
-            Self::Advance { view, last_trusted_cursor, attempted, source } => f
-                .debug_struct("Advance")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .field("attempted", attempted)
-                .field("source", &source.to_string())
-                .finish(),
-            Self::CursorContract { view, last_trusted_cursor, attempted, expected, actual } => f
-                .debug_struct("CursorContract")
-                .field("view", view)
-                .field("last_trusted_cursor", last_trusted_cursor)
-                .field("attempted", attempted)
-                .field("expected", expected)
-                .field("actual", actual)
-                .finish(),
-        }
-    }
 }
 
 impl fmt::Display for ViewError {

@@ -10,7 +10,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static COUNT_EMPTY: AtomicU64 = AtomicU64::new(0);
 
 use aether_bloomery_journal::{Batch, Clock, Draft, Entry, Journal, Seq};
-use aether_bloomery_kinds::{Mode, OpaqueBytes, Program, ProgramName, RecordedHeadMove, RecordedSymbol, Symbol};
+use aether_bloomery_kinds::{Head, Mode, OpaqueBytes, Program, ProgramName, RecordedHead, RecordedHeadMove};
 use aether_bloomery_view::{Heads, View, ViewError, ViewRegistry};
 use aether_data::Kind;
 
@@ -220,14 +220,14 @@ fn appends_between_callbacks_replay_only_the_new_prefix() -> Result<(), Box<dyn 
     {
         let mut batch = Batch::new();
         stored = batch.stage_encoded(&program("trim", "first")?)?;
-        batch.push_event(&Symbol::<Program>::new("trim").move_to(stored), None)?;
+        batch.push_event(&Head::<Program>::new("trim").move_to(stored), None)?;
         journal.append(Seq(0), &batch)?;
     }
     let mut registry = ViewRegistry::new(journal);
     let first = registry
         .views::<(Heads, Count)>()
         .at(Seq(1))
-        .with(|(heads, count)| (heads.get(&Symbol::<Program>::new("trim")), count.seen, count.last_batch))?;
+        .with(|(heads, count)| (heads.get(&Head::<Program>::new("trim")), count.seen, count.last_batch))?;
     assert_eq!(first, (Some(stored), 1, 1));
 
     let later;
@@ -235,13 +235,13 @@ fn appends_between_callbacks_replay_only_the_new_prefix() -> Result<(), Box<dyn 
         let journal = registry.journal_mut();
         let mut batch = Batch::new();
         later = batch.stage_encoded(&program("trim", "second")?)?;
-        batch.push_event(&Symbol::<Program>::new("trim").move_to(later), None)?;
+        batch.push_event(&Head::<Program>::new("trim").move_to(later), None)?;
         journal.append(Seq(1), &batch)?;
     }
     let second = registry
         .views::<(Heads, Count)>()
         .at(Seq(2))
-        .with(|(heads, count)| (heads.get(&Symbol::<Program>::new("trim")), count.seen, count.last_batch))?;
+        .with(|(heads, count)| (heads.get(&Head::<Program>::new("trim")), count.seen, count.last_batch))?;
     assert_eq!(second, (Some(later), 2, 1));
     Ok(())
 }
@@ -361,14 +361,14 @@ fn irrelevant_entries_advance_every_requested_cursor() -> Result<(), Box<dyn Err
     {
         let mut batch = Batch::new();
         stored = batch.stage_encoded(&program("trim", "only")?)?;
-        batch.push_event(&Symbol::<Program>::new("trim").move_to(stored), None)?;
+        batch.push_event(&Head::<Program>::new("trim").move_to(stored), None)?;
         journal.append(Seq(1), &batch)?;
     }
     let mut registry = ViewRegistry::new(journal);
     let (binding, count_at, heads_at) = registry
         .views::<(Heads, Count)>()
         .at(Seq(2))
-        .with(|(heads, count)| (heads.get(&Symbol::<Program>::new("trim")), count.cursor(), heads.cursor()))?;
+        .with(|(heads, count)| (heads.get(&Head::<Program>::new("trim")), count.cursor(), heads.cursor()))?;
     assert_eq!(binding, Some(stored));
     assert_eq!(count_at, Seq(2));
     assert_eq!(heads_at, Seq(2));
@@ -533,27 +533,26 @@ fn filler_head_moves_across_pages_reuse_the_cached_heads_fold() -> Result<(), Bo
         filler = batch.stage_encoded(&program("fill", "page filler")?)?;
         trim = batch.stage_encoded(&program("trim", "live")?)?;
         for index in 0..PAGE {
-            let symbol = format!("f{index:03}");
-            batch
-                .push_event(&RecordedHeadMove::new(RecordedSymbol::new(Program::ID, symbol)?, filler.digest()), None)?;
+            let name = format!("f{index:03}");
+            batch.push_event(&RecordedHeadMove::new(RecordedHead::new(Program::ID, name)?, filler.digest()), None)?;
         }
-        batch.push_event(&Symbol::<Program>::new("trim").move_to(trim), None)?;
+        batch.push_event(&Head::<Program>::new("trim").move_to(trim), None)?;
         journal.append(Seq(0), &batch)?;
     }
     let mut registry = ViewRegistry::new(journal);
     let first = registry.views::<Heads>().at(Seq(u64::try_from(PAGE + 1)?)).with(|heads| {
-        (heads.cursor(), heads.get(&Symbol::<Program>::new("trim")), heads.get(&Symbol::<Program>::new("f000")))
+        (heads.cursor(), heads.get(&Head::<Program>::new("trim")), heads.get(&Head::<Program>::new("f000")))
     })?;
     let later = {
         let journal = registry.journal_mut();
         let mut batch = Batch::new();
         let next = batch.stage_encoded(&program("trim", "after")?)?;
-        batch.push_event(&Symbol::<Program>::new("trim").move_to(next), None)?;
+        batch.push_event(&Head::<Program>::new("trim").move_to(next), None)?;
         journal.append(Seq(u64::try_from(PAGE + 1)?), &batch)?;
         next
     };
     let second = registry.views::<Heads>().at(Seq(u64::try_from(PAGE + 2)?)).with(|heads| {
-        (heads.cursor(), heads.get(&Symbol::<Program>::new("trim")), heads.get(&Symbol::<Program>::new("f000")))
+        (heads.cursor(), heads.get(&Head::<Program>::new("trim")), heads.get(&Head::<Program>::new("f000")))
     })?;
     assert_eq!(first.0, Seq(u64::try_from(PAGE + 1)?));
     assert_eq!(first.1, Some(trim));

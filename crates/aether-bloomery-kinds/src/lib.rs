@@ -17,7 +17,7 @@ mod tree;
 
 pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes};
 pub use digest::Digest;
-pub use head::{HeadMoved, RecordedHeadMove, RecordedSymbol, Symbol, SymbolError};
+pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
 pub use program::{
     Detail, DetailError, ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramHeadMoved,
     ProgramName, ProgramNameError, Transition,
