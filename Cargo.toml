@@ -19,6 +19,7 @@ members = [
     "crates/aether-audio",
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
+    "crates/aether-bloomery-journal",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -125,6 +126,7 @@ default-members = [
     "crates/aether-anthropic",
     "crates/aether-process",
     "crates/aether-mcp",
+    "crates/aether-bloomery-journal",
 ]
 exclude = [
     # The cargo-fuzz harness (issue 1562) is its own nested crate on the
@@ -175,6 +177,11 @@ quote = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
 toml = "0.9"
+# ADR-0220 Bloomery journal (issue 6085): SQLite in WAL mode is the
+# durable single-writer home for the append-only event log and its
+# content-addressed artifacts. `bundled` compiles SQLite from source so
+# no system libsqlite3 is required on CI runners.
+rusqlite = { version = "0.32", features = ["bundled"] }
 # Content-addressed hashing for the hub binary store (ADR-0115, issue
 # 1953): sha256 over a binary's raw bytes keys each entry. Native-only
 # consumer (the hub binary store under `native`); pinned here so any
