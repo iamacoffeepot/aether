@@ -102,6 +102,180 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
     })
 }
 
+pub(super) fn emit_nested(input: &DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let leaves = match &input.data {
+        Data::Struct(s) => emit_struct_leaves(name, &s.fields)?,
+        Data::Enum(e) => emit_enum_leaves(name, e),
+        Data::Union(_) => TokenStream2::new(),
+    };
+    let cites = match &input.data {
+        Data::Struct(s) => emit_struct_cites(name, &s.fields),
+        Data::Enum(e) => emit_enum_cites(name, e),
+        Data::Union(_) => TokenStream2::new(),
+    };
+    Ok(quote! { #leaves #cites })
+}
+
+pub(super) fn emit_validate(input: &DeriveInput) -> TokenStream2 {
+    let name = &input.ident;
+    let inner = validate_inner(input);
+    let schema = emit_validate_schema(name, inner);
+    let leaves = emit_validate_leaves(name, inner);
+    let element = emit_validate_element(name, inner);
+    let wire = emit_validate_wire(name, inner);
+    let cites = emit_validate_cites(name, inner);
+    quote! { #schema #leaves #element #wire #cites }
+}
+
+fn validate_inner(input: &DeriveInput) -> &Type {
+    match &input.data {
+        Data::Struct(s) => match &s.fields {
+            Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => &unnamed.unnamed[0].ty,
+            _ => unreachable!("check_validate requires a single-field tuple struct"),
+        },
+        _ => unreachable!("check_validate requires a single-field tuple struct"),
+    }
+}
+
+fn emit_checked_new(name: &syn::Ident, err: &TokenStream2) -> TokenStream2 {
+    quote! {
+        match #name::check(&inner) {
+            ::core::result::Result::Ok(()) => ::core::result::Result::Ok(#name(inner)),
+            ::core::result::Result::Err(error) => ::core::result::Result::Err(#err),
+        }
+    }
+}
+
+fn storage_invariant(name: &syn::Ident) -> TokenStream2 {
+    quote! {
+        ::aether_data::__derive_runtime::StorageError::Invariant {
+            kind: ::core::stringify!(#name),
+            reason: ::aether_data::Invariant::reason(&error),
+        }
+    }
+}
+
+fn emit_validate_schema(name: &syn::Ident, inner: &Type) -> TokenStream2 {
+    quote! {
+        impl ::aether_data::Schema for #name {
+            const SCHEMA: ::aether_data::__derive_runtime::SchemaType =
+                <#inner as ::aether_data::Schema>::SCHEMA;
+            const LABEL: ::core::option::Option<&'static str> = ::core::option::Option::Some(
+                ::core::concat!(::core::module_path!(), "::", ::core::stringify!(#name)),
+            );
+            const LABEL_NODE: ::aether_data::__derive_runtime::LabelNode =
+                <#inner as ::aether_data::Schema>::LABEL_NODE;
+        }
+    }
+}
+
+fn emit_validate_leaves(name: &syn::Ident, inner: &Type) -> TokenStream2 {
+    let checked = emit_checked_new(name, &storage_invariant(name));
+    quote! {
+        impl ::aether_data::__derive_runtime::StorageLeaves for #name {
+            fn contribute(
+                &self,
+                carry: u64,
+                depth: u32,
+                sink: &mut ::aether_data::__derive_runtime::RecordWriter,
+            ) -> ::core::result::Result<(), ::aether_data::__derive_runtime::StorageError> {
+                <#inner as ::aether_data::__derive_runtime::StorageLeaves>::contribute(
+                    &self.0, carry, depth, sink,
+                )
+            }
+
+            fn assemble(
+                carry: u64,
+                depth: u32,
+                source: &mut ::aether_data::__derive_runtime::RecordReader,
+            ) -> ::core::result::Result<Self, ::aether_data::__derive_runtime::StorageError> {
+                let inner = <#inner as ::aether_data::__derive_runtime::StorageLeaves>::assemble(
+                    carry, depth, source,
+                )?;
+                #checked
+            }
+
+            fn is_absent(
+                carry: u64,
+                depth: u32,
+                source: &::aether_data::__derive_runtime::RecordReader,
+            ) -> bool {
+                <#inner as ::aether_data::__derive_runtime::StorageLeaves>::is_absent(carry, depth, source)
+            }
+        }
+    }
+}
+
+fn emit_validate_element(name: &syn::Ident, inner: &Type) -> TokenStream2 {
+    let checked = emit_checked_new(name, &storage_invariant(name));
+    quote! {
+        impl ::aether_data::__derive_runtime::StorageElement for #name {
+            const TAGGED: bool = <#inner as ::aether_data::__derive_runtime::StorageElement>::TAGGED;
+
+            fn contribute_element(
+                &self,
+                depth: u32,
+                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
+            ) -> ::core::result::Result<(), ::aether_data::__derive_runtime::StorageError> {
+                <#inner as ::aether_data::__derive_runtime::StorageElement>::contribute_element(
+                    &self.0, depth, out,
+                )
+            }
+
+            fn assemble_element(
+                depth: u32,
+                cursor: &mut &[u8],
+            ) -> ::core::result::Result<Self, ::aether_data::__derive_runtime::StorageError> {
+                let inner = <#inner as ::aether_data::__derive_runtime::StorageElement>::assemble_element(
+                    depth, cursor,
+                )?;
+                #checked
+            }
+        }
+    }
+}
+
+fn emit_validate_wire(name: &syn::Ident, inner: &Type) -> TokenStream2 {
+    let err = quote! {
+        ::aether_data::wire::Error::Message(
+            ::aether_data::__derive_runtime::String::from(
+                ::aether_data::Invariant::reason(&error),
+            ),
+        )
+    };
+    let checked = emit_checked_new(name, &err);
+    quote! {
+        impl ::aether_data::wire::WireEncode for #name {
+            fn encode(
+                &self,
+                out: &mut ::aether_data::__derive_runtime::Vec<u8>,
+            ) -> ::core::result::Result<(), ::aether_data::wire::Error> {
+                <#inner as ::aether_data::__derive_runtime::WireEncode>::encode(&self.0, out)
+            }
+        }
+
+        impl<'de> ::aether_data::wire::WireDecode<'de> for #name {
+            fn decode(
+                cursor: &mut &'de [u8],
+            ) -> ::core::result::Result<Self, ::aether_data::wire::Error> {
+                let inner = <#inner as ::aether_data::__derive_runtime::WireDecode>::decode(cursor)?;
+                #checked
+            }
+        }
+    }
+}
+
+fn emit_validate_cites(name: &syn::Ident, inner: &Type) -> TokenStream2 {
+    quote! {
+        impl ::aether_data::__derive_runtime::Cites for #name {
+            fn cites(&self, sink: &mut ::aether_data::__derive_runtime::Citations) {
+                <#inner as ::aether_data::__derive_runtime::Cites>::cites(&self.0, sink);
+            }
+        }
+    }
+}
+
 fn alias_statics(name: &syn::Ident, input: &DeriveInput) -> syn::Result<(Vec<TokenStream2>, Vec<TokenStream2>)> {
     let mut statics = Vec::new();
     let mut pairs = Vec::new();

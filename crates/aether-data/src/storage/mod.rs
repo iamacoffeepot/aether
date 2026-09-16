@@ -7,6 +7,7 @@
 mod cites;
 mod element;
 mod hash;
+mod invariant;
 mod leaf;
 mod leaves;
 mod record;
@@ -21,6 +22,7 @@ pub use hash::{
     field_hash, field_path_root, fold_dotted_path, fold_index_segment, fold_path_segment, nth_leaf_hash,
     terminate_field_hash, variant_hash,
 };
+pub use invariant::Invariant;
 pub use leaf::{LeafBody, decode_stream_leaf};
 pub use leaves::{
     StorageLeaves, assemble_bytes, assemble_bytes_with_aliases, assemble_with_aliases, bytes_absent, contribute_bytes,

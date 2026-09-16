@@ -1,4 +1,4 @@
-//! Per-type walk that collects every typed reference a value carries.
+//! Walk that pushes the identity of every artifact a value points at.
 
 use alloc::collections::BTreeMap;
 use alloc::string::String;
@@ -43,7 +43,9 @@ impl Citations {
     }
 }
 
-/// Collect every typed reference this value carries, at any depth.
+/// Push the identity of every artifact this value points at, with the kind
+/// expected there. Containers forward to their contents; leaves push nothing;
+/// only a reference type pushes.
 pub trait Cites {
     /// Push this value's citations into `sink`.
     fn cites(&self, sink: &mut Citations);
