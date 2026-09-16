@@ -47,6 +47,9 @@ pub enum StorageError {
     UnknownVariant { hash: u64 },
     /// Nested flattening exceeded [`super::hash::MAX_STORAGE_DEPTH`].
     NestingTooDeep,
+    /// The bytes decoded, but the value breaks its type's invariant.
+    /// Raised by validated newtypes on decode; never by the codec itself.
+    Invariant { kind: &'static str, reason: &'static str },
 }
 
 impl fmt::Display for StorageError {
@@ -66,6 +69,7 @@ impl fmt::Display for StorageError {
             Self::LeafBody(err) => write!(f, "storage: leaf body: {err}"),
             Self::UnknownVariant { hash } => write!(f, "storage: unknown enum variant {hash:#018x}"),
             Self::NestingTooDeep => f.write_str("storage: nested flattening exceeded depth cap"),
+            Self::Invariant { kind, reason } => write!(f, "storage: {kind} invariant violated: {reason}"),
         }
     }
 }

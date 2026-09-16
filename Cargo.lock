@@ -141,10 +141,18 @@ dependencies = [
 name = "aether-bloomery-journal"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-bloomery-kinds",
  "aether-data",
  "rusqlite",
- "sha2",
  "tempfile",
+]
+
+[[package]]
+name = "aether-bloomery-kinds"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-data",
+ "sha2",
 ]
 
 [[package]]

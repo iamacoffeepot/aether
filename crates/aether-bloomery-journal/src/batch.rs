@@ -4,12 +4,11 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
+use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, Utf8Text, artifact_blob, hash_bytes};
 use aether_data::{Citation, Citations, Cites, Kind, Storage, StorageData, StorageError};
 
 use crate::Seq;
-use crate::artifact::{Digest, OpaqueBytes, Utf8Text, artifact_blob, hash_bytes};
 use crate::draft::{Draft, DraftError};
-use crate::reference::Ref;
 
 /// One staged blob: digest, prefixed bytes, and citations walked from an encoded value.
 pub struct Staged {
