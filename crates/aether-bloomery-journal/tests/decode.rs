@@ -4,8 +4,16 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{DecodeError, Draft, Journal, Seq};
-use common::{FixedClock, batch_from_drafts};
+use aether_bloomery_journal::{Batch, DecodeError, Draft, Journal, Seq};
+use common::FixedClock;
+
+fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
+    let mut batch = Batch::new();
+    for draft in drafts {
+        batch.push_draft(draft);
+    }
+    batch
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]

@@ -4,8 +4,16 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Draft, Journal, Seq};
-use common::{FixedClock, batch_from_drafts};
+use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
+use common::FixedClock;
+
+fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
+    let mut batch = Batch::new();
+    for draft in drafts {
+        batch.push_draft(draft);
+    }
+    batch
+}
 
 const STAMP_MILLIS: u64 = 1_700_000_000_000;
 

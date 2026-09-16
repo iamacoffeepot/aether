@@ -5,6 +5,7 @@ use std::error::Error;
 use std::fmt;
 use std::ops::Range;
 use std::path::Path;
+use std::slice;
 
 use aether_data::wire::WireDecode;
 use aether_data::{KindId, Storage, StorageError};
@@ -15,6 +16,9 @@ use crate::batch::Batch;
 use crate::clock::{Clock, SystemClock};
 use crate::draft::Draft;
 use crate::entry::{Entry, Seq};
+
+/// Kind prefix and payload of one stored artifact, or `None` when absent.
+type LoadedArtifact = Option<(KindId, Vec<u8>)>;
 
 const ENTRIES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS entries (
@@ -190,7 +194,7 @@ impl Journal {
     ///
     /// Returns [`JournalError`] on a backend or corrupt-blob failure.
     pub fn get_bytes(&self, digest: &Digest) -> Result<Option<(KindId, Vec<u8>)>, JournalError> {
-        Ok(self.get_bytes_many(std::slice::from_ref(digest))?.into_iter().next().ok_or(JournalError::IntegerRange)?)
+        self.get_bytes_many(slice::from_ref(digest))?.into_iter().next().ok_or(JournalError::IntegerRange)
     }
 
     /// Load many artifacts in one query. Results are in input order; absent
@@ -199,7 +203,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`JournalError`] on a backend or corrupt-blob failure, never a short result.
-    pub fn get_bytes_many(&self, digests: &[Digest]) -> Result<Vec<Option<(KindId, Vec<u8>)>>, JournalError> {
+    pub fn get_bytes_many(&self, digests: &[Digest]) -> Result<Vec<LoadedArtifact>, JournalError> {
         if digests.is_empty() {
             return Ok(Vec::new());
         }

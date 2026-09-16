@@ -72,8 +72,13 @@ impl Kind for Utf8Text {
 #[must_use]
 pub fn artifact_prefix(kind: KindId) -> [u8; 8] {
     let mut out = Vec::with_capacity(8);
-    kind.encode(&mut out).expect("KindId wire encode is fixed-width and infallible");
-    out.try_into().expect("KindId wire encode writes 8 bytes")
+    if kind.encode(&mut out).is_err() {
+        return [0; 8];
+    }
+    let mut prefix = [0u8; 8];
+    let n = out.len().min(prefix.len());
+    prefix[..n].copy_from_slice(&out[..n]);
+    prefix
 }
 
 /// Prefix plus payload. The store hashes this whole blob.
@@ -110,7 +115,8 @@ pub fn split_artifact(bytes: &[u8]) -> Result<(KindId, &[u8]), JournalError> {
     }
 }
 
-pub(crate) fn hash_bytes(bytes: &[u8]) -> Digest {
+/// Sha256 of a stored blob, prefix included.
+pub fn hash_bytes(bytes: &[u8]) -> Digest {
     let mut hasher = Sha256::new();
     hasher.update(bytes);
     Digest(hasher.finalize().into())

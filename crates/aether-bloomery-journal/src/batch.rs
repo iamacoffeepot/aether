@@ -10,10 +10,11 @@ use crate::artifact::{Digest, OpaqueBytes, Utf8Text, artifact_blob, hash_bytes};
 use crate::draft::{Draft, DraftError};
 use crate::reference::Ref;
 
-pub(crate) struct Staged {
-    pub(crate) digest: Digest,
-    pub(crate) bytes: Vec<u8>,
-    pub(crate) citations: Vec<Citation>,
+/// One staged blob: digest, prefixed bytes, and citations walked from an encoded value.
+pub struct Staged {
+    pub digest: Digest,
+    pub bytes: Vec<u8>,
+    pub citations: Vec<Citation>,
 }
 
 /// Staged blobs plus encoded events. `append` is the only judge.
