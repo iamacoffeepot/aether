@@ -5,10 +5,12 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery_journal::{DecodeError, Entry, Journal, Seq};
-use aether_bloomery_kinds::{Digest, Head, HeadMoved, Program, ProgramHeadMoved, Ref, Symbol, SymbolError};
-use aether_data::{Kind, KindId};
+use aether_bloomery_kinds::{
+    Digest, Program, ProgramHeadMoved, RecordedHeadMove, RecordedSymbol, Ref, Symbol, SymbolError,
+};
+use aether_data::Kind;
 
-/// Last move per `(target KindId, Symbol)` over a contiguous log prefix.
+/// Last move per recorded `(target KindId, name)` over a contiguous log prefix.
 ///
 /// The cursor is the last applied [`Seq`]. It starts at `Seq(0)`, the empty
 /// prefix. [`Self::apply`] requires the next contiguous sequence, including
@@ -17,7 +19,7 @@ use aether_data::{Kind, KindId};
 #[derive(Debug, Clone)]
 pub struct Heads {
     cursor: Seq,
-    bindings: BTreeMap<(KindId, Symbol), Digest>,
+    bindings: BTreeMap<RecordedSymbol, Digest>,
 }
 
 impl Heads {
@@ -35,8 +37,9 @@ impl Heads {
 
     /// Apply `entry` as the next contiguous sequence.
     ///
-    /// Unrelated kinds advance the cursor. A generic [`HeadMoved`] or historical
-    /// [`ProgramHeadMoved`] updates that head's binding and the cursor together.
+    /// Unrelated kinds advance the cursor. A recorded [`RecordedHeadMove`] or
+    /// historical [`ProgramHeadMoved`] updates that head's binding and the
+    /// cursor together.
     ///
     /// # Errors
     ///
@@ -53,17 +56,17 @@ impl Heads {
         }
 
         let binding = binding_from(entry)?;
-        if let Some((kind, symbol, digest)) = binding {
-            self.bindings.insert((kind, symbol), digest);
+        if let Some((symbol, digest)) = binding {
+            self.bindings.insert(symbol, digest);
         }
         self.cursor = entry.seq;
         Ok(())
     }
 
-    /// Current binding of `head`, if this prefix has seen a move for it.
+    /// Current binding of `symbol`, if this prefix has seen a move for it.
     #[must_use]
-    pub fn get<K: Kind>(&self, head: &Head<K>) -> Option<Ref<K>> {
-        self.bindings.get(&(K::ID, head.symbol().clone())).copied().map(Ref::from_digest)
+    pub fn get<K: Kind>(&self, symbol: &Symbol<K>) -> Option<Ref<K>> {
+        self.bindings.get(&RecordedSymbol::from(symbol)).copied().map(Ref::from_digest)
     }
 }
 
@@ -160,13 +163,13 @@ fn seq_error(cursor: Seq, expected: Seq, actual: Seq) -> HeadFoldError {
     }
 }
 
-fn binding_from(entry: &Entry) -> Result<Option<(KindId, Symbol, Digest)>, HeadFoldError> {
-    if entry.kind == HeadMoved::NAME {
-        let event = Journal::decode::<HeadMoved>(entry)?;
-        Ok(Some((event.target_kind, event.symbol, event.to)))
+fn binding_from(entry: &Entry) -> Result<Option<(RecordedSymbol, Digest)>, HeadFoldError> {
+    if entry.kind == RecordedHeadMove::NAME {
+        let event = Journal::decode::<RecordedHeadMove>(entry)?;
+        Ok(Some((event.symbol().clone(), event.to())))
     } else if entry.kind == ProgramHeadMoved::NAME {
         let event = Journal::decode::<ProgramHeadMoved>(entry)?;
-        Ok(Some((Program::ID, Symbol::new(event.name.as_str())?, event.program.digest())))
+        Ok(Some((RecordedSymbol::new(Program::ID, event.name.as_str())?, event.program.digest())))
     } else {
         Ok(None)
     }

@@ -5,7 +5,7 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{AppendError, Batch, Digest, Draft, Journal, OpaqueBytes, Seq, Utf8Text};
-use aether_bloomery_kinds::{Head, HeadMoved, Move, Ref, Symbol, Tree};
+use aether_bloomery_kinds::{HeadMoved, RecordedHeadMove, Ref, Symbol, Tree};
 use aether_data::{Kind, KindId, Storage, StorageData};
 use common::FixedClock;
 
@@ -15,7 +15,7 @@ struct Note {
     text: String,
 }
 
-/// Same kind name as [`HeadMoved`], with a raw `symbol` so invalid bytes can be encoded.
+/// Same kind name as [`RecordedHeadMove`], with a raw `symbol` so invalid bytes can be encoded.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "bloomery.head_moved")]
 struct RawHeadMoved {
@@ -24,7 +24,7 @@ struct RawHeadMoved {
     to: Digest,
 }
 
-/// Same kind name as [`HeadMoved`], but `to` walks as `Ref<OpaqueBytes>`.
+/// Same kind name as [`RecordedHeadMove`], but `to` walks as `Ref<OpaqueBytes>`.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "bloomery.head_moved")]
 struct CitedHeadMoved {
@@ -37,12 +37,12 @@ fn journal() -> Result<Journal, Box<dyn Error>> {
     Ok(Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?)
 }
 
-fn tree_head(symbol: &str) -> Result<Head<Tree>, Box<dyn Error>> {
-    Ok(Head::<Tree>::new(Symbol::new(symbol)?))
+fn tree_symbol(name: &'static str) -> Symbol<Tree> {
+    Symbol::<Tree>::new(name)
 }
 
-fn move_event<K: Kind>(head: &Head<K>, target: Ref<K>) -> HeadMoved {
-    head.move_to(target).into_event()
+fn move_event<K: Kind + 'static>(symbol: &Symbol<K>, target: Ref<K>) -> HeadMoved<K> {
+    symbol.move_to(target)
 }
 
 #[test]
@@ -56,18 +56,17 @@ fn a_move_to_an_already_stored_target_appends() -> Result<(), Box<dyn Error>> {
     journal.append(Seq(0), &setup)?;
 
     let mut batch = Batch::new();
-    let main = Head::<Tree>::new(Symbol::new("main")?);
-    let intent: Move<Tree> = main.move_to(tree);
-    let event: HeadMoved = intent.into_event();
+    let main = Symbol::<Tree>::new("main");
+    let event: HeadMoved<Tree> = main.move_to(tree);
     batch.push_event(&event, None)?;
     let range = journal.append(Seq(1), &batch)?;
     assert_eq!(range, Seq(2)..Seq(3));
 
     let entry = journal.read(Seq(1), 1)?.into_iter().next().expect("one move");
-    let event = Journal::decode::<HeadMoved>(&entry)?;
-    assert_eq!(event.target_kind, Tree::ID);
-    assert_eq!(event.symbol.as_str(), "main");
-    assert_eq!(event.to, tree.digest());
+    let event = Journal::decode::<HeadMoved<Tree>>(&entry)?;
+    assert_eq!(event.symbol().kind(), Tree::ID);
+    assert_eq!(event.symbol().as_str(), "main");
+    assert_eq!(event.to(), tree);
     Ok(())
 }
 
@@ -78,11 +77,11 @@ fn a_move_to_a_same_batch_target_appends() -> Result<(), Box<dyn Error>> {
     let mut journal = journal()?;
     let mut batch = Batch::new();
     let tree = batch.stage_encoded(&Tree::empty())?;
-    batch.push_event(&move_event(&tree_head("main")?, tree), None)?;
+    batch.push_event(&move_event(&tree_symbol("main"), tree), None)?;
     journal.append(Seq(0), &batch)?;
 
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("one move");
-    assert_eq!(Journal::decode::<HeadMoved>(&entry)?.to, tree.digest());
+    assert_eq!(Journal::decode::<HeadMoved<Tree>>(&entry)?.to(), tree);
     assert_eq!(journal.get::<Tree>(&tree.digest())?, Some(Tree::empty()));
     Ok(())
 }
@@ -97,7 +96,7 @@ fn a_missing_head_target_rolls_back_the_whole_batch() -> Result<(), Box<dyn Erro
     let mut batch = Batch::new();
     let staged = batch.stage_bytes(b"should-not-land");
     batch.push_event(&Note { text: "also-not-land".into() }, None)?;
-    batch.push_event(&move_event(&tree_head("main")?, missing), None)?;
+    batch.push_event(&move_event(&tree_symbol("main"), missing), None)?;
 
     let error = journal.append(Seq(0), &batch).expect_err("missing head target must fail");
     match error {
@@ -122,7 +121,7 @@ fn a_wrong_kind_head_target_rolls_back_the_whole_batch() -> Result<(), Box<dyn E
     let text = batch.stage_text("hello");
     let as_tree = Ref::<Tree>::from_digest(text.digest());
     batch.push_event(&Note { text: "also-not-land".into() }, None)?;
-    batch.push_event(&move_event(&tree_head("main")?, as_tree), None)?;
+    batch.push_event(&move_event(&tree_symbol("main"), as_tree), None)?;
 
     let error = journal.append(Seq(0), &batch).expect_err("wrong-kind head target must fail");
     match error {
@@ -146,7 +145,7 @@ fn push_event_and_push_draft_both_refuse_a_malformed_head_moved_payload() -> Res
     let twin = RawHeadMoved { target_kind: Tree::ID, symbol: "has space".into(), to: Digest::from_bytes([1; 32]) };
     let bytes = RawHeadMoved::encode_storage(&StorageData::from_value(twin.clone()))?;
     let decode_error =
-        HeadMoved::decode_storage(&bytes).expect_err("canonical decode must refuse invalid symbol bytes");
+        RecordedHeadMove::decode_storage(&bytes).expect_err("canonical decode must refuse invalid symbol bytes");
 
     let mut journal = journal()?;
     let mut via_event = Batch::new();
@@ -176,7 +175,7 @@ fn push_event_and_push_draft_both_refuse_a_wrong_kind_head_destination() -> Resu
     let mut via_event = Batch::new();
     let text = via_event.stage_text("hello");
     let as_tree = Ref::<Tree>::from_digest(text.digest());
-    via_event.push_event(&move_event(&tree_head("main")?, as_tree), None)?;
+    via_event.push_event(&move_event(&tree_symbol("main"), as_tree), None)?;
     match journal.append(Seq(0), &via_event).expect_err("push_event wrong kind must fail") {
         AppendError::PrefixMismatch { digest, expected, actual } => {
             assert_eq!(digest, text.digest());
@@ -218,7 +217,7 @@ fn a_stale_fence_writes_nothing_for_a_valid_move() -> Result<(), Box<dyn Error>>
 
     let mut batch = Batch::new();
     let stray = batch.stage_bytes(b"should-not-land");
-    batch.push_event(&move_event(&tree_head("main")?, tree), None)?;
+    batch.push_event(&move_event(&tree_symbol("main"), tree), None)?;
     let error = journal.append(Seq(0), &batch).expect_err("stale fence must fail");
     match error {
         AppendError::HeadMoved { actual } => assert_eq!(actual, Seq(1)),
@@ -239,7 +238,7 @@ fn multiple_moves_replay_and_repeat_remain_distinct_ordered_events() -> Result<(
     let mut batch = Batch::new();
     let first = batch.stage_bytes(b"first");
     let second = batch.stage_bytes(b"second");
-    let head = Head::<OpaqueBytes>::new(Symbol::new("main")?);
+    let head = Symbol::<OpaqueBytes>::new("main");
     batch.push_event(&move_event(&head, first), None)?;
     batch.push_event(&move_event(&head, second), None)?;
     batch.push_event(&move_event(&head, first), None)?;
@@ -252,11 +251,11 @@ fn multiple_moves_replay_and_repeat_remain_distinct_ordered_events() -> Result<(
     let expected = [first.digest(), second.digest(), first.digest(), first.digest()];
     for (index, (entry, digest)) in entries.iter().zip(expected).enumerate() {
         assert_eq!(entry.seq, Seq(u64::try_from(index + 1)?));
-        assert_eq!(entry.kind, HeadMoved::NAME);
-        let event = Journal::decode::<HeadMoved>(entry)?;
-        assert_eq!(event.symbol.as_str(), "main");
-        assert_eq!(event.target_kind, OpaqueBytes::ID);
-        assert_eq!(event.to, digest);
+        assert_eq!(entry.kind, RecordedHeadMove::NAME);
+        let event = Journal::decode::<HeadMoved<OpaqueBytes>>(entry)?;
+        assert_eq!(event.symbol().as_str(), "main");
+        assert_eq!(event.symbol().kind(), OpaqueBytes::ID);
+        assert_eq!(event.to().digest(), digest);
     }
     Ok(())
 }

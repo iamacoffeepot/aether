@@ -56,7 +56,8 @@ unwalked field. The recognized head-move check is not that walk: it decodes
 - `append` is one `BEGIN IMMEDIATE` transaction that reads the log head,
   returns `AppendError::HeadMoved { actual }` if the fence is stale (nothing
   written), otherwise inserts staged blobs, verifies every citation, decodes
-  each `bloomery.head_moved` event and validates `to` against `target_kind`,
+  each `bloomery.head_moved` event as `RecordedHeadMove` and validates `to`
+  against the recorded symbol kind,
   inserts every event with dense `seq` values, and commits. Durable before
   return. All-or-nothing. An empty batch writes nothing. The recognized-event
   check runs after staged artifacts are inserted and before events commit.
@@ -92,9 +93,11 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   exists and carries the expected prefix, and writes nothing on any refusal.
   Citations are collected by a derive-emitted `Cites` walk at draft
   construction, so the typed-`Ref` check does not depend on the writer. The
-  store's only kind check is an eight-byte comparison. `HeadMoved.to` is a
-  bare `Digest`; the derived walk pushes nothing for it. The recognized-event
-  lookup is the citation check for that field.
+  store's only kind check is an eight-byte comparison. The persisted
+  `bloomery.head_moved` destination is a bare `Digest`; the derived walk
+  pushes nothing for it. The recognized-event lookup is the citation check
+  for that field. Typed `HeadMoved<K>` holds a `Ref<K>` in memory; that
+  still does not cite through `Cites`.
 
 ## Consequences
 
@@ -175,12 +178,12 @@ record is the only place they meet.
 
 A `ProgramName` is an immutable label stored inside the declaration. It
 is not a head. Binding a mutable name to a program is a head move,
-identified by `(Program::ID, Symbol)`. `ProgramName` and `ExecutorName`
+identified by `(Program::ID, name)`. `ProgramName` and `ExecutorName`
 keep their current dotted-ASCII rules and persisted encoding. Existing
 `ProgramHeadMoved` (`bloomery.program.head_moved`) history stays
 decodable under that name and encoding (`name: ProgramName`,
 `program: Ref<Program>`). The `Heads` fold treats each as a move of
-`(Program::ID, Symbol::new(old.name))`. New writes use
+`RecordedSymbol::new(Program::ID, old.name)`. New writes use
 `bloomery.head_moved`.
 
 `Transition.input` and `Transition.result` are `Digest`, not `Ref<K>`,
@@ -191,9 +194,10 @@ therefore has the same leaf traits as `Ref<K>`, delegating to
 write a kind that carries one, and the driver checks both prefixes
 against the declaration before append. That is a deliberate bend in the
 typed-citation rule, judged by the driver because the expected prefixes
-live on the cited `Program`, not on the event. `HeadMoved.to` is the
-other bend: its expected prefix is `target_kind` on the event itself, so
-the journal judges it. Derived `Cites` sees neither bare digest.
+live on the cited `Program`, not on the event. A head-move destination is
+the other bend: its expected prefix is the recorded symbol kind on the
+event itself, so the journal judges it. Derived `Cites` sees neither bare
+digest.
 
 Fault rules:
 
@@ -208,7 +212,7 @@ Fault rules:
 
 ## Heads
 
-A head is a mutable slot identified by `(target KindId, Symbol)`. Different
+A head is a mutable slot identified by `(target KindId, name)`. Different
 target kinds may use the same symbol independently. It holds one reference
 to immutable content. The first move establishes the slot; later moves
 replace its current value. There is no registration, deletion, rename, or
@@ -216,62 +220,80 @@ null-target operation. A move to the value the slot already holds is still
 a recorded move. Several moves to one head in a batch take effect in event
 order; last wins. Pointing back at an older target is legal.
 
-The persisted event is:
+Application source declares a typed symbol with the ordinary constructor:
 
 ```rust
-#[derive(aether_data::Storage)]
-#[kind(name = "bloomery.head_moved")]
-pub struct HeadMoved {
-    pub target_kind: KindId,
-    pub symbol: Symbol,
-    pub to: Digest,
-}
+const MAIN: Symbol<Tree> = Symbol::new("main");
+static BUILD: Symbol<Program> = Symbol::new("build");
 ```
 
-`to` is a runtime citation: a digest whose expected prefix is
-`target_kind`. The ordinary derived `Cites` walk does not see it. `append`
-decodes this recognized kind from the draft and judges `to` the same way
-it judges a typed `Ref`: the blob exists, and its eight-byte prefix equals
-`target_kind`. A typed `Ref<K>` used to build the intent does not prove
+`Symbol<K>` owns a private `Cow<'static, str>` and `PhantomData<fn() -> K>`.
+`Symbol::new` is a `const fn` that borrows the literal and panics on an
+invalid name; in a `const` or `static` initializer that fails compilation.
+Decoding owns the string. There is no macro, registry, or unchecked
+constructor. `as_str`, `MAX_BYTES`, and `kind()` (`K::ID`) are the rest of
+the identity surface. Clone, Eq, Ord, Hash, and Debug do not require those
+traits on `K`. A static `Symbol<K>` is `Sync` even when `K` is not.
+
+`MAIN.move_to(tree_ref)` produces `HeadMoved<Tree>` directly. Accessors
+return the symbol and `Ref<K>` target infallibly after a successful
+decode. A symbol is not an immutable content reference and contributes no
+citation to its current target.
+
+Journal and index decoding use explicit runtime forms: `RecordedSymbol`
+(kind plus name, checked construction) and `RecordedHeadMove` (recorded
+symbol plus destination digest). Typed and recorded symbols encode the
+same complete kind-plus-name identity. Typed decoding rejects a recorded
+kind different from `K::ID` with a structured codec error, never a panic.
+Journal validation uses the recorded symbol kind; no registry or runtime
+target-type dispatch is needed.
+
+The persisted event keeps the existing `bloomery.head_moved` `KindId` and
+the flat leaves `target_kind`, string `symbol`, and digest `to`. Standalone
+symbol storage includes kind and name; the event codec flattens that
+identity into those existing fields. Typed `HeadMoved<K>` and
+`RecordedHeadMove` share `Kind::ID` / `NAME` and that compatible schema.
+A private codec-only DTO retains the flat derived shape so old bytes stay
+identical. Every event decode path, including containers and wire,
+validates names.
+
+`to` is a runtime citation: a digest whose expected prefix is the recorded
+symbol kind. The ordinary `Cites` walk does not see it. `append` decodes
+`RecordedHeadMove` from the draft and judges `to` the same way it judges a
+typed `Ref`: the blob exists, and its eight-byte prefix equals the
+recorded kind. A typed `Ref<K>` used to build the event does not prove
 that content exists; the journal always rechecks the persisted event.
 
 `Journal::head()` is the log sequence. Current bindings are not SQLite
-state. `Heads` is the typed index: last move per `(target KindId, Symbol)`
-in seq order. It is not another source of truth.
+state. `Heads` is the typed index: last move per recorded identity in seq
+order, looked up as `heads.get(&MAIN) -> Option<Ref<Tree>>`. It is not
+another source of truth.
 
-A symbol is untyped validated text, not a path and not a program label.
-`Symbol` accepts 1–128 UTF-8 bytes, rejects characters for which
+A symbol name is validated text, not a path and not a program label.
+It accepts 1–128 UTF-8 bytes, rejects characters for which
 `char::is_whitespace()` or `char::is_control()` is true, and otherwise
-preserves bytes exactly. Equality, hashing, and ordering are case-sensitive
-and normalization-free. Punctuation has no special semantics. There are no
-filesystem restrictions and no extra Unicode-format-character blacklist.
-A head symbol is independent of any label stored inside its target.
-`ProgramName` and `ExecutorName` keep their current rules and encoding;
-tree `Name` keeps its materialization rules.
-
-`Head<K>` is a typed identity `(K::ID, Symbol)`, not a stored object, not a
-registration, not a citation, and not a captured current value. It does
-not implement `Storage` or `Cites`. Content continues to cite immutable
-content, never a head.
+preserves bytes exactly. Length is checked first; a character that is both
+control and whitespace is control. Equality, hashing, and ordering are
+case-sensitive and normalization-free. Punctuation has no special
+semantics. There are no filesystem restrictions and no extra
+Unicode-format-character blacklist. A head symbol is independent of any
+label stored inside its target. `ProgramName` and `ExecutorName` keep
+their current rules and encoding; tree `Name` keeps its materialization
+rules.
 
 The typed write path uses the existing batch and append traits:
 
 ```rust
-let main = Head::<Tree>::new(Symbol::new("main")?);
-let intent: Move<Tree> = main.move_to(tree_ref);
-let event: HeadMoved = intent.into_event();
+const MAIN: Symbol<Tree> = Symbol::new("main");
+let event: HeadMoved<Tree> = MAIN.move_to(tree_ref);
 batch.push_event(&event, cause)?;
 journal.append(expected_seq, &batch)?;
 ```
 
-`Move<K>` is a value describing intent, not an executed operation. Its
-only construction path is `Head<K>::move_to(Ref<K>)`. Consuming it into
-the event erases the Rust type to `K::ID`.
-
 Existing `ProgramHeadMoved` history stays decodable under
 `bloomery.program.head_moved` and its current fields. The `Heads` fold
-treats each as a move of `(Program::ID, Symbol::new(old.name))`. Current
-non-compatibility examples and callers write `bloomery.head_moved`.
+treats each as a move of `RecordedSymbol::new(Program::ID, old.name)`.
+Current non-compatibility examples and callers write `bloomery.head_moved`.
 
 Current heads can later serve as retention roots. Neither pruning nor
 garbage collection is in this work.

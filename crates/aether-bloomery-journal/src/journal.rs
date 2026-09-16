@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::Path;
 use std::slice;
 
-use aether_bloomery_kinds::HeadMoved;
+use aether_bloomery_kinds::RecordedHeadMove;
 use aether_data::wire::WireDecode;
 use aether_data::{Kind, KindId, Storage, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
@@ -88,9 +88,10 @@ impl Journal {
     /// One `BEGIN IMMEDIATE` transaction: a stale fence returns
     /// [`AppendError::HeadMoved`] and writes nothing. Staged blobs are
     /// inserted, every citation is verified against the expected prefix,
-    /// each draft named `bloomery.head_moved` is decoded as the canonical
-    /// event and its destination is verified the same way, then events are
-    /// inserted. Any refusal rolls the whole transaction back. An empty
+    /// each draft named `bloomery.head_moved` is decoded as
+    /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
+    /// verified against the recorded symbol kind, then events are inserted.
+    /// Any refusal rolls the whole transaction back. An empty
     /// batch is `Ok` of an empty range and writes nothing. The returned
     /// range is `head+1 .. head+n+1` (end exclusive).
     ///
@@ -285,12 +286,13 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
     }
 
     for draft in &batch.events {
-        if draft.kind != HeadMoved::NAME {
+        if draft.kind != RecordedHeadMove::NAME {
             continue;
         }
-        let event =
-            HeadMoved::decode_storage(&draft.bytes).map(|data| data.value).map_err(AppendError::InvalidHeadMoved)?;
-        verify_prefix(&mut stmt, &mut seen, *event.to.as_bytes(), event.target_kind)?;
+        let event = RecordedHeadMove::decode_storage(&draft.bytes)
+            .map(|data| data.value)
+            .map_err(AppendError::InvalidHeadMoved)?;
+        verify_prefix(&mut stmt, &mut seen, *event.to().as_bytes(), event.symbol().kind())?;
     }
     Ok(())
 }
