@@ -6,9 +6,27 @@ use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Journal, Seq};
 use aether_bloomery_kinds::{ExecutorName, Fault, FaultReason, Utf8Text};
-use aether_bloomery_program::{Applied, ApplyError, Executors, apply, declaration, digest};
+use aether_bloomery_program::{
+    Applied, ApplyError, Execute, Execution, Executors, ReadArtifacts, Refusal, apply, declaration, digest,
+};
 use aether_data::Kind;
-use common::{FixedClock, PanicExecutor, RefuseExecutor, Trim, TrimInput};
+use common::{FixedClock, Trim, TrimInput};
+
+struct RefuseExecutor;
+
+impl Execute<Trim> for RefuseExecutor {
+    fn execute(&self, _input: TrimInput, _store: &dyn ReadArtifacts) -> Result<Execution<Trim>, Refusal> {
+        Err(Refusal::Refused("no".into()))
+    }
+}
+
+struct PanicExecutor;
+
+impl Execute<Trim> for PanicExecutor {
+    fn execute(&self, _input: TrimInput, _store: &dyn ReadArtifacts) -> Result<Execution<Trim>, Refusal> {
+        panic!("trim panicked");
+    }
+}
 
 fn journal_with_input() -> Result<(Journal, aether_bloomery_kinds::Digest), Box<dyn Error>> {
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(1)))?;

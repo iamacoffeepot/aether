@@ -46,7 +46,7 @@ fn valid_segment(segment: &str) -> bool {
 
 macro_rules! dotted_name {
     ($Name:ident, $Error:ident, $kind:literal) => {
-        /// Why [`$Name::new`] refused a string.
+        /// Why construction refused a string.
         #[derive(Debug, Clone, Copy, PartialEq, Eq)]
         pub enum $Error {
             /// The string was empty.
@@ -97,7 +97,7 @@ macro_rules! dotted_name {
             ///
             /// # Errors
             ///
-            /// [`$Error`] names which rule failed.
+            /// The matching error names which rule failed.
             pub fn new(value: impl Into<String>) -> Result<Self, $Error> {
                 let value = value.into();
                 parse_dotted_name(&value).map_err($Error::from_rule)?;

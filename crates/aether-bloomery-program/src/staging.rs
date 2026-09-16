@@ -57,9 +57,9 @@ impl<P: Program> Staging<P> {
     ///
     /// [`FinishError::Storage`] when encoding the result fails.
     /// [`FinishError::Orphaned`] when a staged blob is not reachable from the result.
-    #[allow(clippy::needless_pass_by_value)]
     pub fn finish(mut self, result: P::Result) -> Result<Execution<P>, FinishError> {
-        let result = self.stage_encoded(&result)?;
+        let owned = result;
+        let result = self.stage_encoded(&owned)?;
         let reachable = reachable_from(&self.batch, result.digest());
         if let Some(digest) = self.staged.iter().copied().find(|digest| !reachable.contains(digest)) {
             return Err(FinishError::Orphaned { digest });

@@ -1,7 +1,5 @@
 //! Shared clock, trim program, and in-process executors for program tests.
 
-#![allow(dead_code)]
-
 use std::collections::BTreeMap;
 use std::str;
 
@@ -47,22 +45,6 @@ impl Execute<Trim> for TrimExecutor {
         let mut staging = Staging::new();
         let (tree, changed) = trim_tree(input.tree, store, &mut staging, 0)?;
         staging.finish(TrimResult { tree, changed }).map_err(|error| Refusal::Refused(error.to_string()))
-    }
-}
-
-pub struct RefuseExecutor;
-
-impl Execute<Trim> for RefuseExecutor {
-    fn execute(&self, _input: TrimInput, _store: &dyn ReadArtifacts) -> Result<Execution<Trim>, Refusal> {
-        Err(Refusal::Refused("no".into()))
-    }
-}
-
-pub struct PanicExecutor;
-
-impl Execute<Trim> for PanicExecutor {
-    fn execute(&self, _input: TrimInput, _store: &dyn ReadArtifacts) -> Result<Execution<Trim>, Refusal> {
-        panic!("trim panicked");
     }
 }
 

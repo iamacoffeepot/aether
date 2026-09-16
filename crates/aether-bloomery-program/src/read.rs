@@ -18,10 +18,13 @@ pub trait ReadArtifacts {
 }
 
 impl ReadArtifacts for Journal {
-    #[allow(clippy::use_self)]
     fn get_bytes(&self, digest: &Digest) -> Result<Option<(KindId, Vec<u8>)>, ReadError> {
-        Journal::get_bytes(self, digest).map_err(ReadError::Journal)
+        journal_get_bytes(self, digest).map_err(ReadError::Journal)
     }
+}
+
+fn journal_get_bytes(journal: &Journal, digest: &Digest) -> Result<Option<(KindId, Vec<u8>)>, JournalError> {
+    Journal::get_bytes(journal, digest)
 }
 
 impl dyn ReadArtifacts + '_ {

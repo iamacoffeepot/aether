@@ -2,13 +2,18 @@
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Journal, Seq};
+use aether_bloomery_journal::{Batch, Clock, Journal, Seq};
 use aether_bloomery_kinds::{Mode, OpaqueBytes, ProgramName, ProgramNamed};
 use aether_bloomery_program::named;
 use aether_data::Kind;
-use common::FixedClock;
 
-mod common;
+struct FixedClock(u64);
+
+impl Clock for FixedClock {
+    fn now_millis(&self) -> u64 {
+        self.0
+    }
+}
 
 fn program(name: &str, intent: &str) -> Result<aether_bloomery_kinds::Program, Box<dyn Error>> {
     Ok(aether_bloomery_kinds::Program {
