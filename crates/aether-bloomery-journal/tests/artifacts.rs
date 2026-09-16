@@ -4,8 +4,8 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::Digest;
-use common::journal;
+use aether_bloomery_journal::{Digest, Journal};
+use common::FixedClock;
 
 const TRIPWIRE_PREIMAGE: &[u8] = b"aether-bloomery-journal";
 const TRIPWIRE_DIGEST: [u8; 32] = [
@@ -15,7 +15,7 @@ const TRIPWIRE_DIGEST: [u8; 32] = [
 
 #[test]
 fn putting_the_same_bytes_twice_returns_the_same_digest_and_different_bytes_differ() -> Result<(), Box<dyn Error>> {
-    let mut journal = journal()?;
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     let first = journal.put_artifact(b"alpha")?;
     let second = journal.put_artifact(b"alpha")?;
     assert_eq!(first, second);
@@ -28,7 +28,7 @@ fn putting_the_same_bytes_twice_returns_the_same_digest_and_different_bytes_diff
 
 #[test]
 fn get_artifact_of_an_unknown_digest_is_none_and_a_put_digest_round_trips() -> Result<(), Box<dyn Error>> {
-    let mut journal = journal()?;
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     let missing = Digest([0; 32]);
     assert_eq!(journal.get_artifact(&missing)?, None);
 
@@ -41,7 +41,7 @@ fn get_artifact_of_an_unknown_digest_is_none_and_a_put_digest_round_trips() -> R
 
 #[test]
 fn get_artifacts_keeps_absent_slots_and_put_artifacts_is_positional_and_idempotent() -> Result<(), Box<dyn Error>> {
-    let mut journal = journal()?;
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     let a = journal.put_artifact(b"present-a")?;
     let b = journal.put_artifact(b"present-b")?;
     let missing = Digest([1; 32]);

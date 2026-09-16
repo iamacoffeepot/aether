@@ -5,7 +5,7 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{DecodeError, Draft, Journal, Seq};
-use common::journal;
+use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -27,7 +27,7 @@ struct Other {
 
 #[test]
 fn decode_round_trips_the_appended_kind_and_refuses_a_different_kind_name() -> Result<(), Box<dyn Error>> {
-    let mut journal = journal()?;
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     journal.append(Seq(0), &[Note::draft("hello")])?;
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("one entry");
 

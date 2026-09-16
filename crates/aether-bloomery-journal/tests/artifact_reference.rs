@@ -5,7 +5,7 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{Digest, Draft, Journal, Seq};
-use common::journal;
+use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.referenced")]
@@ -15,7 +15,7 @@ struct Referenced {
 
 #[test]
 fn an_event_with_a_digest_field_round_trips_and_the_digest_resolves() -> Result<(), Box<dyn Error>> {
-    let mut journal = journal()?;
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     let payload = b"transcript";
     let digest = journal.put_artifact(payload)?;
     journal.append(Seq(0), &[Draft::of(&Referenced { digest }, None)?])?;
