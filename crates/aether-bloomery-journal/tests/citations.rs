@@ -27,6 +27,22 @@ enum Nested {
     Named { item: Ref<Utf8Text> },
 }
 
+/// Schema-only leaf whose `Cites` impl pushes a slice that is not 32 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Schema)]
+struct WrongWidthCite;
+
+impl Cites for WrongWidthCite {
+    fn cites(&self, sink: &mut Citations) {
+        sink.push(OpaqueBytes::ID, &[0u8; 16]);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.wrong_width")]
+struct WrongWidth {
+    leaf: Vec<WrongWidthCite>,
+}
+
 #[test]
 fn a_batch_whose_event_cites_an_absent_digest_is_refused_whole() -> Result<(), Box<dyn Error>> {
     // Catches insert-then-verify with no rollback, which leaves orphan rows a
@@ -122,22 +138,6 @@ fn a_ref_nested_inside_a_vec_and_inside_an_enum_variant_is_found() -> Result<(),
     }
     assert_eq!(journal.head()?, Seq(0));
     Ok(())
-}
-
-/// Schema-only leaf whose `Cites` impl pushes a slice that is not 32 bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Schema)]
-struct WrongWidthCite;
-
-impl Cites for WrongWidthCite {
-    fn cites(&self, sink: &mut Citations) {
-        sink.push(OpaqueBytes::ID, &[0u8; 16]);
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.journal.wrong_width")]
-struct WrongWidth {
-    leaf: Vec<WrongWidthCite>,
 }
 
 #[test]
