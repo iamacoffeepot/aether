@@ -33,8 +33,8 @@
 
 use std::path::Path;
 
-use aether_bloomery::{SurfacePattern, path_in_surface};
-use aether_bloomery_git::command::{self, GitCommandError};
+use crate::git::{self as command, GitCommandError};
+use crate::surface::{SurfacePattern, path_in_surface};
 use anyhow::{Context, Result, bail};
 use serde::Serialize;
 
@@ -316,7 +316,7 @@ fn covering(entry: &ClassifiedPath) -> Option<Widening> {
 #[cfg(test)]
 mod tests {
     use super::{ClassifiedPath, Role, covering, crate_label, is_identifier, search};
-    use aether_bloomery::SurfacePattern;
+    use crate::surface::SurfacePattern;
 
     fn uncovered(path: &str) -> ClassifiedPath {
         ClassifiedPath { path: path.to_owned(), role: Role::Defining, covered: false }
@@ -340,25 +340,25 @@ mod tests {
     fn a_widening_suggestion_is_inside_the_surface_grammar() {
         // The plausible bug: emitting `crates/*/src/*.rs` or a mid-path `**`,
         // which the seal door refuses — advice an author cannot act on.
-        let widening = covering(&uncovered("crates/aether-bloomery/src/port/source.rs")).expect("a pattern covers it");
-        assert_eq!(widening.pattern, "crates/aether-bloomery/src/port/source.rs");
+        let widening = covering(&uncovered("crates/aether-codec/src/frame/source.rs")).expect("a pattern covers it");
+        assert_eq!(widening.pattern, "crates/aether-codec/src/frame/source.rs");
         assert!(SurfacePattern::parse(&widening.pattern).is_some(), "and the grammar accepts it");
     }
 
     #[test]
     fn a_crate_label_reads_the_workspace_layout() {
-        assert_eq!(crate_label("crates/aether-bloomery/src/lib.rs"), "aether-bloomery");
+        assert_eq!(crate_label("crates/aether-codec/src/lib.rs"), "aether-codec");
         assert_eq!(crate_label("xtask/src/main.rs"), "xtask");
     }
 
     #[test]
     fn the_search_names_every_file_that_mentions_the_symbol_and_marks_the_definers() {
         // Acceptance (#5300): the case ADR-0208 itself cites. `symbols find`
-        // sees only the two impls; the trait declaration and the call site —
-        // precisely the two files a signature change is guaranteed to touch —
-        // are invisible to it. A subset assertion, not an equality, so a fifth
-        // reference landing later does not fail this spuriously.
-        let Ok(super::ReferenceSearch::Resolved(resolved)) = search("adopt_candidate", "HEAD", &[]) else {
+        // sees only the definition; the call sites — precisely the files a
+        // signature change is guaranteed to touch — are invisible to it. A
+        // subset assertion, not an equality, so a further reference landing
+        // later does not fail this spuriously.
+        let Ok(super::ReferenceSearch::Resolved(resolved)) = search("path_in_surface", "HEAD", &[]) else {
             // A checkout with no git (or a shallow one without HEAD) cannot
             // answer; that is a host condition, not a defect in the search.
             return;
@@ -377,14 +377,9 @@ mod tests {
             .map(|entry| entry.path.as_str())
             .collect();
 
+        assert!(defining.contains(&"xtask/src/surface.rs"), "the definition is a defining path: {defining:?}");
         assert!(
-            defining.contains(&"crates/aether-bloomery/src/port/source.rs"),
-            "the trait declaration is a defining path: {defining:?}",
-        );
-        assert!(defining.contains(&"crates/aether-bloomery-git/src/source.rs"), "{defining:?}");
-        assert!(defining.contains(&"crates/aether-chassis-bloomery/src/bloomery/source.rs"), "{defining:?}");
-        assert!(
-            referencing.contains(&"crates/aether-chassis-bloomery/src/bloomery/reactor/integrate/runtime/mod.rs"),
+            referencing.contains(&"xtask/src/symbols/references.rs"),
             "the call site is a referencing path: {referencing:?}",
         );
         assert_eq!(resolved.at.len(), 40, "the record pins the resolved sha, not the argument");
@@ -396,15 +391,15 @@ mod tests {
         // Tripwire (ADR-0208): the builder derives the evidence that judges the
         // surface; silently appending to the surface is exactly the
         // auto-completion the ADR forbids.
-        let surface = vec!["crates/aether-bloomery-git/**".to_owned()];
-        let Ok(super::ReferenceSearch::Resolved(resolved)) = search("adopt_candidate", "HEAD", &surface) else {
+        let surface = vec!["xtask/src/surface.rs".to_owned()];
+        let Ok(super::ReferenceSearch::Resolved(resolved)) = search("path_in_surface", "HEAD", &surface) else {
             return;
         };
 
         assert_eq!(resolved.surface, surface, "the passed surface is echoed back byte-identically");
         assert!(
             resolved.paths.iter().any(|entry| entry.covered),
-            "the one crate the surface names is covered: {:?}",
+            "the one file the surface names is covered: {:?}",
             resolved.paths,
         );
         assert!(!resolved.widening.is_empty(), "and the rest are reported as widenings");

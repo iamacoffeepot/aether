@@ -70,7 +70,7 @@ impl Chassis for HubChassis {
 }
 
 impl BootableChassis for HubChassis {
-    /// The hub's base is the unit no-op (like bloomery): its `compose` delta needs
+    /// The hub's base is the unit no-op: its `compose` delta needs
     /// the source stack to resolve its always-bind RPC port, so the stack rides
     /// [`Chassis::Env`] as [`ConfigSources`] and reaches `compose`, rather than
     /// being consumed by a `ChassisBase` base ahead of it. The shared

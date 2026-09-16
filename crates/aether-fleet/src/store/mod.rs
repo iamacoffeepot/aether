@@ -25,7 +25,7 @@
 //! `ContentStore<StoredEntry>` under the [`LruBudget`](EvictionPolicy::LruBudget)
 //! policy and layers the binary/component vocabulary — [`ArtifactKind`] /
 //! [`StoredManifest`], the manifest filters, and the four list/match
-//! projections — over the core's entry-iteration API. Bloomery's
+//! projections — over the core's entry-iteration API. A second
 //! eviction-free `artifacts` port (ADR-0149) is the second consumer.
 //!
 //! ## Layout

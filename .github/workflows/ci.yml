@@ -2,33 +2,13 @@ name: CI
 
 on:
   pull_request:
-    # Landing proposals onto the day's bloomery ref are correspondence
-    # (ADR-0186): bloomery's own gates already proved the tree, and the
-    # pull-request jobs are not consumed. Skip them so paid runners are
-    # not spent on a wait nothing reads. PRs onto `main` still run.
-    branches-ignore:
-      - 'bloomery/daily/**'
   push:
-    # `bloomery/daily/**` is ADR-0186's preferred backstop posture
-    # (iamacoffeepot/aether#4946). A bloom lands on the day's ref without a
-    # pull request, so until sync-back nothing exercised the repository-wide
-    # suite over it: an affected-set or scoping miss stayed green inside its
-    # wave and accumulated for the rest of the day. Running the full suite at
-    # each landing caps that at about one bloom.
-    #
-    # It is a backstop, not a gate. Nothing here is a required check, no
-    # branch protection changes, and a red run is read by an operator — the
-    # quarantine and repair-bloom reaction stays deliberately outside this
-    # workflow, because workflow credentials must not become an unreviewed
-    # coordinator-control channel.
     branches:
       - main
-      - 'bloomery/daily/**'
-  # The full-suite lane runs only on a push to `main` or a daily ref, so
-  # without a manual trigger there is no way to exercise a change to it
-  # before merging it. A dispatch takes the same non-pull-request path: the
-  # GitHub-hosted runner, the sharded full suite, and no affected-package
-  # narrowing.
+  # The full-suite lane runs only on a push to `main`, so without a manual
+  # trigger there is no way to exercise a change to it before merging it. A
+  # dispatch takes the same non-pull-request path: the GitHub-hosted runner,
+  # the sharded full suite, and no affected-package narrowing.
   workflow_dispatch:
 
 permissions:
@@ -39,18 +19,15 @@ permissions:
 # instead of letting it hold 8-vCPU runners to completion (the account
 # spot quota is the scarce resource).
 #
-# Integration pushes — `main` and the day's bloomery ref — are exempt, and
-# each gets its own group keyed by sha. Every one of them is a distinct
-# landing whose full run carries the cache-save and scan signal, and GitHub
-# allows only one running + one queued run per group, so a shared group
+# `main` is exempt, and gets its own group keyed by sha. Every push to it is a
+# distinct landing whose full run carries the cache-save and scan signal, and
+# GitHub allows only one running + one queued run per group, so a shared group
 # would serialize back-to-back landings and silently cancel the intermediate
-# runs. On the daily ref that cancellation is the whole failure mode the
-# backstop exists to prevent: a branch-ref group would let bloom N+1 cancel
-# bloom N's run and erase the first red landing, which is exactly the commit
-# an operator needs named.
+# runs — erasing the first red landing, which is exactly the commit an operator
+# needs named.
 concurrency:
-  group: ci-${{ (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/heads/bloomery/daily/')) && github.sha || github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/heads/bloomery/daily/') }}
+  group: ci-${{ github.ref == 'refs/heads/main' && github.sha || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 env:
   CARGO_TERM_COLOR: always
@@ -63,18 +40,12 @@ jobs:
       # A manual dispatch is an explicit request to run the suite, and it
       # carries no diff base for the filter to reason from, so it bypasses
       # the filter rather than being classified by it.
-      #
-      # A daily landing bypasses it too, and for the opposite reason: the
-      # backstop exists specifically to catch a wave whose affected set was
-      # wrong (iamacoffeepot/aether#4946), so classifying it by the same kind
-      # of path selection would let the miss it is hunting decide whether it
-      # runs at all.
-      code: ${{ github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/heads/bloomery/daily/') || steps.filter.outputs.code == 'true' }}
+      code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
         id: filter
-        if: github.event_name != 'workflow_dispatch' && !startsWith(github.ref, 'refs/heads/bloomery/daily/')
+        if: github.event_name != 'workflow_dispatch'
         with:
           filters: |
             code:
@@ -145,12 +116,12 @@ jobs:
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
-  # program, argv, environment, exit-code interpretation and verdict; the
-  # Bloomery verify lane runs the same arm, so a calibration edit — the jscpd
-  # threshold, the machete flags, a rustdoc lint — is one Rust change that moves
-  # the gate and the lane's prediction of it together. Stating the invocation
-  # here as well is exactly the two-site duplication this repository has already
-  # been burned by twice (#4856, #4863).
+  # program, argv, environment, exit-code interpretation and verdict, so a
+  # calibration edit — the jscpd threshold, the machete flags, a rustdoc lint —
+  # is one Rust change that moves the gate and any local prediction of it
+  # together. Stating the invocation here as well is exactly the two-site
+  # duplication this repository has already been burned by twice (#4856,
+  # #4863).
   #
   # Scheduling stays in YAML: job names, `needs`, conditions, runners, caches,
   # tool installation, the affected-package computation, matrix cardinality and
@@ -167,10 +138,10 @@ jobs:
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
       # The toolchain comes from `rust-toolchain.toml`, never from a channel
-      # named here. A Bloomery lane's `verify.check` runs the pinned toolchain
-      # (rustup resolves the file), so a gate on `stable` judges the candidate
-      # with a different compiler than the one that verified it — and the two
-      # drift apart on their own every six weeks. `rustup toolchain install`
+      # named here. A local `verify.check` runs the pinned toolchain (rustup
+      # resolves the file), so a gate on `stable` judges the change with a
+      # different compiler than the one that verified it — and the two drift
+      # apart on their own every six weeks. `rustup toolchain install`
       # with no argument reads the file, including its `components` and
       # `targets`, so each job's needs are declared once, in the repo.
       - run: rustup toolchain install
@@ -452,9 +423,8 @@ jobs:
       # (lockfile, root manifest, toolchain, .cargo/, .config/,
       # clippy.toml, ci.yml, xtask/) and any path matching no package and
       # no rule run everything, and the couplings cargo's graph can't see
-      # (component/behavior wasm executed by the bundle's scenario tests;
-      # bloomery/ config read by aether-chassis-bloomery tests) are injected
-      # in xtask. Pushes to main always run the unconditional full suite
+      # (component/behavior wasm executed by the bundle's scenario tests) are
+      # injected in xtask. Pushes to main always run the unconditional full suite
       # below — squash-merge means main tests the exact landed tree, so a
       # selection miss delays a red signal but never loses it. That same
       # backstop answers the nextest-era removal of the previous

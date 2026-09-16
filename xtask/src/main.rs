@@ -7,13 +7,12 @@
 //! `target/` tree is still populated identically, so in-process scenario
 //! tests (which read `target/…`) are untouched.
 //!
-//! `transform` is ADR-0149 §Execution's portable execution unit: it
-//! runs one typed `verify.*` command — the same invocation CI runs —
-//! identically on a laptop and under the thin `transform.yml` wrapper
-//! workflow. `verify.check` aggregates formatting, clippy, docs, tests,
-//! duplicate code, unused dependencies, and added suppressions;
-//! `verify.member` is the same set less docs, which a single member's
-//! closure can neither break nor prove on its own.
+//! `transform` runs one typed `verify.*` command — the same invocation
+//! CI runs — identically on a laptop and in Actions. `verify.check`
+//! aggregates formatting, clippy, docs, tests, duplicate code, unused
+//! dependencies, and added suppressions; `verify.member` is the same set
+//! less docs, which a narrowed closure can neither break nor prove on its
+//! own.
 
 // xtask is a developer-facing build tool: emitting build progress + a
 // summary to the terminal is its purpose. The workspace
@@ -26,18 +25,17 @@
 
 mod affected;
 mod bins;
-mod bloom;
 mod build_wasm;
 mod bump;
 mod cargo;
 mod dev_component;
 mod dist;
 mod docs;
-mod fixtures;
+mod git;
 mod inventory;
 mod namespaces;
 mod package;
-mod scope;
+mod surface;
 mod symbols;
 mod transform;
 
@@ -46,16 +44,13 @@ use clap::{Parser, Subcommand};
 
 use crate::affected::AffectedArgs;
 use crate::bins::BinsArgs;
-use crate::bloom::BloomArgs;
 use crate::build_wasm::BuildWasmArgs;
 use crate::bump::BumpArgs;
 use crate::dev_component::DevComponentArgs;
 use crate::dist::DistArgs;
 use crate::docs::DocsArgs;
-use crate::fixtures::FixturesArgs;
 use crate::namespaces::NamespacesArgs;
 use crate::package::PackageArgs;
-use crate::scope::ScopeArgs;
 use crate::symbols::SymbolsArgs;
 use crate::transform::TransformArgs;
 
@@ -81,34 +76,26 @@ enum Commands {
     /// `check-mcp-tools` diffs `CLAUDE.md`'s MCP tool list against the
     /// `#[tool]`-registered set in `aether-mcp`.
     Docs(DocsArgs),
-    /// Rewrite or check pinned golden fixture files.
-    Fixtures(FixturesArgs),
     /// Emit the shippable depot layout (ADR-0163 §1): the chassis binary,
     /// the workspace license files, a persisted `pack/manifest`, and
     /// content-addressed component objects under `pack/objects/<sha256>`.
     /// The Steam depot is this directory uploaded verbatim.
     Package(PackageArgs),
-    /// ADR-0149 §Execution's portable execution unit: run one typed
-    /// mechanical-verify command (`verify.fmt`, `verify.clippy`,
-    /// `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, or
-    /// `verify.suppress`) — the same invocation CI runs — and write
-    /// nonce-tagged evidence bytes. `verify.check` runs the full set;
-    /// `verify.member` runs it less `verify.docs`, which the member
-    /// position leaves to the two whole-tree positions.
+    /// Run one typed mechanical-verify command (`verify.fmt`,
+    /// `verify.clippy`, `verify.docs`, `verify.test`, `verify.dup`,
+    /// `verify.deps`, `verify.lock`, or `verify.suppress`) — the same
+    /// invocation CI runs — and write nonce-tagged evidence bytes.
+    /// `verify.check` runs the full set; `verify.member` runs it less
+    /// `verify.docs`, which the narrowed position leaves to the two
+    /// whole-tree positions.
     Transform(TransformArgs),
     /// Compute the affected package set for PR CI test selection
     /// (issue #3611): changed paths against a base ref, mapped through
     /// the workspace graph's reverse-dependency closure.
     Affected(AffectedArgs),
-    /// Drive the Bloomery coordinator REST surface: list blooms, seal a
-    /// draft, or supersede a predecessor without composing JSON by hand.
-    Bloom(BloomArgs),
     /// Workspace symbol inventory: build a deterministic table, find by
     /// name, or diff a working tree against a stored base table.
     Symbols(SymbolsArgs),
-    /// Append one field write to a `scope.fill` run's call log. The value
-    /// arrives by file so multi-paragraph prose survives the transport.
-    Scope(ScopeArgs),
     /// Report string literals repeating another crate's declared actor
     /// `NAMESPACE` — the hand-naming half of the addressing gate, where
     /// `clippy.toml` covers only hand-hashing (#5720).
@@ -130,13 +117,10 @@ fn main() -> Result<()> {
         Commands::BuildWasm(args) => build_wasm::run(&args),
         Commands::Dist(args) => dist::run(&args),
         Commands::Docs(args) => docs::run(&args),
-        Commands::Fixtures(args) => fixtures::run(&args),
         Commands::Package(args) => package::run(&args),
         Commands::Transform(args) => transform::run(&args),
         Commands::Affected(args) => affected::run(&args),
-        Commands::Bloom(args) => bloom::run(&args),
         Commands::Symbols(args) => symbols::run(&args),
-        Commands::Scope(args) => scope::run(&args),
         Commands::Namespaces(args) => namespaces::run(&args),
         Commands::Bump(args) => bump::run(&args),
         Commands::Bins(args) => bins::run(&args),

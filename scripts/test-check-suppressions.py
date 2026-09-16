@@ -374,7 +374,7 @@ ignored = ["changed-but-unrelated"]
         # must pass — the case a guessed origin/main never reaches.
         self.repo.git("checkout", "-q", "--orphan", "candidate")
         self.repo.write("src/lib.rs", "fn clean() {}\n")
-        root = self.repo.commit("bloomery: checkout of bare tree")
+        root = self.repo.commit("checkout of bare tree")
         self.repo.write("src/lib.rs", "fn still_clean() {}\n")
         head = self.repo.commit("candidate")
 
@@ -390,7 +390,7 @@ ignored = ["changed-but-unrelated"]
         self.assertEqual(completed.stdout, b"")
 
     def test_a_head_sharing_no_ancestor_with_the_base_scans_from_its_own_root(self) -> None:
-        # A bloomery lane roots a bare-tree candidate at a parentless wrapper
+        # A bare-tree checkout roots its candidate at a parentless wrapper
         # commit (#5025), so the base ref shares no ancestor with it. Before the
         # fallback the scan died on `merge-base`'s silent exit 1 and reported no
         # verdict at all, which reads as a host fault and costs the member a
@@ -400,7 +400,7 @@ ignored = ["changed-but-unrelated"]
 
         self.repo.git("checkout", "-q", "--orphan", "candidate")
         self.repo.write("src/lib.rs", "fn clean() {}\n")
-        self.repo.commit("bloomery: checkout of bare tree")
+        self.repo.commit("checkout of bare tree")
         self.repo.write("src/lib.rs", "#[allow(dead_code)]\nfn clean() {}\n")
         head = self.repo.commit("candidate")
 

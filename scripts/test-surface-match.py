@@ -279,9 +279,9 @@ class MatcherTests(unittest.TestCase):
             # exempts root Cargo.lock — the #3490 shape (#3492).
             globs_pos = root / "globs-pos.txt"
             paths_pos = root / "paths-pos.txt"
-            globs_pos.write_text("crates/aether-chassis-bloomery/**\n", encoding="utf-8")
+            globs_pos.write_text("crates/aether-chassis-hub/**\n", encoding="utf-8")
             paths_pos.write_text(
-                "crates/aether-chassis-bloomery/Cargo.toml\ncrates/aether-chassis-bloomery/src/lib.rs\nCargo.lock\n",
+                "crates/aether-chassis-hub/Cargo.toml\ncrates/aether-chassis-hub/src/lib.rs\nCargo.lock\n",
                 encoding="utf-8",
             )
             completed_pos = subprocess.run(
@@ -297,7 +297,7 @@ class MatcherTests(unittest.TestCase):
             # in the diff — Cargo.lock still escapes.
             globs_neg = root / "globs-neg.txt"
             paths_neg = root / "paths-neg.txt"
-            globs_neg.write_text("crates/aether-chassis-bloomery/**\n", encoding="utf-8")
+            globs_neg.write_text("crates/aether-chassis-hub/**\n", encoding="utf-8")
             paths_neg.write_text("Cargo.lock\n", encoding="utf-8")
             completed_neg = subprocess.run(
                 [sys.executable, "-I", str(SCRIPT), str(globs_neg), str(paths_neg), str(policy)],

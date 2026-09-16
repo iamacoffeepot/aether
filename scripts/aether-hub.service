@@ -12,8 +12,7 @@
 # recipe — lingering on a headless host, what a restart does to the substrates
 # the hub has forked — is docs/guide/recipes/supervising-the-hub.md.
 #
-# This is a sibling of scripts/bloomery.service, not a child of anything. The
-# development tunnel (aether-tunnel, ADR-0089) forks its own hub for an MCP
+# The development tunnel (aether-tunnel, ADR-0089) forks its own hub for an MCP
 # session and supervises it there; a hub under this unit is the standing fleet
 # coordinator on the host and has no tunnel above it.
 

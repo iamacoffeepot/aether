@@ -1091,9 +1091,9 @@ where
 ///
 /// The chassis binaries that depend on `aether-chassis` (desktop / headless /
 /// hub) hand their [`ChassisMeta`] to [`run_describe_prelude`], which reads
-/// this crate's build provenance for the `--describe` manifest.
-/// The bloomery chassis, which does not depend on this aggregate, fills a
-/// [`BuildProvenance`] from its own crate's `build.rs` instead (ADR-0162).
+/// this crate's build provenance for the `--describe` manifest. A chassis that
+/// does not depend on this aggregate fills a [`BuildProvenance`] from its own
+/// crate's `build.rs` instead (ADR-0162).
 #[must_use]
 pub fn build_provenance() -> BuildProvenance {
     BuildProvenance {

@@ -1,5 +1,6 @@
 mod closure;
 mod delta;
+mod failure;
 mod inputs;
 mod lockfile;
 mod memo;
@@ -25,41 +26,38 @@ use std::slice::from_ref;
 use std::thread;
 use std::time::Instant;
 
-use aether_bloomery::{PipelineManifest, VerifyFailure, VerifyFailureSet};
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Serialize;
 
 use crate::affected::graph::Workspace;
 use crate::cargo::{WASM_TARGET, run_captured, write_json_pretty};
 use crate::dist::cache::{self as dist_cache, CacheStatus};
-use crate::fixtures::annotate_findings;
 use crate::transform::peak_memory::{self, PeakMemory};
 use crate::transform::sccache::{self, CompilerCache, Counters};
 use crate::transform::verify::closure::Closure;
 pub(super) use crate::transform::verify::delta::Carried;
+pub(super) use crate::transform::verify::failure::{VerifyFailure, VerifyFailureSet};
 use crate::transform::verify::memo::Memo;
 use crate::transform::verify::scope::Scope;
 pub(super) use crate::transform::verify::triage::Excused;
 use crate::transform::verify::triage::ReplayVerdict;
-use crate::transform::verify::vocabulary::checkout_vocabulary;
+use crate::transform::verify::vocabulary::{PipelineManifest, checkout_vocabulary};
 use crate::transform::{ChannelKind, Channels, Evidence, EvidenceChannel, GateTiming, TransformArgs, build_evidence};
 
-/// The typed id of the verify umbrella (#3626) the reducer dispatches for the
-/// `AggregateVerify` stage. The bloomery command constant is the type-level
-/// spelling; the checkout's `pipeline.toml` is what the lane fans out to.
-pub(super) use aether_bloomery::VERIFY_CHECK_COMMAND as VERIFY_CHECK;
+/// The typed id of the whole-tree verify umbrella: every gate the vocabulary
+/// declares a fan-out for, over the whole workspace.
+pub(super) const VERIFY_CHECK: &str = "verify.check";
 
-/// The typed id of the per-member verify the reducer dispatches for the Verify
-/// stage. Distinct from [`VERIFY_CHECK`] because the gate set it runs is its
-/// own identity: the proof a member files must name the gates that ran over it.
-pub(super) use aether_bloomery::VERIFY_MEMBER_COMMAND as VERIFY_MEMBER;
+/// The typed id of the closure-narrowed verify. Distinct from [`VERIFY_CHECK`]
+/// because the gate set it runs is its own identity: a proof filed under it
+/// must name the gates that actually ran.
+pub(super) const VERIFY_MEMBER: &str = "verify.member";
 
 /// The typed id of the whole-workspace base verify. Same fan-out as
-/// [`VERIFY_CHECK`] in this repository's manifest, but closure resolution is
-/// skipped: with an empty candidate range `Scope::resolve` yields an empty
-/// package set and `scheduled_args` would strip `--workspace` while adding no
-/// `-p`, reporting green over nothing.
-pub(super) use aether_bloomery::VERIFY_BASE_COMMAND as VERIFY_BASE;
+/// [`VERIFY_CHECK`], but closure resolution is skipped: with an empty candidate
+/// range `Scope::resolve` yields an empty package set and `scheduled_args`
+/// would strip `--workspace` while adding no `-p`, reporting green over nothing.
+pub(super) const VERIFY_BASE: &str = "verify.base";
 
 /// One CI-mirroring invocation for a `verify.*` command id, plus the tools it
 /// needs present to run at all (#4706).
@@ -168,10 +166,9 @@ enum Breadth {
 /// cannot cache an incremental compilation, so leaving it on would make the
 /// wrapper pure overhead on every member that builds.
 ///
-/// Not shared with the model lanes, deliberately. A construct lane's child is an
-/// edit loop over one tree, where incremental is worth more than a cache hit
-/// rate — so this rides the verify invocation rather than the cache export both
-/// lanes go through.
+/// Stated on the verify invocation rather than exported to every child this
+/// process forks: an editing tool spawned beside it wants incremental on, and
+/// the gate's parity with CI is what this constant is for.
 const CI_BUILD_ENV: [(&str, &str); 1] = [("CARGO_INCREMENTAL", "0")];
 
 impl VerifyInvocation {
@@ -306,7 +303,7 @@ impl VerifyInvocation {
 ///
 /// Package selection, the nextest partition, and an attestation that the
 /// caller already ran the component-wasm prepare. Empty on every other path:
-/// the umbrella, a laptop run, a Bloomery member. Presence on any other
+/// the umbrella, a laptop run, a narrowed position. Presence on any other
 /// command is refused at [`super::run`], so a scheduling flag cannot silently
 /// narrow `verify.clippy` or skip a prepare that never ran.
 #[derive(Clone, Copy, Default)]
@@ -601,14 +598,9 @@ const SUPPRESS_MEMBER: &str = "verify.suppress";
 
 /// The committish a whole-workspace base run names as its own diff base.
 ///
-/// The tree the lane stands on, rather than the sealed sha the coordinator
-/// dispatched: `--subject` is a model-lane flag and never reaches a verify
-/// dispatch, so `HEAD` is the only name this process can give for the subject.
-/// It names the same commit either way — the executor resets the slot to the
-/// sealed subject before the lane spawns — and it always resolves, where a
-/// sealed identity may name a bare tree (ADR-0196) that
-/// `rev-parse <ref>^{commit}` refuses for the same exit code this exists to
-/// stop producing.
+/// The tree the run stands on. `HEAD` always resolves, where a caller-supplied
+/// identity may name a bare tree (ADR-0196) that `rev-parse <ref>^{commit}`
+/// refuses for the same exit code this exists to stop producing.
 const BASE_SET_SUBJECT: &str = "HEAD";
 
 /// The base one umbrella member scans its range from.
@@ -634,10 +626,8 @@ fn member_diff_base<'a>(id: &str, order_base: Option<&'a str>, full: bool) -> Op
     }
 }
 
-/// The trailing comment a lane writes on the suppression line itself to state
-/// its case (ADR-0193 §1). Shared with `xtask/src/transform/construct_instructions.md`,
-/// which is where a lane learns to write it, and with the scanner's own
-/// `REQUEST_RE`.
+/// The trailing comment an author writes on the suppression line itself to
+/// state its case (ADR-0193 §1). Shared with the scanner's own `REQUEST_RE`.
 const REQUEST_MARKER: &str = "aether-suppression-request:";
 
 /// One suppression the lane declined to judge, as the evidence record carries
@@ -708,17 +698,6 @@ pub(in crate::transform) fn judged_findings(stdout: &str, judge: &impl Judge) ->
     diagnostics(stdout).filter(|diagnostic| diagnostic.is_finding() && diagnostic.judged_under(judge)).count()
 }
 
-/// How many of those diagnostics are errors rather than warnings.
-///
-/// The construct lane's bar reads this to tell a candidate that does not
-/// compile from one that compiles with lint residue (#6000): the first has
-/// nothing further to learn from a clippy pass over the same crates — clippy
-/// compiles the same units and restates the same errors — so the bar spends
-/// the rest of its budget on the repair turn instead.
-pub(in crate::transform) fn judged_errors(stdout: &str, judge: &impl Judge) -> usize {
-    diagnostics(stdout).filter(|diagnostic| diagnostic.is_error() && diagnostic.judged_under(judge)).count()
-}
-
 /// Which packages a clippy verdict is answerable for.
 ///
 /// The umbrella answers with the [`Scope`] it resolved from the candidate's
@@ -761,11 +740,6 @@ impl Diagnostic {
         self.level == "warning" || self.level == "error"
     }
 
-    /// Whether this message is one the build did not survive.
-    fn is_error(&self) -> bool {
-        self.level == "error"
-    }
-
     /// Whether `scope` is answerable for this message — see [`Scope::judges`].
     ///
     /// An unattributed message is judged. Everything in this lane fails towards
@@ -798,7 +772,7 @@ fn diagnostics(stdout: &str) -> impl Iterator<Item = Diagnostic> + '_ {
 /// The package name a cargo `package_id` names.
 ///
 /// cargo spells a workspace member's id as a `PackageIdSpec` URL —
-/// `path+file:///…/crates/aether-bloomery#0.3.0-alpha` — and omits the name
+/// `path+file:///…/crates/aether-substrate#0.3.0-alpha` — and omits the name
 /// from the fragment when it is the same as the directory's own. So the name is
 /// the fragment's when the fragment carries one, and the locator's last path
 /// segment when the fragment is a bare version.
@@ -2728,7 +2702,7 @@ fn distil_member(id: &str, log: &str) -> Option<String> {
     if id == "verify.test"
         && let Some(failures) = nextest::classify(log, None).as_ref().and_then(nextest::ClassifiedRun::findings)
     {
-        return Some(annotate_findings(&failures));
+        return Some(failures);
     }
 
     distil_diagnostics(log)
@@ -3231,6 +3205,7 @@ mod tests {
         run_timed_prepare, selected_members, spawnable_runs, stated_selection, umbrella_status, unjudged_notice,
         verify_check_members, verify_command, verify_findings, workflow,
     };
+    use super::{VerifyFailure, VerifyFailureSet};
     use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Condvar, Mutex};
@@ -3238,13 +3213,10 @@ mod tests {
     use std::{env, fs, iter, process};
 
     use crate::cargo::WASM_TARGET;
-    use crate::transform::construct::CONSTRUCT_IMPLEMENT;
     use crate::transform::peak_memory;
-    use crate::transform::review::REVIEW_CRITIC;
     use crate::transform::sccache::CompilerCache;
-    use crate::transform::verify::vocabulary::checkout_vocabulary;
+    use crate::transform::verify::vocabulary::{PipelineManifest, checkout_vocabulary};
     use crate::transform::{GateTiming, build_evidence};
-    use aether_bloomery::{PipelineManifest, VERIFY_MEMBER_COMMAND, VerifyFailure, VerifyFailureSet};
 
     /// The full command line an invocation dispatches, program first, in the
     /// shape a workflow `run:` line is read into.
@@ -3577,38 +3549,13 @@ mod tests {
     }
 
     #[test]
-    fn verify_owns_the_heavy_matrix_construct_prose_does_not_restate_it() {
-        // Tripwire: Construct used to mirror every Verify argv (#4951), which
-        // duplicated the mechanical matrix on the serial path and went stale
-        // the moment a flag moved (#5078). Verify's typed map is the authority:
-        // every umbrella member must still resolve, and none of the heavy argv
-        // may appear in construct prose.
-        const CONSTRUCT_SOURCE: &str = include_str!("../construct_instructions.md");
+    fn every_umbrella_member_resolves_an_invocation() {
+        // Tripwire: the umbrella fans out to ids from the vocabulary and looks
+        // each one up in the typed map. A member declared in the vocabulary
+        // that no invocation maps would be spawned as nothing and reported as
+        // a pass.
         for id in verify_check_members() {
             assert!(verify_command(id).is_some(), "{id} must resolve via verify_command");
-        }
-
-        for id in ["verify.clippy", "verify.docs", "verify.test", "verify.suppress", "verify.dup", "verify.deps"] {
-            let invocation = verify_command(id).expect("member mapped");
-            let stated = argv(&invocation).join(" ");
-            assert!(
-                !CONSTRUCT_SOURCE.contains(&stated),
-                "{id} runs `{stated}`, which construct_instructions.md must not restate — Verify owns that argv",
-            );
-            for &(key, value) in invocation.env {
-                let setting = format!("{key}={value}");
-                assert!(
-                    !CONSTRUCT_SOURCE.contains(&setting),
-                    "{id} runs under {setting}, which is Verify's environment, not construct prose",
-                );
-            }
-            if let Some(prepare) = invocation.prepare {
-                let prepare = format!("cargo {}", prepare.join(" "));
-                assert!(
-                    !CONSTRUCT_SOURCE.contains(&prepare),
-                    "{id} is preceded by `{prepare}`, which is Verify's prepare, not a construct step",
-                );
-            }
         }
     }
 
@@ -3642,7 +3589,7 @@ mod tests {
         // both selects the whole workspace regardless — so a narrowing that
         // appended instead of replacing would compile every crate while its
         // receipt claimed a closure, which is worse than never narrowing.
-        let scope = closure_scope(&["aether-chassis-bloomery", "aether-math"]);
+        let scope = closure_scope(&["aether-chassis-hub", "aether-math"]);
 
         let clippy = verify_command("verify.clippy").expect("verify.clippy mapped");
         let args = clippy.scheduled_args(&scope, None, TestSchedule::default());
@@ -3658,7 +3605,7 @@ mod tests {
                 "--keep-going",
                 "--message-format=json",
                 "-p",
-                "aether-chassis-bloomery",
+                "aether-chassis-hub",
                 "-p",
                 "aether-math",
             ]),
@@ -3680,7 +3627,7 @@ mod tests {
             test.scheduled_args(&scope, None, TestSchedule::default()),
             [
                 owned(test.args).into_iter().filter(|arg| arg != "--workspace").collect::<Vec<_>>(),
-                owned(&["-p", "aether-chassis-bloomery", "-p", "aether-math"]),
+                owned(&["-p", "aether-chassis-hub", "-p", "aether-math"]),
             ]
             .concat(),
         );
@@ -3774,7 +3721,7 @@ mod tests {
         // narrowed run reports no duplication between a changed crate and the
         // one it was copied from; cargo-machete walks `crates/` from the
         // filesystem and has no package selection to narrow at all.
-        let scope = closure_scope(&["aether-chassis-bloomery"]);
+        let scope = closure_scope(&["aether-chassis-hub"]);
 
         for id in ["verify.fmt", "verify.dup", "verify.deps", "verify.suppress"] {
             let invocation = verify_command(id).expect("member mapped");
@@ -3841,7 +3788,7 @@ mod tests {
         let test = verify_command("verify.test").expect("verify.test mapped");
 
         assert_eq!(
-            test.prepare_under(&closure_scope(&["aether-chassis-bloomery"])),
+            test.prepare_under(&closure_scope(&["aether-chassis-hub"])),
             None,
             "a closure that opens no dist artifact must not pay for the cross-build",
         );
@@ -3866,7 +3813,7 @@ mod tests {
             "attestation skips a prepare that would have run",
         );
         assert_eq!(
-            test.should_prepare(&closure_scope(&["aether-chassis-bloomery"]), true),
+            test.should_prepare(&closure_scope(&["aether-chassis-hub"]), true),
             None,
             "attestation must not resurrect a prepare the closure declined",
         );
@@ -3874,7 +3821,7 @@ mod tests {
         // A declined build states itself where the reader is. Without the line,
         // a log with no cross-build in it is indistinguishable from a lane that
         // quietly stopped preparing.
-        let notice = member_scope_notice(&test, &closure_scope(&["aether-chassis-bloomery"]))
+        let notice = member_scope_notice(&test, &closure_scope(&["aether-chassis-hub"]))
             .expect("a scoped member qualifies its own log");
         assert!(notice.contains("cargo xtask dist` did not run"), "{notice}");
         assert!(
@@ -4163,7 +4110,7 @@ mod tests {
         // workspace would pass verify silently, which is strictly worse than the
         // truncated reporting it replaced.
         let stream = [
-            r#"{"reason":"compiler-artifact","target":{"name":"aether-bloomery"}}"#.to_owned(),
+            r#"{"reason":"compiler-artifact","target":{"name":"aether-substrate"}}"#.to_owned(),
             json_line("warning", "warning: unnecessary qualification"),
         ]
         .join("\n");
@@ -4182,7 +4129,7 @@ mod tests {
     fn a_warning_in_a_crate_the_closure_does_not_name_is_not_the_candidates() {
         // Tripwire for bloom f063ff066e83, where every one of twenty members
         // failed `verify.clippy` on one `unused import` line in
-        // `aether-bloomery` that no member had touched and that `verify.base`
+        // `aether-substrate` that no member had touched and that `verify.base`
         // had passed over minutes earlier. The member run narrows to the
         // candidate's closure (#4890), and cargo unifies features across the
         // packages an invocation selects — so a crate compiled underneath a
@@ -4192,7 +4139,7 @@ mod tests {
         // candidate can have broken, and blaming it sends every member into a
         // Refine over a line outside its surface.
         let scope = closure_scope(&["xtask"]);
-        let underneath = attributed_json_line("aether-bloomery", "warning", "warning: unused import: `BaseVerdict`");
+        let underneath = attributed_json_line("aether-substrate", "warning", "warning: unused import: `BaseVerdict`");
         let inside = attributed_json_line("xtask", "warning", "warning: unnecessary qualification");
 
         assert!(
@@ -4216,16 +4163,16 @@ mod tests {
         // through the difference (#4895's argument, one member in).
         let scope = closure_scope(&["xtask"]);
         let stream = [
-            attributed_json_line("aether-bloomery", "warning", "warning: unused import"),
-            attributed_json_line("aether-bloomery-git", "warning", "warning: never used"),
-            attributed_json_line("aether-bloomery", "note", "note: for context"),
+            attributed_json_line("aether-substrate", "warning", "warning: unused import"),
+            attributed_json_line("aether-codec", "warning", "warning: never used"),
+            attributed_json_line("aether-substrate", "note", "note: for context"),
         ]
         .join("\n");
 
         let notice = unjudged_notice(&stream, &scope).expect("two findings were left unjudged");
 
         assert!(notice.starts_with("note: 2 diagnostic(s) from 2 crate(s)"), "got: {notice}");
-        assert!(notice.contains("aether-bloomery (1), aether-bloomery-git (1)"), "got: {notice}");
+        assert!(notice.contains("aether-codec (1), aether-substrate (1)"), "got: {notice}");
         assert_eq!(unjudged_notice(&stream, &Scope::resolve(None)), None, "a workspace run leaves nothing unjudged");
         assert!(
             !render_diagnostics(&stream, &scope).contains("unused import"),
@@ -4253,7 +4200,7 @@ mod tests {
         // in this workspace. Reading the fragment as the name would attribute
         // every diagnostic to a version string, which no closure ever names, so
         // the member gate would go green over its own findings.
-        assert_eq!(package_name("path+file:///w/crates/aether-bloomery#0.3.0-alpha"), "aether-bloomery");
+        assert_eq!(package_name("path+file:///w/crates/aether-substrate#0.3.0-alpha"), "aether-substrate");
         assert_eq!(package_name("path+file:///w/xtask#aether-xtask@0.3.0-alpha"), "aether-xtask");
         assert_eq!(package_name("registry+https://github.com/rust-lang/crates.io-index#serde@1.0.0"), "serde");
     }
@@ -4431,14 +4378,14 @@ mod tests {
         let mut manifest = PipelineManifest::compiled();
         let omitted = "verify.lock";
         let runs =
-            manifest.verifiers.runs.get_mut(VERIFY_MEMBER_COMMAND).expect("compiled vocabulary declares a member run");
+            manifest.verifiers.runs.get_mut(VERIFY_MEMBER).expect("the compiled vocabulary declares a member run");
         assert!(runs.iter().any(|id| id == omitted), "the fixture itself must have named the identity");
         runs.retain(|id| id != omitted);
 
         let members = Position::Member.members_of(&manifest);
         assert!(!members.contains(&omitted), "an omitted identity is not a gate this position runs");
         assert!(members.contains(&"verify.fmt"), "the rest of the run is still spawned");
-        assert!(!spawnable_runs(&manifest, VERIFY_MEMBER_COMMAND).contains(&omitted));
+        assert!(!spawnable_runs(&manifest, VERIFY_MEMBER).contains(&omitted));
     }
 
     #[test]
@@ -4619,47 +4566,6 @@ error: test run failed
         assert!(findings.contains("asset_rides_a_named_custom_section_byte_exact"), "the test is named");
         assert!(findings.contains("crates/aether-actor/tests/asset_sections.rs:85:9"), "with its file and line");
         assert!(findings.contains("wasm not pre-built"), "and what it said");
-    }
-
-    #[test]
-    fn a_stale_golden_fixture_names_the_regen_command() {
-        let log = "\
-        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden
-
---- STDERR:              aether-bloomery::golden_decisions decisions_wire_bytes_match_pinned_golden ---
-thread 'decisions_wire_bytes_match_pinned_golden' panicked at crates/aether-bloomery/tests/golden_decisions/main.rs:46:5:
-assertion `left == right` failed
-
-     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
-error: test run failed
-";
-
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
-            .and_then(|channel| channel.text().map(str::to_owned))
-            .expect("findings");
-
-        assert!(findings.contains("run `cargo xtask fixtures regen decisions`"));
-    }
-
-    #[test]
-    fn a_schema_digest_failure_names_append_and_upcast_not_regen() {
-        let log = "\
-        FAIL [   0.008s] ( 156/3737) aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry
-
---- STDERR:              aether-bloomery::golden_decisions pinned_schema_digests_match_the_registry ---
-thread 'pinned_schema_digests_match_the_registry' panicked at crates/aether-bloomery/tests/golden_decisions/schema_digests.rs:20:5:
-kind `decisions` current digest drifted
-
-     Summary [  74.644s] 3737 tests run: 3736 passed, 1 failed, 20 skipped
-error: test run failed
-";
-
-        let findings = verify_findings(&[member("verify.test", MemberOutcome::Failed, log)])
-            .and_then(|channel| channel.text().map(str::to_owned))
-            .expect("findings");
-
-        assert!(findings.contains("append the new digest to `schema-digests.txt` and register an upcast"));
-        assert!(!findings.contains("fixtures regen"), "{findings}");
     }
 
     #[test]
@@ -5030,7 +4936,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // a repeat keeps the finding.
         let invocation = verify_command("verify.test").expect("verify.test mapped");
         let failing =
-            failing_proptest_run("aether-harness-bloomery::generated a_generated_scenario_never_silences_a_member");
+            failing_proptest_run("aether-harness-fleet::generated a_generated_scenario_never_silences_a_member");
         let mut runner = ScriptedRunner::with_replays(&[(&failing, 100)], &[(&failing, 100)]);
 
         let run =
@@ -5563,7 +5469,6 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
         // instead of falling to the unrecognized-id bail!.
         for umbrella in [VERIFY_MEMBER, VERIFY_CHECK, VERIFY_BASE] {
             assert!(verify_command(umbrella).is_none(), "{umbrella} is an umbrella, not a member invocation");
-            assert_ne!(umbrella, CONSTRUCT_IMPLEMENT);
         }
         assert_eq!(
             [Position::Member, Position::Fold, Position::Base].map(Position::command),
@@ -5575,9 +5480,6 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     #[test]
     fn an_unknown_id_is_unmapped() {
         assert!(verify_command("verify.bogus").is_none());
-        // construct.implement and review.critic are the model lanes' ids, not
-        // verify ids — neither must resolve a verify invocation.
-        assert!(verify_command(CONSTRUCT_IMPLEMENT).is_none());
-        assert!(verify_command(REVIEW_CRITIC).is_none());
+        assert!(verify_command("verify").is_none());
     }
 }

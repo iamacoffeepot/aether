@@ -7,11 +7,6 @@
 //! still agree (#4843, #4883). The tripwire therefore checks the structure:
 //! each mechanical job reaches its arm exactly once, no raw calibrated
 //! command remains, and the test job still threads its scheduling inputs.
-//! The transform workflow used to carry a transcribed jq bit table of
-//! [`aether_bloomery::VerifyFailure::ALL`]; the lane now writes the interned
-//! `failure_mask` and the wrapper reads it, so that table is no longer a
-//! fifth copy of the vocabulary.
-//!
 //! Enough YAML to reach the keys the tripwires compare — top-level `on` and
 //! `concurrency`, `jobs.<job>.{runs-on,if,outputs,strategy}`, and
 //! `jobs.<job>.steps[].{name,id,if,uses,run,env}` — and no more: plain scalars
@@ -25,14 +20,9 @@
 /// re-runs the tripwire.
 const CI_WORKFLOW: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/ci.yml"));
 
-/// The transform wrapper's mask derivation. Embedding it rebuilds this crate
-/// when the wrapper starts carrying a bit table again.
-const TRANSFORM_WORKFLOW: &str =
-    include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../.github/workflows/transform.yml"));
-
 /// One `steps:` entry of a workflow job, reduced to the keys the tripwires
 /// compare: argv parity against a [`super::VerifyInvocation`], and the
-/// scheduling `if` / `uses` the daily-backstop assertions read.
+/// scheduling `if` / `uses` the push-suite assertions read.
 pub(super) struct Step {
     /// The step's `name:`, absent on the bare `- run:` / `- uses:` form.
     name: Option<String>,
@@ -146,8 +136,8 @@ fn concurrency_group() -> String {
         .expect("`concurrency.group` must exist in .github/workflows/ci.yml")
 }
 
-/// `concurrency.cancel-in-progress`. False on `main` and the daily ref so the
-/// run that named a red landing is not cancelled by the next bloom.
+/// `concurrency.cancel-in-progress`. False on `main` so the run that named a
+/// red landing is not cancelled by the next one.
 fn cancel_in_progress() -> String {
     scalar(&block(&ci_lines(), "concurrency"), "cancel-in-progress")
         .expect("`concurrency.cancel-in-progress` must exist in .github/workflows/ci.yml")
@@ -341,51 +331,19 @@ mod tests {
     use std::path::Path;
 
     use super::{
-        TRANSFORM_WORKFLOW, cancel_in_progress, changes_code_output, concurrency_group, job_if, job_names, job_runs_on,
-        named_step, push_branches, step_with_id, steps, test_shard_matrix,
+        cancel_in_progress, changes_code_output, concurrency_group, job_if, job_names, job_runs_on, named_step,
+        push_branches, step_with_id, steps, test_shard_matrix,
     };
 
-    /// ADR-0186's daily-branch prefix, the glob `on.push.branches` uses and the
-    /// `startsWith(github.ref, …)` arm the concurrency and filter bypass share.
-    const DAILY_BRANCH: &str = "bloomery/daily/";
-    const DAILY_REF: &str = "refs/heads/bloomery/daily/";
-
-    fn names_daily_ref(expr: &str) -> bool {
-        expr.contains(&format!("startsWith(github.ref, '{DAILY_REF}')"))
-    }
-
     #[test]
-    fn the_wrapper_reads_the_lanes_interned_mask_instead_of_a_bit_table() {
-        // Tripwire: the jq table was a compiled copy of the vocabulary. The
-        // lane now interns against the checkout's pipeline.toml and writes
-        // `failure_mask`; a table here would be a fifth copy again. Token
-        // width stays the wrapper's `printf '%04x'`, which is what
-        // `the_wrapper_renders_a_mask_token_width_the_decoder_accepts` reads.
-        assert!(TRANSFORM_WORKFLOW.contains(".failure_mask"), "the wrapper must read the interned mask the lane wrote");
-        assert!(
-            !TRANSFORM_WORKFLOW.contains("def verifier_bit:"),
-            "a checked-in bit table is a second copy of the vocabulary"
-        );
-        assert!(TRANSFORM_WORKFLOW.contains("printf '%04x'"), "the artifact token stays four zero-padded hex digits");
-    }
-
-    #[test]
-    fn daily_landings_trigger_the_existing_push_suite() {
-        // Tripwire: a bloom lands on the day's ref without a pull request, and
-        // the PR lane ignores that ref. The backstop is this workflow's push
-        // trigger. Dropping the glob (or copying the suite into a second
-        // workflow that then drifts) is how a scoping miss stays green until
-        // sync-back.
+    fn main_landings_trigger_the_existing_push_suite() {
+        // Tripwire: a squash-merge onto main is the tree every later branch is
+        // cut from, and the pull-request lane judged the merge preview rather
+        // than the landed commit. Dropping the push trigger (or copying the
+        // suite into a second workflow that then drifts) is how a selection
+        // miss stays green after landing.
         let branches = push_branches();
-        let glob = format!("{DAILY_BRANCH}**");
-        assert!(
-            branches.iter().any(|branch| branch == &glob),
-            "on.push.branches must include `{glob}`, found {branches:?}"
-        );
-        assert!(
-            branches.iter().any(|branch| branch == "main"),
-            "the same push suite still notarizes main, found {branches:?}"
-        );
+        assert_eq!(branches, vec!["main".to_owned()], "on.push.branches is main alone, found {branches:?}");
 
         let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../.github/workflows");
         for entry in fs::read_dir(&dir).expect("the workflows directory is the declared surface") {
@@ -401,19 +359,18 @@ mod tests {
             });
             let shown = path.display();
             assert!(
-                !text.contains(DAILY_BRANCH.trim_end_matches('/')),
-                "{shown} must not grow a daily trigger; the backstop reuses ci.yml so it cannot drift from the suite that notarizes sync-back",
+                !text.contains("cargo xtask transform verify."),
+                "{shown} must not grow a second copy of a gate invocation; ci.yml owns the suite",
             );
         }
     }
 
     #[test]
-    fn a_daily_push_forces_the_full_suite_instead_of_the_affected_subset() {
-        // Tripwire: the backstop exists to catch a wave whose affected set was
-        // wrong. Routing a daily push through the path filter or the PR
-        // package selection would let that miss decide whether the suite runs.
+    fn a_push_forces_the_full_suite_instead_of_the_affected_subset() {
+        // Tripwire: the push suite exists to catch a pull request whose
+        // affected set was wrong. Routing it through the PR package selection
+        // would let that miss decide whether the suite runs.
         let code = changes_code_output();
-        assert!(names_daily_ref(&code), "jobs.changes.outputs.code must force true on a daily ref: {code}");
         assert!(
             code.contains("github.event_name == 'workflow_dispatch'"),
             "manual dispatch still bypasses the filter: {code}"
@@ -423,10 +380,6 @@ mod tests {
         assert!(
             filter.contains("github.event_name != 'workflow_dispatch'"),
             "the path filter still skips a manual dispatch: {filter}"
-        );
-        assert!(
-            filter.contains(&format!("!startsWith(github.ref, '{DAILY_REF}')")),
-            "the path filter must skip daily refs: {filter}"
         );
 
         assert_eq!(
@@ -439,41 +392,35 @@ mod tests {
             Some(
                 "github.event_name != 'pull_request' || steps.affected.outputs.run_all == 'true' || steps.affected.outputs.package_args != ''"
             ),
-            "a daily push is not a pull_request, so it must take the test gate",
+            "a push is not a pull_request, so it must take the test gate",
         );
     }
 
     #[test]
-    fn integration_pushes_key_concurrency_by_commit_and_do_not_cancel() {
-        // Tripwire: a branch-ref group lets bloom N+1 cancel bloom N's run and
-        // erases the first red landing — the commit an operator has to name.
-        // GitHub allows one running + one queued run per group, so integration
-        // pushes (main and daily) each get a sha-keyed group that does not
-        // cancel; pull requests keep ref-keyed supersession.
+    fn main_pushes_key_concurrency_by_commit_and_do_not_cancel() {
+        // Tripwire: a branch-ref group lets landing N+1 cancel landing N's run
+        // and erases the first red landing — the commit an operator has to
+        // name. GitHub allows one running + one queued run per group, so a push
+        // to main gets a sha-keyed group that does not cancel; pull requests
+        // keep ref-keyed supersession.
         let group = concurrency_group();
-        assert!(names_daily_ref(&group), "daily refs must be classified as integration pushes: {group}");
-        assert!(group.contains("github.ref == 'refs/heads/main'"), "main is the other integration push: {group}");
+        assert!(group.contains("github.ref == 'refs/heads/main'"), "main is the integration push: {group}");
         assert!(
             group.contains("&& github.sha || github.ref"),
             "the group must select sha for integration and ref otherwise: {group}"
         );
 
         let cancel = cancel_in_progress();
-        assert_ne!(cancel, "true", "unconditional cancel would drop bloom N's run when bloom N+1 lands");
+        assert_ne!(cancel, "true", "unconditional cancel would drop landing N's run when landing N+1 arrives");
         assert_ne!(cancel, "false", "unconditional keep-alive would also hold pull-request spot runners to completion");
         assert!(cancel.contains("github.ref != 'refs/heads/main'"), "main must not cancel in-progress: {cancel}");
-        assert!(
-            cancel.contains(&format!("!startsWith(github.ref, '{DAILY_REF}')")),
-            "daily must not cancel in-progress: {cancel}"
-        );
     }
 
     #[test]
-    fn daily_runs_use_the_standard_three_shard_hosted_path() {
-        // Tripwire: a daily push is a non-pull_request event, so it already
-        // takes main's hosted, sharded, disk-reclaiming path — unless someone
-        // special-cases it onto a paid label, a single shard, or the PR
-        // suppression scanner.
+    fn push_runs_use_the_standard_three_shard_hosted_path() {
+        // Tripwire: a push to main is a non-pull_request event, so it takes the
+        // hosted, sharded, disk-reclaiming path — unless someone special-cases
+        // it onto a paid label, a single shard, or the PR suppression scanner.
         let shard = test_shard_matrix();
         assert!(
             shard.contains("fromJSON('[1, 2, 3]')"),
@@ -503,20 +450,20 @@ mod tests {
         assert_eq!(
             named_step("test", "Free disk space (GitHub-hosted only)").if_condition.as_deref(),
             Some("github.event_name != 'pull_request'"),
-            "daily and main hosted runners still reclaim disk",
+            "main's hosted runners still reclaim disk",
         );
         assert_eq!(
             job_if("suppressions").as_deref(),
             Some("github.event_name == 'pull_request'"),
-            "daily pushes have no PR authorization context and must skip the suppression gate",
+            "a push has no PR authorization context and must skip the suppression gate",
         );
     }
 
     #[test]
-    fn the_daily_backstop_does_not_mutate_or_quarantine() {
-        // Tripwire: a red daily run is an operator signal, not a coordinator
-        // control channel. A step that quarantines, dispatches, or shells out
-        // to `gh` would let workflow credentials write the day without review.
+    fn the_push_suite_does_not_mutate_or_quarantine() {
+        // Tripwire: a red push run is an operator signal, not a control
+        // channel. A step that quarantines, dispatches, or shells out to `gh`
+        // would let workflow credentials write the branch without review.
         for job in job_names() {
             for step in steps(&job) {
                 let name = step.name.as_deref().unwrap_or("");

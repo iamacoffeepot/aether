@@ -39,7 +39,7 @@ pub mod capture;
 pub mod chassis;
 pub mod config;
 // ADR-0115 / ADR-0149: the domain-neutral content-addressed storage core
-// the hub's `ArtifactStore` and Bloomery's `artifacts` port both consume.
+// the hub's `ArtifactStore` consumes.
 // Beside `atomic_write` / `pid_lock`, the two primitives it builds on.
 pub mod content_store;
 pub mod mail;

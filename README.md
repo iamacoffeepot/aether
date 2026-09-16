@@ -27,8 +27,8 @@ linking into the runtime.
 The project is a Rust 2024 workspace and is still moving. Current code defines
 what ships; Accepted Architecture Decision Records under `docs/adr/` preserve
 the load-bearing design and its rejected alternatives. A few applications built
-on the engine live in this tree today, the bloomery coordinator and the puppet
-mascot among them; they consume the library rather than belong to it. The
+on the engine live in this tree today, the puppet mascot among them; they
+consume the library rather than belong to it. The
 engine is written with an AI coding agent as a deliberate bet, under recorded
 decisions and CI gates; [How this is built](#how-this-is-built) says exactly
 what that means.
@@ -65,7 +65,7 @@ stable tunnel → aether-mcp → hub + artifact stores
 - A **kind** is a named message schema; a **mailbox** is an actor address.
 - Native capabilities and wasm components use the same actor/mail model.
 - A **chassis** selects the drivers and native capability runtimes for a
-  process: desktop, headless, hub, substrate harness, or bloomery coordinator.
+  process: desktop, headless, hub, or substrate harness.
 - The **hub** supervises child engines and stores content-addressed chassis and
   component artifacts.
 - `aether-mcp` adapts agent-facing JSON tools to live engine RPC/mail. The tool's
@@ -156,8 +156,8 @@ the several thousand hits a grep finds are test assertions. Errors cross
 boundaries as typed enums. A trap inside the native runtime aborts the process
 on purpose (ADR-0063) rather than continuing on corrupted state.
 
-Working today: the desktop, headless, hub, substrate-harness, and bloomery
-chassis; the mail scheduler and settlement tracking; wasm component load, drop,
+Working today: the desktop, headless, hub, and substrate-harness chassis; the
+mail scheduler and settlement tracking; wasm component load, drop,
 and in-place replace with state carried across the swap; rendering (world
 triangles, textured quads, GPU shapes, text) with a depth-tested camera; audio
 with built-in and sampled instruments plus streamed tracks; window control and
@@ -252,7 +252,6 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
 | Guest actors | `aether-kit-commons`, `aether-kit-widget`, `aether-mesh`, `aether-puppet`, `aether-anthropic` | camera, console and mesh viewer; the widget tree; the geometry DSL library; the pen-plotter line-art mascot; the model-provider component |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
-| Consumers in this tree | `aether-bloomery` + `aether-bloomery-*`, `aether-chassis-bloomery`, `aether-harness-bloomery` | the bloomery coordinator built on the engine: work-order reducer and value vocabulary, git and GitHub adapters, coordinator chassis, operator board, scenario harness |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 
 Capability request/reply kinds normally live with their capability, in that

@@ -38,9 +38,6 @@ const REPORT_MARKER: &str = "Command being timed:";
 /// `ru_maxrss`, which the kernel reports in kibibytes.
 const MAXIMUM_RESIDENT: &str = "Maximum resident set size";
 
-/// The key lane evidence carries the reading under.
-const EVIDENCE_KEY: &str = "peak_resident_bytes";
-
 /// The reading a wrapper that has reported nothing yet holds.
 const UNMEASURED: u64 = 0;
 
@@ -109,12 +106,6 @@ impl PeakMemory {
         stderr
     }
 
-    /// Record what a wrapped run reported, for a caller whose stderr is not kept
-    /// — the model lanes, which read theirs only to explain a failed exit.
-    pub(super) fn observe(&self, stderr: &[u8]) {
-        self.record(split_report(stderr).1);
-    }
-
     /// The largest reading this run's commands reported, in bytes, or `None` on a
     /// host that could not measure one.
     pub(super) fn peak_resident_bytes(&self) -> Option<u64> {
@@ -126,19 +117,6 @@ impl PeakMemory {
         if let Some(peak) = peak {
             self.observed.fetch_max(peak, Ordering::Relaxed);
         }
-    }
-}
-
-/// Stamp what a model lane's run peaked at onto its evidence envelope.
-///
-/// Presence-driven like the sccache counters beside it: a host that cannot
-/// measure this stamps no key, so a reader sees "unmeasured" rather than a zero
-/// that claims a run which allocated nothing.
-pub(super) fn stamp(evidence: &mut serde_json::Value, peak_resident_bytes: Option<u64>) {
-    if let Some(bytes) = peak_resident_bytes
-        && let Some(object) = evidence.as_object_mut()
-    {
-        object.insert(EVIDENCE_KEY.to_owned(), serde_json::json!(bytes));
     }
 }
 
@@ -182,7 +160,7 @@ fn parse_maximum_resident_bytes(report: &str) -> Option<u64> {
 mod tests {
     use std::sync::atomic::AtomicU64;
 
-    use super::{PeakMemory, UNMEASURED, split_report, stamp};
+    use super::{PeakMemory, UNMEASURED, split_report};
 
     /// A wrapper in the stated availability state, without probing the host — the
     /// tests state both hosts, and a real probe would make which one they get
@@ -256,20 +234,11 @@ mod tests {
         // The lane runs eight members; the concurrency model needs the most any
         // one of them held at once, not whichever finished last.
         let peak = wrapper(true);
-        peak.observe(REPORT.as_bytes());
-        peak.observe(b"\tCommand being timed: \"cargo fmt\"\n\tMaximum resident set size (kbytes): 12000\n");
+        peak.take_report(REPORT.as_bytes().to_vec());
+        peak.take_report(
+            b"\tCommand being timed: \"cargo fmt\"\n\tMaximum resident set size (kbytes): 12000\n".to_vec(),
+        );
 
         assert_eq!(peak.peak_resident_bytes(), Some(5_242_880 * 1024), "the largest member's peak stands");
-    }
-
-    #[test]
-    fn an_unmeasured_run_stamps_no_evidence_key() {
-        let mut absent = serde_json::json!({ "command": "construct.implement" });
-        stamp(&mut absent, None);
-        assert!(absent.get("peak_resident_bytes").is_none(), "no reading means no key at all");
-
-        let mut present = serde_json::json!({ "command": "construct.implement" });
-        stamp(&mut present, Some(5_368_709_120));
-        assert_eq!(present["peak_resident_bytes"], 5_368_709_120_u64);
     }
 }

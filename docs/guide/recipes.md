@@ -72,17 +72,6 @@ current source.
   dispatch it with a uniform blob, and draw its output texture.
 - **Serving HTTP from a component** (recompile) — the `aether.http.server`
   capability, the request/response handler, and claiming a route.
-- **[Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)**
-  (drive-only) — boot the Bloomery coordinator, stage and seal a draft, and
-  inspect its live state through the localhost control surface.
-- **[Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)**
-  (drive-only) — install the checked-in user unit and its environment-file
-  template, then start, restart, and read the coordinator through systemd and
-  journald.
-- **[Authorizing an instruction bundle and enabling the bloom reader](recipes/enabling-the-bloom-reader.md)**
-  (drive-only) — import the model-process instruction bundle, record it as
-  configuration, authorize its address on the host, and decide the reader's
-  seat separately from the bundle that carries its text.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 

@@ -47,14 +47,6 @@ actor behind it at this layer, so there is no `NAMESPACE` to read.
 """
 
 [[allow]]
-crate = "aether-bloomery"
-namespace = "aether.bloomery.api"
-reason = """
-The domain crate names the chassis cap that hosts it; aether-chassis-bloomery
-depends on aether-bloomery, not the other way round.
-"""
-
-[[allow]]
 crate = "aether-data"
 namespace = "aether.source"
 reason = """

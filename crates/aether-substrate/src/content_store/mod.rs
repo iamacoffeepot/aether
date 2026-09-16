@@ -5,12 +5,10 @@
 //! vocabulary — the per-entry metadata is a caller-supplied type `M`, and
 //! the store root is a caller-supplied path.
 //!
-//! Two consumers share it: the hub's `ArtifactStore` (binary / component
-//! artifacts, LRU-budget eviction) and Bloomery's eviction-free
-//! `artifacts` canonical record (ADR-0149). Both live in higher crates
-//! (`aether-fleet`, `aether-chassis-bloomery`), so the core sits beside the
-//! two primitives it builds on (`atomic_write`, `pid_lock`) and closes no
-//! crate cycle.
+//! Its consumer is the hub's `ArtifactStore` (binary / component artifacts,
+//! LRU-budget eviction), which lives in a higher crate (`aether-fleet`), so the
+//! core sits beside the two primitives it builds on (`atomic_write`,
+//! `pid_lock`) and closes no crate cycle.
 //!
 //! ## Layout
 //!
@@ -31,9 +29,9 @@
 //!
 //! ## The index is a cache, the directory is the truth
 //!
-//! One root can carry several live handles — the bloomery chassis mounts
-//! its artifacts capability and its executor reactor opens a second
-//! handle on the same root, and a second *process* can do the same. Each
+//! One root can carry several live handles — two capabilities in one
+//! chassis can each open the same root, and a second *process* can do the
+//! same. Each
 //! handle builds its index once at open, so the index is a cache over the
 //! content-addressed directory rather than the store's only truth: a
 //! [`get`](ContentStore::get) miss and an [`upload`](ContentStore::upload)
@@ -238,8 +236,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// index: bytes a peer handle on the same root already stored are
     /// adopted first, so they dedup rather than being rewritten under
     /// this caller's `metadata`. That distinction is the difference
-    /// between keeping and losing the peer's sidecar — bloomery records
-    /// an artifact's derivation parents there.
+    /// between keeping and losing the peer's sidecar.
     ///
     /// `pin: true` records durable eviction protection in the entry's
     /// first persisted sidecar (new content) or upgrades an existing
@@ -466,7 +463,7 @@ impl<M: Serialize + DeserializeOwned + Clone> ContentStore<M> {
     /// `upload` decides what a shared `names.json` contains either way.
     /// This resolves the miss that made a peer's name unreachable; it
     /// does not turn the name map into shared state. Both consumers on a
-    /// shared root (bloomery's artifacts record) upload unnamed.
+    /// shared root upload unnamed.
     fn resolve_name(&mut self, name: &str) -> Option<String> {
         if let Some(hash) = self.names.get(name) {
             return Some(hash.clone());

@@ -13,11 +13,10 @@ operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
 reusable guest actors shipped with the engine        aether-kit-*, aether-puppet
-applications built on the engine                     aether-bloomery*
 ```
 
 The list is also the order to read it in. Everything above `aether-kit-*` is the
-engine; the two rows below it are consumers that happen to live in the same
+engine; the remaining row holds consumers that happen to live in the same
 workspace.
 
 ## Foundation crates
@@ -61,36 +60,18 @@ compares these with native capabilities.
 | `aether-fleet` | hub fleet supervision and the content-addressed artifact store |
 | `aether-anthropic` | the content-gen provider component (loaded on demand, not a chassis fixture), a self-contained guest carrying its own pure DTO/string helpers |
 | `aether-chassis` | shared chassis composition: boot fragments, config registry, CLI roots, autoload, boot-manifest and package-depot formats |
-| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` / `aether-chassis-bloomery` | the five checked-in chassis binaries; Bloomery is the dedicated application profile and can run standalone or through the hub launch path |
+| `aether-chassis-desktop` / `aether-chassis-headless` / `aether-chassis-hub` / `aether-chassis-harness` | the four checked-in chassis binaries |
 | `aether-substrate-harness-cap` | the `aether.substrate_harness` mailbox: the harness-chassis drive and the fail-fast stub every other chassis composes |
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
 | `aether-harness-perf` | the `aether-perf-trial` / `-compare` / `-plot` / `-registry` binaries |
-| `aether-harness-bloomery` | `BloomeryHarness`: the coordinator scenario harness and its named cells |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches; also carries the `aether-tunnel` binary |
 
 The substrate is mechanism. A capability is policy and I/O represented as an
 actor. A chassis chooses which capabilities and drivers form a process. The hub
 supervises engine processes; it is not the engine runtime folded into a tool
 server.
-
-## Bloomery application crates
-
-| Crate | Owns |
-|---|---|
-| `aether-bloomery` | canonical Bloomery values, immutable work/bloom identities, the pure reducer, and control/source contracts |
-| `aether-bloomery-git` | the git source adapter implementing the control core's `SourceBackend` port |
-| `aether-bloomery-github` | GitHub source and outward-projection adapter; GitHub objects shadow Bloomery identities rather than defining them |
-| `aether-bloomery-console` | the `bloomery-console` operator terminal client |
-| `aether-chassis-bloomery` | the dedicated Bloomery process, native control/store/artifacts/session/source/signing services, REST API, and reactors |
-
-Bloomery is a first-party application hosted on Aether, not part of the engine.
-Its dedicated binary can run standalone or be uploaded, selected, and forked
-through the hub's binary/fleet path, while `FleetServer` remains owned by the
-hub and generic hub/headless chassis do not become build servers. ADR-0149 is
-Accepted and carries several amendments; read the record's amendment chain
-before changing its projection or landing behavior.
 
 ## Product and geometry crates
 
@@ -146,7 +127,6 @@ uses the nightly fuzzing toolchain.
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
-| Change Bloomery control behavior or projection | `aether-bloomery`, `aether-bloomery-git`, or `aether-bloomery-github` | `aether-chassis-bloomery`, ADR-0149 and its amendments, durable journal/artifact boundaries |
 | Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, or `aether-harness-fleet` | the consuming scenario's chassis and artifact requirements |
 | Add a reusable guest actor | an `aether-kit-*` crate or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |

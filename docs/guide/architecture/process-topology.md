@@ -5,17 +5,12 @@ operator stack. A normal agent-driven session has several boundaries:
 
 ```text
 agent or human client
-├─ MCP → stable tunnel → aether-mcp coordinator
-│                              │ framed Aether RPC
-│                              ▼
-│      hub chassis ───── content-addressed binary/component stores
-│              ├── engine proxy ── child substrate: headless chassis
-│              ├── engine proxy ── child substrate: desktop chassis
-│              └── select/fork ─────────────────────────────┐
-└─ REST / typed RPC ────────────────────────────────────────┤
-                                                           ▼
-                                            Bloomery chassis
-                                            + application stores
+└─ MCP → stable tunnel → aether-mcp coordinator
+                               │ framed Aether RPC
+                               ▼
+       hub chassis ───── content-addressed binary/component stores
+               ├── engine proxy ── child substrate: headless chassis
+               └── engine proxy ── child substrate: desktop chassis
 ```
 
 The tunnel keeps the client-facing MCP connection stable. `aether-mcp`
@@ -25,20 +20,11 @@ it mints each process-local `engine_id` and assigns it to the child proxy. Each
 child substrate owns an independent registry, scheduler, actor set, and live
 runtime state.
 
-Bloomery is a first-party development control-plane application hosted on its
-own substrate and dedicated chassis, with REST and typed-RPC ingresses and
-application-specific durable stores. The binary can run standalone through
-those ingresses or be uploaded, selected, and forked through the hub like other
-chassis binaries. In the latter topology, the hub still owns `FleetServer` and
-the proxy; Bloomery does not become the fleet supervisor.
-
-## The five chassis profiles
+## The four chassis profiles
 
 The `aether-chassis-*` crates assemble the shared runtime into purpose-specific
-profiles. Four are the engine's own; the fifth is Bloomery's application
-profile, built by the same composition layer. The exact capability set is code
-and feature dependent, so treat this table as intent rather than a hardcoded
-manifest.
+profiles. The exact capability set is code and feature dependent, so treat this
+table as intent rather than a hardcoded manifest.
 
 | Profile | Entry binary | Primary job |
 |---|---|---|
@@ -46,12 +32,11 @@ manifest.
 | Headless | `aether-headless` | timer-driven engine without a desktop event loop |
 | Hub | `aether-hub` | supervise child engines, store artifacts, and route RPC |
 | Substrate harness | `aether-substrate-harness` | deterministic in-process operations and test evidence |
-| Bloomery | `bloomery` | host the bounded-development control plane, journal/artifact stores, source adapter, and operator API |
 
 Their builders live under
-`crates/aether-chassis-{desktop,headless,hub,harness,bloomery}`. Shared
-runtime mechanism remains in `aether-substrate`; each shared native actor
-remains in its own `aether-<capability>` crate.
+`crates/aether-chassis-{desktop,headless,hub,harness}`. Shared runtime mechanism
+remains in `aether-substrate`; each shared native actor remains in its own
+`aether-<capability>` crate.
 
 “Headless” is a process/profile statement, not permission to assume every
 capability is absent. Some capabilities have explicit headless implementations
@@ -90,20 +75,6 @@ Every engine has its own:
 
 Terminating a child destroys that live state. Uploaded artifacts live in the
 hub store and can outlive one engine; loaded component instances do not.
-
-## What Bloomery owns
-
-The Bloomery process owns development-control state rather than fleet state:
-the pure reducer's live snapshot, its SQLite journal and transactional outbox,
-canonical non-evicting artifact bytes, source and signing custody, executor
-session reuse, and the REST control API. Its GitHub adapter projects Bloomery
-state outward and can implement the source boundary; GitHub objects are not the
-canonical work identities or the state-transition authority.
-
-ADR-0149 is Accepted, and the implementation above is its realization; read the
-record's amendment chain before changing the projection or landing clauses.
-Keeping the services in the dedicated profile is what keeps the generic hub and
-headless chassis from becoming build servers.
 
 ## One tool call end to end
 
@@ -157,8 +128,6 @@ autoload or packaging behavior.
 
 - Shared chassis traits and frame loop: `crates/aether-substrate/src/chassis/`
 - Process composition: `crates/aether-chassis/src/` + the per-chassis crates
-- Bloomery values/reducer, GitHub adapter, and host: `crates/aether-bloomery/`,
-  `crates/aether-bloomery-github/`, and `crates/aether-chassis-bloomery/`
 - One-shot process execution capability: `crates/aether-process/` (Accepted
   ADR-0157)
 - Fleet, proxy, and stores: `crates/aether-fleet/src/`
@@ -169,5 +138,4 @@ autoload or packaging behavior.
 - ADR-0074: one actor model for native capabilities and wasm guests
 - ADR-0089: stable tunnel boundary
 - ADR-0115 and ADR-0116: binary and component registries
-- ADR-0149 (Accepted): Bloomery development control plane
 - ADR-0157 (Accepted): one-shot process execution capability

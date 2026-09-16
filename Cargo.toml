@@ -19,12 +19,6 @@ members = [
     "crates/aether-audio",
     "crates/aether-behavior",
     "crates/aether-behavior-derive",
-    "crates/aether-bloomery",
-    "crates/aether-bloomery-console",
-    "crates/aether-bloomery-git",
-    "crates/aether-bloomery-github",
-    "crates/aether-bloomery-rest",
-    "crates/aether-chassis-bloomery",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -36,7 +30,6 @@ members = [
     "crates/aether-kit-widget",
     "crates/aether-rpc",
     "crates/aether-fleet",
-    "crates/aether-harness-bloomery",
     "crates/aether-harness-fleet",
     "crates/aether-harness-perf",
     "crates/aether-clipboard",
@@ -72,13 +65,13 @@ members = [
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
 # the engine. Without this cargo defaults to every member, so a first clone
-# compiled the Bloomery coordinator, its terminal console, the wasm test
-# fixtures, and SQLite from C before it produced a single engine artifact —
-# none of which a contributor reading `docs/guide/` is there for.
+# compiled the build pipeline and the wasm test fixtures before it produced a
+# single engine artifact — none of which a contributor reading `docs/guide/` is
+# there for.
 #
 # The split is by role, not by dependency: the members left out are the build
-# pipeline (`xtask`), the Bloomery coordinator and its satellites, the
-# `aether-puppet` lane driver, and the `aether-test-fixtures-*` wasm crates
+# pipeline (`xtask`), the `aether-puppet` lane driver, and the
+# `aether-test-fixtures-*` wasm crates
 # `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
 # them, so leaving them out narrows the build rather than deferring it.
 #
@@ -174,12 +167,6 @@ base64 = "0.22"
 bytemuck = { version = "1.19", default-features = false }
 confique = { version = "0.4", default-features = false }
 cpal = "0.17"
-# ed25519 signature verification behind the `KeyProvider` port (ADR-0149
-# step 3, ADR-0150/ADR-0151): the real author-signature trust gate custodied
-# by the host `aether.signing` capability. `default-features = false` keeps
-# the verify-only surface lean (no `rand`); the pure `Ed25519KeyProvider`
-# lives in `aether-bloomery` (native-gated) and the host cap parses key bytes.
-ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
 hound = "3"
 inventory = "0.3"
 png = "0.18"
@@ -187,24 +174,13 @@ proc-macro2 = "1"
 quote = "1"
 serde = { version = "1", default-features = false }
 serde_json = "1"
-# Live operator TUI for the Bloomery coordinator (issue 5120). The
-# console is a standalone read-only board; these two are its only new
-# workspace deps.
-crossterm = "0.29"
-ratatui = "0.30"
-# ADR-0149 Bloomery journal store (issue 3458): SQLite in WAL mode is the
-# durable single-writer home for the journal / inbox / outbox / active-
-# membership tables. Host crate (`aether-chassis-bloomery`) only — the guest
-# sees typed transact mail, never SQL. `bundled` compiles SQLite from
-# source so no system libsqlite3 is required on CI runners.
-rusqlite = { version = "0.32", features = ["bundled"] }
 toml = "0.9"
 # Content-addressed hashing for the hub binary store (ADR-0115, issue
 # 1953): sha256 over a binary's raw bytes keys each entry. Native-only
 # consumer (the hub binary store under `native`); pinned here so any
 # future hashing surface shares the major. Default features off keeps the
-# no_std consumers (`aether-bloomery`'s wasm-safe content-addressing core,
-# ADR-0149) no_std; native consumers re-add `std` on their own declaration.
+# no_std consumers no_std; native consumers re-add `std` on their own
+# declaration.
 sha2 = { version = "0.10", default-features = false }
 syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }

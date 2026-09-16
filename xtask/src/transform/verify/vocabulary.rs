@@ -1,44 +1,146 @@
-//! The checkout's pipeline manifest: the vocabulary the verify lane fans out
-//! to, interns failure names against, and renders into the evidence mask.
+//! The verifier vocabulary: which identities exist, and what each verify
+//! position's fan-out actually runs.
 //!
-//! ADR-0215 collapses the independently compiled copies of that vocabulary.
-//! The lane reads [`PIPELINE_MANIFEST_PATH`] from the tree it is running in —
-//! the checkout is the working directory — and a checkout that does not carry
-//! the file keeps the compiled vocabulary until slice 9 (#5819) refuses it.
+//! Held here, beside the lane that runs it, rather than read out of a checked-in
+//! manifest. The manifest existed so a coordinator dispatching a lane from
+//! outside the tree could seal the vocabulary the tree declared; nothing
+//! dispatches this lane from outside any more, so the one reader of the
+//! vocabulary is also its one author.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use aether_bloomery::{PIPELINE_MANIFEST_PATH, PipelineManifest};
+use super::failure::VerifyFailure;
 
-/// The vocabulary this checkout declares, or the compiled one when the tree
-/// carries no manifest.
+/// The verifier vocabulary and what each verify position's fan-out runs.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct DeclaredVerifiers {
+    /// Every verifier identity, in canonical order — a position is an
+    /// identity's bit in a recorded failure set, so the order is append-only.
+    pub(super) identities: Vec<String>,
+    /// The fan-out each verify command runs, keyed by that command.
+    ///
+    /// A subset of [`identities`](Self::identities): an identity judged outside
+    /// the umbrella is declared without appearing in any position's list, which
+    /// is how "a legal identity no lane runs" is stated as data rather than
+    /// remembered.
+    pub(super) runs: BTreeMap<String, Vec<String>>,
+}
+
+/// The lane vocabulary this repository runs.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub(super) struct PipelineManifest {
+    /// The verifier vocabulary and per-position fan-out.
+    pub(super) verifiers: DeclaredVerifiers,
+}
+
+/// The fan-out the whole-tree positions run — documentation included.
+///
+/// `verify.containment` is a legal identity no lane runs and is therefore
+/// absent.
+const FOLD_RUNS: [VerifyFailure; 9] = [
+    VerifyFailure::Preflight,
+    VerifyFailure::Fmt,
+    VerifyFailure::Clippy,
+    VerifyFailure::Docs,
+    VerifyFailure::Test,
+    VerifyFailure::Dup,
+    VerifyFailure::Deps,
+    VerifyFailure::Suppress,
+    VerifyFailure::Lock,
+];
+
+/// The fan-out the per-member position runs — [`FOLD_RUNS`] less
+/// [`VerifyFailure::Docs`].
+///
+/// Documentation correctness is a whole-workspace property: an intra-doc link
+/// resolves across crates, so a narrowed closure can neither break it alone nor
+/// prove it alone, while running it there was the most expensive gate that
+/// position carried.
+const MEMBER_RUNS: [VerifyFailure; 8] = [
+    VerifyFailure::Preflight,
+    VerifyFailure::Fmt,
+    VerifyFailure::Clippy,
+    VerifyFailure::Test,
+    VerifyFailure::Dup,
+    VerifyFailure::Deps,
+    VerifyFailure::Suppress,
+    VerifyFailure::Lock,
+];
+
+impl PipelineManifest {
+    /// The vocabulary this binary compiles.
+    #[must_use]
+    pub(super) fn compiled() -> Self {
+        let runs = [
+            (super::VERIFY_MEMBER, MEMBER_RUNS.as_slice()),
+            (super::VERIFY_CHECK, FOLD_RUNS.as_slice()),
+            (super::VERIFY_BASE, FOLD_RUNS.as_slice()),
+        ]
+        .into_iter()
+        .map(|(command, gates)| {
+            (command.to_owned(), gates.iter().map(|gate| gate.as_str().to_owned()).collect::<Vec<String>>())
+        })
+        .collect();
+
+        Self {
+            verifiers: DeclaredVerifiers {
+                identities: VerifyFailure::ALL.iter().map(|gate| gate.as_str().to_owned()).collect(),
+                runs,
+            },
+        }
+    }
+
+    /// The identity `name` spells, or `None` when this vocabulary does not
+    /// declare it.
+    ///
+    /// A membership test against the declared list, not a bare parse: an
+    /// identity the vocabulary does not carry has no position, so nothing can
+    /// record a failure under it.
+    #[must_use]
+    pub(super) fn intern(&self, name: &str) -> Option<VerifyFailure> {
+        if !self.verifiers.identities.iter().any(|declared| declared == name) {
+            return None;
+        }
+        VerifyFailure::from_name(name)
+    }
+}
+
+/// The vocabulary every reader in this lane shares.
 ///
 /// Cached for the process: one umbrella pass asks more than once (preflight,
-/// fan-out, intern), and the file does not change under a lane.
+/// fan-out, intern).
 pub(super) fn checkout_vocabulary() -> &'static PipelineManifest {
     static VOCABULARY: OnceLock<PipelineManifest> = OnceLock::new();
-    VOCABULARY.get_or_init(load_vocabulary)
+    VOCABULARY.get_or_init(PipelineManifest::compiled)
 }
 
-fn load_vocabulary() -> PipelineManifest {
-    // A checkout with no pipeline.toml keeps the compiled vocabulary in the
-    // lane for now. Refusal of a manifestless base is slice 9 (#5819).
-    located_manifest_path().map_or_else(PipelineManifest::compiled, |path| {
-        let text = fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
-        PipelineManifest::from_toml(&text)
-            .unwrap_or_else(|err| panic!("{PIPELINE_MANIFEST_PATH} is not a usable pipeline manifest: {err}"))
-    })
-}
+#[cfg(test)]
+mod tests {
+    use super::super::failure::MAX_VERIFIER_IDENTITIES;
+    use super::{PipelineManifest, VerifyFailure, checkout_vocabulary};
 
-/// `pipeline.toml` at the checkout root, or beside this crate when tests run
-/// with `xtask/` as the working directory.
-fn located_manifest_path() -> Option<PathBuf> {
-    let cwd = PathBuf::from(PIPELINE_MANIFEST_PATH);
-    if cwd.is_file() {
-        return Some(cwd);
+    #[test]
+    fn every_declared_identity_interns_and_nothing_else_does() {
+        let manifest = checkout_vocabulary();
+
+        for failure in VerifyFailure::ALL {
+            assert_eq!(manifest.intern(failure.as_str()), Some(failure));
+        }
+        assert_eq!(manifest.intern("verify.nothing"), None);
+        assert!(manifest.verifiers.identities.len() <= MAX_VERIFIER_IDENTITIES);
     }
-    let bundled = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join(PIPELINE_MANIFEST_PATH);
-    bundled.is_file().then_some(bundled)
+
+    /// Tripwire: containment is declared but no position runs it. A fan-out
+    /// that silently picked it up would spawn a gate with no argv.
+    #[test]
+    fn a_declared_identity_no_position_runs_stays_out_of_every_fan_out() {
+        let manifest = PipelineManifest::compiled();
+
+        assert!(manifest.verifiers.identities.iter().any(|id| id == VerifyFailure::Containment.as_str()));
+        for gates in manifest.verifiers.runs.values() {
+            assert!(!gates.iter().any(|id| id == VerifyFailure::Containment.as_str()), "{gates:?}");
+            assert!(gates.iter().all(|id| manifest.intern(id).is_some()), "{gates:?}");
+        }
+    }
 }

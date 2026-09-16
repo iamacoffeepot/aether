@@ -26,9 +26,8 @@ use std::process::Command;
 /// `SHELL`), locale and timezone (`LANG`, `TZ`), the Rust backtrace toggle,
 /// the windowing handles (`DISPLAY`, `WAYLAND_DISPLAY`, `XAUTHORITY`), the
 /// system cert bundle (`SSL_CERT_FILE`, `SSL_CERT_DIR`), the proxy variables
-/// in both cases, and `GITHUB_TOKEN` (the one named non-`AETHER_` config key
-/// in the workspace — the bloomery mirror's derive-declared credential). No
-/// `AETHER_*` name appears here by construction.
+/// in both cases, and `GITHUB_TOKEN` (the one named non-`AETHER_` credential a
+/// child may need). No `AETHER_*` name appears here by construction.
 const ALLOWLISTED_NAMES: &[&str] = &[
     "PATH",
     "HOME",

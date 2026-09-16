@@ -164,25 +164,6 @@ impl Scope {
             .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
     }
 
-    /// The scope a stated set of changed paths computes, with the same
-    /// fail-open totality [`Self::resolve`] has.
-    ///
-    /// The seam the construct lane's own lint bar resolves its crate set
-    /// through (#6000). That lane owns an uncommitted tree, so it names its
-    /// diff from `git status` rather than from a committed range — but the
-    /// question it then asks of those paths has to be the one the gate asks of
-    /// the candidate's, or the bar reports a clean candidate the gate calls red
-    /// on the first compile. One entry point past the git read, so the two
-    /// cannot drift into two closures.
-    pub(in crate::transform) fn of_changed(changed: &[String]) -> Self {
-        if changed.is_empty() {
-            return Self::workspace("the diff names no changed path, so there is no candidate to narrow by");
-        }
-
-        Self::over_changed(changed)
-            .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
-    }
-
     /// Every workspace crate, for `reason`.
     fn workspace(reason: impl Into<String>) -> Self {
         Self::Workspace { reason: reason.into() }
@@ -699,11 +680,11 @@ mod tests {
         // and nothing else — if this ever widens back to the whole workspace,
         // the narrowing has stopped paying for itself and the receipt is the
         // only place that would say so.
-        let scope = Scope::over_changed(&strings(&["crates/aether-chassis-bloomery/src/lib.rs"]))
+        let scope = Scope::over_changed(&strings(&[DIST_FREE_LEAF_SOURCE]))
             .expect("compute the closure over a near-leaf change");
 
         let packages = scope.packages().expect("a near-leaf change narrows");
-        assert!(packages.contains(&"aether-chassis-bloomery".to_owned()), "the changed crate is in its own closure");
+        assert!(packages.contains(&DIST_FREE_LEAF.to_owned()), "the changed crate is in its own closure");
         let Scope::Closure { skipped, .. } = &scope else {
             unreachable!("packages() already proved the closure arm")
         };
@@ -728,10 +709,13 @@ mod tests {
     /// the same shape honestly — it dev-deps `aether-harness-fleet`, which
     /// forks the dist-resolved chassis binary through `dist/manifest.json`.
     const DIST_CONSUMING_LEAF: &str = "aether-chassis-hub";
+    const DIST_CONSUMING_LEAF_SOURCE: &str = "crates/aether-chassis-hub/src/lib.rs";
 
-    /// A crate whose closure reads nothing the pre-build produces — the shape
-    /// every member of a coordinator-side wave has.
-    const DIST_FREE_LEAF: &str = "aether-chassis-bloomery";
+    /// A crate whose closure reads nothing the pre-build produces. `aether-mcp`
+    /// is a leaf — nothing in the workspace depends on it — and neither it nor
+    /// anything in its closure names a wasm source or a dist-resolving harness.
+    const DIST_FREE_LEAF: &str = "aether-mcp";
+    const DIST_FREE_LEAF_SOURCE: &str = "crates/aether-mcp/src/rpc.rs";
 
     #[test]
     fn the_dist_prebuild_follows_the_closure_rather_than_the_whole_tree() {
@@ -744,9 +728,9 @@ mod tests {
         // back; a closure that starts declining one it needs leaves a
         // dist-resolving test with no artifact, and `AETHER_REQUIRE_RUNTIME=1`
         // turns that into a red member on a candidate that did nothing wrong.
-        let free = Scope::over_changed(&strings(&[&format!("crates/{DIST_FREE_LEAF}/src/lib.rs")]))
-            .expect("compute the closure over a coordinator-side change");
-        let consuming = Scope::over_changed(&strings(&[&format!("crates/{DIST_CONSUMING_LEAF}/src/lib.rs")]))
+        let free = Scope::over_changed(&strings(&[DIST_FREE_LEAF_SOURCE]))
+            .expect("compute the closure over a dist-free change");
+        let consuming = Scope::over_changed(&strings(&[DIST_CONSUMING_LEAF_SOURCE]))
             .expect("compute the closure over a dist-resolving change");
 
         assert!(free.packages().is_some(), "{DIST_FREE_LEAF} must narrow, or the question is never asked");
@@ -887,34 +871,34 @@ mod tests {
     fn a_lockfile_bump_to_a_single_crate_dependency_scopes_to_that_crates_closure() {
         // Tripwire for the payoff issue #5951 exists for: a lockfile-only bump
         // must verify the moved package's reverse-dependency closure, not the
-        // whole workspace. `crossterm` is depended on by exactly one workspace
+        // whole workspace. `notify` is depended on by exactly one workspace
         // crate, so its bump is the crisp case — a return to the blunt rule
-        // shows up as this test widening. If the tree moves and `crossterm`
-        // gains dependents or wasm reach, pick another single-user external
-        // rather than weakening this.
-        let base = "version = 4\n\n[[package]]\nname = \"crossterm\"\nversion = \"0.29.0\"\n\
-                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0.29.0\"\n";
-        let candidate = base.replace("0.29.0", "0.29.1");
+        // shows up as this test widening. If the tree moves and `notify` gains
+        // dependents or wasm reach, pick another single-user external rather
+        // than weakening this.
+        let base = "version = 4\n\n[[package]]\nname = \"notify\"\nversion = \"8.2.0\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"8.2.0\"\n";
+        let candidate = base.replace("8.2.0", "8.2.1");
 
         let scope = Scope::over_changed_with_locks(&strings(&["Cargo.lock"]), base, &candidate)
             .expect("attribute a single-package bump");
 
         let workspace = Workspace::load().expect("load the workspace graph");
         let expected: Vec<String> = workspace
-            .reverse_closure_of_external(&string_set(&["crossterm"]))
-            .expect("attribute crossterm")
+            .reverse_closure_of_external(&string_set(&["notify"]))
+            .expect("attribute notify")
             .into_iter()
             .collect();
         assert!(
             !expected.is_empty() && expected.len() < workspace.members().len(),
-            "crossterm must reach a proper non-empty closure, or this fixture no longer exercises narrowing",
+            "notify must reach a proper non-empty closure, or this fixture no longer exercises narrowing",
         );
 
         let packages = scope.packages().expect("an attributable bump narrows").to_vec();
         assert_eq!(packages, expected, "a bump scopes to its dependents' closure");
         let first_reached = expected.first().expect("the closure is non-empty by the assertion above");
         assert!(
-            scope.receipt().contains("crossterm") && scope.receipt().contains(first_reached),
+            scope.receipt().contains("notify") && scope.receipt().contains(first_reached),
             "the receipt states which package moved and which crate that reached: {}",
             scope.receipt(),
         );
@@ -1022,7 +1006,7 @@ mod tests {
         // The two scopes that do name work keep it: a narrowed run compiles its
         // closure and a workspace run compiles the tree, and neither may answer
         // with a verdict nothing ran for.
-        let closure = Scope::over_changed(&strings(&["crates/aether-chassis-bloomery/src/lib.rs"]))
+        let closure = Scope::over_changed(&strings(&[DIST_FREE_LEAF_SOURCE]))
             .expect("compute the closure over a near-leaf change");
         assert!(closure.empty_closure_verdict().is_none(), "a crate source change must still be compiled and tested");
         assert!(Scope::resolve(None).empty_closure_verdict().is_none(), "a workspace run must still run");
@@ -1053,13 +1037,12 @@ mod tests {
         // visible if the run states which crates it declined to look at. A
         // receipt naming the selection alone reads as a clean pass whether or
         // not the selection lost something.
-        let scope =
-            Scope::over_changed(&strings(&["crates/aether-chassis-bloomery/src/lib.rs"])).expect("compute the closure");
+        let scope = Scope::over_changed(&strings(&[DIST_FREE_LEAF_SOURCE])).expect("compute the closure");
         let receipt = scope.receipt();
 
         assert!(receipt.contains("crates in ("), "{receipt}");
         assert!(receipt.contains("crates skipped ("), "{receipt}");
-        assert!(receipt.contains("aether-chassis-bloomery"), "the changed crate is named: {receipt}");
+        assert!(receipt.contains(DIST_FREE_LEAF), "the changed crate is named: {receipt}");
         assert!(scope.member_notice().expect("a scoped run qualifies its members' logs").contains("workspace crates"));
     }
 }
