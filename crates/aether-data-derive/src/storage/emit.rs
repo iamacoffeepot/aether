@@ -406,6 +406,7 @@ fn enum_cites_arm(vident: &syn::Ident, fields: &Fields) -> TokenStream2 {
 }
 
 fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
+    let mut schema_statics = Vec::new();
     let mut disc_consts = Vec::new();
     let mut contribute_arms = Vec::new();
     let mut assemble_arms = Vec::new();
@@ -413,9 +414,13 @@ fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
         let vident = &variant.ident;
         let vname = vident.to_string();
         let disc_ident = format_ident!("__AETHER_STORAGE_VAR_{}", vname.to_uppercase());
+        let schema_ident = format_ident!("__AETHER_STORAGE_VAR_SCHEMA_{}", vname.to_uppercase());
         let body_schema = variant_body_schema(&variant.fields);
+        schema_statics.push(quote! {
+            static #schema_ident: ::aether_data::__derive_runtime::SchemaType = #body_schema;
+        });
         disc_consts.push(quote! {
-            const #disc_ident: u64 = ::aether_data::__derive_runtime::variant_hash(#vname, &#body_schema);
+            const #disc_ident: u64 = ::aether_data::__derive_runtime::variant_hash(#vname, &#schema_ident);
         });
         contribute_arms.push(enum_contribute_arm(vident, &vname, &disc_ident, &variant.fields));
         assemble_arms.push(enum_assemble_arm(vident, &vname, &disc_ident, &variant.fields));
@@ -428,6 +433,7 @@ fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
                 depth: u32,
                 sink: &mut ::aether_data::__derive_runtime::RecordWriter,
             ) -> ::core::result::Result<(), ::aether_data::__derive_runtime::StorageError> {
+                #(#schema_statics)*
                 #(#disc_consts)*
                 let __var_carry = ::aether_data::__derive_runtime::fold_path_segment(
                     carry,
@@ -444,6 +450,7 @@ fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
                 depth: u32,
                 source: &mut ::aether_data::__derive_runtime::RecordReader,
             ) -> ::core::result::Result<Self, ::aether_data::__derive_runtime::StorageError> {
+                #(#schema_statics)*
                 #(#disc_consts)*
                 let __var_carry = ::aether_data::__derive_runtime::fold_path_segment(
                     carry,

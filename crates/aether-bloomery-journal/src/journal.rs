@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::path::Path;
 
 use aether_data::wire::WireDecode;
-use aether_data::{Kind, KindId, Storage, StorageError};
+use aether_data::{KindId, Storage, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
 use crate::artifact::{ARTIFACTS_DDL, Digest, split_artifact};
@@ -95,6 +95,7 @@ impl Journal {
     /// the cited kind.
     /// [`AppendError::Journal`] on a backend or constraint failure.
     pub fn append(&mut self, expect_head: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
+        let recorded_at_millis = self.clock.now_millis();
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head = head_of(&tx)?;
         if head != expect_head {
@@ -106,26 +107,11 @@ impl Journal {
             return Ok(next..next);
         }
 
-        self.insert_staged(&tx, batch)?;
+        insert_staged(&tx, batch, recorded_at_millis)?;
         verify_citations(&tx, batch)?;
-        let range = insert_events(&tx, head, &batch.events, self.clock.now_millis())?;
+        let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
         Ok(range)
-    }
-
-    fn insert_staged(&self, tx: &Transaction<'_>, batch: &Batch) -> Result<(), JournalError> {
-        if batch.staged.is_empty() {
-            return Ok(());
-        }
-        let recorded_at_millis = sqlite_i64(self.clock.now_millis())?;
-        let mut stmt = tx.prepare(
-            "INSERT OR IGNORE INTO artifacts (digest, size_bytes, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4)",
-        )?;
-        for staged in &batch.staged {
-            let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
-            stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at_millis, staged.bytes])?;
-        }
-        Ok(())
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.
@@ -231,6 +217,21 @@ impl Journal {
         }
         Ok(digests.iter().map(|digest| found.get(digest).cloned()).collect())
     }
+}
+
+fn insert_staged(tx: &Transaction<'_>, batch: &Batch, recorded_at_millis: u64) -> Result<(), JournalError> {
+    if batch.staged.is_empty() {
+        return Ok(());
+    }
+    let recorded_at = sqlite_i64(recorded_at_millis)?;
+    let mut stmt = tx.prepare(
+        "INSERT OR IGNORE INTO artifacts (digest, size_bytes, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4)",
+    )?;
+    for staged in &batch.staged {
+        let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
+        stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at, staged.bytes])?;
+    }
+    Ok(())
 }
 
 fn insert_events(
