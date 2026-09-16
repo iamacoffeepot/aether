@@ -1,4 +1,4 @@
-//! Cursor-bearing fold: last move per `(target KindId, Symbol)`.
+//! Cursor-bearing fold: last move per `(target KindId, name)`.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -6,7 +6,7 @@ use std::fmt;
 
 use aether_bloomery_journal::{DecodeError, Entry, Journal, Seq};
 use aether_bloomery_kinds::{
-    Digest, Program, ProgramHeadMoved, RecordedHeadMove, RecordedSymbol, Ref, Symbol, SymbolError,
+    Digest, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
 };
 use aether_data::Kind;
 
@@ -19,7 +19,7 @@ use aether_data::Kind;
 #[derive(Debug, Clone)]
 pub struct Heads {
     cursor: Seq,
-    bindings: BTreeMap<RecordedSymbol, Digest>,
+    bindings: BTreeMap<RecordedHead, Digest>,
 }
 
 impl Heads {
@@ -46,8 +46,8 @@ impl Heads {
     /// [`HeadFoldError::Gap`], [`HeadFoldError::Duplicate`], or
     /// [`HeadFoldError::Backwards`] when `entry.seq` is not the next sequence.
     /// [`HeadFoldError::Decode`] when a recognized move does not decode.
-    /// [`HeadFoldError::Symbol`] when a historical program name is not a valid
-    /// [`Symbol`]. [`HeadFoldError::Overflow`] when the next sequence does not
+    /// [`HeadFoldError::Name`] when a historical program name is not a valid
+    /// [`Head`] name. [`HeadFoldError::Overflow`] when the next sequence does not
     /// fit in [`Seq`]. On error, cursor and bindings are unchanged.
     pub fn apply(&mut self, entry: &Entry) -> Result<(), HeadFoldError> {
         let expected = next_seq(self.cursor)?;
@@ -56,17 +56,17 @@ impl Heads {
         }
 
         let binding = binding_from(entry)?;
-        if let Some((symbol, digest)) = binding {
-            self.bindings.insert(symbol, digest);
+        if let Some((head, digest)) = binding {
+            self.bindings.insert(head, digest);
         }
         self.cursor = entry.seq;
         Ok(())
     }
 
-    /// Current binding of `symbol`, if this prefix has seen a move for it.
+    /// Current binding of `head`, if this prefix has seen a move for it.
     #[must_use]
-    pub fn get<K: Kind>(&self, symbol: &Symbol<K>) -> Option<Ref<K>> {
-        self.bindings.get(&RecordedSymbol::from(symbol)).copied().map(Ref::from_digest)
+    pub fn get<K: Kind>(&self, head: &Head<K>) -> Option<Ref<K>> {
+        self.bindings.get(&RecordedHead::from(head)).copied().map(Ref::from_digest)
     }
 }
 
@@ -104,8 +104,8 @@ pub enum HeadFoldError {
     Overflow,
     /// A recognized move's payload did not decode.
     Decode(DecodeError),
-    /// A historical [`ProgramHeadMoved`] name is not a valid [`Symbol`].
-    Symbol(SymbolError),
+    /// A historical [`ProgramHeadMoved`] name is not a valid [`Head`] name.
+    Name(HeadNameError),
 }
 
 impl fmt::Display for HeadFoldError {
@@ -122,7 +122,7 @@ impl fmt::Display for HeadFoldError {
             }
             Self::Overflow => write!(f, "journal fold sequence overflow"),
             Self::Decode(error) => write!(f, "{error}"),
-            Self::Symbol(error) => write!(f, "historical program head name is not a symbol: {error}"),
+            Self::Name(error) => write!(f, "historical program head name is not a valid head name: {error}"),
         }
     }
 }
@@ -131,7 +131,7 @@ impl Error for HeadFoldError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Decode(error) => Some(error),
-            Self::Symbol(error) => Some(error),
+            Self::Name(error) => Some(error),
             Self::Gap { .. } | Self::Duplicate { .. } | Self::Backwards { .. } | Self::Overflow => None,
         }
     }
@@ -143,9 +143,9 @@ impl From<DecodeError> for HeadFoldError {
     }
 }
 
-impl From<SymbolError> for HeadFoldError {
-    fn from(error: SymbolError) -> Self {
-        Self::Symbol(error)
+impl From<HeadNameError> for HeadFoldError {
+    fn from(error: HeadNameError) -> Self {
+        Self::Name(error)
     }
 }
 
@@ -163,13 +163,13 @@ fn seq_error(cursor: Seq, expected: Seq, actual: Seq) -> HeadFoldError {
     }
 }
 
-fn binding_from(entry: &Entry) -> Result<Option<(RecordedSymbol, Digest)>, HeadFoldError> {
+fn binding_from(entry: &Entry) -> Result<Option<(RecordedHead, Digest)>, HeadFoldError> {
     if entry.kind == RecordedHeadMove::NAME {
         let event = Journal::decode::<RecordedHeadMove>(entry)?;
-        Ok(Some((event.symbol().clone(), event.to())))
+        Ok(Some((event.head().clone(), event.to())))
     } else if entry.kind == ProgramHeadMoved::NAME {
         let event = Journal::decode::<ProgramHeadMoved>(entry)?;
-        Ok(Some((RecordedSymbol::new(Program::ID, event.name.as_str())?, event.program.digest())))
+        Ok(Some((RecordedHead::new(Program::ID, event.name.as_str())?, event.program.digest())))
     } else {
         Ok(None)
     }

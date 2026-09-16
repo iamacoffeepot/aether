@@ -90,7 +90,7 @@ impl Journal {
     /// inserted, every citation is verified against the expected prefix,
     /// each draft named `bloomery.head_moved` is decoded as
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
-    /// verified against the recorded symbol kind, then events are inserted.
+    /// verified against the recorded head kind, then events are inserted.
     /// Any refusal rolls the whole transaction back. An empty
     /// batch is `Ok` of an empty range and writes nothing. The returned
     /// range is `head+1 .. head+n+1` (end exclusive).
@@ -292,7 +292,7 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
         let event = RecordedHeadMove::decode_storage(&draft.bytes)
             .map(|data| data.value)
             .map_err(AppendError::InvalidHeadMoved)?;
-        verify_prefix(&mut stmt, &mut seen, *event.to().as_bytes(), event.symbol().kind())?;
+        verify_prefix(&mut stmt, &mut seen, *event.to().as_bytes(), event.head().kind())?;
     }
     Ok(())
 }
