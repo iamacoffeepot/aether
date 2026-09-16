@@ -1,14 +1,17 @@
 //! SQLite-backed journal: constructors, fence, append, read, decode.
 
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 
-use aether_data::{Storage, StorageError};
-use rusqlite::{Connection, TransactionBehavior, params};
+use aether_data::wire::WireDecode;
+use aether_data::{Kind, KindId, Storage, StorageError};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
-use crate::artifact::ARTIFACTS_DDL;
+use crate::artifact::{ARTIFACTS_DDL, Digest, split_artifact};
+use crate::batch::Batch;
 use crate::clock::{Clock, SystemClock};
 use crate::draft::Draft;
 use crate::entry::{Entry, Seq};
@@ -77,15 +80,21 @@ impl Journal {
     /// Append `batch` if `expect_head` is still the head.
     ///
     /// One `BEGIN IMMEDIATE` transaction: a stale fence returns
-    /// [`AppendError::HeadMoved`] and writes nothing; any other failure leaves
-    /// the head unchanged. An empty batch is `Ok` of an empty range and writes
-    /// nothing. The returned range is `head+1 .. head+n+1` (end exclusive).
+    /// [`AppendError::HeadMoved`] and writes nothing. Staged blobs are
+    /// inserted, every citation is verified against the expected prefix,
+    /// then events are inserted. Any refusal rolls the whole transaction
+    /// back. An empty batch is `Ok` of an empty range and writes nothing.
+    /// The returned range is `head+1 .. head+n+1` (end exclusive).
     ///
     /// # Errors
     ///
     /// [`AppendError::HeadMoved`] when the fence does not match.
+    /// [`AppendError::DanglingRef`] when a citation names a digest that is
+    /// neither staged nor stored.
+    /// [`AppendError::PrefixMismatch`] when the cited blob's prefix is not
+    /// the cited kind.
     /// [`AppendError::Journal`] on a backend or constraint failure.
-    pub fn append(&mut self, expect_head: Seq, batch: &[Draft]) -> Result<Range<Seq>, AppendError> {
+    pub fn append(&mut self, expect_head: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let head = head_of(&tx)?;
         if head != expect_head {
@@ -97,22 +106,26 @@ impl Journal {
             return Ok(next..next);
         }
 
-        let first = head.0.saturating_add(1);
-        {
-            let mut stmt = tx.prepare(
-                "INSERT INTO entries (seq, kind, cause, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4, ?5)",
-            )?;
-            for (offset, draft) in batch.iter().enumerate() {
-                let seq = first.saturating_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?);
-                let seq_i64 = sqlite_i64(seq)?;
-                let cause = draft.cause.map(|c| sqlite_i64(c.0)).transpose()?;
-                let recorded_at_millis = sqlite_i64(self.clock.now_millis())?;
-                stmt.execute(params![seq_i64, draft.kind, cause, recorded_at_millis, draft.bytes])?;
-            }
-        }
+        self.insert_staged(&tx, batch)?;
+        verify_citations(&tx, batch)?;
+        let range = insert_events(&tx, head, &batch.events, self.clock.now_millis())?;
         tx.commit()?;
-        let last_exclusive = first.saturating_add(u64::try_from(batch.len()).map_err(|_| JournalError::IntegerRange)?);
-        Ok(Seq(first)..Seq(last_exclusive))
+        Ok(range)
+    }
+
+    fn insert_staged(&self, tx: &Transaction<'_>, batch: &Batch) -> Result<(), JournalError> {
+        if batch.staged.is_empty() {
+            return Ok(());
+        }
+        let recorded_at_millis = sqlite_i64(self.clock.now_millis())?;
+        let mut stmt = tx.prepare(
+            "INSERT OR IGNORE INTO artifacts (digest, size_bytes, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4)",
+        )?;
+        for staged in &batch.staged {
+            let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
+            stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at_millis, staged.bytes])?;
+        }
+        Ok(())
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.
@@ -164,6 +177,115 @@ impl Journal {
         }
         K::decode_storage(&entry.bytes).map(|data| data.value).map_err(DecodeError::Storage)
     }
+
+    /// Load and decode a stored encoded artifact as `K`.
+    ///
+    /// `Ok(None)` when the digest was never stored. A stored blob whose prefix
+    /// is not `K::ID` is [`GetError::PrefixMismatch`].
+    ///
+    /// # Errors
+    ///
+    /// [`GetError::Journal`] on a backend or corrupt-blob failure.
+    /// [`GetError::PrefixMismatch`] when the prefix is not `K::ID`.
+    /// [`GetError::Decode`] when the payload does not decode as `K`.
+    pub fn get<K: Storage>(&self, digest: &Digest) -> Result<Option<K>, GetError> {
+        match self.get_bytes(digest)? {
+            None => Ok(None),
+            Some((kind, payload)) if kind == K::ID => K::decode_storage(&payload)
+                .map(|data| Some(data.value))
+                .map_err(|error| GetError::Decode(DecodeError::Storage(error))),
+            Some((actual, _)) => Err(GetError::PrefixMismatch { expected: K::ID, actual }),
+        }
+    }
+
+    /// Load one artifact as `(kind, payload)`. `Ok(None)` when absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] on a backend or corrupt-blob failure.
+    pub fn get_bytes(&self, digest: &Digest) -> Result<Option<(KindId, Vec<u8>)>, JournalError> {
+        Ok(self.get_bytes_many(std::slice::from_ref(digest))?.into_iter().next().ok_or(JournalError::IntegerRange)?)
+    }
+
+    /// Load many artifacts in one query. Results are in input order; absent
+    /// digests are `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`JournalError`] on a backend or corrupt-blob failure, never a short result.
+    pub fn get_bytes_many(&self, digests: &[Digest]) -> Result<Vec<Option<(KindId, Vec<u8>)>>, JournalError> {
+        if digests.is_empty() {
+            return Ok(Vec::new());
+        }
+        let placeholders = vec!["?"; digests.len()].join(", ");
+        let sql = format!("SELECT digest, bytes FROM artifacts WHERE digest IN ({placeholders})");
+        let mut stmt = self.conn.prepare(&sql)?;
+        let mut rows = stmt.query(params_from_iter(digests.iter().map(|digest| digest.as_bytes().as_slice())))?;
+        let mut found = HashMap::with_capacity(digests.len());
+        while let Some(row) = rows.next()? {
+            let raw: Vec<u8> = row.get(0)?;
+            let bytes: Vec<u8> = row.get(1)?;
+            let key = Digest::from_bytes(raw.try_into().map_err(|_| JournalError::CorruptArtifactDigest)?);
+            let (kind, payload) = split_artifact(&bytes)?;
+            found.insert(key, (kind, payload.to_vec()));
+        }
+        Ok(digests.iter().map(|digest| found.get(digest).cloned()).collect())
+    }
+}
+
+fn insert_events(
+    tx: &Transaction<'_>,
+    head: Seq,
+    events: &[Draft],
+    recorded_at_millis: u64,
+) -> Result<Range<Seq>, JournalError> {
+    let first = head.0.saturating_add(1);
+    if events.is_empty() {
+        return Ok(Seq(first)..Seq(first));
+    }
+    let recorded_at = sqlite_i64(recorded_at_millis)?;
+    {
+        let mut stmt = tx
+            .prepare("INSERT INTO entries (seq, kind, cause, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+        for (offset, draft) in events.iter().enumerate() {
+            let seq = first.saturating_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?);
+            let seq_i64 = sqlite_i64(seq)?;
+            let cause = draft.cause.map(|c| sqlite_i64(c.0)).transpose()?;
+            stmt.execute(params![seq_i64, draft.kind, cause, recorded_at, draft.bytes])?;
+        }
+    }
+    let last_exclusive = first.saturating_add(u64::try_from(events.len()).map_err(|_| JournalError::IntegerRange)?);
+    Ok(Seq(first)..Seq(last_exclusive))
+}
+
+fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendError> {
+    let mut seen = HashSet::new();
+    let mut stmt = tx.prepare("SELECT substr(bytes, 1, 8) FROM artifacts WHERE digest = ?1")?;
+    for citation in batch
+        .staged
+        .iter()
+        .flat_map(|staged| staged.citations.iter())
+        .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
+    {
+        if !seen.insert((citation.bytes, citation.kind)) {
+            continue;
+        }
+        let prefix: Option<Vec<u8>> =
+            stmt.query_row(params![citation.bytes.as_slice()], |row| row.get(0)).optional()?;
+        let digest = Digest::from_bytes(citation.bytes);
+        match prefix {
+            None => return Err(AppendError::DanglingRef { digest, expected: citation.kind }),
+            Some(bytes) if bytes.len() != 8 => return Err(JournalError::CorruptArtifact.into()),
+            Some(bytes) => {
+                let mut cursor = bytes.as_slice();
+                let actual = KindId::decode(&mut cursor).map_err(|_| JournalError::CorruptArtifact)?;
+                if actual != citation.kind {
+                    return Err(AppendError::PrefixMismatch { digest, expected: citation.kind, actual });
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
@@ -180,7 +302,7 @@ fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
     }
 }
 
-pub fn sqlite_i64(value: u64) -> Result<i64, JournalError> {
+fn sqlite_i64(value: u64) -> Result<i64, JournalError> {
     i64::try_from(value).map_err(|_| JournalError::IntegerRange)
 }
 
@@ -197,6 +319,8 @@ pub enum JournalError {
     IntegerRange,
     /// A stored artifact digest was not 32 bytes.
     CorruptArtifactDigest,
+    /// A stored blob is shorter than the eight-byte kind prefix.
+    CorruptArtifact,
 }
 
 impl fmt::Display for JournalError {
@@ -205,6 +329,7 @@ impl fmt::Display for JournalError {
             Self::Backend(error) => write!(f, "journal backend: {error}"),
             Self::IntegerRange => write!(f, "integer does not fit in sqlite INTEGER"),
             Self::CorruptArtifactDigest => write!(f, "stored artifact digest is not 32 bytes"),
+            Self::CorruptArtifact => write!(f, "stored artifact is shorter than the eight-byte kind prefix"),
         }
     }
 }
@@ -213,7 +338,7 @@ impl Error for JournalError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
-            Self::IntegerRange | Self::CorruptArtifactDigest => None,
+            Self::IntegerRange | Self::CorruptArtifactDigest | Self::CorruptArtifact => None,
         }
     }
 }
@@ -232,6 +357,22 @@ pub enum AppendError {
         /// Head observed inside the append transaction.
         actual: Seq,
     },
+    /// A citation names a digest that is neither staged nor stored.
+    DanglingRef {
+        /// Digest the event or artifact cited.
+        digest: Digest,
+        /// Kind the citation expected as the blob prefix.
+        expected: KindId,
+    },
+    /// The cited blob exists but its prefix is not the cited kind.
+    PrefixMismatch {
+        /// Digest that was looked up.
+        digest: Digest,
+        /// Kind the citation expected.
+        expected: KindId,
+        /// Kind actually prefixed on the stored blob.
+        actual: KindId,
+    },
     /// Backend or constraint failure; the transaction did not commit.
     Journal(JournalError),
 }
@@ -240,6 +381,12 @@ impl fmt::Display for AppendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::HeadMoved { actual } => write!(f, "journal head moved; actual head is {actual}"),
+            Self::DanglingRef { digest, expected } => {
+                write!(f, "dangling ref {digest} expected kind {expected}")
+            }
+            Self::PrefixMismatch { digest, expected, actual } => {
+                write!(f, "prefix mismatch for {digest}: expected {expected}, actual {actual}")
+            }
             Self::Journal(error) => write!(f, "{error}"),
         }
     }
@@ -248,7 +395,7 @@ impl fmt::Display for AppendError {
 impl Error for AppendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::HeadMoved { .. } => None,
+            Self::HeadMoved { .. } | Self::DanglingRef { .. } | Self::PrefixMismatch { .. } => None,
             Self::Journal(error) => Some(error),
         }
     }
@@ -263,6 +410,56 @@ impl From<JournalError> for AppendError {
 impl From<rusqlite::Error> for AppendError {
     fn from(error: rusqlite::Error) -> Self {
         Self::Journal(error.into())
+    }
+}
+
+/// Failure to load a typed artifact.
+#[derive(Debug)]
+pub enum GetError {
+    /// Backend or corrupt-blob failure.
+    Journal(JournalError),
+    /// Payload did not decode as the requested storage kind.
+    Decode(DecodeError),
+    /// Stored prefix is not the requested kind. Ids only; no kind names.
+    PrefixMismatch {
+        /// Kind the caller asked to decode.
+        expected: KindId,
+        /// Kind actually prefixed on the stored blob.
+        actual: KindId,
+    },
+}
+
+impl fmt::Display for GetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Journal(error) => write!(f, "{error}"),
+            Self::Decode(error) => write!(f, "{error}"),
+            Self::PrefixMismatch { expected, actual } => {
+                write!(f, "artifact prefix mismatch: expected {expected}, actual {actual}")
+            }
+        }
+    }
+}
+
+impl Error for GetError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match self {
+            Self::Journal(error) => Some(error),
+            Self::Decode(error) => Some(error),
+            Self::PrefixMismatch { .. } => None,
+        }
+    }
+}
+
+impl From<JournalError> for GetError {
+    fn from(error: JournalError) -> Self {
+        Self::Journal(error)
+    }
+}
+
+impl From<DecodeError> for GetError {
+    fn from(error: DecodeError) -> Self {
+        Self::Decode(error)
     }
 }
 

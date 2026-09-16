@@ -5,7 +5,7 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{Draft, Journal, Seq};
-use common::FixedClock;
+use common::{FixedClock, batch_from_drafts};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -26,13 +26,13 @@ fn a_file_backed_journal_closed_and_reopened_at_the_same_path_reports_the_same_h
 
     {
         let mut journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
-        journal.append(Seq(0), &[Note::draft("persist")])?;
+        journal.append(Seq(0), &batch_from_drafts([Note::draft("persist")]))?;
         assert_eq!(journal.head()?, Seq(1));
     }
 
     let journal = Journal::open_with_clock(&path, Box::new(FixedClock(0)))?;
     assert_eq!(journal.head()?, Seq(1));
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("persisted entry");
-    assert_eq!(Journal::decode::<Note>(&entry)?.text, "persist");
+    assert_eq!(Journal::decode::<Note>(entry)?.text, "persist");
     Ok(())
 }

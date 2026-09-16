@@ -17,12 +17,22 @@ storage leaf; the journal does not invent a second codec.
 
 The journal knows nothing about the system that will use it.
 
+Collecting an event's citations without knowing its shape needed a new
+`Cites` trait in `aether-data`, emitted by `#[derive(Storage)]`. Two
+alternatives in the code cannot carry it. A record-sink walker cannot see
+the kind: `Ref<K>` is tag-identical to `[u8; 32]` because `terminate_field_hash`
+folds the path carry and the canonical schema bytes only, and a `Ref` inside a
+container never reaches a `RecordWriter` at all (`contribute_container` writes
+elements into a plain `Vec<u8>`). A label-tree walk has no leaf name to hang
+the kind on. A missing `Cites` impl is a compile error, never a silently
+unwalked field.
+
 ## Decision
 
 - The journal is an append-only, single-writer SQLite log. It never deletes,
   rewrites, reorders, compacts, migrates, folds views, or runs reactors.
 - Every event payload is an `aether_data::Storage` kind. The only append path
-  is `Draft::of<K: Storage>(...)`. There is no public path from raw bytes into
+  is `Draft::of<K: Storage + Cites>(...)`. There is no public path from raw bytes into
   the log. The journal records the kind name, not the kind's shape.
 - Kinds are append-only by discipline: a breaking shape change is a new kind
   name; names are never reused; old types stay in the tree.
@@ -35,18 +45,36 @@ The journal knows nothing about the system that will use it.
   `synchronous = FULL`.
 - `append` is one `BEGIN IMMEDIATE` transaction that reads the head, returns
   `HeadMoved { actual }` if the fence is stale (nothing written), otherwise
-  inserts every draft with dense `seq` values and commits. Durable before
-  return. All-or-nothing. An empty batch writes nothing.
+  inserts staged blobs, verifies every citation, inserts every event with
+  dense `seq` values, and commits. Durable before return. All-or-nothing.
+  An empty batch writes nothing.
 - `read(since, limit)` returns entries with `seq > since`, ascending, at most
   `limit`. A backend failure is `Err`, never a short result. `since` past the
   head is `Ok([])`.
 - There is no writer lease, no wake/notify (watching is a polling loop over
   `read`), no verification, no export, no deletion.
-- Artifacts are content-addressed rows in the same database (`digest`,
-  `size_bytes`, `recorded_at_millis`, `bytes`), referenced from events by
-  digest. `put_artifact` is idempotent (`INSERT OR IGNORE`); a put whose event
-  never lands leaves a harmless row that a retry re-uses. Artifacts are never
-  deleted. No atomic event-plus-artifact write.
+- The artifact store stays raw and content-addressed with its landed schema
+  (`digest`, `size_bytes`, `recorded_at_millis`, `bytes`) and knows nothing
+  about kinds. A row is a blob. There is no kind column, no DDL change, and
+  no migration: an existing journal file reopens, and blobs written before
+  this change have no prefix and are simply blobs nobody can cite typed.
+  The crate is pre-1.0 and there are no production journals.
+- An artifact is an abstraction above the store: a blob whose bytes are an
+  eight-byte `KindId` prefix followed by a payload. The digest is the store's
+  ordinary `sha256` over the whole blob, so the digest covers the kind and a
+  digest names one kind and one payload. The same payload under two kinds is
+  two blobs with two digests, both stored.
+- Two leaf kinds ship (opaque bytes, UTF-8 text) beside encoded kinds. Their
+  ids are derived from their names like every storage kind, via
+  `storage_kind_id_from_name`. Artifact kinds are append-only by discipline
+  like entry kinds.
+- `Ref<K>` is the only storable citation; `Digest` is a plain identity value.
+  A batch of staged artifacts plus events is the only write. `append` is the
+  only judge: inside the fence transaction it verifies that every cited blob
+  exists and carries the expected prefix, and writes nothing on any refusal.
+  Citations are collected by a derive-emitted `Cites` walk at draft
+  construction, so the check does not depend on the writer. The store's only
+  kind check is an eight-byte comparison.
 
 ## Consequences
 
@@ -56,6 +84,13 @@ The journal knows nothing about the system that will use it.
 - Single-writer is a caller convention; the fence (`expect_head`) is the
   only concurrency check.
 - The crate is a native rlib over bundled SQLite. It is not a wasm guest.
+- An artifact's digest is not the raw sha256 of its payload. This is the
+  trade Git makes with its object header, and it is the price of the kind
+  being covered by the hash rather than sitting beside it.
+- The prefix is an id, not a name: a reader holding a blob learns which kind
+  produced it only if it can map the id back.
+- The store's only kind check is an eight-byte comparison, which is what
+  keeps the kind vocabulary out of the journal.
 
 ## Alternatives considered
 
@@ -68,3 +103,9 @@ The journal knows nothing about the system that will use it.
   SQLite `:memory:`.
 - **Idempotency keys** — deferred; land with the driver that retries.
 - **Genesis event** — deferred; `Seq(0)` as the empty head is enough.
+- **Kind column on the artifacts table** — rejected; it puts the kind beside
+  the bytes instead of inside them, and teaches the store a vocabulary.
+- **Kind *name* prefix** — rejected; variable width and a second framing to
+  pin when the id is already fixed width and already computed.
+- **`Cites` derive on `#[derive(Schema)]` types** — rejected; the missing
+  impl is a useful compile error.

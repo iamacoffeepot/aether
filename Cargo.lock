@@ -143,7 +143,6 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
  "rusqlite",
- "serde",
  "sha2",
  "tempfile",
 ]

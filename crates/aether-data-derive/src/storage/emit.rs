@@ -43,6 +43,11 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
         Data::Enum(e) => emit_enum_leaves(name, e),
         Data::Union(_) => TokenStream2::new(),
     };
+    let cites = match &input.data {
+        Data::Struct(s) => emit_struct_cites(name, &s.fields),
+        Data::Enum(e) => emit_enum_cites(name, e),
+        Data::Union(_) => TokenStream2::new(),
+    };
     let (alias_statics, alias_pairs) = alias_statics(name, input)?;
     let schema_static = format_ident!("__AETHER_STORAGE_SCHEMA_{}", to_screaming_snake_case(&name.to_string()));
     Ok(quote! {
@@ -84,6 +89,8 @@ pub(super) fn emit(input: &DeriveInput, kind: &KindAttr, storage: &TypeStorageAt
         }
 
         #leaves
+
+        #cites
 
         #(#alias_statics)*
         static #schema_static: ::aether_data::__derive_runtime::SchemaType =
@@ -303,6 +310,99 @@ fn field_absents(fields: &Fields) -> Vec<TokenStream2> {
         }
     }
     out
+}
+
+fn emit_struct_cites(name: &syn::Ident, fields: &Fields) -> TokenStream2 {
+    if matches!(fields, Fields::Unit) || fields.is_empty() {
+        return quote! {
+            impl ::aether_data::__derive_runtime::Cites for #name {
+                fn cites(&self, _sink: &mut ::aether_data::__derive_runtime::Citations) {}
+            }
+        };
+    }
+
+    let field_cites = field_cites(fields);
+    quote! {
+        impl ::aether_data::__derive_runtime::Cites for #name {
+            fn cites(&self, sink: &mut ::aether_data::__derive_runtime::Citations) {
+                #(#field_cites)*
+            }
+        }
+    }
+}
+
+fn field_cites(fields: &Fields) -> Vec<TokenStream2> {
+    let mut out = Vec::new();
+    for (idx, field) in fields.iter().enumerate() {
+        let access = if let Some(id) = &field.ident {
+            quote!(self.#id)
+        } else {
+            let index = syn::Index::from(idx);
+            quote!(self.#index)
+        };
+        out.push(quote! {
+            ::aether_data::__derive_runtime::Cites::cites(&#access, sink);
+        });
+    }
+    out
+}
+
+fn emit_enum_cites(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {
+    let all_unit = data.variants.iter().all(|variant| matches!(variant.fields, Fields::Unit));
+    let sink = if all_unit {
+        quote!(_sink)
+    } else {
+        quote!(sink)
+    };
+    let arms = data.variants.iter().map(|variant| enum_cites_arm(&variant.ident, &variant.fields));
+    quote! {
+        impl ::aether_data::__derive_runtime::Cites for #name {
+            fn cites(&self, #sink: &mut ::aether_data::__derive_runtime::Citations) {
+                match self {
+                    #(#arms)*
+                }
+            }
+        }
+    }
+}
+
+fn enum_cites_arm(vident: &syn::Ident, fields: &Fields) -> TokenStream2 {
+    match fields {
+        Fields::Unit => quote! {
+            Self::#vident => {}
+        },
+        Fields::Unnamed(unnamed) if unnamed.unnamed.len() == 1 => quote! {
+            Self::#vident(__inner) => {
+                ::aether_data::__derive_runtime::Cites::cites(__inner, sink);
+            }
+        },
+        Fields::Unnamed(unnamed) => {
+            let bindings: Vec<_> = (0..unnamed.unnamed.len()).map(|i| format_ident!("__f{i}")).collect();
+            let cites = bindings.iter().map(|binding| {
+                quote! {
+                    ::aether_data::__derive_runtime::Cites::cites(#binding, sink);
+                }
+            });
+            quote! {
+                Self::#vident(#(#bindings),*) => {
+                    #(#cites)*
+                }
+            }
+        }
+        Fields::Named(named) => {
+            let idents: Vec<_> = named.named.iter().filter_map(|f| f.ident.as_ref()).collect();
+            let cites = idents.iter().map(|ident| {
+                quote! {
+                    ::aether_data::__derive_runtime::Cites::cites(#ident, sink);
+                }
+            });
+            quote! {
+                Self::#vident { #(#idents),* } => {
+                    #(#cites)*
+                }
+            }
+        }
+    }
 }
 
 fn emit_enum_leaves(name: &syn::Ident, data: &DataEnum) -> TokenStream2 {

@@ -4,12 +4,14 @@
 //! Mail kinds keep the positional cast / structured codecs. A type
 //! derives [`Storage`] *instead of* [`crate::Kind`], never alongside it.
 
+mod cites;
 mod element;
 mod hash;
 mod leaf;
 mod leaves;
 mod record;
 
+pub use cites::{Citation, Citations, Cites};
 pub use element::{
     ELEMENTS_LEAF, StorageElement, assemble_positional_element, assemble_tagged_element, container_hash,
     contribute_positional_element, contribute_tagged_element,

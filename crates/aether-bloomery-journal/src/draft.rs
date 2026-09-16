@@ -3,7 +3,7 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_data::{Storage, StorageData, StorageError};
+use aether_data::{Citation, Citations, Cites, Storage, StorageData, StorageError};
 
 use crate::Seq;
 
@@ -12,10 +12,11 @@ pub struct Draft {
     pub(crate) kind: String,
     pub(crate) cause: Option<Seq>,
     pub(crate) bytes: Vec<u8>,
+    pub(crate) cites: Vec<Citation>,
 }
 
 impl Draft {
-    /// Encode `event` as a draft.
+    /// Encode `event` as a draft and collect its citations.
     ///
     /// `K` is `Clone` because [`Storage::encode_storage`] takes an owned
     /// [`StorageData`]. The public `&K` argument is the issue's binding shape.
@@ -23,9 +24,17 @@ impl Draft {
     /// # Errors
     ///
     /// Returns [`DraftError::Storage`] when encoding fails.
-    pub fn of<K: Storage + Clone>(event: &K, cause: Option<Seq>) -> Result<Self, DraftError> {
+    pub fn of<K: Storage + Clone + Cites>(event: &K, cause: Option<Seq>) -> Result<Self, DraftError> {
+        let mut sink = Citations::default();
+        event.cites(&mut sink);
         let bytes = K::encode_storage(&StorageData::from_value(event.clone())).map_err(DraftError::Storage)?;
-        Ok(Self { kind: K::NAME.to_owned(), cause, bytes })
+        Ok(Self { kind: K::NAME.to_owned(), cause, bytes, cites: sink.into_vec() })
+    }
+
+    /// Citations collected from the event at construction.
+    #[must_use]
+    pub fn citations(&self) -> &[Citation] {
+        &self.cites
     }
 }
 

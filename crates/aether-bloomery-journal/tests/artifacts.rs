@@ -1,70 +1,102 @@
-//! Artifact put/get idempotence, tripwire digest, and positional batch contract.
+//! Artifact kinds, prefix-aware reads, and the digest tripwire.
 
 mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Digest, Journal};
+use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text, artifact_digest};
+use aether_data::{Kind, KindId};
 use common::FixedClock;
 
-const TRIPWIRE_PREIMAGE: &[u8] = b"aether-bloomery-journal";
+const TRIPWIRE_KIND: KindId = KindId(0x0123_4567_89ab_cdef);
+const TRIPWIRE_PAYLOAD: &[u8] = b"aether-bloomery-journal";
 const TRIPWIRE_DIGEST: [u8; 32] = [
-    0xed, 0x93, 0x22, 0x6a, 0x36, 0x2b, 0x40, 0xa2, 0x9e, 0xb6, 0x6d, 0x81, 0xf5, 0xa8, 0x60, 0xaa, 0x50, 0x5c, 0xd1,
-    0x65, 0xfc, 0x02, 0x48, 0x7d, 0x3e, 0x27, 0x93, 0x25, 0x94, 0x4e, 0xcd, 0x1c,
+    0x77, 0x86, 0x71, 0x92, 0xab, 0x73, 0xa1, 0xc9, 0xcb, 0x5d, 0x12, 0xef, 0x11, 0xd4, 0x05, 0x58, 0xf3, 0x9e, 0xfd,
+    0xec, 0x9c, 0x6f, 0xe2, 0x2f, 0x51, 0xc8, 0x4c, 0x95, 0x2e, 0xe1, 0xcd, 0x17,
 ];
 
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.note")]
+struct Note {
+    text: String,
+}
+
 #[test]
-fn putting_the_same_bytes_twice_returns_the_same_digest_and_different_bytes_differ() -> Result<(), Box<dyn Error>> {
+fn the_same_payload_staged_under_two_kinds_yields_two_blobs() -> Result<(), Box<dyn Error>> {
+    // Catches a store that hashes the payload without the prefix, which
+    // collapses the two and silently makes one kind win.
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
-    let first = journal.put_artifact(b"alpha")?;
-    let second = journal.put_artifact(b"alpha")?;
-    assert_eq!(first, second);
-    let other = journal.put_artifact(b"beta")?;
-    assert_ne!(first, other);
-    assert_eq!(journal.get_artifact(&first)?.as_deref(), Some(b"alpha".as_slice()));
-    assert_eq!(journal.get_artifact(&other)?.as_deref(), Some(b"beta".as_slice()));
+    let payload = "shared";
+    let mut batch = Batch::new();
+    let as_bytes = batch.stage_bytes(payload.as_bytes());
+    let as_text = batch.stage_text(payload);
+    assert_ne!(as_bytes.digest(), as_text.digest());
+    journal.append(Seq(0), &batch)?;
+
+    assert_eq!(journal.get_bytes(&as_bytes.digest())?, Some((OpaqueBytes::ID, payload.as_bytes().to_vec())));
+    assert_eq!(journal.get_bytes(&as_text.digest())?, Some((Utf8Text::ID, payload.as_bytes().to_vec())));
     Ok(())
 }
 
 #[test]
-fn get_artifact_of_an_unknown_digest_is_none_and_a_put_digest_round_trips() -> Result<(), Box<dyn Error>> {
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
-    let missing = Digest([0; 32]);
-    assert_eq!(journal.get_artifact(&missing)?, None);
+fn the_two_leaf_kinds_have_different_ids() {
+    // Their ids come from their names. A #[derive(Kind)] that hashes canonical
+    // schema bytes would give two unit-like markers the same id, after which
+    // every Ref<OpaqueBytes> would accept a text blob and the prefix check
+    // would be decoration.
+    assert_ne!(OpaqueBytes::ID, Utf8Text::ID);
+}
 
-    // Tripwire: pin sha256(b"aether-bloomery-journal"). Drifts if the hash or preimage changes.
-    let digest = journal.put_artifact(TRIPWIRE_PREIMAGE)?;
-    assert_eq!(digest.0, TRIPWIRE_DIGEST);
-    assert_eq!(journal.get_artifact(&digest)?.as_deref(), Some(TRIPWIRE_PREIMAGE));
+#[test]
+fn get_returns_the_value_for_a_matching_prefix_refuses_a_wrong_prefix_and_none_when_absent()
+-> Result<(), Box<dyn Error>> {
+    // The refusal is what earns the test: a prefix-blind decode would accept
+    // any same-shape payload.
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let mut batch = Batch::new();
+    let encoded = batch.stage_encoded(&Note { text: "hello".into() })?;
+    let text = batch.stage_text("hello");
+    journal.append(Seq(0), &batch)?;
+
+    assert_eq!(journal.get::<Note>(&encoded.digest())?, Some(Note { text: "hello".into() }));
+    match journal.get::<Note>(&text.digest()).expect_err("wrong prefix must be refused") {
+        GetError::PrefixMismatch { expected, actual } => {
+            assert_eq!(expected, Note::ID);
+            assert_eq!(actual, Utf8Text::ID);
+        }
+        other => panic!("expected PrefixMismatch, got {other:?}"),
+    }
+    assert_eq!(journal.get::<Note>(&Digest::from_bytes([0; 32]))?, None);
     Ok(())
 }
 
 #[test]
-fn get_artifacts_keeps_absent_slots_and_put_artifacts_is_positional_and_idempotent() -> Result<(), Box<dyn Error>> {
+fn get_bytes_many_keeps_absent_slots_in_input_order() -> Result<(), Box<dyn Error>> {
+    // The positional mapping is this crate's own logic; a batch that drops the
+    // absent slot or reorders is the bug.
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
-    let a = journal.put_artifact(b"present-a")?;
-    let b = journal.put_artifact(b"present-b")?;
-    let missing = Digest([1; 32]);
+    let mut batch = Batch::new();
+    let a = batch.stage_bytes(b"present-a");
+    let b = batch.stage_bytes(b"present-b");
+    journal.append(Seq(0), &batch)?;
+    let missing = Digest::from_bytes([1; 32]);
 
-    let batch = journal.get_artifacts(&[a, missing, b])?;
-    assert_eq!(batch.len(), 3);
-    assert_eq!(batch[0].as_deref(), Some(b"present-a".as_slice()));
-    assert_eq!(batch[1], None);
-    assert_eq!(batch[2].as_deref(), Some(b"present-b".as_slice()));
-    assert_eq!(batch[0], journal.get_artifact(&a)?);
-    assert_eq!(batch[1], journal.get_artifact(&missing)?);
-    assert_eq!(batch[2], journal.get_artifact(&b)?);
-
-    let already = b"present-a";
-    let fresh_one = b"fresh-1";
-    let fresh_two = b"fresh-2";
-    let digests = journal.put_artifacts(&[already.as_slice(), fresh_one.as_slice(), fresh_two.as_slice()])?;
-    assert_eq!(digests.len(), 3);
-    assert_eq!(digests[0], a);
-    assert_ne!(digests[1], a);
-    assert_ne!(digests[2], a);
-    assert_ne!(digests[1], digests[2]);
-    assert_eq!(journal.get_artifact(&digests[1])?.as_deref(), Some(fresh_one.as_slice()));
-    assert_eq!(journal.get_artifact(&digests[2])?.as_deref(), Some(fresh_two.as_slice()));
+    let many = journal.get_bytes_many(&[a.digest(), missing, b.digest()])?;
+    assert_eq!(many.len(), 3);
+    assert_eq!(many[0], Some((OpaqueBytes::ID, b"present-a".to_vec())));
+    assert_eq!(many[1], None);
+    assert_eq!(many[2], Some((OpaqueBytes::ID, b"present-b".to_vec())));
+    assert_eq!(many[0], journal.get_bytes(&a.digest())?);
+    assert_eq!(many[1], journal.get_bytes(&missing)?);
+    assert_eq!(many[2], journal.get_bytes(&b.digest())?);
     Ok(())
+}
+
+#[test]
+fn the_digest_of_one_fixed_artifact_is_pinned() {
+    // Tripwire: prefix byte order, prefix-then-payload order, and the hash
+    // preimage. The digest is sha256(kind_id_le_8 || payload). Drifts the
+    // moment any of those change — and every stored digest in every journal
+    // would move with it.
+    assert_eq!(artifact_digest(TRIPWIRE_KIND, TRIPWIRE_PAYLOAD).as_bytes(), &TRIPWIRE_DIGEST);
 }

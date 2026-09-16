@@ -1,28 +1,33 @@
-//! An event carrying a Digest round-trips and resolves through [`Journal::get_artifact`].
+//! A batch whose event cites an artifact staged in the same batch.
 
 mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Digest, Draft, Journal, Seq};
+use aether_bloomery_journal::{Batch, Journal, OpaqueBytes, Ref, Seq};
+use aether_data::Kind;
 use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.referenced")]
 struct Referenced {
-    digest: Digest,
+    digest: Ref<OpaqueBytes>,
 }
 
 #[test]
-fn an_event_with_a_digest_field_round_trips_and_the_digest_resolves() -> Result<(), Box<dyn Error>> {
+fn a_batch_event_cites_an_artifact_staged_in_the_same_batch_and_the_citation_resolves() -> Result<(), Box<dyn Error>> {
+    // Catches a batch that writes events and blobs in separate transactions
+    // or drops the staged blob.
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
     let payload = b"transcript";
-    let digest = journal.put_artifact(payload)?;
-    journal.append(Seq(0), &[Draft::of(&Referenced { digest }, None)?])?;
+    let mut batch = Batch::new();
+    let digest = batch.stage_bytes(payload);
+    batch.push_event(&Referenced { digest }, None)?;
+    journal.append(Seq(0), &batch)?;
 
     let entry = journal.read(Seq(0), 1)?.into_iter().next().expect("one entry");
     let decoded = Journal::decode::<Referenced>(&entry)?;
     assert_eq!(decoded.digest, digest);
-    assert_eq!(journal.get_artifact(&decoded.digest)?.as_deref(), Some(payload.as_slice()));
+    assert_eq!(journal.get_bytes(&decoded.digest.digest())?, Some((OpaqueBytes::ID, payload.to_vec())));
     Ok(())
 }
