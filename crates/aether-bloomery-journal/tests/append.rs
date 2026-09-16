@@ -5,7 +5,28 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{AppendError, Draft, Journal, Seq};
-use common::{Note, TooLong, journal};
+use common::journal;
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.note")]
+struct Note {
+    text: String,
+}
+
+impl Note {
+    fn draft(text: &str) -> Draft {
+        Draft::of(&Self { text: text.to_owned() }, None).expect("encode note")
+    }
+}
+
+/// Kind name of 257 bytes: the `entries.kind` CHECK is `length(kind) <= 256`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(
+    name = "test.journal.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+)]
+struct TooLong {
+    n: u64,
+}
 
 #[test]
 fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write() -> Result<(), Box<dyn Error>> {
@@ -16,7 +37,7 @@ fn an_append_against_a_stale_expected_head_returns_head_moved_and_does_not_write
     let error = journal.append(Seq(0), &[Note::draft("stale")]).expect_err("stale fence must fail");
     match error {
         AppendError::HeadMoved { actual } => assert_eq!(actual, Seq(1)),
-        other => panic!("expected HeadMoved, got {other:?}"),
+        AppendError::Journal(other) => panic!("expected HeadMoved, got Journal({other:?})"),
     }
     assert_eq!(journal.head()?, Seq(1));
     assert_eq!(journal.read(Seq(0), 16)?, before);

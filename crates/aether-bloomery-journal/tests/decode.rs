@@ -4,8 +4,26 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{DecodeError, Journal, Seq};
-use common::{Note, Other, journal};
+use aether_bloomery_journal::{DecodeError, Draft, Journal, Seq};
+use common::journal;
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.note")]
+struct Note {
+    text: String,
+}
+
+impl Note {
+    fn draft(text: &str) -> Draft {
+        Draft::of(&Self { text: text.to_owned() }, None).expect("encode note")
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.other")]
+struct Other {
+    n: u64,
+}
 
 #[test]
 fn decode_round_trips_the_appended_kind_and_refuses_a_different_kind_name() -> Result<(), Box<dyn Error>> {
@@ -21,7 +39,7 @@ fn decode_round_trips_the_appended_kind_and_refuses_a_different_kind_name() -> R
             assert_eq!(expected, "test.journal.other");
             assert_eq!(actual, "test.journal.note");
         }
-        other => panic!("expected KindMismatch, got {other:?}"),
+        DecodeError::Storage(other) => panic!("expected KindMismatch, got Storage({other:?})"),
     }
     Ok(())
 }

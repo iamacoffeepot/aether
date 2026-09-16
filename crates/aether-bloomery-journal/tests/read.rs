@@ -4,8 +4,20 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Journal, Seq};
-use common::{Note, journal};
+use aether_bloomery_journal::{Draft, Journal, Seq};
+use common::journal;
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.note")]
+struct Note {
+    text: String,
+}
+
+impl Note {
+    fn draft(text: &str) -> Draft {
+        Draft::of(&Self { text: text.to_owned() }, None).expect("encode note")
+    }
+}
 
 #[test]
 fn read_with_a_short_limit_returns_that_many_ascending_and_past_the_head_is_empty() -> Result<(), Box<dyn Error>> {

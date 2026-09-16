@@ -4,8 +4,20 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Journal, Seq};
-use common::{FixedClock, Note};
+use aether_bloomery_journal::{Draft, Journal, Seq};
+use common::FixedClock;
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.note")]
+struct Note {
+    text: String,
+}
+
+impl Note {
+    fn draft(text: &str) -> Draft {
+        Draft::of(&Self { text: text.to_owned() }, None).expect("encode note")
+    }
+}
 
 #[test]
 fn a_file_backed_journal_closed_and_reopened_at_the_same_path_reports_the_same_head() -> Result<(), Box<dyn Error>> {

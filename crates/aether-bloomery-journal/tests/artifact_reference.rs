@@ -1,11 +1,17 @@
-//! An event carrying a Digest round-trips and resolves through get_artifact.
+//! An event carrying a Digest round-trips and resolves through [`Journal::get_artifact`].
 
 mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Draft, Journal, Seq};
-use common::{Referenced, journal};
+use aether_bloomery_journal::{Digest, Draft, Journal, Seq};
+use common::journal;
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.referenced")]
+struct Referenced {
+    digest: Digest,
+}
 
 #[test]
 fn an_event_with_a_digest_field_round_trips_and_the_digest_resolves() -> Result<(), Box<dyn Error>> {
