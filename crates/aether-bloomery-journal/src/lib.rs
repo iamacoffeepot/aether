@@ -16,6 +16,10 @@
 //! and verifies that its destination exists with the recorded head's
 //! eight-byte prefix. A missing citation walk cannot stand in for that
 //! check. See ADR-0220.
+//!
+//! [`JournalIdentity`] is a process-local allocation token minted by each
+//! constructor so a view registry can detect replacement. It is not persisted
+//! and is not a SQL column.
 
 mod artifact;
 mod batch;
@@ -32,4 +36,4 @@ pub use batch::{Batch, BatchError};
 pub use clock::{Clock, SystemClock};
 pub use draft::{Draft, DraftError};
 pub use entry::{Entry, Seq};
-pub use journal::{AppendError, DecodeError, GetError, Journal, JournalError};
+pub use journal::{AppendError, DecodeError, GetError, Journal, JournalError, JournalIdentity};

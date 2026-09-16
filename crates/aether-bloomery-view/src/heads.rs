@@ -5,6 +5,8 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery_journal::{DecodeError, Entry, Journal, Seq};
+
+use crate::view::View;
 use aether_bloomery_kinds::{
     Digest, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
 };
@@ -73,6 +75,25 @@ impl Heads {
 impl Default for Heads {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl View for Heads {
+    type Error = HeadFoldError;
+
+    fn empty() -> Self {
+        Self::new()
+    }
+
+    fn cursor(&self) -> Seq {
+        self.cursor
+    }
+
+    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
+        for entry in entries {
+            self.apply(entry)?;
+        }
+        Ok(())
     }
 }
 

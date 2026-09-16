@@ -1,10 +1,10 @@
 [package]
-name = "aether-bloomery-index"
+name = "aether-bloomery-view"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Typed last-move index of named heads over a contiguous journal prefix (ADR-0220)."
+description = "Lazy native journal views, borrowed tuple injection, and the typed last-move Heads fold (ADR-0220)."
 
 [dependencies]
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }

@@ -2,17 +2,17 @@
 
 use std::error::Error;
 
-use aether_bloomery_index::{HeadFoldError, Heads};
 use aether_bloomery_journal::{Batch, Clock, Entry, Journal, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove, Ref, Tree,
 };
+use aether_bloomery_view::{HeadFoldError, Heads};
 use aether_data::{Kind, Storage, StorageData};
 
 const PAGE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.bloomery.index.note")]
+#[kind(name = "test.bloomery.view.note")]
 struct Note {
     n: u64,
 }
