@@ -11,7 +11,10 @@
 //! Events are [`aether_data::Storage`] kinds. The only write is a [`Batch`] of
 //! staged artifacts plus events; [`Journal::append`] is the only judge.
 //! Citations are typed [`Ref`] values collected by a derive-emitted walk.
-//! See ADR-0220.
+//! The one recognized exception is `bloomery.head_moved`: `append` decodes
+//! that kind from the draft and verifies that its destination exists with
+//! the stated eight-byte prefix. A missing citation walk cannot stand in
+//! for that check. See ADR-0220.
 
 mod artifact;
 mod batch;
