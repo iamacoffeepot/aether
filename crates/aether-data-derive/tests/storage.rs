@@ -15,6 +15,11 @@ fn ui() {
     t.compile_fail("tests/ui/rejects_storage_reserved_prefix.rs");
     t.compile_fail("tests/ui/rejects_storage_leaf_collision.rs");
     t.compile_fail("tests/ui/rejects_storage_alias_collision.rs");
+    t.compile_fail("tests/ui/rejects_storage_validate_two_fields.rs");
+    t.compile_fail("tests/ui/rejects_storage_validate_with_kind.rs");
+    t.compile_fail("tests/ui/rejects_storage_nested_alias.rs");
+    t.compile_fail("tests/ui/rejects_storage_nested_strict.rs");
+    t.compile_fail("tests/ui/rejects_storage_kindless_as_kind.rs");
 }
 
 #[derive(Debug, PartialEq, aether_data::Storage)]

@@ -40,7 +40,10 @@
 //! and emits `SchemaType::Bytes` and `LabelNode::Anonymous` directly.
 //!
 //! `Storage` is the sibling TLV shape: a nominal `Kind::ID` with no positional
-//! codec.
+//! codec. Without `#[kind]`, the same derive emits a nested type — schema,
+//! tagged element, leaves, and cites — and not a root. `#[storage(validate)]`
+//! on a single-field tuple struct emits a validated newtype that encodes as
+//! its inner type and re-runs `check` on every decode path.
 //!
 //! `#[transform]` marks a pure `Kind -> Kind` function with no dependence on
 //! the actor framework; its runtime types live in `aether-data`. The macro
@@ -994,6 +997,14 @@ pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
         attrs.first().map_or_else(proc_macro2::Span::call_site, Spanned::span),
         "missing `#[kind(name = \"...\")]` attribute",
     ))
+}
+
+pub(crate) fn parse_optional_kind_attr(attrs: &[Attribute]) -> syn::Result<Option<KindAttr>> {
+    if attrs.iter().any(|attr| attr.path().is_ident("kind")) {
+        parse_kind_attr(attrs).map(Some)
+    } else {
+        Ok(None)
+    }
 }
 
 pub(crate) fn struct_has_repr_c(attrs: &[Attribute]) -> bool {

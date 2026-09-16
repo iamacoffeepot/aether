@@ -1,0 +1,16 @@
+error[E0277]: the trait bound `Nested: aether_data::Kind` is not satisfied
+ --> tests/ui/rejects_storage_kindless_as_kind.rs:9:14
+  |
+9 |     let _ = <Nested as aether_data::Kind>::ID;
+  |              ^^^^^^ unsatisfied trait bound
+  |
+help: the trait `aether_data::Kind` is not implemented for `Nested`
+ --> tests/ui/rejects_storage_kindless_as_kind.rs:4:1
+  |
+4 | struct Nested {
+  | ^^^^^^^^^^^^^
+help: the trait `aether_data::Kind` is implemented for `()`
+ --> $WORKSPACE/crates/aether-data/src/lib.rs
+  |
+  | impl Kind for () {
+  | ^^^^^^^^^^^^^^^^

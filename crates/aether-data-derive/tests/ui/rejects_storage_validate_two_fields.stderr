@@ -1,0 +1,5 @@
+error: `validate` applies to a tuple struct with exactly one field
+ --> tests/ui/rejects_storage_validate_two_fields.rs:4:11
+  |
+4 | #[storage(validate)]
+  |           ^^^^^^^^

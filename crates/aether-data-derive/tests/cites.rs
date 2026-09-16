@@ -123,3 +123,40 @@ fn emitted_walk_visits_a_citing_leaf_in_tuple_and_named_enum_variants() {
     assert_eq!(tags_of(&Shape::Tuple(CiteKey::new(8), 0)), vec![8]);
     assert_eq!(tags_of(&Shape::Named { leaf: CiteKey::new(9), n: 1 }), vec![9]);
 }
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+enum NestedCited {
+    Off,
+    Key { leaf: CiteKey },
+}
+
+struct Never;
+
+impl aether_data::Invariant for Never {
+    fn reason(&self) -> &'static str {
+        "never"
+    }
+}
+
+#[derive(Debug, PartialEq, aether_data::Storage)]
+#[storage(validate)]
+struct CitedWrap(CiteKey);
+
+impl CitedWrap {
+    fn check(inner: &CiteKey) -> Result<(), Never> {
+        if inner.0.iter().all(|&byte| byte == 0) {
+            Err(Never)
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn kindless_enum_and_validated_newtype_forward_cites() {
+    // Catches a nested enum or validated newtype that implements Cites as a
+    // no-op and drops the citation a leaf inside them carries.
+    assert_eq!(tags_of(&NestedCited::Key { leaf: CiteKey::new(10) }), vec![10]);
+    assert!(tags_of(&NestedCited::Off).is_empty());
+    assert_eq!(tags_of(&CitedWrap(CiteKey::new(11))), vec![11]);
+}

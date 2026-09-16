@@ -1,0 +1,5 @@
+error: `strict` applies to a root; this type has no kind name
+ --> tests/ui/rejects_storage_nested_strict.rs:4:11
+  |
+4 | #[storage(strict)]
+  |           ^^^^^^

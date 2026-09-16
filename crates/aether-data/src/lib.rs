@@ -63,7 +63,9 @@ pub use name_inventory::{
     id_for_name, name_entries, root_entries, template_entries,
 };
 pub use schema::*;
-pub use storage::{Citation, Citations, Cites, Storage, StorageData, StorageError, StorageLeaves, UnknownField};
+pub use storage::{
+    Citation, Citations, Cites, Invariant, Storage, StorageData, StorageError, StorageLeaves, UnknownField,
+};
 pub use tagged_id::{Tag, with_tag};
 pub use transform::{InvokeFn, TransformError};
 #[cfg(not(target_arch = "wasm32"))]
@@ -520,6 +522,7 @@ pub mod __derive_runtime {
     use crate::wire;
     pub use crate::wire::{WireDecode, WireEncode, decode_bytes, encode_bytes};
     pub use alloc::borrow::Cow;
+    pub use alloc::string::String;
     pub use alloc::vec::Vec;
 
     /// Cast-shape decode helper. Routes through `bytemuck::pod_read_unaligned`

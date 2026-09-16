@@ -1,0 +1,5 @@
+error: `validate` cannot be combined with `#[kind]`
+ --> tests/ui/rejects_storage_validate_with_kind.rs:5:11
+  |
+5 | #[storage(validate)]
+  |           ^^^^^^^^

@@ -1,0 +1,5 @@
+error: field aliases are not supported on nested types
+ --> tests/ui/rejects_storage_nested_alias.rs:5:5
+  |
+5 |     #[storage(was = "old")]
+  |     ^^^^^^^^^^^^^^^^^^^^^^^
