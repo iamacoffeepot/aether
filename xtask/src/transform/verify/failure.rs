@@ -233,10 +233,10 @@ mod tests {
         let all: VerifyFailureSet = VerifyFailure::ALL.into_iter().collect();
         let fmt = VerifyFailureSet::one(VerifyFailure::Fmt);
 
-        assert!(all.contains(VerifyFailure::Fmt));
-        assert!(!all.difference(fmt).contains(VerifyFailure::Fmt));
-        assert!(all.difference(fmt).contains(VerifyFailure::Clippy));
+        assert!(VerifyFailure::ALL.into_iter().all(|failure| all.contains(failure)));
+        assert!(!fmt.contains(VerifyFailure::Clippy));
         assert!(fmt.union(VerifyFailureSet::one(VerifyFailure::Docs)).contains(VerifyFailure::Docs));
+        assert!(fmt.union(VerifyFailureSet::EMPTY).contains(VerifyFailure::Fmt), "the empty set is the identity");
         assert!(VerifyFailureSet::EMPTY.is_empty());
     }
 

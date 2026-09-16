@@ -164,25 +164,6 @@ impl Scope {
             .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
     }
 
-    /// The scope a stated set of changed paths computes, with the same
-    /// fail-open totality [`Self::resolve`] has.
-    ///
-    /// The seam the construct lane's own lint bar resolves its crate set
-    /// through (#6000). That lane owns an uncommitted tree, so it names its
-    /// diff from `git status` rather than from a committed range — but the
-    /// question it then asks of those paths has to be the one the gate asks of
-    /// the candidate's, or the bar reports a clean candidate the gate calls red
-    /// on the first compile. One entry point past the git read, so the two
-    /// cannot drift into two closures.
-    pub(in crate::transform) fn of_changed(changed: &[String]) -> Self {
-        if changed.is_empty() {
-            return Self::workspace("the diff names no changed path, so there is no candidate to narrow by");
-        }
-
-        Self::over_changed(changed)
-            .unwrap_or_else(|error| Self::workspace(format!("the closure could not be computed — {error:#}")))
-    }
-
     /// Every workspace crate, for `reason`.
     fn workspace(reason: impl Into<String>) -> Self {
         Self::Workspace { reason: reason.into() }
@@ -890,34 +871,34 @@ mod tests {
     fn a_lockfile_bump_to_a_single_crate_dependency_scopes_to_that_crates_closure() {
         // Tripwire for the payoff issue #5951 exists for: a lockfile-only bump
         // must verify the moved package's reverse-dependency closure, not the
-        // whole workspace. `crossterm` is depended on by exactly one workspace
+        // whole workspace. `notify` is depended on by exactly one workspace
         // crate, so its bump is the crisp case — a return to the blunt rule
-        // shows up as this test widening. If the tree moves and `crossterm`
-        // gains dependents or wasm reach, pick another single-user external
-        // rather than weakening this.
-        let base = "version = 4\n\n[[package]]\nname = \"crossterm\"\nversion = \"0.29.0\"\n\
-                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"0.29.0\"\n";
-        let candidate = base.replace("0.29.0", "0.29.1");
+        // shows up as this test widening. If the tree moves and `notify` gains
+        // dependents or wasm reach, pick another single-user external rather
+        // than weakening this.
+        let base = "version = 4\n\n[[package]]\nname = \"notify\"\nversion = \"8.2.0\"\n\
+                    source = \"registry+https://github.com/rust-lang/crates.io-index\"\nchecksum = \"8.2.0\"\n";
+        let candidate = base.replace("8.2.0", "8.2.1");
 
         let scope = Scope::over_changed_with_locks(&strings(&["Cargo.lock"]), base, &candidate)
             .expect("attribute a single-package bump");
 
         let workspace = Workspace::load().expect("load the workspace graph");
         let expected: Vec<String> = workspace
-            .reverse_closure_of_external(&string_set(&["crossterm"]))
-            .expect("attribute crossterm")
+            .reverse_closure_of_external(&string_set(&["notify"]))
+            .expect("attribute notify")
             .into_iter()
             .collect();
         assert!(
             !expected.is_empty() && expected.len() < workspace.members().len(),
-            "crossterm must reach a proper non-empty closure, or this fixture no longer exercises narrowing",
+            "notify must reach a proper non-empty closure, or this fixture no longer exercises narrowing",
         );
 
         let packages = scope.packages().expect("an attributable bump narrows").to_vec();
         assert_eq!(packages, expected, "a bump scopes to its dependents' closure");
         let first_reached = expected.first().expect("the closure is non-empty by the assertion above");
         assert!(
-            scope.receipt().contains("crossterm") && scope.receipt().contains(first_reached),
+            scope.receipt().contains("notify") && scope.receipt().contains(first_reached),
             "the receipt states which package moved and which crate that reached: {}",
             scope.receipt(),
         );

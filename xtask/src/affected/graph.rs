@@ -61,41 +61,12 @@ impl Workspace {
         self.graph.workspace().iter().map(|package| package.name().to_string()).collect()
     }
 
-    /// The named workspace packages plus every workspace package that links one of them,
-    /// transitively. A name that is not a workspace member is ignored.
-    ///
-    /// This is the reverse-dependency half of the affected-set closure, asked of crate names
-    /// rather than of changed paths. A signature change inside those crates can force an edit in
-    /// a reverse dependency; a same-named definition in a crate that merely sits nearby in the
-    /// workspace is a homonym, not an impl the change touches.
-    pub fn reverse_closure_of(&self, crates: &BTreeSet<String>) -> Result<BTreeSet<String>> {
-        let workspace = self.graph.workspace();
-        let ids: Vec<_> = crates
-            .iter()
-            .filter_map(|name| workspace.member_by_name(name).ok())
-            .map(|package| package.id().clone())
-            .collect();
-        if ids.is_empty() {
-            return Ok(BTreeSet::new());
-        }
-
-        Ok(self
-            .graph
-            .query_reverse(ids.iter())
-            .context("query the reverse-dependency closure")?
-            .resolve()
-            .packages(DependencyDirection::Reverse)
-            .filter(PackageMetadata::in_workspace)
-            .map(|package| package.name().to_string())
-            .collect())
-    }
-
     /// The workspace crates depending on any of the named resolved packages,
     /// transitively — the lockfile half of the verify scope.
     ///
-    /// Unlike [`Self::reverse_closure_of`], the names need not be workspace
-    /// members: they are usually external crates whose version bump the
-    /// lockfile records. Every version in the graph carrying the name roots
+    /// The names need not be workspace members: they are usually external
+    /// crates whose version bump the lockfile records. Every version in the
+    /// graph carrying the name roots
     /// the query, so a bump between two coexisting majors still reaches both
     /// dependents. A name the graph does not contain contributes nothing — a
     /// removed dependency's dependents name their manifest move through the
@@ -164,44 +135,5 @@ impl Workspace {
     /// cross-build.
     pub fn needs_dist_prepare(&self, package: &str) -> bool {
         self.wasm_sources.contains(package) || self.wasm_consumers.contains(package)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    #![allow(clippy::unwrap_used)]
-
-    use std::collections::BTreeSet;
-
-    use super::Workspace;
-
-    fn names(crates: &[&str]) -> BTreeSet<String> {
-        crates.iter().map(|name| (*name).to_owned()).collect()
-    }
-
-    #[test]
-    fn reverse_closure_keeps_the_dependents_and_drops_the_dependencies() {
-        // Tripwire: the direction of the walk. `aether-math` is depended on by
-        // the kinds vocabulary and the renderer, and itself depends on
-        // `aether-data`. A forward walk would answer with `aether-data` and
-        // miss every crate a change to the math primitives can actually break.
-        let workspace = Workspace::load().unwrap();
-        let closure = workspace.reverse_closure_of(&names(&["aether-math"])).unwrap();
-
-        assert!(closure.contains("aether-math"), "the queried crate is in its own closure: {closure:?}");
-        assert!(closure.contains("aether-kinds"), "the kind vocabulary spells Mat4 directly: {closure:?}");
-        assert!(closure.contains("aether-render"), "the renderer consumes the math primitives: {closure:?}");
-        assert!(
-            !closure.contains("aether-data"),
-            "math depends on data, not the reverse; a forward walk would still reach it: {closure:?}",
-        );
-        assert!(!closure.contains("aether-codec"), "the codec shares no reverse edge with math: {closure:?}");
-    }
-
-    #[test]
-    fn reverse_closure_ignores_unknown_names_and_an_empty_query() {
-        let workspace = Workspace::load().unwrap();
-        assert!(workspace.reverse_closure_of(&BTreeSet::new()).unwrap().is_empty());
-        assert!(workspace.reverse_closure_of(&names(&["not-a-workspace-crate"])).unwrap().is_empty());
     }
 }

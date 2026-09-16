@@ -60,9 +60,6 @@ const SCCACHE: &str = "sccache";
 /// more to it than a cache hit rate would be.
 const LANE_BUILD_ENV: [(&str, &str); 1] = [("RUSTC_WRAPPER", SCCACHE)];
 
-/// The key lane evidence carries the counters under.
-const EVIDENCE_KEY: &str = "sccache";
-
 /// The host's sccache, held across one lane run.
 pub(super) struct CompilerCache {
     /// Where the counters stood when the lane started. sccache's server reports
@@ -125,19 +122,6 @@ pub(super) fn export(cache: Option<&CompilerCache>, command: &mut Command) {
     }
 }
 
-/// Stamp what sccache `served` onto a model lane's evidence envelope.
-///
-/// Presence-driven like the envelope's other optional channels: a host without
-/// sccache stamps no key at all, so a reader sees "this host has no cache"
-/// rather than a zero that reads as a cache which served nothing.
-pub(super) fn stamp(evidence: &mut serde_json::Value, served: Option<Counters>) {
-    if let Some(served) = served
-        && let Some(object) = evidence.as_object_mut()
-    {
-        object.insert(EVIDENCE_KEY.to_owned(), serde_json::json!(served));
-    }
-}
-
 /// Ask sccache for its counters.
 fn read_counters() -> Option<Counters> {
     let stats = Command::new(SCCACHE)
@@ -172,7 +156,7 @@ fn counter(value: &serde_json::Value) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Counters, parse_counters, stamp};
+    use super::{Counters, parse_counters};
 
     // The counters come out of the document sccache actually prints — the shape
     // below is `--stats-format=json` output with the fields this does not read
@@ -209,19 +193,5 @@ mod tests {
 
         assert_eq!(after_restart.since(opening), Counters { hits: 0, misses: 0 });
         assert_eq!(Counters { hits: 912, misses: 47 }.since(opening), Counters { hits: 12, misses: 7 });
-    }
-
-    // The evidence channel is presence-driven: a host with no sccache must stamp
-    // no key, because a zeroed one reads as a cache that served nothing — the
-    // opposite conclusion about the host from the one that is true.
-    #[test]
-    fn a_host_without_sccache_stamps_no_evidence_key() {
-        let mut absent = serde_json::json!({ "command": "construct.implement" });
-        stamp(&mut absent, None);
-        assert!(absent.get("sccache").is_none(), "no cache means no key at all");
-
-        let mut present = serde_json::json!({ "command": "construct.implement" });
-        stamp(&mut present, Some(Counters { hits: 12, misses: 7 }));
-        assert_eq!(present["sccache"], serde_json::json!({ "hits": 12, "misses": 7 }));
     }
 }

@@ -121,7 +121,7 @@ mod tests {
 
     use super::diff;
 
-    const EXTERNAL: &str = "crossterm";
+    const EXTERNAL: &str = "notify";
 
     fn lockfile(packages: &str) -> String {
         format!("version = 4\n\n{packages}")
@@ -143,12 +143,12 @@ mod tests {
         // Tripwire for the false-green direction: a bump the diff misses reads
         // as "no resolved package moved", and a lockfile-only diff then
         // resolves an empty closure — a pass over a changed build.
-        let base = lockfile(&external("0.29.0"));
+        let base = lockfile(&external("8.2.0"));
 
         let same = diff(&base, &base, &BTreeSet::new()).expect("diff identical lockfiles");
         assert!(same.changed.is_empty(), "identical lockfiles move nothing: {:?}", same.changed);
 
-        let bumped = diff(&base, &lockfile(&external("0.29.1")), &BTreeSet::new()).expect("diff a bumped lockfile");
+        let bumped = diff(&base, &lockfile(&external("8.2.1")), &BTreeSet::new()).expect("diff a bumped lockfile");
         assert_eq!(bumped.changed, members(&[EXTERNAL]), "a version bump marks its package");
     }
 
@@ -157,13 +157,13 @@ mod tests {
         // Tripwire for a version-only comparison: a source swap or a reshaped
         // dependency list rebuilds dependents exactly as a bump does, so it
         // must attribute the same way.
-        let base = lockfile(&external("0.29.0"));
+        let base = lockfile(&external("8.2.0"));
 
         let swapped = base.replace("registry+https://github.com/rust-lang/crates.io-index", "sparse+candidate");
         let moved = diff(&base, &swapped, &BTreeSet::new()).expect("diff a source swap");
         assert_eq!(moved.changed, members(&[EXTERNAL]), "a source move marks its package");
 
-        let reshaped = lockfile(&(external("0.29.0") + "dependencies = [\n \"serde\",\n]\n"));
+        let reshaped = lockfile(&(external("8.2.0") + "dependencies = [\n \"serde\",\n]\n"));
         let moved = diff(&base, &reshaped, &BTreeSet::new()).expect("diff a dependency move");
         assert_eq!(moved.changed, members(&[EXTERNAL]), "a dependency move marks its package");
     }
@@ -175,10 +175,10 @@ mod tests {
         // move widens the single-dep-add candidate back to the whole workspace.
         let member = "aether-mcp";
         let base = lockfile(&format!(
-            "[[package]]\nname = \"{member}\"\nversion = \"0.3.0-alpha\"\ndependencies = [\n \"crossterm\",\n]\n"
+            "[[package]]\nname = \"{member}\"\nversion = \"0.3.0-alpha\"\ndependencies = [\n \"notify\",\n]\n"
         ));
         let added = lockfile(&format!(
-            "[[package]]\nname = \"{member}\"\nversion = \"0.3.0-alpha\"\ndependencies = [\n \"crossterm\",\n \"ratatui\",\n]\n"
+            "[[package]]\nname = \"{member}\"\nversion = \"0.3.0-alpha\"\ndependencies = [\n \"notify\",\n \"serde\",\n]\n"
         ));
 
         let moved = diff(&base, &added, &members(&[member])).expect("diff a member dependency add");
