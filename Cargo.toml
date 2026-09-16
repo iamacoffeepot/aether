@@ -191,6 +191,9 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 # no_std consumers no_std; native consumers re-add `std` on their own
 # declaration.
 sha2 = { version = "0.10", default-features = false }
+# ADR-0220 Bloomery names (issue 6094): refuse a directory entry that is
+# not Unicode NFC. Default features off keeps the kinds crate no_std.
+unicode-normalization = { version = "0.1", default-features = false }
 syn = { version = "2", features = ["full"] }
 tracing = { version = "0.1", default-features = false }
 wasmtime = "44"
