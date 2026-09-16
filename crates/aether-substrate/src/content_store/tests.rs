@@ -250,7 +250,7 @@ fn two_handles(root: &Path) -> (ContentStore<Meta>, ContentStore<Meta>) {
 
 /// Tripwire: a handle resolves an entry a peer handle wrote to the same
 /// root after it opened. `restore` runs once at open, so the index is a
-/// snapshot; if `get` answered from it alone, the mounted bloomery
+/// snapshot; if `get` answered from it alone, the mounted
 /// artifacts capability would reply `NotFound` for every record the
 /// executor reactor's handle filed after boot — bytes that are on disk,
 /// written by the same process moments earlier.
@@ -273,7 +273,7 @@ fn a_peer_handles_upload_resolves_through_an_older_handle() {
 /// Tripwire: an upload of bytes a peer handle already stored dedups onto
 /// the peer's entry instead of rewriting it. Dedup decided against this
 /// handle's index alone would take the `persist_new` branch and overwrite
-/// the sidecar — in bloomery that sidecar is `ArtifactMeta::parents`, so
+/// the sidecar — a caller-supplied `M` a peer wrote, so
 /// a peer's recorded derivation edge would vanish with nothing logged
 /// (the dropped-parents warning cannot fire on a write that looks new).
 #[test]
@@ -352,7 +352,7 @@ fn both_selectors_resolve_a_peer_pointed_name_the_same_way() {
 /// Tripwire: `refresh` is the enumeration-side counterpart of the
 /// miss-path adopt. `entries` / `entry_count` answer from the index with
 /// no disk read of their own, so a projection rebuild over a shared root
-/// (bloomery's `rebuild_study_index`) enumerates only its own handle's
+/// enumerates only its own handle's
 /// writes until it refreshes.
 #[test]
 fn refresh_adopts_peer_written_entries_into_enumeration() {

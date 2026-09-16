@@ -225,7 +225,7 @@ pub struct EchoSay {
 /// This tests module compiles under `cfg(test)`, so the type is stripped;
 /// generated glue that still names it fails compilation. That is the leak
 /// `#[http::router]` used to produce: reply glue was emitted unconditionally
-/// while the method and kind were cfg-gated (the Bloomery no-default-features
+/// while the method and kind were cfg-gated (a no-default-features
 /// chassis could not resolve github-gated `ArchiveRecordsResult` /
 /// `ListArchiveResult`).
 #[cfg(not(test))]

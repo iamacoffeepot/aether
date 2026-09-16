@@ -113,8 +113,8 @@ pub trait Chassis: Sized + 'static {
 /// Derive a chassis's wire-visible RPC engine name from its
 /// [`Chassis::PROFILE`]. The rule is uniform across every chassis —
 /// `"aether-" + PROFILE` (`desktop` → `aether-desktop`, `headless` →
-/// `aether-headless`, `hub` → `aether-hub`, `bloomery` →
-/// `aether-bloomery`) — so this is the single source of truth every
+/// `aether-headless`, `hub` → `aether-hub`) — so this is the single source of
+/// truth every
 /// `PeerKind::Substrate { engine_name, .. }` a chassis builds reads, and
 /// the name is never stated as a second literal beside the profile.
 #[must_use]
@@ -131,9 +131,9 @@ pub fn engine_name<C: Chassis>() -> String {
 /// method because that stratum reaches above `aether-substrate` (`aether-trace`
 /// sits higher), so a substrate-minted builder cannot install it itself.
 ///
-/// A chassis with no shared base (bloomery composes no config sources) uses the
-/// unit no-op impl below — it still routes through [`composed`], so it gets the
-/// framework-minted aborter by construction.
+/// A chassis that composes no config sources uses the unit no-op impl below —
+/// it still routes through [`composed`], so it gets the framework-minted
+/// aborter by construction.
 #[cfg(feature = "wasm")]
 pub trait ComposeBase<C: Chassis> {
     /// Extend the framework-minted builder with this base's stratum, returning
@@ -142,9 +142,9 @@ pub trait ComposeBase<C: Chassis> {
     fn install(self, builder: Builder<C>) -> Builder<C>;
 }
 
-/// The no-op base: installs nothing. A chassis whose `Base` is `()` (bloomery)
-/// still mints its builder through [`composed`], so it inherits the aborter
-/// without a shared config stratum of its own.
+/// The no-op base: installs nothing. A chassis whose `Base` is `()` still mints
+/// its builder through [`composed`], so it inherits the aborter without a
+/// shared config stratum of its own.
 #[cfg(feature = "wasm")]
 impl<C: Chassis> ComposeBase<C> for () {
     fn install(self, builder: Builder<C>) -> Builder<C> {
@@ -213,7 +213,7 @@ pub fn composed<C: BootableChassis>(
 }
 
 /// The boot-ceremony contract shared by every chassis binary that resolves
-/// config and composes a capability chain (desktop, headless, hub, bloomery).
+/// config and composes a capability chain (desktop, headless, hub).
 /// Layered over [`Chassis`] so passive / test chassis (substrate-harness and
 /// the in-crate test chassis) — which never run this ceremony, they are driven
 /// by an embedder — stay unaffected.
@@ -232,7 +232,7 @@ pub trait BootableChassis: Chassis {
     /// The pre-composition base this chassis's builder carries — the shared
     /// stratum [`composed`] installs before the chassis's own [`Self::compose`]
     /// delta runs. Full-stack chassis and the hub use `aether-chassis`'s
-    /// `ChassisBase`; bloomery, which stages no config sources, uses the unit
+    /// `ChassisBase`; a chassis that stages no config sources uses the unit
     /// no-op base. The base crosses crate layers as a value because its stratum
     /// (`TraceDispatchCapability`, `aether-trace`) sits above `aether-substrate`.
     type Base: ComposeBase<Self>;
@@ -283,8 +283,8 @@ pub trait BootableChassis: Chassis {
     /// The residual hand-registered knobs the composition-derived
     /// [`ConfigManifest`] can't own, folded into the known-keys sweep and the
     /// `--print-config` dump beside the manifest metas. Defaults to none —
-    /// chassis with no config path (bloomery) inherit the empty default; the
-    /// full-stack chassis override it with their per-profile residual set.
+    /// chassis with no config path inherit the empty default; the full-stack
+    /// chassis override it with their per-profile residual set.
     #[must_use]
     fn residual_knobs() -> Vec<KnobRecord> {
         Vec::new()
@@ -331,10 +331,10 @@ pub fn config_manifest<C: BootableChassis>() -> Result<ConfigManifest, BootError
 /// These are crate-local: each binary's `build.rs` bakes them, and `env!`
 /// resolves only in the crate whose build script set them (ADR-0155). The
 /// shared prelude therefore takes provenance as a value the binary constructs
-/// with its own `env!`s rather than reading `env!` itself — this is what lets
-/// the bloomery chassis, which does not depend on the `aether-chassis`
-/// aggregate, route through the same prelude flow (ADR-0162): it fills a
-/// `BuildProvenance` from its own crate's `build.rs` and hands it over.
+/// with its own `env!`s rather than reading `env!` itself — this is what lets a
+/// chassis that does not depend on the `aether-chassis` aggregate route through
+/// the same prelude flow (ADR-0162): it fills a `BuildProvenance` from its own
+/// crate's `build.rs` and hands it over.
 #[derive(Debug, Clone)]
 pub struct BuildProvenance {
     /// `git rev-parse --short HEAD`, or `"unknown"` outside a git checkout.
@@ -409,8 +409,8 @@ pub fn config_dump<C: BootableChassis>() -> Result<String, BootError> {
 }
 
 /// The prelude flags a chassis CLI root exposes before boot. Each names an
-/// exit-before-Init discovery mode; a chassis whose CLI lacks one (bloomery has
-/// no `--print-config`) passes `false` for it.
+/// exit-before-Init discovery mode; a chassis whose CLI lacks one passes
+/// `false` for it.
 #[derive(Debug, Clone, Copy)]
 pub struct PreludeFlags {
     /// `--describe` (ADR-0115): print the [`BinaryManifest`] JSON and exit.
