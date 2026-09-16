@@ -86,10 +86,10 @@ mod tests {
 
     fn census_table() -> Table {
         Table::new(vec![
-            symbol("aether_bloomery", "digest"),
-            symbol("aether_bloomery_console", "digest"),
-            symbol("aether_bloomery_git", "digest_hex"),
-            symbol("aether_bloomery_git", "to_hex"),
+            symbol("aether_codec", "digest"),
+            symbol("aether_substrate", "digest"),
+            symbol("aether_component", "digest_hex"),
+            symbol("aether_component", "to_hex"),
             symbol("aether_chassis", "to_hex"),
             symbol("aether_data", "encode_hex"),
             symbol("unrelated", "scratch_dir"),
@@ -106,8 +106,8 @@ mod tests {
         assert!(names.contains(&"digest"), "exact digest helpers: {names:?}");
         assert!(names.contains(&"digest_hex"), "folded neighbor digest_hex: {names:?}");
         assert!(!names.contains(&"scratch_dir"));
-        assert!(found.matches.iter().any(|symbol| symbol.crate_name == "aether_bloomery"));
-        assert!(found.matches.iter().any(|symbol| symbol.crate_name == "aether_bloomery_console"));
+        assert!(found.matches.iter().any(|symbol| symbol.crate_name == "aether_codec"));
+        assert!(found.matches.iter().any(|symbol| symbol.crate_name == "aether_substrate"));
     }
 
     #[test]
@@ -118,7 +118,7 @@ mod tests {
         assert!(names.contains(&"digest_hex"), "{names:?}");
         assert!(names.contains(&"encode_hex"), "{names:?}");
         let crates: Vec<&str> = found.matches.iter().map(|symbol| symbol.crate_name.as_str()).collect();
-        assert!(crates.contains(&"aether_bloomery_git"));
+        assert!(crates.contains(&"aether_component"));
         assert!(crates.contains(&"aether_chassis"));
         assert!(crates.contains(&"aether_data"));
     }

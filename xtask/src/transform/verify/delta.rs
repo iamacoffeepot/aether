@@ -1,13 +1,11 @@
 //! What a re-verify's delta is, and which gates it leaves to an earlier
 //! receipt (ADR-0200, amendment of 2026-09-15).
 //!
-//! The first verify of a member has nothing to carry: it runs the whole
-//! umbrella. A *re*-verify after a Refine or a Reconcile has a receipt over the
-//! tree the lap started from, and the only question that separates the two runs
-//! is what the lap changed. [`classify`] answers it from a git diff, and
-//! [`aether_bloomery::DeltaClass::invalidates`] — the one table, shared with
-//! the coordinator's admission door — turns that answer into the gates that
-//! have to run.
+//! The first verify has nothing to carry: it runs the whole umbrella. A
+//! *re*-verify has a receipt over the tree the earlier run stood on, and the
+//! only question that separates the two runs is what changed between them.
+//! [`classify`] answers it from a git diff, and [`DeltaClass::invalidates`] —
+//! the one table — turns that answer into the gates that have to run.
 //!
 //! Every judgement here errs towards running. An unreadable diff, an
 //! unrecognized hunk header, a binary file, a path outside the narrow inert
@@ -19,9 +17,150 @@ use std::collections::BTreeSet;
 use std::env;
 use std::process::Command;
 
-use aether_bloomery::{
-    DeltaClass, VERIFY_GATES_ENV, VERIFY_PROVED_ENV, VerifyFailure, VerifyFailureSet, invalidated_by,
-};
+use super::failure::{VerifyFailure, VerifyFailureSet};
+
+/// How a caller states a carry to this lane:
+/// `<proved tree>:<receipt>:<gate,gate,…>`, where the gate list is the
+/// identities that *passed* in that receipt.
+///
+/// The environment rather than an argv flag: a key an older lane does not read
+/// costs nothing — it runs the whole umbrella, which is the behaviour this
+/// carry is an optimization over.
+const VERIFY_PROVED_ENV: &str = "AETHER_VERIFY_PROVED";
+
+/// A per-invocation request to skip gates, as a comma-separated identity list
+/// of the gates to *run*.
+///
+/// Honoured only where [`VERIFY_PROVED_ENV`] backs the omission with a green
+/// receipt over a tree the delta cannot have moved for that gate: a selection
+/// that names fewer gates than the receipt backs still runs the rest.
+const VERIFY_GATES_ENV: &str = "AETHER_VERIFY_GATES";
+
+/// The eight umbrella gates a delta class is answerable for.
+///
+/// [`VerifyFailure::Preflight`] and [`VerifyFailure::Containment`] are absent
+/// and must stay absent: neither is a gate the fan-out runs over the tree.
+/// Preflight is the umbrella's own refusal to start, and containment reads
+/// *which* paths a delta touched rather than what changed inside them, so no
+/// class of line edit can excuse it. Carrying either forward would be carrying
+/// a verdict nothing ever gave.
+const DELTA_GATES: [VerifyFailure; 8] = [
+    VerifyFailure::Fmt,
+    VerifyFailure::Clippy,
+    VerifyFailure::Docs,
+    VerifyFailure::Test,
+    VerifyFailure::Dup,
+    VerifyFailure::Deps,
+    VerifyFailure::Suppress,
+    VerifyFailure::Lock,
+];
+
+/// What one changed line — or one changed file — of a delta is.
+///
+/// A delta is classified per changed line for a Rust file and per path for
+/// everything else, and the classes it produced are unioned: a delta that
+/// touched a doc comment and a `let` is [`Self::Code`] and [`Self::DocComment`]
+/// together, which invalidates the union of both rows.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+pub(super) enum DeltaClass {
+    /// Rust tokens changed — or the line could not be classified at all.
+    ///
+    /// Every gate, because a changed expression reaches every one of them: it
+    /// reformats, it lints, it documents, it runs, it duplicates, it uses a
+    /// dependency, it can carry a suppression, and it can move the resolved
+    /// manifest graph through a `#[path]` or a feature-gated module.
+    Code,
+    /// Only `///` or `//!` lines changed.
+    ///
+    /// Rustdoc reads them, rustfmt reformats them, jscpd tokenizes them, and
+    /// the suppression scanner reads the request marker off any comment
+    /// (`scripts/check-suppressions.py`'s `REQUEST_RE` matches `//`, which
+    /// `///` opens with). Clippy and the test suite cannot see a doc line:
+    /// rustc discards it before the lint pass and no test observes it.
+    DocComment,
+    /// Only ordinary `//` lines, blank lines, or suppression attributes
+    /// (`#[allow(…)]`, `#[expect(…)]`, `#[ignore]`) changed.
+    ///
+    /// Clippy is in this row precisely because an `#[allow]` is clippy's
+    /// business — the attribute is the thing that silences the lint. Rustdoc
+    /// cannot see an ordinary comment and the suite cannot observe one, so
+    /// docs and test stay out.
+    Comment,
+    /// A `Cargo.toml` changed.
+    ///
+    /// The three compiling gates re-resolve their graph from it, `verify.deps`
+    /// scans it for unused dependencies, and `verify.lock` is the gate that
+    /// exists for a manifest edit landing without its lock regeneration.
+    /// `verify.suppress` scans `Cargo.toml` too (the scanner dispatches on the
+    /// file's name), and `cargo fmt --all` resolves workspace membership out of
+    /// the manifests.
+    Manifest,
+    /// `Cargo.lock` changed.
+    ///
+    /// `verify.lock` reads it under `--locked` and `verify.deps` resolves
+    /// against it. Nothing else opens it: a lock edit alone changes no source
+    /// the compiling gates or the scanners read.
+    Lockfile,
+    /// A path no gate in the umbrella opens: `docs/**` and the top-level
+    /// `*.md`.
+    ///
+    /// Stated as a narrow allowlist rather than as "non-Rust", because the
+    /// non-Rust files that *are* read are the ones a repair is most likely to
+    /// reach for: `rustfmt.toml` decides every `verify.fmt` verdict,
+    /// `clippy.toml` every `verify.clippy` verdict, `rust-toolchain.toml` all
+    /// of them, and `scripts/check-suppressions.py` is the suppression gate
+    /// itself. Every one of those falls to [`Self::Code`] instead.
+    Inert,
+}
+
+impl DeltaClass {
+    /// The gates a delta of this class can affect — the table.
+    ///
+    /// The single source of truth. A gate whose scanner reads something a row
+    /// does not name is a wrong row, never a reason for that gate to opt out of
+    /// the selection.
+    #[must_use]
+    pub(super) fn invalidates(self) -> VerifyFailureSet {
+        let gates: &[VerifyFailure] = match self {
+            Self::Code => &DELTA_GATES,
+            Self::DocComment => &[VerifyFailure::Docs, VerifyFailure::Fmt, VerifyFailure::Dup, VerifyFailure::Suppress],
+            Self::Comment => &[VerifyFailure::Fmt, VerifyFailure::Clippy, VerifyFailure::Dup, VerifyFailure::Suppress],
+            Self::Manifest => &[
+                VerifyFailure::Deps,
+                VerifyFailure::Lock,
+                VerifyFailure::Clippy,
+                VerifyFailure::Docs,
+                VerifyFailure::Test,
+                VerifyFailure::Suppress,
+                VerifyFailure::Fmt,
+            ],
+            Self::Lockfile => &[VerifyFailure::Lock, VerifyFailure::Deps],
+            Self::Inert => &[],
+        };
+        gates.iter().copied().collect()
+    }
+
+    /// The canonical name this class records itself under.
+    #[must_use]
+    pub(super) const fn as_str(self) -> &'static str {
+        match self {
+            Self::Code => "code",
+            Self::DocComment => "doc_comment",
+            Self::Comment => "comment",
+            Self::Manifest => "manifest",
+            Self::Lockfile => "lockfile",
+            Self::Inert => "inert",
+        }
+    }
+}
+
+/// The gates a delta made of `classes` can affect.
+///
+/// An empty `classes` is the empty set — a delta that changed nothing
+/// invalidates nothing.
+fn invalidated_by(classes: impl IntoIterator<Item = DeltaClass>) -> VerifyFailureSet {
+    classes.into_iter().fold(VerifyFailureSet::EMPTY, |set, class| set.union(class.invalidates()))
+}
 
 /// The prefix a diff body line carries when it is content rather than a header.
 ///
@@ -370,9 +509,7 @@ fn select(run_list: &[&'static str], proved: &Proved, named: &[&str], delta: &De
 
 #[cfg(test)]
 mod tests {
-    use aether_bloomery::{DeltaClass, VerifyFailure};
-
-    use super::{Delta, Proved, classify, select, split};
+    use super::{DELTA_GATES, Delta, DeltaClass, Proved, VerifyFailure, VerifyFailureSet, classify, select, split};
 
     /// The eight-gate fold run list, in CI-parity order.
     const FOLD: [&str; 8] = [
@@ -420,7 +557,7 @@ mod tests {
     /// private intra-doc link.
     #[test]
     fn a_repaired_doc_line_is_a_doc_comment_delta() {
-        let diff = "diff --git a/crates/aether-bloomery/src/reduce/attempt.rs b/crates/aether-bloomery/src/reduce/attempt.rs\n\
+        let diff = "diff --git a/crates/aether-substrate/src/reduce/attempt.rs b/crates/aether-substrate/src/reduce/attempt.rs\n\
                     @@ -254,1 +254,1 @@\n\
                     -/// See [`reduce_attempt_completed`] for the cursor rules.\n\
                     +/// See `reduce_attempt_completed` for the cursor rules.\n";
@@ -691,5 +828,51 @@ mod tests {
 
         assert_eq!(opaque.classes(), vec![DeltaClass::Code]);
         assert!(opaque.invalidates().contains(VerifyFailure::Test));
+    }
+
+    /// Tripwire: the table itself. Each row is the answer to "what can a gate
+    /// of this shape see", derived by reading every scanner's argv and source in
+    /// `xtask/src/transform/verify/mod.rs` and `scripts/check-suppressions.py`.
+    /// A row that quietly loses a gate is a gate that stops running on a delta
+    /// that changes its verdict, which is the false-green direction and
+    /// invisible in any other test.
+    #[test]
+    fn the_table_states_what_each_class_reaches() {
+        let set = |gates: &[VerifyFailure]| gates.iter().copied().collect::<VerifyFailureSet>();
+
+        assert_eq!(DeltaClass::Code.invalidates(), set(&DELTA_GATES));
+        assert_eq!(
+            DeltaClass::DocComment.invalidates(),
+            set(&[VerifyFailure::Fmt, VerifyFailure::Docs, VerifyFailure::Dup, VerifyFailure::Suppress]),
+        );
+        assert_eq!(
+            DeltaClass::Comment.invalidates(),
+            set(&[VerifyFailure::Fmt, VerifyFailure::Clippy, VerifyFailure::Dup, VerifyFailure::Suppress]),
+        );
+        assert_eq!(
+            DeltaClass::Manifest.invalidates(),
+            set(&[
+                VerifyFailure::Fmt,
+                VerifyFailure::Clippy,
+                VerifyFailure::Docs,
+                VerifyFailure::Test,
+                VerifyFailure::Deps,
+                VerifyFailure::Suppress,
+                VerifyFailure::Lock,
+            ]),
+        );
+        assert_eq!(DeltaClass::Lockfile.invalidates(), set(&[VerifyFailure::Deps, VerifyFailure::Lock]));
+        assert!(DeltaClass::Inert.invalidates().is_empty());
+    }
+
+    /// Tripwire: preflight and containment are not gates a delta can excuse. An
+    /// identity appended to `VerifyFailure::ALL` that silently joined
+    /// `DELTA_GATES` would become carryable on an inert delta without anyone
+    /// deciding it should be.
+    #[test]
+    fn the_umbrella_only_carries_gates_that_read_the_tree() {
+        assert!(!DELTA_GATES.contains(&VerifyFailure::Preflight));
+        assert!(!DELTA_GATES.contains(&VerifyFailure::Containment));
+        assert_eq!(DELTA_GATES.len(), 8);
     }
 }

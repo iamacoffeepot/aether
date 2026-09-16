@@ -6,10 +6,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use aether_bloomery::Digest;
-use aether_bloomery::digest::{ContentAddressed, digest_of};
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest as _, Sha256};
 
 use super::nextest::{captured_output_header, status_line_test};
 use super::{
@@ -29,7 +28,9 @@ pub(super) enum ObservedResult {
 
 #[derive(Serialize)]
 struct InvocationObservation {
-    invocation: Digest,
+    /// The content address of this observation's identity, as 64 lowercase hex
+    /// characters.
+    invocation: String,
     /// None is this order's candidate; Some is an explicitly pinned baseline.
     at: Option<String>,
     /// The one test a same-input replay was about, or `None` for an invocation
@@ -67,8 +68,20 @@ struct InvocationIdentity<'a> {
     at: Option<&'a str>,
 }
 
-impl ContentAddressed for InvocationIdentity<'_> {
-    const DOMAIN: &'static str = "aether.bloomery.verify_invocation_observation.v1";
+/// The domain this identity is hashed under, so an address minted here can
+/// never collide with one minted for another kind of record.
+const INVOCATION_DOMAIN: &str = "aether.verify_invocation_observation.v1";
+
+impl InvocationIdentity<'_> {
+    /// The content address of this identity: sha256 over the domain and the
+    /// identity's canonical JSON.
+    fn address(&self) -> String {
+        let mut hasher = Sha256::new();
+        hasher.update(INVOCATION_DOMAIN.as_bytes());
+        hasher.update([0]);
+        hasher.update(serde_json::to_vec(self).expect("an invocation identity serializes").as_slice());
+        format!("{:x}", hasher.finalize())
+    }
 }
 
 /// Wrap actual spawns rather than deriving a second report from a terminal
@@ -100,13 +113,14 @@ impl<'a> ObservingRunner<'a> {
         outcomes: BTreeMap<String, ObservedResult>,
     ) -> Result<()> {
         self.observations.push(InvocationObservation {
-            invocation: digest_of(&InvocationIdentity {
+            invocation: InvocationIdentity {
                 nonce: self.nonce,
                 gate: self.gate,
                 ordinal: self.observations.len(),
                 test,
                 at,
-            }),
+            }
+            .address(),
             at: at.map(ToOwned::to_owned),
             test: test.map(ToOwned::to_owned),
             outcomes,
@@ -300,14 +314,14 @@ PASS [0.1s] package::suite steady\n",
         let large = test_observations(
             "\
 Summary [1s] 6558 tests run: 6557 passed, 1 failed\n\
-FAIL [0.2s] (1269/6558) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
+FAIL [0.2s] (1269/6558) aether-mcp shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
         );
         let small = test_observations(
             "\
 Summary [1s] 252 tests run: 251 passed, 1 failed\n\
-FAIL [0.2s] (228/252) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
+FAIL [0.2s] (228/252) aether-mcp shell::tests::the_footer_trail_names_every_frame_on_the_stack\n",
         );
-        let key = "aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack";
+        let key = "aether-mcp shell::tests::the_footer_trail_names_every_frame_on_the_stack";
 
         assert_eq!(large.get(key), Some(&ObservedResult::Failed));
         assert_eq!(small.get(key), Some(&ObservedResult::Failed));
@@ -323,13 +337,13 @@ FAIL [0.2s] (228/252) aether-bloomery-console shell::tests::the_footer_trail_nam
         let observed = test_observations(
             "\
         PASS [   0.004s] (   1/2) aether-data::wire round_trips_a_vec3\n\
-        PASS [   0.006s] (   2/2) aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack\n\
+        PASS [   0.006s] (   2/2) aether-mcp shell::tests::the_footer_trail_names_every_frame_on_the_stack\n\
      Summary [   0.010s] 2 tests run: 2 passed, 0 skipped\n",
         );
 
         assert_eq!(observed.get("aether-data::wire round_trips_a_vec3"), Some(&ObservedResult::Passed));
         assert_eq!(
-            observed.get("aether-bloomery-console shell::tests::the_footer_trail_names_every_frame_on_the_stack"),
+            observed.get("aether-mcp shell::tests::the_footer_trail_names_every_frame_on_the_stack"),
             Some(&ObservedResult::Passed),
         );
         assert_eq!(observed.len(), 2);

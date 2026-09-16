@@ -21,8 +21,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 
-use aether_bloomery_git::command;
-
+use crate::git as command;
 use crate::symbols::extract::extract_parsed;
 use crate::symbols::table::{Signature, Symbol, SymbolKind, Table};
 use crate::symbols::walk::build_workspace_table;
@@ -76,17 +75,17 @@ struct RuleHit {
 }
 
 /// A textual rule over the diff's added lines, for a primitive clippy's
-/// `disallowed-methods` cannot express — it matches method *paths*, and both of
-/// these turn on the argument or on the shape of the loop.
+/// `disallowed-methods` cannot express — it matches method *paths*, and this
+/// one turns on the argument rather than on the path.
 struct SeedRule {
     /// The rule's name, as the flag reports it.
     name: &'static str,
     /// The substring an added line must carry to be a candidate.
     needle: &'static str,
     /// A second substring the hunk's added lines must also carry, for a rule
-    /// that needs two signals before it says anything. Matched across the
-    /// hunk rather than a single line: the nibble loop this rule exists to
-    /// catch writes the shift and the mask on adjacent lines.
+    /// that needs two signals before it says anything. Matched across the hunk
+    /// rather than a single line, so a shape written across adjacent lines
+    /// still counts.
     also: Option<&'static str>,
     /// Paths that own this primitive and are therefore exempt. A directory
     /// prefix matches its children; a file matches only itself.
@@ -101,25 +100,13 @@ struct SeedRule {
 /// The ratchet ADR-0193's sibling describes: a re-derivation class confirmed by
 /// review graduates into a row here. Discovery is semantic; retention is
 /// mechanical.
-const SEED_RULES: [SeedRule; 2] = [
-    SeedRule {
-        name: "git-spawn",
-        needle: "Command::new(\"git\")",
-        also: None,
-        owners: &[
-            "crates/aether-bloomery-git/src/command.rs",
-            "crates/aether-chassis-bloomery/src/bloomery/executor/local/process_runner.rs",
-        ],
-        reach_for: "aether_bloomery_git::command::run / run_ok, which owns the spawn, the argv, and the error shape",
-    },
-    SeedRule {
-        name: "hand-rolled-hex",
-        needle: "0x0f",
-        also: Some(">> 4"),
-        owners: &["crates/aether-bloomery/src/digest.rs", "xtask/src/bloom/hex.rs"],
-        reach_for: "Digest::to_hex / digest_from_hex, or xtask's bloom::hex, which own the nibble loop",
-    },
-];
+const SEED_RULES: [SeedRule; 1] = [SeedRule {
+    name: "git-spawn",
+    needle: "Command::new(\"git\")",
+    also: None,
+    owners: &["xtask/src/git.rs", "xtask/src/transform/verify/delta.rs"],
+    reach_for: "crate::git::run / run_ok, which owns the spawn, the argv, and the error shape",
+}];
 
 /// Run the symbol pass over the candidate's diff and render what it found.
 ///
@@ -344,9 +331,9 @@ fn normalize(name: &str) -> String {
 /// The seed rules the candidate's added lines trip.
 ///
 /// Read off the diff rather than off the tree, because the question is what
-/// *this candidate* wrote: an owner module's existing nibble loop is the
-/// primitive, not a re-derivation of it. Needle and `also` match across one
-/// hunk's added lines so a loop split onto adjacent lines still counts.
+/// *this change* wrote: an owner module's existing spawn is the primitive, not
+/// a re-derivation of it. Needle and `also` match across one hunk's added lines
+/// so a shape split onto adjacent lines still counts.
 fn rule_hits(root: &Path, base: &str) -> Vec<RuleHit> {
     let Ok(diff) = command::run_ok(root, &["diff", "--unified=0", "--no-ext-diff", base, "--", "*.rs"]) else {
         return Vec::new();
@@ -521,12 +508,11 @@ mod tests {
     use std::slice::from_ref;
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use aether_bloomery_git::command;
-
     use super::{
         Collision, Dossier, RuleHit, classify, crate_relative, introduced_symbols, is_test_path, neighbours_of,
         normalize, normalized_index, owned_by, related, render, rule_hits,
     };
+    use crate::git as command;
     use crate::symbols::table::{Signature, Symbol, SymbolKind, Table};
 
     fn symbol(name: &str, path: &str) -> Symbol {
@@ -556,7 +542,7 @@ mod tests {
         let flagged = render(
             &[Collision {
                 introduced: symbol("to_hex", "crates/demo/src/render.rs"),
-                sites: vec![symbol("to_hex", "crates/aether-bloomery/src/digest.rs")],
+                sites: vec![symbol("to_hex", "crates/aether-codec/src/digest.rs")],
                 exact: true,
             }],
             &[],
@@ -564,7 +550,7 @@ mod tests {
         )
         .expect("a collision is flagged");
 
-        assert!(flagged.contains("crates/aether-bloomery/src/digest.rs"), "{flagged}");
+        assert!(flagged.contains("crates/aether-codec/src/digest.rs"), "{flagged}");
         assert!(flagged.contains("(u8) -> String"), "{flagged}");
         assert!(flagged.contains("renders a digest"), "{flagged}");
         assert!(flagged.contains("already exists under this exact name"), "{flagged}");
@@ -576,7 +562,7 @@ mod tests {
         // Execution of classify, not of render: a new `fn digest` against the
         // census fixture. A pass that only pretty-printed a hand-built Collision
         // would still go green if the collide step never ran.
-        let existing = placed("aether_bloomery", "aether_bloomery", "digest", "crates/aether-bloomery/src/digest.rs");
+        let existing = placed("aether_codec", "aether_codec", "digest", "crates/aether-codec/src/digest.rs");
         let introduced = symbol("digest", "crates/demo/src/lib.rs");
         let table = Table::new(vec![existing, introduced.clone()]);
         let (collisions, _) = classify(&[introduced], &normalized_index(&table));
@@ -584,7 +570,7 @@ mod tests {
         assert_eq!(collisions.len(), 1, "the census name collides");
         assert!(collisions[0].exact);
         let flagged = render(&collisions, &[], &[]).expect("a collision is flagged");
-        assert!(flagged.contains("crates/aether-bloomery/src/digest.rs"), "{flagged}");
+        assert!(flagged.contains("crates/aether-codec/src/digest.rs"), "{flagged}");
         assert!(flagged.contains("(u8) -> String"), "{flagged}");
         assert!(flagged.contains("renders a digest"), "{flagged}");
     }
@@ -595,7 +581,7 @@ mod tests {
         // not a flag: rendering it alone would put every new helper in front of
         // a review seat and train it to skip the channel.
         let weave = symbol("weave_the_lattice", "crates/demo/src/lib.rs");
-        let table = Table::new(vec![symbol("digest", "crates/aether-bloomery/src/digest.rs"), weave.clone()]);
+        let table = Table::new(vec![symbol("digest", "crates/aether-codec/src/digest.rs"), weave.clone()]);
         let (collisions, dossiers) = classify(from_ref(&weave), &normalized_index(&table));
         assert!(collisions.is_empty(), "a unique name does not collide");
         assert!(dossiers.is_empty(), "and has no related neighbour");
@@ -618,13 +604,13 @@ mod tests {
                 rule: "git-spawn",
                 path: "crates/demo/src/lib.rs".to_owned(),
                 line: "let out = Command::new(\"git\").arg(\"status\");".to_owned(),
-                reach_for: "aether_bloomery_git::command::run",
+                reach_for: "crate::git::run",
             }],
         )
         .expect("a rule hit is flagged");
 
         assert!(flagged.contains("git-spawn"), "{flagged}");
-        assert!(flagged.contains("aether_bloomery_git::command::run"), "{flagged}");
+        assert!(flagged.contains("crate::git::run"), "{flagged}");
     }
 
     #[test]
@@ -643,7 +629,7 @@ mod tests {
         // `hexdigestof`). The nearer name is `hex_digest_of`; taking the first
         // related row would attach the wrong neighbour.
         let introduced = symbol("hex_digest", "crates/demo/src/lib.rs");
-        let farther = placed("aether_bloomery", "aether_bloomery", "digest", "crates/aether-bloomery/src/digest.rs");
+        let farther = placed("aether_codec", "aether_codec", "digest", "crates/aether-codec/src/digest.rs");
         let closer = placed("other", "other", "hex_digest_of", "crates/other/src/lib.rs");
         let table = Table::new(vec![farther, closer, introduced.clone()]);
         let neighbours = neighbours_of(&introduced, &normalized_index(&table));
@@ -663,7 +649,7 @@ mod tests {
         // Tripwire: identity comparison keys on module, and module is derived
         // from the crate-relative path. Feeding the extractor a workspace path
         // would make every existing symbol look newly introduced.
-        assert_eq!(crate_relative("crates/aether-bloomery/src/digest.rs"), "src/digest.rs");
+        assert_eq!(crate_relative("crates/aether-codec/src/digest.rs"), "src/digest.rs");
         assert_eq!(crate_relative("xtask/src/transform/verify/symbols.rs"), "src/transform/verify/symbols.rs");
         assert_eq!(crate_relative("crates/demo/tests/a_scenario.rs"), "tests/a_scenario.rs");
     }
@@ -673,11 +659,11 @@ mod tests {
         // A directory prefix matches its children; a file matches only itself.
         // `hex.rs` is not a child of `hex/`, which is why the seed-rule owner
         // is the file after the flatten.
-        assert!(owned_by("xtask/src/bloom/hex.rs", &["xtask/src/bloom/hex.rs"]));
+        assert!(owned_by("xtask/src/git.rs", &["xtask/src/git.rs"]));
         assert!(owned_by("crates/demo/src/hex/mod.rs", &["crates/demo/src/hex"]));
         assert!(!owned_by("crates/demo/src/hex.rs", &["crates/demo/src/hex"]));
-        assert!(owned_by("crates/aether-bloomery/src/digest.rs", &["crates/aether-bloomery/src/digest.rs"]));
-        assert!(!owned_by("crates/demo/src/lib.rs", &["xtask/src/bloom/hex.rs"]));
+        assert!(owned_by("crates/aether-codec/src/digest.rs", &["crates/aether-codec/src/digest.rs"]));
+        assert!(!owned_by("crates/demo/src/lib.rs", &["xtask/src/git.rs"]));
     }
 
     #[test]
@@ -696,25 +682,14 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(root.join("crates/demo/src")).expect("src");
         command::run_ok(&root, &["init", "-b", "main"]).expect("git init");
-        command::run_ok(&root, &["config", "user.name", "bloomery"]).expect("user.name");
-        command::run_ok(&root, &["config", "user.email", "bloomery@aether.invalid"]).expect("user.email");
+        command::run_ok(&root, &["config", "user.name", "xtask"]).expect("user.name");
+        command::run_ok(&root, &["config", "user.email", "xtask@aether.invalid"]).expect("user.email");
         root
     }
 
     /// Built so this test file does not itself contain the seed-rule needles.
     fn git_spawn_source() -> String {
         format!("fn live() {{ let _ = Command::new(\"{}\"); }}\n", "git")
-    }
-
-    /// The codec's split-line nibble loop, assembled so this test file does not
-    /// itself contain the seed-rule's shift and mask (which would flag the test
-    /// as the hit).
-    fn nibble_loop_source() -> String {
-        format!(
-            "fn encode(byte: u8) -> u8 {{\n    let hi = byte {shift} 4;\n    byte & 0x{mask:02x}\n}}\n",
-            shift = ">>",
-            mask = 0xf
-        )
     }
 
     fn commit_file(root: &Path, rel: &str, source: &str, message: &str) {
@@ -763,29 +738,14 @@ mod tests {
     }
 
     #[test]
-    fn a_split_nibble_loop_outside_the_codec_is_flagged() {
-        // The codec writes the shift and the mask on adjacent lines. A rule
-        // that required both on one line would miss the shape it exists to
-        // catch.
-        let root = scratch_repo();
-        let path = "crates/demo/src/lib.rs";
-        commit_file(&root, path, "fn live() {}\n", "base");
-        fs::write(root.join(path), nibble_loop_source()).expect("candidate");
-
-        let hits = rule_hits(&root, "HEAD");
-        assert!(hits.iter().any(|hit| hit.rule == "hand-rolled-hex" && hit.path == path), "{hits:?}");
-        let _ = fs::remove_dir_all(&root);
-    }
-
-    #[test]
     fn an_owner_module_is_not_flagged_for_its_own_primitive() {
         let root = scratch_repo();
-        let path = "xtask/src/bloom/hex.rs";
+        let path = "xtask/src/git.rs";
         commit_file(&root, path, "fn live() {}\n", "base");
-        fs::write(root.join(path), nibble_loop_source()).expect("candidate");
+        fs::write(root.join(path), git_spawn_source()).expect("candidate");
 
         let hits = rule_hits(&root, "HEAD");
-        assert!(hits.is_empty(), "the hex module owns the wrapper, not a re-derivation: {hits:?}");
+        assert!(hits.is_empty(), "the git module owns the spawn, not a re-derivation: {hits:?}");
         let _ = fs::remove_dir_all(&root);
     }
 }

@@ -173,7 +173,7 @@ mod tests {
         // Tripwire for the case the narrowing exists for: adding a dependency
         // rewrites the member's lock entry, and treating that text as a member
         // move widens the single-dep-add candidate back to the whole workspace.
-        let member = "aether-bloomery-console";
+        let member = "aether-mcp";
         let base = lockfile(&format!(
             "[[package]]\nname = \"{member}\"\nversion = \"0.3.0-alpha\"\ndependencies = [\n \"crossterm\",\n]\n"
         ));

@@ -1,142 +1,44 @@
-//! `cargo xtask transform` — ADR-0149 §Execution's portable execution
-//! unit: a typed `command` id maps to the exact invocation the lane runs,
-//! executes it, and writes nonce-tagged evidence bytes a broker can
-//! validate. Two lanes share this entrypoint:
+//! `cargo xtask transform` — a typed `command` id maps to the exact
+//! invocation the gate runs, executes it, and writes nonce-tagged evidence
+//! bytes a reader can validate.
 //!
-//! - The **mechanical verify lane** (`verify.fmt`, `verify.clippy`,
-//!   `verify.docs`, `verify.test`, `verify.dup`, `verify.deps`, and
-//!   `verify.suppress`, #3501) — zero-secret invocations byte-for-byte with CI.
-//!   The `verify.check` umbrella runs all eight without short-circuiting, and
-//!   `verify.member` runs the seven a per-member position answers for.
-//! - The **model-driven construct lane** (`construct.implement`, #3511) —
-//!   runs headless Claude at the resolved model + reasoning effort against the
-//!   checked-out **subject** tree, and writes the nonce-tagged **result record**
-//!   (cost / tokens / turns) derived in-repo from the run transcript (#3572; the
-//!   lane no longer shells out to `scripts/agent-usage-record.mjs`, which #3565
-//!   deletes). The lane assembles its prompt from the authorized instruction
-//!   bundle the host handed it (ADR-0214), never from files in the checkout.
-//!   Unlike the verify lane it needs a credential, so it runs **worker-side**
-//!   (BYO); the coordinator never sees it.
-//! - The **bloom-level reader** (`retrospect.read`, ADR-0216) — reads what a
-//!   bloom landed and stamps `retrospect_findings` as untrusted claims. It
-//!   never writes to the tree.
+//! The mechanical verify lane (`verify.fmt`, `verify.clippy`, `verify.docs`,
+//! `verify.test`, `verify.dup`, `verify.deps`, `verify.lock`, and
+//! `verify.suppress`) is zero-secret invocations byte-for-byte with CI. The
+//! `verify.check` umbrella runs the whole set without short-circuiting, and
+//! `verify.member` runs the set a closure-narrowed position answers for.
 
-mod budget;
-mod claude;
-pub mod construct;
-pub mod conventions;
-mod fixers;
-mod grok;
-#[cfg(test)]
-mod harness_stub;
-mod heartbeat;
-mod instructions;
-mod lane;
-mod lint_check;
-mod messages;
-mod muse;
 mod peak_memory;
-pub mod retrospect;
-pub mod review;
-mod review_mcp;
-mod review_reports;
 mod sccache;
-pub mod scope;
-mod scratch;
 mod verify;
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
-use aether_bloomery::{Harness, SCOPE_FILL_COMMAND, VerifyFailureSet, is_model_lane};
 use anyhow::{Result, bail};
 use clap::Args;
 use serde::Serialize;
 use serde::ser::{SerializeStruct, Serializer};
 
-use crate::cargo::write_json_pretty;
-use crate::transform::construct::CONSTRUCT_IMPLEMENT;
-use crate::transform::lane::Resumed;
 use crate::transform::peak_memory::PeakMemory;
-use crate::transform::retrospect::RETROSPECT_READ;
-use crate::transform::review::REVIEW_CRITIC;
-use crate::transform::review_reports::REVIEW_REPORT;
 use crate::transform::sccache::{CompilerCache, Counters};
-use crate::transform::scratch::Scratch;
-use crate::transform::verify::{Carried, Excused, Position, SuppressionRequest};
+use crate::transform::verify::{Carried, Excused, Position, SuppressionRequest, VerifyFailureSet};
 
 #[derive(Args, Clone)]
 pub struct TransformArgs {
-    /// Typed command id — a `verify.*` mechanical id, `construct.implement`,
-    /// `review.critic`, `scope.fill`, or `retrospect.read`.
+    /// Typed command id — a `verify.*` mechanical id.
     command: String,
     /// Directory evidence bytes are written to (created if missing).
     #[arg(long)]
     out: PathBuf,
-    /// Idempotency nonce the broker matches against the work order,
+    /// Idempotency nonce a reader matches against the run it asked for,
     /// stamped into `evidence.json`.
     #[arg(long)]
     nonce: Option<String>,
-    /// The git commit this attempt's worker checked out — the sealed subject the
-    /// `construct.implement` lane builds against (#3572). Threaded end-to-end from
-    /// the executor's `subject` dispatch input; named in the assembled prompt so
-    /// the transcript records which tree the work ran on. Ignored by the verify
-    /// lane.
-    #[arg(long)]
-    subject: Option<String>,
-    /// The commit the reviewed candidate's diff is taken against (#4723) — the
-    /// `review.critic` lane's diff source, threaded from the work order's
-    /// `diff_base`. Absent names the working-tree contract every member lane
-    /// runs under; present names the committed range `<diff-base>..HEAD` an
-    /// aggregate review judges. `retrospect.read` uses it as the sealed base of
-    /// the landed range. Ignored by every other lane.
+    /// The commit the judged diff is taken against (#4723). Absent names the
+    /// working-tree contract a local run takes; present names the committed
+    /// range `<diff-base>..HEAD` the symbol pass reads.
     #[arg(long)]
     diff_base: Option<String>,
-    /// The bloom the `retrospect.read` lane is reading (ADR-0216) — a
-    /// `## Bloom` context slot, never interpolated into the instruction text.
-    /// Ignored by every other lane.
-    #[arg(long)]
-    bloom: Option<String>,
-    /// The landing-receipt digest the `retrospect.read` lane binds its findings
-    /// to (ADR-0216) — a `## Receipt digest` context slot. Ignored by every
-    /// other lane.
-    #[arg(long)]
-    receipt: Option<String>,
-    /// Which agent CLI the model lanes fork — the harness the coordinator
-    /// resolved from the stage's sealed `AgentProfile` (#4578). Ignored by the
-    /// verify lane, which runs a compiler. Absent when the coordinator resolved
-    /// none, which falls back to the lane's default harness.
-    #[arg(long)]
-    harness: Option<String>,
-    /// The model the `construct.implement` lane runs its harness under —
-    /// the effective model the coordinator resolved from the sealed
-    /// scope-revision (#3511). Ignored by the verify lane.
-    #[arg(long)]
-    model: Option<String>,
-    /// The reasoning-effort tier the `construct.implement` lane runs at (the
-    /// resolved effort, #3511). Ignored by the verify lane.
-    #[arg(long)]
-    effort: Option<String>,
-    /// The advisory, human-readable work-order description the model lanes name
-    /// in the prompt's `## Task` section (#3595) — the operator-supplied text
-    /// the coordinator persisted at seal and the executor threaded onto the
-    /// dispatch. Absent when none was persisted (a subject-only prompt);
-    /// ignored by the verify lane. `retrospect.read` carries none: its subject
-    /// is the landed range, named in context sections rather than a task.
-    #[arg(long)]
-    task: Option<String>,
-    /// The harness session a retry lap resumes, in whatever the resolved
-    /// harness calls it — a Claude or Grok session id (`--resume`), or a Muse
-    /// session uuid (`--session-id`). Absent launches a fresh session; the Muse
-    /// arm mints its own uuid in that case, because Muse addresses a new and a
-    /// continued session through the same flag. Ignored by the verify lane.
-    #[arg(long)]
-    resume: Option<String>,
-    /// The construct checkpoint this dispatch resumes from (#4994). Named in
-    /// the assembled prompt together with its trust posture; absent on a cold
-    /// start from the sealed (or spliced) base. Ignored by every lane except
-    /// `construct.implement`.
-    #[arg(long)]
-    seeded: Option<String>,
     /// Packages `verify.test` restricts the suite to — CI's affected
     /// selection (#3611, #4883). Each becomes a `-p` on the canonical nextest
     /// argv. Refused on every other command: applying it to `verify.clippy`
@@ -594,25 +496,6 @@ fn build_evidence(
 pub fn run(args: &TransformArgs) -> Result<()> {
     reject_test_schedule(args)?;
     reject_gate_selection(args)?;
-    if args.command == REVIEW_REPORT {
-        return review_mcp::serve(&args.out);
-    }
-    if is_model_lane(&args.command) {
-        let bundle = instructions::load()?;
-        if args.command == CONSTRUCT_IMPLEMENT {
-            return construct::run_construct(args, &bundle);
-        }
-        if args.command == REVIEW_CRITIC {
-            return review::run_review(args, &bundle);
-        }
-        if args.command == SCOPE_FILL_COMMAND {
-            return scope::run_scope(args, &bundle);
-        }
-        if args.command == RETROSPECT_READ {
-            return retrospect::run_retrospect(args, &bundle);
-        }
-        bail!("{} is a model lane this transform does not implement", args.command);
-    }
     if let Some(position) = Position::of(&args.command) {
         return verify::run_verify_check(args, position);
     }
@@ -669,112 +552,12 @@ fn reject_gate_selection(args: &TransformArgs) -> Result<()> {
     bail!("{command} does not take --gate; a gate selection narrows an umbrella's fan-out")
 }
 
-/// Serialize `evidence` to `<out>/evidence.json` — the one write both model
-/// lanes end on.
-fn write_evidence_json(out: &Path, evidence: &serde_json::Value) -> Result<()> {
-    write_json_pretty(&out.join("evidence.json"), evidence)
-}
-
-/// The lane default when the coordinator resolved no harness — the operator's
-/// ambient CLI, matching how an absent `--model` / `--effort` falls back to the
-/// child's own defaults (#3592) rather than refusing the run.
-const DEFAULT_HARNESS: Harness = Harness::Claude;
-
-/// The harness a model lane forks for this run: the resolved `--harness` when
-/// the coordinator named one, [`DEFAULT_HARNESS`] when it did not.
-///
-/// An unrecognized spelling is a hard error rather than a fallback. A dispatch
-/// that names a harness this binary cannot parse is a version skew between the
-/// coordinator and the worker's checkout, and silently running the default
-/// would produce evidence attributed to a harness that never ran — the exact
-/// claim the sealed profile digest is supposed to make verifiable.
-pub fn resolve_harness(harness: Option<&str>) -> Result<Harness> {
-    let Some(name) = harness else {
-        return Ok(DEFAULT_HARNESS);
-    };
-    Harness::from_name(name).map_or_else(|| bail!("unrecognized harness `{name}`"), Ok)
-}
-
-/// Run one model lane's `prompt` under the resolved harness and return the
-/// derived result record — the seam both model lanes (`construct.implement` and
-/// `review.critic`) go through, so a harness is chosen once rather than per
-/// lane.
-///
-/// Every arm returns the same record envelope, which is what lets the lanes
-/// stay harness-agnostic: `construct.rs` reads `result_record.is_error` and
-/// the review lane reads either the Claude findings file or, on harnesses
-/// without tool injection, `result.result` for the critic's `VERDICT:` text.
-///
-/// The run's [`Scratch`] directory is prepared here and dropped when the lane
-/// returns, so every arm hands its child the same place to build throwaway
-/// target directories and every run reaps its own. The host's [`CompilerCache`]
-/// is resolved beside it and rides the same child environment, so a run that
-/// builds where an earlier one did draws on what that one compiled instead of
-/// re-paying for it, and the host's [`PeakMemory`] wrapper is resolved with them
-/// so the child's own peak is measured rather than modelled.
-/// `resumed` states what a resumed conversation is wrong about — the fact the
-/// arms correct in the prompt they pipe. A dispatch-level retry lap resumes
-/// [`Resumed::AfterReset`]; the construct lane's own post-fixer lint repair
-/// resumes [`Resumed::SameTree`], because it continues inside the dispatch that
-/// wrote the tree it is being asked to fix.
-fn run_model_lane(prompt: &str, args: &TransformArgs, resumed: Resumed) -> Result<LaneRun> {
-    let harness = resolve_harness(args.harness.as_deref())?;
-    let scratch = Scratch::prepare(&args.out, args.nonce.as_deref())?;
-    let cache = sccache::detect();
-    let peak = peak_memory::detect();
-
-    let record = match harness {
-        Harness::Claude => claude::run_headless_claude(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
-        Harness::Muse => muse::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
-        Harness::Grok => grok::run(prompt, args, resumed, &scratch, cache.as_ref(), &peak)?,
-        Harness::Codex => bail!("codex harness support has been removed"),
-    };
-
-    Ok(LaneRun {
-        record,
-        measured: Measurements {
-            sccache: cache.as_ref().and_then(CompilerCache::served),
-            peak_resident_bytes: peak.peak_resident_bytes(),
-        },
-    })
-}
-
-/// What one model lane's run produced.
-///
-/// The record is the harness's and the measurements are the host's — taken after
-/// the child is reaped, so they cover everything the run's agent did rather than
-/// only what this process did.
-struct LaneRun {
-    record: serde_json::Value,
-    measured: Measurements,
-}
-
-/// What the host measured about a run, in one value.
-///
-/// One value rather than a parameter each, because both lanes' evidence stampers
-/// carry them together and neither reads either: a third reading arriving later
-/// should not re-open two signatures to add itself.
-#[derive(Clone, Copy, Default)]
-struct Measurements {
-    sccache: Option<Counters>,
-    peak_resident_bytes: Option<u64>,
-}
-
-impl Measurements {
-    /// Stamp both readings onto a model lane's evidence envelope, each
-    /// presence-driven: a host that cannot measure one stamps no key for it.
-    fn stamp(self, evidence: &mut serde_json::Value) {
-        sccache::stamp(evidence, self.sccache);
-        peak_memory::stamp(evidence, self.peak_resident_bytes);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
-        Carried, ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs, build_evidence,
-        interned_mask_bits, reject_test_schedule,
-        verify::{MemberOutcome, MemberRun, stated_requests, verify_findings},
+        Carried, ChannelKind, EvidenceChannel, Excused, GateTiming, SuppressionRequest, TransformArgs,
+        VerifyFailureSet, build_evidence, interned_mask_bits, reject_test_schedule,
+        verify::{MemberOutcome, MemberRun, VerifyFailure, stated_requests, verify_findings},
     };
     use clap::Parser;
     use std::iter::once;
@@ -796,7 +579,7 @@ mod tests {
         assert_eq!(evidence.exit_code, Some(0));
         assert_eq!(evidence.log, "verify.fmt.log");
 
-        let failures = aether_bloomery::VerifyFailureSet::one(aether_bloomery::VerifyFailure::Clippy);
+        let failures = VerifyFailureSet::one(VerifyFailure::Clippy);
         let evidence = build_evidence(
             "verify.clippy",
             None,
@@ -1102,7 +885,6 @@ mod tests {
             "verify.check",
             "verify.member",
             "verify.base",
-            "construct.implement",
         ];
         for command in others {
             let mut packaged = transform_args(command);

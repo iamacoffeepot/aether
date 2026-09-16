@@ -414,10 +414,10 @@ thread 'asset_rides_a_named_custom_section_byte_exact' panicked at crates/aether
 AETHER_REQUIRE_RUNTIME=1 but aether_test_fixtures_bundle wasm not pre-built
 note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
 
-        FAIL [   3.208s] ( 988/3737) aether-chassis-bloomery::control_loop control_loop_converges_across_a_restart
+        FAIL [   3.208s] ( 988/3737) aether-chassis-hub::control_loop control_loop_converges_across_a_restart
 
---- STDERR:              aether-chassis-bloomery::control_loop control_loop_converges_across_a_restart ---
-thread 'control_loop_converges_across_a_restart' panicked at crates/aether-chassis-bloomery/src/reactor/mirror/runtime.rs:480:9:
+--- STDERR:              aether-chassis-hub::control_loop control_loop_converges_across_a_restart ---
+thread 'control_loop_converges_across_a_restart' panicked at crates/aether-chassis-hub/src/reactor/mirror/runtime.rs:480:9:
 assertion `left == right` failed
   left: 2
  right: 3
@@ -425,7 +425,7 @@ assertion `left == right` failed
 ------------
      Summary [  74.644s] 3737 tests run: 3735 passed, 2 failed, 20 skipped
         FAIL [   0.008s] aether-actor::asset_sections asset_rides_a_named_custom_section_byte_exact
-        FAIL [   3.208s] aether-chassis-bloomery::control_loop control_loop_converges_across_a_restart
+        FAIL [   3.208s] aether-chassis-hub::control_loop control_loop_converges_across_a_restart
 error: test run failed
 ";
 
@@ -445,7 +445,7 @@ error: test run failed
         // The second failure's panic is an assertion, whose message runs past
         // its first line — dropping the tail would leave the reader the claim
         // without the values that refute it.
-        assert!(distilled.contains("crates/aether-chassis-bloomery/src/reactor/mirror/runtime.rs:480:9"));
+        assert!(distilled.contains("crates/aether-chassis-hub/src/reactor/mirror/runtime.rs:480:9"));
         assert!(distilled.contains("left: 2"));
         assert!(distilled.contains("right: 3"));
     }

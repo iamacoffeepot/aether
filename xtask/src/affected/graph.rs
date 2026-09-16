@@ -180,24 +180,22 @@ mod tests {
     }
 
     #[test]
-    fn reverse_closure_keeps_the_adopt_candidate_impls_and_drops_unrelated_crates() {
-        // Tripwire: the scope lane's inverse-search calibration discounts a
-        // definition whose crate sits outside this closure. `adopt_candidate`
-        // (ADR-0208) defines in three crates that must stay in; `Pending` in
-        // `aether-substrate` and `from_config` in `aether-kit-widget` must not.
-        // Taking the forward closure of `aether-chassis-bloomery` would pull
-        // `aether-substrate` in (the chassis depends on it) and keep the homonym.
+    fn reverse_closure_keeps_the_dependents_and_drops_the_dependencies() {
+        // Tripwire: the direction of the walk. `aether-math` is depended on by
+        // the kinds vocabulary and the renderer, and itself depends on
+        // `aether-data`. A forward walk would answer with `aether-data` and
+        // miss every crate a change to the math primitives can actually break.
         let workspace = Workspace::load().unwrap();
-        let closure = workspace.reverse_closure_of(&names(&["aether-bloomery"])).unwrap();
+        let closure = workspace.reverse_closure_of(&names(&["aether-math"])).unwrap();
 
-        assert!(closure.contains("aether-bloomery"), "the queried crate is in its own closure: {closure:?}");
-        assert!(closure.contains("aether-bloomery-git"), "git implements adopt_candidate: {closure:?}");
-        assert!(closure.contains("aether-chassis-bloomery"), "the chassis implements adopt_candidate: {closure:?}");
+        assert!(closure.contains("aether-math"), "the queried crate is in its own closure: {closure:?}");
+        assert!(closure.contains("aether-kinds"), "the kind vocabulary spells Mat4 directly: {closure:?}");
+        assert!(closure.contains("aether-render"), "the renderer consumes the math primitives: {closure:?}");
         assert!(
-            !closure.contains("aether-substrate"),
-            "substrate does not depend on aether-bloomery; a forward walk would still reach it through the chassis: {closure:?}",
+            !closure.contains("aether-data"),
+            "math depends on data, not the reverse; a forward walk would still reach it: {closure:?}",
         );
-        assert!(!closure.contains("aether-kit-widget"), "kit-widget shares no reverse edge: {closure:?}");
+        assert!(!closure.contains("aether-codec"), "the codec shares no reverse edge with math: {closure:?}");
     }
 
     #[test]

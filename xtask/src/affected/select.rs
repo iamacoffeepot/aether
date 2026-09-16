@@ -117,10 +117,8 @@ pub(super) fn is_dist_consumer<'a>(
 /// selected tests: the chassis package's scenario tests execute component
 /// wasm, a wasm-source crate's own tests may read its wasm, and a crate
 /// that depends on a wasm source can execute that source's wasm at test
-/// time (issue #3617 — the original such consumer was `aether-chassis-bloomery`
-/// running `aether-bloomery`'s control-core wasm; that retired when the control
-/// core became a native cap, but the rule stays generic for any future consumer
-/// that would hard-fail under `AETHER_REQUIRE_RUNTIME` without the pre-build).
+/// time (issue #3617). The rule stays generic for any consumer that would
+/// hard-fail under `AETHER_REQUIRE_RUNTIME` without the pre-build.
 fn derive_wasm_needed(
     packages: &BTreeSet<String>,
     wasm_sources: &BTreeSet<String>,
@@ -149,18 +147,16 @@ mod tests {
         // nor a wasm source, but whose tests execute a wasm source's component at
         // runtime, still needs the dist pre-build — deriving wasm_needed from
         // chassis membership alone would skip it and hard-fail under
-        // AETHER_REQUIRE_RUNTIME. (The original instance was aether-chassis-bloomery
-        // running aether-bloomery's control-core wasm; that retired when the
-        // control core became a native cap, so the labels below are illustrative
-        // — the generic rule stays for any future such consumer.)
-        let wasm_sources = string_set(&["aether-bloomery"]);
-        let wasm_consumers = string_set(&["aether-chassis-bloomery"]);
+        // AETHER_REQUIRE_RUNTIME. The labels below are illustrative; the
+        // generic rule is what is under test.
+        let wasm_sources = string_set(&["a-wasm-source"]);
+        let wasm_consumers = string_set(&["a-wasm-consumer"]);
         assert!(
-            derive_wasm_needed(&string_set(&["aether-chassis-bloomery"]), &wasm_sources, &wasm_consumers),
+            derive_wasm_needed(&string_set(&["a-wasm-consumer"]), &wasm_sources, &wasm_consumers),
             "a selected wasm-consumer crate needs the pre-build"
         );
         assert!(
-            derive_wasm_needed(&string_set(&["aether-bloomery"]), &wasm_sources, &wasm_consumers),
+            derive_wasm_needed(&string_set(&["a-wasm-source"]), &wasm_sources, &wasm_consumers),
             "a selected wasm-source crate needs the pre-build"
         );
         assert!(
@@ -204,18 +200,15 @@ mod tests {
         let no_wasm_sources = BTreeSet::new();
         let no_wasm_consumers = BTreeSet::new();
 
-        // A leaf-crate change selects that crate but not the chassis
-        // package — the payoff case this tool exists for. An inverted or
-        // over-wide closure shows up here.
-        let leaf = select(
-            &graph,
-            &strings(&["crates/aether-chassis-bloomery/src/lib.rs"]),
-            &no_wasm_sources,
-            &no_wasm_consumers,
-        )
-        .expect("select over leaf change");
+        // A leaf-crate change selects that crate but not the engine
+        // packages it tests — the payoff case this tool exists for. An
+        // inverted or over-wide closure shows up here.
+        let leaf =
+            select(&graph, &strings(&["crates/aether-harness-fleet/src/lib.rs"]), &no_wasm_sources, &no_wasm_consumers)
+                .expect("select over leaf change");
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
-        assert!(leaf.packages.contains("aether-chassis-bloomery"), "changed crate must be selected");
+        assert!(leaf.packages.contains("aether-harness-fleet"), "changed crate must be selected");
+        assert!(!leaf.packages.contains("aether-substrate"), "a leaf's own dependency is not its dependent");
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the
@@ -249,16 +242,6 @@ mod tests {
         assert!(
             library.packages.len() > test_only.packages.len(),
             "a library change in the same package keeps its reverse-dependency closure"
-        );
-
-        // The approval-policy.toml rule maps the cross-boundary test input to
-        // its reader instead of falling back to run-everything.
-        let policy = select(&graph, &strings(&["approval-policy.toml"]), &no_wasm_sources, &no_wasm_consumers)
-            .expect("select over approval policy change");
-        assert!(policy.run_all.is_none(), "the approval policy maps to a package, not run_all");
-        assert!(
-            policy.packages.contains("aether-chassis-bloomery"),
-            "an approval policy change must select its reader"
         );
     }
 }
