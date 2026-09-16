@@ -21,7 +21,7 @@ fn fixture_tree() -> Tree {
     entries.insert(name("b"), Node::Executable(Ref::of_bytes(b"#!/bin/sh")));
     entries.insert(name("c"), Node::Symlink(path("../bin/run")));
     entries.insert(name("d"), Node::Directory(Ref::of_encoded(&empty).expect("empty tree encodes")));
-    Tree::new(entries)
+    Tree::new(entries).expect("fixture names do not collide")
 }
 
 fn encode_tree(tree: &Tree) -> Result<Vec<u8>, StorageError> {
@@ -65,7 +65,7 @@ fn decode_refuses_an_invalid_path() -> Result<(), Box<dyn Error>> {
     // that byte is replaced with NUL.
     let mut entries = BTreeMap::new();
     entries.insert(name("a"), Node::Symlink(path("X")));
-    let mut bytes = encode_tree(&Tree::new(entries))?;
+    let mut bytes = encode_tree(&Tree::new(entries).expect("valid tree"))?;
     let Some(index) = bytes.iter().position(|byte| *byte == b'X') else {
         panic!("fixture encoding did not contain the symlink target byte");
     };
@@ -73,6 +73,25 @@ fn decode_refuses_an_invalid_path() -> Result<(), Box<dyn Error>> {
     match Tree::decode_storage(&bytes) {
         Err(StorageError::Invariant { kind: "Path", .. }) => Ok(()),
         other => panic!("expected Path invariant, got {other:?}"),
+    }
+}
+
+#[test]
+fn decode_refuses_colliding_names() -> Result<(), Box<dyn Error>> {
+    // Catches a map newtype whose decode path skips the case-fold check.
+    #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+    #[kind(name = "test.bloomery.tree_twin")]
+    struct Twin {
+        entries: BTreeMap<String, Node>,
+    }
+
+    let mut entries = BTreeMap::new();
+    entries.insert("README".into(), Node::File(Ref::of_bytes(b"a")));
+    entries.insert("readme".into(), Node::File(Ref::of_bytes(b"b")));
+    let bytes = Twin::encode_storage(&StorageData::from_value(Twin { entries }))?;
+    match Tree::decode_storage(&bytes) {
+        Err(StorageError::Invariant { kind: "Entries", .. }) => Ok(()),
+        other => panic!("expected Entries invariant, got {other:?}"),
     }
 }
 

@@ -4,11 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "the shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, and the tree."
+description = "The shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, and the tree."
 
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
 sha2 = { workspace = true }
+unicode-normalization = { workspace = true }
 
 [lints]
 workspace = true

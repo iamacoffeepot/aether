@@ -12,10 +12,12 @@ use crate::{OpaqueBytes, Ref, Tree};
 
 /// One entry in a [`super::Tree`].
 ///
-/// A map value, so a positional container element: the layout is the same
-/// `#[derive(Schema)]` would emit (u32 selector, then the variant body).
-/// `StorageElement` is written by hand so a bad symlink target becomes
-/// [`StorageError::Invariant`] rather than a wire `Message`. `Cites` is
+/// A map value, so a positional container element (u32 selector, then the
+/// variant body). `StorageElement` is written by hand because the derive's
+/// positional element decodes through the wire codec, so an invalid [`Path`]
+/// would surface as [`StorageError::LeafBody`] of a wire `Message` instead of
+/// [`StorageError::Invariant`]; the byte layout itself is pinned by the tree
+/// encoding tripwire, which is the only guarantee that matters. `Cites` is
 /// written by hand because Schema types do not get an emitted walk.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Node {

@@ -112,6 +112,15 @@ Four entry kinds:
   `Ref<Tree>` and `Ref<OpaqueBytes>` are different kinds and `append`
   checks the prefix.
 
+A name is refused at construction and at decode unless it materializes
+losslessly on Linux, default macOS, and Windows, and Git will accept it:
+no `/` or `\`, no NUL, no controls or format/bidi characters, not `.` or
+`..`, no trailing `.` or leading/trailing Unicode whitespace, no Windows
+reserved characters or device stems, not `.git`, NFC only, 1..=255 bytes.
+A path is a relative `/`-separated symlink target of at most 1024 bytes;
+each segment is `.`, `..`, or a name. Two entries may not collide under
+NFC plus `char::to_lowercase`. Over-refusal is safe; under-refusal is not.
+
 Owner, timestamps, and the other permission bits are dropped on purpose,
 as Git drops them. Build outputs are never entries in any tree; that is a
 rule of the snapshot brick.

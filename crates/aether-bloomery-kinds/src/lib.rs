@@ -16,4 +16,4 @@ mod tree;
 pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes};
 pub use digest::Digest;
 pub use reference::Ref;
-pub use tree::{Name, NameError, Node, Path, PathError, Tree};
+pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};
