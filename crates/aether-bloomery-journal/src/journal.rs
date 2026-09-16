@@ -6,6 +6,7 @@ use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 use std::slice;
+use std::sync::Arc;
 
 use aether_bloomery_kinds::RecordedHeadMove;
 use aether_data::wire::WireDecode;
@@ -34,10 +35,43 @@ CREATE INDEX IF NOT EXISTS entries_kind ON entries (kind);
 CREATE INDEX IF NOT EXISTS entries_cause ON entries (cause);
 ";
 
+/// Process-local identity of one [`Journal`] allocation.
+///
+/// Equality is the backing allocation, not a unit value. Moving a journal
+/// keeps the same identity; each constructor mints a new one. The token is not
+/// persisted and has no public constructor.
+#[derive(Clone)]
+pub struct JournalIdentity {
+    token: Arc<IdentityToken>,
+}
+
+struct IdentityToken;
+
+impl JournalIdentity {
+    fn new() -> Self {
+        Self { token: Arc::new(IdentityToken) }
+    }
+}
+
+impl PartialEq for JournalIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.token, &other.token)
+    }
+}
+
+impl Eq for JournalIdentity {}
+
+impl fmt::Debug for JournalIdentity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("JournalIdentity").finish_non_exhaustive()
+    }
+}
+
 /// Append-only log of typed events and content-addressed artifacts.
 pub struct Journal {
     pub(crate) conn: Connection,
     pub(crate) clock: Box<dyn Clock>,
+    identity: JournalIdentity,
 }
 
 impl Journal {
@@ -59,7 +93,7 @@ impl Journal {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
-        Ok(Self { conn, clock })
+        Ok(Self { conn, clock, identity: JournalIdentity::new() })
     }
 
     /// Open an in-memory journal. Tests use this with a fixed clock.
@@ -71,7 +105,16 @@ impl Journal {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
-        Ok(Self { conn, clock })
+        Ok(Self { conn, clock, identity: JournalIdentity::new() })
+    }
+
+    /// Process-local identity of this journal allocation.
+    ///
+    /// Stable across moves. Distinct from any other constructed journal,
+    /// including a reopen of the same file.
+    #[must_use]
+    pub fn identity(&self) -> JournalIdentity {
+        self.identity.clone()
     }
 
     /// Current head. `Seq(0)` when the log is empty.

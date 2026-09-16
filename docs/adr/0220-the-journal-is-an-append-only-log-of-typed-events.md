@@ -70,6 +70,10 @@ unwalked field. The recognized head-move check is not that walk: it decodes
 - `read(since, limit)` returns entries with `seq > since`, ascending, at most
   `limit`. A backend failure is `Err`, never a short result. `since` past the
   head is `Ok([])`.
+- `JournalIdentity` is minted by each constructor, compared by allocation,
+  and stable when the journal moves. It is not persisted and is not a SQL
+  column. A view registry binds to it so replacement of the owned journal
+  fails closed.
 - There is no writer lease, no wake/notify (watching is a polling loop over
   `read`), no verification, no export, no deletion.
 - The artifact store stays raw and content-addressed with its landed schema
@@ -298,6 +302,71 @@ Current non-compatibility examples and callers write `bloomery.head_moved`.
 Current heads can later serve as retention roots. Neither pruning nor
 garbage collection is in this work.
 
+## Native views
+
+A view is a native fold over a contiguous journal prefix. It is not stored
+in SQLite and it is not a second source of truth. The journal still does
+not fold views; `aether-bloomery-view` is a consumer of `read`.
+
+```rust
+pub trait View: 'static {
+    type Error: std::error::Error + 'static;
+    fn empty() -> Self;
+    fn cursor(&self) -> Seq;
+    fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error>;
+}
+```
+
+`empty` starts at `Seq(0)`. A successful `advance` consumes every contiguous
+entry in the batch, including kinds the view ignores. Views read only those
+entries and their own state. `Heads` keeps `apply` / `get` / `new` / `cursor`
+and implements `View` by folding each entry through `apply`.
+
+`ViewRegistry` owns one `Journal` and caches one instance per native
+`TypeId`. The public builder is:
+
+```rust
+registry.views::<(Heads, OtherView)>().at(position).with(|(heads, other)| { /* ... */ })
+```
+
+`views` and `at` do no replay. `with` creates absent views, catches each up
+to the exact target, and injects immutable references. The callback is
+synchronous, may return owned data, and cannot return a borrowed view.
+`at` is required before `with` (typestate). Tuples of one through eight
+views are supported; duplicate types share one instance. There is no
+erased public value and no manual global registration list.
+
+`journal()`, `journal_mut()`, and `into_journal()` expose the owned log so
+existing `program::apply(&mut Journal, ...)` keeps working. The registry
+captures the journal's process-local `JournalIdentity` at construction and
+verifies it before touching views or invoking a callback. Replacement
+through `journal_mut` fails closed with a binding error: old caches are
+neither reused nor silently cleared. The view crate does not depend on the
+program crate.
+
+Preflight the complete requested tuple before mutating cached views:
+reject a target beyond the journal head or behind any requested cached
+cursor. Then read fixed bounded pages after each view's trusted cursor,
+limited to the requested prefix. Validate dense ordered ranges and
+successful cursor endpoints. Retain successful prefixes on a journal read
+failure and never call the callback on failure. An unexpectedly exhausted
+read before the target is an error, not successful synchronization.
+
+Fold errors, a nonzero initial cursor, or a successful advance that leaves
+the wrong cursor poison that view. The slot is marked unusable before
+calling user `empty` or `advance`, and that mark clears only after
+contract verification, so a panic that an external caller catches still
+leaves the view poisoned. Panics propagate. Do not clone views for
+rollback, silently recreate poisoned views, or poison healthy views for a
+backend read failure. A callback panic does not poison successfully
+synchronized views. Diagnostics include the view type name, last trusted
+cursor, attempted range, and error source where available.
+
+Historical views, persisted checkpoints, eviction, background updates,
+Causes, reactor scheduling, WASM-defined views, and performance issue
+#6111 are deferred. Batch input is an interface contract, not a
+performance claim.
+
 ## Alternatives considered
 
 - **Hash chain over entries (digest / prev / verify)** — deferred; no consumer
@@ -327,3 +396,13 @@ garbage collection is in this work.
   sequence fence and a named-head move are distinct.
 - **Filesystem-safe or NFC-normalized head symbols** — rejected; a head
   symbol is not a path and is independent of tree `Name` and `ProgramName`.
+- **Permanently borrowing `Journal`** — rejected; it prevents the existing
+  driver from appending between view requests.
+- **Clear caches on every mutable journal access** — rejected; it defeats
+  incremental reuse between program executions.
+- **Separate file reader or shared backend redesign** — rejected; it
+  excludes current in-memory consumers or expands this change.
+- **Snapshot cloning and implicit rewind** — rejected; unnecessary cost
+  and undefined historical semantics.
+- **Automatic rebuild after fold failure** — rejected; it hides assumption
+  failures and risks repeated corruption.
