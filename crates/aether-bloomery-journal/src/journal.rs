@@ -5,7 +5,7 @@ use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 
-use aether_data::{Kind, Storage, StorageError};
+use aether_data::{Storage, StorageError};
 use rusqlite::{Connection, TransactionBehavior, params};
 
 use crate::artifact::ARTIFACTS_DDL;
@@ -36,7 +36,7 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] when SQLite cannot open the path or apply DDL.
+    /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
     pub fn open(path: &Path) -> Result<Self, JournalError> {
         Self::open_with_clock(path, Box::new(SystemClock))
     }
@@ -45,7 +45,7 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] when SQLite cannot open the path or apply DDL.
+    /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
     pub fn open_with_clock(path: &Path, clock: Box<dyn Clock>) -> Result<Self, JournalError> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
@@ -57,7 +57,7 @@ impl Journal {
     ///
     /// # Errors
     ///
-    /// Returns [`JournalError`] when SQLite cannot create the connection or schema.
+    /// Returns [`JournalError`] when `SQLite` cannot create the connection or schema.
     pub fn open_in_memory_with_clock(clock: Box<dyn Clock>) -> Result<Self, JournalError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
@@ -180,7 +180,7 @@ fn head_of(conn: &Connection) -> Result<Seq, JournalError> {
     }
 }
 
-pub(crate) fn sqlite_i64(value: u64) -> Result<i64, JournalError> {
+pub fn sqlite_i64(value: u64) -> Result<i64, JournalError> {
     i64::try_from(value).map_err(|_| JournalError::IntegerRange)
 }
 
@@ -191,9 +191,9 @@ fn from_sqlite_i64(value: i64) -> Result<u64, JournalError> {
 /// Store or schema failure.
 #[derive(Debug)]
 pub enum JournalError {
-    /// rusqlite / SQLite failure.
+    /// `rusqlite` / `SQLite` failure.
     Backend(rusqlite::Error),
-    /// A `u64` value does not fit in SQLite's `INTEGER` (i64).
+    /// A `u64` value does not fit in `SQLite`'s `INTEGER` (i64).
     IntegerRange,
     /// A stored artifact digest was not 32 bytes.
     CorruptArtifactDigest,

@@ -1,9 +1,9 @@
-//! The only append path: a typed [`aether_data::Storage`] value encoded before it reaches SQLite.
+//! The only append path: a typed [`aether_data::Storage`] value encoded before it reaches `SQLite`.
 
 use std::error::Error;
 use std::fmt;
 
-use aether_data::{Kind, Storage, StorageData, StorageError};
+use aether_data::{Storage, StorageData, StorageError};
 
 use crate::Seq;
 

@@ -1,4 +1,4 @@
-//! Append-only, single-writer log of typed events, backed by SQLite.
+//! Append-only, single-writer log of typed events, backed by `SQLite`.
 //!
 //! The journal records [`aether_data::Storage`] kinds and content-addressed
 //! artifacts. It never deletes, rewrites, reorders, compacts, migrates, folds

@@ -1,9 +1,10 @@
-//! Content-addressed artifacts in the same SQLite database as the event log.
+//! Content-addressed artifacts in the same `SQLite` database as the event log.
 
 use std::collections::HashMap;
 use std::slice;
 
 use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
+use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{LabelNode, Schema, SchemaType, StorageLeaves};
 use rusqlite::{TransactionBehavior, params, params_from_iter};
 use serde::{Deserialize, Serialize};
@@ -11,7 +12,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::journal::{Journal, JournalError, sqlite_i64};
 
-pub(crate) const ARTIFACTS_DDL: &str = "
+pub const ARTIFACTS_DDL: &str = "
 CREATE TABLE IF NOT EXISTS artifacts (
     digest BLOB PRIMARY KEY NOT NULL,
     size_bytes INTEGER NOT NULL,
@@ -45,6 +46,18 @@ impl StorageLeaves for Digest {
 
     fn is_absent(carry: u64, depth: u32, source: &RecordReader) -> bool {
         <[u8; 32] as StorageLeaves>::is_absent(carry, depth, source)
+    }
+}
+
+impl WireEncode for Digest {
+    fn encode(&self, out: &mut Vec<u8>) -> Result<(), WireError> {
+        self.0.encode(out)
+    }
+}
+
+impl<'de> WireDecode<'de> for Digest {
+    fn decode(cursor: &mut &'de [u8]) -> Result<Self, WireError> {
+        Ok(Self(<[u8; 32] as WireDecode>::decode(cursor)?))
     }
 }
 
