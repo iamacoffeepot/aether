@@ -66,7 +66,7 @@ impl StorageElement for CiteKey {
 
 impl Cites for CiteKey {
     fn cites(&self, sink: &mut Citations) {
-        sink.push(CITE_KIND, self.0);
+        sink.push(CITE_KIND, &self.0);
     }
 }
 
