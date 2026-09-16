@@ -175,27 +175,38 @@ def collect_added_lines(root: Path, base: str, head: str) -> DiffAdditions:
     old_path: str | None = None
     new_path: str | None = None
     head_line: int | None = None
+    in_hunk = False
 
     for line in rendered.splitlines():
         if line.startswith("diff --git "):
             old_path = None
             new_path = None
             head_line = None
+            in_hunk = False
             continue
         if line.startswith("@@ "):
             match = HUNK_RE.match(line)
             if match is None:
                 raise OperationalError(f"malformed zero-context diff hunk: {line}")
             head_line = int(match.group(1)) if new_path is not None else None
+            in_hunk = True
             continue
-        if head_line is not None:
+        # Being inside a hunk is tracked apart from having a head line, because a
+        # deleted file's `+++` side is `/dev/null` and so has no line to count
+        # from. Gating the body on the line number left such a hunk unconsumed,
+        # and a removed `-- ` / `++ ` content line — a SQL comment, say — renders
+        # as `--- ` / `+++ ` and reached the file-header branches below, which
+        # refused it as a malformed diff path (#6082).
+        if in_hunk:
             if line.startswith("+"):
-                additions.setdefault(new_path, {})[head_line] = line[1:]
-                head_line += 1
+                if head_line is not None:
+                    additions.setdefault(new_path, {})[head_line] = line[1:]
+                    head_line += 1
             elif line.startswith("-"):
                 continue
             elif line.startswith(" "):
-                head_line += 1
+                if head_line is not None:
+                    head_line += 1
             elif line.startswith("\\ No newline at end of file"):
                 continue
             else:
@@ -203,13 +214,11 @@ def collect_added_lines(root: Path, base: str, head: str) -> DiffAdditions:
             continue
         if line.startswith("--- "):
             old_path = diff_path(line, "--- ")
-            head_line = None
             continue
         if line.startswith("+++ "):
             new_path = diff_path(line, "+++ ")
             if new_path is not None:
                 base_paths[new_path] = old_path
-            head_line = None
             continue
 
     return DiffAdditions(additions, base_paths)
