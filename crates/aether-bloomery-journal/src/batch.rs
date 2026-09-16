@@ -68,10 +68,26 @@ impl Batch {
         self.events.push(draft);
     }
 
+    /// Citations recorded on the staged blob named by `digest`.
+    #[must_use]
+    pub fn staged_citations(&self, digest: &Digest) -> Option<&[Citation]> {
+        self.lookup(digest).map(|staged| staged.citations.as_slice())
+    }
+
+    /// Prefixed bytes of the staged blob named by `digest`.
+    #[must_use]
+    pub fn staged_blob(&self, digest: &Digest) -> Option<&[u8]> {
+        self.lookup(digest).map(|staged| staged.bytes.as_slice())
+    }
+
     /// True when the batch stages nothing and carries no events.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.staged.is_empty() && self.events.is_empty()
+    }
+
+    fn lookup(&self, digest: &Digest) -> Option<&Staged> {
+        self.staged.iter().find(|staged| staged.digest == *digest)
     }
 
     fn insert_blob(&mut self, bytes: Vec<u8>, citations: Vec<Citation>) -> Digest {

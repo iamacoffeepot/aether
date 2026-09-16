@@ -130,6 +130,44 @@ The vocabulary (`Digest`, `Ref`, leaf kinds, `Name`, `Path`, `Node`,
 not on the cite path for the reactor, the Git projection, or WASM
 programs.
 
+## Programs
+
+A program is a contract stored in the journal. An executor performs
+executions of it. A transition records one execution. The three never
+blur: the definition has no code, the executor is never stored, the
+record is the only place they meet.
+
+| Word | Meaning |
+|---|---|
+| program | a stored declaration: name, input kind, result kind, mode, intent. Identity is its digest. |
+| execution | one performance of a program by an executor: staged blobs plus one result artifact |
+| executor | a runtime type that can perform executions of the programs it claims; never stored |
+| transition | the event recording an execution: program, input, result, executor |
+| fault | the event recording an attempt that produced no execution |
+| result | the one artifact an execution is rooted at; its kind is declared by the program. Programs may stage any blobs; all must be reachable from the result |
+
+"Results describe the world, faults describe the attempt."
+
+`Transition.input` and `Transition.result` are `Digest`, not `Ref<K>`,
+because their kinds are known only from the cited `Program` at runtime.
+A `Digest` field is a citation the store cannot type-check. `Digest`
+therefore has the same leaf traits as `Ref<K>`, delegating to
+`[u8; 32]`, plus a `Cites` impl that pushes nothing. Only the driver may
+write a kind that carries one, and the driver checks both prefixes
+against the declaration before append. This is the one deliberate bend
+in the typed-citation rule.
+
+Fault rules:
+
+1. A fault is an attempt that ended without an `Execution<P>`. If `finish` ran, it is a result; if not, a fault.
+2. Whatever the wrapped thing did (tests failed, compiler errored) is a result, expressed in the result kind.
+3. Faults are about the attempt, never the subject. The reason set is closed.
+4. An executor may return only `Refused`, `InputMissing`, `InputDecode`. The driver assigns the rest from outside. Executors never write events.
+5. A fault carries no blobs. Bounded inline detail only; `String` fields are capped at 4096 bytes by a validated constructor on `FaultReason` (`FaultReason::refused(text)` truncates, never refuses).
+6. One fault per attempt. A retry is a new event.
+7. Faults are never memoized and say nothing about purity.
+8. If a fault seems to need structure, the declaration's result kind is wrong. Faults are never widened.
+
 ## Alternatives considered
 
 - **Hash chain over entries (digest / prev / verify)** — deferred; no consumer
