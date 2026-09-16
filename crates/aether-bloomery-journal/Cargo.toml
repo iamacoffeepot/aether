@@ -1,0 +1,20 @@
+[package]
+name = "aether-bloomery-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Append-only SQLite log of typed Storage events and content-addressed artifacts (ADR-0220)."
+
+[dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+rusqlite = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+sha2 = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+tempfile = "3"
+
+[lints]
+workspace = true
