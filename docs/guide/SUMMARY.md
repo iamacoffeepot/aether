@@ -85,17 +85,13 @@
   - [Writing a component](recipes/writing-a-component.md)
   - [Writing a behavior](recipes/writing-a-behavior.md)
   - [Serving HTTP from a component](recipes/serving-http.md)
-  - [Driving a bloom over the REST control API](recipes/bloomery-rest-api.md)
-  - [Amending a member's declared surface](recipes/amending-a-declared-surface.md)
-  - [Supervising the coordinator with systemd](recipes/supervising-the-coordinator.md)
-  - [Authorizing an instruction bundle and enabling the bloom reader](recipes/enabling-the-bloom-reader.md)
   - [Supervising the hub with systemd](recipes/supervising-the-hub.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification
 
 - [Tests that earn their place](testing.md)
-  - [SubstrateHarness, FleetHarness, and LaneHarness](testing/substrateharness-and-fleetharness.md)
+  - [SubstrateHarness and FleetHarness](testing/substrateharness-and-fleetharness.md)
   - [Performance, load, and fuzzing](testing/performance-and-fuzzing.md)
   - [Offline quality eval](testing/quality-eval.md)
 

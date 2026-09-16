@@ -303,7 +303,7 @@ impl VerifyInvocation {
 ///
 /// Package selection, the nextest partition, and an attestation that the
 /// caller already ran the component-wasm prepare. Empty on every other path:
-/// the umbrella, a laptop run, a Bloomery member. Presence on any other
+/// the umbrella, a laptop run, a narrowed position. Presence on any other
 /// command is refused at [`super::run`], so a scheduling flag cannot silently
 /// narrow `verify.clippy` or skip a prepare that never ran.
 #[derive(Clone, Copy, Default)]

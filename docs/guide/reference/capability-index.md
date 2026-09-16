@@ -37,28 +37,6 @@ linked without the native runtime, and a configured runtime is deny-by-default;
 neither source presence nor this index proves that a selected chassis permits a
 requested binary.
 
-## Bloomery-chassis services
-
-These application-specific native services are assembled by
-`aether-chassis-bloomery`; they are not a universal capability manifest. The
-dedicated process can run standalone or be selected and forked through the hub
-binary/fleet path.
-
-| Mailbox | Responsibility | Public source |
-|---|---|---|
-| `aether.bloomery.control` | own the live snapshot, run the pure reducer, and commit admitted decisions through the journal store | `aether-chassis-bloomery/src/control` |
-| `aether.bloomery.api` | expose the localhost REST control ingress over the HTTP-server capability | `aether-chassis-bloomery/src/api` |
-| `aether.store` | persist the SQLite journal, inbox deduplication, transactional outbox, and active memberships | `aether-chassis-bloomery/src/store` |
-| `aether.artifacts` | retain canonical digest-addressed artifact bytes and derivation parents without eviction | `aether-chassis-bloomery/src/artifacts` |
-| `aether.session` | lease and reuse bounded executor sessions while artifact storage retains transcript bytes | `aether-chassis-bloomery/src/session` |
-| `aether.source` | snapshot, checkpoint, enumerate, integrate, and compare-and-swap land through the configured source adapter | `aether-chassis-bloomery/src/source` |
-| `aether.signing` | verify statements against host-local authorized signer keys | `aether-chassis-bloomery/src/signing` |
-
-ADR-0149 is Accepted and carries several amendments; the table routes readers to
-the code that realizes it, not to the record. As everywhere in this index,
-inspect the running profile with live inventory before assuming that a mailbox
-or handler is installed.
-
 ## Loadable provider components
 
 The content-generation providers are wasm guest components a substrate loads on

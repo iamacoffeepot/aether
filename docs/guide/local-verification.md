@@ -23,9 +23,9 @@ scripts/cargo-cached.sh clippy --workspace --all-targets -- -D warnings
 ```
 
 Both spell `--workspace`. The root manifest's `default-members` is the engine —
-a bare `cargo build` or `cargo clippy` skips the Bloomery coordinator, `xtask`,
-and the wasm test fixtures — while the CI clippy gate compiles every member, so
-an unflagged local run is quiet about crates the gate still judges.
+a bare `cargo build` or `cargo clippy` skips `xtask` and the wasm test
+fixtures — while the CI clippy gate compiles every member, so an unflagged
+local run is quiet about crates the gate still judges.
 
 `scripts/cargo-cached.sh` always uses the current worktree's `target/`
 directory and disables Cargo incremental compilation. It deliberately
@@ -74,12 +74,7 @@ python3 scripts/check-suppressions.py
 
 It defaults to the merge base of `origin/main` and `HEAD`; `--base` and
 `--head` select explicit refs. The `verify.suppress` transform runs that exact
-command, and it is a member of `verify.check`. A finding is a typed
-`verify.suppress` verifier failure like any other member, and the accounting is
-per member: forgiven the first time a member sees it, charged a repair roll on
-every later occurrence for that same member, and wedging the member with
-`repeated_verifiers = {verify.suppress}` if it keeps repeating. Replacing the
-candidate does not reset that memory (ADR-0178).
+command, and it is a member of `verify.check`.
 
 The scan has three terminals, not two (ADR-0193). It exits 0 when a diff adds
 no suppression at all, and 1 when it adds one that says nothing for itself. In
@@ -88,25 +83,14 @@ blesses the write it needs: it states its case **on the suppression line**, as a
 trailing comment on the attribute the scanner finds.
 
 ```rust
-#[allow(clippy::disallowed_methods)] // aether-suppression-request: operator tooling reading the coordinator's REST bind, not cap config
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: test-harness skip/strict knob, not cap config
 ```
 
 A scan whose every finding carries such a marker with a non-empty reason exits
-4, and `verify.suppress` reads that as a pass: the member continues, and the
-requests ride out on the evidence's own `suppression_requests` channel. One
-unrequested finding among requested ones holds the whole run at 1, so a request
-cannot clear its neighbour. A `.jscpd.json` member can carry no comment, so a
-JSON suppression is never requestable.
-
-Passing the lane is not granting the suppression. The request travels with the
-candidate to the two places a reviewer already works — the bloom's landing
-proposal, which renders one line per standing request naming the member, the
-path, the lint and the reason, and the aggregate review — and it is granted by
-the sign-off marker below or refused through `POST
-/blooms/{id}/members/{workpiece}/suppression`, which bounces the member to a
-repair lap with the denial recorded. A lane never grants its own request; what
-it stops doing is paying a refine lap to remove a suppression the policy agrees
-with, or routing the write into a spelling the ban does not enumerate.
+4, and `verify.suppress` reads that as a pass. One unrequested finding among
+requested ones holds the whole run at 1, so a request cannot clear its
+neighbour. A `.jscpd.json` member can carry no comment, so a JSON suppression
+is never requestable.
 
 A repository owner can sign off an intentional pull-request suppression only
 by editing the pull request's main body so it contains exactly one canonical
@@ -193,9 +177,8 @@ When that happens, work the loop:
 2. Identify which changed path should have selected which package. The
    failing test names the consumer.
 3. Add one `[[path-rule]]` block (`globs` → `mark-changed`) to
-   `PATH_RULES_TOML`, mirroring the existing `approval-policy.toml` →
-   `aether-chassis-bloomery` rule, with a comment naming the coupling. The rule
-   PR self-validates: `xtask/` is in `RUN_ALL_PREFIXES`, so it runs the full
+   `PATH_RULES_TOML`, with a comment naming the coupling. The rule PR
+   self-validates: `xtask/` is in `RUN_ALL_PREFIXES`, so it runs the full
    suite.
 4. Land the rule fix alongside (or before) the breakage fix so the selection
    gap closes with the incident.

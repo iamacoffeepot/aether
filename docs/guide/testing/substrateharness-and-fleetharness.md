@@ -1,15 +1,13 @@
-# SubstrateHarness, FleetHarness, and LaneHarness
+# SubstrateHarness and FleetHarness
 
-Aether has three integration harnesses because “use the real actor runtime,”
-“use the real engine process boundary,” and “use the real Bloomery coordinator
-boundary” answer different questions.
+Aether has two integration harnesses because “use the real actor runtime” and
+“use the real engine process boundary” answer different questions.
 
 | Harness | Boundary crossed | Best for |
 |---|---|---|
 | Unit/pure test | function/module only | codecs, parsers, state machines, validation |
 | `SubstrateHarness` | real substrate, scheduler, capabilities; in process | actor chains, settlement, frames, filesystem, component behavior |
 | `FleetHarness` | real hub RPC plus forked child process | stores/selectors, spawn/terminate, proxy routing, cross-process load/replace |
-| `LaneHarness` | forked production Bloomery coordinator plus local lane process | coordinator progress, durable dispatch/evidence/retry/wedge contracts |
 
 Choose the narrowest harness that can falsify the contract. Process tests are
 valuable, but they are slower and produce less-local failures.
@@ -344,48 +342,6 @@ The fixture crates cover distinct contracts:
 Reuse these when the contract matches. A new fixture creates another build
 artifact and CI cost, so it should prove a boundary the current matrix cannot.
 
-## LaneHarness topology
-
-`LaneHarness` is the `aether-harness-bloomery` scenario tier for contracts that cross the
-coordinator's durable, asynchronous boundary. Use it when a test must show that
-a sealed bloom is dispatched, observed, and brought to a recorded resolution or
-wedge through the same coordinator path a local operator runs. It is not a
-replacement for reducer unit tests or executor seam tests; those remain the
-narrower choices when the coordinator boot and process boundary cannot affect
-the result.
-
-A scenario forks the production `bloomery` binary in a scratch repository and
-talks to it over its RPC surface. The production chassis boots the SQLite
-journal, reducer, projection, all reactors, outbox drain, polling timers, and
-intake path. A dispatch uses the production `ProcessTransformRunner`: it
-materializes the sealed checkout with `git worktree add`, scrubs the child
-environment, spawns a subprocess, reads its exit status and `evidence.json`,
-and captures a candidate worktree. LaneHarness is one cell of
-[`BloomeryHarness`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/harness/mod.rs)
-— backend local, coordinator forked, lane scripted. The same builder also
-exposes the in-process fixture cell (reactor-to-reactor handoff) and
-`HarnessBuilder::local_authority` (bare repo, in-process, mock-lane). The
-[cell constructors](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/cells/lane.rs)
-are what that cell's scenarios import.
-
-The substitutions are deliberately narrow. Tests set the lane-program
-configuration to the repository's mock-lane binary, which accepts the real
-dispatch argv and writes deterministic evidence instead of running `cargo xtask
-transform`; they also use the fixture GitHub backend for aggregate-line
-scenarios. Therefore this tier does not evaluate model quality, run the real
-transform program, or prove live GitHub credentials and transport. Test those
-contracts at their own boundary.
-
-`LaneHarness::settle` polls the projection and checks liveness on every poll.
-The [liveness oracle](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-harness-bloomery/src/oracle/liveness.rs)
-makes two failures universal: quiescence while work is still owed, and a
-dispatched order that never completes. The
-[`lane_boundary.rs` scenarios](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-chassis-bloomery/tests/lane_boundary.rs)
-then add named assertions for green dispatches, repair laps, evidence failure,
-and accountable wedges. Prefer this tier when the contract needs both kinds of
-proof: its named outcome and the fact that the coordinator did not silently
-stop short of it.
-
 ## Failure triage
 
 | Failure | Likely layer |
@@ -396,7 +352,6 @@ stop short of it.
 | Capture mismatch with correct mail | render/frame ordering |
 | FleetHarness cannot spawn | dist manifest, binary selector, process boot |
 | FleetHarness mail fails after spawn | RPC proxy, engine id, child registry |
-| LaneHarness stalls or leaves an order outstanding | coordinator polling, outbox, reactor, intake, or local lane lifecycle |
 | Only parallel CI fails | shared env/files, port allocation, timing assumption |
 
 ## Source routes
@@ -406,8 +361,4 @@ stop short of it.
 - FleetHarness harness: `crates/aether-harness-fleet/src/lib.rs`
 - Fleet scenarios: the per-cap `fleetharness_*.rs` suites (e.g. `crates/aether-component/tests/`, `crates/aether-fleet/tests/`)
 - Fixtures: `crates/aether-test-fixtures-*/`
-- Scenario harness (builder axes and named cells): `crates/aether-harness-bloomery/src/harness/mod.rs`
-- Named cells: `crates/aether-harness-bloomery/src/cells/`
-- Lane liveness invariant: `crates/aether-harness-bloomery/src/oracle/liveness.rs`
-- Lane boundary scenarios: `crates/aether-chassis-bloomery/tests/lane_boundary.rs`
 - Decisions: ADR-0067 and the subsystem ADR for the behavior under test

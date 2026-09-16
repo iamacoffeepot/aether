@@ -14,7 +14,6 @@ APIs without a deprecation window.
 - Hear more than a synth: load an SFZ instrument bank or play a WAV track through `aether.fs`, place each note in the stereo image with a per-note pan, and trim one sender's sounding voices live.
 - Build a screen out of widgets: `aether-kit-widget` ships buttons, tabs, dropdowns, virtual lists, sliders, text fields, dialogs, tooltips, toasts and splitters as inline child actors that composite into one ordered draw.
 - Reload a component without restarting the engine: `cargo xtask dev-component` watches, cross-builds, uploads and swaps one wasm module in place, and `on_dehydrate` / `on_rehydrate` carry its state across the swap.
-- The engine now hosts its own development pipeline: the bloomery chassis runs work orders as actors over the same mail, HTTP, and persistence surfaces a game would use.
 
 ### Engine
 

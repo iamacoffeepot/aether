@@ -8,13 +8,11 @@ environment file per host, and journald. Read
 up, and [Harness lifecycle and fleet-wide mutations](../operating/harness-lifecycle.md)
 for what a restart costs the fleet.
 
-This unit is a sibling of the coordinator's
-([Supervising the coordinator with systemd](supervising-the-coordinator.md)),
-not a child of anything. The development tunnel (`aether-tunnel`, ADR-0089)
-forks and supervises its own hub for the duration of an MCP session; that hub is
-part of the harness. A hub under this unit is the standing fleet coordinator on
-the host, and nothing sits above it. Run one or the other on a host, not both on
-the same port.
+This unit is not a child of anything. The development tunnel (`aether-tunnel`,
+ADR-0089) forks and supervises its own hub for the duration of an MCP session;
+that hub is part of the harness. A hub under this unit is the standing fleet
+coordinator on the host, and nothing sits above it. Run one or the other on a
+host, not both on the same port.
 
 Two files in the repository carry the whole arrangement:
 

@@ -9,7 +9,7 @@ operator (agent, human, test, client)
 │                         ├─ engine proxy → desktop/headless child
 │                         └─ binary select/fork ──────────────┐
 └─ an application's own ingress ──────────────────────────────┤
-   (REST or typed RPC, e.g. Bloomery's)                       ▼
+   (REST or typed RPC)                                        ▼
                                              application chassis + stores
 
 Each hosted process composes the shared runtime layers:
@@ -25,10 +25,8 @@ Each hosted process composes the shared runtime layers:
 typed mail/RPC contracts other clients can use. A stable tunnel can preserve an
 MCP session while volatile backends restart. The hub supervises a fleet; every
 per-engine operation names an `engine_id`. An application built on the engine
-may add an ingress of its own: Bloomery, the first-party development control
-plane, has its own chassis, stores, and REST/typed-RPC surface, and can run
-standalone or be uploaded, selected, and forked through the hub's binary/fleet
-path. Such a chassis does not itself own the hub's `FleetServer`.
+may add an ingress of its own, with its own chassis and stores; such a chassis
+does not itself own the hub's `FleetServer`.
 
 **Process boundary.** Framed RPC carries control calls and mail between the hub
 and child substrates. The hub owns artifact stores and proxy/heartbeat state.
@@ -77,7 +75,6 @@ project replies.
 | Test harnesses | `aether-harness-*` | in-process substrate, real-process fleet, capture, and perf drivers |
 | Build tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, package depots, compatibility fixtures, fuzz targets |
 | Guest actors shipped with the engine | `aether-kit-commons`, `aether-kit-widget`, `aether-mesh`, `aether-puppet` | camera and camera-controller, console overlay, mesh viewer, the widget set, geometry authoring, mascot rendering |
-| Applications built on it | `aether-bloomery*`, `aether-chassis-bloomery` | Bloomery's bounded development state/reduction, git and GitHub adapters, console, and host process |
 
 The [repository map](orientation/repository-map.md) routes changes across the
 full workspace. Capability messages such as render/audio/filesystem kinds live
@@ -86,11 +83,8 @@ with their own capability crate, not in a universal central kind catalog
 
 ## Chassis composition
 
-Five checked-in chassis profiles reuse the substrate but install different
-drivers and capabilities: desktop, headless, hub, and substrate harness are the
-engine's own; Bloomery's is an application profile built the same way. It can
-run directly or through the fleet launch path; the generic hub and headless
-profiles do not absorb its development services or become build servers.
+Four checked-in chassis profiles reuse the substrate but install different
+drivers and capabilities: desktop, headless, hub, and substrate harness.
 
 Source presence does not imply every chassis has a working actor. Some
 unsupported surfaces deliberately install a fail-fast fallback so requests
