@@ -188,9 +188,7 @@ impl Invariant for TooLong {
 struct ShortName(String);
 
 impl ShortName {
-    // The derive calls `T::check(&inner)` with `Inner` as the tuple field.
-    #[allow(clippy::ptr_arg)]
-    fn check(inner: &String) -> Result<(), TooLong> {
+    fn check(inner: &str) -> Result<(), TooLong> {
         if inner.len() > 3 {
             Err(TooLong)
         } else {

@@ -143,10 +143,12 @@ impl aether_data::Invariant for Never {
 struct CitedWrap(CiteKey);
 
 impl CitedWrap {
-    // The derive requires `Result` even when this fixture never refuses.
-    #[allow(clippy::unnecessary_wraps)]
-    fn check(_inner: &CiteKey) -> Result<(), Never> {
-        Ok(())
+    fn check(inner: &CiteKey) -> Result<(), Never> {
+        if inner.0.iter().all(|&byte| byte == 0) {
+            Err(Never)
+        } else {
+            Ok(())
+        }
     }
 }
 
