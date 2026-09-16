@@ -92,6 +92,35 @@ unwalked field.
 - The store's only kind check is an eight-byte comparison, which is what
   keeps the kind vocabulary out of the journal.
 
+## Tree
+
+A tree is a directory: a map from name to entry. It is a `Storage` kind
+(`bloomery.tree`) stored as an artifact. Its digest commits to every byte
+beneath it, so repository state is one thirty-two byte value and two states
+are equal when their roots are equal.
+
+Four entry kinds:
+
+- **File** — a citation of opaque bytes.
+- **Executable** — the same citation with the one pure mode bit. Drop it
+  and every script materializes non-runnable.
+- **Symlink** — an inline path, not a blob. Git stores a link target as a
+  blob because a Git tree entry can only hold a hash; our tree is an
+  encoded kind, so the target sits in the node, costs no blob and no
+  citation, and is still covered by the tree's digest.
+- **Directory** — a citation of another tree. Forced by the citation rule:
+  `Ref<Tree>` and `Ref<OpaqueBytes>` are different kinds and `append`
+  checks the prefix.
+
+Owner, timestamps, and the other permission bits are dropped on purpose,
+as Git drops them. Build outputs are never entries in any tree; that is a
+rule of the snapshot brick.
+
+The vocabulary (`Digest`, `Ref`, leaf kinds, `Name`, `Path`, `Node`,
+`Tree`) lives in `aether-bloomery-kinds` so the journal's SQLite store is
+not on the cite path for the reactor, the Git projection, or WASM
+programs.
+
 ## Alternatives considered
 
 - **Hash chain over entries (digest / prev / verify)** — deferred; no consumer

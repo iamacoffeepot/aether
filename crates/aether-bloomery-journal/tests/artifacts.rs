@@ -1,19 +1,12 @@
-//! Artifact kinds, prefix-aware reads, and the digest tripwire.
+//! Artifact kinds and prefix-aware reads.
 
 mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text, artifact_digest};
-use aether_data::{Kind, KindId};
+use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text};
+use aether_data::Kind;
 use common::FixedClock;
-
-const TRIPWIRE_KIND: KindId = KindId(0x0123_4567_89ab_cdef);
-const TRIPWIRE_PAYLOAD: &[u8] = b"aether-bloomery-journal";
-const TRIPWIRE_DIGEST: [u8; 32] = [
-    0x77, 0x86, 0x71, 0x92, 0xab, 0x73, 0xa1, 0xc9, 0xcb, 0x5d, 0x12, 0xef, 0x11, 0xd4, 0x05, 0x58, 0xf3, 0x9e, 0xfd,
-    0xec, 0x9c, 0x6f, 0xe2, 0x2f, 0x51, 0xc8, 0x4c, 0x95, 0x2e, 0xe1, 0xcd, 0x17,
-];
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.journal.note")]
@@ -90,13 +83,4 @@ fn get_bytes_many_keeps_absent_slots_in_input_order() -> Result<(), Box<dyn Erro
     assert_eq!(many[1], journal.get_bytes(&missing)?);
     assert_eq!(many[2], journal.get_bytes(&b.digest())?);
     Ok(())
-}
-
-#[test]
-fn the_digest_of_one_fixed_artifact_is_pinned() {
-    // Tripwire: prefix byte order, prefix-then-payload order, and the hash
-    // preimage. The digest is sha256(kind_id_le_8 || payload). Drifts the
-    // moment any of those change — and every stored digest in every journal
-    // would move with it.
-    assert_eq!(artifact_digest(TRIPWIRE_KIND, TRIPWIRE_PAYLOAD).as_bytes(), &TRIPWIRE_DIGEST);
 }

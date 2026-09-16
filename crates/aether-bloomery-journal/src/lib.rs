@@ -19,12 +19,13 @@ mod clock;
 mod draft;
 mod entry;
 mod journal;
-mod reference;
 
-pub use artifact::{Digest, OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, split_artifact};
+pub use aether_bloomery_kinds::{
+    Digest, OpaqueBytes, Ref, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes,
+};
+pub use artifact::split_artifact;
 pub use batch::{Batch, BatchError};
 pub use clock::{Clock, SystemClock};
 pub use draft::{Draft, DraftError};
 pub use entry::{Entry, Seq};
 pub use journal::{AppendError, DecodeError, GetError, Journal, JournalError};
-pub use reference::Ref;

@@ -11,7 +11,8 @@ use aether_data::wire::WireDecode;
 use aether_data::{KindId, Storage, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
-use crate::artifact::{ARTIFACTS_DDL, Digest, split_artifact};
+use crate::Digest;
+use crate::artifact::{ARTIFACTS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::clock::{Clock, SystemClock};
 use crate::draft::Draft;

@@ -1,15 +1,16 @@
 //! Typed citation of a stored artifact.
 
-use std::fmt;
-use std::hash::{Hash, Hasher};
-use std::marker::PhantomData;
+use alloc::vec::Vec;
+use core::fmt;
+use core::hash::{Hash, Hasher};
+use core::marker::PhantomData;
 
 use aether_data::storage::{RecordReader, RecordWriter, StorageElement, StorageError};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode};
 use aether_data::{Citations, Cites, Kind, LabelNode, Schema, SchemaType, Storage, StorageData, StorageLeaves};
 
-use crate::artifact::{Digest, OpaqueBytes, Utf8Text, artifact_digest};
-use crate::batch::BatchError;
+use crate::Digest;
+use crate::artifact::{OpaqueBytes, Utf8Text, artifact_digest};
 
 /// The only storable citation: 32 bytes, transparent leaf, kind in the type.
 pub struct Ref<K> {
@@ -52,9 +53,9 @@ impl<K: Storage + Clone> Ref<K> {
     ///
     /// # Errors
     ///
-    /// [`BatchError::Storage`] when encoding fails.
-    pub fn of_encoded(value: &K) -> Result<Self, BatchError> {
-        let payload = K::encode_storage(&StorageData::from_value(value.clone())).map_err(BatchError::Storage)?;
+    /// [`StorageError`] when encoding fails.
+    pub fn of_encoded(value: &K) -> Result<Self, StorageError> {
+        let payload = K::encode_storage(&StorageData::from_value(value.clone()))?;
         Ok(Self::from_digest(artifact_digest(K::ID, &payload)))
     }
 }
