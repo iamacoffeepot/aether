@@ -97,6 +97,8 @@ impl Journal {
     /// neither staged nor stored.
     /// [`AppendError::PrefixMismatch`] when the cited blob's prefix is not
     /// the cited kind.
+    /// [`AppendError::Journal`] wrapping [`JournalError::CorruptCitation`]
+    /// when a citation's identity bytes are not 32 bytes.
     /// [`AppendError::Journal`] on a backend or constraint failure.
     pub fn append(&mut self, expect_head: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
         let recorded_at_millis = self.clock.now_millis();
@@ -272,12 +274,12 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
         .flat_map(|staged| staged.citations.iter())
         .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
     {
-        if !seen.insert((citation.bytes, citation.kind)) {
+        let digest_bytes: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
+        if !seen.insert((digest_bytes, citation.kind)) {
             continue;
         }
-        let prefix: Option<Vec<u8>> =
-            stmt.query_row(params![citation.bytes.as_slice()], |row| row.get(0)).optional()?;
-        let digest = Digest::from_bytes(citation.bytes);
+        let prefix: Option<Vec<u8>> = stmt.query_row(params![digest_bytes.as_slice()], |row| row.get(0)).optional()?;
+        let digest = Digest::from_bytes(digest_bytes);
         match prefix {
             None => return Err(AppendError::DanglingRef { digest, expected: citation.kind }),
             Some(bytes) if bytes.len() != 8 => return Err(JournalError::CorruptArtifact.into()),
@@ -326,6 +328,9 @@ pub enum JournalError {
     CorruptArtifactDigest,
     /// A stored blob is shorter than the eight-byte kind prefix.
     CorruptArtifact,
+    /// A citation's identity bytes are not 32 bytes. The journal does not
+    /// pad or truncate.
+    CorruptCitation,
 }
 
 impl fmt::Display for JournalError {
@@ -335,6 +340,7 @@ impl fmt::Display for JournalError {
             Self::IntegerRange => write!(f, "integer does not fit in sqlite INTEGER"),
             Self::CorruptArtifactDigest => write!(f, "stored artifact digest is not 32 bytes"),
             Self::CorruptArtifact => write!(f, "stored artifact is shorter than the eight-byte kind prefix"),
+            Self::CorruptCitation => write!(f, "citation identity is not 32 bytes"),
         }
     }
 }
@@ -343,7 +349,7 @@ impl Error for JournalError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
-            Self::IntegerRange | Self::CorruptArtifactDigest | Self::CorruptArtifact => None,
+            Self::IntegerRange | Self::CorruptArtifactDigest | Self::CorruptArtifact | Self::CorruptCitation => None,
         }
     }
 }

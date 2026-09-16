@@ -4,8 +4,8 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{AppendError, Batch, Digest, Journal, OpaqueBytes, Ref, Seq, Utf8Text};
-use aether_data::Kind;
+use aether_bloomery_journal::{AppendError, Batch, Digest, Journal, JournalError, OpaqueBytes, Ref, Seq, Utf8Text};
+use aether_data::{Citations, Cites, Kind};
 use common::FixedClock;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -25,6 +25,22 @@ struct CiteText {
 enum Nested {
     Many(Vec<Ref<OpaqueBytes>>),
     Named { item: Ref<Utf8Text> },
+}
+
+/// Schema-only leaf whose `Cites` impl pushes a slice that is not 32 bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, aether_data::Schema)]
+struct WrongWidthCite;
+
+impl Cites for WrongWidthCite {
+    fn cites(&self, sink: &mut Citations) {
+        sink.push(OpaqueBytes::ID, &[0u8; 16]);
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.journal.wrong_width")]
+struct WrongWidth {
+    leaf: Vec<WrongWidthCite>,
 }
 
 #[test]
@@ -121,5 +137,23 @@ fn a_ref_nested_inside_a_vec_and_inside_an_enum_variant_is_found() -> Result<(),
         other => panic!("expected DanglingRef, got {other:?}"),
     }
     assert_eq!(journal.head()?, Seq(0));
+    Ok(())
+}
+
+#[test]
+fn a_citation_whose_identity_is_not_thirty_two_bytes_is_refused() -> Result<(), Box<dyn Error>> {
+    // Catches a boundary that pads or truncates instead of refusing.
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(0)))?;
+    let mut batch = Batch::new();
+    let staged = batch.stage_bytes(b"should-not-land");
+    batch.push_event(&WrongWidth { leaf: vec![WrongWidthCite] }, None)?;
+
+    let error = journal.append(Seq(0), &batch).expect_err("wrong-width citation must fail");
+    match error {
+        AppendError::Journal(JournalError::CorruptCitation) => {}
+        other => panic!("expected CorruptCitation, got {other:?}"),
+    }
+    assert_eq!(journal.head()?, Seq(0));
+    assert_eq!(journal.get_bytes(&staged.digest())?, None);
     Ok(())
 }

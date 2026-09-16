@@ -133,6 +133,6 @@ impl<K: Kind + 'static> StorageElement for Ref<K> {
 
 impl<K: Kind> Cites for Ref<K> {
     fn cites(&self, sink: &mut Citations) {
-        sink.push(K::ID, *self.digest.as_bytes());
+        sink.push(K::ID, self.digest.as_bytes());
     }
 }

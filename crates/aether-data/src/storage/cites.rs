@@ -6,13 +6,16 @@ use alloc::vec::Vec;
 
 use crate::{DagId, KindId, MailboxId, ThreadId, TransformId};
 
-/// One typed citation: the kind expected at `bytes` and the 32-byte digest.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// One typed citation: the kind expected at `bytes` and those identity bytes.
+///
+/// Width is owned by the reference type. The data layer does not pick a digest
+/// size; a consumer converts or refuses at its own boundary.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct Citation {
-    /// Kind whose 8-byte prefix must head the cited blob.
+    /// Kind whose prefix must head the cited blob.
     pub kind: KindId,
-    /// Digest of the cited blob, prefix included.
-    pub bytes: [u8; 32],
+    /// Identity bytes of the cited blob. Width is owned by the reference type.
+    pub bytes: Vec<u8>,
 }
 
 /// Accumulator for [`Cites::cites`].
@@ -22,9 +25,9 @@ pub struct Citations {
 }
 
 impl Citations {
-    /// Record one citation.
-    pub fn push(&mut self, kind: KindId, bytes: [u8; 32]) {
-        self.inner.push(Citation { kind, bytes });
+    /// Record one citation. The reference type owns the identity width.
+    pub fn push(&mut self, kind: KindId, bytes: &[u8]) {
+        self.inner.push(Citation { kind, bytes: bytes.to_vec() });
     }
 
     /// Borrow the citations in visit order.
