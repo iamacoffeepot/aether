@@ -189,19 +189,19 @@ fn push_event_and_push_draft_both_refuse_a_wrong_kind_head_destination() -> Resu
     assert_eq!(journal.get_bytes(&text.digest())?, None);
 
     let mut via_draft = Batch::new();
-    let text = via_draft.stage_text("hello");
-    let twin = CitedHeadMoved { target_kind: Tree::ID, symbol: "main".into(), to: Ref::from_digest(text.digest()) };
+    let bytes = via_draft.stage_bytes(b"hello");
+    let twin = CitedHeadMoved { target_kind: Tree::ID, symbol: "main".into(), to: Ref::from_digest(bytes.digest()) };
     via_draft.push_draft(Draft::of(&twin, None)?);
     match journal.append(Seq(0), &via_draft).expect_err("push_draft wrong kind must fail") {
         AppendError::PrefixMismatch { digest, expected, actual } => {
-            assert_eq!(digest, text.digest());
+            assert_eq!(digest, bytes.digest());
             assert_eq!(expected, Tree::ID);
-            assert_eq!(actual, Utf8Text::ID);
+            assert_eq!(actual, OpaqueBytes::ID);
         }
         other => panic!("expected PrefixMismatch from push_draft, got {other:?}"),
     }
     assert_eq!(journal.head()?, Seq(0));
-    assert_eq!(journal.get_bytes(&text.digest())?, None);
+    assert_eq!(journal.get_bytes(&bytes.digest())?, None);
     Ok(())
 }
 
