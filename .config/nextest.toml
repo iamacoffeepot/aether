@@ -17,7 +17,7 @@ slow-timeout = { period = "60s", terminate-after = 1 }
 # binaries rather than profile-wide: a unit test that fails twice in a row is
 # not contention, and a profile-wide retry would quietly soften every gate.
 [[profile.ci.overrides]]
-filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-chassis-bloomery) | package(=aether-harness-bloomery) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
+filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether-rpc) | package(=aether-actor) | package(=aether-tcp) | package(=aether-substrate) | package(=aether-chassis-headless) | package(=aether-chassis-hub) | package(=aether-http) | package(=aether-render) | package(=aether-text)) & kind(test)"
 retries = 1
 
 # A heavy binary iamacoffeepot/aether#3768 sized against the chassis
@@ -110,17 +110,6 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # same fork-contention class, same 180s wall-clock backstop.
 [[profile.ci.overrides]]
 filter = "package(=aether-chassis-hub) & kind(test)"
-slow-timeout = { period = "180s", terminate-after = 1 }
-
-# Bloomery chassis integration binaries (#4727) fork a real coordinator,
-# a real `git worktree add`, and a real lane child per dispatch. Several
-# scenarios wait out a 60-second settle budget — the same wall as the
-# default nextest slow-timeout — so under full-suite contention the
-# default cap is a silent tightening rather than a hang detector. Same
-# 180s deadlock guard as the other chassis crates above; `kind(test)`
-# keeps unit tests on the 60s default.
-[[profile.ci.overrides]]
-filter = "package(=aether-chassis-bloomery) & kind(test)"
 slow-timeout = { period = "180s", terminate-after = 1 }
 
 # The rehomed tcp fleet-load test (`fleetharness_tcp_load`, #3780) forks a

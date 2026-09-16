@@ -123,12 +123,12 @@ def resolve_diff(root: Path, base_ref: str, head_ref: str) -> tuple[str, str]:
         raise UnresolvableBase(f"cannot resolve --base {base_ref}: {error}") from error
     head = resolve_commit(root, head_ref)
     # `merge-base` exits 1 with no output when the two commits share no ancestor,
-    # which a bloomery lane produces by construction: it materializes a bare-tree
-    # subject as a parentless wrapper commit (#5025), so a candidate's history is
-    # rooted at the tree it started from and meets the base ref nowhere. That root
-    # is the base the scan wants — the diff from it is exactly what the candidate
-    # changed — so a disjoint history resolves to it rather than leaving by the
-    # exit code that says no verdict was reached at all.
+    # which a checkout materialized from a bare tree produces by construction: the
+    # subject is rooted at a parentless wrapper commit (#5025), so its history
+    # meets the base ref nowhere. That root is the base the scan wants — the diff
+    # from it is exactly what the head changed — so a disjoint history resolves to
+    # it rather than leaving by the exit code that says no verdict was reached at
+    # all.
     merge_base = git(root, "merge-base", base, head, allow_missing=True)
     if merge_base is None:
         roots = (git(root, "rev-list", "--max-parents=0", head) or "").split()
