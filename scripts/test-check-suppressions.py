@@ -180,6 +180,33 @@ fn baseline() {}
 
         self.assertEqual([(item.path, item.line) for item in findings], [("src/new.rs", 1)])
 
+    def test_deleting_a_file_whose_content_renders_as_a_diff_header_is_clean(self) -> None:
+        # A deleted file has no new side, so its hunk carries no head line. The
+        # body still has to be consumed: a removed `-- ` / `++ ` line renders as
+        # `--- ` / `+++ ` and is otherwise read as a file header (#6082).
+        self.repo.write(
+            "store/schema/v26.sql",
+            "-- aether store schema snapshot v26\n++ nor is this one\nCREATE TABLE store (id INTEGER);\n",
+        )
+        base = self.repo.commit("base")
+        self.repo.remove("store/schema/v26.sql")
+        head = self.repo.commit("delete the schema snapshot")
+
+        self.assertEqual(self.repo.scan(base, head), [])
+        self.assertNotIn("store/schema/v26.sql", scanner.collect_added_lines(self.repo.root, base, head).lines)
+
+    def test_a_suppression_added_beside_such_a_deletion_still_reports(self) -> None:
+        self.repo.write("store/schema/v26.sql", "-- aether store schema snapshot v26\n")
+        self.repo.write("src/lib.rs", "fn baseline() {}\n")
+        base = self.repo.commit("base")
+        self.repo.remove("store/schema/v26.sql")
+        self.repo.write("src/lib.rs", "#[allow(dead_code)]\nfn baseline() {}\n")
+        head = self.repo.commit("delete the snapshot and suppress")
+
+        findings = self.repo.scan(base, head)
+
+        self.assertEqual([(item.path, item.line, item.token) for item in findings], [("src/lib.rs", 1, "allow(dead_code)")])
+
     def test_jscpd_and_machete_report_only_new_members(self) -> None:
         self.repo.write(
             ".jscpd.json",
