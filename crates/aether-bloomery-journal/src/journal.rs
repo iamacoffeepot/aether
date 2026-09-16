@@ -7,8 +7,9 @@ use std::ops::Range;
 use std::path::Path;
 use std::slice;
 
+use aether_bloomery_kinds::HeadMoved;
 use aether_data::wire::WireDecode;
-use aether_data::{KindId, Storage, StorageError};
+use aether_data::{Kind, KindId, Storage, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
 use crate::Digest;
@@ -87,17 +88,21 @@ impl Journal {
     /// One `BEGIN IMMEDIATE` transaction: a stale fence returns
     /// [`AppendError::HeadMoved`] and writes nothing. Staged blobs are
     /// inserted, every citation is verified against the expected prefix,
-    /// then events are inserted. Any refusal rolls the whole transaction
-    /// back. An empty batch is `Ok` of an empty range and writes nothing.
-    /// The returned range is `head+1 .. head+n+1` (end exclusive).
+    /// each draft named `bloomery.head_moved` is decoded as the canonical
+    /// event and its destination is verified the same way, then events are
+    /// inserted. Any refusal rolls the whole transaction back. An empty
+    /// batch is `Ok` of an empty range and writes nothing. The returned
+    /// range is `head+1 .. head+n+1` (end exclusive).
     ///
     /// # Errors
     ///
     /// [`AppendError::HeadMoved`] when the fence does not match.
-    /// [`AppendError::DanglingRef`] when a citation names a digest that is
-    /// neither staged nor stored.
-    /// [`AppendError::PrefixMismatch`] when the cited blob's prefix is not
-    /// the cited kind.
+    /// [`AppendError::DanglingRef`] when a citation or head-move destination
+    /// names a digest that is neither staged nor stored.
+    /// [`AppendError::PrefixMismatch`] when the cited or destination blob's
+    /// prefix is not the expected kind.
+    /// [`AppendError::InvalidHeadMoved`] when a draft named
+    /// `bloomery.head_moved` does not decode as the canonical event.
     /// [`AppendError::Journal`] wrapping [`JournalError::CorruptCitation`]
     /// when a citation's identity bytes are not 32 bytes.
     /// [`AppendError::Journal`] on a backend or constraint failure.
@@ -276,24 +281,44 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
         .chain(batch.events.iter().flat_map(|draft| draft.cites.iter()))
     {
         let digest_bytes: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
-        if !seen.insert((digest_bytes, citation.kind)) {
+        verify_prefix(&mut stmt, &mut seen, digest_bytes, citation.kind)?;
+    }
+
+    for draft in &batch.events {
+        if draft.kind != HeadMoved::NAME {
             continue;
         }
-        let prefix: Option<Vec<u8>> = stmt.query_row(params![digest_bytes.as_slice()], |row| row.get(0)).optional()?;
-        let digest = Digest::from_bytes(digest_bytes);
-        match prefix {
-            None => return Err(AppendError::DanglingRef { digest, expected: citation.kind }),
-            Some(bytes) if bytes.len() != 8 => return Err(JournalError::CorruptArtifact.into()),
-            Some(bytes) => {
-                let mut cursor = bytes.as_slice();
-                let actual = KindId::decode(&mut cursor).map_err(|_| JournalError::CorruptArtifact)?;
-                if actual != citation.kind {
-                    return Err(AppendError::PrefixMismatch { digest, expected: citation.kind, actual });
-                }
+        let event =
+            HeadMoved::decode_storage(&draft.bytes).map(|data| data.value).map_err(AppendError::InvalidHeadMoved)?;
+        verify_prefix(&mut stmt, &mut seen, *event.to.as_bytes(), event.target_kind)?;
+    }
+    Ok(())
+}
+
+fn verify_prefix(
+    stmt: &mut rusqlite::Statement<'_>,
+    seen: &mut HashSet<([u8; 32], KindId)>,
+    digest_bytes: [u8; 32],
+    expected: KindId,
+) -> Result<(), AppendError> {
+    if !seen.insert((digest_bytes, expected)) {
+        return Ok(());
+    }
+    let prefix: Option<Vec<u8>> = stmt.query_row(params![digest_bytes.as_slice()], |row| row.get(0)).optional()?;
+    let digest = Digest::from_bytes(digest_bytes);
+    match prefix {
+        None => Err(AppendError::DanglingRef { digest, expected }),
+        Some(bytes) if bytes.len() != 8 => Err(JournalError::CorruptArtifact.into()),
+        Some(bytes) => {
+            let mut cursor = bytes.as_slice();
+            let actual = KindId::decode(&mut cursor).map_err(|_| JournalError::CorruptArtifact)?;
+            if actual == expected {
+                Ok(())
+            } else {
+                Err(AppendError::PrefixMismatch { digest, expected, actual })
             }
         }
     }
-    Ok(())
 }
 
 fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
@@ -369,14 +394,14 @@ pub enum AppendError {
         /// Head observed inside the append transaction.
         actual: Seq,
     },
-    /// A citation names a digest that is neither staged nor stored.
+    /// A citation or head-move destination names a digest that is neither staged nor stored.
     DanglingRef {
         /// Digest the event or artifact cited.
         digest: Digest,
         /// Kind the citation expected as the blob prefix.
         expected: KindId,
     },
-    /// The cited blob exists but its prefix is not the cited kind.
+    /// The cited or destination blob exists but its prefix is not the expected kind.
     PrefixMismatch {
         /// Digest that was looked up.
         digest: Digest,
@@ -385,6 +410,8 @@ pub enum AppendError {
         /// Kind actually prefixed on the stored blob.
         actual: KindId,
     },
+    /// A draft named `bloomery.head_moved` did not decode as the canonical event.
+    InvalidHeadMoved(StorageError),
     /// Backend or constraint failure; the transaction did not commit.
     Journal(JournalError),
 }
@@ -399,6 +426,7 @@ impl fmt::Display for AppendError {
             Self::PrefixMismatch { digest, expected, actual } => {
                 write!(f, "prefix mismatch for {digest}: expected {expected}, actual {actual}")
             }
+            Self::InvalidHeadMoved(error) => write!(f, "bloomery.head_moved did not decode: {error}"),
             Self::Journal(error) => write!(f, "{error}"),
         }
     }
@@ -408,6 +436,7 @@ impl Error for AppendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::HeadMoved { .. } | Self::DanglingRef { .. } | Self::PrefixMismatch { .. } => None,
+            Self::InvalidHeadMoved(error) => Some(error),
             Self::Journal(error) => Some(error),
         }
     }
