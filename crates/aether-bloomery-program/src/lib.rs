@@ -8,7 +8,6 @@
 mod apply;
 mod declare;
 mod execute;
-mod fold;
 mod read;
 mod registry;
 mod staging;
@@ -16,7 +15,6 @@ mod staging;
 pub use apply::{Applied, ApplyError, apply};
 pub use declare::{Program, declaration, digest};
 pub use execute::{Execute, Refusal};
-pub use fold::{FoldError, named};
 pub use read::{ReadArtifacts, ReadError};
 pub use registry::Executors;
 pub use staging::{Execution, FinishError, Staging};
