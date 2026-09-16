@@ -13,12 +13,11 @@ use aether_data::wire::WireDecode;
 use aether_data::{Kind, KindId, Storage, StorageError};
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
-use crate::Digest;
 use crate::artifact::{ARTIFACTS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::clock::{Clock, SystemClock};
 use crate::draft::Draft;
-use crate::entry::{DecodeError, Entry, Seq};
+use crate::{DecodeError, Digest, Entry, Seq};
 
 /// Kind prefix and payload of one stored artifact, or `None` when absent.
 type LoadedArtifact = Option<(KindId, Vec<u8>)>;

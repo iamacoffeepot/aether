@@ -4,16 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Portable journal entry envelopes and, with the default sqlite feature, the append-only SQLite log of typed Storage events and content-addressed artifacts (ADR-0220)."
-
-[features]
-default = ["sqlite"]
-sqlite = ["dep:rusqlite"]
+description = "Append-only SQLite log of typed Storage events and content-addressed artifacts (ADR-0220)."
 
 [dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
-rusqlite = { workspace = true, optional = true }
+rusqlite = { workspace = true }
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
@@ -22,43 +18,3 @@ tempfile = "3"
 
 [lints]
 workspace = true
-
-[[test]]
-name = "append"
-required-features = ["sqlite"]
-
-[[test]]
-name = "artifact_reference"
-required-features = ["sqlite"]
-
-[[test]]
-name = "artifacts"
-required-features = ["sqlite"]
-
-[[test]]
-name = "citations"
-required-features = ["sqlite"]
-
-[[test]]
-name = "decode"
-required-features = ["sqlite"]
-
-[[test]]
-name = "head_moves"
-required-features = ["sqlite"]
-
-[[test]]
-name = "identity"
-required-features = ["sqlite"]
-
-[[test]]
-name = "read"
-required-features = ["sqlite"]
-
-[[test]]
-name = "reopen"
-required-features = ["sqlite"]
-
-[[test]]
-name = "tree_citations"
-required-features = ["sqlite"]
