@@ -57,7 +57,8 @@ immutable reactor bundle
 - Rebuilding a source library creates new bundle content; it does not change
   the view semantics of an existing immutable bundle.
 - View folding and pure journal decoding must be usable in WASM without
-  SQLite. The native registry can reuse that portable machinery.
+  SQLite. Shared data belongs in the existing kinds crate; fold behavior stays
+  in the view crate. The unused native journal-owning registry is retired.
 - Sharing aggregation avoids replaying and retaining the same view separately
   in each reactor peer. Sending owned data still has serialization and memory
   costs; this decision does not promise zero-copy transport.

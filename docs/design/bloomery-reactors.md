@@ -453,16 +453,32 @@ execute them without preserving those contracts.
 
 ## Implementation seams and validation
 
-The native view implementation needs a concrete dependency split:
+The native view implementation needs a dependency split by responsibility:
 
-- `Entry`, `Seq`, and pure event decoding must be accessible without linking
-  SQLite. Their exact crate placement is a work-order decision.
+| Crate | Responsibility |
+| --- | --- |
+| `aether-bloomery-kinds` | Shared `no_std + alloc` data contracts, entries, and decoding |
+| `aether-bloomery-view` | Portable folds and view behavior |
+| `aether-bloomery-journal` | Native persistence |
+
+The former native journal-owning `ViewRegistry` has no remaining production
+consumer and is retired rather than moved into another crate. Generated
+reactor actors maintain the shared instances they need. Native tests can use
+the same portable folds without a separate native registry API.
+
+Portable consumers use shared types directly, without opting out of SQLite
+through feature flags. This separation follows responsibilities, not a general
+prohibition on justified features elsewhere.
+
+- `Entry`, `Seq`, and pure event decoding belong in the existing shared kinds
+  crate. The native journal may reexport them for source compatibility.
 - `Heads::binding_from` currently calls `Journal::decode`. Move that pure
   decoding dependency out of the native journal implementation.
-- Extract registry construction, ordered folding, cursor validation, and
-  poisoning from `ViewRegistry`'s current owned-Journal pull loop. The bundled
-  views actor receives entries and publishes data. A native adapter may keep
-  using the same fold machinery.
+- Remove the unused native registry API. The bundled views actor receives
+  entries and publishes data. Its internal machinery must enforce construction,
+  cursor validation, and poisoning contracts without exposing a native journal
+  reader or requiring manual author registration. Do not preserve an adapter
+  solely because the previous implementation had one.
 - Add the published data representation and generated peer messages. Local
   borrowed injection remains useful inside one actor, but is not the inter-actor
   contract.
