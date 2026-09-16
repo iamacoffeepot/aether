@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Journal, Seq};
-use aether_bloomery_kinds::{ExecutorName, HeadMoved, Name, Node, Symbol, Transition};
+use aether_bloomery_kinds::{ExecutorName, Head, HeadMoved, Name, Node, Transition};
 use aether_bloomery_program::{Applied, Executors, apply, declaration, digest, kinds};
 use aether_data::Kind;
 use common::{FixedClock, Trim, TrimExecutor, TrimInput, TrimResult};
@@ -45,14 +45,14 @@ fn apply_trims_files_records_a_transition_and_moves_the_program_head() -> Result
     assert_eq!(payload, b"hello");
 
     let mut named_batch = Batch::new();
-    named_batch.push_event(&Symbol::<kinds::Program>::new("trim").move_to(digest::<Trim>()), None)?;
+    named_batch.push_event(&Head::<kinds::Program>::new("trim").move_to(digest::<Trim>()), None)?;
     journal.append(journal.head()?, &named_batch)?;
     let moved = journal.read(seq, 16)?;
     assert_eq!(moved.len(), 1);
     assert_eq!(moved[0].kind, HeadMoved::<kinds::Program>::NAME);
     let event = Journal::decode::<HeadMoved<kinds::Program>>(&moved[0])?;
-    assert_eq!(event.symbol().kind(), kinds::Program::ID);
-    assert_eq!(event.symbol().as_str(), "trim");
+    assert_eq!(event.head().kind(), kinds::Program::ID);
+    assert_eq!(event.head().as_str(), "trim");
     assert_eq!(event.to(), digest::<Trim>());
     Ok(())
 }
