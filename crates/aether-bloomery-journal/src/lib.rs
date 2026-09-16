@@ -25,15 +25,14 @@ mod artifact;
 mod batch;
 mod clock;
 mod draft;
-mod entry;
 mod journal;
 
 pub use aether_bloomery_kinds::{
-    Digest, OpaqueBytes, Ref, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes,
+    DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
+    hash_bytes,
 };
 pub use artifact::split_artifact;
 pub use batch::{Batch, BatchError};
 pub use clock::{Clock, SystemClock};
 pub use draft::{Draft, DraftError};
-pub use entry::{Entry, Seq};
-pub use journal::{AppendError, DecodeError, GetError, Journal, JournalError, JournalIdentity};
+pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity};
