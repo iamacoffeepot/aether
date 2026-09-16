@@ -4,11 +4,10 @@ use alloc::collections::BTreeMap;
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_journal::{DecodeError, Entry, Seq};
-
 use crate::view::View;
 use aether_bloomery_kinds::{
-    Digest, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
+    DecodeError, Digest, Entry, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
+    Seq,
 };
 use aether_data::Kind;
 

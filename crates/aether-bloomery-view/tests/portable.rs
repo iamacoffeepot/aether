@@ -2,8 +2,7 @@
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Entry, Seq};
-use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Entry, Head, Program, Ref, Seq, Tree};
 use aether_bloomery_view::{Heads, View};
 use aether_data::{Kind, Storage, StorageData};
 
@@ -37,8 +36,8 @@ fn note(seq: u64, n: u64) -> Result<Entry, Box<dyn Error>> {
 
 #[test]
 fn contiguous_head_move_and_irrelevant_entries_lookup_typed_heads() -> Result<(), Box<dyn Error>> {
-    // Bug: a no-default-features fold cannot decode supplied entries, skips
-    // ignored kinds without advancing, or looks up heads by name alone.
+    // Bug: supplied-entry fold cannot decode entries, skips ignored kinds
+    // without advancing, or looks up heads by name alone.
     let first = digest_ref::<Program>(1);
     let second = digest_ref::<Program>(2);
     let tree = digest_ref::<Tree>(3);

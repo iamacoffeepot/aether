@@ -169,7 +169,6 @@ dependencies = [
 name = "aether-bloomery-view"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-data",
 ]
