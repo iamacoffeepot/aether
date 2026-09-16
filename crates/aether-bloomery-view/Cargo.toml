@@ -6,8 +6,12 @@ license.workspace = true
 publish = false
 description = "Lazy native journal views, borrowed tuple injection, and the typed last-move Heads fold (ADR-0220)."
 
+[features]
+default = ["native"]
+native = ["aether-bloomery-journal/sqlite"]
+
 [dependencies]
-aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-journal = { path = "../aether-bloomery-journal", default-features = false }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 
@@ -16,3 +20,7 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 
 [lints]
 workspace = true
+
+[[test]]
+name = "registry"
+required-features = ["native"]

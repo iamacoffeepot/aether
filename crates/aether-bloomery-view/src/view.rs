@@ -1,11 +1,12 @@
-//! Native fold over a contiguous journal prefix.
+//! Fold over a contiguous journal prefix.
 
-use std::any::Any;
-use std::error::Error;
+#[cfg(feature = "native")]
+use core::any::Any;
+use core::error::Error;
 
 use aether_bloomery_journal::{Entry, Seq};
 
-/// A native fold over a contiguous journal prefix.
+/// A fold over a contiguous journal prefix.
 ///
 /// [`Self::empty`] starts at `Seq(0)`. A successful [`Self::advance`]
 /// consumes every entry in the batch, including kinds the view ignores.
@@ -34,16 +35,19 @@ pub trait View: 'static {
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error>;
 }
 
+#[cfg(feature = "native")]
 pub trait ErasedView {
     fn cursor(&self) -> Seq;
     fn as_any(&self) -> &dyn Any;
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>>;
 }
 
+#[cfg(feature = "native")]
 pub struct Slot<V: View> {
     pub view: V,
 }
 
+#[cfg(feature = "native")]
 impl<V: View> ErasedView for Slot<V> {
     fn cursor(&self) -> Seq {
         self.view.cursor()

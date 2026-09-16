@@ -2,13 +2,18 @@
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Clock, Entry, Journal, Seq};
+#[cfg(feature = "native")]
+use aether_bloomery_journal::{Batch, Clock, Journal};
+use aether_bloomery_journal::{Entry, Seq};
+#[cfg(feature = "native")]
+use aether_bloomery_kinds::RecordedHead;
 use aether_bloomery_kinds::{
-    Digest, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove, Ref, Tree,
+    Digest, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHeadMove, Ref, Tree,
 };
 use aether_bloomery_view::{HeadFoldError, Heads};
 use aether_data::{Kind, Storage, StorageData};
 
+#[cfg(feature = "native")]
 const PAGE: usize = 256;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -17,8 +22,10 @@ struct Note {
     n: u64,
 }
 
+#[cfg(feature = "native")]
 struct FixedClock(u64);
 
+#[cfg(feature = "native")]
 impl Clock for FixedClock {
     fn now_millis(&self) -> u64 {
         self.0
@@ -65,6 +72,7 @@ fn program(name: &str, intent: &str) -> Result<Program, Box<dyn Error>> {
     })
 }
 
+#[cfg(feature = "native")]
 fn fold_pages(journal: &Journal, page: usize) -> Result<Heads, Box<dyn Error>> {
     let mut heads = Heads::new();
     loop {
@@ -226,6 +234,7 @@ fn malformed_historical_and_generic_events_fail_visibly() {
     assert_eq!(historical_heads.cursor(), Seq(0));
 }
 
+#[cfg(feature = "native")]
 #[test]
 fn incremental_fold_across_pages_matches_rebuild_from_zero() -> Result<(), Box<dyn Error>> {
     // Bug: last-write-wins is applied per page, or incremental apply diverges from a fresh fold of the same prefix.
