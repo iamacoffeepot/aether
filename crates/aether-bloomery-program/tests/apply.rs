@@ -6,13 +6,13 @@ use std::collections::BTreeMap;
 use std::error::Error;
 
 use aether_bloomery_journal::{Batch, Journal, Seq};
-use aether_bloomery_kinds::{ExecutorName, Name, Node, ProgramHeadMoved, Transition};
-use aether_bloomery_program::{Applied, Executors, apply, declaration, digest, named};
+use aether_bloomery_kinds::{ExecutorName, Head, HeadMoved, Name, Node, Symbol, Transition};
+use aether_bloomery_program::{Applied, Executors, apply, declaration, digest, kinds};
 use aether_data::Kind;
 use common::{FixedClock, Trim, TrimExecutor, TrimInput, TrimResult};
 
 #[test]
-fn apply_trims_files_records_a_transition_and_names_fold_after_program_named() -> Result<(), Box<dyn Error>> {
+fn apply_trims_files_records_a_transition_and_moves_the_program_head() -> Result<(), Box<dyn Error>> {
     let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(1)))?;
     let mut batch = Batch::new();
     let file = batch.stage_bytes(b"hello  \n");
@@ -44,14 +44,16 @@ fn apply_trims_files_records_a_transition_and_names_fold_after_program_named() -
     let (_, payload) = journal.get_bytes(&file.digest())?.expect("file bytes");
     assert_eq!(payload, b"hello");
 
-    assert!(named(&journal)?.is_empty());
     let mut named_batch = Batch::new();
-    named_batch.push_event(
-        &ProgramHeadMoved { name: aether_bloomery_kinds::ProgramName::new("trim")?, program: digest::<Trim>() },
-        None,
-    )?;
+    named_batch
+        .push_event(&Head::<kinds::Program>::new(Symbol::new("trim")?).move_to(digest::<Trim>()).into_event(), None)?;
     journal.append(journal.head()?, &named_batch)?;
-    let names = named(&journal)?;
-    assert_eq!(names.get(&aether_bloomery_kinds::ProgramName::new("trim")?), Some(&digest::<Trim>()));
+    let moved = journal.read(seq, 16)?;
+    assert_eq!(moved.len(), 1);
+    assert_eq!(moved[0].kind, HeadMoved::NAME);
+    let event = Journal::decode::<HeadMoved>(&moved[0])?;
+    assert_eq!(event.target_kind, kinds::Program::ID);
+    assert_eq!(event.symbol.as_str(), "trim");
+    assert_eq!(event.to, digest::<Trim>().digest());
     Ok(())
 }

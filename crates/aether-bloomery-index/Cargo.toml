@@ -1,0 +1,18 @@
+[package]
+name = "aether-bloomery-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Typed last-move index of named heads over a contiguous journal prefix (ADR-0220)."
+
+[dependencies]
+aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[dev-dependencies]
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[lints]
+workspace = true
