@@ -5,7 +5,8 @@ use std::error::Error;
 use aether_bloomery_index::{HeadFoldError, Heads};
 use aether_bloomery_journal::{Batch, Clock, Entry, Journal, Seq};
 use aether_bloomery_kinds::{
-    Digest, Head, HeadMoved, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, Ref, Symbol, Tree,
+    Digest, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHeadMove, RecordedSymbol, Ref, Symbol,
+    Tree,
 };
 use aether_data::{Kind, Storage, StorageData};
 
@@ -39,8 +40,8 @@ fn entry_for<K: Storage + Clone>(seq: u64, event: &K) -> Result<Entry, Box<dyn E
     })
 }
 
-fn moved<K: Kind>(seq: u64, symbol: &str, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
-    entry_for(seq, &Head::<K>::new(Symbol::new(symbol)?).move_to(to).into_event())
+fn moved<K: Kind + 'static>(seq: u64, symbol: &'static str, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
+    entry_for(seq, &Symbol::<K>::new(symbol).move_to(to))
 }
 
 fn historical(seq: u64, name: &str, program: Ref<Program>) -> Result<Entry, Box<dyn Error>> {
@@ -88,8 +89,8 @@ fn same_symbol_under_two_kinds_stays_independent() -> Result<(), Box<dyn Error>>
     heads.apply(&moved(1, "main", program_ref)?)?;
     heads.apply(&moved(2, "main", tree_ref)?)?;
 
-    let program_head = Head::<Program>::new(Symbol::new("main")?);
-    let tree_head = Head::<Tree>::new(Symbol::new("main")?);
+    let program_head = Symbol::<Program>::new("main");
+    let tree_head = Symbol::<Tree>::new("main");
     assert_eq!(heads.get(&program_head), Some(program_ref));
     assert_eq!(heads.get(&tree_head), Some(tree_ref));
     Ok(())
@@ -102,8 +103,8 @@ fn head_symbol_is_independent_of_target_label() -> Result<(), Box<dyn Error>> {
     let mut heads = Heads::new();
     heads.apply(&moved(1, "main", stored)?)?;
 
-    assert_eq!(heads.get(&Head::<Program>::new(Symbol::new("main")?)), Some(stored));
-    assert_eq!(heads.get(&Head::<Program>::new(Symbol::new("trim")?)), None);
+    assert_eq!(heads.get(&Symbol::<Program>::new("main")), Some(stored));
+    assert_eq!(heads.get(&Symbol::<Program>::new("trim")), None);
     Ok(())
 }
 
@@ -112,7 +113,7 @@ fn first_reassign_repeat_and_return_are_exact_at_each_cursor() -> Result<(), Box
     // Bug: first-write-wins, skipped identical reassignment, or a forbidden return to an older target.
     let first = digest_ref::<Program>(1);
     let second = digest_ref::<Program>(2);
-    let head = Head::<Program>::new(Symbol::new("trim")?);
+    let head = Symbol::<Program>::new("trim");
     let mut heads = Heads::new();
 
     heads.apply(&moved(1, "trim", first)?)?;
@@ -138,7 +139,7 @@ fn mixed_historical_and_generic_program_moves_use_sequence_order() -> Result<(),
     // Bug: one kind always wins, or historical rows are rewritten as generic events, so order is not seq order.
     let older = digest_ref::<Program>(1);
     let newer = digest_ref::<Program>(2);
-    let head = Head::<Program>::new(Symbol::new("trim")?);
+    let head = Symbol::<Program>::new("trim");
 
     let mut historical_then_generic = Heads::new();
     historical_then_generic.apply(&historical(1, "trim", older)?)?;
@@ -158,7 +159,7 @@ fn mixed_historical_and_generic_program_moves_use_sequence_order() -> Result<(),
 fn ignored_entries_advance_the_cursor() -> Result<(), Box<dyn Error>> {
     // Bug: unrelated kinds are skipped without advancing, so the next real seq looks like a gap.
     let to = digest_ref::<Program>(1);
-    let head = Head::<Program>::new(Symbol::new("trim")?);
+    let head = Symbol::<Program>::new("trim");
     let mut heads = Heads::new();
     heads.apply(&moved(1, "trim", to)?)?;
     heads.apply(&note(2, 7)?)?;
@@ -173,7 +174,7 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
     // Bug: a refused apply still writes the binding or cursor, so a gap or duplicate corrupts the prefix.
     let to = digest_ref::<Program>(1);
     let later = digest_ref::<Program>(2);
-    let head = Head::<Program>::new(Symbol::new("trim")?);
+    let head = Symbol::<Program>::new("trim");
     let mut heads = Heads::new();
     heads.apply(&moved(1, "trim", to)?)?;
 
@@ -211,20 +212,19 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
 }
 
 #[test]
-fn malformed_historical_and_generic_events_fail_visibly() -> Result<(), Box<dyn Error>> {
+fn malformed_historical_and_generic_events_fail_visibly() {
     // Bug: a recognized kind with undecodable bytes is ignored, so the cursor claims a prefix that was not read.
     let mut generic = Heads::new();
-    let generic_error = generic.apply(&malformed(1, HeadMoved::NAME)).expect_err("malformed generic");
+    let generic_error = generic.apply(&malformed(1, RecordedHeadMove::NAME)).expect_err("malformed generic");
     assert!(matches!(generic_error, HeadFoldError::Decode(_)), "{generic_error:?}");
     assert_eq!(generic.cursor(), Seq(0));
-    assert_eq!(generic.get(&Head::<Program>::new(Symbol::new("trim")?)), None);
+    assert_eq!(generic.get(&Symbol::<Program>::new("trim")), None);
 
     let mut historical_heads = Heads::new();
     let historical_error =
         historical_heads.apply(&malformed(1, ProgramHeadMoved::NAME)).expect_err("malformed historical");
     assert!(matches!(historical_error, HeadFoldError::Decode(_)), "{historical_error:?}");
     assert_eq!(historical_heads.cursor(), Seq(0));
-    Ok(())
 }
 
 #[test]
@@ -241,18 +241,18 @@ fn incremental_fold_across_pages_matches_rebuild_from_zero() -> Result<(), Box<d
     let filler = batch.stage_encoded(&program("fill", "page filler")?)?;
     for index in 0..PAGE {
         let symbol = format!("f{index:03}");
-        batch.push_event(&Head::<Program>::new(Symbol::new(symbol)?).move_to(filler).into_event(), None)?;
+        batch.push_event(&RecordedHeadMove::new(RecordedSymbol::new(Program::ID, symbol)?, filler.digest()), None)?;
     }
-    batch.push_event(&Head::<Program>::new(Symbol::new("trim")?).move_to(a_ref).into_event(), None)?;
-    batch.push_event(&Head::<Program>::new(Symbol::new("trim")?).move_to(b_ref).into_event(), None)?;
-    batch.push_event(&Head::<Program>::new(Symbol::new("hash")?).move_to(c_ref).into_event(), None)?;
+    batch.push_event(&Symbol::<Program>::new("trim").move_to(a_ref), None)?;
+    batch.push_event(&Symbol::<Program>::new("trim").move_to(b_ref), None)?;
+    batch.push_event(&Symbol::<Program>::new("hash").move_to(c_ref), None)?;
     journal.append(Seq(0), &batch)?;
 
     let paged = fold_pages(&journal, PAGE)?;
     let rebuilt = fold_pages(&journal, 1)?;
-    let trim = Head::<Program>::new(Symbol::new("trim")?);
-    let hash = Head::<Program>::new(Symbol::new("hash")?);
-    let fill = Head::<Program>::new(Symbol::new("f000")?);
+    let trim = Symbol::<Program>::new("trim");
+    let hash = Symbol::<Program>::new("hash");
+    let fill = Symbol::<Program>::new("f000");
 
     assert_eq!(paged.cursor(), Seq(u64::try_from(PAGE)? + 3));
     assert_eq!(paged.get(&trim), Some(b_ref));
