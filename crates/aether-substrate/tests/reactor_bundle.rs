@@ -14,7 +14,7 @@ use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_test_fixtures_kinds::{CollectReactorOutputs, ReactorOutputsReport};
+use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult};
 
 const VIEWS: &str = "test.bloomery.reactor";
 const SINK: &str = "test.bloomery.reactor.sink";
@@ -69,12 +69,12 @@ fn push(harness: &mut SubstrateHarness, address: &str, entries: Vec<JournalEntry
         .cursor
 }
 
-fn collect(harness: &mut SubstrateHarness, sink: &str) -> ReactorOutputsReport {
+fn collect(harness: &mut SubstrateHarness, sink: &str) -> CollectReactorOutputsResult {
     harness
         .execute(vec![("collect", HarnessOp::send_and_await_reply(sink, &CollectReactorOutputs))])
         .expect("collect sequence")
-        .reply::<ReactorOutputsReport>("collect")
-        .expect("decode ReactorOutputsReport")
+        .reply::<CollectReactorOutputsResult>("collect")
+        .expect("decode CollectReactorOutputsResult")
 }
 
 /// Shared fold, successful guarded output, declined guard, and isolated clusters.

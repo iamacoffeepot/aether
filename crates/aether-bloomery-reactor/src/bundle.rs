@@ -22,7 +22,7 @@ use crate::views::{PublishCtor, PublishSet};
 ///
 /// `output` is the external mailbox that receives typed arm outputs. An empty
 /// path drops outputs rather than guessing a destination.
-#[aether_data::kind(name = "aether.bloomery.reactor.cluster_config", default, eq)]
+#[aether_data::kind(name = "aether.bloomery.reactor.config", default, eq)]
 pub struct ClusterConfig {
     /// Runtime-name address of the external output mailbox.
     pub output: String,

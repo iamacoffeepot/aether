@@ -511,8 +511,8 @@ impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
 pub struct CollectReactorOutputs;
 
 /// Recorded publications one cluster sent to its external output mailbox.
-#[aether_data::kind(name = "aether.test_fixtures.reactor_outputs_report", eq)]
-pub struct ReactorOutputsReport {
+#[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs_result", eq)]
+pub struct CollectReactorOutputsResult {
     pub guarded: Vec<ReactorGuardedPublication>,
     pub open: Vec<ReactorOpenPublication>,
 }

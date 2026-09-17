@@ -15,7 +15,7 @@ use aether_bloomery_reactor::{And, BundledView, Guard, Reactor, reactor, reactor
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::{
-    CollectReactorOutputs, ReactorGuardedPublication, ReactorOpenPublication, ReactorOutputsReport,
+    CollectReactorOutputs, CollectReactorOutputsResult, ReactorGuardedPublication, ReactorOpenPublication,
 };
 
 const CURRENT: Head<Program> = Head::new("current");
@@ -160,7 +160,7 @@ impl WasmActor for ReactorOutputSink {
     #[handler::manual]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectReactorOutputs) {
         if ctx.reply_target().is_some() {
-            ctx.reply(&ReactorOutputsReport { guarded: self.guarded.clone(), open: self.open.clone() });
+            ctx.reply(&CollectReactorOutputsResult { guarded: self.guarded.clone(), open: self.open.clone() });
         }
     }
 }
