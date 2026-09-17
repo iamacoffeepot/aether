@@ -1,6 +1,5 @@
-//! Entry envelope: identity, kind name, optional cause, wall clock, payload bytes.
+//! Entry envelope: identity, kind id, optional cause, wall clock, payload bytes.
 
-use alloc::string::String;
 use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
@@ -22,8 +21,8 @@ impl fmt::Display for Seq {
 pub struct Entry {
     /// Store-assigned identity and fence.
     pub seq: Seq,
-    /// `K::NAME` of the appended kind.
-    pub kind: String,
+    /// `K::ID` of the appended storage kind.
+    pub kind: KindId,
     /// The `seq` this entry reacts to, if any.
     pub cause: Option<Seq>,
     /// Wall clock at insert, for people and consoles. A fold never reads it.
@@ -33,7 +32,7 @@ pub struct Entry {
 }
 
 impl Entry {
-    /// Decode this entry as `K`. Refuses when `kind` is not `K::NAME`.
+    /// Decode this entry as `K`. Refuses when `kind` is not `K::ID`.
     ///
     /// A well-formed payload of a different typed specialization of a shared
     /// stored kind is [`DecodeError::SpecializationMismatch`], not a broken
@@ -41,12 +40,12 @@ impl Entry {
     ///
     /// # Errors
     ///
-    /// [`DecodeError::KindMismatch`] when the stored name is not `K::NAME`.
+    /// [`DecodeError::KindMismatch`] when the stored id is not `K::ID`.
     /// [`DecodeError::SpecializationMismatch`] when the payload discriminator
     /// is not `K`. [`DecodeError::Storage`] when TLV decode fails.
     pub fn decode<K: Storage>(&self) -> Result<K, DecodeError> {
-        if self.kind != K::NAME {
-            return Err(DecodeError::KindMismatch { expected: K::NAME, actual: self.kind.clone() });
+        if self.kind != K::ID {
+            return Err(DecodeError::KindMismatch { expected: K::ID, actual: self.kind });
         }
         K::decode_storage(&self.bytes).map(|data| data.value).map_err(DecodeError::from_storage)
     }
@@ -55,12 +54,12 @@ impl Entry {
 /// Failure to decode an entry as a requested kind.
 #[derive(Debug)]
 pub enum DecodeError {
-    /// `entry.kind` was not `K::NAME`.
+    /// `entry.kind` was not `K::ID`.
     KindMismatch {
-        /// `K::NAME` the caller asked for.
-        expected: &'static str,
-        /// Name stored on the entry.
-        actual: String,
+        /// `K::ID` the caller asked for.
+        expected: KindId,
+        /// Id stored on the entry.
+        actual: KindId,
     },
     /// The envelope kind matched, but the payload is a different typed
     /// specialization of that shared stored kind.

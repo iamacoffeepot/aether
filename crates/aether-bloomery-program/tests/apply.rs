@@ -33,7 +33,7 @@ fn apply_trims_files_records_a_transition_and_moves_the_program_head() -> Result
     let entries = journal.read(Seq(0), 16)?;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].seq, seq);
-    assert_eq!(entries[0].kind, Transition::NAME);
+    assert_eq!(entries[0].kind, Transition::ID);
     let transition = Journal::decode::<Transition>(&entries[0])?;
     let result = journal.get::<TrimResult>(&transition.result)?.expect("result stored");
     assert_eq!(result.changed, 1);
@@ -49,7 +49,7 @@ fn apply_trims_files_records_a_transition_and_moves_the_program_head() -> Result
     journal.append(journal.head()?, &named_batch)?;
     let moved = journal.read(seq, 16)?;
     assert_eq!(moved.len(), 1);
-    assert_eq!(moved[0].kind, HeadMoved::<kinds::Program>::NAME);
+    assert_eq!(moved[0].kind, HeadMoved::<kinds::Program>::ID);
     let event = Journal::decode::<HeadMoved<kinds::Program>>(&moved[0])?;
     assert_eq!(event.head().kind(), kinds::Program::ID);
     assert_eq!(event.head().as_str(), "trim");

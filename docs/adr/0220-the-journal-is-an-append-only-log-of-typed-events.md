@@ -41,7 +41,7 @@ unwalked field. The recognized head-move check is not that walk: it decodes
   Current head bindings stay out of SQLite; they are an index over events.
 - Every event payload is an `aether_data::Storage` kind. The only append path
   is `Draft::of<K: Storage + Cites>(...)`. There is no public path from raw bytes into
-  the log. The journal records the kind name, not the kind's shape, except
+  the log. The journal records the storage `KindId` (`K::ID`), not the kind's shape, except
   that it decodes the one recognized kind `bloomery.head_moved` so it can
   validate that event's destination.
 - Kinds are append-only by discipline: a breaking shape change is a new kind
@@ -49,7 +49,13 @@ unwalked field. The recognized head-move check is not that walk: it decodes
 - The entry envelope is table columns (`seq`, `kind`, `cause`,
   `recorded_at_millis`, `bytes`). Adding a forgotten column later is a SQL
   default, not a migration. `seq` is dense, starts at 1, and is identity and
-  fence. `recorded_at_millis` is for people and consoles; a fold never reads it.
+  fence. New `kind` values are exact eight-byte little-endian `KindId` BLOBs.
+  Old file-backed journals with TEXT kind names reopen without a migration:
+  reads hash those names with `storage_kind_id_from_name`, including names the
+  current code does not recognize. The old TEXT-affinity column also accepts
+  new bound BLOB values. Malformed BLOBs, invalid UTF-8 names, and other
+  storage classes are corruption. `recorded_at_millis` is for people and
+  consoles; a fold never reads it.
 - `open*` creates the `entries` table and `kind` / `cause` indexes if absent,
   sets `journal_mode = WAL` on file-backed databases only, and sets
   `synchronous = FULL`.

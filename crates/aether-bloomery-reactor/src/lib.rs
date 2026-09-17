@@ -75,7 +75,7 @@
 //! let event = Head::<Program>::new("main").move_to(to);
 //! let entry = Entry {
 //!     seq: Seq(1),
-//!     kind: HeadMoved::<Program>::NAME.to_owned(),
+//!     kind: HeadMoved::<Program>::ID,
 //!     cause: None,
 //!     recorded_at_millis: 0,
 //!     bytes: HeadMoved::<Program>::encode_storage(&StorageData::from_value(event)).unwrap(),

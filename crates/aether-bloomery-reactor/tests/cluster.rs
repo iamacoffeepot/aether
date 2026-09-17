@@ -4,9 +4,12 @@ use std::error::Error;
 use std::fmt;
 
 use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Ref, Seq, Tree};
-use aether_bloomery_reactor::{Cluster, EventBatch, Guard, GuardArg, JournalEntry, PeerEvaluated, PrepareError};
+use aether_bloomery_reactor::{
+    Cluster, Event, EventBatch, Guard, GuardArg, JournalEntry, PeerEvaluated, PrepareError, PreparedPrefix,
+};
 use aether_bloomery_view::View;
-use aether_data::{Kind, MailboxId, Storage, StorageData};
+use aether_data::wire::{decode_from_slice, encode_to_vec};
+use aether_data::{Kind, KindId, MailboxId, Storage, StorageData};
 
 const PEER_A: MailboxId = MailboxId(11);
 const PEER_B: MailboxId = MailboxId(12);
@@ -67,11 +70,35 @@ fn moved(seq: u64, to: Ref<Tree>) -> Result<Entry, Box<dyn Error>> {
     let event = Head::<Tree>::new("source").move_to(to);
     Ok(Entry {
         seq: Seq(seq),
-        kind: HeadMoved::<Tree>::NAME.to_owned(),
+        kind: HeadMoved::<Tree>::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<Tree>::encode_storage(&StorageData::from_value(event))?,
     })
+}
+
+#[test]
+fn reactor_mail_envelopes_preserve_full_width_kind_ids() -> Result<(), Box<dyn Error>> {
+    let entry = Entry {
+        seq: Seq(7),
+        kind: KindId(0xfedc_ba98_7654_3210),
+        cause: Some(Seq(3)),
+        recorded_at_millis: 42,
+        bytes: vec![1, 2, 3],
+    };
+    let portable = JournalEntry::from_entry(&entry);
+    assert_eq!(portable.to_entry(), entry);
+
+    let event = Event { stream: "alpha".into(), entry: portable };
+    let event_bytes = encode_to_vec(&event)?;
+    let decoded_event = decode_from_slice::<Event>(&event_bytes)?;
+    assert_eq!(decoded_event.entry.to_entry(), entry);
+
+    let prepared = PreparedPrefix::from_parts("alpha", &entry, Vec::new());
+    let prepared_bytes = encode_to_vec(&prepared)?;
+    let decoded_prepared = decode_from_slice::<PreparedPrefix>(&prepared_bytes)?;
+    assert_eq!(decoded_prepared.to_entry(), entry);
+    Ok(())
 }
 
 #[test]
@@ -146,8 +173,8 @@ fn event_batch_rejects_empty_and_inconsistent_ranges() {
     assert!(matches!(empty.validate(), Err(PrepareError::InvalidRange { .. })));
 
     let entries = vec![
-        JournalEntry { seq: 1, kind: String::from("a"), cause: None, recorded_at_millis: 0, bytes: Vec::new() },
-        JournalEntry { seq: 3, kind: String::from("a"), cause: None, recorded_at_millis: 0, bytes: Vec::new() },
+        JournalEntry { seq: 1, kind: Tree::ID, cause: None, recorded_at_millis: 0, bytes: Vec::new() },
+        JournalEntry { seq: 3, kind: Tree::ID, cause: None, recorded_at_millis: 0, bytes: Vec::new() },
     ];
     let gapped = EventBatch { stream: String::from("alpha"), from: 1, through: 3, entries };
     assert!(matches!(gapped.validate(), Err(PrepareError::InvalidRange { .. })));

@@ -24,7 +24,7 @@ fn digest_ref<K>(byte: u8) -> Ref<K> {
 fn entry_for<K: Storage + Clone>(seq: u64, event: &K) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {
         seq: Seq(seq),
-        kind: K::NAME.to_owned(),
+        kind: K::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: K::encode_storage(&StorageData::from_value(event.clone()))?,
@@ -43,8 +43,8 @@ fn note(seq: u64, n: u64) -> Result<Entry, Box<dyn Error>> {
     entry_for(seq, &Note { n })
 }
 
-fn malformed(seq: u64, kind: &'static str) -> Entry {
-    Entry { seq: Seq(seq), kind: kind.to_owned(), cause: None, recorded_at_millis: 0, bytes: vec![0xff] }
+fn malformed(seq: u64, kind: aether_data::KindId) -> Entry {
+    Entry { seq: Seq(seq), kind, cause: None, recorded_at_millis: 0, bytes: vec![0xff] }
 }
 
 fn program(name: &str, intent: &str) -> Result<Program, Box<dyn Error>> {
@@ -192,14 +192,14 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
 fn malformed_historical_and_generic_events_fail_visibly() {
     // Bug: a recognized kind with undecodable bytes is ignored, so the cursor claims a prefix that was not read.
     let mut generic = Heads::new();
-    let generic_error = generic.apply(&malformed(1, RecordedHeadMove::NAME)).expect_err("malformed generic");
+    let generic_error = generic.apply(&malformed(1, RecordedHeadMove::ID)).expect_err("malformed generic");
     assert!(matches!(generic_error, HeadFoldError::Decode(_)), "{generic_error:?}");
     assert_eq!(generic.cursor(), Seq(0));
     assert_eq!(generic.get(&Head::<Program>::new("trim")), None);
 
     let mut historical_heads = Heads::new();
     let historical_error =
-        historical_heads.apply(&malformed(1, ProgramHeadMoved::NAME)).expect_err("malformed historical");
+        historical_heads.apply(&malformed(1, ProgramHeadMoved::ID)).expect_err("malformed historical");
     assert!(matches!(historical_error, HeadFoldError::Decode(_)), "{historical_error:?}");
     assert_eq!(historical_heads.cursor(), Seq(0));
 }

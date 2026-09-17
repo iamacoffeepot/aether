@@ -251,7 +251,7 @@ fn multiple_moves_replay_and_repeat_remain_distinct_ordered_events() -> Result<(
     let expected = [first.digest(), second.digest(), first.digest(), first.digest()];
     for (index, (entry, digest)) in entries.iter().zip(expected).enumerate() {
         assert_eq!(entry.seq, Seq(u64::try_from(index + 1)?));
-        assert_eq!(entry.kind, RecordedHeadMove::NAME);
+        assert_eq!(entry.kind, RecordedHeadMove::ID);
         let event = Journal::decode::<HeadMoved<OpaqueBytes>>(entry)?;
         assert_eq!(event.head().as_str(), "main");
         assert_eq!(event.head().kind(), OpaqueBytes::ID);

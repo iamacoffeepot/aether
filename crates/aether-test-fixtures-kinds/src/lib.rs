@@ -486,8 +486,9 @@ pub struct DrainEditorInputsResult {
     pub inputs: Vec<ObservedEditorInput>,
 }
 
-/// Stored kind name that makes the reactor fixture's shared fold refuse.
-pub const REACTOR_FOLD_FAIL_KIND: &str = "test.bloomery.reactor.fold_fail";
+/// Stored kind id that makes the reactor fixture's shared fold refuse.
+pub const REACTOR_FOLD_FAIL_KIND: aether_data::KindId =
+    aether_data::storage_kind_id_from_name("test.bloomery.reactor.fold_fail");
 
 /// Output of a reactor arm whose named current-head guard resolved.
 #[aether_data::kind(name = "aether.test_fixtures.reactor_guarded_publication", eq)]

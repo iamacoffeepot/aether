@@ -5,6 +5,7 @@ mod common;
 use std::error::Error;
 
 use aether_bloomery_journal::{AppendError, Batch, Draft, Journal, Seq};
+use aether_data::Kind;
 use common::FixedClock;
 
 fn batch_from_drafts(drafts: impl IntoIterator<Item = Draft>) -> Batch {
@@ -27,15 +28,6 @@ impl Note {
     fn draft(text: &str) -> Draft {
         Draft::of(&Self { text: text.to_owned() }, None).expect("encode note")
     }
-}
-
-/// Kind name of 257 bytes: the `entries.kind` CHECK is `length(kind) <= 256`.
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(
-    name = "test.journal.xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-)]
-struct TooLong {
-    n: u64,
 }
 
 #[test]
@@ -66,7 +58,7 @@ fn a_three_draft_batch_on_an_empty_journal_returns_the_range_and_stamps_the_cloc
     let expected = ["a", "b", "c"];
     for (index, entry) in entries.iter().enumerate() {
         assert_eq!(entry.seq, Seq(u64::try_from(index + 1)?));
-        assert_eq!(entry.kind, "test.journal.note");
+        assert_eq!(entry.kind, Note::ID);
         assert_eq!(entry.cause, None);
         assert_eq!(entry.recorded_at_millis, STAMP_MILLIS);
         assert_eq!(Journal::decode::<Note>(entry)?.text, expected[index]);
@@ -75,18 +67,15 @@ fn a_three_draft_batch_on_an_empty_journal_returns_the_range_and_stamps_the_cloc
 }
 
 #[test]
-fn a_batch_that_fails_midway_on_the_kind_length_check_leaves_head_and_count_unchanged() -> Result<(), Box<dyn Error>> {
-    // Drive: entries.kind CHECK (length <= 256). The second draft is TooLong's
-    // 257-byte name; the first insert would succeed, then the CHECK fails, and
-    // the transaction rolls back.
-    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(STAMP_MILLIS)))?;
-    journal.append(Seq(0), &batch_from_drafts([Note::draft("kept")]))?;
-    let before_head = journal.head()?;
-    let before_count = journal.read(Seq(0), 16)?.len();
-
-    let batch = batch_from_drafts([Note::draft("would-be-second"), Draft::of(&TooLong { n: 1 }, None)?]);
-    assert!(journal.append(Seq(1), &batch).is_err());
-    assert_eq!(journal.head()?, before_head);
-    assert_eq!(journal.read(Seq(0), 16)?.len(), before_count);
+fn fresh_schema_requires_an_eight_byte_blob_kind() -> Result<(), Box<dyn Error>> {
+    let dir = tempfile::tempdir()?;
+    let path = dir.path().join("journal.sqlite");
+    drop(Journal::open_with_clock(&path, Box::new(FixedClock(STAMP_MILLIS)))?);
+    let conn = rusqlite::Connection::open(path)?;
+    let insert = "INSERT INTO entries (seq, kind, recorded_at_millis, bytes) VALUES (1, ?1, 0, X'')";
+    assert!(conn.execute(insert, [b"short".as_slice()]).is_err());
+    assert!(conn.execute(insert, [b"ninebytes".as_slice()]).is_err());
+    assert!(conn.execute(insert, ["legacy.text"]).is_err());
+    assert_eq!(conn.query_row("SELECT COUNT(*) FROM entries", [], |row| row.get::<_, i64>(0))?, 0);
     Ok(())
 }
