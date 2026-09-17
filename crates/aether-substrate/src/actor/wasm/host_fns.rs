@@ -64,6 +64,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          detached: u32,
          from: u64|
          -> u32 {
+            if caller.data_mut().deny_dehydration_effect("send_mail") {
+                return 1;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return 1; // guest exports no memory
             };
@@ -131,6 +134,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
+            if caller.data_mut().deny_dehydration_effect("spawn_sibling") {
+                return 0;
+            }
             // Copy subname + config out of guest memory, ending the
             // immutable borrow before the `data_mut` stage below.
             let copied = {
@@ -229,6 +235,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
+            if caller.data_mut().deny_dehydration_effect("spawn_sibling_scoped") {
+                return 0;
+            }
             let parent = MailboxId(parent);
             if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
                 tracing::warn!(
@@ -334,6 +343,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
+            if caller.data_mut().deny_dehydration_effect("spawn_inline_child") {
+                return 0;
+            }
             // Copy the subname out of guest memory (empty for `Counter`),
             // ending the immutable memory borrow before the reads below.
             let subname_prefix = {
@@ -421,6 +433,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
+            if caller.data_mut().deny_dehydration_effect("spawn_inline_child_scoped") {
+                return 0;
+            }
             let parent = MailboxId(parent);
             if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
                 tracing::warn!(
@@ -511,6 +526,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "despawn_inline_child_p32",
         |mut caller: Caller<'_, ComponentCtx>, alias: u64| -> u32 {
+            if caller.data_mut().deny_dehydration_effect("despawn_inline_child") {
+                return 1;
+            }
             let alias = MailboxId(alias);
             let ctx = caller.data();
             if !is_own_cluster_alias(ctx, alias) {
@@ -559,13 +577,17 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 return SAVE_STATE_TOO_LARGE;
             }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
+                caller.data_mut().save_state_error = Some("save_state: guest exports no memory".to_owned());
                 return SAVE_STATE_NO_MEMORY;
             };
             let data = memory.data(&caller);
             let start = ptr as usize;
             let end = match start.checked_add(len as usize) {
                 Some(e) if e <= data.len() => e,
-                _ => return SAVE_STATE_OOB,
+                _ => {
+                    caller.data_mut().save_state_error = Some("save_state: pointer out of bounds".to_owned());
+                    return SAVE_STATE_OOB;
+                }
             };
             let bytes = data[start..end].to_vec();
             let ctx = caller.data_mut();
@@ -595,6 +617,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
+            if caller.data_mut().deny_dehydration_effect("reply_mail") {
+                return REPLY_OOB;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return REPLY_OOB;
             };
@@ -710,6 +735,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // (`Component::instantiate` falls back to a generic "init
     // returned <rc> without staging an error" diagnostic).
     linker.func_wrap("aether", "init_failed_p32", |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
+        if caller.data_mut().deny_dehydration_effect("init_failed") {
+            return;
+        }
         let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
             return;
         };
@@ -751,6 +779,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
+            if caller.data_mut().deny_dehydration_effect("log_event") {
+                return;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return;
             };
@@ -801,6 +832,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "asset_fetch_p32",
         |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
+            if caller.data_mut().deny_dehydration_effect("asset_fetch") {
+                return Err(wasmtime::Error::msg("asset_fetch is forbidden during dehydration"));
+            }
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
             let bytes = {
                 let ctx = caller.data_mut();

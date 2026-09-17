@@ -45,8 +45,7 @@ pub struct ComponentCtx {
     /// `Mailer` based on the variant.
     pub reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
-    /// substrate extracts it after hooks return via
-    /// `Component::take_saved_state`. Never read by the guest —
+    /// substrate returns it from `Component::on_dehydrate`. Never read by the guest —
     /// rehydration reads from a scratch offset written by the
     /// substrate, not from here.
     pub saved_state: Option<StateBundle>,
@@ -55,6 +54,10 @@ pub struct ComponentCtx {
     /// the replace; the substrate checks this after `on_dehydrate` and
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
+    /// Transient guard while read-only dehydration is running.
+    pub dehydration_active: bool,
+    /// A forbidden host call fails dehydration even if the guest ignores its status.
+    pub dehydration_violation: Option<String>,
     /// Set by the `init_failed_p32` host fn when the guest's `init`
     /// returns `Err(ActorInitError)`. Issue 525 Phase 4b / issue 531: the
     /// substrate reads this after `init` returns non-zero and
@@ -195,6 +198,8 @@ impl ComponentCtx {
             reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
+            dehydration_active: false,
+            dehydration_violation: None,
             init_failure: None,
             binding: None,
             correlation_counter: Cell::new(1),
@@ -207,6 +212,15 @@ impl ComponentCtx {
             pending_alias_retirements: Vec::new(),
             load_window: None,
         }
+    }
+
+    /// Record a forbidden effect and let the host function return without acting.
+    pub fn deny_dehydration_effect(&mut self, operation: &str) -> bool {
+        if !self.dehydration_active {
+            return false;
+        }
+        self.dehydration_violation.get_or_insert_with(|| format!("{operation} is forbidden during dehydration"));
+        true
     }
 
     pub(crate) fn stage_alias(&mut self, alias: PreparedAliasRoute) {

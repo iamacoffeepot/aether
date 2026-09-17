@@ -11,7 +11,7 @@
 //! demuxes to the co-located child the producer addressed.
 //!
 //! The registry is a `BTreeMap<MailboxId, InlineSlot>` — every keyed
-//! operation (`take`, `reinsert`, `with_child_mut`, `remove`,
+//! operation (`take`, `reinsert`, `with_child`, `remove`,
 //! `insert_child`) is O(log n) in the resident child count. `MailboxId`
 //! derives `Ord` and `BTreeMap::new()` is `const`, so the map still backs
 //! a `static __AETHER_INLINE` with no init-time cost.
@@ -101,7 +101,7 @@ struct InlineSlot {
 /// A cloneable snapshot of one resident inline child's reconstruct
 /// metadata (no actor box), produced by [`Registry::child_metas`]
 /// for the dehydrate walk. The compose path reads each child's state
-/// through [`Registry::with_child_mut`] keyed by `id`.
+/// through [`Registry::with_child`] keyed by `id`.
 #[derive(Clone)]
 pub(crate) struct InlineChildMeta {
     /// The child's alias [`MailboxId`] (the registry key).
@@ -288,6 +288,13 @@ impl Registry {
         unsafe { &mut *self.request_contexts.get() }
     }
 
+    /// Borrow request metadata while preparing read-only dehydration.
+    #[doc(hidden)]
+    pub fn request_contexts(&self) -> &RequestContextTable {
+        // SAFETY: dehydration runs under the serialized guest entrypoint.
+        unsafe { &*self.request_contexts.get() }
+    }
+
     /// Replace the per-component request-context table during rehydrate.
     #[doc(hidden)]
     #[allow(dead_code)]
@@ -466,7 +473,7 @@ impl Registry {
     /// Snapshot the reconstruct metadata of every resident inline child
     /// (ADR-0114 §5 dehydrate walk). The actor boxes stay in the
     /// registry; the compose path reads each child's state through
-    /// [`Self::with_child_mut`] keyed by the returned `id`. Children are
+    /// [`Self::with_child`] keyed by the returned `id`. Children are
     /// returned in [`MailboxId`] key order; the dehydrate/rehydrate walk
     /// reconstructs each child independently by its own `alias_id` /
     /// `type_tag` / `full_subname`, so order is irrelevant.
@@ -486,16 +493,11 @@ impl Registry {
             .collect()
     }
 
-    /// Run `f` against the child registered under `id` with a unique
-    /// mutable borrow held only for the call, returning its result (or
-    /// `None` if `id` names no resident child). Used by the dehydrate
-    /// compose to drive each child's `erased_on_dehydrate` in place. The
-    /// borrow drops before this returns, so it never spans a dispatch.
-    /// O(log n).
-    pub(crate) fn with_child_mut<R>(&self, id: MailboxId, f: impl FnOnce(&mut dyn ErasedWasmActor) -> R) -> Option<R> {
-        // SAFETY: see [`Self::insert_child`].
-        let map = unsafe { &mut *self.inner.get() };
-        map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
+    /// Borrow one resident child immutably for dehydration preparation.
+    pub(crate) fn with_child<R>(&self, id: MailboxId, f: impl FnOnce(&dyn ErasedWasmActor) -> R) -> Option<R> {
+        // SAFETY: dehydration runs under the serialized guest entrypoint.
+        let map = unsafe { &*self.inner.get() };
+        map.get(&id).and_then(|slot| slot.actor.as_deref()).map(f)
     }
 
     /// The recorded parent of the inline child registered under `id`, or
@@ -808,7 +810,9 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), String> {
+            Ok(())
+        }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
     }
 
@@ -843,7 +847,9 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), String> {
+            Ok(())
+        }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
     }
 

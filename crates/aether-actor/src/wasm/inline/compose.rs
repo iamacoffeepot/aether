@@ -47,31 +47,31 @@ use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
 /// returns `Some((version, bytes))` for the single host `save_state`;
 /// with no inline children that is byte-identical to the parent's own
 /// blob.
-#[must_use]
 pub fn dehydrate(
-    mailbox_id: u64,
     registry: &Registry,
-    run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>),
-) -> Option<(u32, Vec<u8>)> {
+    run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>) -> Result<(), String>,
+) -> Result<Option<(u32, Vec<u8>)>, String> {
     // Parent half: capture whatever the parent's `on_dehydrate` saves.
     let mut parent_capture = CapturedState::default();
     {
-        let mut ctx = WasmDropCtx::__new_capturing(mailbox_id, registry.parent_id_for(mailbox_id), &mut parent_capture);
-        run_parent_dehydrate(&mut ctx);
+        let mut ctx = WasmDropCtx::__new_capturing(&mut parent_capture);
+        run_parent_dehydrate(&mut ctx)?;
     }
     let parent_saved = parent_capture.take();
 
     // Child half: walk the registry, driving each child's `on_dehydrate`
     // into its own capture buffer. The metadata snapshot is taken first so
-    // the per-child borrow in `with_child_mut` never overlaps the walk.
+    // the per-child shared borrow never overlaps the walk.
     let metas = registry.child_metas();
     let mut children = Vec::with_capacity(metas.len());
     for meta in metas {
         let mut child_capture = CapturedState::default();
-        registry.with_child_mut(meta.id, |child| {
-            let mut ctx = WasmDropCtx::__new_capturing(meta.id.0, meta.parent.0, &mut child_capture);
-            child.erased_on_dehydrate(&mut ctx);
-        });
+        registry
+            .with_child(meta.id, |child| {
+                let mut ctx = WasmDropCtx::__new_capturing(&mut child_capture);
+                child.erased_on_dehydrate(&mut ctx)
+            })
+            .ok_or_else(|| String::from("inline child disappeared during dehydration"))??;
         let (version, state_bytes) = child_capture.take().unwrap_or((0, Vec::new()));
         children.push(ChildEntry {
             alias_id: meta.id.0,
@@ -88,11 +88,11 @@ pub fn dehydrate(
     // No parent save and no children: there is no bundle to migrate, so
     // skip the host save entirely (the unchanged no-state path).
     if parent_saved.is_none() && children.is_empty() {
-        return None;
+        return Ok(None);
     }
 
     let (parent_version, parent_bytes) = parent_saved.unwrap_or((0, Vec::new()));
-    Some(bundle::compose(parent_version, &parent_bytes, &children))
+    Ok(Some(bundle::compose(parent_version, &parent_bytes, &children)))
 }
 
 /// One inline child to reconstruct, handed to the codegen-supplied
@@ -391,10 +391,63 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-        fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+        fn erased_on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+            if self.tag == 0 {
+                return Err(String::from("child refused dehydration"));
+            }
             ctx.save_state(9, &self.tag.to_le_bytes());
+            Ok(())
         }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    }
+
+    #[test]
+    fn dehydration_composes_parent_and_child_without_changing_child() {
+        let registry = Registry::new();
+        let child = MailboxId(0xB1);
+        registry.insert_child(
+            child,
+            0xAAAA,
+            String::from("a"),
+            false,
+            0x7000,
+            vec![0x11, 0x22],
+            Box::new(SavingChild { tag: 0x1111_2222 }),
+        );
+        let prepared = dehydrate(&registry, |ctx| {
+            ctx.save_state(3, &[0xDE, 0xAD]);
+            Ok(())
+        })
+        .expect("dehydration succeeds")
+        .expect("bundle exists");
+        let decomposed = bundle::decompose(prepared.0, &prepared.1);
+        assert_eq!(decomposed.parent.bytes, vec![0xDE, 0xAD]);
+        assert_eq!(decomposed.children[0].alias_id, child.0);
+        assert_eq!(decomposed.children[0].state_bytes, 0x1111_2222u32.to_le_bytes().to_vec());
+        assert_eq!(decomposed.children[0].config_bytes, vec![0x11, 0x22]);
+        assert_eq!(decomposed.children[0].parent_id, Some(0x7000));
+        assert_eq!(registry.with_child(child, |child| child.erased_namespace()), Some("test.inline.saving_child"));
+    }
+
+    #[test]
+    fn child_dehydration_failure_rejects_entire_bundle() {
+        let registry = Registry::new();
+        registry.insert_child(
+            MailboxId(0xB1),
+            0xAAAA,
+            String::from("a"),
+            false,
+            0x7000,
+            Vec::new(),
+            Box::new(SavingChild { tag: 0 }),
+        );
+        assert!(
+            dehydrate(&registry, |ctx| {
+                ctx.save_state(3, &[0xDE, 0xAD]);
+                Ok(())
+            })
+            .is_err()
+        );
     }
 
     fn child_entry(alias_id: u64, type_tag: u64, parent_id: Option<u64>) -> bundle::ChildEntry {
@@ -455,9 +508,11 @@ mod tests {
         );
 
         // Parent saves a marker blob of its own.
-        let (version, bytes) = dehydrate(0x7000, &registry, |ctx| {
+        let (version, bytes) = dehydrate(&registry, |ctx| {
             ctx.save_state(3, &[0xDE, 0xAD]);
+            Ok(())
         })
+        .expect("dehydration succeeds")
         .expect("a parent that saves plus two children yields a bundle");
 
         // Decompose and assert both children + the parent survived. The
@@ -757,7 +812,9 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-        fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
+        fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+            Ok(())
+        }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
     }
 

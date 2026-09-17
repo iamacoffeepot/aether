@@ -18,8 +18,8 @@ pub struct Component {
     /// `WasmTrampoline::wire` invokes [`Self::wire`] post-registration.
     pub(super) wire: Option<TypedFunc<u64, u32>>,
     /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
-    /// the trampoline (via [`Self::unwire`]) before `on_dehydrate` on
-    /// the dying instance, or before the `Component` value drops on a
+    /// the trampoline (via [`Self::unwire`]) after successful dehydration
+    /// on replacement, or before the `Component` value drops on a
     /// `DropComponent`.
     pub(super) unwire: Option<TypedFunc<u64, u32>>,
     pub(super) on_dehydrate: Option<TypedFunc<(), u32>>,

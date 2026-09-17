@@ -16,7 +16,6 @@
 //! reload walk (#2694), re-instantiating only the host's own script.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use aether_actor::{
     ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
@@ -152,16 +151,17 @@ impl WasmActor for BehaviorHost {
     /// Save the host bundle (script source + resident bytes + `state_save`
     /// blob + wrapped-child id) into the host's own parent state. The wrapped
     /// child persists itself through the composite walk (#2694).
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
-        let script_bytes = self.slot.as_ref().map(|s| s.bytes().to_vec()).unwrap_or_default();
-        let script_state = self.slot.as_mut().map_or_else(Vec::new, ScriptSlot::save_state);
+    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+        let script_bytes = self.slot.as_ref().map(|slot| slot.bytes().to_vec()).unwrap_or_default();
+        let script_state = self.slot.as_ref().map(ScriptSlot::save_state_checked).transpose()?.unwrap_or_default();
         let bundle = HostPersist {
             script_source: self.script_source.clone(),
             script_bytes,
             script_state,
             wrapped_child_id: self.wrapped_child.map_or(0, |id| id.0),
         };
-        ctx.save_state(u32::from(HOST_PERSIST_VERSION), &bundle.encode());
+        ctx.save_state(u32::from(HOST_PERSIST_VERSION), &bundle.try_encode()?);
+        Ok(())
     }
 
     /// Restore from the host bundle — re-instantiate the script from its
@@ -772,7 +772,7 @@ mod tests {
         assert!(host.slot.is_none());
         assert!(host.wrapped_child.is_none());
 
-        host.apply_rehydrate(&bundle.encode());
+        host.apply_rehydrate(&bundle.try_encode().expect("test bundle encodes"));
 
         assert_eq!(host.wrapped_child, Some(MailboxId(0x1234_5678)));
         assert!(host.slot.is_some(), "the resident script re-instantiates on reload");
@@ -795,7 +795,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
-        host.apply_rehydrate_with_attach(&bundle.encode(), |host| {
+        host.apply_rehydrate_with_attach(&bundle.try_encode().expect("test bundle encodes"), |host| {
             host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
         });
 
