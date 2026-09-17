@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
-    WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SnapshotError,
+    SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, WasmSnapshotCtx, actor,
 };
 use aether_data::KindId;
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
@@ -162,6 +162,24 @@ impl WasmActor for BehaviorHost {
             wrapped_child_id: self.wrapped_child.map_or(0, |id| id.0),
         };
         ctx.save_state(u32::from(HOST_PERSIST_VERSION), &bundle.encode());
+    }
+
+    fn on_snapshot(&self, ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
+        let script_bytes = self.slot.as_ref().map(|slot| slot.bytes().to_vec()).unwrap_or_default();
+        let script_state = self
+            .slot
+            .as_ref()
+            .map(ScriptSlot::snapshot_state)
+            .transpose()
+            .map_err(SnapshotError::new)?
+            .unwrap_or_default();
+        let bundle = HostPersist {
+            script_source: self.script_source.clone(),
+            script_bytes,
+            script_state,
+            wrapped_child_id: self.wrapped_child.map_or(0, |id| id.0),
+        };
+        ctx.save_state(u32::from(HOST_PERSIST_VERSION), &bundle.try_encode().map_err(SnapshotError::new)?)
     }
 
     /// Restore from the host bundle — re-instantiate the script from its

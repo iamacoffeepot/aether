@@ -1,5 +1,16 @@
 # The frame lifecycle
 
+For a live component replacement, the resident Wasm actor may prepare state
+through `on_snapshot(&self, &mut WasmSnapshotCtx) -> Result<(), SnapshotError>`.
+The context can only deposit a migration bundle. Snapshot hooks must preserve
+the actor's logical state, including through interior mutability and on failure,
+so a rejected candidate leaves the predecessor usable. The `#[actor]` macro
+generates this hook for stateless actors and for `type State` actors with a
+read-only `dehydrate(&self)` accessor. A custom mutable `on_dehydrate` needs a
+separate read-only `on_snapshot` implementation. Older binaries still run, but
+their legacy mutable-only export cannot prepare a transactional live replacement.
+See [ADR-0101](../../adr/0101-replace-hooks-on-ffiactor.md).
+
 > **Governing ADR:** [ADR-0082](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0082-application-declared-lifecycle-sequence.md)
 > (application-declared lifecycle sequence). The model — a declared graph of
 > stages, settlement-gated advance, per-stage subscription on `aether.lifecycle`

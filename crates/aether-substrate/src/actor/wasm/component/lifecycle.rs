@@ -51,6 +51,47 @@ impl Component {
         }
     }
 
+    /// Prepare migration state on demand while the predecessor remains live.
+    /// Legacy guests without the explicit export are unsupported, never
+    /// treated as a successful empty snapshot.
+    pub fn snapshot(&mut self) -> wasmtime::Result<Option<StateBundle>> {
+        let hook = self
+            .on_snapshot
+            .clone()
+            .ok_or_else(|| wasmtime::Error::msg("read-only snapshot unsupported: guest exports no on_snapshot_p32"))?;
+        {
+            let ctx = self.store.data_mut();
+            ctx.saved_state = None;
+            ctx.save_state_error = None;
+            ctx.snapshot_violation = None;
+            ctx.snapshot_failure = None;
+            ctx.snapshot_active = true;
+        }
+        let call = hook.call(&mut self.store, ());
+        let ctx = self.store.data_mut();
+        ctx.snapshot_active = false;
+        let violation = ctx.snapshot_violation.take();
+        let save_error = ctx.save_state_error.take();
+        let failure = ctx.snapshot_failure.take();
+        let saved = ctx.saved_state.take();
+        if let Some(error) = violation.or(save_error) {
+            return Err(wasmtime::Error::msg(format!("read-only snapshot rejected: {error}")));
+        }
+        let status = call.map_err(|error| wasmtime::Error::msg(format!("read-only snapshot trapped: {error}")))?;
+        if status == 0
+            && let Some(error) = failure.as_ref()
+        {
+            return Err(wasmtime::Error::msg(format!("read-only snapshot failed: {error}")));
+        }
+        if status != 0 {
+            return Err(wasmtime::Error::msg(format!(
+                "read-only snapshot failed: {}",
+                failure.unwrap_or_else(|| format!("guest returned status {status}")),
+            )));
+        }
+        Ok(saved)
+    }
+
     /// Extract the state bundle the guest deposited via `save_state`
     /// during `on_dehydrate`. Returns `None` if `save_state` was never
     /// called (component doesn't implement migration, or the hook is

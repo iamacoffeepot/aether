@@ -41,6 +41,15 @@ pub struct HostPersist {
 }
 
 impl HostPersist {
+    /// Encode for fallible snapshot preparation without discarding an error.
+    pub fn try_encode(&self) -> Result<Vec<u8>, alloc::string::String> {
+        let body = wire::to_vec(self).map_err(|error| alloc::format!("host state encode failed: {error}"))?;
+        let mut out = Vec::with_capacity(1 + body.len());
+        out.push(HOST_PERSIST_VERSION);
+        out.extend_from_slice(&body);
+        Ok(out)
+    }
+
     /// Encode to the host's parent state bytes: a [`HOST_PERSIST_VERSION`]
     /// byte then the `aether_data::wire` body.
     #[must_use]

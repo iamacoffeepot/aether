@@ -59,7 +59,7 @@ pub mod raw;
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
     ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, Sends, SpawnError, WasmCtx, WasmDropCtx,
-    WasmInitCtx, WireCtx,
+    WasmInitCtx, WasmSnapshotCtx, WireCtx,
 };
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
@@ -114,6 +114,41 @@ impl From<&'static str> for ActorInitError {
 impl From<String> for ActorInitError {
     fn from(s: String) -> Self {
         Self::new(s)
+    }
+}
+
+/// Failure to prepare a read-only migration snapshot.
+#[derive(Debug, Clone)]
+pub struct SnapshotError {
+    message: Cow<'static, str>,
+}
+
+impl SnapshotError {
+    pub fn new<S: Into<Cow<'static, str>>>(message: S) -> Self {
+        Self { message: message.into() }
+    }
+
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+}
+
+impl fmt::Display for SnapshotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl From<&'static str> for SnapshotError {
+    fn from(message: &'static str) -> Self {
+        Self::new(message)
+    }
+}
+
+impl From<String> for SnapshotError {
+    fn from(message: String) -> Self {
+        Self::new(message)
     }
 }
 
@@ -213,6 +248,13 @@ pub trait WasmActor:
         let _ = ctx;
     }
 
+    /// Prepare replacement state without changing the live actor. Authors
+    /// must also avoid logical mutation through interior mutability. A
+    /// mutable-only legacy hook is deliberately unsupported by default.
+    fn on_snapshot(&self, _ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
+        Err(SnapshotError::new("read-only snapshot hook is not implemented"))
+    }
+
     /// Restore-side hot-swap hook (ADR-0040 / ADR-0101). Runs after
     /// [`Lifecycle::init`](crate::Lifecycle::init) on a freshly-instantiated replacement, if and only
     /// if the predecessor produced a state bundle via
@@ -299,6 +341,11 @@ pub trait ErasedWasmActor {
 
     /// Forwards to [`WasmActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
+
+    /// Forwards to [`WasmActor::on_snapshot`].
+    fn erased_on_snapshot(&self, _ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
+        Err(SnapshotError::new("read-only snapshot hook is not implemented"))
+    }
 
     /// Forwards to [`WasmActor::on_rehydrate`].
     fn erased_on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, prior: crate::PriorState<'_>);
@@ -1132,6 +1179,33 @@ macro_rules! __export_internal {
             0
         }
 
+        /// Prepare migration state while the old actor remains live.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_snapshot_p32() -> u32 {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+                return 1;
+            };
+            let result = $crate::wasm::inline::compose::snapshot(
+                &__AETHER_INLINE,
+                |ctx| <$component as $crate::WasmActor>::on_snapshot(instance, ctx),
+            )
+            .and_then(|user_state| {
+                let state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), user_state);
+                if let Some((version, bytes)) = state {
+                    $crate::WasmSnapshotCtx::__new().save_state(version, &bytes)?;
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => 0,
+                Err(error) => {
+                    $crate::wasm::bridge::persist::snapshot_failed(error.message());
+                    1
+                }
+            }
+        }
+
         /// # Safety
         /// Called by the substrate after `init` on a freshly
         /// instantiated replacement, with `(version, ptr, len)`
@@ -1832,6 +1906,33 @@ macro_rules! __export_multi_internal {
                 ctx.save_state(version, &bytes);
             }
             0
+        }
+
+        /// Prepare migration state while the boxed actor remains live.
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(no_mangle)]
+        pub unsafe extern "C" fn on_snapshot_p32() -> u32 {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
+                return 1;
+            };
+            let result = $crate::wasm::inline::compose::snapshot(
+                &__AETHER_INLINE,
+                |ctx| instance.erased_on_snapshot(ctx),
+            )
+            .and_then(|user_state| {
+                let state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), user_state);
+                if let Some((version, bytes)) = state {
+                    $crate::WasmSnapshotCtx::__new().save_state(version, &bytes)?;
+                }
+                Ok(())
+            });
+            match result {
+                Ok(()) => 0,
+                Err(error) => {
+                    $crate::wasm::bridge::persist::snapshot_failed(error.message());
+                    1
+                }
+            }
         }
 
         /// # Safety

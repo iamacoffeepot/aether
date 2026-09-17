@@ -152,7 +152,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     fallback = Some(FallbackFn { method: f, agent_doc });
                 } else if name == "init" {
                     init_method = Some(f);
-                } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_rehydrate") {
+                } else if matches!(name.as_str(), "wire" | "unwire" | "on_dehydrate" | "on_snapshot" | "on_rehydrate") {
                     lifecycle_methods.push(f);
                 } else if name == "receive" {
                     return Err(syn::Error::new_spanned(
@@ -212,8 +212,9 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `on_dehydrate` / `on_rehydrate` hooks, so they are mutually
     // exclusive with hand-written hooks and require each other. Validate
     // the XOR at the offending span before synthesizing / generating.
-    let manual_state_hook =
-        lifecycle_methods.iter().find(|m| matches!(m.sig.ident.to_string().as_str(), "on_dehydrate" | "on_rehydrate"));
+    let manual_state_hook = lifecycle_methods
+        .iter()
+        .find(|m| matches!(m.sig.ident.to_string().as_str(), "on_dehydrate" | "on_snapshot" | "on_rehydrate"));
     if let Some(state) = state_type.as_ref() {
         // (a) `type State` + a hand-written hook is contradictory — the
         // macro already generates the hook from the accessors.
@@ -462,6 +463,12 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 >(__aether_ctx, 0, &__aether_state);
             }
 
+
+            fn on_snapshot(&self, __aether_ctx: &mut ::aether_actor::WasmSnapshotCtx<'_>) -> ::core::result::Result<(), ::aether_actor::SnapshotError> {
+                let __aether_state = self.dehydrate();
+                __aether_ctx.save_state_kind::<<Self as ::aether_actor::WasmActor>::Persist>(0, &__aether_state)
+            }
+
             fn on_rehydrate(
                 &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
@@ -484,7 +491,18 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
         }
     } else {
-        quote! {}
+        if lifecycle_methods
+            .iter()
+            .any(|method| matches!(method.sig.ident.to_string().as_str(), "on_dehydrate" | "on_snapshot"))
+        {
+            quote! {}
+        } else {
+            quote! {
+                fn on_snapshot(&self, _ctx: &mut ::aether_actor::WasmSnapshotCtx<'_>) -> ::core::result::Result<(), ::aether_actor::SnapshotError> {
+                    ::core::result::Result::Ok(())
+                }
+            }
+        }
     };
 
     // ADR-0113: the lifted accessors ride as inherent methods on Self
@@ -650,6 +668,12 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
             ) {
                 <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx);
+            }
+            fn erased_on_snapshot(
+                &self,
+                __aether_ctx: &mut ::aether_actor::WasmSnapshotCtx<'_>,
+            ) -> ::core::result::Result<(), ::aether_actor::SnapshotError> {
+                <#self_ty as ::aether_actor::WasmActor>::on_snapshot(self, __aether_ctx)
             }
             fn erased_on_rehydrate(
                 &mut self,

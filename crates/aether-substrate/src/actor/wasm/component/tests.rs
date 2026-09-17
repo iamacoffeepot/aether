@@ -409,6 +409,86 @@ const WAT_SAVES_STATE: &str = r#"
                 i32.const 0))
     "#;
 
+const WAT_READ_ONLY_SNAPSHOT: &str = r#"
+        (module
+            (import "aether" "save_state_p32" (func $save (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (data (i32.const 300) "\de\ad\be\ef")
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
+            (func (export "on_snapshot_p32") (result i32)
+                (drop (call $save (i32.const 7) (i32.const 300) (i32.const 4)))
+                i32.const 0))
+    "#;
+
+#[test]
+fn snapshot_returns_prepared_bundle_and_leaves_guard_clear() {
+    let mut component = instantiate(WAT_READ_ONLY_SNAPSHOT);
+    let saved = component.snapshot().expect("snapshot supported").expect("bundle saved");
+    assert_eq!(saved.version, 7);
+    assert_eq!(saved.bytes, [0xde, 0xad, 0xbe, 0xef]);
+    assert!(!component.store.data().snapshot_active);
+    assert!(component.take_saved_state().is_none());
+}
+
+#[test]
+fn legacy_mutable_only_snapshot_is_explicitly_unsupported() {
+    let mut component = instantiate(WAT_SAVES_STATE);
+    let error = component.snapshot().expect_err("legacy export must not stand in for snapshot");
+    assert!(error.to_string().contains("unsupported"));
+    assert!(!component.store.data().snapshot_active);
+}
+
+#[test]
+fn snapshot_trap_clears_transient_guard() {
+    let mut component = instantiate(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
+            (func (export "on_snapshot_p32") (result i32) unreachable))
+    "#,
+    );
+    assert!(component.snapshot().expect_err("trap must reject snapshot").to_string().contains("trapped"));
+    assert!(!component.store.data().snapshot_active);
+    assert!(component.store.data().snapshot_violation.is_none());
+}
+
+#[test]
+fn forbidden_mail_rejects_snapshot_even_when_guest_ignores_status() {
+    let mut component = instantiate(
+        r#"
+        (module
+            (import "aether" "send_mail_p32" (func $send (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
+            (func (export "on_snapshot_p32") (result i32)
+                (drop (call $send
+                    (i64.const 1) (i64.const 2) (i32.const 0) (i32.const 0)
+                    (i32.const 1) (i32.const 0) (i64.const 0)))
+                i32.const 0))
+    "#,
+    );
+    let error = component.snapshot().expect_err("ignored host error still rejects snapshot");
+    assert!(error.to_string().contains("send_mail"));
+    assert!(!component.store.data().snapshot_active);
+}
+
+#[test]
+fn ignored_oversize_save_rejects_snapshot() {
+    let mut component = instantiate(
+        r#"
+        (module
+            (import "aether" "save_state_p32" (func $save (param i32 i32 i32) (result i32)))
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
+            (func (export "on_snapshot_p32") (result i32)
+                (drop (call $save (i32.const 1) (i32.const 0) (i32.const 2097152)))
+                i32.const 0))
+    "#,
+    );
+    assert!(component.snapshot().expect_err("oversize save must reject snapshot").to_string().contains("cap"));
+}
+
 /// ADR-0016 save-side: `on_dehydrate` attempts a save larger than
 /// the 1 MiB cap. The host fn records the error on the ctx and
 /// returns status 3 (too-large). The guest drops the return.
