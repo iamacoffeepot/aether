@@ -11,6 +11,7 @@
 //! fixture wasm and sets `AETHER_REQUIRE_RUNTIME=1`, flipping the skip
 //! into a hard panic so a missing pre-build is loud.
 
+use std::error::Error;
 use std::fs;
 use std::path::Path;
 
@@ -639,11 +640,11 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 }
 
 #[test]
-fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidate_mail() {
+fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidate_mail() -> Result<(), Box<dyn Error>> {
     use aether_actor::Addressable;
 
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
-        return;
+        return Ok(());
     };
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
     let address = format!("aether.component/{}:transactional_counter", WasmTrampoline::NAMESPACE);
@@ -685,11 +686,11 @@ fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidat
             ),
         )])
         .expect("replace with malformed candidate config");
-    assert!(matches!(failed_init.reply::<ReplaceResult>("replace"), Some(ReplaceResult::Err { .. })));
+    assert!(matches!(failed_init.reply::<ReplaceResult>("replace")?, ReplaceResult::Err { .. }));
     let after_init = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
         .expect("query predecessor after rejected init");
-    assert_eq!(after_init.reply::<CountReport>("query"), Some(CountReport { count: 1 }));
+    assert_eq!(after_init.reply::<CountReport>("query")?, CountReport { count: 1 });
 
     let failed_rehydrate = harness
         .execute(vec![(
@@ -706,7 +707,7 @@ fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidat
             ),
         )])
         .expect("replace with trapping candidate");
-    assert!(matches!(failed_rehydrate.reply::<ReplaceResult>("replace"), Some(ReplaceResult::Err { .. })));
+    assert!(matches!(failed_rehydrate.reply::<ReplaceResult>("replace")?, ReplaceResult::Err { .. }));
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
         0,
@@ -715,7 +716,7 @@ fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidat
     let after_rehydrate = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
         .expect("query predecessor after rejected rehydrate");
-    assert_eq!(after_rehydrate.reply::<CountReport>("query"), Some(CountReport { count: 1 }));
+    assert_eq!(after_rehydrate.reply::<CountReport>("query")?, CountReport { count: 1 });
 
     let accepted = harness
         .execute(vec![(
@@ -732,11 +733,12 @@ fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidat
             ),
         )])
         .expect("replace with healthy candidate");
-    assert!(matches!(accepted.reply::<ReplaceResult>("replace"), Some(ReplaceResult::Ok { .. })));
+    assert!(matches!(accepted.reply::<ReplaceResult>("replace")?, ReplaceResult::Ok { .. }));
     let restored = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
         .expect("query accepted successor");
-    assert_eq!(restored.reply::<CountReport>("query"), Some(CountReport { count: 1 }));
+    assert_eq!(restored.reply::<CountReport>("query")?, CountReport { count: 1 });
+    Ok(())
 }
 
 /// ADR-0113: a single-actor component carries its declared `type State`

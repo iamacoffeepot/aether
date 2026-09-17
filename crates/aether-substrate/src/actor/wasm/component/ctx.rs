@@ -289,11 +289,20 @@ impl ComponentCtx {
 
     /// Enable candidate-only effect capture before `Component::instantiate`
     /// invokes the guest's init export.
+    ///
+    /// # Panics
+    ///
+    /// Panics if preparation is already active for this context.
     pub fn begin_replacement_preparation(&mut self) {
         assert!(self.prepared_effects.get_mut().is_none(), "replacement preparation already active");
         *self.prepared_effects.get_mut() = Some(Vec::new());
     }
 
+    /// Take the effects captured while the replacement candidate was prepared.
+    ///
+    /// # Panics
+    ///
+    /// Panics if preparation was not active for this context.
     pub fn take_prepared_effects(&mut self) -> PreparedComponentEffects {
         PreparedComponentEffects {
             registry: Arc::clone(&self.registry),
