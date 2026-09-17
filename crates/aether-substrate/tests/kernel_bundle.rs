@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use aether_actor::Addressable;
 use aether_bloomery_kernel::KernelReconcileIntent;
-use aether_bloomery_kinds::{Digest, Head, HeadMoved, KERNEL_HEAD, OpaqueBytes, REACTORS_HEAD, ReactorSet, Ref, Tree};
+use aether_bloomery_kinds::{Digest, Head, HeadMoved, KERNEL_HEAD, OpaqueBytes, REACTORS_HEAD, Ref, Tree};
 use aether_bloomery_reactor::{
     CLUSTER_NAMESPACE, ClusterConfig, EvaluatedResult, Event, EventBatch, JournalEntry, PreparedResult,
 };
@@ -24,7 +24,7 @@ const STREAM: &str = "kernel-test";
 
 #[derive(Default)]
 struct Observed {
-    intents: Vec<u64>,
+    intents: Vec<KernelReconcileIntent>,
     prepared: Vec<PreparedResult>,
     evaluated: Vec<EvaluatedResult>,
 }
@@ -43,7 +43,7 @@ impl NativeActor for KernelSink {
 
     #[aether_actor::handler::single]
     fn on_intent(&self, _ctx: &mut NativeCtx<'_>, intent: KernelReconcileIntent) {
-        self.0.lock().expect("sink lock").intents.push(intent.event_seq);
+        self.0.lock().expect("sink lock").intents.push(intent);
     }
 
     #[aether_actor::handler::single]
@@ -61,7 +61,7 @@ fn reference<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))
 }
 
-fn moved<K: Kind + 'static>(seq: u64, head: Head<K>, to: Ref<K>) -> JournalEntry {
+fn moved<K: Kind + 'static>(seq: u64, head: &Head<K>, to: Ref<K>) -> JournalEntry {
     JournalEntry {
         seq,
         kind: HeadMoved::<K>::NAME.to_owned(),
@@ -165,22 +165,24 @@ fn kernel_warmup_is_silent_and_live_moves_emit_one_correlated_intent() {
     settle_batch(
         &mut harness,
         &cluster,
-        vec![moved(1, REACTORS_HEAD, reference(1)), moved(2, KERNEL_HEAD, reference(2))],
+        vec![moved(1, &REACTORS_HEAD, reference(1)), moved(2, &KERNEL_HEAD, reference(2))],
     );
     {
         let captured = observed.lock().expect("sink lock");
         assert!(captured.intents.is_empty(), "historical moves must not emit intents");
         assert!(captured.evaluated.is_empty(), "warmup does not evaluate peers");
         assert!(matches!(captured.prepared.as_slice(), [PreparedResult::Ok { stream, seq: 2 }] if stream == STREAM));
+        drop(captured);
     }
 
-    settle_event(&mut harness, &cluster, moved(3, REACTORS_HEAD, reference(3)));
-    settle_event(&mut harness, &cluster, moved(4, KERNEL_HEAD, reference(4)));
-    settle_event(&mut harness, &cluster, moved(5, Head::<Tree>::new("source"), reference(5)));
+    settle_event(&mut harness, &cluster, moved(3, &REACTORS_HEAD, reference(3)));
+    settle_event(&mut harness, &cluster, moved(4, &KERNEL_HEAD, reference(4)));
+    settle_event(&mut harness, &cluster, moved(5, &Head::<Tree>::new("source"), reference(5)));
 
     let captured = observed.lock().expect("sink lock");
-    assert_eq!(captured.intents, [3, 4]);
+    assert_eq!(captured.intents, [KernelReconcileIntent { event_seq: 3 }, KernelReconcileIntent { event_seq: 4 }]);
     assert_eq!(evaluated_sequences(&captured), [3, 4, 5]);
+    drop(captured);
 }
 
 #[test]
@@ -189,18 +191,27 @@ fn kernel_replacement_restores_generated_peers_and_warmup_is_silent() {
         return;
     };
     let (cluster, mailbox_id) = load_cluster(&mut harness, &wasm_path, "kernel-replace");
-    let history = vec![moved(1, REACTORS_HEAD, reference(1)), moved(2, KERNEL_HEAD, reference(2))];
+    let history = vec![moved(1, &REACTORS_HEAD, reference(1)), moved(2, &KERNEL_HEAD, reference(2))];
     settle_batch(&mut harness, &cluster, history.clone());
-    let first_live = moved(3, Head::<OpaqueBytes>::new("worker"), reference(3));
+    let first_live = moved(3, &Head::<OpaqueBytes>::new("worker"), reference(3));
     settle_event(&mut harness, &cluster, first_live.clone());
-    assert_eq!(observed.lock().expect("sink lock").intents, [3]);
+    assert_eq!(observed.lock().expect("sink lock").intents, [KernelReconcileIntent { event_seq: 3 }]);
 
     replace_cluster(&mut harness, &wasm_path, mailbox_id);
     settle_batch(&mut harness, &cluster, [history, vec![first_live]].concat());
-    assert_eq!(observed.lock().expect("sink lock").intents, [3], "warmup after replacement must not replay output");
+    assert_eq!(
+        observed.lock().expect("sink lock").intents,
+        [KernelReconcileIntent { event_seq: 3 }],
+        "warmup after replacement must not replay output"
+    );
 
-    settle_event(&mut harness, &cluster, moved(4, KERNEL_HEAD, reference(4)));
+    settle_event(&mut harness, &cluster, moved(4, &KERNEL_HEAD, reference(4)));
     let captured = observed.lock().expect("sink lock");
-    assert_eq!(captured.intents, [3, 4], "restored peer must emit once");
+    assert_eq!(
+        captured.intents,
+        [KernelReconcileIntent { event_seq: 3 }, KernelReconcileIntent { event_seq: 4 }],
+        "restored peer must emit once"
+    );
     assert_eq!(evaluated_sequences(&captured), [3, 4]);
+    drop(captured);
 }

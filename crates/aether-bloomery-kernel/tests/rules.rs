@@ -13,7 +13,7 @@ fn reference<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))
 }
 
-fn moved<K: Kind + 'static>(seq: u64, head: Head<K>, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
+fn moved<K: Kind + 'static>(seq: u64, head: &Head<K>, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {
         seq: Seq(seq),
         kind: HeadMoved::<K>::NAME.to_owned(),
@@ -35,17 +35,17 @@ fn evaluate(owner: &mut Owner, entry: Entry) -> Result<Vec<KernelReconcileIntent
 #[test]
 fn only_conventional_set_root_and_byte_head_moves_reconcile() -> Result<(), Box<dyn Error>> {
     let mut owner = Owner::new();
-    assert!(evaluate(&mut owner, moved(1, Head::<ReactorSet>::new("other.reactors"), reference(1))?)?.is_empty());
+    assert!(evaluate(&mut owner, moved(1, &Head::<ReactorSet>::new("other.reactors"), reference(1))?)?.is_empty());
     assert_eq!(
-        evaluate(&mut owner, moved(2, REACTORS_HEAD, reference(2))?)?,
+        evaluate(&mut owner, moved(2, &REACTORS_HEAD, reference(2))?)?,
         vec![KernelReconcileIntent { event_seq: 2 }]
     );
     assert_eq!(
-        evaluate(&mut owner, moved(3, KERNEL_HEAD, reference(3))?)?,
+        evaluate(&mut owner, moved(3, &KERNEL_HEAD, reference(3))?)?,
         vec![KernelReconcileIntent { event_seq: 3 }]
     );
     assert_eq!(
-        evaluate(&mut owner, moved(4, Head::<OpaqueBytes>::new("worker"), reference(4))?)?,
+        evaluate(&mut owner, moved(4, &Head::<OpaqueBytes>::new("worker"), reference(4))?)?,
         vec![KernelReconcileIntent { event_seq: 4 }]
     );
     Ok(())
@@ -54,12 +54,12 @@ fn only_conventional_set_root_and_byte_head_moves_reconcile() -> Result<(), Box<
 #[test]
 fn other_typed_specializations_and_unrelated_events_decline() -> Result<(), Box<dyn Error>> {
     let mut owner = Owner::new();
-    assert!(evaluate(&mut owner, moved(1, Head::<Tree>::new("source"), reference(1))?)?.is_empty());
+    assert!(evaluate(&mut owner, moved(1, &Head::<Tree>::new("source"), reference(1))?)?.is_empty());
     let unrelated =
         Entry { seq: Seq(2), kind: "test.unrelated".to_owned(), cause: None, recorded_at_millis: 0, bytes: Vec::new() };
     assert!(evaluate(&mut owner, unrelated)?.is_empty());
     assert_eq!(
-        evaluate(&mut owner, moved(3, REACTORS_HEAD, reference(3))?)?,
+        evaluate(&mut owner, moved(3, &REACTORS_HEAD, reference(3))?)?,
         vec![KernelReconcileIntent { event_seq: 3 }]
     );
     Ok(())
