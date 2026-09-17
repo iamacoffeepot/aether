@@ -12,35 +12,31 @@ use aether_substrate::chassis::error::BootError;
 pub const MAX_READ_EVENTS: u32 = 128;
 
 /// One independently named, file-backed journal owner.
-pub struct JournalActor;
-
-/// Private state retained by one actor instance.
-pub struct JournalActorState {
+pub struct JournalActor {
     journal: Journal,
 }
 
 #[actor(instanced, root)]
 impl NativeActor for JournalActor {
-    type State = JournalActorState;
     type Config = PathBuf;
 
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
-    fn init(path: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<JournalActorState, BootError> {
-        Ok(JournalActorState { journal: Journal::open(&path).map_err(|error| BootError::Other(Box::new(error)))? })
+    fn init(path: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { journal: Journal::open(&path).map_err(|error| BootError::Other(Box::new(error)))? })
     }
 
     #[handler::single]
-    fn on_read_events(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, request: ReadEvents) -> ReadEventsResult {
+    fn on_read_events(&self, _ctx: &mut NativeCtx<'_>, request: ReadEvents) -> ReadEventsResult {
         let ReadEvents { after, limit } = request;
         if !(1..=MAX_READ_EVENTS).contains(&limit) {
             return ReadEventsResult::Err { after, message: format!("limit must be between 1 and {MAX_READ_EVENTS}") };
         }
 
-        match state
+        match self
             .journal
             .read(Seq(after), limit as usize)
-            .and_then(|entries| state.journal.head().map(|head| (entries, head)))
+            .and_then(|entries| self.journal.head().map(|head| (entries, head)))
         {
             Ok((entries, head)) => ReadEventsResult::Ok {
                 after,
@@ -52,8 +48,8 @@ impl NativeActor for JournalActor {
     }
 
     #[handler::single]
-    fn on_read_head(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _request: ReadHead) -> ReadHeadResult {
-        match state.journal.head() {
+    fn on_read_head(&self, _ctx: &mut NativeCtx<'_>, _request: ReadHead) -> ReadHeadResult {
+        match self.journal.head() {
             Ok(head) => ReadHeadResult::Ok { head: head.0 },
             Err(error) => ReadHeadResult::Err { message: error.to_string() },
         }

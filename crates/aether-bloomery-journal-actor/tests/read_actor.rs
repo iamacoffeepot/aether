@@ -1,22 +1,33 @@
 //! Two named owners answer isolated, correlated pages from their own files.
 
-// A deliberate test embedder boots a bare chassis to spawn independent roots.
-#![allow(clippy::disallowed_methods)]
-
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use aether_actor::actor;
 use aether_bloomery_journal::{Batch, Clock, Draft, Journal, Seq};
 use aether_bloomery_journal_actor::JournalActor;
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
+use aether_substrate::actor::native::{NativeActor, NativeInitCtx};
 use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority};
-use aether_substrate::{Builder, SpawnError, Subname};
+use aether_substrate::testing::{bare_substrate, boot_authority, boot_test_chassis_with};
+use aether_substrate::{BootError, SpawnError, Subname};
 
 const STAMP_MILLIS: u64 = 1_700_000_000_000;
+
+struct TestAnchor;
+
+#[actor(singleton, root)]
+impl NativeActor for TestAnchor {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.bloomery.journal_actor.anchor";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+}
 
 struct FixedClock;
 
@@ -102,8 +113,7 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     let (registry, mailer) = bare_substrate();
     let (first_caller, first_rx) = caller(&registry, "test.journal_actor.caller_first");
     let (second_caller, second_rx) = caller(&registry, "test.journal_actor.caller_second");
-    let chassis =
-        Builder::<TestChassis>::new(Arc::clone(&registry), mailer).build_passive().expect("test chassis boots");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
     let alpha =
         chassis.spawn_actor::<JournalActor>(Subname::Named("alpha"), alpha_path, ()).finish().expect("alpha birth");
     let beta = chassis.spawn_actor::<JournalActor>(Subname::Named("beta"), beta_path, ()).finish().expect("beta birth");
@@ -171,7 +181,7 @@ fn invalid_path_fails_actor_birth() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
     let invalid_path = temp.path().join("missing-parent").join("journal.sqlite");
     let (registry, mailer) = bare_substrate();
-    let chassis = Builder::<TestChassis>::new(registry, mailer).build_passive().expect("test chassis boots");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
 
     let result = chassis.spawn_actor::<JournalActor>(Subname::Named("invalid"), invalid_path, ()).finish();
     assert!(matches!(result, Err(SpawnError::InitFailed(_))), "invalid path must fail birth: {result:?}");
