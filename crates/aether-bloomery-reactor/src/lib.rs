@@ -3,7 +3,7 @@
 //!
 //! [`Owner`] retains pushed entries and lazily constructed views. Each concrete
 //! view folds once, catches up from its trusted cursor, and stays poisoned
-//! after a failed fold. [`prepare`] is a one-shot over a fresh owner.
+//! after a failed fold. [`prepare()`] is a one-shot over a fresh owner.
 //!
 //! A later signature macro classifies `heads: Heads` and
 //! `current: CurrentCompilation` into [`ViewArg`] / [`GuardArg`] chains. Role
