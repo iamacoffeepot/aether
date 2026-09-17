@@ -1,7 +1,7 @@
 //! The main test-fixture bundle: the bulk of the workspace's wasm
 //! fixtures consolidated into one ADR-0096 multi-actor module. One
 //! `src/<name>.rs` module per former fixture; a single
-//! `export!(default = Probe, …, generators = [ReactorBundle])` packs all of
+//! `export!(default = Probe, …, generators = [bundle_reactors])` packs all of
 //! them into one cdylib, with `Probe` the opted-in default (ADR-0138) so a
 //! bare `load` of `aether_test_fixtures_bundle.wasm` instantiates it. The
 //! integration tests load this one wasm and select an in-bundle actor with
@@ -93,7 +93,7 @@ aether_actor::export!(
     SourcePublisher,
     SourceWitness,
     ReactorOutputSink,
-    generators = [aether_bloomery_reactor::ReactorBundle],
+    generators = [aether_bloomery_reactor::bundle_reactors],
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

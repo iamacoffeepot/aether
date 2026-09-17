@@ -1,4 +1,4 @@
-// ReactorBundle on an all-actor export! is misuse, not a silent no-op.
+// bundle_reactors on an all-actor export! is misuse, not a silent no-op.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
 
@@ -16,6 +16,6 @@ impl WasmActor for Probe {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 }
 
-export!(Probe, generators = [aether_bloomery_reactor::ReactorBundle]);
+export!(Probe, generators = [aether_bloomery_reactor::bundle_reactors]);
 
 fn main() {}

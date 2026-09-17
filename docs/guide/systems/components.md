@@ -71,14 +71,14 @@ separately. Grouping actors that belong together — a subsystem's coordinator a
 panels it manages, say — into one module is the intended use: it ships and versions
 them as a unit, and lets a running instance spawn its siblings ([below](#spawning-siblings)).
 
-Optional trailing `generators = [aether_bloomery_reactor::ReactorBundle]` names
-an export generator. `export!` stays the only author entry; `ReactorBundle` is a
+Optional trailing `generators = [aether_bloomery_reactor::bundle_reactors]` names
+an export generator. `export!` stays the only author entry; `bundle_reactors` is a
 function-like macro hook, not a second export macro and not a runtime trait.
 `#[actor]` and `#[reactor]` emit a same-name companion macro so `use`, `pub use`,
 and `as` aliases carry descriptor metadata. Generators receive `actors` (each
 type's namespace plus optional namespaced extensions) and `exports` (the types
 the module will bind). Ordinary actors have no extra extension; `#[reactor]` adds
-`aether_bloomery_reactor`. `ReactorBundle` selects that extension on exported
+`aether_bloomery_reactor`. `bundle_reactors` selects that extension on exported
 paths, keeps ordinary actors in `exports`, and replaces selected reactors with one
 hidden views coordinator loaded at `aether.bloomery.reactor` (`CLUSTER_NAMESPACE`).
 Reactor envelopes stay on their original types in `actors`; their other extensions
@@ -94,7 +94,7 @@ aether_actor::export!(
     SourcePublisher,
     SourceWitness,
     ReactorOutputSink,
-    generators = [aether_bloomery_reactor::ReactorBundle],
+    generators = [aether_bloomery_reactor::bundle_reactors],
 );
 ```
 

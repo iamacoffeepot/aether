@@ -15,7 +15,7 @@
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
 //! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
-//! `aether_actor::export!(…, generators = [ReactorBundle])` collects
+//! `aether_actor::export!(…, generators = [bundle_reactors])` collects
 //! framework-owned `actors` envelopes and an `exports` selection, selects the
 //! bloomery reactor extension on exported paths, keeps ordinary actors in the
 //! export list, and generates one views coordinator ([`CLUSTER_NAMESPACE`])
@@ -43,7 +43,7 @@
 //!     SourcePublisher,
 //!     SourceWitness,
 //!     ReactorOutputSink,
-//!     generators = [aether_bloomery_reactor::ReactorBundle],
+//!     generators = [aether_bloomery_reactor::bundle_reactors],
 //! );
 //! ```
 //!

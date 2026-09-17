@@ -2,7 +2,7 @@
 //!
 //! `#[reactor]` sits on `impl Reactor for Name` and consumes `#[rule]` methods.
 //! It emits inherent rule methods plus a `Reactor` impl whose `evaluate` /
-//! `visit_arms` plus a framework descriptor extension so `ReactorBundle` can
+//! `visit_arms` plus a framework descriptor extension so `bundle_reactors` can
 //! wrap authored reactors without a second export macro. Parameter roles are
 //! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify view
 //! versus guard by type name.
@@ -40,8 +40,8 @@ pub fn reactor(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
-/// Hidden `ReactorBundle` export generator. Invoked by
-/// [`aether_bloomery_reactor::ReactorBundle`], not by authors.
+/// Hidden `bundle_reactors` export generator. Invoked by
+/// [`aether_bloomery_reactor::bundle_reactors`], not by authors.
 #[doc(hidden)]
 #[proc_macro]
 pub fn __reactor_export_generate(input: TokenStream) -> TokenStream {

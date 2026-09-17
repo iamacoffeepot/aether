@@ -40,7 +40,7 @@ impl Reactor for Publisher {
 export!(
     default = Publisher,
     Sink,
-    generators = [aether_bloomery_reactor::ReactorBundle],
+    generators = [aether_bloomery_reactor::bundle_reactors],
 );
 
 fn main() {}

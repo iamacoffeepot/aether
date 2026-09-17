@@ -21,6 +21,6 @@ impl Reactor for Publisher {
     }
 }
 
-export!(Publisher, generators = [aether_bloomery_reactor::ReactorBundle]);
+export!(Publisher, generators = [aether_bloomery_reactor::bundle_reactors]);
 
 fn main() {}
