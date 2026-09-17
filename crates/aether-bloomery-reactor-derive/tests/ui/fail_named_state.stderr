@@ -1,0 +1,10 @@
+error[E0423]: expected value, found struct `StatefulReactor`
+  --> tests/ui/fail_named_state.rs:15:42
+   |
+10 | / struct StatefulReactor {
+11 | |     marker: u32,
+12 | | }
+   | |_- `StatefulReactor` defined here
+...
+15 |   impl aether_bloomery_reactor::Reactor for StatefulReactor {
+   |                                            ^^^^^^^^^^^^^^^ help: use struct literal syntax instead: `StatefulReactor { marker: val }`
