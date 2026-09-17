@@ -50,6 +50,18 @@ impl<C> Slot<C> {
         // the `UnsafeCell` is never aliased.
         unsafe { (*self.inner.get()).as_mut() }
     }
+
+    /// Borrow the resident value without mutation during read-only
+    /// dehydration. The caller must serialize entrypoints and hold no
+    /// mutable borrow of this slot for the duration of the returned borrow.
+    ///
+    /// # Safety
+    /// Caller must guarantee no concurrent or aliasing mutable access.
+    pub unsafe fn get(&self) -> Option<&C> {
+        // SAFETY: caller upholds the same serialized-entrypoint invariant as
+        // `get_mut` and promises no overlapping mutable borrow.
+        unsafe { (*self.inner.get()).as_ref() }
+    }
 }
 
 impl<C> Default for Slot<C> {

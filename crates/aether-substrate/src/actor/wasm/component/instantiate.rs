@@ -18,12 +18,11 @@ pub struct Component {
     /// `WasmTrampoline::wire` invokes [`Self::wire`] post-registration.
     pub(super) wire: Option<TypedFunc<u64, u32>>,
     /// Issue 584 Phase 2b: pre-shutdown mail-allowed hook. Called by
-    /// the trampoline (via [`Self::unwire`]) before `on_dehydrate` on
-    /// the dying instance, or before the `Component` value drops on a
+    /// the trampoline (via [`Self::unwire`]) after successful dehydration
+    /// on replacement, or before the `Component` value drops on a
     /// `DropComponent`.
     pub(super) unwire: Option<TypedFunc<u64, u32>>,
     pub(super) on_dehydrate: Option<TypedFunc<(), u32>>,
-    pub(super) on_snapshot: Option<TypedFunc<(), u32>>,
     pub(super) on_rehydrate: Option<TypedFunc<(u32, u32, u32), u32>>,
     /// ADR-0095: the guest's generic delivery allocator
     /// (`realloc_p32`, `cabi_realloc`-shaped). Every payload — mail, config,
@@ -341,7 +340,6 @@ impl Component {
         // pre-shutdown hook now.) Named save/restore-side so the two
         // locals don't read as a `de`/`re` minimal pair.
         let save_hook = instance.get_typed_func::<(), u32>(&mut store, "on_dehydrate").ok();
-        let snapshot_hook = instance.get_typed_func::<(), u32>(&mut store, "on_snapshot_p32").ok();
         // ADR-0016: `on_rehydrate` takes `(version, ptr, len)` — the
         // substrate writes the state bytes into a delivery region (ADR-0095,
         // via `call_on_rehydrate`), then calls the shim with `(version, ptr, len)`.
@@ -372,7 +370,6 @@ impl Component {
             wire,
             unwire,
             on_dehydrate: save_hook,
-            on_snapshot: snapshot_hook,
             on_rehydrate: restore_hook,
             realloc,
             small_ptr,

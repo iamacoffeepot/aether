@@ -60,6 +60,6 @@ impl aether_actor::WasmActor for Counter {
 fn main() {
     let _: for<'a> fn(
         &Counter,
-        &mut aether_actor::WasmSnapshotCtx<'a>,
-    ) -> Result<(), aether_actor::SnapshotError> = <Counter as aether_actor::WasmActor>::on_snapshot;
+        &mut aether_actor::WasmDropCtx<'a>,
+    ) -> Result<(), aether_actor::__macro_internals::String> = <Counter as aether_actor::WasmActor>::on_dehydrate;
 }

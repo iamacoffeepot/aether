@@ -59,7 +59,7 @@ pub mod raw;
 #[allow(clippy::module_name_repetitions)]
 pub use ctx::{
     ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, Sends, SpawnError, WasmCtx, WasmDropCtx,
-    WasmInitCtx, WasmSnapshotCtx, WireCtx,
+    WasmInitCtx, WireCtx,
 };
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
@@ -114,41 +114,6 @@ impl From<&'static str> for ActorInitError {
 impl From<String> for ActorInitError {
     fn from(s: String) -> Self {
         Self::new(s)
-    }
-}
-
-/// Failure to prepare a read-only migration snapshot.
-#[derive(Debug, Clone)]
-pub struct SnapshotError {
-    message: Cow<'static, str>,
-}
-
-impl SnapshotError {
-    pub fn new<S: Into<Cow<'static, str>>>(message: S) -> Self {
-        Self { message: message.into() }
-    }
-
-    #[must_use]
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl fmt::Display for SnapshotError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.message)
-    }
-}
-
-impl From<&'static str> for SnapshotError {
-    fn from(message: &'static str) -> Self {
-        Self::new(message)
-    }
-}
-
-impl From<String> for SnapshotError {
-    fn from(message: String) -> Self {
-        Self::new(message)
     }
 }
 
@@ -231,8 +196,7 @@ pub trait WasmActor:
     type Persist: aether_data::Kind;
 
     /// Save-side hot-swap hook (ADR-0040 / ADR-0101). Runs once on the
-    /// old instance immediately before a `replace_component` swap, after
-    /// [`Lifecycle::unwire`](crate::Lifecycle::unwire). Default no-op; override to serialize state the
+    /// old instance while it is still live, before retirement. Default no-op; override to serialize state the
     /// replacement instance recovers through [`Self::on_rehydrate`].
     /// Prefer
     /// [`WasmDropCtx::save_state_kind`][crate::model::ctx::Persistence::save_state_kind]
@@ -241,18 +205,11 @@ pub trait WasmActor:
     /// only when persisting a non-kind blob or driving an explicit
     /// migration off the leading id.
     ///
-    /// Concrete `&mut WasmDropCtx<'_>` — the ctx that carries
-    /// `Persistence::save_state` and outbound mail, with the reply /
-    /// resolve surfaces intentionally absent.
-    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+    /// The hook must preserve logical guest state, including through interior
+    /// mutability and on failure. Its context provides persistence only.
+    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
         let _ = ctx;
-    }
-
-    /// Prepare replacement state without changing the live actor. Authors
-    /// must also avoid logical mutation through interior mutability. A
-    /// mutable-only legacy hook is deliberately unsupported by default.
-    fn on_snapshot(&self, _ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
-        Err(SnapshotError::new("read-only snapshot hook is not implemented"))
+        Ok(())
     }
 
     /// Restore-side hot-swap hook (ADR-0040 / ADR-0101). Runs after
@@ -340,12 +297,7 @@ pub trait ErasedWasmActor {
     fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
-    fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
-
-    /// Forwards to [`WasmActor::on_snapshot`].
-    fn erased_on_snapshot(&self, _ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
-        Err(SnapshotError::new("read-only snapshot hook is not implemented"))
-    }
+    fn erased_on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String>;
 
     /// Forwards to [`WasmActor::on_rehydrate`].
     fn erased_on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, prior: crate::PriorState<'_>);
@@ -1134,24 +1086,8 @@ macro_rules! __export_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get() }) else {
                 return 1;
-            };
-            // ADR-0114 addressing amendment: the cluster self-identity is the
-            // real folded id captured at `init` / `wire` — the same id
-            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
-            // hook resolves correctly at any lineage depth. Fall back to
-            // `hash(NAMESPACE)` only before any shim has run.
-            let mailbox_id = {
-                let captured = __AETHER_INLINE.self_id();
-                if captured != 0 {
-                    captured
-                } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        <$component as $crate::Addressable>::NAMESPACE,
-                    )
-                    .0
-                }
             };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
             // resident inline child's into a single composite, then call
@@ -1159,51 +1095,19 @@ macro_rules! __export_internal {
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
-                mailbox_id,
+            let __aether_user_state = match $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
-            );
-            let __aether_state = {
-                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
-                // entrypoint, matching the registry's interior-mutability
-                // invariant.
-                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
-                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
+            ) {
+                Ok(state) => state,
+                Err(_) => return 1,
             };
+            let __aether_state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), __aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> =
-                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
+                let mut ctx = $crate::WasmDropCtx::__new();
                 ctx.save_state(version, &bytes);
             }
             0
-        }
-
-        /// Prepare migration state while the old actor remains live.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn on_snapshot_p32() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
-                return 1;
-            };
-            let result = $crate::wasm::inline::compose::snapshot(
-                &__AETHER_INLINE,
-                |ctx| <$component as $crate::WasmActor>::on_snapshot(instance, ctx),
-            )
-            .and_then(|user_state| {
-                let state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), user_state);
-                if let Some((version, bytes)) = state {
-                    $crate::WasmSnapshotCtx::__new().save_state(version, &bytes)?;
-                }
-                Ok(())
-            });
-            match result {
-                Ok(()) => 0,
-                Err(error) => {
-                    $crate::wasm::bridge::persist::snapshot_failed(error.message());
-                    1
-                }
-            }
         }
 
         /// # Safety
@@ -1865,74 +1769,26 @@ macro_rules! __export_multi_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get() }) else {
                 return 1;
-            };
-            // ADR-0114 addressing amendment: the cluster self-identity is the
-            // real folded id captured at `init` / `wire` — the same id
-            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
-            // hook resolves correctly at any lineage depth. Fall back to
-            // `hash(namespace)` only before any shim has run.
-            let mailbox_id = {
-                let captured = __AETHER_INLINE.self_id();
-                if captured != 0 {
-                    captured
-                } else {
-                    $crate::__macro_internals::mailbox_id_from_name(
-                        instance.erased_namespace(),
-                    )
-                    .0
-                }
             };
             // ADR-0114 §5: compose the parent + every inline child into one
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
-                mailbox_id,
+            let __aether_user_state = match $crate::wasm::inline::compose::dehydrate(
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
-            );
-            let __aether_state = {
-                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
-                // entrypoint, matching the registry's interior-mutability
-                // invariant.
-                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
-                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
+            ) {
+                Ok(state) => state,
+                Err(_) => return 1,
             };
+            let __aether_state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), __aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> =
-                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
+                let mut ctx = $crate::WasmDropCtx::__new();
                 ctx.save_state(version, &bytes);
             }
             0
-        }
-
-        /// Prepare migration state while the boxed actor remains live.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(no_mangle)]
-        pub unsafe extern "C" fn on_snapshot_p32() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
-                return 1;
-            };
-            let result = $crate::wasm::inline::compose::snapshot(
-                &__AETHER_INLINE,
-                |ctx| instance.erased_on_snapshot(ctx),
-            )
-            .and_then(|user_state| {
-                let state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), user_state);
-                if let Some((version, bytes)) = state {
-                    $crate::WasmSnapshotCtx::__new().save_state(version, &bytes)?;
-                }
-                Ok(())
-            });
-            match result {
-                Ok(()) => 0,
-                Err(error) => {
-                    $crate::wasm::bridge::persist::snapshot_failed(error.message());
-                    1
-                }
-            }
         }
 
         /// # Safety

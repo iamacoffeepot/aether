@@ -169,7 +169,7 @@ impl ScriptSlot {
     /// never brings the host down).
     #[must_use]
     pub fn save_state(&mut self) -> Vec<u8> {
-        match self.snapshot_state() {
+        match self.save_state_checked() {
             Ok(bytes) => bytes,
             Err(error) => {
                 tracing::warn!(target: "aether_behavior", %error, "state_save failed; dropping migration state blob (fail-open)");
@@ -178,11 +178,11 @@ impl ScriptSlot {
         }
     }
 
-    /// Fallible, semantically read-only script snapshot. The nested script's
+    /// Fallible, semantically read-only script save. The nested script's
     /// `state_save` must preserve its logical state even when it traps.
-    pub fn snapshot_state(&self) -> Result<Vec<u8>, String> {
+    pub fn save_state_checked(&self) -> Result<Vec<u8>, String> {
         if self.state_save_fn.is_some() != self.state_load_fn.is_some() {
-            return Err("script must export both state_save and state_load for a read-only snapshot".to_string());
+            return Err("script must export both state_save and state_load for dehydration".to_string());
         }
         let Some(save) = self.state_save_fn else {
             return Ok(Vec::new());
@@ -532,7 +532,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_state_save_trap_is_an_explicit_snapshot_error() {
+    fn nested_state_save_trap_is_an_explicit_dehydration_error() {
         let script = wat::parse_str(
             r#"
             (module
@@ -545,11 +545,11 @@ mod tests {
         )
         .expect("test WAT parses");
         let slot = ScriptSlot::instantiate(&build_engine(), &script, None, 1_000_000, 3).expect("script instantiates");
-        assert!(slot.snapshot_state().expect_err("trap must reject snapshot").contains("trapped"));
+        assert!(slot.save_state_checked().expect_err("trap must reject dehydration").contains("trapped"));
     }
 
     #[test]
-    fn unpaired_script_state_exports_reject_snapshot() {
+    fn unpaired_script_state_exports_reject_dehydration() {
         let script = wat::parse_str(
             r#"
             (module
@@ -562,8 +562,8 @@ mod tests {
         .expect("test WAT parses");
         let slot = ScriptSlot::instantiate(&build_engine(), &script, None, 1_000_000, 3).expect("script instantiates");
         assert!(
-            slot.snapshot_state()
-                .expect_err("missing save must reject snapshot")
+            slot.save_state_checked()
+                .expect_err("missing save must reject dehydration")
                 .contains("both state_save and state_load")
         );
     }
