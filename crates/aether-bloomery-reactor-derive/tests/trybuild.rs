@@ -22,6 +22,9 @@ fn ui() {
     t.compile_fail("tests/ui/fail_export_reserved_namespace.rs");
     t.compile_fail("tests/ui/fail_export_type_alias.rs");
     t.compile_fail("tests/ui/fail_mutable.rs");
+    t.compile_fail("tests/ui/fail_named_state.rs");
+    t.compile_fail("tests/ui/fail_interior_mutable_state.rs");
+    t.compile_fail("tests/ui/fail_tuple_state.rs");
     t.compile_fail("tests/ui/fail_context.rs");
     t.compile_fail("tests/ui/fail_no_trigger.rs");
     t.compile_fail("tests/ui/fail_option_return.rs");

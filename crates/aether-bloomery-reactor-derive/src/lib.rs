@@ -6,6 +6,8 @@
 //! wrap authored reactors without a second export macro. Parameter roles are
 //! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify view
 //! versus guard by type name.
+//! An authored reactor must be a unit struct: the expansion checks that the
+//! declared type can be constructed as a unit value, with no stored fields.
 
 #![forbid(unsafe_code)]
 
@@ -26,8 +28,9 @@ mod pattern;
 /// and generates preparation/evaluation plus associated-type visitors.
 ///
 /// Takes no arguments. The impl must declare `const NAMESPACE` and at least one
-/// `#[rule]`. Each rule takes `&self`, a typed trigger, then owned view or
-/// guard parameters, and returns exactly one mail-capable output.
+/// `#[rule]`. The reactor type must be a unit struct. Each rule takes `&self`,
+/// a typed trigger, then owned view or guard parameters, and returns exactly
+/// one mail-capable output.
 #[proc_macro_attribute]
 pub fn reactor(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {

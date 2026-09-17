@@ -1,0 +1,15 @@
+error[E0308]: mismatched types
+  --> tests/ui/fail_tuple_state.rs:13:42
+   |
+10 | struct StatefulReactor(u32);
+   | ---------------------- `StatefulReactor` defines a struct constructor here, which should be called
+...
+13 | impl aether_bloomery_reactor::Reactor for StatefulReactor {
+   |                                          ^^^^^^^^^^^^^^^ expected `StatefulReactor`, found struct constructor
+   |
+   = note:          expected struct `StatefulReactor`
+           found struct constructor `fn(u32) -> StatefulReactor {StatefulReactor}`
+help: use parentheses to construct this tuple struct
+   |
+13 | impl aether_bloomery_reactor::Reactor for StatefulReactor(/* u32 */) {
+   |                                                         +++++++++++
