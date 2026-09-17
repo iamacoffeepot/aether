@@ -41,8 +41,12 @@ pub fn emit_reactor_export_desc(self_ty: &Type, namespace: &LitStr) -> TokenStre
 }
 
 fn unique_macro_ident(name: &Ident) -> Ident {
-    let span = name.span().unwrap();
-    let key = format!("{}:{}:{}:{name}", span.file(), span.line(), span.column());
+    let key = if proc_macro::is_available() {
+        let span = name.span().unwrap();
+        format!("{}:{}:{}:{name}", span.file(), span.line(), span.column())
+    } else {
+        format!("{:?}:{name}", name.span())
+    };
     format_ident!("__aether_export_desc_{}_{:x}", name, fnv1a_64(key.as_bytes()))
 }
 

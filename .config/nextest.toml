@@ -212,9 +212,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # `aether-derive` fixture dep graph (local wall-clock 240s → 18s on
 # our dev boxes); CI's 2-core runners still push it past 60s under
 # parallel contention with `aether-data-derive`'s ui binary, so all
-# four derive crates (`aether-data-derive`, `aether-derive`,
-# `aether-actor-derive`, `aether-behavior-derive`) keep the wider cap.
-# The bigger speedup for all four is its own follow-up.
+# derive crates keep the wider cap. Bloomery's reactor export fixtures also
+# compile nested projects and exceeded the default cap in CI.
 [[profile.ci.overrides]]
-filter = "package(=aether-data-derive) | package(=aether-derive) | package(=aether-actor-derive) | package(=aether-behavior-derive)"
+filter = "package(=aether-data-derive) | package(=aether-derive) | package(=aether-actor-derive) | package(=aether-behavior-derive) | package(=aether-bloomery-reactor-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }
