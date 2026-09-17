@@ -1,7 +1,7 @@
 //! Generate inherent rule methods and the `Reactor` impl.
 
 use proc_macro2::TokenStream as TokenStream2;
-use quote::{quote, quote_spanned};
+use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 use syn::spanned::Spanned;
 
@@ -79,7 +79,7 @@ fn expand_arm_eval(rule: &Rule) -> TokenStream2 {
     let output_ty = &rule.output_ty;
     let params_ty = params_type(&rule.params);
     let unpack = unpack_pat(&rule.params);
-    let call_args = rule.params.iter().map(|param| &param.ident);
+    let call_args = (0..rule.params.len()).map(param_binding);
     let test_pat = match_test(&rule.trigger_pat);
 
     quote_spanned! { trigger_ty.span() =>
@@ -112,9 +112,13 @@ fn params_type(params: &[Param]) -> TokenStream2 {
 
 fn unpack_pat(params: &[Param]) -> TokenStream2 {
     let mut pat = quote! { () };
-    for param in params.iter().rev() {
-        let ident = &param.ident;
+    for index in (0..params.len()).rev() {
+        let ident = param_binding(index);
         pat = quote! { (#ident, #pat) };
     }
     pat
+}
+
+fn param_binding(index: usize) -> Ident {
+    format_ident!("aether_reactor_param_{index}", span = proc_macro2::Span::mixed_site())
 }

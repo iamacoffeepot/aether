@@ -79,6 +79,7 @@ impl Reactor for SourcePublisher {
 impl PublicationProposal {
     fn with_heads(self, heads: Heads, program: Ref<Program>) -> Self {
         assert_eq!(heads.get(&CURRENT), Some(program));
+        drop(heads);
         self
     }
 

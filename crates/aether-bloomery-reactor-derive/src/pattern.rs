@@ -9,7 +9,14 @@ pub fn match_test(pat: &Pat) -> Pat {
             .subpat
             .as_ref()
             .map_or_else(|| parse_quote_spanned!(ident.ident.span() => _), |(_, sub)| match_test(sub)),
-        Pat::Wild(_) | Pat::Lit(_) | Pat::Path(_) | Pat::Rest(_) | Pat::Range(_) | Pat::Const(_) => pat.clone(),
+        Pat::Wild(_)
+        | Pat::Lit(_)
+        | Pat::Path(_)
+        | Pat::Rest(_)
+        | Pat::Range(_)
+        | Pat::Const(_)
+        | Pat::Macro(_)
+        | Pat::Verbatim(_) => pat.clone(),
         Pat::Or(or) => {
             let mut or = or.clone();
             or.cases = or.cases.into_iter().map(|case| match_test(&case)).collect();
@@ -39,10 +46,14 @@ pub fn match_test(pat: &Pat) -> Pat {
             let mut structure = structure.clone();
             for field in &mut structure.fields {
                 let span = field.pat.span();
-                field.pat = Box::new(match_test(&field.pat));
+                *field.pat = match_test(&field.pat);
                 if field.colon_token.is_none() {
                     field.colon_token = Some(syn::Token![:](span));
                 }
+            }
+            if structure.rest.is_some() {
+                structure.fields =
+                    structure.fields.into_iter().filter(|field| !matches!(*field.pat, Pat::Wild(_))).collect();
             }
             Pat::Struct(structure)
         }
@@ -52,7 +63,6 @@ pub fn match_test(pat: &Pat) -> Pat {
             Pat::Slice(slice)
         }
         Pat::Type(typed) => match_test(&typed.pat),
-        Pat::Macro(_) | Pat::Verbatim(_) => pat.clone(),
         _ => parse_quote_spanned!(pat.span() => _),
     }
 }
