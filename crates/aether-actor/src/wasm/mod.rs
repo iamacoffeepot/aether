@@ -406,7 +406,7 @@ pub mod guest_alloc;
 /// `__export_multi_internal!`; the arity is what keeps the multi-actor
 /// arm from shadowing this single-actor form.
 ///
-/// Optional trailing `generators = [ReactorBundle]` names export-generator
+/// Optional trailing `generators = [bundle_reactors]` names export-generator
 /// macros (paths, not trait objects). Direct `($($ty:ty),+, generators = […])`
 /// matching is ambiguous because `generators` is a valid `$ty`, so unmatched
 /// tokens fall through to a muncher. This crate then collects a framework-owned
@@ -429,7 +429,7 @@ pub mod guest_alloc;
 ///     SourcePublisher,
 ///     SourceWitness,
 ///     ReactorOutputSink,
-///     generators = [aether_bloomery_reactor::ReactorBundle],
+///     generators = [aether_bloomery_reactor::bundle_reactors],
 /// );
 /// ```
 ///
@@ -506,7 +506,7 @@ macro_rules! export {
     ($first:ty $(, $rest:ty)+ $(,)?) => {
         $crate::__export_multi_internal!(@no_boot ; @no_default ; @all $first $(, $rest)+);
     };
-    // Generator extension: `export!(…, generators = [ReactorBundle])`.
+    // Generator extension: `export!(…, generators = [bundle_reactors])`.
     // Existing type-list arms above cannot parse `generators =` (the ident is
     // a valid `$ty`), so unmatched generator invocations fall through here
     // and are token-munched. No-generator forms keep matching the arms above

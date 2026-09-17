@@ -1,10 +1,10 @@
-error: ReactorBundle found no #[reactor] exports in this export! set
+error: bundle_reactors found no #[reactor] exports in this export! set
   --> tests/ui/fail_export_no_reactors.rs:7:1
    |
  7 | #[actor]
    | ^^^^^^^^
 ...
-19 | export!(Probe, generators = [aether_bloomery_reactor::ReactorBundle]);
-   | --------------------------------------------------------------------- in this macro invocation
+19 | export!(Probe, generators = [aether_bloomery_reactor::bundle_reactors]);
+   | ----------------------------------------------------------------------- in this macro invocation
    |
    = note: this error originates in the macro `$crate::__reactor_export_generate` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -43,6 +43,6 @@ mod two {
     }
 }
 
-export!(one::Publisher, two::Publisher, generators = [aether_bloomery_reactor::ReactorBundle]);
+export!(one::Publisher, two::Publisher, generators = [aether_bloomery_reactor::bundle_reactors]);
 
 fn main() {}

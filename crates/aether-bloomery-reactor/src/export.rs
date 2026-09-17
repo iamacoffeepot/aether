@@ -1,4 +1,4 @@
-//! `ReactorBundle` export generator: a macro hook over host-side proc-macro codegen.
+//! `bundle_reactors` export generator: a macro hook over host-side proc-macro codegen.
 //!
 //! `export!` collects framework-owned descriptor envelopes into `actors` and the
 //! listed types into `exports`, then invokes
@@ -13,7 +13,7 @@
 
 /// Framework-owned mailbox namespace of the generated views coordinator.
 ///
-/// One coordinator is emitted per `export!(…, generators = [ReactorBundle])`.
+/// One coordinator is emitted per `export!(…, generators = [bundle_reactors])`.
 /// Load it with this selector. Reactor peers use each reactor's own
 /// `NAMESPACE` and are inline children, not module exports. Multiple loaded
 /// cluster instances remain isolated. The coordinator is never a `boot` actor.
@@ -30,7 +30,7 @@ pub const CLUSTER_NAMESPACE: &str = "aether.bloomery.reactor";
 ///     SourcePublisher,
 ///     SourceWitness,
 ///     ReactorOutputSink,
-///     generators = [aether_bloomery_reactor::ReactorBundle],
+///     generators = [aether_bloomery_reactor::bundle_reactors],
 /// );
 /// ```
 ///
@@ -43,7 +43,7 @@ pub const CLUSTER_NAMESPACE: &str = "aether.bloomery.reactor";
 /// — entries are never dropped silently. `reactor` already names the
 /// attribute macro, so this generator is not `reactor!`.
 #[macro_export]
-macro_rules! ReactorBundle {
+macro_rules! bundle_reactors {
     (@aether_export_generate
         { remaining_generators: [$($rest:path),*] }
         { boot: $boot:tt, default: $default:tt, actors: [$($actors:tt)*], exports: [$($exports:tt)*] }
@@ -58,7 +58,7 @@ macro_rules! ReactorBundle {
     };
     ($($tt:tt)*) => {
         ::core::compile_error!(
-            "ReactorBundle is an export! generator; write `export!(..., generators = [ReactorBundle])`"
+            "bundle_reactors is an export! generator; write `export!(..., generators = [bundle_reactors])`"
         );
     };
 }

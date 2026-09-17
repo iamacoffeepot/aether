@@ -4,7 +4,7 @@ error: export! default cannot be a reactor in a mixed module; name an ordinary a
 40 | / export!(
 41 | |     default = Publisher,
 42 | |     Sink,
-43 | |     generators = [aether_bloomery_reactor::ReactorBundle],
+43 | |     generators = [aether_bloomery_reactor::bundle_reactors],
 44 | | );
    | |_^
    |

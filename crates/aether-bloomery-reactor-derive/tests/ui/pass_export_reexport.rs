@@ -29,6 +29,6 @@ mod inner {
 
 pub use inner::Publisher;
 
-export!(Publisher, generators = [aether_bloomery_reactor::ReactorBundle]);
+export!(Publisher, generators = [aether_bloomery_reactor::bundle_reactors]);
 
 fn main() {}

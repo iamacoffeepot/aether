@@ -155,11 +155,11 @@ impl Reactor for SceneCompilation {
 
 aether_actor::export!(
     SceneCompilation,
-    generators = [aether_bloomery_reactor::ReactorBundle],
+    generators = [aether_bloomery_reactor::bundle_reactors],
 );
 ```
 
-`export!` remains the module's export entry point. `ReactorBundle` selects
+`export!` remains the module's export entry point. `bundle_reactors` selects
 actors carrying reactor metadata and generates their shared views actor and
 peer wiring. Ordinary actors may appear in the same export list without
 becoming reactors. Each reactor declares its own namespace; authors do not

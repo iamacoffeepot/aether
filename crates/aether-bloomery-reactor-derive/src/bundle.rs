@@ -1,4 +1,4 @@
-//! `ReactorBundle` export generator: select bloomery reactor extensions from
+//! `bundle_reactors` export generator: select bloomery reactor extensions from
 //! the framework-owned descriptor list, emit one shared views coordinator plus
 //! inline peers, then continue the `export!` generator pipeline.
 
@@ -63,7 +63,7 @@ impl Parse for GenerateInput {
             }
         }
         if exports.is_empty() {
-            return Err(syn::Error::new(Span::call_site(), "ReactorBundle requires at least one export type"));
+            return Err(syn::Error::new(Span::call_site(), "bundle_reactors requires at least one export type"));
         }
         Ok(Self { remaining_generators, boot, default, actors, exports })
     }
@@ -208,7 +208,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     if reactors.is_empty() {
         return Err(syn::Error::new(
             Span::call_site(),
-            "ReactorBundle found no #[reactor] exports in this export! set",
+            "bundle_reactors found no #[reactor] exports in this export! set",
         ));
     }
     if let Some(boot) = &boot

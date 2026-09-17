@@ -87,6 +87,6 @@ export!(
     default = Probe,
     Publisher,
     Witness,
-    generators = [InjectSentinel, RequireSentinel, aether_bloomery_reactor::ReactorBundle],
+    generators = [InjectSentinel, RequireSentinel, aether_bloomery_reactor::bundle_reactors],
 );
 fn main() {}

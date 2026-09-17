@@ -1,7 +1,7 @@
 //! Generated reactor-bundle fixture: two source-publication reactors share one
 //! views owner inside a WASM cluster.
 //!
-//! Authors declare reactors and guards. `export!(…, generators = [ReactorBundle])`
+//! Authors declare reactors and guards. `export!(…, generators = [bundle_reactors])`
 //! keeps ordinary actors (including imported names) and generates one views
 //! coordinator plus inline peers. Load the coordinator at
 //! [`aether_bloomery_reactor::CLUSTER_NAMESPACE`].
