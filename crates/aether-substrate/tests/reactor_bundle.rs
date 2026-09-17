@@ -196,6 +196,20 @@ fn reactor_bundle_shared_fold_guard_and_isolated_clusters() {
     assert_eq!(b_status.cursor, 1, "mailing A must not advance B's views or routes");
     assert_eq!(b_status.stream, STREAM_B);
     assert!(!b_status.poisoned);
+
+    settle_event(&mut harness, &cluster_b, &live_event(STREAM_B, 2, "current", program));
+    let now_ready = collect(&mut harness, &sink_b);
+    assert!(now_ready.guarded.is_empty(), "a declined event must not resume when its guard becomes ready");
+    assert_eq!(now_ready.open.len(), 1);
+    assert_eq!(evaluated_ok_seqs(&now_ready), [1, 2]);
+
+    settle_event(&mut harness, &cluster_b, &live_event(STREAM_B, 3, "source", digest_ref::<Tree>(3)));
+    let later = collect(&mut harness, &sink_b);
+    assert_eq!(later.guarded.len(), 1, "only the new matching event may publish");
+    assert_eq!(later.guarded[0].digest, [3; 32]);
+    assert_eq!(later.guarded[0].folds, 3);
+    assert_eq!(later.open.len(), 2);
+    assert_eq!(evaluated_ok_seqs(&later), [1, 2, 3]);
 }
 
 /// Fold-only warmup consumes history without live reactions; the next live
