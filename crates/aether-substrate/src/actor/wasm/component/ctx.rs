@@ -48,8 +48,7 @@ pub struct ComponentCtx {
     /// `Mailer` based on the variant.
     pub reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
-    /// substrate extracts it after hooks return via
-    /// `Component::take_saved_state`. Never read by the guest —
+    /// substrate returns it from `Component::on_dehydrate`. Never read by the guest —
     /// rehydration reads from a scratch offset written by the
     /// substrate, not from here.
     pub saved_state: Option<StateBundle>,
@@ -58,12 +57,10 @@ pub struct ComponentCtx {
     /// the replace; the substrate checks this after `on_dehydrate` and
     /// surfaces the message back up the control plane.
     pub save_state_error: Option<String>,
-    /// Transient guard while an immutable migration snapshot is running.
-    pub snapshot_active: bool,
-    /// Any forbidden host call fails the snapshot even if guest code ignores its status.
-    pub snapshot_violation: Option<String>,
-    /// Guest-staged error from `snapshot_failed_p32`.
-    pub snapshot_failure: Option<String>,
+    /// Transient guard while read-only dehydration is running.
+    pub dehydration_active: bool,
+    /// A forbidden host call fails dehydration even if the guest ignores its status.
+    pub dehydration_violation: Option<String>,
     /// Set by the `init_failed_p32` host fn when the guest's `init`
     /// returns `Err(ActorInitError)`. Issue 525 Phase 4b / issue 531: the
     /// substrate reads this after `init` returns non-zero and
@@ -273,9 +270,8 @@ impl ComponentCtx {
             reply_table: ReplyTable::new(),
             saved_state: None,
             save_state_error: None,
-            snapshot_active: false,
-            snapshot_violation: None,
-            snapshot_failure: None,
+            dehydration_active: false,
+            dehydration_violation: None,
             init_failure: None,
             binding: None,
             correlation_counter: Cell::new(1),
@@ -350,11 +346,11 @@ impl ComponentCtx {
     }
 
     /// Record a forbidden effect and let the host function return without acting.
-    pub fn deny_snapshot_effect(&mut self, operation: &str) -> bool {
-        if !self.snapshot_active {
+    pub fn deny_dehydration_effect(&mut self, operation: &str) -> bool {
+        if !self.dehydration_active {
             return false;
         }
-        self.snapshot_violation.get_or_insert_with(|| format!("{operation} is forbidden during read-only snapshot"));
+        self.dehydration_violation.get_or_insert_with(|| format!("{operation} is forbidden during dehydration"));
         true
     }
 

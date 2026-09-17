@@ -379,9 +379,8 @@ const WAT_WIRE_TRAPS: &str = r#"
                 unreachable))
     "#;
 
-/// WAT whose `unwire` traps. Tests that `Component::unwire`
-/// contains the trap (logs but doesn't propagate), same pattern
-/// as `on_dehydrate`'s trap-is-contained behaviour.
+/// WAT whose `unwire` traps. Teardown remains best effort, unlike
+/// the fallible dehydration preparation hook.
 const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -409,84 +408,71 @@ const WAT_SAVES_STATE: &str = r#"
                 i32.const 0))
     "#;
 
-const WAT_READ_ONLY_SNAPSHOT: &str = r#"
-        (module
-            (import "aether" "save_state_p32" (func $save (param i32 i32 i32) (result i32)))
-            (memory (export "memory") 1)
-            (data (i32.const 300) "\de\ad\be\ef")
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_snapshot_p32") (result i32)
-                (drop (call $save (i32.const 7) (i32.const 300) (i32.const 4)))
-                i32.const 0))
-    "#;
-
 #[test]
-fn snapshot_returns_prepared_bundle_and_leaves_guard_clear() {
-    let mut component = instantiate(WAT_READ_ONLY_SNAPSHOT);
-    let saved = component.snapshot().expect("snapshot supported").expect("bundle saved");
-    assert_eq!(saved.version, 7);
-    assert_eq!(saved.bytes, [0xde, 0xad, 0xbe, 0xef]);
-    assert!(!component.store.data().snapshot_active);
-    assert!(component.take_saved_state().is_none());
-}
-
-#[test]
-fn legacy_mutable_only_snapshot_is_explicitly_unsupported() {
-    let mut component = instantiate(WAT_SAVES_STATE);
-    let error = component.snapshot().expect_err("legacy export must not stand in for snapshot");
-    assert!(error.to_string().contains("unsupported"));
-    assert!(!component.store.data().snapshot_active);
-}
-
-#[test]
-fn snapshot_trap_clears_transient_guard() {
+fn dehydration_trap_clears_transient_guard() {
     let mut component = instantiate(
         r#"
         (module
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_snapshot_p32") (result i32) unreachable))
+            (func (export "on_dehydrate") (result i32) unreachable))
     "#,
     );
-    assert!(component.snapshot().expect_err("trap must reject snapshot").to_string().contains("trapped"));
-    assert!(!component.store.data().snapshot_active);
-    assert!(component.store.data().snapshot_violation.is_none());
+    assert!(component.on_dehydrate().expect_err("trap must reject dehydration").to_string().contains("trapped"));
+    assert!(!component.store.data().dehydration_active);
+    assert!(component.store.data().dehydration_violation.is_none());
 }
 
 #[test]
-fn forbidden_mail_rejects_snapshot_even_when_guest_ignores_status() {
+fn nonzero_dehydration_status_rejects_preparation() {
+    let mut component = instantiate(
+        r#"
+        (module
+            (memory (export "memory") 1)
+            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
+            (func (export "on_dehydrate") (result i32) i32.const 1))
+    "#,
+    );
+    assert!(
+        component.on_dehydrate().expect_err("nonzero status must reject dehydration").to_string().contains("status 1")
+    );
+    assert!(!component.store.data().dehydration_active);
+}
+
+#[test]
+fn forbidden_mail_rejects_dehydration_even_when_guest_ignores_status() {
     let mut component = instantiate(
         r#"
         (module
             (import "aether" "send_mail_p32" (func $send (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_snapshot_p32") (result i32)
+            (func (export "on_dehydrate") (result i32)
                 (drop (call $send
                     (i64.const 1) (i64.const 2) (i32.const 0) (i32.const 0)
                     (i32.const 1) (i32.const 0) (i64.const 0)))
                 i32.const 0))
     "#,
     );
-    let error = component.snapshot().expect_err("ignored host error still rejects snapshot");
+    let error = component.on_dehydrate().expect_err("ignored host error still rejects dehydration");
     assert!(error.to_string().contains("send_mail"));
-    assert!(!component.store.data().snapshot_active);
+    assert!(!component.store.data().dehydration_active);
 }
 
 #[test]
-fn ignored_oversize_save_rejects_snapshot() {
+fn ignored_oversize_save_rejects_dehydration() {
     let mut component = instantiate(
         r#"
         (module
             (import "aether" "save_state_p32" (func $save (param i32 i32 i32) (result i32)))
             (memory (export "memory") 1)
             (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_snapshot_p32") (result i32)
+            (func (export "on_dehydrate") (result i32)
                 (drop (call $save (i32.const 1) (i32.const 0) (i32.const 2097152)))
                 i32.const 0))
     "#,
     );
-    assert!(component.snapshot().expect_err("oversize save must reject snapshot").to_string().contains("cap"));
+    assert!(component.on_dehydrate().expect_err("oversize save must reject dehydration").to_string().contains("cap"));
 }
 
 /// ADR-0016 save-side: `on_dehydrate` attempts a save larger than
@@ -605,7 +591,7 @@ fn wat_replies(kind_id: u64) -> String {
 fn on_dehydrate_invokes_export_and_writes_marker() {
     let mut component = instantiate(WAT_HOOKS);
     assert_eq!(component.read_u32(200), 0);
-    component.on_dehydrate();
+    component.on_dehydrate().expect("dehydration succeeds");
     assert_eq!(component.read_u32(200), 0x11);
 }
 
@@ -613,7 +599,7 @@ fn on_dehydrate_invokes_export_and_writes_marker() {
 fn on_dehydrate_on_component_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
     // Just needs to not panic. No marker to check.
-    component.on_dehydrate();
+    assert!(component.on_dehydrate().expect("missing hook is a no-op").is_none());
 }
 
 /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
@@ -782,13 +768,10 @@ fn instantiate_config_without_allocator_returns_clean_error() {
 #[test]
 fn on_dehydrate_save_state_populates_bundle() {
     let mut component = instantiate(WAT_SAVES_STATE);
-    assert!(component.take_saved_state().is_none());
-    component.on_dehydrate();
-    let bundle = component.take_saved_state().expect("bundle saved");
+    let bundle = component.on_dehydrate().expect("dehydration succeeds").expect("bundle saved");
     assert_eq!(bundle.version, 7);
     assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-    // take_saved_state is destructive.
-    assert!(component.take_saved_state().is_none());
+    assert!(component.store.data().saved_state.is_none());
 }
 
 /// Issue 584 Phase 2b: `Component::wire` invokes the guest's
@@ -914,18 +897,16 @@ fn deliver_to_guest_without_allocator_dropped() {
 #[test]
 fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    component.on_dehydrate();
-    assert!(component.take_saved_state().is_none());
-    assert!(component.take_save_error().is_none());
+    assert!(component.on_dehydrate().expect("missing hook is a no-op").is_none());
+    assert!(component.store.data().save_state_error.is_none());
 }
 
 #[test]
 fn save_state_over_cap_records_error_and_no_bundle() {
     let mut component = instantiate(WAT_SAVES_TOO_LARGE);
-    component.on_dehydrate();
-    let err = component.take_save_error().expect("error recorded");
-    assert!(err.contains("exceeds"), "got: {err}");
-    assert!(component.take_saved_state().is_none());
+    let err = component.on_dehydrate().expect_err("oversize save fails dehydration");
+    assert!(err.to_string().contains("exceeds"), "got: {err}");
+    assert!(component.store.data().saved_state.is_none());
 }
 
 #[test]

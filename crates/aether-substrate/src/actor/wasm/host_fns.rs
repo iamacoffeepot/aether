@@ -63,7 +63,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          detached: u32,
          from: u64|
          -> u32 {
-            if caller.data_mut().deny_snapshot_effect("send_mail") {
+            if caller.data_mut().deny_dehydration_effect("send_mail") {
                 return 1;
             }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
@@ -133,7 +133,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
-            if caller.data_mut().deny_snapshot_effect("spawn_sibling") {
+            if caller.data_mut().deny_dehydration_effect("spawn_sibling") {
                 return 0;
             }
             // Copy subname + config out of guest memory, ending the
@@ -234,7 +234,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
-            if caller.data_mut().deny_snapshot_effect("spawn_sibling_scoped") {
+            if caller.data_mut().deny_dehydration_effect("spawn_sibling_scoped") {
                 return 0;
             }
             let parent = MailboxId(parent);
@@ -342,7 +342,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
-            if caller.data_mut().deny_snapshot_effect("spawn_inline_child") {
+            if caller.data_mut().deny_dehydration_effect("spawn_inline_child") {
                 return 0;
             }
             // Copy the subname out of guest memory (empty for `Counter`),
@@ -432,7 +432,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
-            if caller.data_mut().deny_snapshot_effect("spawn_inline_child_scoped") {
+            if caller.data_mut().deny_dehydration_effect("spawn_inline_child_scoped") {
                 return 0;
             }
             let parent = MailboxId(parent);
@@ -525,7 +525,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "despawn_inline_child_p32",
         |mut caller: Caller<'_, ComponentCtx>, alias: u64| -> u32 {
-            if caller.data_mut().deny_snapshot_effect("despawn_inline_child") {
+            if caller.data_mut().deny_dehydration_effect("despawn_inline_child") {
                 return 1;
             }
             let alias = MailboxId(alias);
@@ -616,7 +616,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
-            if caller.data_mut().deny_snapshot_effect("reply_mail") {
+            if caller.data_mut().deny_dehydration_effect("reply_mail") {
                 return REPLY_OOB;
             }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
@@ -734,7 +734,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // (`Component::instantiate` falls back to a generic "init
     // returned <rc> without staging an error" diagnostic).
     linker.func_wrap("aether", "init_failed_p32", |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
-        if caller.data_mut().deny_snapshot_effect("init_failed") {
+        if caller.data_mut().deny_dehydration_effect("init_failed") {
             return;
         }
         let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
@@ -748,27 +748,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         };
         let msg = String::from_utf8_lossy(&data[start..end]).into_owned();
         caller.data_mut().init_failure = Some(msg);
-    })?;
-
-    linker.func_wrap("aether", "snapshot_failed_p32", |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
-        if !caller.data().snapshot_active {
-            return;
-        }
-        let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-            caller.data_mut().snapshot_failure = Some("guest exports no memory for snapshot error".to_owned());
-            return;
-        };
-        let data = memory.data(&caller);
-        let start = ptr as usize;
-        let end = match start.checked_add(len as usize) {
-            Some(end) if end <= data.len() => end,
-            _ => {
-                caller.data_mut().snapshot_failure = Some("snapshot error pointer out of bounds".to_owned());
-                return;
-            }
-        };
-        let message = String::from_utf8_lossy(&data[start..end]).into_owned();
-        caller.data_mut().snapshot_failure = Some(message);
     })?;
 
     // ADR-0081 §7: `log_event_p32` re-fires a guest `tracing::*` event
@@ -799,7 +778,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
-            if caller.data_mut().deny_snapshot_effect("log_event") {
+            if caller.data_mut().deny_dehydration_effect("log_event") {
                 return;
             }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
@@ -852,8 +831,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "asset_fetch_p32",
         |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
-            if caller.data_mut().deny_snapshot_effect("asset_fetch") {
-                return Err(wasmtime::Error::msg("asset_fetch is forbidden during read-only snapshot"));
+            if caller.data_mut().deny_dehydration_effect("asset_fetch") {
+                return Err(wasmtime::Error::msg("asset_fetch is forbidden during dehydration"));
             }
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
             let bytes = {

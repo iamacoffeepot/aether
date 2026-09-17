@@ -37,6 +37,6 @@ impl aether_actor::WasmActor for Minimal {
 fn main() {
     let _: for<'a> fn(
         &Minimal,
-        &mut aether_actor::WasmSnapshotCtx<'a>,
-    ) -> Result<(), aether_actor::SnapshotError> = <Minimal as aether_actor::WasmActor>::on_snapshot;
+        &mut aether_actor::WasmDropCtx<'a>,
+    ) -> Result<(), aether_actor::__macro_internals::String> = <Minimal as aether_actor::WasmActor>::on_dehydrate;
 }
