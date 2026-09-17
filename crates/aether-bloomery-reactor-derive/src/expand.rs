@@ -56,7 +56,7 @@ fn expand_rule_method(rule: &Rule) -> TokenStream2 {
         #vis fn #ident(&self, #trigger: #trigger_ty, #(#param_args),*) -> #output_ty {
             match #trigger {
                 #trigger_pat => #body,
-                #[allow(unreachable_patterns)]
+                #[allow(unreachable_patterns)] // aether-suppression-request: the same generated match accepts both refutable and irrefutable author patterns
                 _ => ::core::unreachable!("reactor rule trigger pattern already matched"),
             }
         }

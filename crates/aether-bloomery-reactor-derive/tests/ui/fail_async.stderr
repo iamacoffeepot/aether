@@ -1,5 +1,5 @@
 error: #[rule] methods are synchronous; remove `async`
-  --> tests/ui/fail_async.rs:20:5
+  --> tests/ui/fail_async.rs:17:5
    |
-20 |     async fn publish(&self, _change: HeadMoved<Tree>) -> PublicationProposal {
+17 |     async fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
    |     ^^^^^
