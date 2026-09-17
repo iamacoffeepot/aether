@@ -89,14 +89,28 @@ only after the views actor can process the corresponding event. A live actor
 need not have finished processing all its application input. No additional
 engine readiness gate is needed to prevent unprepared reactions.
 
-Use an ordered ring buffer for pending events, with allocated overflow for
-bursts. Preserve FIFO across the ring and overflow, account for queued payload
-bytes as well as event count, and release overflow storage after it drains.
-An event awaiting a prerequisite remains pending; later events must not pass
-it or affect its prepared view. Mail that supplies the prerequisite must still
-be handled normally so the actor can resume. Fold-only history may establish
-the missing prefix but must not skip pending live reactions. No silent event
-dropping or new engine backpressure policy is authorized by this queue.
+The journal assigns sequence numbers on append; those numbers establish log
+order, not that an event's producer observed preceding events. Live input must
+arrive contiguously in that order. Live batches are permitted, provided each
+event is prepared and dispatched to reactor arms in sequence. A gap, duplicate,
+or regression in live input violates the application contract: request
+system-wide shutdown through the existing shutdown mechanism. Do not sort or
+repair a broken live stream by silently fetching the missing entries.
+
+Use an ordered ring buffer for pending payloads. On overflow, retain ranges of
+already received and validated journal sequences and request their payloads
+again as space opens. Preserve FIFO across resident payloads and deferred
+ranges. Refill replies are separately correlated; they are not new live arrivals.
+Count resident bytes as well as events; range and reply bookkeeping also has
+a memory cost. Do not introduce a heap for reordering or a new engine
+backpressure policy. Performance tuning remains deferred.
+
+An event awaiting an application prerequisite remains pending; later events
+must not pass it or affect its prepared view. Prerequisite mail remains normally
+processable. Distinguish received, prepared and evaluated progress. Fold-only
+history is for explicitly eligible warmup; refilling deferred live payloads
+must still produce each live reaction and must not use fold-only replay to
+skip that work.
 
 This corrects the withdrawn held-activation and retained-admission work orders
 #6149, #6150, #6151, and #6153 (PRs #6152 and #6154). Those proposals are not
