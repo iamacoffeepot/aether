@@ -148,10 +148,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-journal-actor"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-data",
+ "aether-kinds",
+ "aether-substrate",
+ "tempfile",
+]
+
+[[package]]
 name = "aether-bloomery-kinds"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
+ "serde",
  "sha2",
  "unicode-normalization",
 ]
