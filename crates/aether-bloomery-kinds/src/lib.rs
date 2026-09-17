@@ -13,7 +13,7 @@ mod digest;
 mod entry;
 mod head;
 mod program;
-mod reactor_set;
+mod reactor;
 mod reference;
 mod tree;
 
@@ -25,6 +25,6 @@ pub use program::{
     Detail, DetailError, ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramHeadMoved,
     ProgramName, ProgramNameError, Transition,
 };
-pub use reactor_set::{ReactorSet, ReactorSetError};
+pub use reactor::{ReactorSet, ReactorSetError};
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};
