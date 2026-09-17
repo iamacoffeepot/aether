@@ -1,8 +1,8 @@
 //! `FleetHarness` reply-routing regression for the two **forwarded**
 //! component-lifecycle ops (issue 1466). Over the real hub → RPC →
 //! forked-substrate wire, `ReplaceComponent` and `DropComponent` are
-//! forwarded by the component cap to the trampoline, whose deferred
-//! `ctx.reply` must stream back before the originating call settles.
+//! forwarded by the component cap to the trampoline, whose typed result
+//! must be relayed back before the originating call settles.
 //! Before the fix the forward did not hold the call's trace root open,
 //! so the call emitted `ReplyEnd(Ok)` with zero reply events and the
 //! `ReplaceResult` / `DropResult` routed to a call that had already
@@ -19,9 +19,8 @@ mod tests {
     /// Load the `probe` component, then drive a `ReplaceComponent`
     /// and a `DropComponent` to its cap over the real wire and assert
     /// each draws its `*Result::Ok` as a streamed reply event ahead
-    /// of `ReplyEnd`. Both ops route through the component cap's
-    /// `forward_to_trampoline`; before the issue-1466 fix the forward
-    /// let the call settle before the trampoline replied, so the
+    /// of `ReplyEnd`. Both ops route through the component cap;
+    /// before the issue-1466 fix the forward let the call settle, so the
     /// reply set came back empty.
     #[test]
     fn forwarded_replace_and_drop_route_their_reply() {

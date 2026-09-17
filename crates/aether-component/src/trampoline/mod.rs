@@ -51,11 +51,13 @@
 //! - **Drop**: `DropComponent` mail addressed to the trampoline's mailbox
 //!   lands on `on_drop_component`, which drops the `Component` and clears the
 //!   mailbox's accept-set. The trampoline (and its mailbox name) survives as an
-//!   empty slot, refillable by `ReplaceComponent`.
+//!   empty slot, refillable by `ReplaceComponent`. A host bootstrap can prohibit
+//!   this individual operation for the slot.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which instantiates a new `Component` against the same binding and swaps
 //!   `state.component`. ADR-0022 + ADR-0038 invariants hold because the inbox
-//!   channel is the trampoline's `NativeBinding` and outlives the swap.
+//!   channel is the trampoline's `NativeBinding` and outlives the swap. A
+//!   bootstrap replacement prohibition rejects before candidate work.
 
 // `#[handler]` methods take their decoded payload by value per the
 // ADR-0033 dispatch ABI; the macro-generated dispatch owns the

@@ -29,6 +29,7 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
+use crate::ComponentRestrictions;
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
@@ -115,6 +116,7 @@ impl NativeActor for WasmTrampoline {
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
         Ok(WasmTrampolineState {
+            prohibit: config.prohibit,
             component: Some(component),
             engine: config.engine,
             linker: config.linker,
@@ -159,6 +161,15 @@ impl NativeActor for WasmTrampoline {
         state.stage_inline_alias_retirements(ctx, retired);
     }
 
+    /// Application teardown is a different lifecycle path from an
+    /// individual `DropComponent` request. The bootstrap prohibition does
+    /// not prevent the resident guest from unwiring during actor shutdown.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        if let Some(component) = state.component.as_mut() {
+            component.unwire();
+        }
+    }
+
     /// Drop the **wasm component**. Runs the guest's `unwire`
     /// pre-shutdown hook, then drops the `Component`. The trampoline itself
     /// stays alive — the mailbox `aether.embedded:NAME`
@@ -172,6 +183,10 @@ impl NativeActor for WasmTrampoline {
     /// `state.component` is `None`.
     #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
+        if state.prohibit.contains(ComponentRestrictions::DROP) {
+            return DropResult::Err { error: "component drop prohibited by native bootstrap".to_owned() };
+        }
+
         if let Some(mut component) = state.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
@@ -314,5 +329,221 @@ impl NativeActor for WasmTrampoline {
             state.spawn_sibling(ctx, pending);
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod lifecycle_restriction_tests {
+    use std::fs;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use aether_data::{Kind, MailId, MailboxId, Source};
+    use aether_harness_substrate::test_helpers::require_wasm;
+    use aether_substrate::actor::native::NativeBinding;
+    use aether_substrate::actor::wasm::host_fns;
+    use aether_substrate::actor::wasm::kind_manifest;
+    use aether_substrate::mail::mailer::Mailer;
+    use aether_substrate::mail::outbound::HubOutbound;
+    use aether_substrate::mail::registry::{OwnedDispatch, Registry};
+    use aether_substrate::testing::boot_authority;
+    use aether_test_fixtures_kinds::{BootTornDown, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME};
+    use wasmtime::{Engine, Linker, Module};
+
+    use super::*;
+
+    fn state(
+        wasm: &[u8],
+        prohibit: ComponentRestrictions,
+        type_tag: Option<u64>,
+    ) -> (WasmTrampolineState, Arc<NativeBinding>) {
+        let engine = Arc::new(Engine::default());
+        let mut linker = Linker::new(&engine);
+        host_fns::register(&mut linker).expect("register host functions");
+        let linker = Arc::new(linker);
+        let module = Module::new(&engine, wasm).expect("compile fixture");
+        let registry = Arc::new(Registry::new());
+        let outbound = HubOutbound::disconnected();
+        let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+        let mailbox = MailboxId(0x6135);
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), mailbox));
+        let mut guest_ctx =
+            ComponentCtx::new(mailbox, Arc::clone(&registry), Arc::clone(&mailer), Arc::clone(&outbound));
+        guest_ctx.install_binding(Arc::clone(&binding));
+        guest_ctx
+            .install_load_window(asset_manifest::LoadWindow::index(Arc::from(wasm)).expect("index fixture assets"));
+        let component =
+            Component::instantiate(&engine, &linker, &module, guest_ctx, &[], type_tag).expect("instantiate fixture");
+
+        (
+            WasmTrampolineState {
+                prohibit,
+                component: Some(component),
+                engine,
+                linker,
+                registry,
+                mailer,
+                outbound,
+                mailbox,
+                type_tag,
+                module,
+                actor_caps: Vec::new(),
+                wasm_bytes: Arc::from(wasm),
+            },
+            binding,
+        )
+    }
+
+    fn replace(wasm: &[u8], mailbox_id: MailboxId) -> ReplaceComponent {
+        ReplaceComponent { mailbox_id, wasm: wasm.to_vec(), drain_timeout_ms: None, config: Vec::new(), export: None }
+    }
+
+    #[test]
+    fn native_drop_prohibition_survives_successful_and_failed_replacement() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read fixture");
+        let (mut state, binding) = state(&wasm, ComponentRestrictions::DROP, None);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mailbox = state.mailbox;
+
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut state, &mut ctx, DropComponent { mailbox_id: mailbox }),
+            DropResult::Err { .. }
+        ));
+        assert!(state.component.is_some(), "rejected drop leaves the guest serving");
+        assert!(matches!(state.handle_replace(&mut ctx, replace(b"invalid wasm", mailbox)), ReplaceResult::Err { .. }));
+        assert!(state.component.is_some(), "failed replace leaves the guest serving");
+        assert!(matches!(state.handle_replace(&mut ctx, replace(&wasm, mailbox)), ReplaceResult::Ok { .. }));
+        assert_eq!(state.prohibit, ComponentRestrictions::DROP);
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut state, &mut ctx, DropComponent { mailbox_id: mailbox }),
+            DropResult::Err { .. }
+        ));
+        assert!(state.component.is_some(), "successful replacement retains drop prohibition");
+    }
+
+    #[test]
+    fn replace_prohibition_precedes_candidate_work_and_does_not_affect_sibling() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read fixture");
+        let (mut protected, binding) = state(&wasm, ComponentRestrictions::REPLACE | ComponentRestrictions::DROP, None);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mailbox = protected.mailbox;
+
+        let ReplaceResult::Err { error } = protected.handle_replace(&mut ctx, replace(b"invalid wasm", mailbox)) else {
+            panic!("replacement must be prohibited");
+        };
+        assert!(error.contains("prohibited"), "the policy rejects before invalid wasm compilation: {error}");
+        assert!(protected.component.is_some());
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut protected, &mut ctx, DropComponent { mailbox_id: mailbox }),
+            DropResult::Err { .. }
+        ));
+
+        let (mut replace_only, replace_only_binding) = state(&wasm, ComponentRestrictions::REPLACE, None);
+        let mut replace_only_ctx = NativeCtx::new(&replace_only_binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let replace_only_mailbox = replace_only.mailbox;
+        assert!(matches!(
+            replace_only.handle_replace(&mut replace_only_ctx, replace(&wasm, replace_only_mailbox)),
+            ReplaceResult::Err { .. }
+        ));
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(
+                &mut replace_only,
+                &mut replace_only_ctx,
+                DropComponent { mailbox_id: replace_only_mailbox }
+            ),
+            DropResult::Ok
+        ));
+
+        let (mut sibling, sibling_binding) = state(&wasm, ComponentRestrictions::NONE, None);
+        let mut sibling_ctx = NativeCtx::new(&sibling_binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let sibling_mailbox = sibling.mailbox;
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(
+                &mut sibling,
+                &mut sibling_ctx,
+                DropComponent { mailbox_id: sibling_mailbox }
+            ),
+            DropResult::Ok
+        ));
+        assert!(sibling.component.is_none(), "a separately bootstrapped slot has its own policy");
+        assert!(protected.component.is_some(), "sibling operation does not affect protected slot");
+    }
+
+    fn observe_boot_unwire(state: &WasmTrampolineState) -> Arc<AtomicUsize> {
+        let observed = Arc::new(AtomicUsize::new(0));
+        let captured = Arc::clone(&observed);
+        state.registry.register_inbox(
+            &boot_authority(),
+            SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+            Arc::new(move |dispatch: OwnedDispatch| {
+                if dispatch.kind == BootTornDown::ID {
+                    captured.fetch_add(1, Ordering::SeqCst);
+                }
+                dispatch.discharge();
+            }),
+        );
+        observed
+    }
+
+    #[test]
+    fn protected_application_shutdown_unwires_once_and_drop_does_not_double_unwire() {
+        let Some(path) = require_wasm("aether_test_fixtures_boot") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read boot fixture");
+        let boot_namespace = kind_manifest::read_boot_namespace_from_bytes(&wasm)
+            .expect("read boot namespace")
+            .expect("fixture declares a boot actor");
+        let boot_tag = Some(
+            kind_manifest::read_actor_inputs_from_bytes(&wasm)
+                .expect("read fixture actor inputs")
+                .into_iter()
+                .filter_map(|actor| actor.namespace)
+                .find(|namespace| namespace == &boot_namespace)
+                .map(|namespace| aether_data::ActorId::singleton(&namespace).0)
+                .expect("boot namespace belongs to an exported actor"),
+        );
+
+        let (mut protected, protected_binding) = state(&wasm, ComponentRestrictions::DROP, boot_tag);
+        let protected_events = observe_boot_unwire(&protected);
+        let mut protected_ctx = NativeCtx::new(&protected_binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let protected_mailbox = protected.mailbox;
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(
+                &mut protected,
+                &mut protected_ctx,
+                DropComponent { mailbox_id: protected_mailbox }
+            ),
+            DropResult::Err { .. }
+        ));
+        assert_eq!(protected_events.load(Ordering::SeqCst), 0, "rejected individual drop does not unwire");
+        <WasmTrampoline as aether_actor::Lifecycle<WasmTrampolineState>>::unwire(&mut protected, &mut protected_ctx);
+        drop(protected_ctx);
+        assert_eq!(protected_events.load(Ordering::SeqCst), 1, "application shutdown unwires a protected guest once");
+
+        let (mut ordinary, ordinary_binding) = state(&wasm, ComponentRestrictions::NONE, boot_tag);
+        let ordinary_events = observe_boot_unwire(&ordinary);
+        let mut ordinary_ctx = NativeCtx::new(&ordinary_binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let ordinary_mailbox = ordinary.mailbox;
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(
+                &mut ordinary,
+                &mut ordinary_ctx,
+                DropComponent { mailbox_id: ordinary_mailbox }
+            ),
+            DropResult::Ok
+        ));
+        <WasmTrampoline as aether_actor::Lifecycle<WasmTrampolineState>>::unwire(&mut ordinary, &mut ordinary_ctx);
+        drop(ordinary_ctx);
+        assert_eq!(
+            ordinary_events.load(Ordering::SeqCst),
+            1,
+            "shutdown does not repeat a prior individual drop's hook"
+        );
     }
 }
