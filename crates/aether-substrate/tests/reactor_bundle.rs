@@ -273,28 +273,40 @@ fn boot() -> Option<(SubstrateHarness, PathBuf)> {
     Some((harness, wasm_path))
 }
 
-fn load_journal_provider(harness: &mut SubstrateHarness, wasm_path: &Path, entries: Vec<JournalEntry>) -> String {
+struct JournalProvider {
+    address: String,
+    mailbox_id: MailboxId,
+}
+
+fn load_journal_provider(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    entries: Vec<JournalEntry>,
+) -> JournalProvider {
     let head = entries.last().map_or(0, |entry| entry.seq);
-    load_export(
+    match load_export_result(
         harness,
         wasm_path,
         "reactor-journal",
         JOURNAL_PROVIDER,
         ReactorJournalConfig { head, entries }.encode_into_bytes(),
-    )
+    ) {
+        LoadResult::Ok { name, mailbox_id, .. } => JournalProvider { address: name, mailbox_id },
+        LoadResult::Err { error } => panic!("load journal provider: {error}"),
+    }
 }
 
-fn journal_status(harness: &mut SubstrateHarness, provider: &str) -> ReactorJournalStatus {
+fn journal_status(harness: &mut SubstrateHarness, provider: &JournalProvider) -> ReactorJournalStatus {
     harness
-        .execute(vec![("pending", HarnessOp::send_and_await_reply(provider, &ReactorJournalStatusQuery))])
+        .execute(vec![("pending", HarnessOp::send_and_await_reply(&provider.address, &ReactorJournalStatusQuery))])
         .expect("journal status")
         .reply::<ReactorJournalStatus>("pending")
         .expect("decode journal status")
 }
 
-fn release_page(harness: &mut SubstrateHarness, provider: &str, mode: ReleaseReactorJournalPage) {
+fn release_page(harness: &mut SubstrateHarness, provider: &JournalProvider, mode: ReleaseReactorJournalPage) {
     harness
-        .execute(vec![("release", HarnessOp::send_and_settle(provider, &mode))])
+        .execute(vec![("release", HarnessOp::send_and_settle(&provider.address, &mode))])
         .expect("release controlled journal reply");
 }
 
@@ -326,7 +338,11 @@ fn reactor_bundle_managed_history_buffers_selected_live_inputs() {
             "begin",
             HarnessOp::send_and_settle(
                 &cluster,
-                &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider.clone(), historical_through: 41 },
+                &BeginWarmup {
+                    stream: STREAM_A.to_owned(),
+                    journal_mailbox: provider.mailbox_id,
+                    historical_through: 41,
+                },
             ),
         )])
         .expect("begin managed warmup");
@@ -361,12 +377,12 @@ fn reactor_bundle_managed_history_buffers_selected_live_inputs() {
     assert_eq!(evaluated_ok_seqs(&report), [42, 43, 44]);
     assert_eq!(report.guarded.len(), 3);
     assert_eq!(report.open.len(), 3);
-    for (index, expected_seq) in (42..=44).enumerate() {
-        let expected_digest = [(expected_seq - 40) as u8; 32];
+    for (index, expected_seq) in (42_u8..=44).enumerate() {
+        let expected_digest = [expected_seq - 40; 32];
         assert_eq!(report.guarded[index].digest, expected_digest);
         assert_eq!(report.open[index].digest, expected_digest);
-        assert_eq!(report.guarded[index].folds, expected_seq as u32);
-        assert_eq!(report.open[index].folds, expected_seq as u32);
+        assert_eq!(report.guarded[index].folds, u32::from(expected_seq));
+        assert_eq!(report.open[index].folds, u32::from(expected_seq));
         assert_eq!(report.guarded[index].fold_id, report.open[index].fold_id);
     }
 }
@@ -384,7 +400,11 @@ fn reactor_bundle_zero_history_is_ready_without_a_read() {
             "begin",
             HarnessOp::send_and_settle(
                 &cluster,
-                &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider.clone(), historical_through: 0 },
+                &BeginWarmup {
+                    stream: STREAM_A.to_owned(),
+                    journal_mailbox: provider.mailbox_id,
+                    historical_through: 0,
+                },
             ),
         )])
         .expect("zero-history begin");
@@ -414,7 +434,11 @@ fn reactor_bundle_replaced_cluster_begins_managed_feed_with_restored_peers() {
             "begin",
             HarnessOp::send_and_settle(
                 &cluster,
-                &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider.clone(), historical_through: 0 },
+                &BeginWarmup {
+                    stream: STREAM_A.to_owned(),
+                    journal_mailbox: provider.mailbox_id,
+                    historical_through: 0,
+                },
             ),
         )])
         .expect("begin with restored peer aliases");
@@ -453,7 +477,7 @@ fn reactor_bundle_malformed_history_poison_stops_live_drain() {
                     &cluster,
                     &BeginWarmup {
                         stream: STREAM_A.to_owned(),
-                        journal_address: provider.clone(),
+                        journal_mailbox: provider.mailbox_id,
                         historical_through: 1,
                     },
                 ),
@@ -487,7 +511,11 @@ fn reactor_bundle_live_order_violations_fatally_abort() {
                 "begin",
                 HarnessOp::send_and_settle(
                     &cluster,
-                    &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider, historical_through: 0 },
+                    &BeginWarmup {
+                        stream: STREAM_A.to_owned(),
+                        journal_mailbox: provider.mailbox_id,
+                        historical_through: 0,
+                    },
                 ),
             )])
             .expect("begin before live order violation");
@@ -507,7 +535,7 @@ fn reactor_bundle_managed_admission_refuses_legacy_and_conflicting_begin() {
     };
     let sink = load_export(&mut harness, &wasm_path, "sink-admit", SINK, Vec::new());
     let provider = load_journal_provider(&mut harness, &wasm_path, historical_entries(1));
-    let cluster = load_cluster(&mut harness, &wasm_path, "reactor-admit", sink.clone());
+    let cluster = load_cluster(&mut harness, &wasm_path, "reactor-admit", sink);
     let before_begin = LiveEventBatch::from_journal(STREAM_A, vec![journal_moved(2, "source", digest_ref::<Tree>(2))])
         .expect("live range");
     let refused = harness
@@ -517,7 +545,8 @@ fn reactor_bundle_managed_admission_refuses_legacy_and_conflicting_begin() {
         .expect("decode prebegin reply");
     assert!(matches!(refused, PreparedResult::Err { seq: 0, .. }));
 
-    let begin = BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider.clone(), historical_through: 1 };
+    let begin =
+        BeginWarmup { stream: STREAM_A.to_owned(), journal_mailbox: provider.mailbox_id, historical_through: 1 };
     harness.execute(vec![("begin", HarnessOp::send_and_settle(&cluster, &begin))]).expect("begin warmup");
     let second = harness
         .execute(vec![("second", HarnessOp::send_and_await_reply(&cluster, &begin))])
@@ -549,7 +578,11 @@ fn reactor_bundle_uncorrelated_history_reply_poisoned_without_folding() {
             "begin",
             HarnessOp::send_and_settle(
                 &cluster,
-                &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider, historical_through: 1 },
+                &BeginWarmup {
+                    stream: STREAM_A.to_owned(),
+                    journal_mailbox: provider.mailbox_id,
+                    historical_through: 1,
+                },
             ),
         )])
         .expect("begin before forged history");

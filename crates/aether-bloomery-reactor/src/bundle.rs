@@ -11,7 +11,7 @@ use alloc::vec::Vec;
 
 pub use aether_bloomery_kinds::JournalEntry;
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_data::KindId;
+use aether_data::{KindId, MailboxId};
 
 use crate::error::PrepareError;
 use crate::evaluate::{ArmVisitor, Output, Reactor};
@@ -62,8 +62,8 @@ impl Event {
 pub struct BeginWarmup {
     /// Stream token for this cluster.
     pub stream: String,
-    /// Runtime name of the journal read actor.
-    pub journal_address: String,
+    /// Mailbox of the journal read actor, resolved by the native owner.
+    pub journal_mailbox: MailboxId,
     /// Last entry folded as history without peer evaluation.
     pub historical_through: u64,
 }
@@ -71,18 +71,18 @@ pub struct BeginWarmup {
 impl BeginWarmup {
     /// Describe the committed historical boundary and journal reader.
     #[must_use]
-    pub fn new(stream: impl Into<String>, journal_address: impl Into<String>, historical_through: u64) -> Self {
-        Self { stream: stream.into(), journal_address: journal_address.into(), historical_through }
+    pub fn new(stream: impl Into<String>, journal_mailbox: MailboxId, historical_through: u64) -> Self {
+        Self { stream: stream.into(), journal_mailbox, historical_through }
     }
 
     /// Validate fields that do not depend on the coordinator's current state.
     ///
     /// # Errors
     ///
-    /// Returns a reason for an empty address or stream.
+    /// Returns a reason for an absent mailbox or empty stream.
     pub fn validate(&self) -> Result<(), &'static str> {
-        if self.stream.is_empty() || self.journal_address.is_empty() {
-            return Err("warmup requires a stream and journal address");
+        if self.stream.is_empty() || self.journal_mailbox == MailboxId::NONE {
+            return Err("warmup requires a stream and journal mailbox");
         }
         Ok(())
     }

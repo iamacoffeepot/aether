@@ -3,7 +3,7 @@
 use alloc::string::String;
 
 use aether_bloomery_kinds::JournalEntry;
-use aether_data::{MailboxId, mailbox_id_from_path};
+use aether_data::MailboxId;
 
 use crate::{BeginWarmup, LiveQueue};
 
@@ -25,8 +25,8 @@ pub struct PendingRead {
 impl PendingRead {
     /// Remember the exact journal actor and host-minted request identity.
     #[must_use]
-    pub fn new(correlation: u64, address: &str, after: u64, limit: u32) -> Self {
-        Self { correlation, source: mailbox_id_from_path(address), after, limit }
+    pub fn new(correlation: u64, source: MailboxId, after: u64, limit: u32) -> Self {
+        Self { correlation, source, after, limit }
     }
 }
 
@@ -34,8 +34,8 @@ impl PendingRead {
 pub struct Warming {
     /// Bound stream.
     pub stream: String,
-    /// Runtime journal address supplied by the owner.
-    pub journal_address: String,
+    /// Journal mailbox supplied by the owner.
+    pub journal_mailbox: MailboxId,
     /// Inclusive fold-only boundary.
     pub historical_through: u64,
     /// Last selected live sequence received independently of fold progress.
@@ -80,21 +80,21 @@ impl ManagedFeed {
     pub fn begin(
         &mut self,
         stream: String,
-        journal_address: String,
+        journal_mailbox: MailboxId,
         historical_through: u64,
     ) -> Result<(), &'static str> {
         if !matches!(self.mode, FeedMode::Direct) {
             return Err("warmup already started");
         }
-        let begin = BeginWarmup::new(stream, journal_address, historical_through);
+        let begin = BeginWarmup::new(stream, journal_mailbox, historical_through);
         begin.validate()?;
-        let BeginWarmup { stream, journal_address, historical_through } = begin;
+        let BeginWarmup { stream, journal_mailbox, historical_through } = begin;
         self.mode = if historical_through == 0 {
             FeedMode::Feeding { stream, received_live_through: 0 }
         } else {
             FeedMode::Warming(Warming {
                 stream,
-                journal_address,
+                journal_mailbox,
                 historical_through,
                 received_live_through: historical_through,
                 pending: None,

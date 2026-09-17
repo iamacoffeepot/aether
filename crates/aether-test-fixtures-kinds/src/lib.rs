@@ -545,7 +545,7 @@ pub struct ReactorJournalStatus {
 }
 
 /// Release a parked journal read, optionally corrupting one reply field.
-#[aether_data::kind(name = "aether.test_fixtures.release_reactor_journal_page", eq)]
+#[aether_data::kind(name = "aether.test_fixtures.release_reactor_journal_page", copy, eq)]
 pub enum ReleaseReactorJournalPage {
     Exact,
     WrongAfter,

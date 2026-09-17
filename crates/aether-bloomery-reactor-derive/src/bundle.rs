@@ -709,7 +709,7 @@ fn begin_handler_tokens(names: &ManagedNames<'_>, peers: &[ReactorPeer]) -> Toke
             {
                 Some("warmup requires an empty direct cluster")
             } else {
-                self.feed.begin(begin.stream.clone(), begin.journal_address, begin.historical_through).err()
+                self.feed.begin(begin.stream.clone(), begin.journal_mailbox, begin.historical_through).err()
             };
             if let Some(message) = refusal {
                 let result = ::aether_bloomery_reactor::PreparedResult::Err {
@@ -878,11 +878,11 @@ fn managed_helpers_tokens(views: &Ident, names: &ManagedNames<'_>, peers: &[Reac
                     return;
                 };
                 let limit = remaining.min(u64::from(::aether_bloomery_reactor::WARMUP_PAGE_LIMIT)) as u32;
-                let address = state.journal_address.clone();
-                ctx.send_to_named(&address, &::aether_bloomery_reactor::ReadEvents { after, limit });
+                let journal_mailbox = state.journal_mailbox;
+                ctx.send_to(journal_mailbox, &::aether_bloomery_reactor::ReadEvents { after, limit });
                 let pending = ::aether_bloomery_reactor::PendingRead::new(
                     ctx.prev_correlation(),
-                    &address,
+                    journal_mailbox,
                     after,
                     limit,
                 );

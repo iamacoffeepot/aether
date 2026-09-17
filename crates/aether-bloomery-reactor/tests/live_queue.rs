@@ -4,12 +4,15 @@ use aether_bloomery_reactor::{JournalEntry, LiveQueue};
 use aether_data::KindId;
 
 fn entry(seq: u64, len: usize) -> JournalEntry {
+    let seed = u8::try_from(seq % 256).expect("sequence byte remainder fits");
     JournalEntry {
         seq,
         kind: KindId(seq + 100),
         cause: Some(seq.saturating_sub(1)),
         recorded_at_millis: seq * 17,
-        bytes: (0..len).map(|index| (index as u8).wrapping_add(seq as u8)).collect(),
+        bytes: (0..len)
+            .map(|index| u8::try_from(index % 256).expect("index byte remainder fits").wrapping_add(seed))
+            .collect(),
     }
 }
 
