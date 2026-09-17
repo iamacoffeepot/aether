@@ -340,6 +340,16 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
+struct ManagedNames<'a> {
+    warmup: &'a Ident,
+    live: &'a Ident,
+    ack_prepared: &'a Ident,
+    ack_evaluated: &'a Ident,
+    drain: &'a Ident,
+    request: &'a Ident,
+    fail: &'a Ident,
+}
+
 fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     let live_fn = format_ident!("__aether_{views}_fold_live");
     let warmup_fn = format_ident!("__aether_{views}_fold_warmup");
@@ -368,17 +378,16 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     let ack = ack_fn_tokens(&ack_prepared_fn, &ack_evaluated_fn);
     let event = event_handler_tokens(&live_fn, &ack_prepared_fn, &ack_evaluated_fn, &drain_fn, peers);
     let batch = batch_handler_tokens(&warmup_fn, &ack_prepared_fn);
-    let (managed_handlers, managed_helpers) = managed_handler_tokens(
-        views,
-        &warmup_fn,
-        &live_fn,
-        &ack_prepared_fn,
-        &ack_evaluated_fn,
-        &drain_fn,
-        &request_fn,
-        &fail_fn,
-        peers,
-    );
+    let managed_names = ManagedNames {
+        warmup: &warmup_fn,
+        live: &live_fn,
+        ack_prepared: &ack_prepared_fn,
+        ack_evaluated: &ack_evaluated_fn,
+        drain: &drain_fn,
+        request: &request_fn,
+        fail: &fail_fn,
+    };
+    let (managed_handlers, managed_helpers) = managed_handler_tokens(views, &managed_names, peers);
     quote! {
         struct #views {
             cluster: ::aether_bloomery_reactor::Cluster,
@@ -386,7 +395,6 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
             output: ::aether_actor::__macro_internals::String,
             ack: ::aether_actor::__macro_internals::String,
             peer_birth_error: Option<::aether_actor::SpawnError>,
-            peers_wired: bool,
         }
 
         #[::aether_actor::actor]
@@ -404,7 +412,6 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                     output: config.output,
                     ack: config.ack,
                     peer_birth_error: None,
-                    peers_wired: false,
                 })
             }
 
@@ -414,7 +421,6 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                     ack: self.ack.clone(),
                 };
                 #(#spawn_peers)*
-                self.peers_wired = true;
             }
 
             #event
@@ -659,19 +665,26 @@ fn batch_handler_tokens(warmup_fn: &Ident, ack_prepared_fn: &Ident) -> TokenStre
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn managed_handler_tokens(
     views: &Ident,
-    warmup_fn: &Ident,
-    live_fn: &Ident,
-    ack_prepared_fn: &Ident,
-    ack_evaluated_fn: &Ident,
-    drain_fn: &Ident,
-    request_fn: &Ident,
-    fail_fn: &Ident,
+    names: &ManagedNames<'_>,
     peers: &[ReactorPeer],
 ) -> (TokenStream2, TokenStream2) {
+    let ManagedNames {
+        warmup: warmup_fn,
+        live: live_fn,
+        ack_prepared: ack_prepared_fn,
+        ack_evaluated: ack_evaluated_fn,
+        drain: drain_fn,
+        request: request_fn,
+        fail: fail_fn,
+    } = names;
     let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, quote! { continue; });
+    let ready_peers = peers.iter().map(|peer| {
+        let ty = &peer.peer;
+        let subname = &peer.subname;
+        quote! { ctx.child_as::<#ty>(#subname).is_some() }
+    });
     let handlers = quote! {
         #[handler::manual]
         fn on_begin_warmup(
@@ -680,7 +693,8 @@ fn managed_handler_tokens(
             begin: ::aether_bloomery_reactor::BeginWarmup,
         ) {
             use ::aether_actor::OutboundReply;
-            let refusal = if !self.peers_wired || self.peer_birth_error.is_some() {
+            let peers_ready = true #(&& #ready_peers)*;
+            let refusal = if !peers_ready || self.peer_birth_error.is_some() {
                 Some("reactor peer failed to spawn")
             } else if self.cluster.owner().cursor().0 != 0
                 || self.cluster.stream().is_some()

@@ -397,6 +397,41 @@ fn reactor_bundle_zero_history_is_ready_without_a_read() {
 }
 
 #[test]
+fn reactor_bundle_replaced_cluster_begins_managed_feed_with_restored_peers() {
+    let Some((mut harness, wasm_path)) = boot() else {
+        return;
+    };
+    let sink = load_export(&mut harness, &wasm_path, "sink-replaced-managed", SINK, Vec::new());
+    let provider = load_journal_provider(&mut harness, &wasm_path, Vec::new());
+    let (cluster, mailbox_id) = load_cluster_full(&mut harness, &wasm_path, "reactor-replaced-managed", sink.clone());
+    match replace_cluster(&mut harness, &wasm_path, mailbox_id, sink.clone()) {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace before managed warmup: {error}"),
+    }
+
+    harness
+        .execute(vec![(
+            "begin",
+            HarnessOp::send_and_settle(
+                &cluster,
+                &BeginWarmup { stream: STREAM_A.to_owned(), journal_address: provider.clone(), historical_through: 0 },
+            ),
+        )])
+        .expect("begin with restored peer aliases");
+    assert!(!journal_status(&mut harness, &provider).pending);
+    assert_eq!(prepared_ok_seqs(&collect(&mut harness, &sink)), [0]);
+
+    settle_event(&mut harness, &cluster, &live_event(STREAM_A, 1, "current", digest_ref::<Program>(1)));
+    settle_event(&mut harness, &cluster, &live_event(STREAM_A, 2, "source", digest_ref::<Tree>(2)));
+    let report = collect(&mut harness, &sink);
+    assert_eq!(prepared_ok_seqs(&report), [0, 1, 2]);
+    assert_eq!(evaluated_ok_seqs(&report), [1, 2]);
+    assert_eq!(report.guarded.len(), 1, "restored guarded peer must evaluate: {:?}", report.guarded);
+    assert_eq!(report.open.len(), 1, "restored open peer must evaluate: {:?}", report.open);
+    assert_eq!(report.guarded[0].fold_id, report.open[0].fold_id);
+}
+
+#[test]
 fn reactor_bundle_malformed_history_poison_stops_live_drain() {
     for mode in [
         ReleaseReactorJournalPage::WrongAfter,

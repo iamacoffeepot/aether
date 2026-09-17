@@ -40,7 +40,8 @@ pub struct Warming {
     pub historical_through: u64,
     /// Last selected live sequence received independently of fold progress.
     pub received_live_through: u64,
-    /// Exactly one outstanding journal page.
+    /// `Some` while a page request is outstanding; `None` before the first
+    /// request and after a correlated reply is taken for folding.
     pub pending: Option<PendingRead>,
 }
 
