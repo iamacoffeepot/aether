@@ -239,6 +239,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
         peers.push(ReactorPeer {
             reactor: entry.ty.clone(),
             peer: format_ident!("__AetherBloomeryReactorPeer_n{:x}", hash),
+            namespace: namespace.clone(),
             subname: format!("r_{hash:x}"),
         });
     }
@@ -246,8 +247,17 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let coordinator = format_ident!("{COORDINATOR_IDENT}");
     let cluster = expand_cluster(&coordinator, &peers);
     let boot_tokens = optional_type_tokens(boot.as_ref());
-    let default_tokens = optional_type_tokens(default.as_ref());
+    let default_tokens = if default.is_none() && !mixed {
+        quote! { { #coordinator } }
+    } else {
+        optional_type_tokens(default.as_ref())
+    };
     let actor_tokens = actors.iter().map(envelope_tokens);
+    let peer_actor_tokens = peers.iter().map(|peer| {
+        let ty = &peer.peer;
+        let namespace = &peer.namespace;
+        quote! { { ty: { #ty } namespace: #namespace extensions: [] } }
+    });
     let export_tokens = rewritten_exports(&exports, &reactors, &coordinator, &peers);
     let rest = remaining_generators.iter();
     Ok(quote! {
@@ -259,6 +269,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
             actors: [
                 #(#actor_tokens)*
                 { ty: { #coordinator } namespace: #CLUSTER_NAMESPACE extensions: [] }
+                #(#peer_actor_tokens)*
             ]
             exports: [ #export_tokens ]
         }
@@ -275,9 +286,7 @@ fn envelope_tokens(entry: &Envelope) -> TokenStream2 {
     quote! { { ty: { #ty } namespace: #ns extensions: [ #ext ] } }
 }
 
-/// Replace selected reactor exports with the coordinator, then each generated
-/// peer factory. Peer types are omitted from `actors`, so the emit finish
-/// keeps them reconstruct-only rather than independently spawnable.
+/// Replace selected reactor exports with the coordinator and public peers.
 fn rewritten_exports(
     exports: &[Type],
     reactors: &[&Envelope],
@@ -310,6 +319,7 @@ fn optional_type_tokens(ty: Option<&Type>) -> TokenStream2 {
 struct ReactorPeer {
     reactor: Type,
     peer: Ident,
+    namespace: String,
     subname: String,
 }
 
@@ -682,7 +692,7 @@ fn ack_fn_tokens(ack_prepared_fn: &Ident, ack_evaluated_fn: &Ident) -> TokenStre
 fn expand_peer(views: &Ident, peer: &ReactorPeer, emit_fn: &Ident) -> TokenStream2 {
     let ReactorPeer { reactor, peer: peer_ty, .. } = peer;
     quote! {
-        struct #peer_ty {
+        pub struct #peer_ty {
             reactor: #reactor,
             output: ::aether_actor::__macro_internals::String,
         }
@@ -808,11 +818,13 @@ mod rewritten_export_tests {
             ReactorPeer {
                 reactor: publisher.clone(),
                 peer: format_ident!("__AetherBloomeryReactorPeer_n1"),
+                namespace: String::from("test.bloomery.export.publisher"),
                 subname: String::from("r_1"),
             },
             ReactorPeer {
                 reactor: witness.clone(),
                 peer: format_ident!("__AetherBloomeryReactorPeer_n2"),
+                namespace: String::from("test.bloomery.export.witness"),
                 subname: String::from("r_2"),
             },
         ];

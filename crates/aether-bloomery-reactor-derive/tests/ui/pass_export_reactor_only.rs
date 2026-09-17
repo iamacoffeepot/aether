@@ -1,4 +1,4 @@
-// Reactor-only export! becomes a single coordinator (existing single-actor export).
+// Reactor-only export! keeps the coordinator as default and exposes its peer.
 
 use aether_actor::export;
 use aether_bloomery_kinds::{HeadMoved, Tree};
