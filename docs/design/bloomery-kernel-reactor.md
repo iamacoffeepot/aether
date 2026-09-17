@@ -89,6 +89,24 @@ only after the views actor can process the corresponding event. A live actor
 need not have finished processing all its application input. No additional
 engine readiness gate is needed to prevent unprepared reactions.
 
+The journal actor provides event access through ordinary request/reply mail.
+Consumers request an ordered page after a sequence, with a limit, and receive
+the committed entries. The existing storage `Journal::read` is the underlying
+operation; the actor-facing names below are illustrative:
+
+```rust
+ReadEvents { after: 41, limit: 128 }
+// Reply: committed entries beginning at 42, in ascending order.
+```
+
+Views request history to build their prefix, subsequent pages to advance, and
+older ranges again when buffered payloads need refilling. The journal actor is
+the source for those requests. A separate receipt acknowledgment or unsolicited
+subscription protocol is not required for this access pattern. Reading a page
+does not decide whether to react: the integration assigns the historical
+warmup boundary and the events selected for live evaluation. Keep that
+distinction explicit even when both use the same journal read API.
+
 The journal assigns sequence numbers on append; those numbers establish log
 order, not that an event's producer observed preceding events. Live input must
 arrive contiguously in that order. Live batches are permitted, provided each
