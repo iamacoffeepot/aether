@@ -26,6 +26,7 @@ mod receive;
 mod relative;
 mod send;
 mod sends;
+mod snapshot;
 mod spawn;
 mod wire;
 
@@ -38,8 +39,10 @@ pub use init::WasmInitCtx;
 pub use receive::{NO_INBOUND_SOURCE, WasmCtx};
 pub use relative::RelativeMailbox;
 pub use sends::Sends;
+pub use snapshot::WasmSnapshotCtx;
 pub use spawn::{ActorTypeTag, SpawnError};
 pub use wire::WireCtx;
 
 pub(crate) use drop::CapturedState;
+pub(crate) use snapshot::CapturedSnapshot;
 pub(crate) use spawn::install_inline_child;

@@ -67,6 +67,9 @@ unsafe extern "C" {
     /// guest memory before the call returns.
     #[link_name = "init_failed_p32"]
     pub fn init_failed(ptr: u32, len: u32);
+    /// Stage a fallible read-only snapshot failure for the substrate.
+    #[link_name = "snapshot_failed_p32"]
+    pub fn snapshot_failed(ptr: u32, len: u32);
     /// ADR-0081 §7: re-emit one `tracing::*` event on the host side
     /// so the trampoline's `ActorAwareLayer` lands it in this guest's
     /// per-actor `ActorLogRing`. Called from `ForwardingSubscriber::event`

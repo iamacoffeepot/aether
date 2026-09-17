@@ -16,6 +16,7 @@
 use alloc::collections::BTreeSet;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;
+use core::cell::RefCell;
 
 use aether_data::KindId;
 use wasmi::{Config, Engine, Instance, Linker, Memory, Module, Store, TrapCode, TypedFunc};
@@ -62,7 +63,7 @@ enum RunState {
 
 /// One compiled, instantiated script plus its fail-open bookkeeping.
 pub struct ScriptSlot {
-    store: Store<()>,
+    store: RefCell<Store<()>>,
     #[allow(dead_code)]
     instance: Instance,
     memory: Memory,
@@ -113,7 +114,7 @@ impl ScriptSlot {
         let state_load_fn = instance.get_typed_func::<(u32, u32), u32>(&store, "state_load").ok();
 
         let mut slot = Self {
-            store,
+            store: RefCell::new(store),
             instance,
             memory,
             alloc_fn,
@@ -168,27 +169,31 @@ impl ScriptSlot {
     /// never brings the host down).
     #[must_use]
     pub fn save_state(&mut self) -> Vec<u8> {
-        let Some(save) = self.state_save_fn else {
-            return Vec::new();
-        };
-        // `state_save` is unmetered from the fuel budget's point of view — a
-        // dehydrate is not a filter call — but a generous budget still bounds
-        // a pathological serializer.
-        if self.store.set_fuel(self.fuel_per_call).is_err() {
-            tracing::warn!(
-                target: "aether_behavior",
-                "state_save fuel budget could not be set; dropping migration state blob (fail-open)"
-            );
-            return Vec::new();
+        match self.snapshot_state() {
+            Ok(bytes) => bytes,
+            Err(error) => {
+                tracing::warn!(target: "aether_behavior", %error, "state_save failed; dropping migration state blob (fail-open)");
+                Vec::new()
+            }
         }
-        let Ok(packed) = save.call(&mut self.store, ()) else {
-            tracing::warn!(
-                target: "aether_behavior",
-                "state_save export trapped; dropping migration state blob (fail-open)"
-            );
-            return Vec::new();
+    }
+
+    /// Fallible, semantically read-only script snapshot. The nested script's
+    /// `state_save` must preserve its logical state even when it traps.
+    pub fn snapshot_state(&self) -> Result<Vec<u8>, String> {
+        if self.state_save_fn.is_some() != self.state_load_fn.is_some() {
+            return Err("script must export both state_save and state_load for a read-only snapshot".to_string());
+        }
+        let Some(save) = self.state_save_fn else {
+            return Ok(Vec::new());
         };
-        self.read_packed(packed).unwrap_or_default()
+        let mut store = self.store.borrow_mut();
+        store.set_fuel(self.fuel_per_call).map_err(|error| alloc::format!("state_save fuel: {error}"))?;
+        let packed = save.call(&mut *store, ()).map_err(|error| alloc::format!("state_save trapped: {error}"))?;
+        let (ptr, len) = unpack_ptr_len(packed);
+        let data = self.memory.data(&*store);
+        let end = (ptr as usize).checked_add(len as usize).ok_or_else(|| "state_save pointer overflow".to_string())?;
+        data.get(ptr as usize..end).map(<[u8]>::to_vec).ok_or_else(|| "state_save pointer out of bounds".to_string())
     }
 
     /// Offer `blob` to the script's `state_load` export (migration restore).
@@ -198,13 +203,13 @@ impl ScriptSlot {
         let Some(load) = self.state_load_fn else {
             return;
         };
-        if self.store.set_fuel(self.fuel_per_call).is_err() {
+        if self.store.borrow_mut().set_fuel(self.fuel_per_call).is_err() {
             return;
         }
         let Some((ptr, len)) = self.write_guest(blob) else {
             return;
         };
-        let _ = load.call(&mut self.store, (ptr, len));
+        let _ = load.call(&mut *self.store.borrow_mut(), (ptr, len));
     }
 
     /// Run one fuel-metered filter call for `(kind, bytes)`. Any trap or
@@ -232,9 +237,12 @@ impl ScriptSlot {
     fn filter_inner(&mut self, kind: KindId, bytes: &[u8]) -> Result<FilterOutput, FaultReason> {
         // Fuel resets per call — a runaway script traps at the budget rather
         // than wedging the host.
-        self.store.set_fuel(self.fuel_per_call).map_err(|_| FaultReason::FuelSetFailed)?;
+        self.store.borrow_mut().set_fuel(self.fuel_per_call).map_err(|_| FaultReason::FuelSetFailed)?;
         let (ptr, len) = self.write_guest(bytes).ok_or(FaultReason::GuestWrite)?;
-        let packed = self.filter_fn.call(&mut self.store, (kind.0, ptr, len)).map_err(|error| classify_trap(&error))?;
+        let packed = self
+            .filter_fn
+            .call(&mut *self.store.borrow_mut(), (kind.0, ptr, len))
+            .map_err(|error| classify_trap(&error))?;
         let out = self.read_packed(packed).ok_or(FaultReason::MalformedReturn)?;
         envelope::decode(&out).ok_or(FaultReason::DecodeFailed { kind })
     }
@@ -261,8 +269,8 @@ impl ScriptSlot {
         let len = u32::try_from(bytes.len()).ok()?;
         // `alloc(old_ptr=0, old_size=0, align=1, new_size=len)` — a fresh
         // byte region (bytes need no alignment).
-        let ptr = self.alloc_fn.call(&mut self.store, (0, 0, 1, len)).ok()?;
-        self.memory.write(&mut self.store, ptr as usize, bytes).ok()?;
+        let ptr = self.alloc_fn.call(&mut *self.store.borrow_mut(), (0, 0, 1, len)).ok()?;
+        self.memory.write(&mut *self.store.borrow_mut(), ptr as usize, bytes).ok()?;
         Some((ptr, len))
     }
 
@@ -271,7 +279,8 @@ impl ScriptSlot {
     fn read_packed(&self, packed: u64) -> Option<Vec<u8>> {
         let (ptr, len) = unpack_ptr_len(packed);
         let (start, end) = (ptr as usize, ptr as usize + len as usize);
-        let data = self.memory.data(&self.store);
+        let store = self.store.borrow();
+        let data = self.memory.data(&*store);
         data.get(start..end).map(<[u8]>::to_vec)
     }
 }
@@ -520,6 +529,43 @@ mod tests {
             .expect("test setup: stateless module instantiates");
 
         assert!(slot.save_state().is_empty());
+    }
+
+    #[test]
+    fn nested_state_save_trap_is_an_explicit_snapshot_error() {
+        let script = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+                (func (export "filter") (param i64 i32 i32) (result i64) i64.const 0)
+                (func (export "state_load") (param i32 i32) (result i32) i32.const 0)
+                (func (export "state_save") (result i64) unreachable))
+        "#,
+        )
+        .expect("test WAT parses");
+        let slot = ScriptSlot::instantiate(&build_engine(), &script, None, 1_000_000, 3).expect("script instantiates");
+        assert!(slot.snapshot_state().expect_err("trap must reject snapshot").contains("trapped"));
+    }
+
+    #[test]
+    fn unpaired_script_state_exports_reject_snapshot() {
+        let script = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32 i32 i32 i32) (result i32) i32.const 1024)
+                (func (export "filter") (param i64 i32 i32) (result i64) i64.const 0)
+                (func (export "state_load") (param i32 i32) (result i32) i32.const 0))
+        "#,
+        )
+        .expect("test WAT parses");
+        let slot = ScriptSlot::instantiate(&build_engine(), &script, None, 1_000_000, 3).expect("script instantiates");
+        assert!(
+            slot.snapshot_state()
+                .expect_err("missing save must reject snapshot")
+                .contains("both state_save and state_load")
+        );
     }
 
     // Tripwire: a missing `state_load` export is a no-op; the fresh script

@@ -35,3 +35,11 @@ pub fn save_state(version: u32, bytes: &[u8]) -> u32 {
     // out of guest memory before returning.
     unsafe { raw::save_state(version, bytes.as_ptr().addr() as u32, bytes.len() as u32) }
 }
+
+/// Stage a snapshot failure before returning a non-zero export status.
+#[cfg(target_family = "wasm")]
+pub fn snapshot_failed(message: &str) {
+    let bytes = message.as_bytes();
+    // SAFETY: the substrate copies the borrowed bytes synchronously.
+    unsafe { raw::snapshot_failed(bytes.as_ptr().addr() as u32, bytes.len() as u32) }
+}

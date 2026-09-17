@@ -4,6 +4,35 @@
 - **Date:** 2026-06-08
 - **Accepted:** 2026-06-09 (implemented by iamacoffeepot/aether#1480)
 
+## Read-only preparation amendment (2026-09-17)
+
+Transactional live replacement needs a migration snapshot while the predecessor
+remains usable. It must not call `unwire` or the mutable `on_dehydrate` hook until
+the replacement has been accepted. The new `WasmActor::on_snapshot(&self,
+&mut WasmSnapshotCtx) -> Result<(), SnapshotError>` and `on_snapshot_p32`
+export provide that preparation boundary. `WasmSnapshotCtx` permits only a
+fallible state deposit; the inline-child walk borrows each resident child
+immutably and preserves the existing composite bundle shape (including aliases,
+configuration, and parent links). A failed parent or child snapshot rejects the
+whole bundle.
+
+The SDK generates the read-only hook for stateless `#[actor]` types and types
+declaring `type State` with a `dehydrate(&self)` accessor. Authors of custom
+`on_dehydrate(&mut self)` hooks must implement `on_snapshot` explicitly. The
+substrate keeps loading historical binaries, but a guest without the distinct
+snapshot export is unsupported for transactional live replacement; its mutable
+hook is never silently treated as read-only. The replacement handler's use of
+this prerequisite is tracked separately in #6134.
+
+Snapshot purity is an author contract: neither the hook nor a nested serializer
+may change logical guest state, including through interior mutability, even if
+it errors or traps. The host rejects outbound mail, spawn/despawn, logging, and
+other effectful imports during snapshot and fails preparation if the guest
+ignores their status. Allocation and interpreter fuel are scratch work, not
+logical state. Wasm's `&self`-shaped SDK API does not prove arbitrary raw-WASM
+code pure; this is not a general rollback sandbox or Store clone. Snapshots
+are prepared on demand, with no per-message snapshot cache.
+
 ## Context
 
 `replace_component` (ADR-0022) swaps any component's wasm module behind a stable mailbox. Nothing opts in — the swap works on every component. The `Replaceable` trait and the `export!(X, replaceable)` flag (ADR-0016 / ADR-0040) govern only whether the instance carries state *across* that swap, through a save hook on the old instance (`on_replace` in today's code) and a restore hook on the new one (`on_rehydrate`). The name `Replaceable` implies a gate on replaceability; it gates only state-migration behavior.

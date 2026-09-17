@@ -21,7 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, Mail, Manual, OutboundReply, PriorState, SnapshotError, WasmActor, WasmCtx, WasmDropCtx,
+    WasmInitCtx, WasmSnapshotCtx, actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
@@ -58,6 +59,10 @@ impl WasmActor for Counter {
     /// wire shape of the saved bundle.
     fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
         ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
+    }
+
+    fn on_snapshot(&self, ctx: &mut WasmSnapshotCtx<'_>) -> Result<(), SnapshotError> {
+        ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count })
     }
 
     /// Restore-side hot-swap hook: recover the counter the predecessor

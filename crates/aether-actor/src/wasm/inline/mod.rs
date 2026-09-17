@@ -288,6 +288,13 @@ impl Registry {
         unsafe { &mut *self.request_contexts.get() }
     }
 
+    /// Borrow request metadata while preparing a read-only snapshot.
+    #[doc(hidden)]
+    pub fn request_contexts(&self) -> &RequestContextTable {
+        // SAFETY: snapshot runs under the serialized guest entrypoint.
+        unsafe { &*self.request_contexts.get() }
+    }
+
     /// Replace the per-component request-context table during rehydrate.
     #[doc(hidden)]
     #[allow(dead_code)]
@@ -496,6 +503,13 @@ impl Registry {
         // SAFETY: see [`Self::insert_child`].
         let map = unsafe { &mut *self.inner.get() };
         map.get_mut(&id).and_then(|s| s.actor.as_deref_mut()).map(f)
+    }
+
+    /// Borrow one resident child immutably for snapshot preparation.
+    pub(crate) fn with_child<R>(&self, id: MailboxId, f: impl FnOnce(&dyn ErasedWasmActor) -> R) -> Option<R> {
+        // SAFETY: snapshot runs under the serialized guest entrypoint.
+        let map = unsafe { &*self.inner.get() };
+        map.get(&id).and_then(|slot| slot.actor.as_deref()).map(f)
     }
 
     /// The recorded parent of the inline child registered under `id`, or

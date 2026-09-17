@@ -57,4 +57,9 @@ impl aether_actor::WasmActor for Counter {
     }
 }
 
-fn main() {}
+fn main() {
+    let _: for<'a> fn(
+        &Counter,
+        &mut aether_actor::WasmSnapshotCtx<'a>,
+    ) -> Result<(), aether_actor::SnapshotError> = <Counter as aether_actor::WasmActor>::on_snapshot;
+}
