@@ -92,21 +92,14 @@ fn all_outcomes_commit_one_typed_entry_with_cause_and_cited_bytes() {
 }
 
 #[test]
-fn refused_observations_leave_events_and_staged_bytes_unchanged() {
+fn mismatched_and_uncited_artifact_bytes_are_refused_without_writes() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
-    let path = temp.path().join("refusals.sqlite");
-    let mut journal = Journal::open(&path).expect("seed artifact store");
-    let mut batch = Batch::new();
-    let stored = batch.stage_bytes(b"already stored");
-    let wrong_kind = batch.stage_text("text artifact");
-    journal.append(Seq(0), &batch).expect("seed artifacts without event");
-    drop(journal);
-
+    let path = temp.path().join("invalid-bytes.sqlite");
     let (registry, mailer) = bare_substrate();
-    let (caller_id, rx) = caller(&registry, "test.journal_actor.refusal_caller");
+    let (caller_id, rx) = caller(&registry, "test.journal_actor.invalid_bytes_caller");
     let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
     let owner = chassis
-        .spawn_actor::<JournalActor>(Subname::Named("refusals"), path.clone(), ())
+        .spawn_actor::<JournalActor>(Subname::Named("invalid_bytes"), path.clone(), ())
         .finish()
         .expect("owner birth");
 
@@ -147,6 +140,35 @@ fn refused_observations_leave_events_and_staged_bytes_unchanged() {
         reply::<RecordReactorLifecycleResult>(&rx, 22),
         RecordReactorLifecycleResult::Err { message } if message.contains("retirement")
     ));
+
+    let journal = Journal::open(&path).expect("inspect journal");
+    assert_eq!(journal.head().expect("head"), Seq(0));
+    assert!(journal.read(Seq(0), 10).expect("no entries").is_empty());
+    for absent in
+        [Ref::<OpaqueBytes>::of_bytes(&mismatch_bytes).digest(), Ref::<OpaqueBytes>::of_bytes(b"not cited").digest()]
+    {
+        assert_eq!(journal.get_bytes(&absent).expect("absent blob"), None);
+    }
+}
+
+#[test]
+fn missing_and_wrong_kind_citations_refuse_but_preexisting_bytes_commit() {
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let path = temp.path().join("citations.sqlite");
+    let mut journal = Journal::open(&path).expect("seed artifact store");
+    let mut batch = Batch::new();
+    let stored = batch.stage_bytes(b"already stored");
+    let wrong_kind = batch.stage_text("text artifact");
+    journal.append(Seq(0), &batch).expect("seed artifacts without event");
+    drop(journal);
+
+    let (registry, mailer) = bare_substrate();
+    let (caller_id, rx) = caller(&registry, "test.journal_actor.citation_caller");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let owner = chassis
+        .spawn_actor::<JournalActor>(Subname::Named("citations"), path.clone(), ())
+        .finish()
+        .expect("owner birth");
 
     let missing = Ref::<OpaqueBytes>::of_bytes(b"missing artifact");
     request(
@@ -200,12 +222,50 @@ fn refused_observations_leave_events_and_staged_bytes_unchanged() {
     );
     assert_eq!(reply::<RecordReactorLifecycleResult>(&rx, 25), RecordReactorLifecycleResult::Committed { seq: 1 });
 
-    let stale_bytes = b"stale bytes".to_vec();
+    let journal = Journal::open(&path).expect("inspect journal");
+    assert_eq!(journal.head().expect("head"), Seq(1));
+    let entries = journal.read(Seq(0), 10).expect("read entries");
+    assert_eq!(entries.len(), 1);
+    assert_eq!(entries[0].decode::<ReactorLifecycleOutcome>().expect("decode only entry"), existing);
+    assert_eq!(journal.get_bytes(&missing.digest()).expect("missing blob"), None);
+    assert_eq!(
+        journal.get_bytes(&wrong_kind.digest()).expect("wrong kind remains"),
+        Some((Utf8Text::ID, b"text artifact".to_vec()))
+    );
+    assert_eq!(
+        journal.get_bytes(&stored.digest()).expect("preexisting artifact remains"),
+        Some((OpaqueBytes::ID, b"already stored".to_vec()))
+    );
+}
+
+#[test]
+fn stale_head_rolls_back_matching_staged_bytes() {
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let path = temp.path().join("stale-head.sqlite");
+    let (registry, mailer) = bare_substrate();
+    let (caller_id, rx) = caller(&registry, "test.journal_actor.stale_head_caller");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let owner = chassis
+        .spawn_actor::<JournalActor>(Subname::Named("stale_head"), path.clone(), ())
+        .finish()
+        .expect("owner birth");
+
+    let retired = ReactorLifecycleOutcome::Retired { cluster: KERNEL_HEAD };
     request(
         &registry,
         owner,
         caller_id,
         26,
+        &RecordReactorLifecycle { expect_head: 0, cause: None, event: retired.clone(), artifact_bytes: None },
+    );
+    assert_eq!(reply::<RecordReactorLifecycleResult>(&rx, 26), RecordReactorLifecycleResult::Committed { seq: 1 });
+
+    let stale_bytes = b"stale bytes".to_vec();
+    request(
+        &registry,
+        owner,
+        caller_id,
+        27,
         &RecordReactorLifecycle {
             expect_head: 0,
             cause: Some(1),
@@ -217,29 +277,14 @@ fn refused_observations_leave_events_and_staged_bytes_unchanged() {
             artifact_bytes: Some(stale_bytes.clone()),
         },
     );
-    assert_eq!(reply::<RecordReactorLifecycleResult>(&rx, 26), RecordReactorLifecycleResult::HeadMoved { actual: 1 });
+    assert_eq!(reply::<RecordReactorLifecycleResult>(&rx, 27), RecordReactorLifecycleResult::HeadMoved { actual: 1 });
 
     let journal = Journal::open(&path).expect("inspect journal");
     assert_eq!(journal.head().expect("head"), Seq(1));
     let entries = journal.read(Seq(0), 10).expect("read entries");
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].decode::<ReactorLifecycleOutcome>().expect("decode only entry"), existing);
-    for absent in [
-        Ref::<OpaqueBytes>::of_bytes(&mismatch_bytes).digest(),
-        Ref::<OpaqueBytes>::of_bytes(b"not cited").digest(),
-        missing.digest(),
-        Ref::<OpaqueBytes>::of_bytes(&stale_bytes).digest(),
-    ] {
-        assert_eq!(journal.get_bytes(&absent).expect("absent blob"), None);
-    }
-    assert_eq!(
-        journal.get_bytes(&wrong_kind.digest()).expect("wrong kind remains"),
-        Some((Utf8Text::ID, b"text artifact".to_vec()))
-    );
-    assert_eq!(
-        journal.get_bytes(&stored.digest()).expect("preexisting artifact remains"),
-        Some((OpaqueBytes::ID, b"already stored".to_vec()))
-    );
+    assert_eq!(entries[0].decode::<ReactorLifecycleOutcome>().expect("decode only entry"), retired);
+    assert_eq!(journal.get_bytes(&Ref::<OpaqueBytes>::of_bytes(&stale_bytes).digest()).expect("stale blob"), None);
 }
 
 #[test]
