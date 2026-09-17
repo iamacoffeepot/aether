@@ -341,6 +341,7 @@ mod lifecycle_restriction_tests {
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_substrate::actor::native::NativeBinding;
     use aether_substrate::actor::wasm::host_fns;
+    use aether_substrate::actor::wasm::kind_manifest;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{OwnedDispatch, Registry};
@@ -420,8 +421,6 @@ mod lifecycle_restriction_tests {
             DropResult::Err { .. }
         ));
         assert!(state.component.is_some(), "successful replacement retains drop prohibition");
-
-        assert!(state.component.is_some());
     }
 
     #[test]
@@ -492,13 +491,23 @@ mod lifecycle_restriction_tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods, reason = "fixture export tag is derived from its declared namespace")]
     fn protected_application_shutdown_unwires_once_and_drop_does_not_double_unwire() {
         let Some(path) = require_wasm("aether_test_fixtures_boot") else {
             return;
         };
         let wasm = fs::read(path).expect("read boot fixture");
-        let boot_tag = Some(aether_data::mailbox_id_from_name("aether.test.boot.boot").0);
+        let boot_namespace = kind_manifest::read_boot_namespace_from_bytes(&wasm)
+            .expect("read boot namespace")
+            .expect("fixture declares a boot actor");
+        let boot_tag = Some(
+            kind_manifest::read_actor_inputs_from_bytes(&wasm)
+                .expect("read fixture actor inputs")
+                .into_iter()
+                .filter_map(|actor| actor.namespace)
+                .find(|namespace| namespace == &boot_namespace)
+                .map(|namespace| aether_data::ActorId::singleton(&namespace).0)
+                .expect("boot namespace belongs to an exported actor"),
+        );
 
         let (mut protected, protected_binding) = state(&wasm, ComponentRestrictions::DROP, boot_tag);
         let protected_events = observe_boot_unwire(&protected);
