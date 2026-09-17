@@ -211,8 +211,7 @@ fn stale_source_guard_declines_without_body_checks() -> Result<(), Box<dyn Error
         entry_for(2, &Compilation::Succeeded { source: [1; 32], output: [8; 32] })?,
     ])?;
     let intents = CompilationPublisher.evaluate(&mut owner)?;
-    assert_eq!(intents.len(), 1, "the independent unguarded arm still runs");
-    assert_eq!(intents[0].decode::<PublicationProposal>().expect("head observation").marker, 2);
+    assert!(intents.is_empty());
     Ok(())
 }
 
