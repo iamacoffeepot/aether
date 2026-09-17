@@ -553,6 +553,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             ::aether_actor::__macro_internals::inventory::submit! {
                 ::aether_actor::wasm::inline::factory::ReconstructionFactory {
                     namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    type_tag: ::aether_actor::ActorTypeTag::of::<#self_ty>(),
                     placement: <#self_ty>::__AETHER_PLACEMENT,
                     reconstruct: ::aether_actor::wasm::inline::compose::reconstruct_one_child_at_parent::<#self_ty>,
                 }

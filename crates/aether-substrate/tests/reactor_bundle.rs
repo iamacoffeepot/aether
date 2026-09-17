@@ -12,7 +12,7 @@ use aether_actor::Addressable;
 use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
 use aether_bloomery_reactor::{
     CLUSTER_NAMESPACE, ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch,
-    JournalEntry, PeerEvaluated, PreparedResult,
+    JournalEntry, PeerEvaluated, PreparedPrefix, PreparedResult,
 };
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId, Storage, StorageData};
