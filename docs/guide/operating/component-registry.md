@@ -43,10 +43,10 @@ replaceable slot until the substrate terminates. Consequently, drop releases
 guest state but does not make the same load name available to a fresh load.
 
 Trusted native bootstrap can set `WasmTrampolineConfig.prohibit` to
-`ComponentRestrictions::DROP`, `ComponentRestrictions::REPLACE`, or their
+`LifecycleFlags::DROP`, `LifecycleFlags::REPLACE`, or their
 bitwise combination (`DROP | REPLACE`). The flags are exported by
 `aether-component`; ordinary load and module-boot constructors use
-`ComponentRestrictions::NONE`. They are host policy for one trampoline slot,
+`LifecycleFlags::NONE`. They are host policy for one trampoline slot,
 not guest manifest content or a field in public load mail. A sibling spawned
 from a resident module starts with empty restrictions and has its own policy.
 
@@ -215,7 +215,7 @@ describe the replacement actor type. An omitted export reuses the actor type the
 trampoline currently hosts; it does not necessarily select the new module's
 default entry.
 
-A native bootstrap's `ComponentRestrictions::REPLACE` flag makes replacement
+A native bootstrap's `LifecycleFlags::REPLACE` flag makes replacement
 return an error before candidate work or guest hooks. A successful replacement
 of a DROP-protected slot keeps its DROP prohibition.
 

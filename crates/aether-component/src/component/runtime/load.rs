@@ -20,7 +20,7 @@ use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
-use crate::ComponentRestrictions;
+use crate::LifecycleFlags;
 use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingDrop, PendingReplace};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -60,7 +60,7 @@ enum LoadPlacement {
 impl PreparedLoad {
     fn requested_config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
-            prohibit: ComponentRestrictions::NONE,
+            prohibit: LifecycleFlags::NONE,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
@@ -108,7 +108,7 @@ impl PreparedBoot {
     #[allow(clippy::disallowed_methods)]
     fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
-            prohibit: ComponentRestrictions::NONE,
+            prohibit: LifecycleFlags::NONE,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),

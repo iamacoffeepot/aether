@@ -29,7 +29,7 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
-use crate::ComponentRestrictions;
+use crate::LifecycleFlags;
 pub use aether_actor::Local;
 use aether_actor::{Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
@@ -183,7 +183,7 @@ impl NativeActor for WasmTrampoline {
     /// `state.component` is `None`.
     #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
-        if state.prohibit.contains(ComponentRestrictions::DROP) {
+        if state.prohibit.contains(LifecycleFlags::DROP) {
             return DropResult::Err { error: "component drop prohibited by native bootstrap".to_owned() };
         }
 
@@ -333,7 +333,7 @@ impl NativeActor for WasmTrampoline {
 }
 
 #[cfg(test)]
-mod lifecycle_restriction_tests {
+mod lifecycle_flags_tests {
     use std::fs;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -353,7 +353,7 @@ mod lifecycle_restriction_tests {
 
     fn state(
         wasm: &[u8],
-        prohibit: ComponentRestrictions,
+        prohibit: LifecycleFlags,
         type_tag: Option<u64>,
     ) -> (WasmTrampolineState, Arc<NativeBinding>) {
         let engine = Arc::new(Engine::default());
@@ -403,7 +403,7 @@ mod lifecycle_restriction_tests {
             return;
         };
         let wasm = fs::read(path).expect("read fixture");
-        let (mut state, binding) = state(&wasm, ComponentRestrictions::DROP, None);
+        let (mut state, binding) = state(&wasm, LifecycleFlags::DROP, None);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mailbox = state.mailbox;
 
@@ -415,7 +415,7 @@ mod lifecycle_restriction_tests {
         assert!(matches!(state.handle_replace(&mut ctx, replace(b"invalid wasm", mailbox)), ReplaceResult::Err { .. }));
         assert!(state.component.is_some(), "failed replace leaves the guest serving");
         assert!(matches!(state.handle_replace(&mut ctx, replace(&wasm, mailbox)), ReplaceResult::Ok { .. }));
-        assert_eq!(state.prohibit, ComponentRestrictions::DROP);
+        assert_eq!(state.prohibit, LifecycleFlags::DROP);
         assert!(matches!(
             WasmTrampoline::on_drop_component(&mut state, &mut ctx, DropComponent { mailbox_id: mailbox }),
             DropResult::Err { .. }
@@ -429,7 +429,7 @@ mod lifecycle_restriction_tests {
             return;
         };
         let wasm = fs::read(path).expect("read fixture");
-        let (mut protected, binding) = state(&wasm, ComponentRestrictions::REPLACE | ComponentRestrictions::DROP, None);
+        let (mut protected, binding) = state(&wasm, LifecycleFlags::REPLACE | LifecycleFlags::DROP, None);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mailbox = protected.mailbox;
 
@@ -443,7 +443,7 @@ mod lifecycle_restriction_tests {
             DropResult::Err { .. }
         ));
 
-        let (mut replace_only, replace_only_binding) = state(&wasm, ComponentRestrictions::REPLACE, None);
+        let (mut replace_only, replace_only_binding) = state(&wasm, LifecycleFlags::REPLACE, None);
         let mut replace_only_ctx = NativeCtx::new(&replace_only_binding, Source::NONE, MailId::NONE, MailId::NONE);
         let replace_only_mailbox = replace_only.mailbox;
         assert!(matches!(
@@ -459,7 +459,7 @@ mod lifecycle_restriction_tests {
             DropResult::Ok
         ));
 
-        let (mut sibling, sibling_binding) = state(&wasm, ComponentRestrictions::NONE, None);
+        let (mut sibling, sibling_binding) = state(&wasm, LifecycleFlags::NONE, None);
         let mut sibling_ctx = NativeCtx::new(&sibling_binding, Source::NONE, MailId::NONE, MailId::NONE);
         let sibling_mailbox = sibling.mailbox;
         assert!(matches!(
@@ -509,7 +509,7 @@ mod lifecycle_restriction_tests {
                 .expect("boot namespace belongs to an exported actor"),
         );
 
-        let (mut protected, protected_binding) = state(&wasm, ComponentRestrictions::DROP, boot_tag);
+        let (mut protected, protected_binding) = state(&wasm, LifecycleFlags::DROP, boot_tag);
         let protected_events = observe_boot_unwire(&protected);
         let mut protected_ctx = NativeCtx::new(&protected_binding, Source::NONE, MailId::NONE, MailId::NONE);
         let protected_mailbox = protected.mailbox;
@@ -526,7 +526,7 @@ mod lifecycle_restriction_tests {
         drop(protected_ctx);
         assert_eq!(protected_events.load(Ordering::SeqCst), 1, "application shutdown unwires a protected guest once");
 
-        let (mut ordinary, ordinary_binding) = state(&wasm, ComponentRestrictions::NONE, boot_tag);
+        let (mut ordinary, ordinary_binding) = state(&wasm, LifecycleFlags::NONE, boot_tag);
         let ordinary_events = observe_boot_unwire(&ordinary);
         let mut ordinary_ctx = NativeCtx::new(&ordinary_binding, Source::NONE, MailId::NONE, MailId::NONE);
         let ordinary_mailbox = ordinary.mailbox;
