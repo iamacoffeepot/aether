@@ -211,9 +211,11 @@ These steps describe obligations, not an assertion that existing hooks already
 satisfy them. In particular, `unwire` can emit mail and mutate guest state.
 Moving `drop(old)` later is insufficient. The implementation plan must account
 for guest-memory mutation, state capture, host calls, and buffered outputs.
-If the current migration hook cannot provide a reversible snapshot, expose
-that limitation and revise its contract explicitly; do not silently weaken
-rollback or impose purity on arbitrary existing guests.
+Repair the existing dehydration contract so state capture is read-only and
+fallible, and complete candidate preparation before retiring the predecessor.
+Do not add a parallel snapshot hook or FFI. Keep candidate effects staged until
+acceptance; do not silently weaken rollback or impose purity on arbitrary
+existing guests.
 
 Do not call successor `wire` unconditionally: the established rehydration
 path already restores children and other actor state. Duplicate wiring can

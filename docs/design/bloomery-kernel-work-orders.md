@@ -86,11 +86,12 @@ candidate or preparation hook publishes partial lifecycle effects.
 - Existing queued-message and tracked-reply behavior remains intact.
 - Ordinary replacement of an intentionally empty, unprotected slot still works.
 
-**Boundary.** If retaining a guest snapshot requires changing SDK hooks or
-host-call semantics outside the declared surface, return a concrete plan
-amendment before implementing it. Do not replace the agreed invariant with
-best-effort rollback. This order is large and needs a transaction-mechanics
-checkpoint before its final implementation issue surface can be frozen.
+**Boundary.** Repair the existing read-only, fallible dehydration contract;
+do not add a second snapshot hook or FFI. Any host-call semantics outside the
+declared surface require a concrete plan amendment. Do not replace the agreed
+invariant with best-effort rollback. This order is large and needs a
+transaction-mechanics checkpoint before its final implementation issue surface
+can be frozen.
 
 **Search:** `rg -n 'handle_replace|on_dehydrate|call_on_rehydrate|take_save_error|pending_alias|pending_spawn' crates/aether-component crates/aether-substrate/src/actor/wasm crates/aether-actor/src/wasm`
 
@@ -145,8 +146,10 @@ governance, or protection against terminating the application process.
 **Problem.** The reactor generator omits hidden peer types from final exports,
 but inline-child reconstruction dispatches over that exported type list.
 
-**Result.** Generated reactor peers are discoverable by the established
-reconstruction machinery and keep their identities through replacement.
+**Result.** Generated reactor peers are public exports for debugging and other
+consumers, and keep their identities through replacement. Private actors must
+also remain discoverable by the reconstruction machinery; restoration cannot
+depend solely on the public export list.
 
 **Owned surfaces, to narrow when filed:**
 
@@ -162,11 +165,13 @@ reconstruction machinery and keep their identities through replacement.
 1. Add a focused failing replacement scenario to the real generated-bundle
    fixture. Show that initial execution works and post-replacement peer
    reconstruction is missing.
-2. Provide generated peer types to the reconstruction factory through export
-   generation. Preserve inline placement restrictions, ordinary actor exports,
-   coordinator default selection, and generator metadata for later generators.
-3. Prefer the smallest existing metadata/export integration. Do not make hidden
-   peers independently spawnable merely to make type lookup succeed.
+2. Include private actor factories in the reconstruction inventory and test
+   private-child replacement independently of reactor exports. Preserve inline
+   placement restrictions, ordinary actor exports, coordinator default
+   selection, and generator metadata for later generators.
+3. Export generated reactor peers publicly as the owner requested. Public
+   visibility is useful independently of restoration and must not be the fix
+   for private-actor reconstruction.
 4. Restore through the existing child composition path; do not run `wire`
    again indiscriminately.
 5. Verify view state/cursor behavior. If views are intentionally rebuilt,
@@ -181,6 +186,7 @@ reconstruction machinery and keep their identities through replacement.
 - Check mixed ordinary-actor/reactor exports and downstream generator metadata.
 - Exercise repeated replacement; no silent missing-peer success.
 - Keep ordinary inline-child replacement tests green.
+- Restore a private inline child even when it is absent from public exports.
 
 **Boundary.** No new bundle authoring macro, no manual user registration, and
 no unrelated actor lifecycle redesign.
