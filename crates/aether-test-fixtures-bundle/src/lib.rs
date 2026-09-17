@@ -25,6 +25,7 @@ mod multi_actor;
 mod peer_routing;
 mod probe;
 mod reactor_cluster;
+mod reactor_journal_provider;
 mod source_observer;
 mod stateful_replace;
 mod tcp_load_probe;
@@ -47,6 +48,7 @@ pub use multi_actor::{Panel, RootManager};
 pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
 pub use reactor_cluster::{ReactorOutputSink, SourcePublisher, SourceWitness};
+pub use reactor_journal_provider::ReactorJournalProvider;
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
@@ -93,6 +95,7 @@ aether_actor::export!(
     SourcePublisher,
     SourceWitness,
     ReactorOutputSink,
+    ReactorJournalProvider,
     generators = [aether_bloomery_reactor::bundle_reactors],
 );
 

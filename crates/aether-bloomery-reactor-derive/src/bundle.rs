@@ -346,6 +346,9 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     let emit_fn = format_ident!("__aether_{views}_emit_outputs");
     let ack_prepared_fn = format_ident!("__aether_{views}_ack_prepared");
     let ack_evaluated_fn = format_ident!("__aether_{views}_ack_evaluated");
+    let drain_fn = format_ident!("__aether_{views}_drain_live");
+    let request_fn = format_ident!("__aether_{views}_request_history");
+    let fail_fn = format_ident!("__aether_{views}_fail_managed");
     let peer_structs = peers.iter().map(|peer| expand_peer(views, peer, &emit_fn));
     let spawn_peers = peers.iter().map(|peer| {
         let ty = &peer.peer;
@@ -363,14 +366,27 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     let warmup = warmup_fn_tokens(&warmup_fn, peers);
     let emit = emit_outputs_fn(&emit_fn);
     let ack = ack_fn_tokens(&ack_prepared_fn, &ack_evaluated_fn);
-    let event = event_handler_tokens(&live_fn, &ack_prepared_fn, &ack_evaluated_fn, peers);
+    let event = event_handler_tokens(&live_fn, &ack_prepared_fn, &ack_evaluated_fn, &drain_fn, peers);
     let batch = batch_handler_tokens(&warmup_fn, &ack_prepared_fn);
+    let (managed_handlers, managed_helpers) = managed_handler_tokens(
+        views,
+        &warmup_fn,
+        &live_fn,
+        &ack_prepared_fn,
+        &ack_evaluated_fn,
+        &drain_fn,
+        &request_fn,
+        &fail_fn,
+        peers,
+    );
     quote! {
         struct #views {
             cluster: ::aether_bloomery_reactor::Cluster,
+            feed: ::aether_bloomery_reactor::ManagedFeed,
             output: ::aether_actor::__macro_internals::String,
             ack: ::aether_actor::__macro_internals::String,
             peer_birth_error: Option<::aether_actor::SpawnError>,
+            peers_wired: bool,
         }
 
         #[::aether_actor::actor]
@@ -384,9 +400,11 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
             ) -> Result<Self, ::aether_actor::ActorInitError> {
                 Ok(Self {
                     cluster: ::aether_bloomery_reactor::Cluster::new(),
+                    feed: ::aether_bloomery_reactor::ManagedFeed::new(),
                     output: config.output,
                     ack: config.ack,
                     peer_birth_error: None,
+                    peers_wired: false,
                 })
             }
 
@@ -396,11 +414,14 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                     ack: self.ack.clone(),
                 };
                 #(#spawn_peers)*
+                self.peers_wired = true;
             }
 
             #event
 
             #batch
+
+            #managed_handlers
 
             #[handler::single]
             fn on_peer_evaluated(
@@ -431,6 +452,7 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
 
         #live
         #warmup
+        #managed_helpers
         #ack
         #emit
         #(#peer_structs)*
@@ -441,9 +463,10 @@ fn event_handler_tokens(
     live_fn: &Ident,
     ack_prepared_fn: &Ident,
     ack_evaluated_fn: &Ident,
+    drain_fn: &Ident,
     peers: &[ReactorPeer],
 ) -> TokenStream2 {
-    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn);
+    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, quote! { return; });
     quote! {
         #[handler::manual]
         fn on_event(
@@ -453,6 +476,29 @@ fn event_handler_tokens(
         ) {
             use ::aether_actor::OutboundReply;
             let before = self.cluster.owner().cursor();
+            if matches!(
+                &self.feed.mode,
+                ::aether_bloomery_reactor::FeedMode::Warming(_)
+                    | ::aether_bloomery_reactor::FeedMode::Feeding { .. }
+            ) {
+                if let Err(reason) = self.feed.push_live(&event.stream, event.entry) {
+                    ctx.fatal_abort(reason.into());
+                }
+                self.#drain_fn(ctx);
+                return;
+            }
+            if matches!(&self.feed.mode, ::aether_bloomery_reactor::FeedMode::Failed) {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: event.stream,
+                    seq: before.0,
+                    message: "managed feed failed".into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
             if self.peer_birth_error.is_some() {
                 let result = ::aether_bloomery_reactor::PreparedResult::Err {
                     stream: event.stream,
@@ -525,6 +571,18 @@ fn batch_handler_tokens(warmup_fn: &Ident, ack_prepared_fn: &Ident) -> TokenStre
         ) {
             use ::aether_actor::OutboundReply;
             let before = self.cluster.owner().cursor();
+            if !matches!(&self.feed.mode, ::aether_bloomery_reactor::FeedMode::Direct) {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: batch.stream,
+                    seq: before.0,
+                    message: "external fold-only history is unavailable in managed mode".into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
             if self.peer_birth_error.is_some() {
                 let result = ::aether_bloomery_reactor::PreparedResult::Err {
                     stream: batch.stream,
@@ -601,7 +659,238 @@ fn batch_handler_tokens(warmup_fn: &Ident, ack_prepared_fn: &Ident) -> TokenStre
     }
 }
 
-fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident) -> TokenStream2 {
+#[allow(clippy::too_many_arguments)]
+fn managed_handler_tokens(
+    views: &Ident,
+    warmup_fn: &Ident,
+    live_fn: &Ident,
+    ack_prepared_fn: &Ident,
+    ack_evaluated_fn: &Ident,
+    drain_fn: &Ident,
+    request_fn: &Ident,
+    fail_fn: &Ident,
+    peers: &[ReactorPeer],
+) -> (TokenStream2, TokenStream2) {
+    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, quote! { continue; });
+    let handlers = quote! {
+        #[handler::manual]
+        fn on_begin_warmup(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            begin: ::aether_bloomery_reactor::BeginWarmup,
+        ) {
+            use ::aether_actor::OutboundReply;
+            let refusal = if !self.peers_wired || self.peer_birth_error.is_some() {
+                Some("reactor peer failed to spawn")
+            } else if self.cluster.owner().cursor().0 != 0
+                || self.cluster.stream().is_some()
+                || self.cluster.is_poisoned()
+            {
+                Some("warmup requires an empty direct cluster")
+            } else {
+                self.feed.begin(begin.stream.clone(), begin.journal_address, begin.historical_through).err()
+            };
+            if let Some(message) = refusal {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: begin.stream,
+                    seq: self.cluster.owner().cursor().0,
+                    message: message.into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
+            self.cluster.bind_stream(begin.stream.clone());
+            if begin.historical_through == 0 {
+                let result = ::aether_bloomery_reactor::PreparedResult::ok(begin.stream, 0);
+                #ack_prepared_fn(ctx, &self.ack, &result);
+            } else {
+                self.#request_fn(ctx);
+            }
+        }
+
+        #[handler::manual]
+        fn on_live_batch(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            batch: ::aether_bloomery_reactor::LiveEventBatch,
+        ) {
+            use ::aether_actor::OutboundReply;
+            if !matches!(
+                &self.feed.mode,
+                ::aether_bloomery_reactor::FeedMode::Warming(_)
+                    | ::aether_bloomery_reactor::FeedMode::Feeding { .. }
+            ) {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: batch.stream,
+                    seq: self.cluster.owner().cursor().0,
+                    message: "live batch requires an active managed feed".into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
+            if batch.validate().is_err() {
+                ctx.fatal_abort("invalid live batch range".into());
+            }
+            for entry in batch.entries {
+                if let Err(reason) = self.feed.push_live(&batch.stream, entry) {
+                    ctx.fatal_abort(reason.into());
+                }
+            }
+            self.#drain_fn(ctx);
+        }
+
+        #[handler::single]
+        fn on_read_events_result(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_>,
+            reply: ::aether_bloomery_reactor::ReadEventsResult,
+        ) {
+            let Some(state) = (match &mut self.feed.mode {
+                ::aether_bloomery_reactor::FeedMode::Warming(state) => Some(state),
+                _ => None,
+            }) else {
+                self.#fail_fn(ctx, "unsolicited historical reply");
+                return;
+            };
+            let Some(pending) = state.pending.take() else {
+                self.#fail_fn(ctx, "unsolicited historical reply");
+                return;
+            };
+            if ctx.in_reply_to().map(|id| id.0) != Some(pending.correlation)
+                || ctx.source_mailbox() != Some(pending.source)
+            {
+                self.#fail_fn(ctx, "stale or wrong-source historical reply");
+                return;
+            }
+            if self.cluster.owner().cursor().0 != pending.after {
+                self.#fail_fn(ctx, "historical reply overlaps folded prefix");
+                return;
+            }
+            let boundary = state.historical_through;
+            let entries = match reply {
+                ::aether_bloomery_reactor::ReadEventsResult::Err { after, .. } => {
+                    self.#fail_fn(ctx, if after == pending.after {
+                        "journal historical read failed"
+                    } else {
+                        "journal reply boundary mismatch"
+                    });
+                    return;
+                }
+                ::aether_bloomery_reactor::ReadEventsResult::Ok { after, head, entries } => {
+                    if after != pending.after || head < boundary || entries.len() != pending.limit as usize {
+                        self.#fail_fn(ctx, "malformed or short historical page");
+                        return;
+                    }
+                    for (offset, entry) in entries.iter().enumerate() {
+                        let expected = u64::try_from(offset).ok()
+                            .and_then(|offset| pending.after.checked_add(offset))
+                            .and_then(|seq| seq.checked_add(1));
+                        if expected != Some(entry.seq) || entry.seq > boundary {
+                            self.#fail_fn(ctx, "noncontiguous historical page");
+                            return;
+                        }
+                    }
+                    entries
+                }
+            };
+            for entry in entries {
+                if #warmup_fn(self.cluster.owner_mut(), entry).is_err() {
+                    self.#fail_fn(ctx, "historical view fold failed");
+                    return;
+                }
+            }
+            self.cluster.trust_cursor();
+            let result = ::aether_bloomery_reactor::PreparedResult::ok(
+                self.cluster.stream().unwrap_or_default(),
+                self.cluster.owner().cursor().0,
+            );
+            #ack_prepared_fn(ctx, &self.ack, &result);
+            if self.cluster.owner().cursor().0 == boundary {
+                self.feed.finish_history();
+                self.#drain_fn(ctx);
+            } else {
+                self.#request_fn(ctx);
+            }
+        }
+    };
+    let helpers = quote! {
+        impl #views {
+            fn #request_fn<M: ::aether_actor::ReplyMode>(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_, M>) {
+                use ::aether_actor::MailSender;
+                let ::aether_bloomery_reactor::FeedMode::Warming(state) = &self.feed.mode else {
+                    return;
+                };
+                let after = self.cluster.owner().cursor().0;
+                let Some(remaining) = state.historical_through.checked_sub(after).filter(|remaining| *remaining > 0) else {
+                    self.#fail_fn(ctx, "invalid historical read boundary");
+                    return;
+                };
+                let limit = remaining.min(u64::from(::aether_bloomery_reactor::WARMUP_PAGE_LIMIT)) as u32;
+                let address = state.journal_address.clone();
+                ctx.send_to_named(&address, &::aether_bloomery_reactor::ReadEvents { after, limit });
+                let pending = ::aether_bloomery_reactor::PendingRead::new(
+                    ctx.prev_correlation(),
+                    &address,
+                    after,
+                    limit,
+                );
+                let ::aether_bloomery_reactor::FeedMode::Warming(state) = &mut self.feed.mode else {
+                    return;
+                };
+                state.pending = Some(pending);
+            }
+
+            fn #fail_fn<M: ::aether_actor::ReplyMode>(
+                &mut self,
+                ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+                reason: &str,
+            ) {
+                let stream = ::aether_actor::__macro_internals::String::from(self.feed.stream().unwrap_or_default());
+                self.cluster.mark_poisoned();
+                self.feed.mode = ::aether_bloomery_reactor::FeedMode::Failed;
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream,
+                    seq: self.cluster.owner().cursor().0,
+                    message: reason.into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+            }
+
+            fn #drain_fn<M: ::aether_actor::ReplyMode>(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_, M>) {
+                if !matches!(&self.feed.mode, ::aether_bloomery_reactor::FeedMode::Feeding { .. }) {
+                    return;
+                }
+                while let Some(entry) = self.feed.queue.pop() {
+                    let stream = ::aether_actor::__macro_internals::String::from(self.feed.stream().unwrap_or_default());
+                    match #live_fn(self.cluster.owner_mut(), stream.clone(), entry) {
+                        Ok(prepared) => {
+                            self.cluster.trust_cursor();
+                            let result = ::aether_bloomery_reactor::PreparedResult::ok(stream.clone(), prepared.seq);
+                            #ack_prepared_fn(ctx, &self.ack, &result);
+                            #delivery
+                            if let Some(evaluated) = self.cluster.start_live(stream, prepared.seq, &expected) {
+                                #ack_evaluated_fn(ctx, &self.ack, &evaluated);
+                            }
+                        }
+                        Err(_) => {
+                            self.#fail_fn(ctx, "live view fold failed");
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+    };
+    (handlers, helpers)
+}
+
+fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident, on_missing: TokenStream2) -> TokenStream2 {
     let peer_count = peers.len();
     let peer_lookups = peers.iter().enumerate().map(|(index, peer)| {
         let ty = &peer.peer;
@@ -631,7 +920,7 @@ fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident) -> Toke
                 "reactor peer is missing",
             );
             #ack_evaluated_fn(ctx, &self.ack, &evaluated);
-            return;
+            #on_missing
         }
     }
 }

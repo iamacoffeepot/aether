@@ -524,3 +524,33 @@ pub struct CollectReactorOutputsResult {
     pub prepared: Vec<aether_bloomery_reactor::PreparedResult>,
     pub evaluated: Vec<aether_bloomery_reactor::EvaluatedResult>,
 }
+
+/// Test-only journal provider contents, supplied when its WASM actor loads.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_journal_config")]
+pub struct ReactorJournalConfig {
+    pub head: u64,
+    pub entries: Vec<aether_bloomery_reactor::JournalEntry>,
+}
+
+/// Ask whether the controlled provider has parked a history request.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_journal_status_query", default)]
+pub struct ReactorJournalStatusQuery;
+
+/// The request boundary and limit currently held by the provider.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_journal_status", eq)]
+pub struct ReactorJournalStatus {
+    pub pending: bool,
+    pub after: u64,
+    pub limit: u32,
+}
+
+/// Release a parked journal read, optionally corrupting one reply field.
+#[aether_data::kind(name = "aether.test_fixtures.release_reactor_journal_page", eq)]
+pub enum ReleaseReactorJournalPage {
+    Exact,
+    WrongAfter,
+    Short,
+    WrongSequence,
+    LowHead,
+    BackendError,
+}

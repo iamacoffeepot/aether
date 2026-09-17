@@ -102,18 +102,22 @@ mod error;
 mod evaluate;
 mod export;
 mod guard;
+mod live_queue;
+mod managed;
 mod owner;
 mod params;
 mod prepare;
 mod trigger;
 mod views;
 
+pub use aether_bloomery_kinds::{ReadEvents, ReadEventsResult};
 #[doc(hidden)]
 pub use aether_bloomery_reactor_derive::__reactor_export_generate;
 pub use aether_bloomery_reactor_derive::{reactor, rule};
 pub use bundle::{
-    ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch, JournalEntry, PeerEvaluated,
-    PreparedPrefix, PreparedResult, PublishedView, extend_snapshots, snapshot_reactor, warm_reactor,
+    BeginWarmup, ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch, JournalEntry,
+    LiveEventBatch, PeerEvaluated, PreparedPrefix, PreparedResult, PublishedView, extend_snapshots, snapshot_reactor,
+    warm_reactor,
 };
 pub use cluster::Cluster;
 pub use direct::Direct;
@@ -121,6 +125,8 @@ pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
 pub use export::CLUSTER_NAMESPACE;
 pub use guard::Guard;
+pub use live_queue::LiveQueue;
+pub use managed::{FeedMode, ManagedFeed, PendingRead, WARMUP_PAGE_LIMIT, Warming};
 pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};

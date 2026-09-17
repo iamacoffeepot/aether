@@ -36,9 +36,10 @@ pub struct ClusterConfig {
 /// One live journal event. The views owner folds this entry through its
 /// sequence, freezes owned snapshots, and mails them to reactor peers.
 ///
-/// Caller cadence: feed eligible history with [`EventBatch`], then live
-/// [`Event`]s one boundary at a time. This kind does not execute programs,
-/// persist a checkpoint, or treat lifecycle settlement as evaluation.
+/// In direct mode, callers can feed [`EventBatch`] history first. In managed
+/// mode, an [`Event`] enters the same FIFO as [`LiveEventBatch`]. This kind
+/// does not execute programs, persist a checkpoint, or treat lifecycle
+/// settlement as evaluation.
 #[aether_data::kind(name = "aether.bloomery.reactor.event")]
 pub struct Event {
     /// Caller-supplied stream/activation token. Bound on first successful admit.
@@ -52,6 +53,86 @@ impl Event {
     #[must_use]
     pub fn from_entry(stream: impl Into<String>, entry: &Entry) -> Self {
         Self { stream: stream.into(), entry: JournalEntry::from_entry(entry) }
+    }
+}
+
+/// Start a managed historical fold through the committed inclusive boundary.
+/// Selected live events must follow this mail in exact journal order.
+#[aether_data::kind(name = "aether.bloomery.reactor.begin_warmup")]
+pub struct BeginWarmup {
+    /// Stream token for this cluster.
+    pub stream: String,
+    /// Runtime name of the journal read actor.
+    pub journal_address: String,
+    /// Last entry folded as history without peer evaluation.
+    pub historical_through: u64,
+}
+
+impl BeginWarmup {
+    /// Describe the committed historical boundary and journal reader.
+    #[must_use]
+    pub fn new(stream: impl Into<String>, journal_address: impl Into<String>, historical_through: u64) -> Self {
+        Self { stream: stream.into(), journal_address: journal_address.into(), historical_through }
+    }
+
+    /// Validate fields that do not depend on the coordinator's current state.
+    ///
+    /// # Errors
+    ///
+    /// Returns a reason for an empty address or stream.
+    pub fn validate(&self) -> Result<(), &'static str> {
+        if self.stream.is_empty() || self.journal_address.is_empty() {
+            return Err("warmup requires a stream and journal address");
+        }
+        Ok(())
+    }
+}
+
+/// A dense range of selected live events. Unlike [`EventBatch`], each entry
+/// receives its own prepared prefix and peer evaluation.
+#[aether_data::kind(name = "aether.bloomery.reactor.live_event_batch")]
+pub struct LiveEventBatch {
+    /// Stream token for this cluster.
+    pub stream: String,
+    /// First sequence in `entries`.
+    pub from: u64,
+    /// Last sequence in `entries`.
+    pub through: u64,
+    /// Dense live envelopes in receipt order.
+    pub entries: Vec<JournalEntry>,
+}
+
+impl LiveEventBatch {
+    /// Wrap retained entries as a live range.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when `entries` is empty or not dense.
+    pub fn from_entries(stream: impl Into<String>, entries: &[Entry]) -> Result<Self, PrepareError> {
+        Self::from_journal(stream, entries.iter().map(JournalEntry::from_entry).collect())
+    }
+
+    /// Wrap already encoded envelopes as a live range.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when `entries` is empty or not dense.
+    pub fn from_journal(stream: impl Into<String>, entries: Vec<JournalEntry>) -> Result<Self, PrepareError> {
+        let (from, through) = range_of(&entries)?;
+        Ok(Self { stream: stream.into(), from, through, entries })
+    }
+
+    /// Require the declared range to match every envelope.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when the range and entries disagree.
+    pub fn validate(&self) -> Result<(), PrepareError> {
+        let (from, through) = range_of(&self.entries)?;
+        if from != self.from || through != self.through {
+            return Err(PrepareError::InvalidRange { from: Seq(self.from), through: Seq(self.through) });
+        }
+        Ok(())
     }
 }
 
@@ -111,7 +192,10 @@ fn range_of(entries: &[JournalEntry]) -> Result<(u64, u64), PrepareError> {
         return Err(PrepareError::InvalidRange { from: Seq(first.seq), through: Seq(last.seq) });
     }
     for (offset, entry) in entries.iter().enumerate() {
-        let expected = first.seq.checked_add(offset as u64).ok_or(PrepareError::Overflow)?;
+        let expected = first
+            .seq
+            .checked_add(u64::try_from(offset).map_err(|_| PrepareError::Overflow)?)
+            .ok_or(PrepareError::Overflow)?;
         if entry.seq != expected {
             return Err(PrepareError::InvalidRange { from: Seq(first.seq), through: Seq(last.seq) });
         }
