@@ -1,5 +1,7 @@
 //! Two named owners answer isolated, correlated pages from their own files.
 
+use std::collections::BTreeMap;
+use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -59,7 +61,7 @@ struct Marker {
     value: u64,
 }
 
-fn seed(path: &std::path::Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
+fn seed(path: &Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
     let mut journal = Journal::open_with_clock(path, Box::new(FixedClock)).expect("create seed journal");
     let mut batch = Batch::new();
     for (index, note) in notes.iter().enumerate() {
@@ -112,6 +114,23 @@ fn reply<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlation: u64) -> K {
     K::decode_from_bytes(dispatch.payload.bytes()).expect("decode reply")
 }
 
+fn replies_by_correlation<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlations: [u64; 2]) -> (K, K) {
+    assert_ne!(correlations[0], correlations[1]);
+    let mut replies = BTreeMap::new();
+    for _ in 0..correlations.len() {
+        let dispatch = rx.recv_timeout(Duration::from_secs(2)).expect("reply within two seconds");
+        assert_eq!(dispatch.kind, K::ID);
+        let correlation = dispatch.sender.correlation_id;
+        assert!(correlations.contains(&correlation), "unexpected correlation {correlation}");
+        let decoded = K::decode_from_bytes(dispatch.payload.bytes()).expect("decode reply");
+        assert!(replies.insert(correlation, decoded).is_none(), "duplicate correlation {correlation}");
+    }
+    (
+        replies.remove(&correlations[0]).expect("first correlated reply"),
+        replies.remove(&correlations[1]).expect("second correlated reply"),
+    )
+}
+
 #[test]
 fn named_journals_return_isolated_pages_and_correlated_replies() {
     let temp = tempfile::tempdir().expect("temporary journal directory");
@@ -137,10 +156,8 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
     request(&registry, beta, first_caller, 33, &ReadEvents { after: 0, limit: 2 });
     request(&registry, alpha, second_caller, 44, &ReadHead);
 
-    let first_alpha: ReadEventsResult = reply(&first_rx, 11);
-    let second_beta: ReadHeadResult = reply(&second_rx, 22);
-    let first_beta: ReadEventsResult = reply(&first_rx, 33);
-    let second_alpha: ReadHeadResult = reply(&second_rx, 44);
+    let (first_alpha, first_beta): (ReadEventsResult, ReadEventsResult) = replies_by_correlation(&first_rx, [11, 33]);
+    let (second_beta, second_alpha): (ReadHeadResult, ReadHeadResult) = replies_by_correlation(&second_rx, [22, 44]);
     assert_eq!(second_beta, ReadHeadResult::Ok { head: beta_expected.len() as u64 });
     assert_eq!(second_alpha, ReadHeadResult::Ok { head: alpha_expected.len() as u64 });
     assert_eq!(
