@@ -8,14 +8,11 @@ use core::error::Error;
 use core::fmt;
 
 use aether_bloomery_kinds::{Digest, HeadNameError, RecordedHead, Seq};
-use aether_data::canonical::{canonical_len_kind, canonical_serialize_kind};
 use aether_data::wire::{Error as WireError, WireDecode, WireEncode, decode_from_slice, encode_to_vec};
-use aether_data::{KIND_DOMAIN, Kind, KindId, LabelNode, Schema, SchemaType, Tag, fnv1a_64_prefixed, with_tag};
+use aether_data::{KindId, LabelNode, Schema, SchemaType};
 
 use crate::heads::Heads;
 use crate::view::View;
-
-const HEADS_NAME: &str = "bloomery.view.heads";
 
 /// Owned same-type snapshot of a view. Uses the structured mail codec, not
 /// journal [`aether_data::Storage`] bytes.
@@ -107,10 +104,6 @@ struct PublishedBinding {
     to: Digest,
 }
 
-static HEADS_SCHEMA: SchemaType = <HeadsSnapshot as Schema>::SCHEMA;
-const HEADS_CANONICAL_LEN: usize = canonical_len_kind(HEADS_NAME, &HEADS_SCHEMA);
-const HEADS_CANONICAL_BYTES: [u8; HEADS_CANONICAL_LEN] = canonical_serialize_kind(HEADS_NAME, &HEADS_SCHEMA);
-
 impl From<&Heads> for HeadsSnapshot {
     fn from(heads: &Heads) -> Self {
         Self {
@@ -153,19 +146,6 @@ impl Schema for Heads {
     const SCHEMA: SchemaType = <HeadsSnapshot as Schema>::SCHEMA;
     const LABEL: Option<&'static str> = Some(concat!(module_path!(), "::Heads"));
     const LABEL_NODE: LabelNode = <HeadsSnapshot as Schema>::LABEL_NODE;
-}
-
-impl Kind for Heads {
-    const NAME: &'static str = HEADS_NAME;
-    const ID: KindId = KindId(with_tag(Tag::Kind, fnv1a_64_prefixed(KIND_DOMAIN, &HEADS_CANONICAL_BYTES)));
-
-    fn decode_from_bytes(bytes: &[u8]) -> Option<Self> {
-        <Self as Publish>::decode(bytes).ok()
-    }
-
-    fn encode_into_bytes(&self) -> Vec<u8> {
-        encode_to_vec(self).expect("wire encode to Vec fails only past the u32 length ceiling")
-    }
 }
 
 impl WireEncode for Heads {
