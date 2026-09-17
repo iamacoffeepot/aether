@@ -178,7 +178,8 @@ pub struct InlineChildToReconstruct<'a> {
 /// logical parent. `reconstruct_child` is the codegen callback that checks
 /// the replacement module's current placement facts, re-`init`s one child
 /// by type tag, restores its state, and re-registers it in that registry;
-/// it returns `false` when the child cannot be restored.
+/// it returns `false` when the child cannot be restored. Any such failure,
+/// including an orphaned descendant, rejects the replacement preparation.
 ///
 /// Modern parent links reconstruct in iterative eligible passes so a parent
 /// is resident before any descendant. A pass that makes no progress stops;
@@ -194,13 +195,14 @@ pub fn reconstruct_inline_children(
     registry: &Registry,
     run_parent_rehydrate: impl FnOnce(u32, &[u8]),
     mut reconstruct_child: impl FnMut(&Registry, MailboxId, &InlineChildToReconstruct<'_>) -> bool,
-) {
+) -> Result<(), MailboxId> {
     let decomposed = bundle::decompose(version, bytes);
 
     run_parent_rehydrate(decomposed.parent.version, &decomposed.parent.bytes);
 
     let cluster_root = MailboxId(registry.self_id());
     let mut pending = decomposed.children.iter().collect::<Vec<_>>();
+    let mut failed = None;
     while !pending.is_empty() {
         let pending_count = pending.len();
         let mut deferred = Vec::with_capacity(pending_count);
@@ -223,23 +225,20 @@ pub fn reconstruct_inline_children(
                 config_bytes: &entry.config_bytes,
             };
             if !reconstruct_child(registry, parent, &to_reconstruct) {
-                // An unknown type tag, placement rejected by the replacement
-                // module's current facts, or a failed re-`init`: skip it.
-                // Descendants remain deferred because this alias never
-                // becomes resident.
+                failed.get_or_insert(to_reconstruct.alias);
                 tracing::warn!(
                     target = "aether_actor::inline",
                     alias = to_reconstruct.alias.0,
                     parent = parent.0,
                     type_tag = to_reconstruct.type_tag,
-                    "inline child not reconstructed across replace_component (unknown type tag, \
-                     invalid current placement, or re-init failure); skipping",
+                    "inline child reconstruction failed (unknown type tag, invalid current placement, or re-init failure)",
                 );
             }
         }
 
         if deferred.len() == pending_count {
             for entry in deferred {
+                failed.get_or_insert(MailboxId(entry.alias_id));
                 tracing::warn!(
                     target = "aether_actor::inline",
                     alias = entry.alias_id,
@@ -253,6 +252,7 @@ pub fn reconstruct_inline_children(
         }
         pending = deferred;
     }
+    failed.map_or(Ok(()), Err)
 }
 
 /// Re-`init` one inline child of concrete type `A`, restore its `type State`,
@@ -608,7 +608,7 @@ mod tests {
         registry.set_self_id(0xC0);
         let mut parent_runs = 0u32;
         let mut offered: Vec<(u64, MailboxId, Vec<u8>)> = Vec::new();
-        reconstruct_inline_children(
+        let failure = reconstruct_inline_children(
             version,
             &bytes,
             &registry,
@@ -623,6 +623,7 @@ mod tests {
                 child.type_tag != TAG_UNKNOWN
             },
         );
+        assert_eq!(failure, Err(MailboxId(0xC2)), "an unknown child must reject restoration");
 
         assert_eq!(parent_runs, 1, "the parent rehydrate runs exactly once");
         assert_eq!(offered.len(), 2, "both children are offered to the callback");
@@ -640,7 +641,8 @@ mod tests {
         let registry = Registry::new();
         registry.set_self_id(root.0);
 
-        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed)
+            .expect("legacy child reconstructs");
 
         assert_eq!(registry.parent_of(child), Some(root), "a trailer-free legacy child keeps the root fallback");
     }
@@ -666,7 +668,8 @@ mod tests {
                 order.push(child.alias);
                 install_reconstructed(registry, parent, child)
             },
-        );
+        )
+        .expect("descendant reconstructs after parent");
 
         assert_eq!(order, vec![parent, descendant], "the parent reconstructs before its earlier-recorded descendant");
     }
@@ -686,7 +689,8 @@ mod tests {
         let registry = Registry::new();
         registry.set_self_id(root.0);
 
-        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed)
+            .expect("every exact parent link reconstructs");
 
         assert_eq!(registry.parent_of(branch), Some(root));
         assert_eq!(registry.parent_of(nested), Some(branch));
@@ -710,7 +714,7 @@ mod tests {
         registry.set_self_id(root.0);
         let mut offered = Vec::new();
 
-        reconstruct_inline_children(
+        let failure = reconstruct_inline_children(
             version,
             &bytes,
             &registry,
@@ -720,6 +724,7 @@ mod tests {
                 false
             },
         );
+        assert_eq!(failure, Err(rejected), "failed child must reject restoration");
 
         assert_eq!(offered, vec![rejected], "only the eligible but rejected parent is offered");
         assert!(registry.take(rejected).is_none());
@@ -738,7 +743,7 @@ mod tests {
         registry.set_self_id(root.0);
         let mut offered = 0;
 
-        reconstruct_inline_children(
+        let failure = reconstruct_inline_children(
             version,
             &bytes,
             &registry,
@@ -748,6 +753,7 @@ mod tests {
                 true
             },
         );
+        assert_eq!(failure, Err(left), "orphan cycle must reject restoration");
 
         assert_eq!(offered, 0, "a parent cycle reaches the no-progress exit without offering either child");
     }
@@ -768,7 +774,8 @@ mod tests {
         let registry = Registry::new();
         registry.set_self_id(root.0);
 
-        reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+        let failure = reconstruct_inline_children(version, &bytes, &registry, |_, _| {}, install_reconstructed);
+        assert_eq!(failure, Err(orphan), "an independent success cannot mask a missing parent");
 
         assert!(registry.take(orphan).is_none(), "the blocked branch stays absent");
         assert!(registry.take(valid_parent).is_some(), "the independent parent reconstructs");

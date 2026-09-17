@@ -4,6 +4,17 @@
 - **Date:** 2026-04-14
 - **Accepted:** 2026-04-17
 - **Revised by:** ADR-0101 (2026-06-09) — the opt-in is retired. `on_dehydrate` (the former `on_replace`) and `on_rehydrate` are now default-no-op `WasmActor` lifecycle hooks, not a `Replaceable` subtrait reached through an `export!` flag. The state-bundle protocol described below is unchanged.
+- **Revised for #6134 (2026-09-17):** The transaction and hook ordering below are superseded by the correction in the next section. The existing `on_dehydrate` export and `save_state_p32` import remain the save ABI.
+
+## Transactional correction
+
+Replacement first validates the candidate module, manifest, selected export, and asset catalog. While the old guest remains wired and resident, the host invokes its fallible `on_dehydrate` hook to capture an optional bundle. The SDK hook borrows the actor immutably and offers a persistence-only context. Conforming authors must not change logical state through interior mutability or other hidden paths. The host denies external-effect imports during dehydration and rejects a recorded violation even if guest code ignores a returned status. A trap, nonzero hook status, rejected `save_state`, or missing required reconstruction aborts preparation. The host cannot prove arbitrary raw Wasm is internally pure; the read-only rule is a guest contract.
+
+The candidate's `init` and `on_rehydrate` run in a separate Store with private effect capture. Mail keeps its original source, correlation, and lineage, while hub replies and guest log events remain unpublished. A failed candidate is discarded with those effects. Nonzero rehydrate status and missing restore export for a saved bundle reject the candidate. Inline-child reconstruction must report unknown types, failed child init/configuration, and missing parents as failures. An intentional typed-state schema decode miss handled by the guest's migration policy may still boot fresh, as specified by ADR-0113.
+
+Current owner admission cannot guarantee new alias routes, alias retirements, or detached sibling births before a success reply, so a candidate requesting these during preparation is explicitly rejected. Already published inline aliases remain at their stable addresses when their children rehydrate. Only after every fallible preparation step succeeds does the host call the old guest's `unwire`, install the successor and module/capability/cost metadata, and release captured effects. A contained unwire trap after this acceptance is diagnostic, not an error claiming rollback. A `ReplaceResult::Err` leaves the predecessor and its metadata in place; an already-empty slot stays empty. An unrestricted empty slot can be refilled without a predecessor bundle. Native DROP and REPLACE restrictions remain in force across replacements.
+
+This is the same-handler `ReplaceComponent` contract. A later journal admission boundary must prepare before its journal append and commit only after that append succeeds; this correction alone does not make the two systems one transaction.
 
 ## Context
 

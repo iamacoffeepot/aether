@@ -1,6 +1,8 @@
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 use std::sync::Arc;
+
+use aether_data::{EngineId, SessionToken};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::wasm::reply_table::ReplyTable;
@@ -8,6 +10,7 @@ use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
 use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
+use crate::runtime::log_install;
 use crate::scheduler::pending_depth;
 
 use crate::actor::wasm::asset_manifest::LoadWindow;
@@ -137,6 +140,9 @@ pub struct ComponentCtx {
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
     pending_alias_retirements: Vec<MailboxId>,
+    /// `Some` only while a replacement candidate runs init and rehydrate.
+    /// The candidate owns this buffer; dropping its Store aborts every effect.
+    prepared_effects: RefCell<Option<Vec<PreparedComponentEffect>>>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -177,6 +183,72 @@ pub struct PendingSpawn {
     pub config: Vec<u8>,
 }
 
+enum PreparedComponentEffect {
+    Mail {
+        mail: Mail,
+        identity: MailboxId,
+    },
+    SessionReply {
+        session: SessionToken,
+        kind_name: String,
+        payload: Vec<u8>,
+        origin: Option<String>,
+        correlation: u64,
+    },
+    EngineReply {
+        engine: EngineId,
+        mailbox: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        correlation: u64,
+    },
+    Log {
+        level: u32,
+        target: String,
+        message: String,
+    },
+}
+
+/// Guest effects captured during candidate initialization and restoration.
+/// No sent trace, routing, hub egress, or guest log publication occurs until
+/// the successful replacement consumes this value.
+pub struct PreparedComponentEffects {
+    registry: Arc<Registry>,
+    queue: Arc<Mailer>,
+    outbound: Arc<HubOutbound>,
+    effects: Vec<PreparedComponentEffect>,
+}
+
+impl PreparedComponentEffects {
+    pub fn publish(self) {
+        for effect in self.effects {
+            match effect {
+                PreparedComponentEffect::Mail { mail, identity } => {
+                    self.queue.record_sent(
+                        mail.mail_id,
+                        mail.root,
+                        mail.parent_mail,
+                        identity,
+                        mail.recipient,
+                        mail.kind,
+                    );
+                    ComponentCtx::dispatch_routed_mail(&self.registry, &self.queue, mail, identity);
+                }
+                PreparedComponentEffect::SessionReply { session, kind_name, payload, origin, correlation } => {
+                    self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation);
+                }
+                PreparedComponentEffect::EngineReply { engine, mailbox, kind, payload, count, correlation } => {
+                    self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
+                }
+                PreparedComponentEffect::Log { level, target, message } => {
+                    log_install::emit_host_event(level, &target, &message);
+                }
+            }
+        }
+    }
+}
+
 /// Issue iamacoffeepot/aether#1465: starting value of
 /// [`ComponentCtx::reply_lineage_counter`]. Sits at the top half of the
 /// `u64` space, above the `send` correlation counter (which starts at
@@ -214,7 +286,66 @@ impl ComponentCtx {
             pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
+            prepared_effects: RefCell::new(None),
             load_window: None,
+        }
+    }
+
+    /// Enable candidate-only effect capture before `Component::instantiate`
+    /// invokes the guest's init export.
+    pub fn begin_replacement_preparation(&mut self) {
+        assert!(self.prepared_effects.get_mut().is_none(), "replacement preparation already active");
+        *self.prepared_effects.get_mut() = Some(Vec::new());
+    }
+
+    pub fn take_prepared_effects(&mut self) -> PreparedComponentEffects {
+        PreparedComponentEffects {
+            registry: Arc::clone(&self.registry),
+            queue: Arc::clone(&self.queue),
+            outbound: Arc::clone(&self.outbound),
+            effects: self.prepared_effects.get_mut().take().expect("replacement preparation must be active"),
+        }
+    }
+
+    pub fn emit_session_reply(
+        &self,
+        session: SessionToken,
+        kind_name: String,
+        payload: Vec<u8>,
+        origin: Option<String>,
+        correlation: u64,
+    ) {
+        let mut buffer = self.prepared_effects.borrow_mut();
+        if let Some(effects) = buffer.as_mut() {
+            effects.push(PreparedComponentEffect::SessionReply { session, kind_name, payload, origin, correlation });
+        } else {
+            self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation);
+        }
+    }
+
+    pub fn emit_engine_reply(
+        &self,
+        engine: EngineId,
+        mailbox: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        correlation: u64,
+    ) {
+        let mut buffer = self.prepared_effects.borrow_mut();
+        if let Some(effects) = buffer.as_mut() {
+            effects.push(PreparedComponentEffect::EngineReply { engine, mailbox, kind, payload, count, correlation });
+        } else {
+            self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
+        }
+    }
+
+    pub fn emit_guest_log(&self, level: u32, target: String, message: String) {
+        let mut buffer = self.prepared_effects.borrow_mut();
+        if let Some(effects) = buffer.as_mut() {
+            effects.push(PreparedComponentEffect::Log { level, target, message });
+        } else {
+            log_install::emit_host_event(level, &target, &message);
         }
     }
 
@@ -451,8 +582,9 @@ impl ComponentCtx {
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp
-    /// the inbound lineage, offer lifecycle-authored mail to the staged
-    /// activation hold, then fire the ADR-0080 §2 `Sent` hook and dispatch
+    /// the inbound lineage, capture a replacement candidate's mail privately
+    /// or offer lifecycle-authored mail to the staged activation hold, then
+    /// fire the ADR-0080 §2 `Sent` hook and dispatch
     /// by recipient class (inline sink, actor inbox, or dropped/unknown
     /// bubble-up). The caller supplies the `reply_to`
     /// (fresh `Component(self)` correlation for a send, echoed inbound
@@ -502,6 +634,11 @@ impl ComponentCtx {
         let root = inherited_root.unwrap_or(mail_id);
         let mail =
             Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(mail_id, root, parent_mail);
+
+        if let Some(effects) = self.prepared_effects.borrow_mut().as_mut() {
+            effects.push(PreparedComponentEffect::Mail { mail, identity });
+            return;
+        }
 
         // ADR-0165: guest `wire` runs before this actor's route is
         // authoritatively Live. A trampoline-backed ctx therefore offers its

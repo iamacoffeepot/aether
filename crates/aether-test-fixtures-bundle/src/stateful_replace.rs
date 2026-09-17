@@ -21,10 +21,12 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, Mail, Manual, OutboundReply, PriorState, SnapshotError, WasmActor, WasmCtx, WasmDropCtx,
-    WasmInitCtx, WasmSnapshotCtx, actor,
+    ActorInitError, Mail, MailSender, Manual, OutboundReply, PriorState, SnapshotError, WasmActor, WasmCtx,
+    WasmDropCtx, WasmInitCtx, WasmSnapshotCtx, actor,
 };
-use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
+use aether_test_fixtures_kinds::{
+    Bump, CountQuery, CountReport, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, TickObserved,
+};
 
 /// Entry export — the first type in the `export!` list. Holds a counter
 /// that must survive `replace_component`.
@@ -87,6 +89,14 @@ impl WasmActor for Sidecar {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Sidecar)
+    }
+
+    /// Replacement rejection fixture: a candidate emits mail and a guest
+    /// log before trapping. Neither effect may escape its preparation buffer.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+        ctx.send_to_named::<TickObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &TickObserved { count: 6134 });
+        tracing::info!(target: "aether_test_fixture_rejected_rehydrate", "candidate_before_rehydrate_trap");
+        panic!("intentional Sidecar rehydrate failure");
     }
 
     #[fallback]

@@ -13,7 +13,6 @@ use wasmtime::{Caller, Linker};
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
-use crate::runtime::log_install;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -651,7 +650,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                         return REPLY_KIND_NOT_FOUND;
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
-                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation);
+                    ctx.emit_session_reply(token, kind_name, payload, origin, correlation);
                 }
                 SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
@@ -687,7 +686,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
+                    ctx.emit_engine_reply(engine_id, mailbox_id, kind, payload, count, correlation);
                 }
                 SourceAddr::None => {
                     // Shouldn't happen — `ReplyEntry`s only get
@@ -821,7 +820,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let Some(message) = copy(message_ptr, message_len) else {
                 return;
             };
-            log_install::emit_host_event(level, &target, &message);
+            caller.data().emit_guest_log(level, target, message);
         },
     )?;
 
