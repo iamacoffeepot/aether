@@ -1,0 +1,18 @@
+error: NAMESPACE `aether.bloomery.reactor` is reserved for the generated views coordinator
+  --> tests/ui/fail_export_reserved_namespace.rs:14:1
+   |
+14 | #[reactor]
+   | ^^^^^^^^^^
+...
+24 | export!(Publisher, generators = [aether_bloomery_reactor::ReactorBundle]);
+   | ------------------------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::__export_collect` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `Reactor`
+ --> tests/ui/fail_export_reserved_namespace.rs:3:39
+  |
+3 | use aether_bloomery_reactor::{Output, Reactor, reactor};
+  |                                       ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

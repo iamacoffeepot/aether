@@ -10,8 +10,8 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
 use aether_bloomery_reactor::{
-    ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch, JournalEntry, PeerEvaluated,
-    PreparedResult,
+    CLUSTER_NAMESPACE, ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch,
+    JournalEntry, PeerEvaluated, PreparedResult,
 };
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
@@ -20,7 +20,6 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND};
 
-const VIEWS: &str = "test.bloomery.reactor";
 const SINK: &str = "test.bloomery.reactor.sink";
 const STREAM_A: &str = "alpha";
 const STREAM_B: &str = "beta";
@@ -68,7 +67,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, exp
 
 fn load_cluster(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, sink: String) -> String {
     let config = ClusterConfig { output: sink.clone(), ack: sink };
-    load_export(harness, wasm_path, name, VIEWS, config.encode_into_bytes())
+    load_export(harness, wasm_path, name, CLUSTER_NAMESPACE, config.encode_into_bytes())
 }
 
 fn status(harness: &mut SubstrateHarness, address: &str) -> ClusterStatus {

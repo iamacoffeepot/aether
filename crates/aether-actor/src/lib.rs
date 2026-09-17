@@ -129,6 +129,8 @@ pub mod __macro_internals {
     pub use tracing;
 }
 
+#[doc(hidden)]
+pub use aether_actor_derive::__export_emit_classified;
 /// ADR-0033 actor-SDK attribute macros plus the data-layer
 /// `Kind` / `Schema` re-exports. `Kind` / `Schema` / `KindId` /
 /// `MailboxId` forward through `aether-data` so the derive paths the

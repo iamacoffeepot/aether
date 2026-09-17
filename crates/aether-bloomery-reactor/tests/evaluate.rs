@@ -58,7 +58,7 @@ struct SourcePublisher;
 
 #[reactor]
 impl Reactor for SourcePublisher {
-    const NAME: &'static str = "source.publisher";
+    const NAMESPACE: &'static str = "source.publisher";
 
     #[rule]
     fn publish_source(
@@ -93,7 +93,7 @@ struct CompilationPublisher;
 
 #[reactor]
 impl Reactor for CompilationPublisher {
-    const NAME: &'static str = "compilation.publisher";
+    const NAMESPACE: &'static str = "compilation.publisher";
 
     #[rule]
     fn publish_compiled(

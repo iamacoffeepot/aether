@@ -1,10 +1,11 @@
 //! Generated reactor-bundle fixture: two source-publication reactors share one
 //! views owner inside a WASM cluster.
 //!
-//! Authors declare reactors and guards. `reactor_bundle!` generates the views
-//! owner and inline peers. Load `SourcePublicationViews` by NAMESPACE; packing
-//! the peer types in `export!` does not instantiate them. `ReactorOutputSink`
-//! is the external mailbox that records typed outputs for the host test.
+//! Authors declare reactors and guards. `export!(…, generators = [ReactorBundle])`
+//! keeps ordinary actors (including imported names) and generates one views
+//! coordinator plus inline peers. Load the coordinator at
+//! [`aether_bloomery_reactor::CLUSTER_NAMESPACE`].
+//! `ReactorOutputSink` is the external mailbox that records typed outputs.
 
 use core::error::Error;
 use core::fmt;
@@ -12,9 +13,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_bloomery_reactor::{
-    And, BundledView, EvaluatedResult, Guard, PreparedResult, Reactor, reactor, reactor_bundle,
-};
+use aether_bloomery_reactor::{And, BundledView, EvaluatedResult, Guard, PreparedResult, Reactor, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::{
@@ -113,7 +112,7 @@ pub struct SourcePublisher;
 
 #[reactor]
 impl Reactor for SourcePublisher {
-    const NAME: &'static str = "source.publisher";
+    const NAMESPACE: &'static str = "test.bloomery.source.publisher";
 
     #[rule]
     fn publish_source(
@@ -135,20 +134,13 @@ pub struct SourceWitness;
 
 #[reactor]
 impl Reactor for SourceWitness {
-    const NAME: &'static str = "source.witness";
+    const NAMESPACE: &'static str = "test.bloomery.source.witness";
 
     #[rule]
     fn note_heads(&self, change: HeadMoved<Tree>, tally: FoldTally) -> ReactorOpenPublication {
         assert!(tally.cursor.0 > 0);
         ReactorOpenPublication { digest: *change.to().digest().as_bytes(), fold_id: tally.id, folds: tally.folds }
     }
-}
-
-reactor_bundle! {
-    default = SourcePublicationViews,
-    namespace = "test.bloomery.reactor",
-    SourcePublisher,
-    SourceWitness,
 }
 
 /// External output mailbox for one loaded cluster.

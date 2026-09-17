@@ -5,14 +5,16 @@ use quote::{format_ident, quote, quote_spanned};
 use syn::Ident;
 use syn::spanned::Spanned;
 
+use crate::export_desc::emit_reactor_export_desc;
 use crate::parse::{Param, ReactorDef, Rule};
 use crate::pattern::match_test;
 
 pub fn expand(def: ReactorDef) -> TokenStream2 {
-    let ReactorDef { attrs, self_ty, name_const, rules, helpers } = def;
+    let ReactorDef { attrs, self_ty, name_const, namespace, rules, helpers } = def;
     let inherent_rules = rules.iter().map(expand_rule_method);
     let visits = rules.iter().map(expand_visit);
     let arm_evals = rules.iter().map(expand_arm_eval);
+    let export_desc = emit_reactor_export_desc(&self_ty, &namespace);
 
     quote! {
         #(#attrs)*
@@ -41,6 +43,8 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
                 Ok(intents)
             }
         }
+
+        #export_desc
     }
 }
 

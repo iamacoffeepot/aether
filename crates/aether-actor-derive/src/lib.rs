@@ -12,6 +12,8 @@
 
 mod asset;
 mod diagnostics;
+mod export_desc;
+mod export_emit;
 mod handler_parse;
 mod handler_set;
 mod kind_imports;
@@ -411,6 +413,14 @@ pub fn export_asset(input: TokenStream) -> TokenStream {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
+}
+
+/// Hidden finish of an `export!` generator pipeline. Invoked by
+/// [`aether_actor::__export_continue`], not by authors.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __export_emit_classified(input: TokenStream) -> TokenStream {
+    export_emit::emit(input)
 }
 
 #[cfg(test)]

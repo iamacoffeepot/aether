@@ -3,6 +3,7 @@ use quote::quote;
 use syn::{FnArg, ImplItem, ItemImpl, Type};
 
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
+use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
     classify_handler_reply, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error, parse_handler_class,
@@ -369,7 +370,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `NAMESPACE` at the type — each a pointed diagnostic rather than a
     // later "no associated const NAMESPACE" error against the surfaceless
     // `Addressable` trait.
-    validate_addressable_consts(&consts, self_ty, "WasmActor")?;
+    let namespace_expr = validate_addressable_consts(&consts, self_ty, "WasmActor")?;
     let const_tokens = consts.iter();
     // ADR-0119: an FFI/wasm component is embedded — it resolves under the
     // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
@@ -542,6 +543,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! {}
     };
 
+    let export_desc = emit_actor_export_desc(self_ty, namespace_expr);
+
     Ok(quote! {
         #actor_impl
         #root_impl
@@ -658,6 +661,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         }
 
         #kind_retention_statics
+
+        #export_desc
     })
 }
 
