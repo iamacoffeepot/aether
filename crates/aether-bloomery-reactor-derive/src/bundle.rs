@@ -49,18 +49,7 @@ impl Parse for BundleDef {
 pub fn expand(def: BundleDef) -> syn::Result<TokenStream2> {
     let BundleDef { views, namespace, reactors } = def;
     let ns = namespace.value();
-    let mut peers = Vec::with_capacity(reactors.len());
-    let mut seen = Vec::new();
-    for reactor in reactors {
-        let subname = to_snake(&reactor.to_string());
-        if seen.iter().any(|existing| existing == &subname) {
-            return Err(syn::Error::new_spanned(&reactor, "reactor_bundle! reactor type names must be unique"));
-        }
-        seen.push(subname.clone());
-        let peer = format_ident!("{reactor}Peer", span = reactor.span());
-        let peer_namespace = format!("{ns}.{subname}");
-        peers.push(ReactorPeer { reactor, peer, subname, namespace: peer_namespace });
-    }
+    let peers = peer_definitions(&ns, reactors)?;
 
     let views_namespace = &ns;
     let push_fn = format_ident!("__aether_{views}_push_and_prepare");
@@ -85,12 +74,7 @@ pub fn expand(def: BundleDef) -> syn::Result<TokenStream2> {
             }
         }
     });
-    let warm_reactors = peers.iter().map(|peer| {
-        let reactor = &peer.reactor;
-        quote! {
-            ::aether_bloomery_reactor::warm_reactor::<#reactor>(owner)?;
-        }
-    });
+    let prepare = preparation_fn(&push_fn, &peers);
     let emit = emit_outputs_fn(&emit_fn);
 
     Ok(quote! {
@@ -99,7 +83,6 @@ pub fn expand(def: BundleDef) -> syn::Result<TokenStream2> {
             output: ::aether_actor::__macro_internals::String,
         }
 
-        #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
         #[::aether_actor::actor]
         impl ::aether_actor::WasmActor for #views {
             type Config = ::aether_bloomery_reactor::ClusterConfig;
@@ -158,6 +141,45 @@ pub fn expand(def: BundleDef) -> syn::Result<TokenStream2> {
             }
         }
 
+        #prepare
+
+        #emit
+
+        #(#peer_structs)*
+    })
+}
+
+fn peer_definitions(namespace: &str, reactors: Vec<Ident>) -> syn::Result<Vec<ReactorPeer>> {
+    let mut peers = Vec::with_capacity(reactors.len());
+    let mut seen = Vec::new();
+    for reactor in reactors {
+        let subname = to_snake(&reactor.to_string());
+        if seen.iter().any(|existing| existing == &subname) {
+            return Err(syn::Error::new_spanned(&reactor, "reactor_bundle! reactor type names must be unique"));
+        }
+        seen.push(subname.clone());
+        let peer = format_ident!("{reactor}Peer", span = reactor.span());
+        let peer_namespace = format!("{namespace}.{subname}");
+        peers.push(ReactorPeer { reactor, peer, subname, namespace: peer_namespace });
+    }
+    Ok(peers)
+}
+
+fn preparation_fn(push_fn: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
+    let warm_reactors = peers.iter().map(|peer| {
+        let reactor = &peer.reactor;
+        quote! { ::aether_bloomery_reactor::warm_reactor::<#reactor>(owner)?; }
+    });
+    let snapshot_reactors = peers.iter().map(|peer| {
+        let reactor = &peer.reactor;
+        quote! {
+            ::aether_bloomery_reactor::extend_snapshots(
+                &mut views,
+                ::aether_bloomery_reactor::snapshot_reactor::<#reactor>(owner)?,
+            )?;
+        }
+    });
+    quote! {
         fn #push_fn(
             owner: &mut ::aether_bloomery_reactor::Owner,
             item: ::aether_bloomery_reactor::JournalEntry,
@@ -165,16 +187,11 @@ pub fn expand(def: BundleDef) -> syn::Result<TokenStream2> {
             let entry = item.to_entry();
             owner.push(::core::slice::from_ref(&entry))?;
             #(#warm_reactors)*
-            Ok(::aether_bloomery_reactor::PreparedPrefix::from_entry(
-                &entry,
-                owner.published_heads(),
-            ))
+            let mut views = ::aether_bloomery_reactor::__macro_internals::Vec::new();
+            #(#snapshot_reactors)*
+            Ok(::aether_bloomery_reactor::PreparedPrefix::from_parts(&entry, views))
         }
-
-        #emit
-
-        #(#peer_structs)*
-    })
+    }
 }
 
 fn expand_peer(views: &Ident, peer: &ReactorPeer, emit_fn: &Ident) -> TokenStream2 {
@@ -185,7 +202,6 @@ fn expand_peer(views: &Ident, peer: &ReactorPeer, emit_fn: &Ident) -> TokenStrea
             output: ::aether_actor::__macro_internals::String,
         }
 
-        #[allow(clippy::unused_self, clippy::needless_pass_by_value)]
         #[::aether_actor::actor(instanced, child_of(#views))]
         impl ::aether_actor::WasmActor for #peer_ty {
             type Config = ::aether_bloomery_reactor::ClusterConfig;
@@ -204,7 +220,7 @@ fn expand_peer(views: &Ident, peer: &ReactorPeer, emit_fn: &Ident) -> TokenStrea
                 ctx: &mut ::aether_actor::WasmCtx<'_>,
                 prepared: ::aether_bloomery_reactor::PreparedPrefix,
             ) {
-                let Ok(mut owner) = prepared.into_owner() else {
+                let Ok(mut owner) = prepared.into_owner::<#reactor>() else {
                     return;
                 };
                 let Ok(intents) = self.reactor.evaluate(&mut owner) else {
@@ -238,6 +254,7 @@ fn emit_outputs_fn(emit_fn: &Ident) -> TokenStream2 {
                 where
                     T: ::aether_bloomery_reactor::Trigger,
                     L: ::aether_bloomery_reactor::Params<T>,
+                    L::Views: ::aether_bloomery_reactor::PublishSet,
                     O: ::aether_bloomery_reactor::Output,
                 {
                     if !self.seen.insert(O::NAME) {

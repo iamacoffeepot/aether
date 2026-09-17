@@ -23,8 +23,8 @@
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
 //! lists, view visitors, actor wrappers, and mail encoding are implementation
 //! details. Authored view and guard types become one views-owner fold per
-//! loaded cluster; peers receive [`PreparedPrefix`] mail and resolve guards
-//! against that snapshot:
+//! loaded cluster; peers receive [`PreparedPrefix`] mail carrying every
+//! inferred [`BundledView`] snapshot and resolve guards against that prefix:
 //!
 //! ```ignore
 //! reactor_bundle! {
@@ -97,8 +97,8 @@ mod views;
 
 pub use aether_bloomery_reactor_derive::{reactor, reactor_bundle, rule};
 pub use bundle::{
-    ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PreparedPrefix, PushEntries, PushResult,
-    warm_reactor,
+    ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PreparedPrefix, PublishedView, PushEntries,
+    PushResult, extend_snapshots, snapshot_reactor, warm_reactor,
 };
 pub use direct::Direct;
 pub use error::PrepareError;
@@ -108,7 +108,7 @@ pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};
 pub use trigger::Trigger;
-pub use views::{And, NoViews, ViewSet};
+pub use views::{And, BundledView, NoViews, PublishSet, ViewSet};
 
 #[doc(hidden)]
 pub use evaluate::__macro_internals;

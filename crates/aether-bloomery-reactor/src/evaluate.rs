@@ -14,6 +14,7 @@ use crate::error::PrepareError;
 use crate::owner::Owner;
 use crate::params::Params;
 use crate::trigger::Trigger;
+use crate::views::PublishSet;
 
 /// Marker for a mail-capable arm output.
 ///
@@ -72,6 +73,7 @@ pub trait ArmVisitor {
     where
         T: Trigger,
         L: Params<T>,
+        L::Views: PublishSet,
         O: Output;
 }
 

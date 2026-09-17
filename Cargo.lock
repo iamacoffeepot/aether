@@ -800,6 +800,8 @@ name = "aether-substrate"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-reactor",
  "aether-component",
  "aether-data",
  "aether-derive",
@@ -887,6 +889,9 @@ name = "aether-test-fixtures-bundle"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-reactor",
+ "aether-bloomery-view",
  "aether-component",
  "aether-data",
  "aether-fs",
@@ -914,6 +919,7 @@ dependencies = [
 name = "aether-test-fixtures-kinds"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-bloomery-reactor",
  "aether-data",
  "bytemuck",
  "serde",

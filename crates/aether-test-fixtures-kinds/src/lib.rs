@@ -490,10 +490,29 @@ pub struct DrainEditorInputsResult {
 #[aether_data::kind(name = "aether.test_fixtures.reactor_guarded_publication", eq)]
 pub struct ReactorGuardedPublication {
     pub digest: [u8; 32],
+    pub fold_id: u32,
+    pub folds: u32,
 }
 
-/// Output of a reactor arm that takes Heads directly and does not name a guard.
+impl aether_bloomery_reactor::Output for ReactorGuardedPublication {}
+
+/// Output of a reactor arm that takes a published fold tally directly.
 #[aether_data::kind(name = "aether.test_fixtures.reactor_open_publication", eq)]
 pub struct ReactorOpenPublication {
     pub digest: [u8; 32],
+    pub fold_id: u32,
+    pub folds: u32,
+}
+
+impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
+
+/// Drain recorded reactor outputs from the fixture sink.
+#[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs", default)]
+pub struct CollectReactorOutputs;
+
+/// Recorded publications one cluster sent to its external output mailbox.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_outputs_report", eq)]
+pub struct ReactorOutputsReport {
+    pub guarded: Vec<ReactorGuardedPublication>,
+    pub open: Vec<ReactorOpenPublication>,
 }

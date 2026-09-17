@@ -6,7 +6,7 @@ use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
 
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_bloomery_view::{Heads, View};
+use aether_bloomery_view::View;
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
@@ -17,7 +17,8 @@ use crate::views::{ErasedView, ViewCtor, ViewSet, box_view};
 ///
 /// Callers push contiguous journal entries. Views are constructed on first
 /// use, catch up from their trusted cursor, and stay poisoned after a failed
-/// fold. This type does not own a journal.
+/// fold. Retained views must be `Send` so this owner can be held by an actor.
+/// This type does not own a journal.
 pub struct Owner {
     prefix: Vec<Entry>,
     slots: BTreeMap<TypeId, CachedView>,
@@ -89,36 +90,34 @@ impl Owner {
         self.slot_ref(TypeId::of::<V>())?.downcast_ref()
     }
 
-    /// Owned [`Heads`] snapshot at the current cursor, or empty heads.
-    #[must_use]
-    pub fn published_heads(&self) -> Heads {
-        self.get::<Heads>().cloned().unwrap_or_default()
-    }
-
     /// Install an already-folded view at the current cursor.
     ///
     /// # Errors
     ///
     /// [`PrepareError::CursorContract`] when `view` is not at this prefix.
-    pub fn install_published<V: View + 'static>(&mut self, view: V) -> Result<(), PrepareError> {
+    pub fn install_published<V: View + Send + 'static>(&mut self, view: V) -> Result<(), PrepareError> {
+        self.install_erased(TypeId::of::<V>(), type_name::<V>(), box_view(view))
+    }
+
+    pub(crate) fn install_erased(
+        &mut self,
+        id: TypeId,
+        name: &'static str,
+        boxed: Box<dyn ErasedView>,
+    ) -> Result<(), PrepareError> {
         let target = self.cursor();
-        let actual = view.cursor();
+        let actual = boxed.cursor();
         if actual != target {
             return Err(PrepareError::CursorContract {
-                view: type_name::<V>(),
+                view: name,
                 last_trusted_cursor: actual,
                 expected: target,
                 actual,
             });
         }
         self.slots.insert(
-            TypeId::of::<V>(),
-            CachedView {
-                poisoned: false,
-                last_trusted_cursor: actual,
-                type_name: type_name::<V>(),
-                inner: Some(box_view(view)),
-            },
+            id,
+            CachedView { poisoned: false, last_trusted_cursor: actual, type_name: name, inner: Some(boxed) },
         );
         Ok(())
     }
@@ -225,7 +224,7 @@ impl Owner {
         Ok(&self.prefix[start..end])
     }
 
-    fn slot_ref(&self, id: TypeId) -> Option<&dyn Any> {
+    pub(crate) fn slot_ref(&self, id: TypeId) -> Option<&dyn Any> {
         let slot = self.slots.get(&id)?;
         if slot.poisoned {
             return None;

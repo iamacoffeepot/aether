@@ -1,6 +1,7 @@
 //! Failures while pushing a prefix or folding retained views.
 
 use alloc::boxed::Box;
+use alloc::string::String;
 use core::error::Error;
 use core::fmt;
 
@@ -70,6 +71,23 @@ pub enum PrepareError {
         /// Last cursor trusted for that view, if any.
         last_trusted_cursor: Seq,
     },
+    /// A required published snapshot was absent from the prepared prefix.
+    MissingSnapshot {
+        /// Stable published name of the view.
+        view: &'static str,
+    },
+    /// The prepared prefix listed the same published view twice.
+    DuplicateSnapshot {
+        /// Published name that appeared more than once.
+        view: String,
+    },
+    /// Publish-codec encode or decode failed for a snapshot.
+    Snapshot {
+        /// Stable published name of the view.
+        view: &'static str,
+        /// Codec error.
+        source: Box<dyn Error + 'static>,
+    },
 }
 
 impl fmt::Display for PrepareError {
@@ -99,6 +117,9 @@ impl fmt::Display for PrepareError {
             Self::Poisoned { view, last_trusted_cursor } => {
                 write!(f, "view {view} is unusable after seq {last_trusted_cursor}")
             }
+            Self::MissingSnapshot { view } => write!(f, "prepared prefix is missing snapshot {view}"),
+            Self::DuplicateSnapshot { view } => write!(f, "prepared prefix repeats snapshot {view}"),
+            Self::Snapshot { view, source } => write!(f, "prepared snapshot {view} failed: {source}"),
         }
     }
 }
@@ -107,7 +128,7 @@ impl Error for PrepareError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Trigger(error) => Some(error),
-            Self::Advance { source, .. } => Some(source.as_ref()),
+            Self::Advance { source, .. } | Self::Snapshot { source, .. } => Some(source.as_ref()),
             Self::Empty
             | Self::Gap { .. }
             | Self::Duplicate { .. }
@@ -115,7 +136,9 @@ impl Error for PrepareError {
             | Self::Overflow
             | Self::NonzeroEmpty { .. }
             | Self::CursorContract { .. }
-            | Self::Poisoned { .. } => None,
+            | Self::Poisoned { .. }
+            | Self::MissingSnapshot { .. }
+            | Self::DuplicateSnapshot { .. } => None,
         }
     }
 }

@@ -234,6 +234,7 @@ fn visit_arms_exposes_each_rule() {
         where
             T: Trigger,
             L: Params<T>,
+            L::Views: aether_bloomery_reactor::PublishSet,
             O: Output,
         {
             self.0.push(name);
