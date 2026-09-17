@@ -3,9 +3,6 @@
 //! CI builds `aether_bloomery_kernel` for WASM before this test. A missing
 //! artifact is a test failure when `AETHER_REQUIRE_RUNTIME=1`.
 
-// The native actor handler ABI owns decoded mail values.
-#![allow(clippy::needless_pass_by_value)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};

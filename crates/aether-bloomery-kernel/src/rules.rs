@@ -1,8 +1,5 @@
-// Reactor rule signatures receive owned decoded triggers and guards.
-#![allow(clippy::needless_pass_by_value)]
-
 use aether_bloomery_kinds::{HeadMoved, OpaqueBytes, REACTORS_HEAD, ReactorSet};
-use aether_bloomery_reactor::{Guard, Reactor, reactor};
+use aether_bloomery_reactor::{Guard, reactor};
 use aether_bloomery_view::Heads;
 
 use crate::KernelReconcileIntent;

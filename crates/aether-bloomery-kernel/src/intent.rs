@@ -1,4 +1,5 @@
 use aether_bloomery_reactor::Output;
+use serde as _;
 
 /// Request native reconciliation after the kernel observed a configuration move.
 ///
