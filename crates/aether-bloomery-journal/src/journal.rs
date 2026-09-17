@@ -205,7 +205,7 @@ impl Journal {
 
     /// Freeze the exact entries for a typed batch before attempting to append.
     ///
-    /// This checks the current head and SQLite integer bounds without writing
+    /// This checks the current head and `SQLite` integer bounds without writing
     /// or reserving the prefix. The timestamp is sampled once; a later
     /// [`Self::commit_prepared`] uses it even if the clock advances. Citation,
     /// recognized head-move, and SQL constraint checks still run at commit.
@@ -264,7 +264,7 @@ impl Journal {
 
     /// Append exactly the entries of a prepared typed batch.
     ///
-    /// Rejects a different journal allocation before touching SQLite, then
+    /// Rejects a different journal allocation before touching `SQLite`, then
     /// rechecks the head inside an immediate transaction. Artifacts, citations,
     /// recognized head moves, and event constraints retain the ordinary
     /// append path's all-or-nothing validation. The clock is not resampled.
