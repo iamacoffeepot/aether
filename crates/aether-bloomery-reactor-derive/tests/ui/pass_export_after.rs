@@ -58,7 +58,9 @@ macro_rules! RequireSentinel {
             { ty: { $publisher:ty } namespace: "test.bloomery.export.publisher" extensions: [aether_bloomery_reactor {} test_export_sentinel { one }] }
             { ty: { $witness:ty } namespace: "test.bloomery.export.witness" extensions: [aether_bloomery_reactor {} test_export_sentinel { two }] }
             { ty: { $coordinator:ty } namespace: "aether.bloomery.reactor" extensions: [] }
-        ], exports: [{ $ordinary_export:ty } { $cluster_export:ty }] }
+            { ty: { $peer_a_actor:ty } namespace: "test.bloomery.export.publisher" extensions: [] }
+            { ty: { $peer_b_actor:ty } namespace: "test.bloomery.export.witness" extensions: [] }
+        ], exports: [{ $ordinary_export:ty } { $cluster_export:ty } { $peer_a:ty } { $peer_b:ty }] }
     ) => {
         const _: fn() = || {
             use core::marker::PhantomData;
@@ -67,6 +69,10 @@ macro_rules! RequireSentinel {
             let _: PhantomData<Witness> = PhantomData::<$witness>;
             let _: PhantomData<Probe> = PhantomData::<$ordinary_export>;
             let _: PhantomData<$coordinator> = PhantomData::<$cluster_export>;
+            let _: PhantomData<$peer_a> = PhantomData::<$peer_a>;
+            let _: PhantomData<$peer_b> = PhantomData::<$peer_b>;
+            let _: PhantomData<$peer_a_actor> = PhantomData::<$peer_a>;
+            let _: PhantomData<$peer_b_actor> = PhantomData::<$peer_b>;
         };
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
@@ -76,8 +82,10 @@ macro_rules! RequireSentinel {
                 { ty: { $publisher } namespace: "test.bloomery.export.publisher" extensions: [aether_bloomery_reactor {} test_export_sentinel { one }] }
                 { ty: { $witness } namespace: "test.bloomery.export.witness" extensions: [aether_bloomery_reactor {} test_export_sentinel { two }] }
                 { ty: { $coordinator } namespace: "aether.bloomery.reactor" extensions: [] }
+                { ty: { $peer_a_actor } namespace: "test.bloomery.export.publisher" extensions: [] }
+                { ty: { $peer_b_actor } namespace: "test.bloomery.export.witness" extensions: [] }
             ]
-            exports: [{ $ordinary_export } { $cluster_export }]
+            exports: [{ $ordinary_export } { $cluster_export } { $peer_a } { $peer_b }]
         }
     };
     ($($unexpected:tt)*) => { compile_error!("actor association, namespace, extension payload, or export selection changed"); };

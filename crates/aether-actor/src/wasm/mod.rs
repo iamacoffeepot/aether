@@ -1140,9 +1140,7 @@ macro_rules! __export_internal {
             // parent, then reconstruct each inline child by type. For a
             // childless component the bundle decomposes to the raw parent
             // blob, so the parent sees the identical `PriorState` it would
-            // have before. A single-actor module's reconstructable type set
-            // is just `$component` (an inline child of any other type is
-            // not in the `export!` set; its tag is logged + skipped).
+            // have before. An unknown tag is logged + skipped.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {
@@ -1182,15 +1180,27 @@ macro_rules! __export_internal {
         }
     };
 
-    // Reconstruct one inline child by matching its persisted type tag
-    // against the module's exported type set (ADR-0114 §5). For each
-    // candidate type whose `hash(NAMESPACE)` matches, validate the
-    // replacement module's current placement facts against the effective
-    // parent, then re-`init` it and restore its state through the
-    // parent-aware compose helper. An unmatched or rejected child returns
-    // `false` so the caller logs + skips it.
+    // Public exports preserve their direct reconstruction path. Private
+    // actors use linked `#[actor]` factories after the public candidates
+    // fail to match. A rejected child returns `false` for the caller to log.
     (@reconstruct_child $registry:ident, $parent:ident, $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
+        let mut __aether_matches = 0usize;
+        $(
+            if $child.type_tag
+                == $crate::__macro_internals::mailbox_id_from_name(
+                    <$candidate as $crate::Addressable>::NAMESPACE,
+                )
+                .0
+            {
+                __aether_matches += 1;
+            }
+        )+
+        if __aether_matches == 0 {
+            $crate::wasm::inline::factory::reconstruct_registered_child($registry, $parent, $child)
+        } else if __aether_matches != 1 {
+            false
+        } else {
         $(
             if $child.type_tag
                 == $crate::__macro_internals::mailbox_id_from_name(
@@ -1213,13 +1223,13 @@ macro_rules! __export_internal {
             }
         )+
         __aether_reconstructed
+        }
     }};
 
     // Resolve one inline child to *spawn* by matching a runtime actor-type
-    // tag against the module's exported type set (issue 2692) — the spawn
-    // sibling of `@reconstruct_child`, a second consumer of the same
-    // `$($candidate)` list, not a second copy of the table. Emits a
-    // non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
+    // tag against the module's public exported type set (issue 2692). Linked
+    // private reconstruction factories are not independently spawnable here.
+    // Emits a non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
     // module's init shims install it on `__AETHER_INLINE`. The matched branch
     // allocates the child's alias via the host `spawn_inline_child` host fn
     // THEN runs the shared decode + init core; an unmatched tag returns
@@ -1819,9 +1829,9 @@ macro_rules! __export_multi_internal {
                 }
             };
             // ADR-0114 §5: decompose, restore the boxed parent, then
-            // reconstruct each inline child by matching its type tag against
-            // every exported type. Childless ⇒ the boxed parent sees the
-            // identical `PriorState`.
+            // reconstruct each inline child by its saved actor tag. Public
+            // exports match directly; private actors use linked factories.
+            // Childless ⇒ the boxed parent sees the identical `PriorState`.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {

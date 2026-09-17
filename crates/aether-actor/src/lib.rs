@@ -105,6 +105,8 @@ pub mod __macro_internals {
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
     pub use aether_data::{ActorId, Kind, Schema, mailbox_id_from_name};
+    #[cfg(target_family = "wasm")]
+    pub use inventory;
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.

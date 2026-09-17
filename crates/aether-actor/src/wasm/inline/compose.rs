@@ -110,7 +110,7 @@ pub struct InlineChildToReconstruct<'a> {
     /// re-keying the guest registry by it restores addressing without a
     /// host round-trip.
     pub alias: MailboxId,
-    /// The actor-type tag to resolve against the exported type set.
+    /// The actor-type tag to resolve against public exports or linked factories.
     pub type_tag: u64,
     /// Whether the original spawn used a counter discriminator (carried
     /// into the rebuilt slot metadata).
@@ -246,9 +246,8 @@ where
 
 /// Re-`init` one inline child of concrete type `A`, restore its `type State`,
 /// and re-register it under `alias` with the supplied logical `parent`.
-/// Called by the `export!`-generated reconstruct callback after it matches
-/// the type tag and validates the replacement module's current placement
-/// facts.
+/// Called after a public export or linked factory matches the type tag and
+/// validates the replacement module's current placement facts.
 #[must_use]
 pub fn reconstruct_one_child_at_parent<A>(
     registry: &Registry,
