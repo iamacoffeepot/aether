@@ -128,7 +128,7 @@ source and compiler:
 ```rust
 #[reactor]
 impl Reactor for SceneCompilation {
-    const NAME: &'static str = "editor.scene_compilation";
+    const NAMESPACE: &'static str = "editor.scene_compilation";
 
     #[rule]
     fn source_changed(
@@ -153,8 +153,24 @@ impl Reactor for SceneCompilation {
     }
 }
 
-reactor_bundle!(SceneCompilation);
+aether_actor::export!(
+    SceneCompilation,
+    generators = [aether_bloomery_reactor::ReactorBundle],
+);
 ```
+
+`export!` remains the module's export entry point. `ReactorBundle` selects
+actors carrying reactor metadata and generates their shared views actor and
+peer wiring. Ordinary actors may appear in the same export list without
+becoming reactors. Each reactor declares its own namespace; authors do not
+name or declare the generated views actor.
+
+The actor framework owns descriptor collection and the common actor metadata
+envelope. Reactor-specific metadata is a namespaced extension owned by
+Bloomery. Generators receive the collected descriptors and preserve extensions
+they do not understand, allowing other generators to consume their own
+metadata. Metadata association must survive ordinary actor imports, reexports,
+and `use` aliases.
 
 These are candidate APIs and domain types, not existing implementations.
 In particular, `Ran<P>` and `Request<P>` illustrate deferred program
