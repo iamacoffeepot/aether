@@ -47,6 +47,9 @@ fn decode_round_trips_the_appended_kind_and_refuses_a_different_kind_name() -> R
             assert_eq!(expected, "test.journal.other");
             assert_eq!(actual, "test.journal.note");
         }
+        DecodeError::SpecializationMismatch { expected, actual } => {
+            panic!("expected KindMismatch, got SpecializationMismatch {{ expected: {expected}, actual: {actual} }}")
+        }
         DecodeError::Storage(other) => panic!("expected KindMismatch, got Storage({other:?})"),
     }
     Ok(())

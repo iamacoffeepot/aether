@@ -356,6 +356,7 @@ fn poisoned_owner_cannot_serve_the_failed_view() -> Result<(), Box<dyn Error>> {
     owner.push(&[moved(1, "source", digest_ref::<Tree>(1))?])?;
     let boom = owner.prepare::<HeadMoved<Tree>, GuardArg<NeedsBoom>>().expect_err("advance");
     assert!(matches!(boom, PrepareError::Advance { .. }), "{boom}");
+    assert!(owner.is_poisoned());
     assert_eq!(ADVANCES.load(Ordering::Relaxed), 1);
 
     let again = owner.prepare::<HeadMoved<Tree>, GuardArg<NeedsBoom>>().expect_err("poisoned");

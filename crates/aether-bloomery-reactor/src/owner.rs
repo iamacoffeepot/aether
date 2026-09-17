@@ -44,6 +44,12 @@ impl Owner {
         self.prefix.last().map_or(Seq(0), |entry| entry.seq)
     }
 
+    /// Whether any constructed view is unusable after a failed fold.
+    #[must_use]
+    pub fn is_poisoned(&self) -> bool {
+        self.slots.values().any(|slot| slot.poisoned)
+    }
+
     /// Append the next contiguous entries. Does not fold; views catch up on
     /// prepare.
     ///

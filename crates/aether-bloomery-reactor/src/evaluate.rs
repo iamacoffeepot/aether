@@ -92,8 +92,8 @@ pub trait Reactor: Sized + 'static {
     /// each resolved arm once.
     ///
     /// A refutable trigger pattern or a [`crate::Guard`] that returns [`None`]
-    /// declines that arm. A stored-kind mismatch declines that arm. Other
-    /// [`PrepareError`] values fail closed.
+    /// declines that arm. A stored-kind or typed-specialization mismatch
+    /// declines that arm. Other [`PrepareError`] values fail closed.
     ///
     /// # Errors
     ///

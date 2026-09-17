@@ -20,12 +20,15 @@ use crate::views::{PublishCtor, PublishSet};
 
 /// Boot configuration for a generated views owner and its reactor peers.
 ///
-/// `output` is the external mailbox that receives typed arm outputs. An empty
-/// path drops outputs rather than guessing a destination.
-#[aether_data::kind(name = "aether.bloomery.reactor.cluster_config", default, eq)]
+/// `output` is the external mailbox that receives typed arm outputs. `ack`
+/// receives explicit [`PreparedResult`] / [`EvaluatedResult`] messages.
+/// Empty paths drop that class of mail rather than guessing a destination.
+#[aether_data::kind(name = "aether.bloomery.reactor.config", default, eq)]
 pub struct ClusterConfig {
     /// Runtime-name address of the external output mailbox.
     pub output: String,
+    /// Runtime-name address for preparation and evaluation acknowledgments.
+    pub ack: String,
 }
 
 /// Portable journal envelope carried over mail. `bytes` are storage-codec
@@ -71,47 +74,238 @@ impl JournalEntry {
     }
 }
 
-/// Contiguous entries pushed to a views owner. Each entry is prepared as its
-/// own prefix so later live Event/EventBatch admission can keep per-event
-/// boundaries.
-#[aether_data::kind(name = "aether.bloomery.reactor.push_entries")]
-pub struct PushEntries {
-    /// Ordered journal envelopes.
-    pub entries: Vec<JournalEntry>,
+/// One live journal event. The views owner folds this entry through its
+/// sequence, freezes owned snapshots, and mails them to reactor peers.
+///
+/// Caller cadence: feed eligible history with [`EventBatch`], then live
+/// [`Event`]s one boundary at a time. This kind does not execute programs,
+/// persist a checkpoint, or treat lifecycle settlement as evaluation.
+#[aether_data::kind(name = "aether.bloomery.reactor.event")]
+pub struct Event {
+    /// Caller-supplied stream/activation token. Bound on first successful admit.
+    pub stream: String,
+    /// The next contiguous journal envelope.
+    pub entry: JournalEntry,
 }
 
-impl PushEntries {
-    /// Wrap retained entries for mail.
+impl Event {
+    /// Wrap one retained entry for live admission.
     #[must_use]
-    pub fn from_entries(entries: &[Entry]) -> Self {
-        Self { entries: entries.iter().map(JournalEntry::from_entry).collect() }
+    pub fn from_entry(stream: impl Into<String>, entry: &Entry) -> Self {
+        Self { stream: stream.into(), entry: JournalEntry::from_entry(entry) }
     }
 }
 
-/// Aggregation outcome for one [`PushEntries`] request. Settlement of the
-/// request is not proof of successful reactor evaluation.
-#[aether_data::kind(name = "aether.bloomery.reactor.push_result")]
-pub enum PushResult {
-    /// Views advanced through `cursor`.
+/// Fold-only warmup of an ordered historical prefix. Every entry is folded;
+/// no live peer evaluation runs. The caller chooses an eligible prefix;
+/// this kind does not infer recovery eligibility.
+#[aether_data::kind(name = "aether.bloomery.reactor.event_batch")]
+pub struct EventBatch {
+    /// Caller-supplied stream/activation token. Bound on first successful admit.
+    pub stream: String,
+    /// First sequence in `entries`.
+    pub from: u64,
+    /// Last sequence in `entries`.
+    pub through: u64,
+    /// Dense historical envelopes from `from` through `through`.
+    pub entries: Vec<JournalEntry>,
+}
+
+impl EventBatch {
+    /// Wrap retained entries as a warmup range.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when `entries` is empty.
+    pub fn from_entries(stream: impl Into<String>, entries: &[Entry]) -> Result<Self, PrepareError> {
+        Self::from_journal(stream, entries.iter().map(JournalEntry::from_entry).collect())
+    }
+
+    /// Wrap already-encoded journal envelopes as a warmup range.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when `entries` is empty or not dense.
+    pub fn from_journal(stream: impl Into<String>, entries: Vec<JournalEntry>) -> Result<Self, PrepareError> {
+        let (from, through) = range_of(&entries)?;
+        Ok(Self { stream: stream.into(), from, through, entries })
+    }
+
+    /// Reject a batch whose declared range does not match its envelopes.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::InvalidRange`] when the range and entries disagree.
+    pub fn validate(&self) -> Result<(), PrepareError> {
+        let (from, through) = range_of(&self.entries)?;
+        if from != self.from || through != self.through {
+            return Err(PrepareError::InvalidRange { from: Seq(self.from), through: Seq(self.through) });
+        }
+        Ok(())
+    }
+}
+
+fn range_of(entries: &[JournalEntry]) -> Result<(u64, u64), PrepareError> {
+    let first = entries.first().ok_or(PrepareError::InvalidRange { from: Seq(0), through: Seq(0) })?;
+    let last = entries.last().ok_or(PrepareError::InvalidRange { from: Seq(0), through: Seq(0) })?;
+    if first.seq == 0 {
+        return Err(PrepareError::InvalidRange { from: Seq(first.seq), through: Seq(last.seq) });
+    }
+    for (offset, entry) in entries.iter().enumerate() {
+        let expected = first.seq.checked_add(offset as u64).ok_or(PrepareError::Overflow)?;
+        if entry.seq != expected {
+            return Err(PrepareError::InvalidRange { from: Seq(first.seq), through: Seq(last.seq) });
+        }
+    }
+    Ok((first.seq, last.seq))
+}
+
+/// Preparation/admission outcome correlated to one [`Event`] or [`EventBatch`].
+///
+/// This is fold and dispatch only. Lifecycle settlement of the request is not
+/// successful evaluation; see [`EvaluatedResult`].
+#[aether_data::kind(name = "aether.bloomery.reactor.prepared_result", eq)]
+pub enum PreparedResult {
+    /// Prefix folded through `seq` and, for live events, owned snapshots dispatched.
     Ok {
-        /// Last retained sequence after the push.
-        cursor: u64,
+        /// Stream/activation token.
+        stream: String,
+        /// Last sequence prepared.
+        seq: u64,
     },
-    /// Prefix or fold failed before peers were prepared.
+    /// Stream, range, or fold failed before peers evaluated.
     Err {
+        /// Stream/activation token on the refused input, if any.
+        stream: String,
+        /// Sequence the cluster trusted after the attempt.
+        seq: u64,
         /// Display of the [`PrepareError`].
         message: String,
     },
 }
 
-impl PushResult {
-    /// Convert a prepare/push outcome into the reply kind.
+impl PreparedResult {
+    /// Successful preparation at `seq`.
     #[must_use]
-    pub fn from_prepare(result: Result<u64, PrepareError>) -> Self {
-        match result {
-            Ok(cursor) => Self::Ok { cursor },
-            Err(error) => Self::Err { message: alloc::format!("{error}") },
+    pub fn ok(stream: impl Into<String>, seq: u64) -> Self {
+        Self::Ok { stream: stream.into(), seq }
+    }
+
+    /// Failed preparation. `seq` is the cluster cursor after the attempt.
+    #[must_use]
+    pub fn from_error(stream: impl Into<String>, seq: u64, error: &PrepareError) -> Self {
+        Self::Err { stream: stream.into(), seq, message: alloc::format!("{error}") }
+    }
+
+    /// Whether this result is successful preparation.
+    #[must_use]
+    pub const fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
+}
+
+/// Peer evaluation outcome correlated to one live [`Event`].
+///
+/// A declined guard or unmatched trigger pattern is successful evaluation
+/// with no arm output. Missing peer replies and reconstruction failures are
+/// not success. Timeout settlement is not this kind.
+#[aether_data::kind(name = "aether.bloomery.reactor.evaluated_result", eq)]
+pub enum EvaluatedResult {
+    /// Every reactor peer completed evaluation at `seq`.
+    Ok {
+        /// Stream/activation token.
+        stream: String,
+        /// Trigger sequence that was evaluated.
+        seq: u64,
+    },
+    /// A peer failed reconstruction or evaluation, or a required peer was missing.
+    Err {
+        /// Stream/activation token.
+        stream: String,
+        /// Trigger sequence that failed evaluation.
+        seq: u64,
+        /// Display of the peer or dispatch error.
+        message: String,
+    },
+}
+
+impl EvaluatedResult {
+    /// Successful evaluation at `seq`, including declined guards.
+    #[must_use]
+    pub fn ok(stream: impl Into<String>, seq: u64) -> Self {
+        Self::Ok { stream: stream.into(), seq }
+    }
+
+    /// Failed evaluation.
+    #[must_use]
+    pub fn from_error(stream: impl Into<String>, seq: u64, message: impl Into<String>) -> Self {
+        Self::Err { stream: stream.into(), seq, message: message.into() }
+    }
+
+    /// Whether every peer completed evaluation.
+    #[must_use]
+    pub const fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
+    }
+}
+
+/// Ordinary-mail evaluation report from a reactor peer to its views owner.
+///
+/// Inline cluster dispatch has no host reply handle, so peers send this kind
+/// to `ctx.source_mailbox()` instead of `ctx.reply()`.
+#[aether_data::kind(name = "aether.bloomery.reactor.peer_evaluated", eq)]
+pub enum PeerEvaluated {
+    /// Reconstruction and evaluation completed, including declined arms.
+    Ok {
+        /// Stream/activation token copied from the prepared prefix.
+        stream: String,
+        /// Trigger sequence.
+        seq: u64,
+    },
+    /// Reconstruction or evaluation failed.
+    Err {
+        /// Stream/activation token copied from the prepared prefix.
+        stream: String,
+        /// Trigger sequence.
+        seq: u64,
+        /// Display of the [`PrepareError`].
+        message: String,
+    },
+}
+
+impl PeerEvaluated {
+    /// Successful peer evaluation.
+    #[must_use]
+    pub fn ok(stream: impl Into<String>, seq: u64) -> Self {
+        Self::Ok { stream: stream.into(), seq }
+    }
+
+    /// Failed peer evaluation.
+    #[must_use]
+    pub fn from_error(stream: impl Into<String>, seq: u64, error: &PrepareError) -> Self {
+        Self::Err { stream: stream.into(), seq, message: alloc::format!("{error}") }
+    }
+
+    /// Stream token carried on this report.
+    #[must_use]
+    pub fn stream(&self) -> &str {
+        match self {
+            Self::Ok { stream, .. } | Self::Err { stream, .. } => stream,
         }
+    }
+
+    /// Trigger sequence carried on this report.
+    #[must_use]
+    pub const fn seq(&self) -> u64 {
+        match self {
+            Self::Ok { seq, .. } | Self::Err { seq, .. } => *seq,
+        }
+    }
+
+    /// Whether this peer completed evaluation.
+    #[must_use]
+    pub const fn is_ok(&self) -> bool {
+        matches!(self, Self::Ok { .. })
     }
 }
 
@@ -119,11 +313,16 @@ impl PushResult {
 #[aether_data::kind(name = "aether.bloomery.reactor.cluster_status_query", default)]
 pub struct ClusterStatusQuery;
 
-/// Cursor of one cluster's bundled views. Not a durable execution checkpoint.
+/// Cursor of one cluster's bundled views. Not a durable execution checkpoint
+/// and not an evaluation acknowledgment.
 #[aether_data::kind(name = "aether.bloomery.reactor.cluster_status", eq)]
 pub struct ClusterStatus {
     /// Last retained sequence, or `0` when empty.
     pub cursor: u64,
+    /// Bound stream/activation token, or empty when unbound.
+    pub stream: String,
+    /// Whether a fold failed and further admission is refused.
+    pub poisoned: bool,
 }
 
 /// One published view snapshot. `bytes` are [`aether_bloomery_view::Publish::encode`] output.
@@ -143,6 +342,8 @@ pub struct PublishedView {
 /// peer against those snapshots; they are not serialized.
 #[aether_data::kind(name = "aether.bloomery.reactor.prepared_prefix")]
 pub struct PreparedPrefix {
+    /// Stream/activation token copied from the live [`Event`].
+    pub stream: String,
     /// Trigger sequence.
     pub seq: u64,
     /// Stored trigger kind name.
@@ -161,8 +362,9 @@ pub struct PreparedPrefix {
 impl PreparedPrefix {
     /// Snapshot `entry` together with already-encoded published views.
     #[must_use]
-    pub fn from_parts(entry: &Entry, views: Vec<PublishedView>) -> Self {
+    pub fn from_parts(stream: impl Into<String>, entry: &Entry, views: Vec<PublishedView>) -> Self {
         Self {
+            stream: stream.into(),
             seq: entry.seq.0,
             kind: entry.kind.clone(),
             cause: entry.cause.map(|seq| seq.0),

@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 use core::error::Error;
 use core::fmt;
 
-use aether_data::{Storage, StorageError};
+use aether_data::{KindId, Storage, StorageError};
 
 /// Dense sequence number assigned by the store. Starts at 1; `Seq(0)` is the empty-journal head.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -35,15 +35,20 @@ pub struct Entry {
 impl Entry {
     /// Decode this entry as `K`. Refuses when `kind` is not `K::NAME`.
     ///
+    /// A well-formed payload of a different typed specialization of a shared
+    /// stored kind is [`DecodeError::SpecializationMismatch`], not a broken
+    /// payload. Malformed bytes stay [`DecodeError::Storage`].
+    ///
     /// # Errors
     ///
     /// [`DecodeError::KindMismatch`] when the stored name is not `K::NAME`.
-    /// [`DecodeError::Storage`] when TLV decode fails.
+    /// [`DecodeError::SpecializationMismatch`] when the payload discriminator
+    /// is not `K`. [`DecodeError::Storage`] when TLV decode fails.
     pub fn decode<K: Storage>(&self) -> Result<K, DecodeError> {
         if self.kind != K::NAME {
             return Err(DecodeError::KindMismatch { expected: K::NAME, actual: self.kind.clone() });
         }
-        K::decode_storage(&self.bytes).map(|data| data.value).map_err(DecodeError::Storage)
+        K::decode_storage(&self.bytes).map(|data| data.value).map_err(DecodeError::from_storage)
     }
 }
 
@@ -57,8 +62,32 @@ pub enum DecodeError {
         /// Name stored on the entry.
         actual: String,
     },
+    /// The envelope kind matched, but the payload is a different typed
+    /// specialization of that shared stored kind.
+    SpecializationMismatch {
+        /// Kind id the caller asked to specialize as.
+        expected: KindId,
+        /// Kind id stored on the payload discriminator.
+        actual: KindId,
+    },
     /// TLV decode failed.
     Storage(StorageError),
+}
+
+impl DecodeError {
+    /// Envelope or specialization mismatch. Matching layers decline; they do
+    /// not treat this as a broken payload.
+    #[must_use]
+    pub const fn is_unmatched(&self) -> bool {
+        matches!(self, Self::KindMismatch { .. } | Self::SpecializationMismatch { .. })
+    }
+
+    fn from_storage(error: StorageError) -> Self {
+        match error {
+            StorageError::TypeMismatch { expected, actual } => Self::SpecializationMismatch { expected, actual },
+            other => Self::Storage(other),
+        }
+    }
 }
 
 impl fmt::Display for DecodeError {
@@ -66,6 +95,9 @@ impl fmt::Display for DecodeError {
         match self {
             Self::KindMismatch { expected, actual } => {
                 write!(f, "entry kind {actual:?} is not {expected:?}")
+            }
+            Self::SpecializationMismatch { expected, actual } => {
+                write!(f, "entry specialization {actual} is not {expected}")
             }
             Self::Storage(error) => write!(f, "failed to decode entry: {error}"),
         }
@@ -75,7 +107,7 @@ impl fmt::Display for DecodeError {
 impl Error for DecodeError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::KindMismatch { .. } => None,
+            Self::KindMismatch { .. } | Self::SpecializationMismatch { .. } => None,
             Self::Storage(error) => Some(error),
         }
     }

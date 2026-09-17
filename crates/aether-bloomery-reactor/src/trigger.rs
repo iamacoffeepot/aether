@@ -10,6 +10,8 @@ pub trait Trigger: Storage + Sized + 'static {
     /// # Errors
     ///
     /// [`DecodeError`] when the stored kind or payload does not match `Self`.
+    /// Envelope and specialization mismatches are unmatched triggers;
+    /// malformed payloads stay storage errors.
     fn from_entry(entry: &Entry) -> Result<Self, DecodeError> {
         entry.decode()
     }
