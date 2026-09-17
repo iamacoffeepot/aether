@@ -17,7 +17,7 @@ use aether_data::Kind;
 /// prefix. [`Self::apply`] requires the next contiguous sequence, including
 /// unrelated entries, so the cursor is an exact statement about the observed
 /// prefix rather than a best-effort watermark.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Heads {
     cursor: Seq,
     bindings: BTreeMap<RecordedHead, Digest>,
@@ -68,6 +68,14 @@ impl Heads {
     #[must_use]
     pub fn get<K: Kind>(&self, head: &Head<K>) -> Option<Ref<K>> {
         self.bindings.get(&RecordedHead::from(head)).copied().map(Ref::from_digest)
+    }
+
+    pub(crate) fn bindings(&self) -> &BTreeMap<RecordedHead, Digest> {
+        &self.bindings
+    }
+
+    pub(crate) fn reconstruct(cursor: Seq, bindings: BTreeMap<RecordedHead, Digest>) -> Self {
+        Self { cursor, bindings }
     }
 }
 
