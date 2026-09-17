@@ -351,10 +351,12 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
         let ty = &peer.peer;
         let subname = &peer.subname;
         quote! {
-            let _ = ctx.spawn_inline_child::<#views, #ty>(
+            if let Err(error) = ctx.spawn_inline_child::<#views, #ty>(
                 ::aether_actor::Subname::Named(#subname),
                 &config,
-            );
+            ) && self.peer_birth_error.is_none() {
+                self.peer_birth_error = Some(error);
+            }
         }
     });
     let live = live_fn_tokens(&live_fn, peers);
@@ -368,6 +370,7 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
             cluster: ::aether_bloomery_reactor::Cluster,
             output: ::aether_actor::__macro_internals::String,
             ack: ::aether_actor::__macro_internals::String,
+            peer_birth_error: Option<::aether_actor::SpawnError>,
         }
 
         #[::aether_actor::actor]
@@ -383,6 +386,7 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                     cluster: ::aether_bloomery_reactor::Cluster::new(),
                     output: config.output,
                     ack: config.ack,
+                    peer_birth_error: None,
                 })
             }
 
@@ -449,6 +453,18 @@ fn event_handler_tokens(
         ) {
             use ::aether_actor::OutboundReply;
             let before = self.cluster.owner().cursor();
+            if self.peer_birth_error.is_some() {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: event.stream,
+                    seq: before.0,
+                    message: "reactor peer failed to spawn".into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
             if let Err(error) = self.cluster.check_admit(&event.stream) {
                 let result = ::aether_bloomery_reactor::PreparedResult::from_error(
                     event.stream,
@@ -509,6 +525,18 @@ fn batch_handler_tokens(warmup_fn: &Ident, ack_prepared_fn: &Ident) -> TokenStre
         ) {
             use ::aether_actor::OutboundReply;
             let before = self.cluster.owner().cursor();
+            if self.peer_birth_error.is_some() {
+                let result = ::aether_bloomery_reactor::PreparedResult::Err {
+                    stream: batch.stream,
+                    seq: before.0,
+                    message: "reactor peer failed to spawn".into(),
+                };
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
             if let Err(error) = self.cluster.check_admit(&batch.stream) {
                 let result = ::aether_bloomery_reactor::PreparedResult::from_error(
                     batch.stream,

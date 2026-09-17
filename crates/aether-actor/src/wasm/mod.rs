@@ -1086,7 +1086,7 @@ macro_rules! __export_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_COMPONENT.get() }) else {
+            let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
@@ -1779,7 +1779,7 @@ macro_rules! __export_multi_internal {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn on_dehydrate() -> u32 {
-            let Some(instance) = (unsafe { __AETHER_MULTI.get() }) else {
+            let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
             // ADR-0114 §5: compose the parent + every inline child into one
