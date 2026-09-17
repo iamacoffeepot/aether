@@ -161,6 +161,7 @@ aether-fs = { path = "../aether-fs" }
 # test binary.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-kernel = { path = "../aether-bloomery-kernel" }
 aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
 # The cap-registry replace test swaps the probe wasm for aether-kit-commons's
 # camera export and asserts on `aether_kit_commons::camera::CameraCreate`.

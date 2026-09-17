@@ -148,6 +148,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-kernel"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-reactor",
+ "aether-bloomery-view",
+ "aether-data",
+ "serde",
+]
+
+[[package]]
 name = "aether-bloomery-kinds"
 version = "0.3.0-alpha"
 dependencies = [
@@ -801,6 +813,7 @@ name = "aether-substrate"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-kernel",
  "aether-bloomery-kinds",
  "aether-bloomery-reactor",
  "aether-component",

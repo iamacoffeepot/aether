@@ -1,0 +1,24 @@
+[package]
+name = "aether-bloomery-kernel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Journal-observing WASM reactor kernel (ADR-0223)."
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+aether-bloomery-view = { path = "../aether-bloomery-view" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[package.metadata.cargo-machete]
+ignored = ["serde"] # aether-suppression-request: #[aether_data::kind] expansion names serde; source-only scan cannot see it
+
+[lints]
+workspace = true
