@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use aether_data::KindId;
 
-use crate::{Entry, Seq};
+use crate::{Entry, ReactorLifecycleOutcome, Seq};
 
 /// One recorded entry carried over mail. Payload bytes retain their storage encoding.
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema, serde::Serialize, serde::Deserialize)]
@@ -90,4 +90,37 @@ pub enum ReadHeadResult {
     Ok { head: u64 },
     /// Journal backend failure.
     Err { message: String },
+}
+
+/// Record one reactor lifecycle observation through its journal owner.
+#[aether_data::kind(name = "aether.bloomery.journal.record_reactor_lifecycle", eq, no_serde)]
+pub struct RecordReactorLifecycle {
+    /// Journal sequence that must still be the head.
+    pub expect_head: u64,
+    /// Recorded causing sequence, when the caller has one.
+    pub cause: Option<u64>,
+    /// Typed observation to append.
+    pub event: ReactorLifecycleOutcome,
+    /// Cited opaque artifact bytes, when not already stored.
+    pub artifact_bytes: Option<Vec<u8>>,
+}
+
+/// Result of attempting one lifecycle observation append.
+#[aether_data::kind(name = "aether.bloomery.journal.record_reactor_lifecycle_result", eq, no_serde)]
+pub enum RecordReactorLifecycleResult {
+    /// The observation committed at the assigned sequence.
+    Committed {
+        /// Sequence assigned by the journal.
+        seq: u64,
+    },
+    /// The expected sequence was stale; no event or artifact was written.
+    HeadMoved {
+        /// Head observed by the append transaction.
+        actual: u64,
+    },
+    /// Invalid staged bytes, citation, encoding, or backend failure.
+    Err {
+        /// Human-readable refusal.
+        message: String,
+    },
 }

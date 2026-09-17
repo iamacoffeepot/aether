@@ -3,8 +3,11 @@
 use std::path::PathBuf;
 
 use aether_actor::actor;
-use aether_bloomery_journal::Journal;
-use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq};
+use aether_bloomery_journal::{AppendError, Batch, Journal};
+use aether_bloomery_kinds::{
+    JournalEntry, ReactorLifecycleOutcome, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
+    RecordReactorLifecycle, RecordReactorLifecycleResult, Seq,
+};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -52,6 +55,42 @@ impl NativeActor for JournalActor {
         match self.journal.head() {
             Ok(head) => ReadHeadResult::Ok { head: head.0 },
             Err(error) => ReadHeadResult::Err { message: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_record_reactor_lifecycle(
+        &mut self,
+        _ctx: &mut NativeCtx<'_>,
+        request: RecordReactorLifecycle,
+    ) -> RecordReactorLifecycleResult {
+        let RecordReactorLifecycle { expect_head, cause, event, artifact_bytes } = request;
+        let cited_artifact = match &event {
+            ReactorLifecycleOutcome::Activated { artifact, .. } => Some(*artifact),
+            ReactorLifecycleOutcome::Rejected { attempted, .. } => Some(*attempted),
+            ReactorLifecycleOutcome::Retired { .. } => None,
+        };
+
+        let mut batch = Batch::new();
+        if let Some(bytes) = artifact_bytes {
+            let Some(expected) = cited_artifact else {
+                return RecordReactorLifecycleResult::Err { message: "retirement cannot stage artifact bytes".into() };
+            };
+            if batch.stage_bytes(&bytes) != expected {
+                return RecordReactorLifecycleResult::Err {
+                    message: "staged artifact bytes do not match the lifecycle citation".into(),
+                };
+            }
+        }
+
+        if let Err(error) = batch.push_event(&event, cause.map(Seq)) {
+            return RecordReactorLifecycleResult::Err { message: error.to_string() };
+        }
+
+        match self.journal.append(Seq(expect_head), &batch) {
+            Ok(range) => RecordReactorLifecycleResult::Committed { seq: range.start.0 },
+            Err(AppendError::HeadMoved { actual }) => RecordReactorLifecycleResult::HeadMoved { actual: actual.0 },
+            Err(error) => RecordReactorLifecycleResult::Err { message: error.to_string() },
         }
     }
 }

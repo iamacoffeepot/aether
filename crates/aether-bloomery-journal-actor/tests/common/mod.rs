@@ -1,0 +1,74 @@
+//! Shared native journal actor boot and correlated mailbox helpers.
+
+use std::sync::{Arc, mpsc};
+use std::time::Duration;
+
+use aether_actor::actor;
+use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
+use aether_kinds::trace::Nanos;
+use aether_substrate::BootError;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::mail::MailRef;
+use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
+use aether_substrate::testing::boot_authority;
+
+#[aether_data::kind(name = "test.bloomery.journal_actor.anchor_ping", default, no_serde)]
+struct AnchorPing;
+
+pub struct TestAnchor {
+    pings: u64,
+}
+
+#[actor(singleton, root)]
+impl NativeActor for TestAnchor {
+    type Config = ();
+    const NAMESPACE: &'static str = "test.bloomery.journal_actor.anchor";
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { pings: 0 })
+    }
+
+    #[handler::single]
+    fn on_anchor_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: AnchorPing) {
+        self.pings += 1;
+    }
+}
+
+pub fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<OwnedDispatch>) {
+    let (tx, rx) = mpsc::channel();
+    let mailbox = registry.register_inbox(
+        &boot_authority(),
+        name,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            tx.send(dispatch).expect("capture reply");
+        }),
+    );
+    (mailbox, rx)
+}
+
+pub fn request<K: Kind>(registry: &Registry, target: MailboxId, caller: MailboxId, correlation: u64, mail: &K) {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
+        panic!("actor mailbox is not an inbox");
+    };
+    handler.enqueue(OwnedDispatch::disarmed(
+        K::ID,
+        None,
+        Source::with_correlation(SourceAddr::Component(caller), correlation),
+        MailRef::from(mail.encode_into_bytes()),
+        1,
+        MailId::NONE,
+        MailId::NONE,
+        None,
+        Nanos(0),
+        0,
+        MailboxId(0),
+    ));
+}
+
+pub fn reply<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlation: u64) -> K {
+    let dispatch = rx.recv_timeout(Duration::from_secs(2)).expect("reply within two seconds");
+    assert_eq!(dispatch.kind, K::ID);
+    assert_eq!(dispatch.sender.correlation_id, correlation);
+    K::decode_from_bytes(dispatch.payload.bytes()).expect("decode reply")
+}
