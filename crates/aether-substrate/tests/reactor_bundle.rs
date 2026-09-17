@@ -7,6 +7,7 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, mpsc};
 
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
@@ -21,7 +22,15 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
 };
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+use aether_substrate::actor::wasm::host_fns;
+use aether_substrate::mail::Mail;
+use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::mail::outbound::HubOutbound;
+use aether_substrate::mail::registry::{OwnedDispatch, Registry};
+use aether_substrate::testing::boot_authority;
 use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND};
+use wasmtime::{Engine, Linker, Module};
 
 const SINK: &str = "test.bloomery.reactor.sink";
 const STREAM_A: &str = "alpha";
@@ -52,6 +61,76 @@ fn fold_fail(seq: u64) -> JournalEntry {
 
 fn live_event<K: Kind + 'static>(stream: &str, seq: u64, name: &'static str, to: Ref<K>) -> Event {
     Event { stream: stream.to_owned(), entry: journal_moved(seq, name, to) }
+}
+
+/// A guest can finish `wire` even when an inline peer could not obtain its
+/// host alias. Preparation must expose that failure before folding anything.
+#[test]
+#[allow(
+    clippy::disallowed_methods,
+    reason = "the direct multi-export Component test selects a guest type by its namespace tag"
+)]
+fn reactor_bundle_peer_spawn_failure_refuses_batch_and_live_event() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let engine = Engine::default();
+    let mut linker = Linker::new(&engine);
+    host_fns::register(&mut linker).expect("register component host functions");
+    let module = Module::new(&engine, fs::read(wasm_path).expect("read fixture wasm")).expect("compile fixture wasm");
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    let (ack_tx, ack_rx) = mpsc::channel();
+    registry.register_inbox(
+        &boot_authority(),
+        "test.bloomery.reactor.missing_peer_ack",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            assert_eq!(dispatch.kind, PreparedResult::ID);
+            ack_tx
+                .send(PreparedResult::decode_from_bytes(dispatch.payload.bytes()).expect("decode prepared ack"))
+                .expect("receive prepared ack");
+            dispatch.discharge();
+        }),
+    );
+
+    // The direct component has no NativeBinding or registered parent name.
+    // The real generated `wire` calls the host inline-child allocator, which
+    // returns zero rather than staging a peer alias in this setup.
+    let sender = MailboxId(0x6164);
+    let ctx = ComponentCtx::new(sender, registry, mailer, HubOutbound::disconnected());
+    let config = ClusterConfig { output: String::new(), ack: "test.bloomery.reactor.missing_peer_ack".to_owned() };
+    let mut component = Component::instantiate(
+        &engine,
+        &linker,
+        &module,
+        ctx,
+        &config.encode_into_bytes(),
+        Some(aether_data::mailbox_id_from_name(CLUSTER_NAMESPACE).0),
+    )
+    .expect("instantiate generated coordinator");
+    component.wire().expect("generated wire returns after peer allocation failure");
+    assert!(component.drain_pending_aliases().is_empty(), "failed peer spawns stage no aliases");
+
+    let batch = EventBatch::from_journal(STREAM_A, vec![journal_moved(1, "current", digest_ref::<Program>(1))])
+        .expect("valid batch");
+    assert_eq!(
+        component.deliver(&Mail::new(sender, EventBatch::ID, batch.encode_into_bytes(), 1)).expect("deliver batch"),
+        0
+    );
+    assert!(
+        matches!(ack_rx.try_recv().expect("batch ack"), PreparedResult::Err { stream, seq: 0, .. } if stream == STREAM_A),
+        "a missing peer must prevent successful warmup admission"
+    );
+
+    let event = live_event(STREAM_A, 1, "current", digest_ref::<Program>(1));
+    assert_eq!(
+        component.deliver(&Mail::new(sender, Event::ID, event.encode_into_bytes(), 1)).expect("deliver event"),
+        0
+    );
+    assert!(
+        matches!(ack_rx.try_recv().expect("event ack"), PreparedResult::Err { stream, seq: 0, .. } if stream == STREAM_A),
+        "a missing peer must prevent live preparation as well"
+    );
 }
 
 fn load_export_result(
