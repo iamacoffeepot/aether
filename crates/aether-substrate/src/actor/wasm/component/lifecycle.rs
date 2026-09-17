@@ -7,8 +7,8 @@ use super::{
     Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, PreparedComponentEffects, SMALL_REGION_BYTES,
     StateBundle,
 };
-use crate::mail::MailboxId;
 use crate::mail::registry::PreparedAliasRoute;
+use crate::mail::{KindId, Mail, MailboxId};
 
 impl Component {
     /// Loudly log an init config rejected by [`Component::instantiate`] (ADR-0095)
@@ -98,6 +98,20 @@ impl Component {
 
     pub fn take_prepared_effects(&mut self) -> PreparedComponentEffects {
         self.store.data_mut().take_prepared_effects()
+    }
+
+    pub fn prepared_effect_count(&self) -> usize {
+        self.store.data().prepared_effect_count()
+    }
+
+    pub fn take_only_mail_since(
+        &mut self,
+        checkpoint: usize,
+        recipient: MailboxId,
+        kind: KindId,
+        identity: MailboxId,
+    ) -> Result<Mail, String> {
+        self.store.data_mut().take_only_mail_since(checkpoint, recipient, kind, identity)
     }
 
     /// Write the prior-state bytes into a delivery region (ADR-0095, via

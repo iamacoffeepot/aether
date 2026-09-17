@@ -79,6 +79,8 @@ mod runtime;
 // re-export re-gates to `feature = "runtime"`.
 #[cfg(feature = "runtime")]
 pub use runtime::WasmTrampolineConfig;
+#[cfg(feature = "runtime")]
+pub use runtime::admission;
 
 /// The wasm-trampoline **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`), the

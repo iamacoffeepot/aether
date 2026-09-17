@@ -5,16 +5,17 @@ use std::sync::Arc;
 use aether_actor::Local as _;
 use aether_actor::Single;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
+use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{
-    Dispatch, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Dispatch, NativeBinding, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, PreparedComponentEffects};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::registry::PreparedAliasRoute;
-use aether_substrate::mail::{CostCells, KindId, MailboxId};
+use aether_substrate::mail::{CostCells, KindId, Mail, MailboxId};
 use wasmtime::Module;
 
 use crate::ComponentRestrictions;
@@ -27,17 +28,75 @@ use super::state::WasmTrampolineState;
 /// Dropping this value aborts without changing the resident component or
 /// publishing guest effects. The later journal admission slice can retain it
 /// across its own fence without inventing a second replacement path.
-struct PreparedReplacement {
+pub struct PreparedReplacement {
     component: Component,
     module: Module,
     actor_caps: Vec<ActorInputs>,
     wasm_bytes: Arc<[u8]>,
     type_tag: Option<u64>,
     capabilities: ComponentCapabilities,
-    effects: PreparedComponentEffects,
+}
+
+impl PreparedReplacement {
+    /// Fold an adapter-supplied prefix in the actual candidate while its
+    /// host effects are still private. Only the expected acknowledgement may
+    /// have been emitted by this call; earlier init/rehydrate effects remain.
+    pub fn warm(
+        &mut self,
+        mail: Mail,
+        ack_recipient: MailboxId,
+        ack_kind: KindId,
+        identity: MailboxId,
+    ) -> Result<Vec<u8>, String> {
+        let checkpoint = self.component.prepared_effect_count();
+        let status = self.component.deliver(&mail).map_err(|error| format!("candidate warmup trapped: {error}"))?;
+        if status != 0 {
+            return Err(format!("candidate warmup returned status {status}"));
+        }
+        if !self.component.drain_pending_spawns().is_empty()
+            || !self.component.drain_pending_aliases().is_empty()
+            || !self.component.drain_pending_alias_retirements().is_empty()
+        {
+            return Err("candidate warmup changed topology; admission is unsupported".to_owned());
+        }
+        self.component
+            .take_only_mail_since(checkpoint, ack_recipient, ack_kind, identity)
+            .map(|ack| ack.payload.bytes().to_vec())
+    }
 }
 
 impl WasmTrampolineState {
+    /// Dispatch through the resident guest and perform the same topology
+    /// drain for ordinary, held, and committed-event mail.
+    pub fn deliver_guest(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Single, WasmTrampoline>,
+        mail: &Mail,
+    ) -> Result<u32, String> {
+        let component = self.component.as_mut().ok_or("trampoline has no resident component")?;
+        let status = component.deliver(mail).map_err(|error| format!("component {} trapped: {error}", self.mailbox))?;
+        let aliases = component.drain_pending_aliases();
+        let retired = component.drain_pending_alias_retirements();
+        let pendings = component.drain_pending_spawns();
+        self.stage_inline_aliases(ctx, aliases);
+        self.stage_inline_alias_retirements(ctx, retired);
+        for pending in pendings {
+            self.spawn_sibling(ctx, pending);
+        }
+        Ok(status)
+    }
+
+    pub fn deliver_envelope(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Single, WasmTrampoline>,
+        env: &Envelope,
+    ) -> Result<u32, String> {
+        let mail = Mail::new(env.recipient, env.kind, env.payload.bytes().to_vec(), env.count)
+            .with_reply_to(env.sender)
+            .with_lineage(env.mail_id, env.root, env.parent_mail);
+        self.deliver_guest(ctx, &mail)
+    }
+
     /// Publish the logical inline-child routes a guest call staged. The
     /// owner batch is reserved admission; completion is a later no-reply
     /// actor turn so rejection cannot silently lose the originating chain.
@@ -102,6 +161,7 @@ impl WasmTrampolineState {
             .unwrap_or_default();
         let config = WasmTrampolineConfig {
             prohibit: ComponentRestrictions::NONE,
+            admission_authority: None,
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
             module: self.module.clone(),
@@ -206,9 +266,9 @@ impl WasmTrampolineState {
             })
     }
 
-    fn prepare_replace(
+    pub fn prepare_replace(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        binding: Arc<NativeBinding>,
         payload: ReplaceComponent,
     ) -> Result<PreparedReplacement, String> {
         if self.prohibit.contains(ComponentRestrictions::REPLACE) {
@@ -267,7 +327,7 @@ impl WasmTrampolineState {
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
         );
-        substrate_ctx.install_binding(ctx.transport_arc());
+        substrate_ctx.install_binding(binding);
         substrate_ctx.begin_replacement_preparation();
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
@@ -307,7 +367,6 @@ impl WasmTrampolineState {
         }
 
         Ok(PreparedReplacement {
-            effects: new_component.take_prepared_effects(),
             component: new_component,
             module,
             actor_caps: actors,
@@ -317,9 +376,9 @@ impl WasmTrampolineState {
         })
     }
 
-    fn commit_replace(&mut self, prepared: PreparedReplacement) -> ReplaceResult {
-        let PreparedReplacement { component, module, actor_caps, wasm_bytes, type_tag, capabilities, effects } =
-            prepared;
+    pub fn commit_replace(&mut self, prepared: PreparedReplacement) -> ReplaceResult {
+        let PreparedReplacement { mut component, module, actor_caps, wasm_bytes, type_tag, capabilities } = prepared;
+        let effects = component.take_prepared_effects();
         if let Some(mut old) = self.component.take() {
             // Acceptance is final. A contained teardown trap is diagnostic.
             old.unwire();
@@ -366,8 +425,18 @@ impl WasmTrampolineState {
         ReplaceResult::Ok { capabilities }
     }
 
-    pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
-        match self.prepare_replace(ctx, payload) {
+    pub fn handle_replace<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Single, A>,
+        payload: ReplaceComponent,
+    ) -> ReplaceResult {
+        if self.has_pending_admission() {
+            return ReplaceResult::Err { error: "component has a pending journal admission".to_owned() };
+        }
+        if self.admission_authority.is_some() {
+            return ReplaceResult::Err { error: "managed component replacement requires slot admission".to_owned() };
+        }
+        match self.prepare_replace(ctx.transport_arc(), payload) {
             Ok(prepared) => self.commit_replace(prepared),
             Err(error) => ReplaceResult::Err { error },
         }

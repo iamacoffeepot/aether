@@ -61,6 +61,7 @@ impl PreparedLoad {
     fn requested_config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
             prohibit: ComponentRestrictions::NONE,
+            admission_authority: None,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
@@ -109,6 +110,7 @@ impl PreparedBoot {
     fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
             prohibit: ComponentRestrictions::NONE,
+            admission_authority: None,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),

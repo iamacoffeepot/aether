@@ -5,6 +5,7 @@ use std::sync::Arc;
 use aether_kinds::ComponentCapabilities;
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
+use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
@@ -20,6 +21,9 @@ pub struct WasmTrampolineConfig {
     /// bootstrap may set `DROP | REPLACE`; ordinary component loads use
     /// [`ComponentRestrictions::NONE`]. The guest cannot change this policy.
     pub prohibit: ComponentRestrictions,
+    /// Only this native mailbox may drive the held-slot admission protocol.
+    /// Ordinary loads and siblings leave it unset.
+    pub admission_authority: Option<MailboxId>,
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub module: Module,

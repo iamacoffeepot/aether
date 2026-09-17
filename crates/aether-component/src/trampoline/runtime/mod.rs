@@ -13,10 +13,15 @@
 //! `WasmTrampolineConfig` init bundle), and [`replace`] (the inherent replace /
 //! sibling-spawn impl on the state).
 
+pub mod admission;
 mod config;
 mod replace;
 mod state;
 
+pub use admission::{
+    CancelSlot, CommitSlot, EvaluateResident, PrepareSlot, ResidentDelivered, SlotCancelled, SlotCommitted,
+    SlotPrepared,
+};
 pub use config::WasmTrampolineConfig;
 pub use state::WasmTrampolineState;
 
@@ -117,6 +122,10 @@ impl NativeActor for WasmTrampoline {
 
         Ok(WasmTrampolineState {
             prohibit: config.prohibit,
+            admission_authority: config.admission_authority,
+            pending_admission: None,
+            last_attempt: None,
+            last_cancelled: None,
             component: Some(component),
             engine: config.engine,
             linker: config.linker,
@@ -165,6 +174,7 @@ impl NativeActor for WasmTrampoline {
     /// individual `DropComponent` request. The bootstrap prohibition does
     /// not prevent the resident guest from unwiring during actor shutdown.
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        state.discard_pending_on_shutdown();
         if let Some(component) = state.component.as_mut() {
             component.unwire();
         }
@@ -183,6 +193,12 @@ impl NativeActor for WasmTrampoline {
     /// `state.component` is `None`.
     #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
+        if state.admission_authority.is_some() && state.admission_authority != ctx.source_mailbox() {
+            return DropResult::Err { error: "managed component drop requires the native authority".to_owned() };
+        }
+        if state.has_pending_admission() {
+            return DropResult::Err { error: "component has a pending journal admission".to_owned() };
+        }
         if state.prohibit.contains(ComponentRestrictions::DROP) {
             return DropResult::Err { error: "component drop prohibited by native bootstrap".to_owned() };
         }
@@ -241,7 +257,42 @@ impl NativeActor for WasmTrampoline {
         ctx: &mut NativeCtx<'_>,
         payload: ReplaceComponent,
     ) -> ReplaceResult {
+        if state.has_pending_admission() {
+            return ReplaceResult::Err { error: "component has a pending journal admission".to_owned() };
+        }
         state.handle_replace(ctx, payload)
+    }
+
+    #[handler::single]
+    fn on_prepare_slot(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: PrepareSlot) -> SlotPrepared {
+        state.prepare_slot(ctx.source_mailbox(), ctx.transport_arc(), payload)
+    }
+
+    #[handler::single]
+    fn on_evaluate_resident(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Single, Self>,
+        payload: EvaluateResident,
+    ) -> ResidentDelivered {
+        state.evaluate_resident(ctx, payload)
+    }
+
+    #[handler::single]
+    fn on_commit_slot(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Single, Self>,
+        payload: CommitSlot,
+    ) -> SlotCommitted {
+        state.commit_slot(ctx, payload)
+    }
+
+    #[handler::single]
+    fn on_cancel_slot(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Single, Self>,
+        payload: CancelSlot,
+    ) -> SlotCancelled {
+        state.cancel_slot(ctx, payload)
     }
 
     #[handler(task)]
@@ -272,61 +323,21 @@ impl NativeActor for WasmTrampoline {
     /// dispatch shim do the rest.
     #[fallback]
     fn forward_to_wasm(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, env: &Envelope) -> bool {
-        // ADR-0097: deliver the inbound, then drain every sibling spawn
-        // the guest staged during `deliver`. The block scopes the
-        // `&mut component` borrow so `spawn_sibling` can read the
-        // trampoline's other fields afterward.
-        let (aliases, retired, pendings) = {
-            let Some(component) = state.component.as_mut() else {
-                tracing::warn!(
-                    target: "aether_component",
-                    mailbox = %state.mailbox,
-                    kind = %ctx.mailer().registry().kind_label(env.kind),
-                    "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
-                );
-                return true;
-            };
-            // Issue iamacoffeepot/aether#722: carry the inbound's
-            // lineage through to the synthetic `Mail`.
-            // `Component::deliver` reads `mail.mail_id` and `mail.root`
-            // to populate `ComponentCtx`'s in-flight cells, so any
-            // guest-triggered `send_mail_p32` / `reply_mail_p32` stamps
-            // `parent_mail = Some(env.mail_id)` and inherits the chain
-            // `root`. Without this, the trampoline's wrapped Mail
-            // defaults to `MailId::NONE` and the guest's outbound looks
-            // like a fresh root.
-            // ADR-0114 §2: deliver the *routed* recipient as the guest
-            // `Mail`'s recipient, not the trampoline's own id. For a
-            // normally-addressed actor `env.recipient` equals
-            // `state.mailbox`, so this is a no-op; for an inline-child
-            // alias it carries the child's address, which
-            // `Component::deliver` threads to the guest's `receive`
-            // frame + the `ComponentCtx` dispatch identity so the
-            // membrane demuxes to the child and the child's sends stamp
-            // its address as origin.
-            let mail = Mail::new(env.recipient, env.kind, env.payload.bytes().to_vec(), env.count)
-                .with_reply_to(env.sender)
-                .with_lineage(env.mail_id, env.root, env.parent_mail);
-            if let Err(e) = component.deliver(&mail) {
-                // ADR-0063 fail-fast: a wasm trap (or host-fn error
-                // returned through `Component::deliver`) kills the
-                // substrate. Wedge detection (CPU-loop guests) waits
-                // on a future epoch-deadline ADR — symmetric with
-                // native actors, which have no wedge guard either
-                // today.
-                let kind = ctx.mailer().registry().kind_label(env.kind);
-                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", state.mailbox));
-            }
-            (
-                component.drain_pending_aliases(),
-                component.drain_pending_alias_retirements(),
-                component.drain_pending_spawns(),
-            )
-        };
-        state.stage_inline_aliases(ctx, aliases);
-        state.stage_inline_alias_retirements(ctx, retired);
-        for pending in pendings {
-            state.spawn_sibling(ctx, pending);
+        if state.has_pending_admission() {
+            state.hold_guest_mail(ctx.take_inbound());
+            return true;
+        }
+        if state.component.is_none() {
+            tracing::warn!(
+                target: "aether_component",
+                mailbox = %state.mailbox,
+                kind = %ctx.mailer().registry().kind_label(env.kind),
+                "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
+            );
+            return true;
+        }
+        if let Err(error) = state.deliver_envelope(ctx, env) {
+            ctx.fatal_abort(error);
         }
         true
     }
@@ -335,9 +346,12 @@ impl NativeActor for WasmTrampoline {
 #[cfg(test)]
 mod lifecycle_restriction_tests {
     use std::fs;
+    use std::sync::Mutex;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use aether_data::{Kind, MailId, MailboxId, Source};
+    use aether_bloomery_journal::{Batch, Clock, Journal, Seq};
+    use aether_bloomery_reactor::{CLUSTER_NAMESPACE, ClusterConfig, Event, EventBatch, JournalEntry, PreparedResult};
+    use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr, Storage};
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_substrate::actor::native::NativeBinding;
     use aether_substrate::actor::wasm::host_fns;
@@ -377,6 +391,10 @@ mod lifecycle_restriction_tests {
         (
             WasmTrampolineState {
                 prohibit,
+                admission_authority: None,
+                pending_admission: None,
+                last_attempt: None,
+                last_cancelled: None,
                 component: Some(component),
                 engine,
                 linker,
@@ -474,6 +492,46 @@ mod lifecycle_restriction_tests {
         assert!(protected.component.is_some(), "sibling operation does not affect protected slot");
     }
 
+    #[test]
+    fn idle_managed_slot_rejects_direct_replace_and_unauthorized_drop() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read fixture");
+        let (mut state, binding) = state(&wasm, ComponentRestrictions::NONE, None);
+        let authority = MailboxId(0x6150);
+        state.admission_authority = Some(authority);
+        let mailbox = state.mailbox;
+        let mut ordinary = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        assert!(matches!(state.handle_replace(&mut ordinary, replace(&wasm, mailbox)), ReplaceResult::Err { .. }));
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut state, &mut ordinary, DropComponent { mailbox_id: mailbox }),
+            DropResult::Err { .. }
+        ));
+        assert!(state.component.is_some());
+        state.prohibit = ComponentRestrictions::REPLACE;
+        assert!(matches!(
+            state.prepare_slot(
+                Some(authority),
+                Arc::clone(&binding),
+                PrepareSlot {
+                    attempt: admission::SlotAttempt { epoch: 1, serial: 1 },
+                    replacement: replace(&wasm, mailbox),
+                    warmup_kind: KindId(1),
+                    warmup_bytes: Vec::new(),
+                    ack_recipient: MailboxId(2),
+                    ack_kind: KindId(3),
+                },
+            ),
+            SlotPrepared::Err { error, .. } if error.contains("prohibited")
+        ));
+        let mut authorized = NativeCtx::new(&binding, authority_source(authority), MailId::NONE, MailId::NONE);
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut state, &mut authorized, DropComponent { mailbox_id: mailbox }),
+            DropResult::Ok
+        ));
+    }
+
     fn observe_boot_unwire(state: &WasmTrampolineState) -> Arc<AtomicUsize> {
         let observed = Arc::new(AtomicUsize::new(0));
         let captured = Arc::clone(&observed);
@@ -545,5 +603,280 @@ mod lifecycle_restriction_tests {
             1,
             "shutdown does not repeat a prior individual drop's hook"
         );
+    }
+
+    #[derive(Clone, aether_data::Storage)]
+    #[kind(name = "test.component.slot.note")]
+    struct SlotNote {
+        value: u32,
+    }
+
+    struct FixedSlotClock;
+
+    impl Clock for FixedSlotClock {
+        fn now_millis(&self) -> u64 {
+            6150
+        }
+    }
+
+    type CapturedAcks = Arc<Mutex<Vec<(aether_data::KindId, Vec<u8>)>>>;
+
+    fn reactor_slot(
+        wasm: &[u8],
+    ) -> (WasmTrampolineState, Arc<NativeBinding>, MailboxId, MailboxId, Vec<u8>, CapturedAcks) {
+        let (mut state, binding) = state(wasm, ComponentRestrictions::NONE, None);
+        let authority = MailboxId(0x6150);
+        let captured: CapturedAcks = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&captured);
+        let ack = state.registry.register_inbox(
+            &boot_authority(),
+            "test.slot.ack",
+            Arc::new(move |dispatch: OwnedDispatch| {
+                sink.lock().expect("ack capture lock").push((dispatch.kind, dispatch.payload.bytes().to_vec()));
+                dispatch.discharge();
+            }),
+        );
+        let config = ClusterConfig { output: String::new(), ack: "test.slot.ack".to_owned() }.encode_into_bytes();
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut replacement = replace(wasm, state.mailbox);
+        replacement.export = Some(CLUSTER_NAMESPACE.to_owned());
+        replacement.config = config.clone();
+        assert!(matches!(state.handle_replace(&mut ctx, replacement), ReplaceResult::Ok { .. }));
+        state.component.as_mut().expect("coordinator resident").wire().expect("coordinator wire");
+        state.admission_authority = Some(authority);
+        (state, binding, authority, ack, config, captured)
+    }
+
+    fn preview_note(seq: u64, value: u32) -> JournalEntry {
+        let note = SlotNote { value };
+        JournalEntry {
+            seq,
+            kind: SlotNote::NAME.to_owned(),
+            cause: None,
+            recorded_at_millis: 6150,
+            bytes: SlotNote::encode_storage(&aether_data::StorageData::from_value(note))
+                .expect("encode prospective note"),
+        }
+    }
+
+    fn slot_prepare(
+        wasm: &[u8],
+        mailbox: MailboxId,
+        attempt: admission::SlotAttempt,
+        ack: MailboxId,
+        config: &[u8],
+    ) -> PrepareSlot {
+        let mut replacement = replace(wasm, mailbox);
+        replacement.export = Some(CLUSTER_NAMESPACE.to_owned());
+        replacement.config = config.to_vec();
+        PrepareSlot {
+            attempt,
+            replacement,
+            warmup_kind: EventBatch::ID,
+            warmup_bytes: EventBatch::from_journal("slot-attempt", vec![preview_note(1, 1)])
+                .expect("dense warmup")
+                .encode_into_bytes(),
+            ack_recipient: ack,
+            ack_kind: PreparedResult::ID,
+        }
+    }
+
+    fn authority_source(authority: MailboxId) -> Source {
+        Source::to(SourceAddr::Component(authority))
+    }
+
+    #[test]
+    fn prepared_slot_warms_actual_candidate_and_cancel_preserves_resident() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read reactor fixture");
+        let (mut state, binding, authority, ack, config, captured) = reactor_slot(&wasm);
+        let attempt = admission::SlotAttempt { epoch: 1, serial: 1 };
+        let mailbox = state.mailbox;
+        let request = slot_prepare(&wasm, mailbox, attempt, ack, &config);
+        assert!(matches!(
+            state.prepare_slot(
+                Some(MailboxId(0xDEAD)),
+                Arc::clone(&binding),
+                slot_prepare(&wasm, mailbox, attempt, ack, &config)
+            ),
+            SlotPrepared::Err { .. }
+        ));
+        let prepared = state.prepare_slot(Some(authority), Arc::clone(&binding), request);
+        let SlotPrepared::Ok { ack_bytes, .. } = prepared else {
+            panic!("valid prepared slot must warm the coordinator");
+        };
+        assert!(matches!(
+            PreparedResult::decode_from_bytes(&ack_bytes),
+            Some(PreparedResult::Ok { stream, seq: 1 }) if stream == "slot-attempt"
+        ));
+        assert!(captured.lock().expect("ack capture lock").is_empty(), "warmup ack remains private");
+        let mut ctx = NativeCtx::<Single, WasmTrampoline>::new_for_actor(
+            &binding,
+            authority_source(authority),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        assert!(matches!(state.handle_replace(&mut ctx, replace(&wasm, mailbox)), ReplaceResult::Err { .. }));
+        let mut drop_ctx = NativeCtx::new(&binding, authority_source(authority), MailId::NONE, MailId::NONE);
+        assert!(matches!(
+            WasmTrampoline::on_drop_component(&mut state, &mut drop_ctx, DropComponent { mailbox_id: mailbox }),
+            DropResult::Err { .. }
+        ));
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Ok { .. }));
+        assert!(state.component.is_some(), "cancel keeps the original coordinator");
+        assert!(captured.lock().expect("ack capture lock").is_empty(), "cancel publishes no candidate ack");
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Ok { .. }));
+        assert!(matches!(
+            state.prepare_slot(
+                Some(authority),
+                Arc::clone(&binding),
+                slot_prepare(&wasm, mailbox, attempt, ack, &config)
+            ),
+            SlotPrepared::Err { .. }
+        ));
+        let next = admission::SlotAttempt { epoch: 1, serial: 2 };
+        assert!(matches!(
+            state.prepare_slot(Some(authority), Arc::clone(&binding), slot_prepare(&wasm, mailbox, next, ack, &config)),
+            SlotPrepared::Ok { .. }
+        ));
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Err { .. }));
+        assert!(matches!(state.commit_slot(&mut ctx, CommitSlot { attempt }), SlotCommitted::Err { .. }));
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt: next }), SlotCancelled::Ok { .. }));
+    }
+
+    #[test]
+    fn committed_event_reaches_resident_once_before_prepared_slot_commit() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read reactor fixture");
+        let (mut state, binding, authority, ack, config, captured) = reactor_slot(&wasm);
+        let attempt = admission::SlotAttempt { epoch: 2, serial: 1 };
+        let mailbox = state.mailbox;
+        assert!(matches!(
+            state.prepare_slot(
+                Some(authority),
+                Arc::clone(&binding),
+                slot_prepare(&wasm, mailbox, attempt, ack, &config)
+            ),
+            SlotPrepared::Ok { .. }
+        ));
+        assert!(captured.lock().expect("ack capture lock").is_empty(), "prospective warmup did not evaluate resident");
+
+        let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedSlotClock)).expect("open journal");
+        let mut batch = Batch::new();
+        batch.push_event(&SlotNote { value: 1 }, None).expect("typed event draft");
+        journal.append(Seq(0), &batch).expect("commit event before resident evaluation");
+        let entries = journal.read(Seq(0), 1).expect("read committed event");
+        assert_eq!(
+            JournalEntry::from_entry(&entries[0]),
+            preview_note(1, 1),
+            "warmup used the exact committed envelope"
+        );
+
+        let mut ctx = NativeCtx::<Single, WasmTrampoline>::new_for_actor(
+            &binding,
+            authority_source(authority),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        let event = EvaluateResident {
+            attempt,
+            event_kind: Event::ID,
+            event_bytes: Event::from_entry("resident-stream", &entries[0]).encode_into_bytes(),
+        };
+        assert!(matches!(state.evaluate_resident(&mut ctx, event), ResidentDelivered::Ok { .. }));
+        assert!(matches!(
+            state.evaluate_resident(
+                &mut ctx,
+                EvaluateResident { attempt, event_kind: Event::ID, event_bytes: Vec::new() }
+            ),
+            ResidentDelivered::Err { .. }
+        ));
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Err { .. }));
+        let observed = captured.lock().expect("ack capture lock");
+        assert!(observed.iter().any(|(kind, bytes)| {
+            *kind == PreparedResult::ID
+                && matches!(PreparedResult::decode_from_bytes(bytes), Some(PreparedResult::Ok { stream, seq: 1 }) if stream == "resident-stream")
+        }));
+        assert!(observed.iter().any(|(kind, _)| *kind == aether_bloomery_reactor::EvaluatedResult::ID));
+        drop(observed);
+
+        assert!(matches!(state.commit_slot(&mut ctx, CommitSlot { attempt }), SlotCommitted::Ok { .. }));
+        assert!(state.component.is_some(), "same warmed candidate is resident after commit");
+        assert!(matches!(state.commit_slot(&mut ctx, CommitSlot { attempt }), SlotCommitted::Err { .. }));
+        assert!(matches!(
+            state.prepare_slot(
+                Some(authority),
+                Arc::clone(&binding),
+                slot_prepare(&wasm, mailbox, attempt, ack, &config)
+            ),
+            SlotPrepared::Err { .. }
+        ));
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Err { .. }));
+        let next = Event { stream: "slot-attempt".to_owned(), entry: preview_note(2, 2) };
+        let mail = Mail::new(mailbox, Event::ID, next.encode_into_bytes(), 1);
+        assert_eq!(state.component.as_mut().expect("committed candidate").deliver(&mail).expect("deliver n+1"), 0);
+        assert!(captured.lock().expect("ack capture lock").iter().any(|(kind, bytes)| {
+            *kind == PreparedResult::ID
+                && matches!(PreparedResult::decode_from_bytes(bytes), Some(PreparedResult::Ok { stream, seq: 2 }) if stream == "slot-attempt")
+        }), "successor accepts n+1 only because the same prepared instance retained n");
+    }
+
+    #[test]
+    fn failed_candidate_fold_stays_private_and_can_be_cancelled() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read reactor fixture");
+        let (mut state, binding, authority, ack, config, captured) = reactor_slot(&wasm);
+        let attempt = admission::SlotAttempt { epoch: 3, serial: 1 };
+        let mailbox = state.mailbox;
+        let mut request = slot_prepare(&wasm, mailbox, attempt, ack, &config);
+        let mut failed = preview_note(1, 1);
+        failed.kind = aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND.to_owned();
+        request.warmup_bytes =
+            EventBatch::from_journal("slot-attempt", vec![failed]).expect("dense failed prefix").encode_into_bytes();
+        let SlotPrepared::Ok { ack_bytes, .. } = state.prepare_slot(Some(authority), Arc::clone(&binding), request)
+        else {
+            panic!("the failed fold is reported by the captured typed acknowledgement");
+        };
+        assert!(matches!(PreparedResult::decode_from_bytes(&ack_bytes), Some(PreparedResult::Err { .. })));
+        assert!(captured.lock().expect("ack capture lock").is_empty());
+        let mut ctx = NativeCtx::<Single, WasmTrampoline>::new_for_actor(
+            &binding,
+            authority_source(authority),
+            MailId::NONE,
+            MailId::NONE,
+        );
+        assert!(matches!(state.cancel_slot(&mut ctx, CancelSlot { attempt }), SlotCancelled::Ok { .. }));
+        assert!(state.component.is_some());
+        assert!(captured.lock().expect("ack capture lock").is_empty());
+    }
+
+    #[test]
+    fn shutdown_discards_a_pending_candidate_without_publishing_its_ack() {
+        let Some(path) = require_wasm("aether_test_fixtures_bundle") else {
+            return;
+        };
+        let wasm = fs::read(path).expect("read reactor fixture");
+        let (mut state, binding, authority, ack, config, captured) = reactor_slot(&wasm);
+        let attempt = admission::SlotAttempt { epoch: 4, serial: 1 };
+        let mailbox = state.mailbox;
+        assert!(matches!(
+            state.prepare_slot(
+                Some(authority),
+                Arc::clone(&binding),
+                slot_prepare(&wasm, mailbox, attempt, ack, &config)
+            ),
+            SlotPrepared::Ok { .. }
+        ));
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        <WasmTrampoline as aether_actor::Lifecycle<WasmTrampolineState>>::unwire(&mut state, &mut ctx);
+        assert!(!state.has_pending_admission());
+        assert!(state.component.is_some(), "shutdown unwires the predecessor before its slot is dropped");
+        assert!(captured.lock().expect("ack capture lock").is_empty(), "pending candidate effects are aborted");
     }
 }

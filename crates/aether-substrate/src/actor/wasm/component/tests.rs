@@ -1688,6 +1688,42 @@ fn prepared_component_effects_abort_without_egress_and_publish_in_order() {
 }
 
 #[test]
+fn prepared_ack_extraction_keeps_earlier_effects_and_rejects_warmup_egress() {
+    let (outbound, rx) = HubOutbound::attached_loopback();
+    let registry = Arc::new(Registry::new());
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
+    let sender = MailboxId(0x6150);
+    let recipient = MailboxId(0x6151);
+    let ack = MailboxId(0x6152);
+    let kind = aether_data::KindId(0x6153);
+    let mut candidate = ComponentCtx::new(sender, registry, mailer, outbound);
+    candidate.begin_replacement_preparation();
+    candidate.send(recipient, kind, vec![1], 1, sender);
+    let checkpoint = candidate.prepared_effect_count();
+    candidate.send(ack, kind, vec![2], 1, sender);
+    assert_eq!(candidate.prepared_effect_count(), checkpoint + 1);
+    assert!(candidate.take_only_mail_since(checkpoint, ack, kind, recipient).is_err(), "wrong origin is refused");
+    let captured = candidate.take_only_mail_since(checkpoint, ack, kind, sender).expect("one exact ack");
+    assert_eq!(captured.payload.bytes(), &[2]);
+    assert_eq!(candidate.prepared_effect_count(), checkpoint, "only the ack was removed");
+    assert!(rx.try_recv().is_err(), "captured ack was never published");
+    candidate.take_prepared_effects().publish();
+    assert!(matches!(
+        rx.try_recv().expect("earlier effect published"),
+        EgressEvent::UnresolvedMail { recipient_mailbox_id, payload, .. }
+            if recipient_mailbox_id == recipient && payload == vec![1]
+    ));
+    assert!(rx.try_recv().is_err(), "ack never escaped during publication");
+
+    let mut rejected = ctx();
+    rejected.begin_replacement_preparation();
+    let checkpoint = rejected.prepared_effect_count();
+    rejected.send(ack, kind, vec![3], 1, sender);
+    rejected.emit_guest_log(2, "warmup".to_owned(), "extra log".to_owned());
+    assert!(rejected.take_only_mail_since(checkpoint, ack, kind, sender).is_err(), "extra warmup effect is refused");
+}
+
+#[test]
 fn prepared_component_reply_keeps_echo_and_lineage() {
     let registry = Arc::new(Registry::new());
     let observed = Arc::new(Mutex::new(Vec::new()));

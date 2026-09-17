@@ -34,7 +34,7 @@ publish = false
 
 [features]
 default = ["runtime"]
-runtime = ["dep:aether-substrate", "dep:wasmtime", "dep:sha2", "dep:tracing"]
+runtime = ["dep:aether-substrate", "dep:wasmtime", "dep:sha2", "dep:tracing", "dep:serde"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
@@ -55,6 +55,7 @@ sha2 = { workspace = true, optional = true }
 # transitions and warn-drop unroutable mail. Rides the `runtime` feature —
 # those log sites are native-only.
 tracing = { workspace = true, optional = true, features = ["std", "attributes"] }
+serde = { workspace = true, optional = true, features = ["derive"] }
 
 # The `#[actor]` macro emits a `cfg(not(target_family = "wasm"))`-gated
 # `inventory::submit!`, so native builds need `inventory` reachable; wasm
@@ -104,6 +105,8 @@ aether-test-fixtures-boot = { path = "../aether-test-fixtures-boot" }
 aether-test-fixtures-defaultless = { path = "../aether-test-fixtures-defaultless" }
 aether-test-fixtures-stateful-typed = { path = "../aether-test-fixtures-stateful-typed" }
 aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-stateful-reshaped" }
+aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
 # `dispatch_decode_failure` drives the `Probe` fixture directly through
 # the pub `Component::instantiate` / `deliver` API, which needs the
 # substrate types and `wasmtime::{Engine, Linker, Module}` in test scope

@@ -9,7 +9,7 @@ use crate::actor::wasm::reply_table::ReplyTable;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, PreparedAliasRoute, Registry};
-use crate::mail::{Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
+use crate::mail::{KindId, Mail, MailId, MailKind, MailboxId, Source, SourceAddr};
 use crate::runtime::log_install;
 use crate::scheduler::pending_depth;
 
@@ -137,7 +137,8 @@ pub struct ComponentCtx {
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
     pending_alias_retirements: Vec<MailboxId>,
-    /// `Some` only while a replacement candidate runs init and rehydrate.
+    /// `Some` while a replacement candidate runs init, rehydrate, and any
+    /// fold-only warmup before acceptance.
     /// The candidate owns this buffer; dropping its Store aborts every effect.
     prepared_effects: RefCell<Option<Vec<PreparedComponentEffect>>>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
@@ -296,6 +297,40 @@ impl ComponentCtx {
     pub fn begin_replacement_preparation(&mut self) {
         assert!(self.prepared_effects.get_mut().is_none(), "replacement preparation already active");
         *self.prepared_effects.get_mut() = Some(Vec::new());
+    }
+
+    /// Number of effects captured before a speculative guest call. A caller
+    /// can then require that the call emitted only its expected acknowledgement.
+    ///
+    /// # Panics
+    ///
+    /// Panics if preparation is not active.
+    pub fn prepared_effect_count(&self) -> usize {
+        self.prepared_effects.borrow().as_ref().expect("replacement preparation must be active").len()
+    }
+
+    /// Remove one expected acknowledgement emitted after `checkpoint` while
+    /// retaining earlier initialization effects for publication on acceptance.
+    /// A warmup that emitted any other external effect is refused.
+    pub fn take_only_mail_since(
+        &mut self,
+        checkpoint: usize,
+        recipient: MailboxId,
+        kind: KindId,
+        identity: MailboxId,
+    ) -> Result<Mail, String> {
+        let effects = self.prepared_effects.get_mut().as_mut().ok_or("replacement preparation is not active")?;
+        let tail = effects.get(checkpoint..).ok_or("prepared effect checkpoint is out of range")?;
+        let [PreparedComponentEffect::Mail { mail, identity: actual_identity }] = tail else {
+            return Err("warmup must emit exactly one acknowledgement and no other external effects".to_owned());
+        };
+        if mail.recipient != recipient || mail.kind != kind || *actual_identity != identity {
+            return Err("warmup acknowledgement recipient, kind, or origin did not match".to_owned());
+        }
+        match effects.pop() {
+            Some(PreparedComponentEffect::Mail { mail, .. }) => Ok(mail),
+            _ => Err("warmup acknowledgement disappeared during capture".to_owned()),
+        }
     }
 
     /// Take the effects captured while the replacement candidate was prepared.
