@@ -65,6 +65,34 @@ A fold-only `EventBatch` rebuilds views; it does not issue historical effects.
 Executing a historical event uses its historical selection, not the newest
 head. Restoring a current view and re-executing historical events are distinct.
 
+### Engine boundary and pending view input
+
+Core engine scheduling, dispatch, registry publication, and actor lifecycle
+semantics are not part of this implementation authorization. Changes to those
+mechanics require explicit owner consultation and permission. In particular,
+do not hold activation between `wire` and `Live` for a journal decision.
+
+Actors activate through the ordinary engine lifecycle. The views actor owns
+aggregation and pending journal input; reactor arms receive prepared inputs
+only after the views actor can process the corresponding event. A live actor
+need not have finished processing all its application input. No additional
+engine readiness gate is needed to prevent unprepared reactions.
+
+Use an ordered ring buffer for pending events, with allocated overflow for
+bursts. Preserve FIFO across the ring and overflow, account for queued payload
+bytes as well as event count, and release overflow storage after it drains.
+An event awaiting a prerequisite remains pending; later events must not pass
+it or affect its prepared view. Mail that supplies the prerequisite must still
+be handled normally so the actor can resume. Fold-only history may establish
+the missing prefix but must not skip pending live reactions. No silent event
+dropping or new engine backpressure policy is authorized by this queue.
+
+This corrects the withdrawn held-activation and retained-admission work orders
+#6149, #6150, #6151, and #6153 (PRs #6152 and #6154). Those proposals are not
+prerequisites. Buffering does not itself resolve historical selection after a
+failed bundle replacement; the integration proof in section 6 remains required
+before implementation of that handoff.
+
 ## 3. Shared lifecycle restrictions
 
 Proposed API shape; final names follow existing code conventions:
