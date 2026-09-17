@@ -166,6 +166,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-reactor"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-kinds",
+ "aether-bloomery-view",
+ "aether-data",
+]
+
+[[package]]
 name = "aether-bloomery-view"
 version = "0.3.0-alpha"
 dependencies = [

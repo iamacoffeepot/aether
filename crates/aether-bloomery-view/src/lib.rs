@@ -2,9 +2,10 @@
 //!
 //! [`Heads`] is the typed last-move fold. A [`View`] consumes every entry in a
 //! batch, including kinds it ignores. There is no `Clone` / `Send` / `Sync`
-//! bound. This crate is `no_std` + `alloc` and does not own a journal: callers
-//! supply entries, and the owner of the fold enforces cursor and failure
-//! handling.
+//! bound. [`Publish`] is the opt-in owned snapshot contract; it is not required
+//! of every view. This crate is `no_std` + `alloc` and does not own a journal:
+//! callers supply entries, and the owner of the fold enforces cursor and
+//! failure handling.
 //!
 //! ```
 //! use aether_bloomery_kinds::Seq;
@@ -20,7 +21,9 @@
 extern crate alloc;
 
 mod heads;
+mod publish;
 mod view;
 
 pub use heads::{HeadFoldError, Heads};
+pub use publish::{Publish, PublishError};
 pub use view::View;
