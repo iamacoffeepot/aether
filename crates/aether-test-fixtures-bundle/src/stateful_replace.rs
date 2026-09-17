@@ -56,7 +56,7 @@ impl WasmActor for Counter {
     /// Save-side hot-swap hook: serialize the live counter so the
     /// replacement instance can pick it up. `CountReport` doubles as the
     /// wire shape of the saved bundle.
-    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), aether_actor::__macro_internals::String> {
+    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
         ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
         Ok(())
     }

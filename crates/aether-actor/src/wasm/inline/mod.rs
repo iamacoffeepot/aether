@@ -810,7 +810,7 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), alloc::string::String> {
+        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), String> {
             Ok(())
         }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
@@ -847,7 +847,7 @@ mod tests {
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
         fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), alloc::string::String> {
+        fn erased_on_dehydrate(&self, _ctx: &mut crate::WasmDropCtx<'_>) -> Result<(), String> {
             Ok(())
         }
         fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
