@@ -248,7 +248,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let boot_tokens = optional_type_tokens(boot.as_ref());
     let default_tokens = optional_type_tokens(default.as_ref());
     let actor_tokens = actors.iter().map(envelope_tokens);
-    let export_tokens = rewritten_exports(&exports, &reactors, &coordinator);
+    let export_tokens = rewritten_exports(&exports, &reactors, &coordinator, &peers);
     let rest = remaining_generators.iter();
     Ok(quote! {
         #cluster
@@ -275,13 +275,25 @@ fn envelope_tokens(entry: &Envelope) -> TokenStream2 {
     quote! { { ty: { #ty } namespace: #ns extensions: [ #ext ] } }
 }
 
-fn rewritten_exports(exports: &[Type], reactors: &[&Envelope], coordinator: &Ident) -> TokenStream2 {
+/// Replace selected reactor exports with the coordinator, then each generated
+/// peer factory. Peer types are omitted from `actors`, so the emit finish
+/// keeps them reconstruct-only rather than independently spawnable.
+fn rewritten_exports(
+    exports: &[Type],
+    reactors: &[&Envelope],
+    coordinator: &Ident,
+    peers: &[ReactorPeer],
+) -> TokenStream2 {
     let mut inserted = false;
     let mut out = TokenStream2::new();
     for ty in exports {
         if type_in(ty, reactors.iter().map(|entry| &entry.ty)) {
             if !inserted {
                 out.extend(quote! { { #coordinator } });
+                for peer in peers {
+                    let peer_ty = &peer.peer;
+                    out.extend(quote! { { #peer_ty } });
+                }
                 inserted = true;
             }
         } else {
@@ -756,5 +768,62 @@ fn emit_outputs_fn(emit_fn: &Ident) -> TokenStream2 {
             };
             <R as ::aether_bloomery_reactor::Reactor>::visit_arms(&mut emit);
         }
+    }
+}
+
+#[cfg(test)]
+mod rewritten_export_tests {
+    use super::{COORDINATOR_IDENT, Envelope, NamespaceTok, ReactorPeer, rewritten_exports};
+    use proc_macro2::TokenStream as TokenStream2;
+    use quote::format_ident;
+    use syn::{Type, parse_quote};
+
+    fn tokens_contain(tokens: &TokenStream2, needle: &str) -> bool {
+        tokens.to_string().replace(' ', "").contains(&needle.replace(' ', ""))
+    }
+
+    #[test]
+    fn rewritten_exports_inserts_coordinator_and_peer_factories_once() {
+        let probe: Type = parse_quote!(Probe);
+        let publisher: Type = parse_quote!(Publisher);
+        let witness: Type = parse_quote!(Witness);
+        let sink: Type = parse_quote!(Sink);
+        let reactors = [
+            Envelope {
+                ty: publisher.clone(),
+                namespace: NamespaceTok::Lit(String::from("test.bloomery.export.publisher")),
+                extensions: TokenStream2::new(),
+                is_reactor: true,
+            },
+            Envelope {
+                ty: witness.clone(),
+                namespace: NamespaceTok::Lit(String::from("test.bloomery.export.witness")),
+                extensions: TokenStream2::new(),
+                is_reactor: true,
+            },
+        ];
+        let reactor_refs: Vec<&Envelope> = reactors.iter().collect();
+        let coordinator = format_ident!("{COORDINATOR_IDENT}");
+        let peers = [
+            ReactorPeer {
+                reactor: publisher.clone(),
+                peer: format_ident!("__AetherBloomeryReactorPeer_n1"),
+                subname: String::from("r_1"),
+            },
+            ReactorPeer {
+                reactor: witness.clone(),
+                peer: format_ident!("__AetherBloomeryReactorPeer_n2"),
+                subname: String::from("r_2"),
+            },
+        ];
+
+        let tokens = rewritten_exports(&[probe, publisher, witness, sink], &reactor_refs, &coordinator, &peers);
+        assert!(tokens_contain(&tokens, "Probe"));
+        assert!(tokens_contain(&tokens, COORDINATOR_IDENT));
+        assert!(tokens_contain(&tokens, "__AetherBloomeryReactorPeer_n1"));
+        assert!(tokens_contain(&tokens, "__AetherBloomeryReactorPeer_n2"));
+        assert!(tokens_contain(&tokens, "Sink"));
+        assert!(!tokens_contain(&tokens, "Publisher"));
+        assert!(!tokens_contain(&tokens, "Witness"));
     }
 }
