@@ -17,7 +17,8 @@ use aether_data::Kind;
 /// prefix. [`Self::apply`] requires the next contiguous sequence, including
 /// unrelated entries, so the cursor is an exact statement about the observed
 /// prefix rather than a best-effort watermark.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Kind)]
+#[kind(name = "bloomery.view.heads")]
 pub struct Heads {
     cursor: Seq,
     bindings: BTreeMap<RecordedHead, Digest>,
