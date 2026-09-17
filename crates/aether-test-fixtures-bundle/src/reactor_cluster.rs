@@ -13,7 +13,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_bloomery_reactor::{And, BundledView, EvaluatedResult, Guard, PreparedResult, Reactor, reactor};
+use aether_bloomery_reactor::{And, BundledView, EvaluatedResult, Guard, PreparedResult, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::{
