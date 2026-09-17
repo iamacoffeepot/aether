@@ -69,9 +69,11 @@ impl fmt::Debug for JournalIdentity {
 }
 
 /// Append-only log of typed events and content-addressed artifacts.
+///
+/// The injected clock is `Send` so a journal can be owned by a native actor.
 pub struct Journal {
     pub(crate) conn: Connection,
-    pub(crate) clock: Box<dyn Clock>,
+    pub(crate) clock: Box<dyn Clock + Send>,
     identity: JournalIdentity,
 }
 
@@ -90,7 +92,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
-    pub fn open_with_clock(path: &Path, clock: Box<dyn Clock>) -> Result<Self, JournalError> {
+    pub fn open_with_clock(path: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
@@ -102,7 +104,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`JournalError`] when `SQLite` cannot create the connection or schema.
-    pub fn open_in_memory_with_clock(clock: Box<dyn Clock>) -> Result<Self, JournalError> {
+    pub fn open_in_memory_with_clock(clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
