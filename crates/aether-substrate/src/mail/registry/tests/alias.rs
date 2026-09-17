@@ -6,6 +6,8 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use aether_data::{ActorId, Tag, fold_lineage, with_tag};
+
 use crate::config::RegistryQueueCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
@@ -13,7 +15,7 @@ use crate::mail::registry::effect::{
 };
 use crate::mail::registry::owner::RegistryOwnerLease;
 use crate::mail::registry::{MailboxEntry, Registry, canonical_mailbox_id, noop_handler};
-use crate::mail::{KindId, Mail};
+use crate::mail::{KindId, Mail, MailboxId};
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority as auth;
 
@@ -138,16 +140,13 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
 }
 
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the registry alias test intentionally folds canonical paths to verify atomic admission"
-)]
 fn alias_batch_collision_publishes_none_of_its_new_routes() {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let parent = registry.register_inbox(&auth(), "alias-batch-parent", noop_handler());
     let collision = "alias-batch-parent/aether.embedded:collision";
-    let collision_id = aether_data::mailbox_id_from_path(collision);
+    let collision_id =
+        MailboxId(with_tag(Tag::Mailbox, fold_lineage(parent.0, ActorId::instanced("aether.embedded", "collision"))));
     registry.try_register_inbox_with_id(&auth(), collision_id, collision.to_owned(), noop_handler()).unwrap();
     let owner = RegistryOwnerLease::attach(
         auth(),
@@ -157,7 +156,8 @@ fn alias_batch_collision_publishes_none_of_its_new_routes() {
         RegistryQueueCapacities::default(),
     );
     let first = "alias-batch-parent/aether.embedded:first";
-    let first_id = aether_data::mailbox_id_from_path(first);
+    let first_id =
+        MailboxId(with_tag(Tag::Mailbox, fold_lineage(parent.0, ActorId::instanced("aether.embedded", "first"))));
     let batch = RegistryBatch::publish_aliases(vec![
         PreparedAliasRoute::new(first_id, first, parent),
         PreparedAliasRoute::new(collision_id, collision, parent),

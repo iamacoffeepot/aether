@@ -7,7 +7,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::{ActorId, Kind as _};
+use aether_data::{ActorId, Kind as _, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
@@ -19,7 +19,7 @@ use crate::mail::registry::effect::{
     RegistryEffectError,
 };
 use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
-use crate::mail::{Mail, MailId, Source};
+use crate::mail::{Mail, MailId, MailboxId, Source};
 use crate::runtime::effect_chain::EffectChain;
 use crate::runtime::lifecycle::FatalAbortRecord;
 use crate::scheduler::WakeSink;
@@ -118,7 +118,6 @@ fn held_birth_waits_at_starting_until_exact_release_then_completes() {
 }
 
 #[test]
-#[allow(clippy::disallowed_methods, reason = "test checks the alias id derived from its canonical name")]
 fn held_cancellation_clears_starting_and_rejects_stale_token() {
     let (spawner, registry, mailer, pool) = activation_fixture();
     let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.cancelled-effects");
@@ -153,7 +152,7 @@ fn held_cancellation_clears_starting_and_rejects_stale_token() {
     assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Wire(_)));
 
     let alias_name = "test.activation.probe:held-cancel/aether.embedded:child";
-    let alias = aether_data::mailbox_id_from_path(alias_name);
+    let alias = MailboxId(with_tag(Tag::Mailbox, fold_lineage(id.0, ActorId::instanced("aether.embedded", "child"))));
     let aliases = registry
         .submit(RegistryBatch::publish_aliases(vec![PreparedAliasRoute::new(alias, alias_name, id)]).into_effects())
         .unwrap();
