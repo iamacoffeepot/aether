@@ -89,7 +89,8 @@ only after the views actor can process the corresponding event. A live actor
 need not have finished processing all its application input. No additional
 engine readiness gate is needed to prevent unprepared reactions.
 
-The journal actor provides event access through ordinary request/reply mail.
+The journal actor owns `Journal` and provides access through ordinary
+request/reply mail. It is an application actor, not a new engine primitive.
 Consumers request an ordered page after a sequence, with a limit, and receive
 the committed entries. The existing storage `Journal::read` is the underlying
 operation; the actor-facing names below are illustrative:
@@ -99,9 +100,10 @@ ReadEvents { after: 41, limit: 128 }
 // Reply: committed entries beginning at 42, in ascending order.
 ```
 
-Views request history to build their prefix, subsequent pages to advance, and
-older ranges again when buffered payloads need refilling. The journal actor is
-the source for those requests. A separate receipt acknowledgment or unsolicited
+Views request history to build their prefix and subsequent pages to advance.
+The journal actor is the source for those requests. Its ownership and query
+API are useful independently of any pending-buffer optimization.
+A separate receipt acknowledgment or unsolicited
 subscription protocol is not required for this access pattern. Reading a page
 does not decide whether to react: the integration assigns the historical
 warmup boundary and the events selected for live evaluation. Keep that
@@ -115,13 +117,15 @@ or regression in live input violates the application contract: request
 system-wide shutdown through the existing shutdown mechanism. Do not sort or
 repair a broken live stream by silently fetching the missing entries.
 
-Use an ordered ring buffer for pending payloads. On overflow, retain ranges of
-already received and validated journal sequences and request their payloads
-again as space opens. Preserve FIFO across resident payloads and deferred
-ranges. Refill replies are separately correlated; they are not new live arrivals.
-Count resident bytes as well as events; range and reply bookkeeping also has
-a memory cost. Do not introduce a heap for reordering or a new engine
-backpressure policy. Performance tuning remains deferred.
+Use a growable ring buffer (`VecDeque<JournalEntry>`) for pending payloads.
+Allocate more capacity when it fills; preserve every pending payload and arrival order.
+do not introduce a heap for reordering or a new engine backpressure policy.
+The queue can grow while preparation is blocked. Sequence-range overflow
+and journal rereads are a deferred optimization, not
+an implementation prerequisite. That optimization would need to account for
+resident bytes, decoded page allocations, range/reply bookkeeping, and the
+views owner's separate retained history; a bounded ring alone would not bound
+total memory. Any future refill must preserve every pending live reaction.
 
 An event awaiting an application prerequisite remains pending; later events
 must not pass it or affect its prepared view. Prerequisite mail remains normally
