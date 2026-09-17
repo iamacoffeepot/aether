@@ -6,6 +6,7 @@
 //! artifact is absent is not proof of this wiring.
 
 use std::fs;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, mpsc};
 
@@ -521,9 +522,16 @@ fn reactor_bundle_live_order_violations_fatally_abort() {
             .expect("begin before live order violation");
         settle_event(&mut harness, &cluster, &live_event(STREAM_A, 1, "current", digest_ref::<Program>(1)));
         let violation = Event { stream: STREAM_A.to_owned(), entry };
+        let _pending = harness.send_deferred(&cluster, &violation).expect("enqueue live order violation");
+        // A fatal abort cannot settle the violating mail's causal chain.
+        // Teardown observes the chassis's recorded abort reason instead.
+        let reported = *catch_unwind(AssertUnwindSafe(|| drop(harness)))
+            .expect_err("live order violation must fatally abort the test substrate")
+            .downcast::<String>()
+            .expect("teardown reports a formatted fatal reason");
         assert!(
-            harness.execute(vec![(name, HarnessOp::send_and_settle(&cluster, &violation))]).is_err(),
-            "{name} must trap the WASM coordinator and abort its test substrate"
+            reported.contains("kind aether.bloomery.reactor.event") && reported.contains("trapped"),
+            "{name} must trap the WASM coordinator and abort its test substrate, got: {reported}"
         );
     }
 }
