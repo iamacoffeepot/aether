@@ -9,7 +9,7 @@ use aether_bloomery_journal_actor::JournalActor;
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
-use aether_substrate::actor::native::{NativeActor, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
 use aether_substrate::testing::{bare_substrate, boot_authority, boot_test_chassis_with};
@@ -17,7 +17,12 @@ use aether_substrate::{BootError, SpawnError, Subname};
 
 const STAMP_MILLIS: u64 = 1_700_000_000_000;
 
-struct TestAnchor;
+#[aether_data::kind(name = "test.bloomery.journal_actor.anchor_ping", default)]
+struct AnchorPing;
+
+struct TestAnchor {
+    pings: u64,
+}
 
 #[actor(singleton, root)]
 impl NativeActor for TestAnchor {
@@ -25,7 +30,12 @@ impl NativeActor for TestAnchor {
     const NAMESPACE: &'static str = "test.bloomery.journal_actor.anchor";
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self)
+        Ok(Self { pings: 0 })
+    }
+
+    #[handler::single]
+    fn on_anchor_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: AnchorPing) {
+        self.pings += 1;
     }
 }
 
