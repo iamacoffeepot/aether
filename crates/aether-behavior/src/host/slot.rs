@@ -63,6 +63,7 @@ enum RunState {
 
 /// One compiled, instantiated script plus its fail-open bookkeeping.
 pub struct ScriptSlot {
+    // wasmi needs mutable execution access during shared dehydration; state_save must preserve logical guest state.
     store: RefCell<Store<()>>,
     #[allow(dead_code)]
     instance: Instance,
