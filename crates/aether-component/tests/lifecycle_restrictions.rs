@@ -10,8 +10,7 @@ use aether_component::{ComponentRestrictions, WasmTrampoline, resolve_embedded};
 use aether_data::MailboxId;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
-use aether_test_fixtures_kinds::Ping;
+use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult};
 
 fn load(
     harness: &mut SubstrateHarness,
