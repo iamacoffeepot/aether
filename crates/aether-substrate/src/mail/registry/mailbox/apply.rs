@@ -296,7 +296,7 @@ impl Registry {
                         (birth.token == token
                             && !birth.cancel_requested
                             && !prepared_cancellations.contains(&(id, token)))
-                        .then(|| birth.activation.as_ref())
+                        .then_some(birth.activation.as_ref())
                         .flatten()
                     });
                     let Some(activation) = activation.filter(|activation| valid_route && activation.held_ready())

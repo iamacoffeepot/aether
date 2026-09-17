@@ -189,9 +189,10 @@ pub(super) fn finalized_probe_with_hold(
     );
     let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
     let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
-    let config = lifecycle_target
-        .map(|target| ActivationConfig::with_lifecycle_target(events.clone(), target))
-        .unwrap_or_else(|| ActivationConfig::new(events));
+    let config = match lifecycle_target {
+        Some(target) => ActivationConfig::with_lifecycle_target(events, target),
+        None => ActivationConfig::new(events),
+    };
     let staged = spawner.build::<ActivationProbe>(identity, config, (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent.self_mailbox(), correlation);
     let deferred = parent.dispatch_arm::<SpawnOutcome, _>(

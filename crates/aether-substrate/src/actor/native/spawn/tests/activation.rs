@@ -19,8 +19,8 @@ use crate::mail::registry::effect::{
     RegistryEffectError,
 };
 use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
-use crate::mail::{Mail, MailId, MailboxId, Source};
-use crate::runtime::effect_chain::EffectChain;
+use crate::mail::{KindId, Mail, MailId, MailboxId, Source};
+use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::lifecycle::FatalAbortRecord;
 use crate::scheduler::WakeSink;
 use crate::testing::boot_authority;
@@ -59,7 +59,7 @@ fn held_birth_waits_at_starting_until_exact_release_then_completes() {
     let ready = ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert_eq!(ready.mailbox_id, id);
     assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Wire(_)));
-    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
+    assert!(registry.route_lookup(KindId(0), id).is_starting());
     assert!(registry.entry(id).is_none());
     assert!(registry.inventory().mailboxes.iter().all(|mailbox| mailbox.id != id));
     assert!(lifecycle_mail.try_recv().is_err(), "held wire egress remains buffered");
@@ -84,7 +84,7 @@ fn held_birth_waits_at_starting_until_exact_release_then_completes() {
         mixed.wait_timeout(Duration::from_secs(1)).unwrap(),
         Err(RegistryEffectError::ActivationRejected)
     ));
-    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
+    assert!(registry.route_lookup(KindId(0), id).is_starting());
 
     mailer.push(Mail::new(id, ActivationPoke::ID, ActivationPoke.encode_into_bytes(), 1));
     owner.run_once();
@@ -166,8 +166,8 @@ fn held_cancellation_clears_starting_and_rejects_stale_token() {
         rejected.wait_timeout(Duration::from_secs(1)).unwrap(),
         Err(RegistryEffectError::ActivationRejected)
     ));
-    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
-    assert!(registry.route_lookup(crate::mail::KindId(0), alias).is_starting());
+    assert!(registry.route_lookup(KindId(0), id).is_starting());
+    assert!(registry.route_lookup(KindId(0), alias).is_starting());
 
     let missing = canonical_mailbox_id("test.activation.missing-alias");
     let invalid_aliases = registry
@@ -178,7 +178,7 @@ fn held_cancellation_clears_starting_and_rejects_stale_token() {
         invalid_aliases.wait_timeout(Duration::from_secs(1)).unwrap(),
         Err(RegistryEffectError::ActivationRejected)
     ));
-    assert!(registry.route_lookup(crate::mail::KindId(0), alias).is_starting());
+    assert!(registry.route_lookup(KindId(0), alias).is_starting());
 
     let cancel =
         registry.submit(RegistryBatch::cancel_held_starting(id, ready.token, vec![alias]).into_effects()).unwrap();
@@ -186,7 +186,7 @@ fn held_cancellation_clears_starting_and_rejects_stale_token() {
     assert!(cancel.wait_timeout(Duration::from_secs(1)).unwrap().is_ok());
     assert_eq!(registry.lookup(alias_name), None, "aborted alias leaves no Dropped tombstone");
     let deadline = Instant::now() + Duration::from_secs(1);
-    while registry.route_lookup(crate::mail::KindId(0), id).is_starting() {
+    while registry.route_lookup(KindId(0), id).is_starting() {
         owner.run_once();
         assert!(Instant::now() < deadline, "home cancellation removes exact Starting route");
         thread::yield_now();
@@ -210,12 +210,8 @@ fn held_cancellation_before_wire_closes_ready_without_running_hooks() {
     let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
     let identity = spawner.preflight::<ActivationProbe>(Subname::Named("held-before-wire"), None).unwrap();
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
-    let mut commit = spawner.prepare_commit_with_hold(
-        staged,
-        None,
-        EffectChain::Uncaused(crate::runtime::effect_chain::Uncaused::EmbedderCall),
-        Some(ready_tx),
-    );
+    let mut commit =
+        spawner.prepare_commit_with_hold(staged, None, EffectChain::Uncaused(Uncaused::EmbedderCall), Some(ready_tx));
     let token = ActivationToken::from_value(1).unwrap();
     let activation = commit.take_activation().reserve(token).unwrap_or_else(|_| panic!("reservation accepted"));
     activation.cancel_and_join();
