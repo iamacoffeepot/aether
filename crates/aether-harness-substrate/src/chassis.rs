@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_component::{ComponentHostCapability, ComponentHostParams, ComponentRestrictions};
+use aether_component::{ComponentHostCapability, ComponentHostParams, LifecycleFlags};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -238,7 +238,7 @@ pub struct SubstrateHarnessEnv {
     /// wasm skip the cap entirely.
     pub component_host: bool,
     /// Composer-owned restrictions for requested component slots.
-    pub component_host_restrictions: HashMap<MailboxId, ComponentRestrictions>,
+    pub component_host_restrictions: HashMap<MailboxId, LifecycleFlags>,
     /// Caller-supplied capability composition, applied to the chassis
     /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
     /// lifecycle, headless window) in push order. The harness gives the

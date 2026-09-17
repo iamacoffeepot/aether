@@ -8,7 +8,7 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
-use crate::ComponentRestrictions;
+use crate::LifecycleFlags;
 
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
@@ -24,7 +24,7 @@ use crate::ComponentRestrictions;
 pub struct WasmTrampolineState {
     /// Bootstrap policy for this slot, retained even when its guest is
     /// replaced or individually dropped.
-    pub prohibit: ComponentRestrictions,
+    pub prohibit: LifecycleFlags,
     /// `Some` while wasm is loaded; `None` after a `DropComponent`.
     /// Mail arriving in the `None` state warn-drops via the
     /// fallback (the trampoline is just an empty named slot).

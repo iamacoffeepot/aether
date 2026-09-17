@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_component::ComponentRestrictions;
+use aether_component::LifecycleFlags;
 use aether_data::{Kind, KindId, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
@@ -332,7 +332,7 @@ pub struct SubstrateHarnessBuilder {
     poll_cap: Option<Duration>,
     render_hook: Option<HookFactory>,
     component_host: bool,
-    component_host_restrictions: HashMap<MailboxId, ComponentRestrictions>,
+    component_host_restrictions: HashMap<MailboxId, LifecycleFlags>,
     compose: Vec<ComposeFn>,
     scheduler_tuning: SchedulerTuning,
 }
@@ -583,7 +583,7 @@ impl SubstrateHarnessBuilder {
     #[must_use]
     pub fn with_component_host_restrictions(
         mut self,
-        restrictions_by_slot: HashMap<MailboxId, ComponentRestrictions>,
+        restrictions_by_slot: HashMap<MailboxId, LifecycleFlags>,
     ) -> Self {
         self.component_host = true;
         self.component_host_restrictions = restrictions_by_slot;

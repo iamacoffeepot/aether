@@ -6,7 +6,7 @@ use std::collections::HashMap;
 use std::fs;
 
 use aether_actor::Addressable;
-use aether_component::{ComponentRestrictions, WasmTrampoline, resolve_embedded};
+use aether_component::{LifecycleFlags, WasmTrampoline, resolve_embedded};
 use aether_data::MailboxId;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -52,14 +52,14 @@ fn assert_drop_prohibited(result: DropResult) {
 }
 
 #[test]
-fn restriction_flags_combine_without_overlap() {
-    let mut prohibit = ComponentRestrictions::DROP;
-    prohibit |= ComponentRestrictions::REPLACE;
-    assert_eq!(prohibit, ComponentRestrictions::DROP | ComponentRestrictions::REPLACE);
-    assert!(prohibit.contains(ComponentRestrictions::DROP));
-    assert!(prohibit.contains(ComponentRestrictions::REPLACE));
-    assert!(!ComponentRestrictions::NONE.contains(ComponentRestrictions::DROP));
-    assert_eq!(ComponentRestrictions::default(), ComponentRestrictions::NONE);
+fn lifecycle_flags_combine_without_overlap() {
+    let mut prohibit = LifecycleFlags::DROP;
+    prohibit |= LifecycleFlags::REPLACE;
+    assert_eq!(prohibit, LifecycleFlags::DROP | LifecycleFlags::REPLACE);
+    assert!(prohibit.contains(LifecycleFlags::DROP));
+    assert!(prohibit.contains(LifecycleFlags::REPLACE));
+    assert!(!LifecycleFlags::NONE.contains(LifecycleFlags::DROP));
+    assert_eq!(LifecycleFlags::default(), LifecycleFlags::NONE);
 }
 
 #[test]
@@ -137,7 +137,7 @@ fn configured_slot_rejects_direct_and_forwarded_drop_after_replace() {
     let protected_slot = resolve_embedded("protected");
     let mut harness = SubstrateHarness::builder()
         .size(64, 48)
-        .with_component_host_restrictions(HashMap::from([(protected_slot, ComponentRestrictions::DROP)]))
+        .with_component_host_restrictions(HashMap::from([(protected_slot, LifecycleFlags::DROP)]))
         .build()
         .expect("boot");
 
@@ -182,7 +182,7 @@ fn resolved_default_name_is_protected_but_guest_sibling_is_not() {
     let protected_slot = resolve_embedded("test.ui.root");
     let mut harness = SubstrateHarness::builder()
         .size(64, 48)
-        .with_component_host_restrictions(HashMap::from([(protected_slot, ComponentRestrictions::DROP)]))
+        .with_component_host_restrictions(HashMap::from([(protected_slot, LifecycleFlags::DROP)]))
         .build()
         .expect("boot");
 
@@ -205,7 +205,7 @@ fn scoped_load_uses_its_actual_parent_for_slot_restrictions() {
     let protected_slot = resolve_embedded("scoped");
     let mut harness = SubstrateHarness::builder()
         .size(64, 48)
-        .with_component_host_restrictions(HashMap::from([(protected_slot, ComponentRestrictions::DROP)]))
+        .with_component_host_restrictions(HashMap::from([(protected_slot, LifecycleFlags::DROP)]))
         .build()
         .expect("boot");
 
@@ -228,7 +228,7 @@ fn module_boot_actor_does_not_inherit_requested_slot_restrictions() {
     let protected_slot = resolve_embedded("protected-widget");
     let mut harness = SubstrateHarness::builder()
         .size(64, 48)
-        .with_component_host_restrictions(HashMap::from([(protected_slot, ComponentRestrictions::DROP)]))
+        .with_component_host_restrictions(HashMap::from([(protected_slot, LifecycleFlags::DROP)]))
         .build()
         .expect("boot");
 

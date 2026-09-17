@@ -6,7 +6,7 @@ use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::outbound::HubOutbound;
 use wasmtime::{Engine, Linker};
 
-use crate::ComponentRestrictions;
+use crate::LifecycleFlags;
 
 /// Composer-supplied construction params for `ComponentHostCapability`
 /// (ADR-0156 §3). These are live wasmtime / egress handles the composer
@@ -23,6 +23,6 @@ pub struct ComponentHostParams {
     pub linker: Arc<Linker<ComponentCtx>>,
     pub hub_outbound: Arc<HubOutbound>,
     /// Host-owned lifecycle flags for exact requested trampoline slots.
-    /// Unlisted slots use [`ComponentRestrictions::NONE`].
-    pub restrictions_by_slot: HashMap<MailboxId, ComponentRestrictions>,
+    /// Unlisted slots use [`LifecycleFlags::NONE`].
+    pub restrictions_by_slot: HashMap<MailboxId, LifecycleFlags>,
 }

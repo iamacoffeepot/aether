@@ -80,7 +80,7 @@ pub struct ComponentHostCapabilityState {
     pub registry: Arc<Registry>,
     pub mailer: Arc<Mailer>,
     pub outbound: Arc<HubOutbound>,
-    pub restrictions_by_slot: HashMap<MailboxId, crate::ComponentRestrictions>,
+    pub restrictions_by_slot: HashMap<MailboxId, crate::LifecycleFlags>,
     /// Retained registry-inventory subscription. `wire` installs the weak sink
     /// before the registry issues its initial wake, then this handle keeps that
     /// sink live for the host's lifetime.
