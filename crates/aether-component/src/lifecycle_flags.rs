@@ -7,9 +7,9 @@ use core::ops::{BitOr, BitOrAssign};
 /// These flags belong to the host, not the wasm guest or its manifest. They
 /// remain attached to the trampoline when its resident component changes.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct ComponentRestrictions(u8);
+pub struct LifecycleFlags(u8);
 
-impl ComponentRestrictions {
+impl LifecycleFlags {
     /// Permit both individual lifecycle operations.
     pub const NONE: Self = Self(0);
     /// Reject an individual `DropComponent` request.
@@ -24,7 +24,7 @@ impl ComponentRestrictions {
     }
 }
 
-impl BitOr for ComponentRestrictions {
+impl BitOr for LifecycleFlags {
     type Output = Self;
 
     fn bitor(self, rhs: Self) -> Self::Output {
@@ -32,7 +32,7 @@ impl BitOr for ComponentRestrictions {
     }
 }
 
-impl BitOrAssign for ComponentRestrictions {
+impl BitOrAssign for LifecycleFlags {
     fn bitor_assign(&mut self, rhs: Self) {
         self.0 |= rhs.0;
     }

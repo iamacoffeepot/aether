@@ -4,20 +4,20 @@
 
 use std::fs;
 
-use aether_component::ComponentRestrictions;
+use aether_component::LifecycleFlags;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 
 #[test]
-fn restriction_flags_combine_without_overlap() {
-    let mut prohibit = ComponentRestrictions::DROP;
-    prohibit |= ComponentRestrictions::REPLACE;
-    assert_eq!(prohibit, ComponentRestrictions::DROP | ComponentRestrictions::REPLACE);
-    assert!(prohibit.contains(ComponentRestrictions::DROP));
-    assert!(prohibit.contains(ComponentRestrictions::REPLACE));
-    assert!(!ComponentRestrictions::NONE.contains(ComponentRestrictions::DROP));
-    assert_eq!(ComponentRestrictions::default(), ComponentRestrictions::NONE);
+fn lifecycle_flags_combine_without_overlap() {
+    let mut prohibit = LifecycleFlags::DROP;
+    prohibit |= LifecycleFlags::REPLACE;
+    assert_eq!(prohibit, LifecycleFlags::DROP | LifecycleFlags::REPLACE);
+    assert!(prohibit.contains(LifecycleFlags::DROP));
+    assert!(prohibit.contains(LifecycleFlags::REPLACE));
+    assert!(!LifecycleFlags::NONE.contains(LifecycleFlags::DROP));
+    assert_eq!(LifecycleFlags::default(), LifecycleFlags::NONE);
 }
 
 #[test]

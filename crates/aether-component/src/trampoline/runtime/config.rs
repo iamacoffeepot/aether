@@ -9,7 +9,7 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use wasmtime::{Engine, Linker, Module};
 
-use crate::ComponentRestrictions;
+use crate::LifecycleFlags;
 
 /// Configuration handed to [`Lifecycle::init`](aether_actor::Lifecycle::init) by the spawn
 /// path. Carries the wasmtime engine / linker plus the parsed
@@ -18,8 +18,8 @@ use crate::ComponentRestrictions;
 pub struct WasmTrampolineConfig {
     /// Host-owned lifecycle prohibitions for this trampoline slot. Native
     /// bootstrap may set `DROP | REPLACE`; ordinary component loads use
-    /// [`ComponentRestrictions::NONE`]. The guest cannot change this policy.
-    pub prohibit: ComponentRestrictions,
+    /// [`LifecycleFlags::NONE`]. The guest cannot change this policy.
+    pub prohibit: LifecycleFlags,
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub module: Module,

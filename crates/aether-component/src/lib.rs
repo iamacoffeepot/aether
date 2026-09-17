@@ -30,11 +30,11 @@
 extern crate alloc;
 
 pub mod component;
-mod restrictions;
+mod lifecycle_flags;
 pub mod trampoline;
 
 pub use component::{ComponentHostCapability, resolve_embedded};
-pub use restrictions::ComponentRestrictions;
+pub use lifecycle_flags::LifecycleFlags;
 // `ComponentHostParams` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it
