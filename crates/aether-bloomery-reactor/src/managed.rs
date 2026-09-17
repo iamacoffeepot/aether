@@ -111,8 +111,8 @@ impl ManagedFeed {
     /// Returns a reason for wrong stream or noncontiguous receipt.
     pub fn push_live(&mut self, stream: &str, entry: JournalEntry) -> Result<(), &'static str> {
         let (bound, received) = match &mut self.mode {
-            FeedMode::Warming(state) => (&state.stream, &mut state.received_live_through),
-            FeedMode::Feeding { stream, received_live_through } => (stream, received_live_through),
+            FeedMode::Warming(state) => (state.stream.as_str(), &mut state.received_live_through),
+            FeedMode::Feeding { stream, received_live_through } => (stream.as_str(), received_live_through),
             _ => return Err("live input outside managed feed"),
         };
         if stream != bound {

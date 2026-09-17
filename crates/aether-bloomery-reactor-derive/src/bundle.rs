@@ -360,18 +360,7 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     let request_fn = format_ident!("__aether_{views}_request_history");
     let fail_fn = format_ident!("__aether_{views}_fail_managed");
     let peer_structs = peers.iter().map(|peer| expand_peer(views, peer, &emit_fn));
-    let spawn_peers = peers.iter().map(|peer| {
-        let ty = &peer.peer;
-        let subname = &peer.subname;
-        quote! {
-            if let Err(error) = ctx.spawn_inline_child::<#views, #ty>(
-                ::aether_actor::Subname::Named(#subname),
-                &config,
-            ) && self.peer_birth_error.is_none() {
-                self.peer_birth_error = Some(error);
-            }
-        }
-    });
+    let spawn_peers = spawn_peer_tokens(views, peers);
     let live = live_fn_tokens(&live_fn, peers);
     let warmup = warmup_fn_tokens(&warmup_fn, peers);
     let emit = emit_outputs_fn(&emit_fn);
@@ -465,6 +454,24 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
     }
 }
 
+fn spawn_peer_tokens(views: &Ident, peers: &[ReactorPeer]) -> Vec<TokenStream2> {
+    peers
+        .iter()
+        .map(|peer| {
+            let ty = &peer.peer;
+            let subname = &peer.subname;
+            quote! {
+                if let Err(error) = ctx.spawn_inline_child::<#views, #ty>(
+                    ::aether_actor::Subname::Named(#subname),
+                    &config,
+                ) && self.peer_birth_error.is_none() {
+                    self.peer_birth_error = Some(error);
+                }
+            }
+        })
+        .collect()
+}
+
 fn event_handler_tokens(
     live_fn: &Ident,
     ack_prepared_fn: &Ident,
@@ -472,7 +479,7 @@ fn event_handler_tokens(
     drain_fn: &Ident,
     peers: &[ReactorPeer],
 ) -> TokenStream2 {
-    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, quote! { return; });
+    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, &quote! { return; });
     quote! {
         #[handler::manual]
         fn on_event(
@@ -670,22 +677,22 @@ fn managed_handler_tokens(
     names: &ManagedNames<'_>,
     peers: &[ReactorPeer],
 ) -> (TokenStream2, TokenStream2) {
-    let ManagedNames {
-        warmup: warmup_fn,
-        live: live_fn,
-        ack_prepared: ack_prepared_fn,
-        ack_evaluated: ack_evaluated_fn,
-        drain: drain_fn,
-        request: request_fn,
-        fail: fail_fn,
-    } = names;
-    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, quote! { continue; });
+    let begin = begin_handler_tokens(names, peers);
+    let batch = live_batch_handler_tokens(names);
+    let read = read_events_result_handler_tokens(names);
+    let helpers = managed_helpers_tokens(views, names, peers);
+    (quote! { #begin #batch #read }, helpers)
+}
+
+fn begin_handler_tokens(names: &ManagedNames<'_>, peers: &[ReactorPeer]) -> TokenStream2 {
+    let ack_prepared_fn = names.ack_prepared;
+    let request_fn = names.request;
     let ready_peers = peers.iter().map(|peer| {
         let ty = &peer.peer;
         let subname = &peer.subname;
         quote! { ctx.child_as::<#ty>(#subname).is_some() }
     });
-    let handlers = quote! {
+    quote! {
         #[handler::manual]
         fn on_begin_warmup(
             &mut self,
@@ -724,7 +731,13 @@ fn managed_handler_tokens(
                 self.#request_fn(ctx);
             }
         }
+    }
+}
 
+fn live_batch_handler_tokens(names: &ManagedNames<'_>) -> TokenStream2 {
+    let ack_prepared_fn = names.ack_prepared;
+    let drain_fn = names.drain;
+    quote! {
         #[handler::manual]
         fn on_live_batch(
             &mut self,
@@ -758,7 +771,16 @@ fn managed_handler_tokens(
             }
             self.#drain_fn(ctx);
         }
+    }
+}
 
+fn read_events_result_handler_tokens(names: &ManagedNames<'_>) -> TokenStream2 {
+    let warmup_fn = names.warmup;
+    let ack_prepared_fn = names.ack_prepared;
+    let drain_fn = names.drain;
+    let request_fn = names.request;
+    let fail_fn = names.fail;
+    quote! {
         #[handler::single]
         fn on_read_events_result(
             &mut self,
@@ -832,8 +854,18 @@ fn managed_handler_tokens(
                 self.#request_fn(ctx);
             }
         }
-    };
-    let helpers = quote! {
+    }
+}
+
+fn managed_helpers_tokens(views: &Ident, names: &ManagedNames<'_>, peers: &[ReactorPeer]) -> TokenStream2 {
+    let live_fn = names.live;
+    let ack_prepared_fn = names.ack_prepared;
+    let ack_evaluated_fn = names.ack_evaluated;
+    let drain_fn = names.drain;
+    let request_fn = names.request;
+    let fail_fn = names.fail;
+    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn, &quote! { continue; });
+    quote! {
         impl #views {
             fn #request_fn<M: ::aether_actor::ReplyMode>(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_, M>) {
                 use ::aether_actor::MailSender;
@@ -900,11 +932,10 @@ fn managed_handler_tokens(
                 }
             }
         }
-    };
-    (handlers, helpers)
+    }
 }
 
-fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident, on_missing: TokenStream2) -> TokenStream2 {
+fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident, on_missing: &TokenStream2) -> TokenStream2 {
     let peer_count = peers.len();
     let peer_lookups = peers.iter().enumerate().map(|(index, peer)| {
         let ty = &peer.peer;
