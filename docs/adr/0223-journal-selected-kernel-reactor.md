@@ -23,6 +23,11 @@ object does not establish transactional behavior.
 
 ## Decision
 
+Events record things that happened. A reactor head move records successful
+activation or replacement; it does not request that operation. Attempt the
+operation first. On failure, record rejection and preserve the existing head.
+Never publish the candidate head and then try to make that fact true.
+
 The kernel is a required, replaceable WASM reactor bundle. Genesis is a pinned
 build of that kernel, stored and copied as ordinary immutable bytes. It does
 not introduce a special executable format or a second rule engine.
@@ -33,10 +38,15 @@ event execution, resolve the set and member heads at that event's boundary,
 not against today's heads. The companion proposes the precise before/after
 boundary.
 
-Kernel rules observe configuration events and emit lifecycle intents. Existing
+Kernel rules observe recorded events and emit lifecycle intents. Existing
 native component machinery performs the operations. Lifecycle outcomes become
 observable events, including rejection, so application reactors, agents, and
 humans can respond.
+
+Observing the resulting head move must not request the same replacement again.
+The delivery boundary for that observation requires reconciliation with the
+already completed replacement; the earlier predecessor-recipient proposal is
+withdrawn pending that proof. This does not authorize engine lifecycle changes.
 
 Establish the shared component replacement invariant:
 

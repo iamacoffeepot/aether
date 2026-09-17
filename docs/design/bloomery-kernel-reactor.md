@@ -18,6 +18,11 @@ Reactors respond to what they observe. Lifecycle success and failure must
 therefore be observable events, not only native logs. External agents and
 humans may react to those events; automatic recovery policy is not required.
 
+Events are records of things that happened. Intents request lifecycle work.
+Publish a reactor head move only after activation or replacement succeeds.
+Failure records rejection while leaving the existing reactor head unchanged.
+Do not assign events to an uninstalled candidate by publishing its head early.
+
 Reactors are stateless by construction: predicates and computations over
 explicit inputs. Their generated actor hosts may retain delivery bookkeeping,
 and the views actor owns aggregation and pending-event buffers, but reactor
@@ -60,17 +65,13 @@ the existing kind framing; it is not necessarily the raw-WASM hash.
 For an event, resolve both set membership and member heads at its journal
 boundary. A set reference alone does not pin the members' moving heads.
 
-Proposed exact boundary:
-
-```text
-event n:   select recipients from prefix n-1
-           selected bundles fold their own views through n
-           evaluate event n
-
-head move at n:
-           predecessor handles n
-           successor warms through n and handles later events
-```
+The earlier unconditional prefix `n-1` recipient proposal is withdrawn.
+For a truthful replacement head move at `n`, replacement has already succeeded:
+the predecessor may no longer exist when this event can be recorded. Therefore
+the design cannot promise that the predecessor handles its own replacement
+observation. Establish the observation's recipient and the successor's warmup
+boundary before implementing native delivery. Do not publish success early,
+retain old actors, or alter engine activation to preserve the old proposal.
 
 A fold-only `EventBatch` rebuilds views; it does not issue historical effects.
 Executing a historical event uses its historical selection, not the newest
@@ -268,14 +269,18 @@ Use existing fold-only batches to prepare views before live delivery. Preserve
 event order; concurrent program execution is not a reason to wait for every
 program to finish before handling another journal event.
 
-A rejected replacement leaves the application resident and usable. It must
-not falsely acknowledge that the requested bytes became active. In particular,
-if a journal head already selects a failed candidate, the adapter cannot
-silently evaluate an event selected for that candidate using the predecessor.
-The integration work order must demonstrate how rejection, subsequent
-selection, and any corrective head event fit together. Historical head
-resolution remains authoritative; outcomes do not create a second activation
-history.
+A rejected replacement leaves the application resident and usable, with the
+predecessor head unchanged. Record the failed attempt as rejection; there is no
+candidate head move to undo and no stream assigned to that failed candidate.
+The earlier failed-candidate delivery question rested on publishing success
+before it happened and is withdrawn.
+
+After successful replacement, record the successful head change. Integration
+must establish who receives that observation and how views are prepared for it.
+Observing this head change must not request the same replacement again.
+Historical head resolution remains authoritative; outcomes do not create a
+second activation history. Recording the result after runtime success is not
+a claim of atomicity between the engine and journal.
 
 This is a required integration proof, not permission to invent governance or
 claim that prohibition flags validate all journal writes. Likewise, keeping

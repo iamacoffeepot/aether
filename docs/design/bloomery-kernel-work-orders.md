@@ -220,25 +220,33 @@ the prerequisite contracts are verified. It is not one large coding dispatch.
    events. Select exact artifact bytes rather than mutable hub names.
 4. **End-to-end handoff.** Tie selection, fold-only warmup, replacement results,
    activation correlation, and next-event delivery together. Demonstrate
-   rejection with a still-usable predecessor without falsely claiming a
-   failed selected candidate handled subsequent events.
+   rejection with a still-usable predecessor and unchanged head. Record a
+   successful head move only after the replacement actually succeeds.
 
 **Mandatory integration proof before dispatching slice 4.**
 
-A durable head can name a candidate whose runtime replacement is rejected.
-Show the exact event sequence for that case and for subsequent repair:
-which head selects each executed event, which outcome is recorded, and what
-delivery remains pending. Do not silently reinterpret a historical head or
-introduce a second authoritative activation history. Show how the kernel
-remains part of the effective configuration; drop prohibition alone does not
-validate reactor-set membership.
+Events record completed facts; intents request work. Show replacement success
+followed by its head move, and replacement failure followed by rejection with
+the predecessor head unchanged. The former scenario of publishing a candidate
+head before attempting replacement is withdrawn. No failed-candidate stream
+or corrective head move is needed for that scenario.
+
+Reconcile recipient selection for the successful head-change observation:
+the predecessor may already be gone when the event is recorded. Withdraw the
+unconditional claim that it handles that event. Prove the chosen recipient and
+warmup boundary before native delivery implementation, without engine changes,
+activation gates, or a second activation history. Show how the kernel remains
+part of the effective configuration; drop prohibition alone does not validate
+reactor-set membership.
 
 **Tests / acceptance.**
 
 - Fresh journal boots the pinned bytes without another reactor being available.
 - Replay selects the reactor set and bundle bindings at each event boundary.
-- Head/set changes are handled by the predecessor at the proposed boundary;
-  successful successors receive only their assigned later events.
+- Successful head changes are recorded after lifecycle success; failed
+  replacements leave the predecessor head unchanged.
+- The recipient and warmup boundary for the successful head-change observation
+  agree with the completed replacement and historical selection.
 - Fold-only warmup causes no historical lifecycle effects.
 - A-to-B-to-A rejects stale readiness replies.
 - Identical bytes under distinct cluster heads produce distinct view state.
