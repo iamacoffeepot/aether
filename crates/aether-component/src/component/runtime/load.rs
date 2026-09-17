@@ -6,7 +6,8 @@ use std::sync::Arc;
 use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{Kind, KindDescriptor};
 use aether_kinds::{
-    ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
+    ComponentCapabilities, DropComponent, DropResult, LoadComponent, LoadComponentUnder, ReplaceComponent,
+    ReplaceResult,
 };
 use wasmtime::Module;
 
@@ -19,8 +20,9 @@ use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
+use crate::ComponentRestrictions;
 use crate::component::ComponentHostCapability;
-use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
+use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingDrop, PendingReplace};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
 fn content_hash_hex(wasm: &[u8]) -> String {
@@ -58,6 +60,7 @@ enum LoadPlacement {
 impl PreparedLoad {
     fn requested_config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
+            prohibit: ComponentRestrictions::NONE,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
@@ -105,6 +108,7 @@ impl PreparedBoot {
     #[allow(clippy::disallowed_methods)]
     fn config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
         WasmTrampolineConfig {
+            prohibit: ComponentRestrictions::NONE,
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
@@ -559,6 +563,29 @@ impl ComponentHostCapabilityState {
         );
     }
 
+    pub fn begin_drop(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: DropComponent) {
+        let source = ctx.reply_target();
+        let actor_mailbox = payload.mailbox_id;
+        let boot_operation = self.next_boot_operation(actor_mailbox);
+        let mail_id = ctx.send_envelope_tracked(actor_mailbox, DropComponent::ID, &payload.encode_into_bytes());
+        self.pending_drop.insert(mail_id.correlation_id, PendingDrop { source, actor_mailbox, boot_operation });
+    }
+
+    pub fn finish_drop(&mut self, ctx: &mut NativeCtx<'_, Manual, ComponentHostCapability>, result: DropResult) {
+        let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
+            return;
+        };
+        let Some(pending) = self.pending_drop.remove(&correlation) else {
+            return;
+        };
+        if matches!(result, DropResult::Ok)
+            && self.accept_successful_boot_operation(pending.actor_mailbox, pending.boot_operation)
+        {
+            self.release_boot_ref(ctx, pending.actor_mailbox);
+        }
+        ctx.reply_to(pending.source, &result);
+    }
+
     pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, Manual, ComponentHostCapability>, result: ReplaceResult) {
         let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
             return;
@@ -654,11 +681,6 @@ impl ComponentHostCapabilityState {
         *dominant = boot_operation;
         true
     }
-
-    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor_mailbox: MailboxId) {
-        let boot_operation = self.next_boot_operation(actor_mailbox);
-        self.dominant_boot_operation_by_actor.insert(actor_mailbox, boot_operation);
-    }
 }
 
 #[cfg(test)]
@@ -695,6 +717,7 @@ mod tests {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            pending_drop: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         }
@@ -702,6 +725,64 @@ mod tests {
 
     fn binding(state: &ComponentHostCapabilityState) -> Arc<NativeBinding> {
         Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0xC065)))
+    }
+
+    #[test]
+    fn rejected_forwarded_drop_keeps_module_boot_reference_and_replacement_order() {
+        let mut state = state();
+        let binding = binding(&state);
+        let actor = MailboxId(0xA135);
+        let hash = "protected-module".to_owned();
+        let operation = state.next_boot_operation(actor);
+        state
+            .boot_registry
+            .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB135), refcount: 1, pending_requests: 0 });
+        state.boot_hash_by_actor.insert(actor, hash.clone());
+        state
+            .pending_drop
+            .insert(7, PendingDrop { source: Source::NONE, actor_mailbox: actor, boot_operation: operation });
+        let mut ctx: NativeCtx<'_, Manual, ComponentHostCapability> = NativeCtx::new_for_actor(
+            &binding,
+            Source::with_correlation(aether_data::SourceAddr::None, 7),
+            MailId::NONE,
+            MailId::NONE,
+        );
+
+        state.finish_drop(&mut ctx, DropResult::Err { error: "drop prohibited".to_owned() });
+
+        assert!(state.pending_drop.is_empty());
+        assert_eq!(state.boot_hash_by_actor.get(&actor), Some(&hash));
+        assert_eq!(state.boot_registry.get(&hash).map(|entry| entry.refcount), Some(1));
+        assert!(!state.dominant_boot_operation_by_actor.contains_key(&actor));
+    }
+
+    #[test]
+    fn successful_forwarded_drop_releases_module_boot_reference() {
+        let mut state = state();
+        let binding = binding(&state);
+        let actor = MailboxId(0xA136);
+        let hash = "droppable-module".to_owned();
+        let operation = state.next_boot_operation(actor);
+        state
+            .boot_registry
+            .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB136), refcount: 1, pending_requests: 0 });
+        state.boot_hash_by_actor.insert(actor, hash.clone());
+        state
+            .pending_drop
+            .insert(8, PendingDrop { source: Source::NONE, actor_mailbox: actor, boot_operation: operation });
+        let mut ctx: NativeCtx<'_, Manual, ComponentHostCapability> = NativeCtx::new_for_actor(
+            &binding,
+            Source::with_correlation(aether_data::SourceAddr::None, 8),
+            MailId::NONE,
+            MailId::NONE,
+        );
+
+        state.finish_drop(&mut ctx, DropResult::Ok);
+
+        assert!(state.pending_drop.is_empty());
+        assert!(!state.boot_hash_by_actor.contains_key(&actor));
+        assert!(!state.boot_registry.contains_key(&hash));
+        assert_eq!(state.dominant_boot_operation_by_actor.get(&actor), Some(&operation));
     }
 
     #[test]
@@ -780,7 +861,8 @@ mod tests {
         let hash = "replacement-completes-after-drop".to_owned();
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
-        state.invalidate_replacement_boot_operation(actor);
+        let boot_operation = state.next_boot_operation(actor);
+        assert!(state.accept_successful_boot_operation(actor, boot_operation));
         state
             .boot_registry
             .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB004), refcount: 0, pending_requests: 0 });

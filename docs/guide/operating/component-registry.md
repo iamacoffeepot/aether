@@ -42,6 +42,23 @@ destroy the trampoline. The lineage name and mailbox remain as an empty,
 replaceable slot until the substrate terminates. Consequently, drop releases
 guest state but does not make the same load name available to a fresh load.
 
+Trusted native bootstrap can set `WasmTrampolineConfig.prohibit` to
+`ComponentRestrictions::DROP`, `ComponentRestrictions::REPLACE`, or their
+bitwise combination (`DROP | REPLACE`). The flags are exported by
+`aether-component`; ordinary load and module-boot constructors use
+`ComponentRestrictions::NONE`. They are host policy for one trampoline slot,
+not guest manifest content or a field in public load mail. A sibling spawned
+from a resident module starts with empty restrictions and has its own policy.
+
+The trampoline rejects prohibited drop or replace requests before calling
+guest hooks, compiling replacement wasm, or changing component state. This
+applies whether mail is sent directly to the trampoline or forwarded through
+`aether.component`. The host releases module-boot references only after a
+forwarded drop succeeds. Replacement keeps the slot's bootstrap flags, so a
+DROP-protected component may be replaced and remains DROP-protected afterward.
+These flags govern individual lifecycle requests; orderly application shutdown
+still unwires and tears down the actor normally.
+
 ## Upload before selector
 
 Only `upload_component` accepts a filesystem path. `load_component`,
@@ -198,6 +215,10 @@ describe the replacement actor type. An omitted export reuses the actor type the
 trampoline currently hosts; it does not necessarily select the new module's
 default entry.
 
+A native bootstrap's `ComponentRestrictions::REPLACE` flag makes replacement
+return an error before candidate work or guest hooks. A successful replacement
+of a DROP-protected slot keeps its DROP prohibition.
+
 There is no drain phase and no drain timeout. ADR-0038 made the splice
 structural, so the replace kind's `drain_timeout_ms` field is vestigial wire
 shape the MCP layer always sends empty; the tool exposes no such argument.
@@ -226,6 +247,8 @@ For a task-owned instance in a shared engine:
 For an engine wholly owned by the task, terminating the engine is the simpler
 complete cleanup: all its live registries, empty slots, and components die with
 it. This does not delete the hub's stored component artifacts.
+An individually DROP-protected slot requires that whole-engine shutdown path;
+the restriction does not block application teardown.
 
 ## Source routes
 

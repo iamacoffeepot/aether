@@ -10,9 +10,9 @@
 //! `LoadComponent` reaches the capability, which spawns a trampoline child and
 //! instantiates the guest wasm `Component` against that trampoline's binding.
 //! `DropComponent` and `ReplaceComponent` are forwarded to the addressed
-//! trampoline with the original `reply_to` intact, so the trampoline answers
-//! the caller directly. The capability keeps no per-component bookkeeping: the
-//! trampoline manages its own lifecycle, dispatch rides the framework's
+//! trampoline. The host relays their typed results to the caller and commits
+//! module-boot bookkeeping only after a successful operation. The trampoline
+//! manages its own lifecycle admission, dispatch rides the framework's
 //! `NativeActor` loop, and an in-place replace swaps the `Component` inside
 //! the trampoline behind a stable mailbox handle, so a mailbox id or route
 //! cache taken before the swap stays valid (ADR-0022).
@@ -30,9 +30,11 @@
 extern crate alloc;
 
 pub mod component;
+mod restrictions;
 pub mod trampoline;
 
 pub use component::{ComponentHostCapability, resolve_embedded};
+pub use restrictions::ComponentRestrictions;
 // `ComponentHostParams` is wasmtime-bound (it holds `Arc<Engine>` /
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it

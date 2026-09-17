@@ -4,8 +4,7 @@
 //! `ComponentHostCapability` identity never names these types nor pulls
 //! `aether_substrate` / `wasmtime`. The substrate-typed imports are gated once
 //! by this module rather than line-by-line; the `#[actor] impl` reaches the
-//! state and the `forward_to_trampoline` helper through the single
-//! `use runtime::*` glob in the parent, and the `load` sibling reaches the
+//! state through the single `use runtime::*` glob in the parent, and the `load` sibling reaches the
 //! state fields through their `pub` visibility.
 
 // The moved `#[runtime] impl NativeActor for ComponentHostCapability` body
@@ -37,13 +36,12 @@ use aether_kinds::{
 pub use aether_actor::Manual;
 
 // Crate-local wiring the `#[runtime] impl` handler bodies name (the
-// `Kind` / `MailboxCategory` vocabulary), the state struct, and
-// `forward_to_trampoline` — all used within this module. No sibling-cap
+// `Kind` / `MailboxCategory` vocabulary) and the state struct. No sibling-cap
 // imports: drop-time cleanup rides the ADR-0079 vacate/close
 // `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{OutboundReply, ReplyMode, Single};
-use aether_data::{Kind, MailboxCategory, Source};
+use aether_actor::{OutboundReply, Single};
+use aether_data::{MailboxCategory, Source};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -55,10 +53,10 @@ use aether_substrate::actor::native::{
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{Registry, RegistrySubscription};
-use aether_substrate::mail::{KindId, MailboxId};
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
 /// `engine` + `linker` every load instantiates against, the mail `registry`,
@@ -121,9 +119,12 @@ pub struct ComponentHostCapabilityState {
     /// replacement wasm are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
+    /// Forwarded drops awaiting the trampoline's verdict. A refused drop
+    /// must leave module-boot references and replacement ordering intact.
+    pub pending_drop: HashMap<u64, PendingDrop>,
     /// Last replace/drop operation sequence allocated for each actor mailbox.
-    /// A replace reserves its sequence when forwarded; a drop reserves the
-    /// next sequence and immediately makes it dominant. Entries survive the
+    /// A replace or drop reserves its sequence when forwarded; only a
+    /// successful result makes it dominant. Entries survive the
     /// deterministic mailbox id's drop/reload boundary so an older incarnation
     /// can never become current again.
     pub boot_operation_sequence_by_actor: HashMap<MailboxId, u64>,
@@ -148,6 +149,13 @@ pub struct PendingReplace {
     pub boot_operation: u64,
 }
 
+/// One forwarded individual drop, correlated with its trampoline reply.
+pub struct PendingDrop {
+    pub source: Source,
+    pub actor_mailbox: MailboxId,
+    pub boot_operation: u64,
+}
+
 /// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
 /// trampoline (spawned through the same `WasmTrampoline` path as any export);
 /// `refcount` counts the module's live **non-boot** actors — boot never counts
@@ -161,30 +169,6 @@ pub struct BootEntry {
     pub mailbox_id: MailboxId,
     pub refcount: u32,
     pub pending_requests: u32,
-}
-
-/// Forward an arbitrary kind to a trampoline's mailbox, preserving the
-/// original `reply_to` so the trampoline's reply lands at the agent (not the
-/// cap). Used for [`DropComponent`] and [`ReplaceComponent`].
-///
-/// The forward threads the child mail under the cap's current in-flight root
-/// and bumps that root's `in_flight` count before the calling handler returns
-/// (`send_envelope_tracked_with_reply_to`), so the originating call stays open
-/// across the boundary: the trampoline's deferred `ctx.reply` streams back
-/// under a still-open root and settlement fires `ReplyEnd` only after it. A
-/// bare enqueue would let the cap handler's return settle the call before the
-/// trampoline replied, dropping the reply (the deferred-reply hold-open
-/// contract).
-///
-/// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
-/// holds no field this helper reads, so it stays stateless and the handlers
-/// reach it through the parent's `use runtime::*` glob.
-fn forward_to_trampoline<M: ReplyMode, P>(ctx: &mut NativeCtx<'_, M>, recipient: MailboxId, kind: KindId, payload: &P)
-where
-    P: Kind,
-{
-    let bytes = payload.encode_into_bytes();
-    let _ = ctx.send_envelope_tracked_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
 }
 
 #[runtime]
@@ -219,6 +203,7 @@ impl NativeActor for ComponentHostCapability {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            pending_drop: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         })
@@ -288,11 +273,12 @@ impl NativeActor for ComponentHostCapability {
     /// Drop a component by its mailbox id. Forwards
     /// [`DropComponent`] mail to the addressed trampoline; the
     /// trampoline's `WasmTrampoline::on_drop_component` handler
-    /// replies `DropResult::Ok` and vacates its mailbox (ADR-0079 §8
-    /// amended), which is what purges the mailbox from every sibling
+    /// replies `DropResult::Ok` on success and vacates its mailbox
+    /// (ADR-0079 §8 amended), which is what purges the mailbox from every sibling
     /// cap's fan-out / routing table — each cap monitors its
     /// registrants and drops its own rows on the `MonitorNotice`, so
-    /// the host mails no cap anything at drop time.
+    /// the host mails no cap anything at drop time. A refusal is returned
+    /// without releasing the actor's module-boot reference.
     ///
     /// # Agent
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
@@ -318,13 +304,16 @@ impl NativeActor for ComponentHostCapability {
             });
             return;
         }
-        // ADR-0147: account this actor's departure against its module's boot
-        // singleton before forwarding the drop — the last non-boot actor from a
-        // boot-bearing module tears the boot down here (the boot trampoline's
-        // own `DropComponent` handler vacates its registrations).
-        state.invalidate_replacement_boot_operation(payload.mailbox_id);
-        state.release_boot_ref(ctx, payload.mailbox_id);
-        forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
+        // The trampoline owns lifecycle admission. Wait for its typed result
+        // before changing module-boot ownership or replacement ordering.
+        state.begin_drop(ctx, payload);
+    }
+
+    /// Commit a forwarded drop only after the trampoline actually unloaded
+    /// its guest; a bootstrap prohibition leaves host bookkeeping untouched.
+    #[handler::manual]
+    fn on_drop_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, payload: DropResult) {
+        state.finish_drop(ctx, payload);
     }
 
     /// Replace the component at `mailbox_id` with a fresh wasm
@@ -491,6 +480,7 @@ mod tests {
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
+            pending_drop: HashMap::new(),
             boot_operation_sequence_by_actor: HashMap::new(),
             dominant_boot_operation_by_actor: HashMap::new(),
         };
