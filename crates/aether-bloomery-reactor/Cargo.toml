@@ -4,10 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Portable typed stored-event triggers, named guards, inferred view folding, and owned prepared data (ADR-0222)."
+description = "Portable reactor preparation, signature macros, and pure evaluation of typed stored-event arms (ADR-0222)."
 
 [dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-reactor-derive = { path = "../aether-bloomery-reactor-derive" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 
@@ -15,6 +16,7 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [lints]
 workspace = true

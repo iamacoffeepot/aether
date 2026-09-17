@@ -1,0 +1,5 @@
+error: #[rule] methods return exactly one mail-capable typed output; `Vec` is unsupported
+  --> tests/ui/fail_vec_return.rs:17:98
+   |
+17 |     fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Vec<PublicationProposal> {
+   |                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^

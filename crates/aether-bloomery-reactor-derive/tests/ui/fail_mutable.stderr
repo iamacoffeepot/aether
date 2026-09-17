@@ -1,0 +1,5 @@
+error: #[rule] methods take `&self`; mutable self is not supported
+  --> tests/ui/fail_mutable.rs:17:16
+   |
+17 |     fn publish(&mut self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
+   |                ^^^^^^^^^

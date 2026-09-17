@@ -170,8 +170,25 @@ name = "aether-bloomery-reactor"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery-kinds",
+ "aether-bloomery-reactor-derive",
  "aether-bloomery-view",
  "aether-data",
+ "serde",
+]
+
+[[package]]
+name = "aether-bloomery-reactor-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-kinds",
+ "aether-bloomery-reactor",
+ "aether-bloomery-view",
+ "aether-data",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
+ "trybuild",
 ]
 
 [[package]]

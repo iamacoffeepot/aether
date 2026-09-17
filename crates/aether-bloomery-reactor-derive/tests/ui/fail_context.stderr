@@ -1,0 +1,5 @@
+error: #[rule] parameters are owned trigger, view, and guard values; engine context and borrowed parameters are unsupported
+  --> tests/ui/fail_context.rs:19:101
+   |
+19 |     fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>, _ctx: &mut EngineCtx) -> PublicationPr...
+   |                                                                                                     ^^^^^^^^^^^^^^

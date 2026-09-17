@@ -1,0 +1,5 @@
+error: #[rule] methods are synchronous; remove `async`
+  --> tests/ui/fail_async.rs:17:5
+   |
+17 |     async fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
+   |     ^^^^^
