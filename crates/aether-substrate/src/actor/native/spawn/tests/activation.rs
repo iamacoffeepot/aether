@@ -15,7 +15,8 @@ use crate::actor::native::spawn::reservation::ChildReservationKey;
 use crate::actor::native::spawn::{SpawnError, SpawnOutcome, Subname};
 use crate::config::RegistryQueueCapacities;
 use crate::mail::registry::effect::{
-    ActivationToken, EffectBatch, RegistryApplied, RegistryEffect, RegistryEffectError,
+    ActivationToken, EffectBatch, PreparedAliasRoute, RegistryApplied, RegistryBatch, RegistryEffect,
+    RegistryEffectError,
 };
 use crate::mail::registry::{RegistryOwnerLease, RouteRelayLease, canonical_mailbox_id, noop_handler};
 use crate::mail::{Mail, MailId, Source};
@@ -26,8 +27,204 @@ use crate::testing::boot_authority;
 
 use super::support::{
     ActivationClose, ActivationConfig, ActivationEvent, ActivationPoke, ActivationProbe, activation_fixture,
-    activation_sink, await_spawn_done, finalized_probe, prepared_probe, prepared_probe_with_lifecycle_target,
+    activation_sink, await_spawn_done, finalized_probe, finalized_probe_with_hold, prepared_probe,
+    prepared_probe_with_lifecycle_target,
 };
+
+#[test]
+fn held_birth_waits_at_starting_until_exact_release_then_completes() {
+    let (spawner, registry, mailer, pool) = activation_fixture();
+    let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.held-effects");
+    let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let parent =
+        Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), canonical_mailbox_id("test.activation.held-parent")));
+    let (events_tx, events_rx) = crossbeam_channel::unbounded();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let (commit, dispatch_id, _) =
+        finalized_probe_with_hold(&spawner, &parent, "held", events_tx, 1, Some(ready_tx), Some(lifecycle_target));
+    let id = commit.route.id;
+    let birth = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+    owner.run_once();
+    assert!(matches!(
+        birth.wait_timeout(Duration::from_secs(1)).unwrap().unwrap().as_slice(),
+        [RegistryApplied::Starting { .. }]
+    ));
+    let ready = ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert_eq!(ready.mailbox_id, id);
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Wire(_)));
+    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
+    assert!(registry.entry(id).is_none());
+    assert!(registry.inventory().mailboxes.iter().all(|mailbox| mailbox.id != id));
+    assert!(lifecycle_mail.try_recv().is_err(), "held wire egress remains buffered");
+    assert!(parent.dispatch_take::<SpawnOutcome, ()>(dispatch_id).is_none());
+
+    let wrong = ActivationToken::from_value(ready.token.value() + 1).unwrap();
+    let rejected = registry.submit(RegistryBatch::release_held_starting(id, wrong).into_effects()).unwrap();
+    owner.run_once();
+    assert!(matches!(
+        rejected.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::ActivationRejected)
+    ));
+
+    let mixed = registry
+        .submit(EffectBatch::new(vec![
+            RegistryEffect::ReleaseHeldStarting { id, token: ready.token },
+            RegistryEffect::ReleaseHeldStarting { id, token: wrong },
+        ]))
+        .unwrap();
+    owner.run_once();
+    assert!(matches!(
+        mixed.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::ActivationRejected)
+    ));
+    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
+
+    mailer.push(Mail::new(id, ActivationPoke::ID, ActivationPoke.encode_into_bytes(), 1));
+    owner.run_once();
+    assert!(events_rx.try_recv().is_err(), "held actor does not dispatch parked mail");
+    let release = registry.submit(RegistryBatch::release_held_starting(id, ready.token).into_effects()).unwrap();
+    owner.run_once();
+    assert!(
+        matches!(release.wait_timeout(Duration::from_secs(1)).unwrap().unwrap().as_slice(), [RegistryApplied::HeldReleased(released)] if *released == id)
+    );
+    let duplicate = registry.submit(RegistryBatch::release_held_starting(id, ready.token).into_effects()).unwrap();
+    owner.run_once();
+    assert!(matches!(
+        duplicate.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::ActivationRejected)
+    ));
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while registry.entry(id).is_none() {
+        owner.run_once();
+        assert!(Instant::now() < deadline, "released barrier promotes held actor");
+        thread::yield_now();
+    }
+    let done = await_spawn_done(&parent, dispatch_id);
+    assert!(matches!(done.output().result, Ok(())));
+    done.release_no_reply();
+    assert_eq!(lifecycle_mail.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationPoke::ID);
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Dispatch(_)));
+
+    spawner.shutdown_instanced(Duration::from_millis(1), Duration::from_secs(1), &FatalAbortRecord::new());
+    drop(owner);
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
+#[test]
+#[allow(clippy::disallowed_methods, reason = "test checks the alias id derived from its canonical name")]
+fn held_cancellation_clears_starting_and_rejects_stale_token() {
+    let (spawner, registry, mailer, pool) = activation_fixture();
+    let (lifecycle_target, lifecycle_mail) = activation_sink(&registry, "test.activation.cancelled-effects");
+    let _relay = RouteRelayLease::attach(&mailer, pool.wake_sink(), RegistryQueueCapacities::default());
+    let owner = RegistryOwnerLease::attach(
+        boot_authority(),
+        &registry,
+        &mailer,
+        WakeSink::detached(),
+        RegistryQueueCapacities::default(),
+    );
+    let parent = Arc::new(NativeBinding::new_for_test(
+        Arc::clone(&mailer),
+        canonical_mailbox_id("test.activation.held-cancel-parent"),
+    ));
+    let (events_tx, events_rx) = crossbeam_channel::unbounded();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let (commit, dispatch_id, key) = finalized_probe_with_hold(
+        &spawner,
+        &parent,
+        "held-cancel",
+        events_tx,
+        1,
+        Some(ready_tx),
+        Some(lifecycle_target),
+    );
+    let id = commit.route.id;
+    let birth = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
+    owner.run_once();
+    birth.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
+    let ready = ready_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Wire(_)));
+
+    let alias_name = "test.activation.probe:held-cancel/aether.embedded:child";
+    let alias = aether_data::mailbox_id_from_path(alias_name);
+    let aliases = registry
+        .submit(RegistryBatch::publish_aliases(vec![PreparedAliasRoute::new(alias, alias_name, id)]).into_effects())
+        .unwrap();
+    owner.run_once();
+    assert!(aliases.wait_timeout(Duration::from_secs(1)).unwrap().is_ok());
+
+    let stale = ActivationToken::from_value(ready.token.value() + 1).unwrap();
+    let rejected = registry.submit(RegistryBatch::cancel_held_starting(id, stale, vec![alias]).into_effects()).unwrap();
+    owner.run_once();
+    assert!(matches!(
+        rejected.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::ActivationRejected)
+    ));
+    assert!(registry.route_lookup(crate::mail::KindId(0), id).is_starting());
+    assert!(registry.route_lookup(crate::mail::KindId(0), alias).is_starting());
+
+    let missing = canonical_mailbox_id("test.activation.missing-alias");
+    let invalid_aliases = registry
+        .submit(RegistryBatch::cancel_held_starting(id, ready.token, vec![alias, missing]).into_effects())
+        .unwrap();
+    owner.run_once();
+    assert!(matches!(
+        invalid_aliases.wait_timeout(Duration::from_secs(1)).unwrap(),
+        Err(RegistryEffectError::ActivationRejected)
+    ));
+    assert!(registry.route_lookup(crate::mail::KindId(0), alias).is_starting());
+
+    let cancel =
+        registry.submit(RegistryBatch::cancel_held_starting(id, ready.token, vec![alias]).into_effects()).unwrap();
+    owner.run_once();
+    assert!(cancel.wait_timeout(Duration::from_secs(1)).unwrap().is_ok());
+    assert_eq!(registry.lookup(alias_name), None, "aborted alias leaves no Dropped tombstone");
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while registry.route_lookup(crate::mail::KindId(0), id).is_starting() {
+        owner.run_once();
+        assert!(Instant::now() < deadline, "home cancellation removes exact Starting route");
+        thread::yield_now();
+    }
+    let done = await_spawn_done(&parent, dispatch_id);
+    assert!(matches!(done.output().result, Err(SpawnError::ActivationRejected)));
+    done.release_no_reply();
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Unwire(_)));
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(_)));
+    assert!(lifecycle_mail.try_recv().is_err(), "cancel discards wire and unwire egress");
+    drop(parent.reserve_child(key).expect("cancelled child releases its parent reservation"));
+
+    drop(owner);
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
+
+#[test]
+fn held_cancellation_before_wire_closes_ready_without_running_hooks() {
+    let (spawner, _registry, _mailer, pool) = activation_fixture();
+    let (events_tx, events_rx) = crossbeam_channel::unbounded();
+    let (ready_tx, ready_rx) = crossbeam_channel::bounded(1);
+    let identity = spawner.preflight::<ActivationProbe>(Subname::Named("held-before-wire"), None).unwrap();
+    let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
+    let mut commit = spawner.prepare_commit_with_hold(
+        staged,
+        None,
+        EffectChain::Uncaused(crate::runtime::effect_chain::Uncaused::EmbedderCall),
+        Some(ready_tx),
+    );
+    let token = ActivationToken::from_value(1).unwrap();
+    let activation = commit.take_activation().reserve(token).unwrap_or_else(|_| panic!("reservation accepted"));
+    activation.cancel_and_join();
+    assert!(ready_rx.recv_timeout(Duration::from_secs(1)).is_err());
+    assert!(matches!(events_rx.recv_timeout(Duration::from_secs(1)).unwrap(), ActivationEvent::Drop(_)));
+    assert!(events_rx.try_recv().is_err(), "cancelled birth never wires or unwires");
+    assert!(pool.shutdown_with_results().into_iter().all(|result| result.is_ok()));
+}
 
 #[test]
 fn prepared_activation_lifecycle_stays_on_scheduler_home() {

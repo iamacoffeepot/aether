@@ -7,7 +7,15 @@ use std::sync::Arc;
 use crate::actor::native::DispatchId;
 use crate::mail::MailboxId;
 
-use super::SpawnError;
+use super::{HeldActivationToken, SpawnError};
+
+/// A held birth has finished wiring at its execution home but is still
+/// `Starting`. The token must accompany every later release or cancellation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct HeldActivationReady {
+    pub mailbox_id: MailboxId,
+    pub token: HeldActivationToken,
+}
 
 /// Deterministic result returned when a handler has locally prepared and
 /// staged a child birth. It names a reservation, not proof that the child is

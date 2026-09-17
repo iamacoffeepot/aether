@@ -23,12 +23,13 @@ use crate::runtime::effect_chain::{EffectChain, OrderingDevice};
 use crate::runtime::trace::SettlementHold;
 
 use super::reservation::ChildReservationKey;
-use super::{SpawnBuilder, SpawnError, SpawnReceipt, Subname};
+use super::{HeldActivationReady, SpawnBuilder, SpawnError, SpawnReceipt, Subname};
 
 /// Handler-owned child builder, the only spawn surface
 /// [`NativeCtx::spawn_child`](crate::actor::native::ctx::NativeCtx::spawn_child) hands back.
 /// Every terminal it carries — [`stage`](Self::stage),
-/// [`stage_with`](Self::stage_with), [`continue_from`](Self::continue_from) —
+/// [`stage_with`](Self::stage_with), [`stage_held_with`](Self::stage_held_with),
+/// [`continue_from`](Self::continue_from) —
 /// performs only local preparation during the actor turn and appends one
 /// ordered prepared birth to the parent binding, so a handler never takes the
 /// spawn path's shared locks mid-turn (ADR-0165). It deliberately exposes no
@@ -103,6 +104,33 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     where
         C: Send + 'static,
     {
+        self.stage_with_ready(context, None)
+    }
+
+    /// Stage a child whose wired activation must remain `Starting` until its
+    /// exact token is released through the registry owner. The ready sender
+    /// fires only after `wire` has returned and the wired lease is retained.
+    /// Supply an unbounded channel or one with a free slot; a full or closed
+    /// channel rejects the birth without blocking an activation worker.
+    pub fn stage_held_with<C>(
+        self,
+        context: C,
+        ready: crossbeam_channel::Sender<HeldActivationReady>,
+    ) -> Result<SpawnReceipt, SpawnError>
+    where
+        C: Send + 'static,
+    {
+        self.stage_with_ready(context, Some(ready))
+    }
+
+    fn stage_with_ready<C>(
+        self,
+        context: C,
+        held_ready: Option<crossbeam_channel::Sender<HeldActivationReady>>,
+    ) -> Result<SpawnReceipt, SpawnError>
+    where
+        C: Send + 'static,
+    {
         let Self { inner, parent_binding, completion_root, completion_reply_to, chain } = self;
         let SpawnBuilder { spawner, subname, config, params, sender, parent, after_init, .. } = inner;
         let config = config.expect("HandlerSpawnBuilder::stage consumed exactly once");
@@ -140,7 +168,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             Arc::downgrade(&staged.transport),
             Arc::clone(spawner.mailer()),
         );
-        let commit = spawner.prepare_commit(staged, Some(finalizer), chain);
+        let commit = spawner.prepare_commit_with_hold(staged, Some(finalizer), chain, held_ready);
         parent_binding.stage_child_birth(commit);
         let _ = sender;
         Ok(receipt)

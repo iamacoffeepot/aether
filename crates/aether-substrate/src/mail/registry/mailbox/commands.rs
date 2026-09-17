@@ -67,6 +67,7 @@ impl Registry {
             Batch(RegistryBatchCompletionSink, Result<Vec<RegistryApplied>, RegistryEffectError>),
             Route(RouteContinuation),
             Schedule(Arc<dyn ActivationReservation>),
+            Release(Arc<dyn ActivationReservation>),
             CatchUp(Box<dyn FnOnce() + Send>),
         }
 
@@ -78,10 +79,11 @@ impl Registry {
             match command {
                 OwnerCommand::Batch(BatchEnvelope { batch, completion }) => {
                     let result = match Self::apply_batch_locked(&mut inner, batch) {
-                        Ok((applied, batch_publication, continuations, schedules)) => {
+                        Ok((applied, batch_publication, continuations, schedules, releases)) => {
                             publication.append(batch_publication);
                             after_lock.extend(continuations.into_iter().map(AfterLock::Route));
                             after_lock.extend(schedules.into_iter().map(AfterLock::Schedule));
+                            after_lock.extend(releases.into_iter().map(AfterLock::Release));
                             Ok(applied)
                         }
                         Err(error) => Err(error),
@@ -125,6 +127,7 @@ impl Registry {
                 }
                 AfterLock::Route(continuation) => mailer.relay_captured(continuation),
                 AfterLock::Schedule(activation) => activation.schedule(),
+                AfterLock::Release(activation) => activation.schedule_held_release(),
                 AfterLock::CatchUp(catch_up) => catch_up(),
             }
         }

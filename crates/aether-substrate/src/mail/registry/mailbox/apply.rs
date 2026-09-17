@@ -40,9 +40,10 @@ impl Registry {
         let results = batches
             .into_iter()
             .map(|batch| match Self::apply_batch_locked(&mut inner, batch) {
-                Ok((applied, batch_publication, continuations, schedules)) => {
+                Ok((applied, batch_publication, continuations, schedules, releases)) => {
                     assert!(continuations.is_empty(), "direct legacy effects cannot cancel a pending birth");
                     assert!(schedules.is_empty(), "prepared births must run through the registry owner");
+                    assert!(releases.is_empty(), "held releases must run through the registry owner");
                     publication.append(batch_publication);
                     Ok(applied)
                 }
@@ -62,7 +63,13 @@ impl Registry {
         inner: &mut Inner,
         batch: EffectBatch,
     ) -> Result<
-        (Vec<RegistryApplied>, Publication, Vec<RouteContinuation>, Vec<Arc<dyn ActivationReservation>>),
+        (
+            Vec<RegistryApplied>,
+            Publication,
+            Vec<RouteContinuation>,
+            Vec<Arc<dyn ActivationReservation>>,
+            Vec<Arc<dyn ActivationReservation>>,
+        ),
         RegistryEffectError,
     > {
         let mut staged_routes = FxHashMap::<MailboxId, Option<RouteRecord>>::default();
@@ -74,6 +81,7 @@ impl Registry {
         let mut prepared_births = FxHashMap::<MailboxId, PendingBirth>::default();
         let mut prepared_cancellations = HashSet::<(MailboxId, ActivationToken)>::new();
         let mut promotions = Vec::<(MailboxId, RouteEndpoint)>::new();
+        let mut releases = Vec::<(MailboxId, ActivationToken, Arc<dyn ActivationReservation>)>::new();
 
         for effect in batch.effects {
             match effect {
@@ -279,6 +287,58 @@ impl Registry {
                     };
                     applied.push(RegistryApplied::StartingCancellation(cancellation));
                 }
+                RegistryEffect::ReleaseHeldStarting { id, token } => {
+                    let valid_route = matches!(
+                        staged_route(&staged_routes, inner, id).map(|route| &route.lifecycle),
+                        Some(RouteLifecycle::Starting { token: current }) if *current == token
+                    );
+                    let activation = inner.pending_births.get(&id).and_then(|birth| {
+                        (birth.token == token
+                            && !birth.cancel_requested
+                            && !prepared_cancellations.contains(&(id, token)))
+                        .then(|| birth.activation.as_ref())
+                        .flatten()
+                    });
+                    let Some(activation) = activation.filter(|activation| valid_route && activation.held_ready())
+                    else {
+                        return Err(RegistryEffectError::ActivationRejected);
+                    };
+                    if releases.iter().any(|(released_id, _, _)| *released_id == id) {
+                        return Err(RegistryEffectError::ActivationRejected);
+                    }
+                    releases.push((id, token, Arc::clone(activation)));
+                    applied.push(RegistryApplied::HeldReleased(id));
+                }
+                RegistryEffect::CancelHeldStarting { id, token, aliases } => {
+                    let valid_route = matches!(
+                        staged_route(&staged_routes, inner, id).map(|route| &route.lifecycle),
+                        Some(RouteLifecycle::Starting { token: current }) if *current == token
+                    );
+                    let valid_birth = inner.pending_births.get(&id).is_some_and(|birth| {
+                        birth.token == token
+                            && !birth.cancel_requested
+                            && birth.activation.as_ref().is_some_and(|activation| activation.is_held())
+                    });
+                    if !valid_route
+                        || !valid_birth
+                        || prepared_cancellations.contains(&(id, token))
+                        || releases.iter().any(|(released_id, _, _)| *released_id == id)
+                        || aliases.iter().any(|alias| {
+                            !matches!(
+                                staged_route(&staged_routes, inner, *alias).map(|route| &route.lifecycle),
+                                Some(RouteLifecycle::Alias { target_parent }) if *target_parent == id
+                            )
+                        })
+                    {
+                        return Err(RegistryEffectError::ActivationRejected);
+                    }
+                    for alias in aliases {
+                        staged_routes.insert(alias, None);
+                        publication.route_updates.push(Update::Remove(alias));
+                    }
+                    prepared_cancellations.insert((id, token));
+                    applied.push(RegistryApplied::StartingCancellation(StartingCancellation::Cancelled(id)));
+                }
                 RegistryEffect::PublishLive { route, activation } => {
                     if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
@@ -391,6 +451,16 @@ impl Registry {
             }
         }
 
+        let mut armed = Vec::<&Arc<dyn ActivationReservation>>::new();
+        for (_, _, activation) in &releases {
+            if !activation.arm_held_release() {
+                for prior in armed {
+                    prior.disarm_held_release();
+                }
+                return Err(RegistryEffectError::ActivationRejected);
+            }
+            armed.push(activation);
+        }
         inner.next_activation_token = next_activation_token;
         let mut continuations = commit_staged(inner, staged_routes, staged_kinds, staged_pending);
         // The promoted route is Live now, so the mail parked behind its
@@ -418,7 +488,13 @@ impl Registry {
             schedules.push(Arc::clone(birth.activation.as_ref().expect("prepared birth retains activation")));
             inner.pending_births.insert(id, birth);
         }
-        Ok((applied, publication, continuations, schedules))
+        Ok((
+            applied,
+            publication,
+            continuations,
+            schedules,
+            releases.into_iter().map(|(_, _, activation)| activation).collect(),
+        ))
     }
 
     pub(super) fn apply_one(

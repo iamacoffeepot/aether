@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak, mpsc};
 use aether_actor::local::ActorSlots;
 
 use super::reservation::ParentReservation;
-use super::{SpawnError, SpawnOutcome};
+use super::{HeldActivationReady, SpawnError, SpawnOutcome};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::DeferredCompletion;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
@@ -41,6 +41,7 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     /// home so `wire` can attach a birth-completing effect to whatever chain
     /// it names.
     chain: EffectChain,
+    held_ready: Option<crossbeam_channel::Sender<HeldActivationReady>>,
 }
 
 pub(super) struct NativeSpawnFinalizer {
@@ -206,7 +207,12 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         state: A::State,
         chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, chain }
+        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, chain, held_ready: None }
+    }
+
+    pub(super) fn with_held_ready(mut self, ready: Option<crossbeam_channel::Sender<HeldActivationReady>>) -> Self {
+        self.held_ready = ready;
+        self
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {
@@ -237,6 +243,9 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
             return Err((self, PreparedSpawnFailure::SubnameInUse { full_name }));
         }
         let failure = Arc::new(Mutex::new(None));
+        let held = self.held_ready.as_ref().map(|sender| Arc::new(HeldGate::new(sender.clone())));
+        let binding = Arc::clone(&self.binding);
+        let spawner = Arc::clone(&self.spawner);
         Ok(Arc::new(LegacyActivationControl {
             actor_registry: Arc::clone(self.spawner.actor_registry()),
             registry: Arc::clone(self.spawner.registry()),
@@ -249,6 +258,9 @@ impl<A: NativeActor> PreparedSpawnActivation for LegacyPreparedActivation<A> {
             barrier_mail_id: Arc::new(Mutex::new(None)),
             cancelled: Arc::new(AtomicBool::new(false)),
             failure,
+            held,
+            binding,
+            spawner,
         }))
     }
 
@@ -329,6 +341,69 @@ struct LegacyActivationControl<A: NativeActor> {
     barrier_mail_id: Arc<Mutex<Option<MailId>>>,
     cancelled: Arc<AtomicBool>,
     failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
+    held: Option<Arc<HeldGate>>,
+    binding: Arc<NativeBinding>,
+    spawner: Arc<Spawner>,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum HeldPhase {
+    Wiring,
+    Ready,
+    ReleaseArmed,
+    BarrierSent,
+    Cancelled,
+}
+
+struct HeldGate {
+    state: Mutex<(HeldPhase, Option<crossbeam_channel::Sender<HeldActivationReady>>)>,
+}
+
+impl HeldGate {
+    fn new(sender: crossbeam_channel::Sender<HeldActivationReady>) -> Self {
+        Self { state: Mutex::new((HeldPhase::Wiring, Some(sender))) }
+    }
+
+    fn ready(&self, id: MailboxId, token: ActivationToken) -> bool {
+        let mut state = self.state.lock().expect("held activation gate lock poisoned");
+        if state.0 != HeldPhase::Wiring {
+            return false;
+        }
+        let delivered =
+            state.1.take().is_some_and(|sender| sender.try_send(HeldActivationReady { mailbox_id: id, token }).is_ok());
+        state.0 = if delivered {
+            HeldPhase::Ready
+        } else {
+            HeldPhase::Cancelled
+        };
+        delivered
+    }
+
+    fn is_ready(&self) -> bool {
+        self.state.lock().expect("held activation gate lock poisoned").0 == HeldPhase::Ready
+    }
+
+    fn arm_release(&self) -> bool {
+        let mut state = self.state.lock().expect("held activation gate lock poisoned");
+        if state.0 != HeldPhase::Ready {
+            return false;
+        }
+        state.0 = HeldPhase::ReleaseArmed;
+        true
+    }
+
+    fn disarm_release(&self) {
+        let mut state = self.state.lock().expect("held activation gate lock poisoned");
+        if state.0 == HeldPhase::ReleaseArmed {
+            state.0 = HeldPhase::Ready;
+        }
+    }
+
+    fn cancel(&self) {
+        let mut state = self.state.lock().expect("held activation gate lock poisoned");
+        state.0 = HeldPhase::Cancelled;
+        state.1.take();
+    }
 }
 
 impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
@@ -353,6 +428,7 @@ impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
             actor_registry: Arc::clone(&self.actor_registry),
             done: Mutex::new(Some(done_tx)),
             ran: AtomicBool::new(false),
+            held: self.held.as_ref().map(Arc::clone),
         });
         let erased: Arc<dyn Drainable> = job;
         sink.schedule(erased);
@@ -364,6 +440,9 @@ impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
 
     fn cancel(&self) {
         self.cancelled.store(true, Ordering::Release);
+        if let Some(held) = &self.held {
+            held.cancel();
+        }
         self.schedule();
         if let Some(live) = self.take_live() {
             self.cancel_done.lock().expect("activation cancel completion lock poisoned").replace(live.cancel_at_home());
@@ -397,6 +476,85 @@ impl<A: NativeActor> ActivationReservation for LegacyActivationControl<A> {
     fn barrier_matches(&self, mail_id: MailId) -> bool {
         *self.barrier_mail_id.lock().expect("activation barrier identity lock poisoned") == Some(mail_id)
     }
+
+    fn is_held(&self) -> bool {
+        self.held.is_some()
+    }
+
+    fn held_ready(&self) -> bool {
+        self.held.as_ref().is_some_and(|held| held.is_ready())
+    }
+
+    fn arm_held_release(&self) -> bool {
+        self.held.as_ref().is_some_and(|held| held.arm_release())
+    }
+
+    fn disarm_held_release(&self) {
+        if let Some(held) = &self.held {
+            held.disarm_release();
+        }
+    }
+
+    fn schedule_held_release(&self) {
+        let held = Arc::clone(self.held.as_ref().expect("validated held release has a gate"));
+        let job: Arc<dyn Drainable> = Arc::new(HeldReleaseJob {
+            held,
+            binding: Arc::clone(&self.binding),
+            id: self.id,
+            token: self.token,
+            barrier_mail_id: Arc::clone(&self.barrier_mail_id),
+            ran: AtomicBool::new(false),
+        });
+        self.spawner.wake_sink().schedule(job);
+    }
+}
+
+struct HeldReleaseJob {
+    held: Arc<HeldGate>,
+    binding: Arc<NativeBinding>,
+    id: MailboxId,
+    token: ActivationToken,
+    barrier_mail_id: Arc<Mutex<Option<MailId>>>,
+    ran: AtomicBool,
+}
+
+impl Drainable for HeldReleaseJob {
+    fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+        if self.ran.swap(true, Ordering::AcqRel) {
+            return CycleResult::Closed;
+        }
+        let emit = {
+            let mut state = self.held.state.lock().expect("held activation gate lock poisoned");
+            if state.0 == HeldPhase::ReleaseArmed {
+                state.0 = HeldPhase::BarrierSent;
+                true
+            } else {
+                false
+            }
+        };
+        if emit {
+            self.binding.push_envelope_returning_root_before_push(
+                self.id.0,
+                ACTIVATION_BARRIER_KIND.0,
+                &self.token.value().to_le_bytes(),
+                1,
+                None,
+                None,
+                |mail_id| {
+                    self.barrier_mail_id.lock().expect("activation barrier identity lock poisoned").replace(mail_id);
+                },
+            );
+        }
+        CycleResult::Closed
+    }
+
+    fn label(&self) -> &'static str {
+        "native-activation-held-release"
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
 }
 
 struct ActivationJob<A: NativeActor> {
@@ -412,6 +570,7 @@ struct ActivationJob<A: NativeActor> {
     actor_registry: Arc<ActorRegistry>,
     done: Mutex<Option<crossbeam_channel::Sender<()>>>,
     ran: AtomicBool,
+    held: Option<Arc<HeldGate>>,
 }
 
 impl<A: NativeActor> ActivationJob<A> {
@@ -459,24 +618,31 @@ impl<A: NativeActor> Drainable for ActivationJob<A> {
             let binding = Arc::clone(&live.binding);
             let id = live.id;
             self.live.lock().expect("activation live lock poisoned").replace(Box::new(live));
-            // The live lease is visible to the owner before the barrier can
-            // leave this execution home. This substrate-owned control mail is
-            // intentionally eager; buffered wire work stays behind the
-            // binding's activation hold until the owner's post-Live suffix.
-            binding.push_envelope_returning_root_before_push(
-                id.0,
-                ACTIVATION_BARRIER_KIND.0,
-                &self.token.value().to_le_bytes(),
-                1,
-                None,
-                None,
-                |barrier_mail_id| {
-                    self.barrier_mail_id
-                        .lock()
-                        .expect("activation barrier identity lock poisoned")
-                        .replace(barrier_mail_id);
-                },
-            );
+            // The live lease is visible to the owner before any barrier can
+            // leave this execution home. Ordinary births emit it eagerly;
+            // held births report Ready and wait for an exact-token release.
+            // Buffered wire work stays behind the binding's activation hold
+            // until the owner's post-Live suffix.
+            if let Some(held) = &self.held {
+                if !held.ready(id, self.token) {
+                    self.cancelled.store(true, Ordering::Release);
+                }
+            } else {
+                binding.push_envelope_returning_root_before_push(
+                    id.0,
+                    ACTIVATION_BARRIER_KIND.0,
+                    &self.token.value().to_le_bytes(),
+                    1,
+                    None,
+                    None,
+                    |barrier_mail_id| {
+                        self.barrier_mail_id
+                            .lock()
+                            .expect("activation barrier identity lock poisoned")
+                            .replace(barrier_mail_id);
+                    },
+                );
+            }
             if self.cancelled.load(Ordering::Acquire)
                 && let Some(live) = self.live.lock().expect("activation live lock poisoned").take()
             {
@@ -518,8 +684,18 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer, chain } =
-            prepared;
+        let LegacyPreparedActivation {
+            spawner,
+            id,
+            subname,
+            sender,
+            binding,
+            slots,
+            state,
+            finalizer,
+            chain,
+            held_ready: _,
+        } = prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),

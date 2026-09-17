@@ -162,6 +162,22 @@ pub trait ActivationReservation: Send + Sync {
     fn join(&self);
     fn barrier_matches(&self, mail_id: MailId) -> bool;
 
+    fn is_held(&self) -> bool {
+        false
+    }
+
+    fn held_ready(&self) -> bool {
+        false
+    }
+
+    fn arm_held_release(&self) -> bool {
+        false
+    }
+
+    fn disarm_held_release(&self) {}
+
+    fn schedule_held_release(&self) {}
+
     fn cancel_and_join(&self) {
         self.cancel();
         self.join();
@@ -336,6 +352,15 @@ pub enum RegistryEffect {
         id: MailboxId,
         token: ActivationToken,
     },
+    ReleaseHeldStarting {
+        id: MailboxId,
+        token: ActivationToken,
+    },
+    CancelHeldStarting {
+        id: MailboxId,
+        token: ActivationToken,
+        aliases: Vec<MailboxId>,
+    },
     PublishLive {
         route: PreparedRoute,
         activation: PreparedActivation,
@@ -387,6 +412,7 @@ pub enum RegistryApplied {
         token: ActivationToken,
     },
     StartingCancellation(StartingCancellation),
+    HeldReleased(MailboxId),
     Mailbox(MailboxId),
     Dropped(String),
     /// Outcome of [`RegistryEffect::RetireAlias`]: `true` when a live alias
@@ -457,6 +483,24 @@ impl RegistryBatch {
     #[must_use]
     pub fn publish_alias(alias: PreparedAliasRoute) -> Self {
         Self { batch: EffectBatch::new(vec![RegistryEffect::PublishAlias(alias)]) }
+    }
+
+    /// Admit all aliases under one owner transaction, including collision
+    /// and target checks against the same staged view.
+    #[must_use]
+    pub fn publish_aliases(aliases: Vec<PreparedAliasRoute>) -> Self {
+        Self { batch: EffectBatch::new(aliases.into_iter().map(RegistryEffect::PublishAlias).collect()) }
+    }
+
+    #[must_use]
+    pub fn release_held_starting(id: MailboxId, token: ActivationToken) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::ReleaseHeldStarting { id, token }]) }
+    }
+
+    /// Cancel one exact held birth and remove only aliases still targeting it.
+    #[must_use]
+    pub fn cancel_held_starting(id: MailboxId, token: ActivationToken, aliases: Vec<MailboxId>) -> Self {
+        Self { batch: EffectBatch::new(vec![RegistryEffect::CancelHeldStarting { id, token, aliases }]) }
     }
 
     /// Retire one logical inline-child alias through the owner — the teardown

@@ -24,6 +24,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::local;
+use crate::actor::native::spawn::HeldActivationReady;
 use crate::actor::native::spawn::activation::{LegacyPreparedActivation, NativeSpawnFinalizer};
 use crate::actor::native::{ExportedHandles, NativeActor, NativeInitCtx};
 use crate::mail::cost::{CostCell, CostCells};
@@ -215,6 +216,19 @@ impl Spawner {
     where
         A: Instanced + NativeActor,
     {
+        self.prepare_commit_with_hold(staged, finalizer, chain, None)
+    }
+
+    pub(in crate::actor::native::spawn) fn prepare_commit_with_hold<A>(
+        self: &Arc<Self>,
+        staged: StagedActor<A>,
+        finalizer: Option<Arc<NativeSpawnFinalizer>>,
+        chain: EffectChain,
+        held_ready: Option<crossbeam_channel::Sender<HeldActivationReady>>,
+    ) -> PreparedSpawnCommit
+    where
+        A: Instanced + NativeActor,
+    {
         let StagedActor { identity, sender, transport, slots, state, after_init } = staged;
         let SpawnIdentity { id, canonical_name, subname, .. } = identity;
         // The actor's own declared kinds are seeded on top of whatever its
@@ -256,7 +270,8 @@ impl Spawner {
             })
             .collect();
         let activation =
-            LegacyPreparedActivation::<A>::new(Arc::clone(self), id, subname, sender, transport, slots, state, chain);
+            LegacyPreparedActivation::<A>::new(Arc::clone(self), id, subname, sender, transport, slots, state, chain)
+                .with_held_ready(held_ready);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,

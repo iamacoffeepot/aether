@@ -46,8 +46,9 @@ mod tests;
 /// hashed deterministically (ADR-0029) to the returned `MailboxId`.
 pub use aether_actor::Subname;
 
+pub use crate::mail::registry::effect::ActivationToken as HeldActivationToken;
 pub use eager::SpawnBuilder;
 pub use error::SpawnError;
-pub use outcome::{SpawnOutcome, SpawnReceipt};
+pub use outcome::{HeldActivationReady, SpawnOutcome, SpawnReceipt};
 pub use spawner::Spawner;
 pub use staged::HandlerSpawnBuilder;

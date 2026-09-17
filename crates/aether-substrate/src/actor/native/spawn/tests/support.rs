@@ -12,7 +12,7 @@ use aether_data::{ActorId, Kind};
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::actor::native::spawn::reservation::ChildReservationKey;
-use crate::actor::native::spawn::{SpawnOutcome, Spawner, Subname};
+use crate::actor::native::spawn::{HeldActivationReady, SpawnOutcome, Spawner, Subname};
 use crate::actor::native::{DispatchId, NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 use crate::actor::registry::ActorRegistry;
 use crate::chassis::error::BootError;
@@ -170,6 +170,18 @@ pub(super) fn finalized_probe(
     events: crossbeam_channel::Sender<ActivationEvent>,
     correlation: u64,
 ) -> (PreparedSpawnCommit, DispatchId, ChildReservationKey) {
+    finalized_probe_with_hold(spawner, parent, name, events, correlation, None, None)
+}
+
+pub(super) fn finalized_probe_with_hold(
+    spawner: &Arc<Spawner>,
+    parent: &Arc<NativeBinding>,
+    name: &str,
+    events: crossbeam_channel::Sender<ActivationEvent>,
+    correlation: u64,
+    held_ready: Option<crossbeam_channel::Sender<HeldActivationReady>>,
+    lifecycle_target: Option<MailboxId>,
+) -> (PreparedSpawnCommit, DispatchId, ChildReservationKey) {
     let key = ChildReservationKey::new(
         parent.self_mailbox(),
         ActorId::singleton(ActivationProbe::NAMESPACE),
@@ -177,7 +189,10 @@ pub(super) fn finalized_probe(
     );
     let parent_reservation = parent.reserve_child(key).expect("distinct staged parent key reservation wins");
     let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
-    let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
+    let config = lifecycle_target
+        .map(|target| ActivationConfig::with_lifecycle_target(events.clone(), target))
+        .unwrap_or_else(|| ActivationConfig::new(events));
+    let staged = spawner.build::<ActivationProbe>(identity, config, (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent.self_mailbox(), correlation);
     let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
         spawner.mailer().acquire_settlement_hold(causing_chain),
@@ -194,7 +209,11 @@ pub(super) fn finalized_probe(
         Arc::clone(spawner.mailer()),
     );
 
-    (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)
+    (
+        spawner.prepare_commit_with_hold(staged, Some(finalizer), EffectChain::Held(causing_chain), held_ready),
+        dispatch_id,
+        key,
+    )
 }
 
 pub(super) fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
