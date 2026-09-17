@@ -18,6 +18,16 @@ Reactors respond to what they observe. Lifecycle success and failure must
 therefore be observable events, not only native logs. External agents and
 humans may react to those events; automatic recovery policy is not required.
 
+Reactors are stateless by construction: predicates and computations over
+explicit inputs. Their generated actor hosts may retain delivery bookkeeping,
+and the views actor owns aggregation and pending-event buffers, but reactor
+functions cannot access that host state. Author-facing signatures expose no
+actor receiver, mutable host state, or host context. Prepared view data is an
+input value, not a capability to reach the underlying host. Keep this boundary
+in macro validation and generated calls, with compile-fail coverage for
+state/context-bearing reactor signatures. This is a framework API invariant,
+not a claim that arbitrary Rust or WASM code is mathematically pure.
+
 A component replacement is transactional. Success installs the successor.
 Rejection preserves the predecessor's usable state, mailbox, peers, and
 bindings. It must not leak partial lifecycle effects. Individual kernel drop
