@@ -6,6 +6,7 @@ use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 use std::slice;
+use std::str;
 use std::sync::Arc;
 
 use aether_bloomery_kinds::RecordedHeadMove;
@@ -395,7 +396,7 @@ fn decode_entry_kind(value: ValueRef<'_>) -> Result<KindId, JournalError> {
             bytes.try_into().map_err(|_| JournalError::CorruptEntryKind("kind blob is not eight bytes"))?,
         ))),
         ValueRef::Text(bytes) => Ok(storage_kind_id_from_name(
-            std::str::from_utf8(bytes).map_err(|_| JournalError::CorruptEntryKind("legacy kind name is not UTF-8"))?,
+            str::from_utf8(bytes).map_err(|_| JournalError::CorruptEntryKind("legacy kind name is not UTF-8"))?,
         )),
         _ => Err(JournalError::CorruptEntryKind("kind is neither a blob nor legacy text")),
     }
