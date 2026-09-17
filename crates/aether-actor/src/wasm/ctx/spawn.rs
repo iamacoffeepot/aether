@@ -10,7 +10,7 @@ use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
+use crate::wasm::{__validate_inline_child_alias, ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -224,7 +224,11 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
         <C as WasmActor>::State: ErasedWasmActor,
     {
         let (is_counter, full_subname) = resolve_subname(subname)?;
-        let alias = MailboxId(mail::spawn_inline_child_scoped(self.mailbox, is_counter, &full_subname));
+        let alias = __validate_inline_child_alias(MailboxId(mail::spawn_inline_child_scoped(
+            self.mailbox,
+            is_counter,
+            &full_subname,
+        )))?;
         // Re-decode an owned `C::Config` for the in-guest `init` from the
         // same bytes the detached path would have shipped — symmetric with
         // `spawn_child`'s encode-in-guest / decode-in-host round-trip, and
@@ -444,6 +448,7 @@ where
     // the erased child. For an un-split component `State = Self`.
     <A as WasmActor>::State: ErasedWasmActor,
 {
+    __validate_inline_child_alias(alias)?;
     let mut ctx = WasmInitCtx::__new(alias.0);
     // ADR-0156 §2: inline children resolve `Params` to the compiled default
     // (empty params for now), mirroring the `()`-config round-trip.

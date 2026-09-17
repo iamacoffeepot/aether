@@ -12,6 +12,7 @@ mod artifact;
 mod digest;
 mod entry;
 mod head;
+mod journal_mail;
 mod program;
 mod reactor_lifecycle;
 mod reactor_set;
@@ -22,6 +23,7 @@ pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifa
 pub use digest::Digest;
 pub use entry::{DecodeError, Entry, Seq};
 pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
+pub use journal_mail::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 pub use program::{
     Detail, DetailError, ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramHeadMoved,
     ProgramName, ProgramNameError, Transition,

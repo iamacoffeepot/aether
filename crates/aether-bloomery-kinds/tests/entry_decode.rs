@@ -52,7 +52,7 @@ struct CheckedName {
 fn encoded_entry<K: Storage + Clone>(value: &K) -> Entry {
     Entry {
         seq: Seq(1),
-        kind: K::NAME.to_owned(),
+        kind: K::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: K::encode_storage(&StorageData::from_value(value.clone())).expect("encode"),
@@ -66,14 +66,14 @@ fn decode_round_trips_a_supplied_entry() {
 }
 
 #[test]
-fn decode_refuses_a_different_kind_name() {
+fn decode_refuses_a_different_kind_id() {
     let entry = encoded_entry(&Note { text: "hello".to_owned() });
     let error = entry.decode::<Other>().expect_err("other kind must be refused");
-    assert_eq!(error.to_string(), "entry kind \"test.kinds.note\" is not \"test.kinds.other\"");
+    assert_eq!(error.to_string(), format!("entry kind {:?} is not {:?}", Note::ID, Other::ID));
     match error {
         DecodeError::KindMismatch { expected, actual } => {
-            assert_eq!(expected, "test.kinds.other");
-            assert_eq!(actual, "test.kinds.note");
+            assert_eq!(expected, Other::ID);
+            assert_eq!(actual, Note::ID);
         }
         DecodeError::SpecializationMismatch { expected, actual } => {
             panic!("expected KindMismatch, got SpecializationMismatch {{ expected: {expected}, actual: {actual} }}")
@@ -84,8 +84,7 @@ fn decode_refuses_a_different_kind_name() {
 
 #[test]
 fn decode_refuses_a_malformed_payload() {
-    let entry =
-        Entry { seq: Seq(1), kind: Note::NAME.to_owned(), cause: None, recorded_at_millis: 0, bytes: vec![0xff, 0x00] };
+    let entry = Entry { seq: Seq(1), kind: Note::ID, cause: None, recorded_at_millis: 0, bytes: vec![0xff, 0x00] };
     let error = entry.decode::<Note>().expect_err("malformed payload must fail");
     match &error {
         DecodeError::Storage(_) => {
@@ -135,13 +134,8 @@ fn decode_skips_a_well_formed_head_moved_specialization() {
 
 #[test]
 fn decode_refuses_a_malformed_matching_head_moved() {
-    let entry = Entry {
-        seq: Seq(1),
-        kind: HeadMoved::<Tree>::NAME.to_owned(),
-        cause: None,
-        recorded_at_millis: 0,
-        bytes: vec![0xff, 0x00],
-    };
+    let entry =
+        Entry { seq: Seq(1), kind: HeadMoved::<Tree>::ID, cause: None, recorded_at_millis: 0, bytes: vec![0xff, 0x00] };
     let error = entry.decode::<HeadMoved<Tree>>().expect_err("malformed payload must fail");
     assert!(!error.is_unmatched(), "{error}");
     match error {

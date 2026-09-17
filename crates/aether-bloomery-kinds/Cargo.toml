@@ -8,6 +8,7 @@ description = "The shared vocabulary of bloomery kinds: digests, typed citations
 
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 sha2 = { workspace = true }
 unicode-normalization = { workspace = true }
 

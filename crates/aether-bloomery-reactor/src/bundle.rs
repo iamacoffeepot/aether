@@ -9,7 +9,9 @@ use alloc::collections::BTreeSet;
 use alloc::string::String;
 use alloc::vec::Vec;
 
+pub use aether_bloomery_kinds::JournalEntry;
 use aether_bloomery_kinds::{Entry, Seq};
+use aether_data::KindId;
 
 use crate::error::PrepareError;
 use crate::evaluate::{ArmVisitor, Output, Reactor};
@@ -29,49 +31,6 @@ pub struct ClusterConfig {
     pub output: String,
     /// Runtime-name address for preparation and evaluation acknowledgments.
     pub ack: String,
-}
-
-/// Portable journal envelope carried over mail. `bytes` are storage-codec
-/// payload bytes, never positional [`aether_data::Kind::encode_into_bytes`].
-#[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema, serde::Serialize, serde::Deserialize)]
-pub struct JournalEntry {
-    /// Dense sequence assigned by the store.
-    pub seq: u64,
-    /// Stored kind name.
-    pub kind: String,
-    /// Optional causing sequence.
-    pub cause: Option<u64>,
-    /// Wall clock at insert; folds ignore it.
-    pub recorded_at_millis: u64,
-    /// Verbatim storage-codec payload.
-    #[serde(with = "aether_data::bytes")]
-    pub bytes: Vec<u8>,
-}
-
-impl JournalEntry {
-    /// Copy one retained [`Entry`] into the mail envelope.
-    #[must_use]
-    pub fn from_entry(entry: &Entry) -> Self {
-        Self {
-            seq: entry.seq.0,
-            kind: entry.kind.clone(),
-            cause: entry.cause.map(|seq| seq.0),
-            recorded_at_millis: entry.recorded_at_millis,
-            bytes: entry.bytes.clone(),
-        }
-    }
-
-    /// Rebuild the portable [`Entry`]. Payload bytes stay storage-encoded.
-    #[must_use]
-    pub fn to_entry(&self) -> Entry {
-        Entry {
-            seq: Seq(self.seq),
-            kind: self.kind.clone(),
-            cause: self.cause.map(Seq),
-            recorded_at_millis: self.recorded_at_millis,
-            bytes: self.bytes.clone(),
-        }
-    }
 }
 
 /// One live journal event. The views owner folds this entry through its
@@ -346,8 +305,8 @@ pub struct PreparedPrefix {
     pub stream: String,
     /// Trigger sequence.
     pub seq: u64,
-    /// Stored trigger kind name.
-    pub kind: String,
+    /// Stored trigger kind id.
+    pub kind: KindId,
     /// Optional causing sequence.
     pub cause: Option<u64>,
     /// Wall clock at insert.
@@ -366,7 +325,7 @@ impl PreparedPrefix {
         Self {
             stream: stream.into(),
             seq: entry.seq.0,
-            kind: entry.kind.clone(),
+            kind: entry.kind,
             cause: entry.cause.map(|seq| seq.0),
             recorded_at_millis: entry.recorded_at_millis,
             bytes: entry.bytes.clone(),
@@ -379,7 +338,7 @@ impl PreparedPrefix {
     pub fn to_entry(&self) -> Entry {
         Entry {
             seq: Seq(self.seq),
-            kind: self.kind.clone(),
+            kind: self.kind,
             cause: self.cause.map(Seq),
             recorded_at_millis: self.recorded_at_millis,
             bytes: self.bytes.clone(),

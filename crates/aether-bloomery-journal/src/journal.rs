@@ -6,11 +6,13 @@ use std::fmt;
 use std::ops::Range;
 use std::path::Path;
 use std::slice;
+use std::str;
 use std::sync::Arc;
 
 use aether_bloomery_kinds::RecordedHeadMove;
 use aether_data::wire::WireDecode;
-use aether_data::{Kind, KindId, Storage, StorageError};
+use aether_data::{Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
+use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
 use crate::artifact::{ARTIFACTS_DDL, split_artifact};
@@ -25,7 +27,7 @@ type LoadedArtifact = Option<(KindId, Vec<u8>)>;
 const ENTRIES_DDL: &str = "
 CREATE TABLE IF NOT EXISTS entries (
     seq INTEGER PRIMARY KEY NOT NULL,
-    kind TEXT NOT NULL CHECK (length(kind) > 0 AND length(kind) <= 256),
+    kind BLOB NOT NULL CHECK (typeof(kind) = 'blob' AND length(kind) = 8),
     cause INTEGER,
     recorded_at_millis INTEGER NOT NULL,
     bytes BLOB NOT NULL
@@ -67,9 +69,11 @@ impl fmt::Debug for JournalIdentity {
 }
 
 /// Append-only log of typed events and content-addressed artifacts.
+///
+/// The injected clock is `Send` so a journal can be owned by a native actor.
 pub struct Journal {
     pub(crate) conn: Connection,
-    pub(crate) clock: Box<dyn Clock>,
+    pub(crate) clock: Box<dyn Clock + Send>,
     identity: JournalIdentity,
 }
 
@@ -88,7 +92,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`JournalError`] when `SQLite` cannot open the path or apply DDL.
-    pub fn open_with_clock(path: &Path, clock: Box<dyn Clock>) -> Result<Self, JournalError> {
+    pub fn open_with_clock(path: &Path, clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         let conn = Connection::open(path)?;
         conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
@@ -100,7 +104,7 @@ impl Journal {
     /// # Errors
     ///
     /// Returns [`JournalError`] when `SQLite` cannot create the connection or schema.
-    pub fn open_in_memory_with_clock(clock: Box<dyn Clock>) -> Result<Self, JournalError> {
+    pub fn open_in_memory_with_clock(clock: Box<dyn Clock + Send>) -> Result<Self, JournalError> {
         let conn = Connection::open_in_memory()?;
         conn.execute_batch("PRAGMA synchronous = FULL;")?;
         prepare_schema(&conn)?;
@@ -130,7 +134,7 @@ impl Journal {
     /// One `BEGIN IMMEDIATE` transaction: a stale fence returns
     /// [`AppendError::HeadMoved`] and writes nothing. Staged blobs are
     /// inserted, every citation is verified against the expected prefix,
-    /// each draft named `bloomery.head_moved` is decoded as
+    /// each draft with the `bloomery.head_moved` id is decoded as
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
     /// verified against the recorded head kind, then events are inserted.
     /// Any refusal rolls the whole transaction back. An empty
@@ -144,7 +148,7 @@ impl Journal {
     /// names a digest that is neither staged nor stored.
     /// [`AppendError::PrefixMismatch`] when the cited or destination blob's
     /// prefix is not the expected kind.
-    /// [`AppendError::InvalidHeadMoved`] when a draft named
+    /// [`AppendError::InvalidHeadMoved`] when a draft identified as
     /// `bloomery.head_moved` does not decode as the canonical event.
     /// [`AppendError::Journal`] wrapping [`JournalError::CorruptCitation`]
     /// when a citation's identity bytes are not 32 bytes.
@@ -186,7 +190,7 @@ impl Journal {
         let rows = stmt.query_map(params![since_i64, limit_i64], |row| {
             Ok((
                 row.get::<_, i64>(0)?,
-                row.get::<_, String>(1)?,
+                decode_entry_kind(row.get_ref(1)?),
                 row.get::<_, Option<i64>>(2)?,
                 row.get::<_, i64>(3)?,
                 row.get::<_, Vec<u8>>(4)?,
@@ -197,7 +201,7 @@ impl Journal {
             let (seq, kind, cause, recorded_at_millis, bytes) = row?;
             entries.push(Entry {
                 seq: Seq(from_sqlite_i64(seq)?),
-                kind,
+                kind: kind?,
                 cause: cause.map(from_sqlite_i64).transpose()?.map(Seq),
                 recorded_at_millis: from_sqlite_i64(recorded_at_millis)?,
                 bytes,
@@ -206,13 +210,13 @@ impl Journal {
         Ok(entries)
     }
 
-    /// Decode `entry` as `K`. Refuses when `entry.kind` is not `K::NAME`.
+    /// Decode `entry` as `K`. Refuses when `entry.kind` is not `K::ID`.
     ///
     /// Forwards to [`Entry::decode`].
     ///
     /// # Errors
     ///
-    /// [`DecodeError::KindMismatch`] when the stored name is not `K::NAME`.
+    /// [`DecodeError::KindMismatch`] when the stored id is not `K::ID`.
     /// [`DecodeError::SpecializationMismatch`] when the payload is a different
     /// typed specialization of that stored kind. [`DecodeError::Storage`] when
     /// TLV decode fails.
@@ -308,7 +312,7 @@ fn insert_events(
             let seq = first.saturating_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?);
             let seq_i64 = sqlite_i64(seq)?;
             let cause = draft.cause.map(|c| sqlite_i64(c.0)).transpose()?;
-            stmt.execute(params![seq_i64, draft.kind, cause, recorded_at, draft.bytes])?;
+            stmt.execute(params![seq_i64, draft.kind.0.to_le_bytes().as_slice(), cause, recorded_at, draft.bytes])?;
         }
     }
     let last_exclusive = first.saturating_add(u64::try_from(events.len()).map_err(|_| JournalError::IntegerRange)?);
@@ -329,7 +333,7 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
     }
 
     for draft in &batch.events {
-        if draft.kind != RecordedHeadMove::NAME {
+        if draft.kind != RecordedHeadMove::ID {
             continue;
         }
         let event = RecordedHeadMove::decode_storage(&draft.bytes)
@@ -388,6 +392,18 @@ fn from_sqlite_i64(value: i64) -> Result<u64, JournalError> {
     u64::try_from(value).map_err(|_| JournalError::IntegerRange)
 }
 
+fn decode_entry_kind(value: ValueRef<'_>) -> Result<KindId, JournalError> {
+    match value {
+        ValueRef::Blob(bytes) => Ok(KindId(u64::from_le_bytes(
+            bytes.try_into().map_err(|_| JournalError::CorruptEntryKind("kind blob is not eight bytes"))?,
+        ))),
+        ValueRef::Text(bytes) => Ok(storage_kind_id_from_name(
+            str::from_utf8(bytes).map_err(|_| JournalError::CorruptEntryKind("legacy kind name is not UTF-8"))?,
+        )),
+        _ => Err(JournalError::CorruptEntryKind("kind is neither a blob nor legacy text")),
+    }
+}
+
 /// Store or schema failure.
 #[derive(Debug)]
 pub enum JournalError {
@@ -399,6 +415,8 @@ pub enum JournalError {
     CorruptArtifactDigest,
     /// A stored blob is shorter than the eight-byte kind prefix.
     CorruptArtifact,
+    /// A stored journal entry has an invalid kind value.
+    CorruptEntryKind(&'static str),
     /// A citation's identity bytes are not 32 bytes. The journal does not
     /// pad or truncate.
     CorruptCitation,
@@ -411,6 +429,7 @@ impl fmt::Display for JournalError {
             Self::IntegerRange => write!(f, "integer does not fit in sqlite INTEGER"),
             Self::CorruptArtifactDigest => write!(f, "stored artifact digest is not 32 bytes"),
             Self::CorruptArtifact => write!(f, "stored artifact is shorter than the eight-byte kind prefix"),
+            Self::CorruptEntryKind(reason) => write!(f, "stored entry kind is corrupt: {reason}"),
             Self::CorruptCitation => write!(f, "citation identity is not 32 bytes"),
         }
     }
@@ -420,7 +439,11 @@ impl Error for JournalError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Backend(error) => Some(error),
-            Self::IntegerRange | Self::CorruptArtifactDigest | Self::CorruptArtifact | Self::CorruptCitation => None,
+            Self::IntegerRange
+            | Self::CorruptArtifactDigest
+            | Self::CorruptArtifact
+            | Self::CorruptEntryKind(_)
+            | Self::CorruptCitation => None,
         }
     }
 }
