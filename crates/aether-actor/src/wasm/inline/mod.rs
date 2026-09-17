@@ -55,6 +55,7 @@ use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
 
 mod bundle;
 pub mod compose;
+pub mod factory;
 
 /// One inline child's slot. `actor` is `None` while the child is taken
 /// out for dispatch (the slot-shaped take / reinsert) and `Some` at rest.
@@ -70,7 +71,8 @@ pub mod compose;
 /// by type.
 struct InlineSlot {
     /// `mailbox_id_from_name(A::NAMESPACE)` — the actor-type tag the
-    /// rehydrate reconstruct matches against the module's exported types.
+    /// rehydrate reconstruct resolves against public exports or linked
+    /// private-actor factories.
     type_tag: u64,
     /// The resolved discriminator the alias id was folded from (a counter
     /// child's monotonic value is already resolved here, not the
@@ -176,7 +178,7 @@ pub(crate) enum ChainMode {
 /// [`WasmCtx::spawn_inline_child_by_tag`] call routes through (issue 2692).
 /// A plain `fn` pointer, not a boxed closure: the resolver is a
 /// non-capturing tag-match the macro emits over the module's exported type
-/// set — the same set [`crate::export!`]'s `@reconstruct_child` arm walks —
+/// set; private linked reconstruction factories are not spawn-by-tag exports.
 /// so it coerces cleanly and stores in a `Cell`. Given the module's
 /// registry, the spawning actor's real folded id (`parent`), a runtime
 /// [`ActorTypeTag`], the resolved `(is_counter, subname)` pair, and the

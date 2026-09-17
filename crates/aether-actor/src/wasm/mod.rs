@@ -734,7 +734,7 @@ macro_rules! __export_continue {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __export_internal {
-    ($component:ty $(; @reconstruct $($__aether_recon:ty),+)?) => {
+    ($component:ty) => {
         static __AETHER_COMPONENT: $crate::Slot<$component> = $crate::Slot::new();
 
         // ADR-0114: the component's own inline-child registry — one per
@@ -1140,9 +1140,7 @@ macro_rules! __export_internal {
             // parent, then reconstruct each inline child by type. For a
             // childless component the bundle decomposes to the raw parent
             // blob, so the parent sees the identical `PriorState` it would
-            // have before. The reconstructable set is `$component` plus any
-            // hidden inline factories passed as `@reconstruct` (generated
-            // reactor peers). An unknown tag is logged + skipped.
+            // have before. An unknown tag is logged + skipped.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {
@@ -1175,22 +1173,34 @@ macro_rules! __export_internal {
                     );
                 },
                 |registry, parent, child| {
-                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $component $(, $($__aether_recon),+)?)
+                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $component)
                 },
             );
             if restored.is_err() { 1 } else { 0 }
         }
     };
 
-    // Reconstruct one inline child by matching its persisted type tag
-    // against the module's exported type set (ADR-0114 §5). For each
-    // candidate type whose `hash(NAMESPACE)` matches, validate the
-    // replacement module's current placement facts against the effective
-    // parent, then re-`init` it and restore its state through the
-    // parent-aware compose helper. An unmatched or rejected child returns
-    // `false` so the caller logs + skips it.
+    // Public exports preserve their direct reconstruction path. Private
+    // actors use linked `#[actor]` factories after the public candidates
+    // fail to match. A rejected child returns `false` for the caller to log.
     (@reconstruct_child $registry:ident, $parent:ident, $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
+        let mut __aether_matches = 0usize;
+        $(
+            if $child.type_tag
+                == $crate::__macro_internals::mailbox_id_from_name(
+                    <$candidate as $crate::Addressable>::NAMESPACE,
+                )
+                .0
+            {
+                __aether_matches += 1;
+            }
+        )+
+        if __aether_matches == 0 {
+            $crate::wasm::inline::factory::reconstruct_registered_child($registry, $parent, $child)
+        } else if __aether_matches != 1 {
+            false
+        } else {
         $(
             if $child.type_tag
                 == $crate::__macro_internals::mailbox_id_from_name(
@@ -1213,13 +1223,13 @@ macro_rules! __export_internal {
             }
         )+
         __aether_reconstructed
+        }
     }};
 
     // Resolve one inline child to *spawn* by matching a runtime actor-type
-    // tag against the module's public exported type set (issue 2692). Hidden
-    // reconstruct-only factories are not independently spawnable here;
-    // `@reconstruct_child` may walk a larger candidate list. Emits a
-    // non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
+    // tag against the module's public exported type set (issue 2692). Linked
+    // private reconstruction factories are not independently spawnable here.
+    // Emits a non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
     // module's init shims install it on `__AETHER_INLINE`. The matched branch
     // allocates the child's alias via the host `spawn_inline_child` host fn
     // THEN runs the shared decode + init core; an unmatched tag returns
@@ -1306,23 +1316,23 @@ macro_rules! __export_multi_internal {
     // the host constructs the singleton through the same `init_typed_p32` path
     // as any named export. The two marker dimensions (boot present/absent,
     // default present/absent) compose rather than exploding the shared body.
-    (@boot $boot:ty ; @default $default:ty ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
+    (@boot $boot:ty ; @default $default:ty ; @all $($component:ty),+) => {
         $crate::__export_multi_internal!(@boot_section $boot);
-        $crate::__export_multi_internal!(@default $default ; @all $($component),+ $(; @reconstruct $($recon),+)?);
+        $crate::__export_multi_internal!(@default $default ; @all $($component),+);
     };
-    (@boot $boot:ty ; @no_default ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
+    (@boot $boot:ty ; @no_default ; @all $($component:ty),+) => {
         $crate::__export_multi_internal!(@boot_section $boot);
-        $crate::__export_multi_internal!(@no_default ; @all $($component),+ $(; @reconstruct $($recon),+)?);
+        $crate::__export_multi_internal!(@no_default ; @all $($component),+);
     };
     // `@no_boot` wrapper — no boot section, a straight re-dispatch. Its
     // presence makes the four boot × default combinations explicit at the
     // `export!` call site instead of leaving the bootless forms to invoke
     // `@default` / `@no_default` directly.
-    (@no_boot ; @default $default:ty ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
-        $crate::__export_multi_internal!(@default $default ; @all $($component),+ $(; @reconstruct $($recon),+)?);
+    (@no_boot ; @default $default:ty ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@default $default ; @all $($component),+);
     };
-    (@no_boot ; @no_default ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
-        $crate::__export_multi_internal!(@no_default ; @all $($component),+ $(; @reconstruct $($recon),+)?);
+    (@no_boot ; @no_default ; @all $($component:ty),+) => {
+        $crate::__export_multi_internal!(@no_default ; @all $($component),+);
     };
     // The `aether.boot` custom section (ADR-0147) — a wasm-target-gated static
     // pinning `$boot`'s `Addressable::NAMESPACE` bytes, byte-for-byte the twin
@@ -1346,7 +1356,7 @@ macro_rules! __export_multi_internal {
     // ADR-0138: multi-actor module WITH a default. Emits the
     // `aether.namespace` section (naming `$default`) and parent-aware plus
     // compatibility init exports that construct `$default`, then the shared body.
-    (@default $default:ty ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
+    (@default $default:ty ; @all $($component:ty),+) => {
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(link_section = "aether.namespace")]
         static __AETHER_NAMESPACE_SECTION: [u8; <$default as $crate::Addressable>::NAMESPACE.len()] = {
@@ -1401,7 +1411,7 @@ macro_rules! __export_multi_internal {
             unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
         }
 
-        $crate::__export_multi_internal!(@shared_body $($component),+ $(; @reconstruct $($recon),+)?);
+        $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
     // ADR-0138: multi-actor module WITHOUT a default. Omits the
@@ -1410,7 +1420,7 @@ macro_rules! __export_multi_internal {
     // (the guest-side backstop — the host rejects a bare, defaultless load
     // before it ever reaches this shim). A named load still resolves
     // through `init_typed_p32` in the shared body.
-    (@no_default ; @all $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
+    (@no_default ; @all $($component:ty),+) => {
         // The section-level no-default marker (ADR-0138): a single version
         // byte in `aether.no_default`, wasm-target-gated exactly like the
         // `aether.namespace` section the default form emits. Its presence is
@@ -1448,13 +1458,13 @@ macro_rules! __export_multi_internal {
             unsafe { init_with_parent(mailbox_id, 0, config_ptr, config_len) }
         }
 
-        $crate::__export_multi_internal!(@shared_body $($component),+ $(; @reconstruct $($recon),+)?);
+        $crate::__export_multi_internal!(@shared_body $($component),+);
     };
 
     // ADR-0138: the body shared by `@default` and `@no_default` — everything
     // except the `aether.namespace` / `aether.no_default` sections and the
     // default-init shims, which the wrapper rules emit.
-    (@shared_body $($component:ty),+ $(; @reconstruct $($recon:ty),+)?) => {
+    (@shared_body $($component:ty),+) => {
         static __AETHER_MULTI: $crate::Slot<
             $crate::__macro_internals::Box<dyn $crate::ErasedWasmActor>
         > = $crate::Slot::new();
@@ -1819,8 +1829,8 @@ macro_rules! __export_multi_internal {
                 }
             };
             // ADR-0114 §5: decompose, restore the boxed parent, then
-            // reconstruct each inline child by matching its type tag against
-            // public exports plus any hidden `@reconstruct` factories.
+            // reconstruct each inline child by its saved actor tag. Public
+            // exports match directly; private actors use linked factories.
             // Childless ⇒ the boxed parent sees the identical `PriorState`.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
@@ -1851,7 +1861,7 @@ macro_rules! __export_multi_internal {
                     instance.erased_on_rehydrate(&mut ctx, parent_prior);
                 },
                 |registry, parent, child| {
-                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $($component),+ $(, $($recon),+)?)
+                    $crate::__export_internal!(@reconstruct_child registry, parent, child ; $($component),+)
                 },
             );
             if restored.is_err() { 1 } else { 0 }

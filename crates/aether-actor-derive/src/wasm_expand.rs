@@ -545,6 +545,22 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     };
 
     let export_desc = emit_actor_export_desc(self_ty, namespace_expr);
+    // A linked static needs a concrete type. Generic actor implementations
+    // have no monomorphization to register until a caller selects one.
+    let reconstruction_factory = if generics.params.is_empty() {
+        quote! {
+            #[cfg(target_family = "wasm")]
+            ::aether_actor::__macro_internals::inventory::submit! {
+                ::aether_actor::wasm::inline::factory::ReconstructionFactory {
+                    namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    placement: <#self_ty>::__AETHER_PLACEMENT,
+                    reconstruct: ::aether_actor::wasm::inline::compose::reconstruct_one_child_at_parent::<#self_ty>,
+                }
+            }
+        }
+    } else {
+        quote! {}
+    };
 
     Ok(quote! {
         #actor_impl
@@ -664,6 +680,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #kind_retention_statics
 
         #export_desc
+        #reconstruction_factory
     })
 }
 
