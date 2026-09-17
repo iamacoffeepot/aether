@@ -50,7 +50,7 @@ impl JournalEntry {
 }
 
 /// Read entries after `after`, in stored sequence order.
-#[aether_data::kind(name = "aether.bloomery.journal.read_events", eq)]
+#[aether_data::kind(name = "aether.bloomery.journal.read_events", copy, eq)]
 pub struct ReadEvents {
     /// Exclusive sequence boundary; zero begins at the first entry.
     pub after: u64,
