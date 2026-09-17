@@ -4,7 +4,7 @@
 //! view folds once, catches up from its trusted cursor, and stays poisoned
 //! after a failed fold. [`prepare()`] is a one-shot over a fresh owner.
 //!
-//! Authors write `#[reactor] impl Reactor for Name` with `const NAME` and
+//! Authors write `#[reactor] impl Reactor for Name` with `const NAMESPACE` and
 //! `#[rule]` methods. The first parameter after `&self` is a typed stored-event
 //! trigger; later parameters are direct published views or named [`Guard`]s.
 //! Rust infers each parameter's role from the [`Arg`] impls — the macro emits
@@ -13,17 +13,41 @@
 //! not suspended work. Each invoked arm returns exactly one [`Output`].
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
-//! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types to a
-//! later actor-bundle generator. Evaluation encodes outputs through the mail
-//! codec and does not execute or append them.
+//! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
+//! `aether_actor::export!(…, generators = [ReactorBundle])` collects
+//! framework-owned `actors` envelopes and an `exports` selection, selects the
+//! bloomery reactor extension on exported paths, keeps ordinary actors in the
+//! export list, and generates one views coordinator ([`CLUSTER_NAMESPACE`])
+//! plus inline reactor peers. Reactor envelopes stay on their original types.
+//! The
+//! coordinator folds shared views once per cluster, mails an owned prepared
+//! prefix to each peer, and each peer resolves guards locally and sends typed
+//! outputs to a configured external mailbox. Evaluation encodes outputs
+//! through the mail codec and does not execute or append them.
 //!
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
-//! lists, view visitors, and mail encoding are implementation details:
+//! lists, view visitors, actor wrappers, and mail encoding are implementation
+//! details. Authored view and guard types become one views-owner fold per
+//! loaded cluster; peers receive [`PreparedPrefix`] mail carrying every
+//! inferred [`BundledView`] snapshot and resolve guards against that prefix:
+//!
+//! ```ignore
+//! aether_actor::export!(
+//!     default = Probe,
+//!     SourcePublisher,
+//!     SourceWitness,
+//!     ReactorOutputSink,
+//!     generators = [aether_bloomery_reactor::ReactorBundle],
+//! );
+//! ```
+//!
+//! Load the coordinator with [`CLUSTER_NAMESPACE`]. Reactor peers are inline
+//! children and are not module exports.
 //!
 //! ```text
 //! #[reactor]
 //! impl Reactor for SourcePublisher {
-//!     const NAME: &'static str = "source.publisher";
+//!     const NAMESPACE: &'static str = "test.bloomery.source.publisher";
 //!
 //!     #[rule]
 //!     fn publish(
@@ -65,9 +89,11 @@
 extern crate alloc;
 extern crate self as aether_bloomery_reactor;
 
+mod bundle;
 mod direct;
 mod error;
 mod evaluate;
+mod export;
 mod guard;
 mod owner;
 mod params;
@@ -75,16 +101,23 @@ mod prepare;
 mod trigger;
 mod views;
 
+#[doc(hidden)]
+pub use aether_bloomery_reactor_derive::__reactor_export_generate;
 pub use aether_bloomery_reactor_derive::{reactor, rule};
+pub use bundle::{
+    ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PreparedPrefix, PublishedView, PushEntries,
+    PushResult, extend_snapshots, snapshot_reactor, warm_reactor,
+};
 pub use direct::Direct;
 pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
+pub use export::CLUSTER_NAMESPACE;
 pub use guard::Guard;
 pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};
 pub use trigger::Trigger;
-pub use views::{And, NoViews, ViewSet};
+pub use views::{And, BundledView, NoViews, PublishSet, ViewSet};
 
 #[doc(hidden)]
 pub use evaluate::__macro_internals;

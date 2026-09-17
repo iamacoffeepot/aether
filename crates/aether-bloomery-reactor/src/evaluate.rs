@@ -1,7 +1,7 @@
 //! Pure evaluation of authored reactor arms against a retained [`Owner`].
 //!
-//! [`Reactor::evaluate`] is the in-process preparation/evaluation boundary a
-//! later actor-bundle generator can wrap. It does not execute intents, append
+//! [`Reactor::evaluate`] is the in-process preparation/evaluation boundary the
+//! `ReactorBundle` export generator wraps. It does not execute intents, append
 //! journal entries, or take an engine context. [`Output`] is the mail-capable
 //! marker: storage-derived kinds do not implement it, so evaluation cannot
 //! call their panicking positional codec.
@@ -14,6 +14,7 @@ use crate::error::PrepareError;
 use crate::owner::Owner;
 use crate::params::Params;
 use crate::trigger::Trigger;
+use crate::views::PublishSet;
 
 /// Marker for a mail-capable arm output.
 ///
@@ -64,24 +65,25 @@ impl Intent {
 /// Walks each authored rule's trigger, inferred parameter list, and output.
 ///
 /// The visitor, not the signature macro, reads associated types such as
-/// [`Params::Views`]. A later bundle generator uses this to collect shared
-/// views without guessing from type names.
+/// [`Params::Views`]. `ReactorBundle` uses this to collect shared views without
+/// guessing from type names.
 pub trait ArmVisitor {
     /// Observe one rule.
     fn visit<T, L, O>(&mut self, name: &'static str)
     where
         T: Trigger,
         L: Params<T>,
+        L::Views: PublishSet,
         O: Output;
 }
 
 /// Authored reactor: named rules, inferred dependencies, pure evaluation.
 ///
-/// `#[reactor]` generates this impl. Authors write `const NAME` and `#[rule]`
+/// `#[reactor]` generates this impl. Authors write `const NAMESPACE` and `#[rule]`
 /// methods; they do not implement these methods by hand.
 pub trait Reactor: Sized + 'static {
-    /// Stable authoring name for this reactor.
-    const NAME: &'static str;
+    /// Stable mailbox namespace for the generated inline peer of this reactor.
+    const NAMESPACE: &'static str;
 
     /// Describe each rule's trigger, parameter list, and output type.
     fn visit_arms(visitor: &mut impl ArmVisitor);
@@ -113,5 +115,6 @@ impl Owner {
 
 #[doc(hidden)]
 pub mod __macro_internals {
+    pub use alloc::collections::BTreeSet;
     pub use alloc::vec::Vec;
 }

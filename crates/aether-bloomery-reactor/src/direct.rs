@@ -6,10 +6,10 @@ use crate::views::ViewSet;
 
 /// A parameter that is itself a folded view, not a named guard.
 ///
-/// Implemented for [`Publish`] views. Signature authoring uses the view type
+/// Implemented for [`Publish`] views that are [`Send`]. Signature authoring uses the view type
 /// directly (`heads: Heads`) without a wrapper. Absence of a direct view is
 /// [`crate::Nil`] / [`crate::NoViews`] on the inferred list, not `()`.
-pub trait Direct: Publish {
+pub trait Direct: Publish + Send {
     /// Views this parameter needs. For a published view this is `Self`.
     type Views: ViewSet;
 
@@ -17,7 +17,7 @@ pub trait Direct: Publish {
     fn from_views(views: <Self::Views as ViewSet>::Refs<'_>) -> Self;
 }
 
-impl<V: Publish> Direct for V {
+impl<V: Publish + Send> Direct for V {
     type Views = V;
 
     fn from_views(view: &V) -> Self {

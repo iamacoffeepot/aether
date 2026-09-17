@@ -42,7 +42,7 @@ struct Publisher;
 
 #[reactor]
 impl Reactor for Publisher {
-    const NAME: &'static str = "shared.publisher";
+    const NAMESPACE: &'static str = "shared.publisher";
 
     #[rule]
     fn from_heads(&self, _change: HeadMoved<Tree>, _heads: Heads) -> PublicationProposal {
@@ -70,5 +70,5 @@ impl Reactor for Publisher {
 }
 
 fn main() {
-    let _ = Publisher::NAME;
+    let _ = Publisher::NAMESPACE;
 }

@@ -2,9 +2,10 @@
 //!
 //! `#[reactor]` sits on `impl Reactor for Name` and consumes `#[rule]` methods.
 //! It emits inherent rule methods plus a `Reactor` impl whose `evaluate` /
-//! `visit_arms` hooks a later actor-bundle generator can wrap. Parameter roles
-//! are inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify
-//! view versus guard by type name.
+//! `visit_arms` plus a framework descriptor extension so `ReactorBundle` can
+//! wrap authored reactors without a second export macro. Parameter roles are
+//! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify view
+//! versus guard by type name.
 
 #![forbid(unsafe_code)]
 
@@ -14,15 +15,17 @@ use quote::quote_spanned;
 use syn::spanned::Spanned;
 use syn::{ItemImpl, parse_macro_input};
 
+mod bundle;
 mod check;
 mod expand;
+mod export_desc;
 mod parse;
 mod pattern;
 
 /// Outer attribute on `impl Reactor for Name`. Consumes `#[rule]` methods
 /// and generates preparation/evaluation plus associated-type visitors.
 ///
-/// Takes no arguments. The impl must declare `const NAME` and at least one
+/// Takes no arguments. The impl must declare `const NAMESPACE` and at least one
 /// `#[rule]`. Each rule takes `&self`, a typed trigger, then owned view or
 /// guard parameters, and returns exactly one mail-capable output.
 #[proc_macro_attribute]
@@ -35,6 +38,14 @@ pub fn reactor(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(def) => expand::expand(def).into(),
         Err(error) => error.to_compile_error().into(),
     }
+}
+
+/// Hidden `ReactorBundle` export generator. Invoked by
+/// [`aether_bloomery_reactor::ReactorBundle`], not by authors.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __reactor_export_generate(input: TokenStream) -> TokenStream {
+    bundle::generate(input)
 }
 
 /// Marker consumed by [`macro@reactor`]. Reaching this expansion means the

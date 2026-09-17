@@ -6,17 +6,19 @@ use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
 
 use aether_bloomery_kinds::{Entry, Seq};
+use aether_bloomery_view::View;
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
 use crate::trigger::Trigger;
-use crate::views::{ErasedView, ViewCtor, ViewSet};
+use crate::views::{ErasedView, ViewCtor, ViewSet, box_view};
 
 /// Portable owner of inferred view instances.
 ///
 /// Callers push contiguous journal entries. Views are constructed on first
 /// use, catch up from their trusted cursor, and stay poisoned after a failed
-/// fold. This type does not own a journal.
+/// fold. Retained views must be `Send` so this owner can be held by an actor.
+/// This type does not own a journal.
 pub struct Owner {
     prefix: Vec<Entry>,
     slots: BTreeMap<TypeId, CachedView>,
@@ -63,6 +65,60 @@ impl Owner {
             expected = Seq(expected.0.checked_add(1).ok_or(PrepareError::Overflow)?);
         }
         self.prefix.extend_from_slice(entries);
+        Ok(())
+    }
+
+    /// One prepared event whose views are installed separately rather than folded
+    /// from this prefix. Used by reactor peers that receive owned snapshots.
+    #[must_use]
+    pub fn from_prepared(entry: Entry) -> Self {
+        Self { prefix: alloc::vec![entry], slots: BTreeMap::new() }
+    }
+
+    /// Fold `S` to the current cursor, constructing missing views from empty.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError`] when a view cannot be constructed or advanced.
+    pub fn warm<S: ViewSet>(&mut self) -> Result<(), PrepareError> {
+        self.catch_up::<S>()
+    }
+
+    /// Borrow a constructed, unpoisoned view.
+    #[must_use]
+    pub fn get<V: 'static>(&self) -> Option<&V> {
+        self.slot_ref(TypeId::of::<V>())?.downcast_ref()
+    }
+
+    /// Install an already-folded view at the current cursor.
+    ///
+    /// # Errors
+    ///
+    /// [`PrepareError::CursorContract`] when `view` is not at this prefix.
+    pub fn install_published<V: View + Send + 'static>(&mut self, view: V) -> Result<(), PrepareError> {
+        self.install_erased(TypeId::of::<V>(), type_name::<V>(), box_view(view))
+    }
+
+    pub(crate) fn install_erased(
+        &mut self,
+        id: TypeId,
+        name: &'static str,
+        boxed: Box<dyn ErasedView>,
+    ) -> Result<(), PrepareError> {
+        let target = self.cursor();
+        let actual = boxed.cursor();
+        if actual != target {
+            return Err(PrepareError::CursorContract {
+                view: name,
+                last_trusted_cursor: actual,
+                expected: target,
+                actual,
+            });
+        }
+        self.slots.insert(
+            id,
+            CachedView { poisoned: false, last_trusted_cursor: actual, type_name: name, inner: Some(boxed) },
+        );
         Ok(())
     }
 
@@ -168,7 +224,7 @@ impl Owner {
         Ok(&self.prefix[start..end])
     }
 
-    fn slot_ref(&self, id: TypeId) -> Option<&dyn Any> {
+    pub(crate) fn slot_ref(&self, id: TypeId) -> Option<&dyn Any> {
         let slot = self.slots.get(&id)?;
         if slot.poisoned {
             return None;

@@ -406,6 +406,33 @@ pub mod guest_alloc;
 /// `__export_multi_internal!`; the arity is what keeps the multi-actor
 /// arm from shadowing this single-actor form.
 ///
+/// Optional trailing `generators = [ReactorBundle]` names export-generator
+/// macros (paths, not trait objects). Direct `($($ty:ty),+, generators = […])`
+/// matching is ambiguous because `generators` is a valid `$ty`, so unmatched
+/// tokens fall through to a muncher. This crate then collects a framework-owned
+/// descriptor envelope per listed path — actor namespace plus optional
+/// namespaced extensions — by invoking each type's same-name companion macro
+/// (`use` / `pub use` / `as` aliases carry it). Generators receive `actors`
+/// (envelopes, intact for the pipeline) and `exports` (the types the final
+/// emitter will bind). A generator may rewrite `exports` and append envelopes
+/// without moving another actor's extensions. FFI emission stays in this
+/// macro. Ordinary no-generator invocations keep matching the
+/// type/default/boot/library arms above unchanged.
+///
+/// `type Alias = T` is not followed; generators need a path that names the
+/// `#[actor]` / `#[reactor]` type (or an import alias of it). A mixed example:
+///
+/// ```ignore
+/// aether_actor::export!(
+///     default = Probe,
+///     ProbeWithConfig,
+///     SourcePublisher,
+///     SourceWitness,
+///     ReactorOutputSink,
+///     generators = [aether_bloomery_reactor::ReactorBundle],
+/// );
+/// ```
+///
 /// ```ignore
 /// pub struct Hello { /* fields */ }
 /// impl aether_actor::WasmActor for Hello { /* init + receive */ }
@@ -478,6 +505,230 @@ macro_rules! export {
     // list position. Opt into a default with the `default =` arm above.
     ($first:ty $(, $rest:ty)+ $(,)?) => {
         $crate::__export_multi_internal!(@no_boot ; @no_default ; @all $first $(, $rest)+);
+    };
+    // Generator extension: `export!(…, generators = [ReactorBundle])`.
+    // Existing type-list arms above cannot parse `generators =` (the ident is
+    // a valid `$ty`), so unmatched generator invocations fall through here
+    // and are token-munched. No-generator forms keep matching the arms above
+    // unchanged.
+    ($($tt:tt)+) => {
+        $crate::__export_parse!(@start $($tt)+);
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_parse {
+    (@start $($tt:tt)*) => {
+        $crate::__export_parse!(
+            @parse
+            { boot: none, default: none, types: [], generators: none }
+            $($tt)*
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: $default:tt, types: [$($types:tt)*], generators: none }
+     generators = [$($g:path),+ $(,)?] $(,)?) => {
+        $crate::__export_with_generators!(
+            boot: $boot,
+            default: $default,
+            types: [$($types)*],
+            generators: [$($g),+]
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: $default:tt, types: [$($types:tt)*], generators: none }
+     generators = [] $($rest:tt)*) => {
+        ::core::compile_error!("export! generators list must not be empty");
+    };
+
+    (@parse { boot: none, default: $default:tt, types: [$($types:tt)*], generators: none }
+     boot = $boot:ty, $($rest:tt)*) => {
+        $crate::__export_parse!(
+            @parse
+            { boot: { $boot }, default: $default, types: [$($types)* { $boot }], generators: none }
+            $($rest)*
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: none, types: [$($types:tt)*], generators: none }
+     default = $default:ty, $($rest:tt)*) => {
+        $crate::__export_parse!(
+            @parse
+            { boot: $boot, default: { $default }, types: [$($types)* { $default }], generators: none }
+            $($rest)*
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: $default:tt, types: [$($types:tt)*], generators: none }
+     $ty:ty, $($rest:tt)*) => {
+        $crate::__export_parse!(
+            @parse
+            { boot: $boot, default: $default, types: [$($types)* { $ty }], generators: none }
+            $($rest)*
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: $default:tt, types: [$($types:tt)*], generators: none }
+     $ty:ty $(,)?) => {
+        $crate::__export_parse!(
+            @parse
+            { boot: $boot, default: $default, types: [$($types)* { $ty }], generators: none }
+        );
+    };
+
+    (@parse { boot: $boot:tt, default: $default:tt, types: [$($types:tt)*], generators: none }) => {
+        ::core::compile_error!("export! did not match a supported form (missing generators = […] or unsupported tokens)");
+    };
+
+    (@parse { $($state:tt)* } $bad:tt $($rest:tt)*) => {
+        ::core::compile_error!(concat!("unsupported export! token: ", stringify!($bad)));
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_with_generators {
+    (
+        boot: $boot:tt,
+        default: $default:tt,
+        types: [$($types:tt)*],
+        generators: [$($g:path),+]
+    ) => {
+        $crate::__export_collect!(
+            @start
+            { boot: $boot, default: $default, types: [$($types)*], generators: [$($g),+] }
+        );
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_collect {
+    (@start { boot: $boot:tt, default: $default:tt, types: [], generators: [$($g:path),+] }) => {
+        ::core::compile_error!("export! generators require at least one type");
+    };
+    (@start
+        { boot: $boot:tt, default: $default:tt, types: [ { $first:path } $($rest:tt)* ], generators: [$($g:path),+] }
+    ) => {
+        $first! {
+            @aether_export_desc
+            $crate::__export_collect
+            {
+                current_ty: { $first }
+                pending: [ $($rest)* ]
+                actors: []
+                exports: [ { $first } $($rest)* ]
+                boot: $boot
+                default: $default
+                remaining_generators: [$($g),+]
+            }
+        }
+    };
+    (@start { boot: $boot:tt, default: $default:tt, types: [ { $first:ty } $($rest:tt)* ], generators: [$($g:path),+] }) => {
+        ::core::compile_error!(concat!(
+            "export! generators require a simple type path with #[actor] or #[reactor] companion metadata; `type` aliases are not followed: ",
+            stringify!($first)
+        ));
+    };
+    (@aether_export_got
+        { namespace: $ns:tt, extensions: [ $($ext:tt)* ] }
+        {
+            current_ty: { $ty:path }
+            pending: [ { $next:path } $($pending:tt)* ]
+            actors: [$($actors:tt)*]
+            exports: [$($exports:tt)*]
+            boot: $boot:tt
+            default: $default:tt
+            remaining_generators: [$($g:path),+]
+        }
+    ) => {
+        $next! {
+            @aether_export_desc
+            $crate::__export_collect
+            {
+                current_ty: { $next }
+                pending: [ $($pending)* ]
+                actors: [
+                    $($actors)*
+                    { ty: { $ty } namespace: $ns extensions: [ $($ext)* ] }
+                ]
+                exports: [$($exports)*]
+                boot: $boot
+                default: $default
+                remaining_generators: [$($g),+]
+            }
+        }
+    };
+    (@aether_export_got
+        { namespace: $ns:tt, extensions: [ $($ext:tt)* ] }
+        {
+            current_ty: { $ty:path }
+            pending: []
+            actors: [$($actors:tt)*]
+            exports: [$($exports:tt)*]
+            boot: $boot:tt
+            default: $default:tt
+            remaining_generators: [$gen:path $(, $rest:path)*]
+        }
+    ) => {
+        $gen! {
+            @aether_export_generate
+            { remaining_generators: [$($rest),*] }
+            {
+                boot: $boot,
+                default: $default,
+                actors: [
+                    $($actors)*
+                    { ty: { $ty } namespace: $ns extensions: [ $($ext)* ] }
+                ],
+                exports: [$($exports)*]
+            }
+        }
+    };
+    (@aether_export_got { $($meta:tt)* } { $($state:tt)* }) => {
+        ::core::compile_error!("export! descriptor envelope was malformed");
+    };
+    ($($tt:tt)*) => {
+        ::core::compile_error!("export! descriptor collection failed");
+    };
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_desc_discard {
+    (@aether_export_got { $($__aether_meta:tt)* } { $($__aether_state:tt)* }) => {};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __export_continue {
+    (
+        remaining_generators: []
+        boot: $boot:tt
+        default: $default:tt
+        actors: [$($actors:tt)*]
+        exports: [$($exports:tt)*]
+    ) => {
+        $crate::__export_emit_classified! {
+            boot: $boot
+            default: $default
+            actors: [$($actors)*]
+            exports: [$($exports)*]
+        }
+    };
+    (
+        remaining_generators: [$next:path $(, $rest:path)*]
+        boot: $boot:tt
+        default: $default:tt
+        actors: [$($actors:tt)*]
+        exports: [$($exports:tt)*]
+    ) => {
+        $next! {
+            @aether_export_generate
+            { remaining_generators: [$($rest),*] }
+            { boot: $boot, default: $default, actors: [$($actors)*], exports: [$($exports)*] }
+        }
     };
 }
 

@@ -11,12 +11,12 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-reactor-derive = { path = "../aether-bloomery-reactor-derive" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-data = { path = "../aether-data", features = ["derive"] }
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [lints]
 workspace = true

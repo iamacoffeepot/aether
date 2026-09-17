@@ -47,6 +47,9 @@ aether-fs = { path = "../aether-fs", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 # Issue #581: the probe emits `tracing::info!` on the first tick; the

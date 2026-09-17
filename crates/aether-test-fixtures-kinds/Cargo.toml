@@ -17,6 +17,7 @@ crate-type = ["rlib"]
 
 [dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
 bytemuck = { workspace = true, default-features = false, features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive"] }
 

@@ -2,7 +2,8 @@
 
 use syn::spanned::Spanned;
 use syn::{
-    Attribute, Block, Expr, ExprLit, Ident, ImplItem, ImplItemConst, ImplItemFn, ItemImpl, Lit, Pat, Type, Visibility,
+    Attribute, Block, Expr, ExprLit, Ident, ImplItem, ImplItemConst, ImplItemFn, ItemImpl, Lit, LitStr, Pat, Type,
+    Visibility,
 };
 
 use crate::check::{
@@ -14,6 +15,7 @@ pub struct ReactorDef {
     pub attrs: Vec<Attribute>,
     pub self_ty: Type,
     pub name_const: ImplItemConst,
+    pub namespace: LitStr,
     pub rules: Vec<Rule>,
     pub helpers: Vec<ImplItem>,
 }
@@ -53,10 +55,10 @@ pub fn parse_reactor(item: ItemImpl) -> syn::Result<ReactorDef> {
 
     for impl_item in item.items {
         match impl_item {
-            ImplItem::Const(konst) if konst.ident == "NAME" => {
-                validate_name_const(&konst)?;
+            ImplItem::Const(konst) if konst.ident == "NAMESPACE" => {
+                validate_namespace_const(&konst)?;
                 if name_const.is_some() {
-                    return Err(syn::Error::new_spanned(&konst.ident, "`const NAME` is given twice"));
+                    return Err(syn::Error::new_spanned(&konst.ident, "`const NAMESPACE` is given twice"));
                 }
                 name_const = Some(konst);
             }
@@ -66,28 +68,33 @@ pub fn parse_reactor(item: ItemImpl) -> syn::Result<ReactorDef> {
             other => {
                 return Err(syn::Error::new_spanned(
                     other,
-                    "#[reactor] impl blocks hold `const NAME`, `#[rule]` methods, and inherent helpers",
+                    "#[reactor] impl blocks hold `const NAMESPACE`, `#[rule]` methods, and inherent helpers",
                 ));
             }
         }
     }
 
     let mut name_const = name_const.ok_or_else(|| {
-        syn::Error::new(item.self_ty.span(), "#[reactor] requires `const NAME: &'static str = \"…\"`")
+        syn::Error::new(item.self_ty.span(), "#[reactor] requires `const NAMESPACE: &'static str = \"…\"`")
     })?;
     name_const.vis = Visibility::Inherited;
     if rules.is_empty() {
         return Err(syn::Error::new(item.self_ty.span(), "#[reactor] requires at least one `#[rule]` method"));
     }
 
-    Ok(ReactorDef { attrs: item.attrs, self_ty: *item.self_ty, name_const, rules, helpers })
+    let namespace = namespace_literal(&name_const)?;
+    Ok(ReactorDef { attrs: item.attrs, self_ty: *item.self_ty, name_const, namespace, rules, helpers })
 }
 
-fn validate_name_const(konst: &ImplItemConst) -> syn::Result<()> {
-    let Expr::Lit(ExprLit { lit: Lit::Str(_), .. }) = peel_group(&konst.expr) else {
-        return Err(syn::Error::new_spanned(&konst.expr, "#[reactor] needs `const NAME` to be a string literal"));
-    };
-    Ok(())
+fn validate_namespace_const(konst: &ImplItemConst) -> syn::Result<()> {
+    namespace_literal(konst).map(|_| ())
+}
+
+pub fn namespace_literal(konst: &ImplItemConst) -> syn::Result<LitStr> {
+    match peel_group(&konst.expr) {
+        Expr::Lit(ExprLit { lit: Lit::Str(value), .. }) => Ok(value.clone()),
+        other => Err(syn::Error::new_spanned(other, "#[reactor] needs `const NAMESPACE` to be a string literal")),
+    }
 }
 
 fn peel_group(expr: &Expr) -> &Expr {
