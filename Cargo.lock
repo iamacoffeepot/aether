@@ -180,6 +180,7 @@ dependencies = [
 name = "aether-bloomery-reactor-derive"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-reactor",
  "aether-bloomery-view",

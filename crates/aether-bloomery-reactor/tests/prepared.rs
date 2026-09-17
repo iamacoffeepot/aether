@@ -88,7 +88,7 @@ struct SourcePublisher;
 
 #[reactor]
 impl Reactor for SourcePublisher {
-    const NAME: &'static str = "source.publisher";
+    const NAMESPACE: &'static str = "source.publisher";
 
     #[rule]
     fn publish(&self, change: HeadMoved<Tree>, current: CurrentCompilation, heads: Heads, tally: Tally) -> Publication {

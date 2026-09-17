@@ -8,7 +8,9 @@ use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{Digest, Head, Program, Ref, Tree};
-use aether_bloomery_reactor::{ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PushEntries};
+use aether_bloomery_reactor::{
+    CLUSTER_NAMESPACE, ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PushEntries,
+};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -16,7 +18,6 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult};
 
-const VIEWS: &str = "test.bloomery.reactor";
 const SINK: &str = "test.bloomery.reactor.sink";
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
@@ -54,7 +55,7 @@ fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, exp
 
 fn load_cluster(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, output: String) -> String {
     let config = ClusterConfig { output };
-    load_export(harness, wasm_path, name, VIEWS, config.encode_into_bytes())
+    load_export(harness, wasm_path, name, CLUSTER_NAMESPACE, config.encode_into_bytes())
 }
 
 fn push(harness: &mut SubstrateHarness, address: &str, entries: Vec<JournalEntry>) -> u64 {
