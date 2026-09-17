@@ -64,9 +64,9 @@ The host must not commit a failed kernel transition.
 Add component lifecycle prohibition flags at bootstrap. Illustrative API:
 
 ```rust
-prohibit: ComponentRestrictions::DROP
+prohibit: LifecycleFlags::DROP
 // Other components can prohibit both:
-prohibit: ComponentRestrictions::REPLACE | ComponentRestrictions::DROP
+prohibit: LifecycleFlags::REPLACE | LifecycleFlags::DROP
 ```
 
 The stable host slot owns the restrictions and preserves them across replacement.

@@ -158,7 +158,7 @@ Proposed API shape; final names follow existing code conventions:
 
 ```rust
 ComponentBootstrap {
-    prohibit: ComponentRestrictions::DROP,
+    prohibit: LifecycleFlags::DROP,
     // Existing module, configuration, and routing inputs...
 }
 ```
