@@ -485,3 +485,15 @@ pub struct DrainEditorInputsResult {
     pub region_name: String,
     pub inputs: Vec<ObservedEditorInput>,
 }
+
+/// Output of a reactor arm whose named current-head guard resolved.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_guarded_publication", eq)]
+pub struct ReactorGuardedPublication {
+    pub digest: [u8; 32],
+}
+
+/// Output of a reactor arm that takes Heads directly and does not name a guard.
+#[aether_data::kind(name = "aether.test_fixtures.reactor_open_publication", eq)]
+pub struct ReactorOpenPublication {
+    pub digest: [u8; 32],
+}

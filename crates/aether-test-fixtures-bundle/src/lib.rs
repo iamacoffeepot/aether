@@ -24,6 +24,7 @@ mod matrix_sweep;
 mod multi_actor;
 mod peer_routing;
 mod probe;
+mod reactor_cluster;
 mod source_observer;
 mod stateful_replace;
 mod tcp_load_probe;
@@ -45,6 +46,7 @@ pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
+pub use reactor_cluster::{SourcePublicationViews, SourcePublisherPeer, SourceWitnessPeer};
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
@@ -88,6 +90,9 @@ aether_actor::export!(
     Counter,
     Sidecar,
     TcpLoadProbe,
+    SourcePublicationViews,
+    SourcePublisherPeer,
+    SourceWitnessPeer,
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

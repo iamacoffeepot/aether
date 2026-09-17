@@ -2,9 +2,9 @@
 //!
 //! `#[reactor]` sits on `impl Reactor for Name` and consumes `#[rule]` methods.
 //! It emits inherent rule methods plus a `Reactor` impl whose `evaluate` /
-//! `visit_arms` hooks a later actor-bundle generator can wrap. Parameter roles
-//! are inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify
-//! view versus guard by type name.
+//! `visit_arms` hooks [`macro@reactor_bundle`] so authors do not write actor
+//! wrappers. Parameter roles are inferred by Rust from `Arg<_, T, Rest>` —
+//! this crate does not classify view versus guard by type name.
 
 #![forbid(unsafe_code)]
 
@@ -14,6 +14,7 @@ use quote::quote_spanned;
 use syn::spanned::Spanned;
 use syn::{ItemImpl, parse_macro_input};
 
+mod bundle;
 mod check;
 mod expand;
 mod parse;
@@ -33,6 +34,30 @@ pub fn reactor(attr: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemImpl);
     match parse::parse_reactor(item) {
         Ok(def) => expand::expand(def).into(),
+        Err(error) => error.to_compile_error().into(),
+    }
+}
+
+/// Generate one views owner and one inline reactor peer per listed reactor.
+///
+/// `default` names the views owner type that `wire` instantiates peers under.
+/// That type is the cluster role to load; packing the generated types in
+/// `export!` does not spawn the peers. `namespace` is the views owner's
+/// `NAMESPACE`; each peer is `{namespace}.{snake_case(Reactor)}`.
+///
+/// ```ignore
+/// reactor_bundle! {
+///     default = SourcePublicationViews,
+///     namespace = "test.bloomery.reactor",
+///     SourcePublisher,
+///     SourceWitness,
+/// }
+/// ```
+#[proc_macro]
+pub fn reactor_bundle(input: TokenStream) -> TokenStream {
+    let def = parse_macro_input!(input as bundle::BundleDef);
+    match bundle::expand(def) {
+        Ok(tokens) => tokens.into(),
         Err(error) => error.to_compile_error().into(),
     }
 }

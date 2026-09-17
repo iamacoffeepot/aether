@@ -113,5 +113,6 @@ impl Owner {
 
 #[doc(hidden)]
 pub mod __macro_internals {
+    pub use alloc::collections::BTreeSet;
     pub use alloc::vec::Vec;
 }

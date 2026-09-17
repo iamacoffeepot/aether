@@ -52,6 +52,10 @@ pub trait ErasedView {
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Box<dyn Error + 'static>>;
 }
 
+pub(crate) fn box_view<V: View>(view: V) -> Box<dyn ErasedView> {
+    Box::new(Slot { view })
+}
+
 struct Slot<V: View> {
     view: V,
 }

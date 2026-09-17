@@ -13,12 +13,31 @@
 //! not suspended work. Each invoked arm returns exactly one [`Output`].
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
-//! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types to a
-//! later actor-bundle generator. Evaluation encodes outputs through the mail
-//! codec and does not execute or append them.
+//! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
+//! [`reactor_bundle`] generates one views owner and one peer actor per
+//! reactor: the owner folds shared views once per cluster, mails an owned
+//! prepared prefix to each peer, and each peer resolves guards locally and
+//! sends typed outputs to a configured external mailbox. Evaluation encodes
+//! outputs through the mail codec and does not execute or append them.
 //!
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
-//! lists, view visitors, and mail encoding are implementation details:
+//! lists, view visitors, actor wrappers, and mail encoding are implementation
+//! details. Authored view and guard types become one views-owner fold per
+//! loaded cluster; peers receive [`PreparedPrefix`] mail and resolve guards
+//! against that snapshot:
+//!
+//! ```ignore
+//! reactor_bundle! {
+//!     default = SourcePublicationViews,
+//!     namespace = "test.bloomery.reactor",
+//!     SourcePublisher,
+//!     SourceWitness,
+//! }
+//! ```
+//!
+//! Load `SourcePublicationViews` explicitly (`export: Some(NAMESPACE)` or an
+//! `export!(default = SourcePublicationViews, …)` list). Exporting the peer
+//! types does not instantiate them; the views owner spawns them in `wire`.
 //!
 //! ```text
 //! #[reactor]
@@ -65,6 +84,7 @@
 extern crate alloc;
 extern crate self as aether_bloomery_reactor;
 
+mod bundle;
 mod direct;
 mod error;
 mod evaluate;
@@ -75,7 +95,11 @@ mod prepare;
 mod trigger;
 mod views;
 
-pub use aether_bloomery_reactor_derive::{reactor, rule};
+pub use aether_bloomery_reactor_derive::{reactor, reactor_bundle, rule};
+pub use bundle::{
+    ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PreparedPrefix, PushEntries, PushResult,
+    warm_reactor,
+};
 pub use direct::Direct;
 pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
