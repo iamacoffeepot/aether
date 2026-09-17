@@ -17,7 +17,7 @@ use aether_substrate::{BootError, SpawnError, Subname};
 
 const STAMP_MILLIS: u64 = 1_700_000_000_000;
 
-#[aether_data::kind(name = "test.bloomery.journal_actor.anchor_ping", default)]
+#[aether_data::kind(name = "test.bloomery.journal_actor.anchor_ping", default, no_serde)]
 struct AnchorPing;
 
 struct TestAnchor {
