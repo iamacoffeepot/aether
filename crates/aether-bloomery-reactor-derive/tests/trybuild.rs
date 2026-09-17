@@ -14,6 +14,7 @@ fn ui() {
     t.pass("tests/ui/pass_export_duplicate_short.rs");
     t.pass("tests/ui/pass_export_passthrough.rs");
     t.pass("tests/ui/pass_export_after.rs");
+    t.pass("tests/ui/pass_export_reactor_peer.rs");
     t.compile_fail("tests/ui/fail_async.rs");
     t.compile_fail("tests/ui/fail_export_missing_desc.rs");
     t.compile_fail("tests/ui/fail_export_no_reactors.rs");
