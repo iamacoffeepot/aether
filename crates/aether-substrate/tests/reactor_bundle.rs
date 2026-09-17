@@ -1,5 +1,6 @@
 //! Generated reactor-bundle WASM: stream-bound Event/EventBatch, shared views,
-//! guard decline, and isolated clusters.
+//! guard decline, isolated clusters, and replacement reconstruction of
+//! generated inline peers.
 //!
 //! Loads the compiled `aether_test_fixtures_bundle` wasm. A skip when the
 //! artifact is absent is not proof of this wiring.
@@ -14,15 +15,18 @@ use aether_bloomery_reactor::{
     JournalEntry, PeerEvaluated, PreparedResult,
 };
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Kind, MailboxId, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND};
 
 const SINK: &str = "test.bloomery.reactor.sink";
 const STREAM_A: &str = "alpha";
 const STREAM_B: &str = "beta";
+/// Must match `SourcePublisher` / `SourceWitness` `NAMESPACE` in `reactor_cluster.rs`.
+const SOURCE_PUBLISHER: &str = "test.bloomery.source.publisher";
+const SOURCE_WITNESS: &str = "test.bloomery.source.witness";
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))
@@ -48,9 +52,15 @@ fn live_event<K: Kind + 'static>(stream: &str, seq: u64, name: &'static str, to:
     Event { stream: stream.to_owned(), entry: journal_moved(seq, name, to) }
 }
 
-fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, export: &str, config: Vec<u8>) -> String {
+fn load_export_result(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    name: &str,
+    export: &str,
+    config: Vec<u8>,
+) -> LoadResult {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = harness
+    harness
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
@@ -58,16 +68,68 @@ fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, exp
                 &LoadComponent { wasm, name: Some(name.to_owned()), config, export: Some(export.to_owned()) },
             ),
         )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        .expect("load sequence")
+        .reply::<LoadResult>("load")
+        .expect("decode LoadResult")
+}
+
+fn load_export(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, export: &str, config: Vec<u8>) -> String {
+    match load_export_result(harness, wasm_path, name, export, config) {
         LoadResult::Ok { name, .. } => name,
         LoadResult::Err { error } => panic!("load_component({name}): {error}"),
     }
 }
 
 fn load_cluster(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str, sink: String) -> String {
+    load_cluster_full(harness, wasm_path, name, sink).0
+}
+
+fn load_cluster_full(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    name: &str,
+    sink: String,
+) -> (String, MailboxId) {
     let config = ClusterConfig { output: sink.clone(), ack: sink };
-    load_export(harness, wasm_path, name, CLUSTER_NAMESPACE, config.encode_into_bytes())
+    match load_export_result(harness, wasm_path, name, CLUSTER_NAMESPACE, config.encode_into_bytes()) {
+        LoadResult::Ok { name, mailbox_id, .. } => (name, mailbox_id),
+        LoadResult::Err { error } => panic!("load_component({name}): {error}"),
+    }
+}
+
+fn replace_cluster(
+    harness: &mut SubstrateHarness,
+    wasm_path: &Path,
+    mailbox_id: MailboxId,
+    sink: String,
+) -> ReplaceResult {
+    let wasm = fs::read(wasm_path).expect("re-read fixture wasm");
+    let config = ClusterConfig { output: sink.clone(), ack: sink };
+    harness
+        .execute(vec![(
+            "swap",
+            HarnessOp::send_and_await_reply(
+                ComponentHostCapability::NAMESPACE,
+                &ReplaceComponent {
+                    mailbox_id,
+                    wasm,
+                    drain_timeout_ms: None,
+                    config: config.encode_into_bytes(),
+                    export: Some(CLUSTER_NAMESPACE.to_owned()),
+                },
+            ),
+        )])
+        .expect("replace sequence")
+        .reply::<ReplaceResult>("swap")
+        .expect("decode ReplaceResult")
+}
+
+fn evaluated_ok_count(report: &CollectReactorOutputsResult, seq: u64) -> usize {
+    report
+        .evaluated
+        .iter()
+        .filter(|result| matches!(result, EvaluatedResult::Ok { seq: found, .. } if *found == seq))
+        .count()
 }
 
 fn status(harness: &mut SubstrateHarness, address: &str) -> ClusterStatus {
@@ -427,4 +489,90 @@ fn reactor_bundle_unknown_peer_outcome_is_not_success() {
         .expect("wrong-stream peer settle");
     let still = collect(&mut harness, &sink);
     assert_eq!(evaluated_ok_seqs(&still), [1], "{:?}", still.evaluated);
+}
+
+/// Replacement reconstructs generated reactor peers at their original aliases.
+/// Coordinator views rebuild (`init` without `wire`); fold-only warmup is
+/// required before the next live event. A skip when the fixture wasm is
+/// missing is not proof of this path.
+#[test]
+fn reactor_bundle_replace_restores_generated_peers() {
+    let Some((mut harness, wasm_path)) = boot() else {
+        return;
+    };
+    let sink = load_export(&mut harness, &wasm_path, "sink-replace", SINK, Vec::new());
+
+    let publisher =
+        load_export_result(&mut harness, &wasm_path, "must-not-spawn-publisher", SOURCE_PUBLISHER, Vec::new());
+    assert!(
+        matches!(publisher, LoadResult::Err { .. }),
+        "generated publisher peers must not be independently spawnable: {publisher:?}"
+    );
+    let witness = load_export_result(&mut harness, &wasm_path, "must-not-spawn-witness", SOURCE_WITNESS, Vec::new());
+    assert!(
+        matches!(witness, LoadResult::Err { .. }),
+        "generated witness peers must not be independently spawnable: {witness:?}"
+    );
+
+    let (cluster, mailbox_id) = load_cluster_full(&mut harness, &wasm_path, "reactor-replace", sink.clone());
+    let program = digest_ref::<Program>(1);
+    let tree = digest_ref::<Tree>(2);
+
+    for round in 1..=2 {
+        match replace_cluster(&mut harness, &wasm_path, mailbox_id, sink.clone()) {
+            ReplaceResult::Ok { .. } => {}
+            ReplaceResult::Err { error } => panic!("replace_component round {round}: {error}"),
+        }
+    }
+    let rebuilt = status(&mut harness, &cluster);
+    assert_eq!(
+        rebuilt.cursor, 0,
+        "replacement rebuilds coordinator views; peer restore is not aggregation persistence"
+    );
+    assert!(!rebuilt.poisoned);
+    assert_eq!(rebuilt.stream, "");
+
+    settle_batch(
+        &mut harness,
+        &cluster,
+        &EventBatch::from_journal(STREAM_A, vec![journal_moved(1, "current", program)]).expect("warmup"),
+    );
+    let warmed = collect(&mut harness, &sink);
+    assert!(warmed.guarded.is_empty(), "warmup must not evaluate arms: {:?}", warmed.guarded);
+    assert!(warmed.open.is_empty(), "{:?}", warmed.open);
+    assert!(warmed.evaluated.is_empty(), "warmup must not emit evaluation: {:?}", warmed.evaluated);
+    assert_eq!(prepared_ok_seqs(&warmed), [1]);
+
+    settle_event(&mut harness, &cluster, &live_event(STREAM_A, 2, "source", tree));
+    let live = collect(&mut harness, &sink);
+    assert_eq!(live.guarded.len(), 1, "restored publisher must evaluate once after replace: {:?}", live.guarded);
+    assert_eq!(live.open.len(), 1, "restored witness must evaluate once after replace: {:?}", live.open);
+    assert_eq!(live.guarded[0].digest, [2; 32]);
+    assert_eq!(live.open[0].digest, [2; 32]);
+    assert_eq!(live.guarded[0].fold_id, live.open[0].fold_id);
+    assert_eq!(live.guarded[0].folds, 2);
+    assert_eq!(evaluated_ok_count(&live, 2), 1, "exactly one evaluation ack after replace: {:?}", live.evaluated);
+    assert_eq!(evaluated_ok_seqs(&live), [2]);
+
+    match replace_cluster(&mut harness, &wasm_path, mailbox_id, sink.clone()) {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component after live: {error}"),
+    }
+    assert_eq!(status(&mut harness, &cluster).cursor, 0, "a later replace still rebuilds views");
+    settle_batch(
+        &mut harness,
+        &cluster,
+        &EventBatch::from_journal(STREAM_A, vec![journal_moved(1, "current", program)]).expect("second warmup"),
+    );
+    settle_event(&mut harness, &cluster, &live_event(STREAM_A, 2, "source", tree));
+    let again = collect(&mut harness, &sink);
+    assert_eq!(again.guarded.len(), 2, "second live event after repeated replace: {:?}", again.guarded);
+    assert_eq!(again.open.len(), 2, "{:?}", again.open);
+    assert_eq!(
+        evaluated_ok_count(&again, 2),
+        2,
+        "one evaluation per live event, not a duplicate peer storm: {:?}",
+        again.evaluated
+    );
+    assert_eq!(again.guarded[1].folds, 2, "successor views fold the warmup and live entry from empty state");
 }
