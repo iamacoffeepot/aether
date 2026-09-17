@@ -39,67 +39,34 @@ impl Component {
         }
     }
 
-    /// Invoke the guest's `on_dehydrate` hook if it exports one.
-    /// Wasmtime traps (guest panics, unreachable) are caught and
-    /// logged rather than propagated — per ADR-0015, a panicking
-    /// hook must not stall teardown.
-    pub fn on_dehydrate(&mut self) {
-        if let Some(f) = self.on_dehydrate.clone()
-            && let Err(e) = f.call(&mut self.store, ())
-        {
-            tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
-        }
-    }
-
-    /// Prepare migration state on demand while the predecessor remains live.
-    /// Legacy guests without the explicit export are unsupported, never
-    /// treated as a successful empty snapshot.
-    pub fn snapshot(&mut self) -> wasmtime::Result<Option<StateBundle>> {
-        let hook = self
-            .on_snapshot
-            .clone()
-            .ok_or_else(|| wasmtime::Error::msg("read-only snapshot unsupported: guest exports no on_snapshot_p32"))?;
+    /// Prepare migration state while the predecessor remains live. Any guest
+    /// trap, nonzero status, save rejection, or forbidden effect aborts the
+    /// operation; the caller may then keep using the predecessor.
+    pub fn on_dehydrate(&mut self) -> wasmtime::Result<Option<StateBundle>> {
+        let Some(hook) = self.on_dehydrate.clone() else {
+            return Ok(None);
+        };
         {
             let ctx = self.store.data_mut();
             ctx.saved_state = None;
             ctx.save_state_error = None;
-            ctx.snapshot_violation = None;
-            ctx.snapshot_failure = None;
-            ctx.snapshot_active = true;
+            ctx.dehydration_violation = None;
+            ctx.dehydration_active = true;
         }
         let call = hook.call(&mut self.store, ());
         let ctx = self.store.data_mut();
-        ctx.snapshot_active = false;
-        let violation = ctx.snapshot_violation.take();
+        ctx.dehydration_active = false;
+        let violation = ctx.dehydration_violation.take();
         let save_error = ctx.save_state_error.take();
-        let failure = ctx.snapshot_failure.take();
         let saved = ctx.saved_state.take();
         if let Some(error) = violation.or(save_error) {
-            return Err(wasmtime::Error::msg(format!("read-only snapshot rejected: {error}")));
+            return Err(wasmtime::Error::msg(format!("dehydration rejected: {error}")));
         }
-        let status = call.map_err(|error| wasmtime::Error::msg(format!("read-only snapshot trapped: {error}")))?;
-        if status == 0
-            && let Some(error) = failure.as_ref()
-        {
-            return Err(wasmtime::Error::msg(format!("read-only snapshot failed: {error}")));
-        }
+        let status = call.map_err(|error| wasmtime::Error::msg(format!("dehydration trapped: {error}")))?;
         if status != 0 {
-            return Err(wasmtime::Error::msg(format!(
-                "read-only snapshot failed: {}",
-                failure.unwrap_or_else(|| format!("guest returned status {status}")),
-            )));
+            return Err(wasmtime::Error::msg(format!("dehydration returned status {status}")));
         }
         Ok(saved)
-    }
-
-    /// Extract the state bundle the guest deposited via `save_state`
-    /// during `on_dehydrate`. Returns `None` if `save_state` was never
-    /// called (component doesn't implement migration, or the hook is
-    /// a no-op). Called by the control plane *after* `on_dehydrate`
-    /// runs on the old instance — the bundle has to outlive the
-    /// store.
-    pub fn take_saved_state(&mut self) -> Option<StateBundle> {
-        self.store.data_mut().saved_state.take()
     }
 
     /// ADR-0097: drain every sibling-spawn request the guest staged via
@@ -124,14 +91,6 @@ impl Component {
     /// [`Self::drain_pending_aliases`].
     pub fn drain_pending_alias_retirements(&mut self) -> Vec<MailboxId> {
         self.store.data_mut().take_pending_alias_retirements()
-    }
-
-    /// Extract a failure recorded by `save_state` (size cap, OOB).
-    /// `None` on clean saves and on components that didn't attempt a
-    /// save. Checked by the control plane to decide whether to abort
-    /// the replace (ADR-0016 §4).
-    pub fn take_save_error(&mut self) -> Option<String> {
-        self.store.data_mut().save_state_error.take()
     }
 
     /// Write the prior-state bytes into a delivery region (ADR-0095, via

@@ -235,23 +235,20 @@ impl WasmTrampolineState {
         };
         capabilities.assets = load_window.catalog();
 
-        // Run unwire then on_dehydrate on the old instance and lift
-        // any saved-state bundle. If the trampoline is currently
+        // Prepare state before unwire so a dehydration failure leaves the
+        // predecessor running. If the trampoline is currently
         // empty (post-DropComponent — load-after-drop refill),
         // there's no prior wasm to drain; the new instance starts
-        // from scratch. Issue 584 Phase 2b: unwire fires first so
-        // the old instance can announce its retirement before the
-        // swap.
+        // from scratch. Retirement still follows successful preparation.
         let saved = if let Some(mut old) = self.component.take() {
+            let saved = match old.on_dehydrate() {
+                Ok(saved) => saved,
+                Err(error) => {
+                    self.component = Some(old);
+                    return ReplaceResult::Err { error: error.to_string() };
+                }
+            };
             old.unwire();
-            old.on_dehydrate();
-            if let Some(err) = old.take_save_error() {
-                // Restore the old component so the trampoline isn't
-                // accidentally emptied by a save-state failure.
-                self.component = Some(old);
-                return ReplaceResult::Err { error: err };
-            }
-            let saved = old.take_saved_state();
             // Old component drops at end of scope — the `Component`'s
             // own `Drop` releases the wasm store.
             drop(old);

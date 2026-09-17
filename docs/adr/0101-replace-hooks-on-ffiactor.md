@@ -4,34 +4,29 @@
 - **Date:** 2026-06-08
 - **Accepted:** 2026-06-09 (implemented by iamacoffeepot/aether#1480)
 
-## Read-only preparation amendment (2026-09-17)
+## Read-only dehydration amendment (2026-09-17)
 
-Transactional live replacement needs a migration snapshot while the predecessor
-remains usable. It must not call `unwire` or the mutable `on_dehydrate` hook until
-the replacement has been accepted. The new `WasmActor::on_snapshot(&self,
-&mut WasmSnapshotCtx) -> Result<(), SnapshotError>` and `on_snapshot_p32`
-export provide that preparation boundary. `WasmSnapshotCtx` permits only a
-fallible state deposit; the inline-child walk borrows each resident child
-immutably and preserves the existing composite bundle shape (including aliases,
-configuration, and parent links). A failed parent or child snapshot rejects the
-whole bundle.
+Transactional live replacement prepares migration state while the predecessor
+remains usable. The existing `WasmActor::on_dehydrate` hook now takes `&self`
+and returns `Result<(), String>`. Its `WasmDropCtx` permits only state deposit.
+The existing `on_dehydrate` export and `save_state_p32` import remain the ABI;
+there is no parallel preparation export. The inline-child walk borrows each
+resident child immutably, preserves aliases, configuration, and parent links in
+the composite bundle, and propagates a parent or child failure. The substrate
+rejects a guest trap, nonzero export status, rejected save, or forbidden host
+effect before retiring the predecessor.
 
-The SDK generates the read-only hook for stateless `#[actor]` types and types
-declaring `type State` with a `dehydrate(&self)` accessor. Authors of custom
-`on_dehydrate(&mut self)` hooks must implement `on_snapshot` explicitly. The
-substrate keeps loading historical binaries, but a guest without the distinct
-snapshot export is unsupported for transactional live replacement; its mutable
-hook is never silently treated as read-only. The replacement handler's use of
-this prerequisite is tracked separately in #6134.
-
-Snapshot purity is an author contract: neither the hook nor a nested serializer
-may change logical guest state, including through interior mutability, even if
-it errors or traps. The host rejects outbound mail, spawn/despawn, logging, and
-other effectful imports during snapshot and fails preparation if the guest
-ignores their status. Allocation and interpreter fuel are scratch work, not
-logical state. Wasm's `&self`-shaped SDK API does not prove arbitrary raw-WASM
-code pure; this is not a general rollback sandbox or Store clone. Snapshots
-are prepared on demand, with no per-message snapshot cache.
+The macro generates the corrected hook from `type State` and a read-only
+`dehydrate(&self)` accessor. Stateless actors use the default no-op. Authors
+of custom hooks must make the existing `on_dehydrate` read-only and fallible.
+This is a deliberate pre-1.0 correction of that contract. Hook purity remains
+an author obligation, including interior mutation and preserving logical state
+on trap; Rust `&self` cannot prove arbitrary raw Wasm pure. Host-call gating
+rejects outbound mail, spawn/despawn, logging, and other effectful imports even
+if the guest ignores their status. Allocation and interpreter fuel are scratch
+work, not logical state. No per-message cache or general Wasm rollback is
+introduced. Full candidate preparation and retirement ordering is tracked in
+#6134.
 
 ## Context
 
@@ -51,9 +46,9 @@ Make `on_dehydrate` / `on_rehydrate` default-no-op methods on `WasmActor`, besid
 
 **Naming.** The save-side hook is `on_replace` in today's code. This ADR renames it to `on_dehydrate` so it pairs with `on_rehydrate`: the save step *is* dehydration (serialize to a dry bundle), and `on_replace` named the trigger rather than the action. The hook serializes by calling `ctx.save_state` / `ctx.save_state_kind` in its body, the same calls it accepts today. The rename carries through the trait method, the erased method, the wasm export name, and the host's lookup string; everything below uses `on_dehydrate`.
 
-1. **`WasmActor` gains two lifecycle hooks.** `fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {}` and `fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {}`, default no-op, beside `wire` / `unwire`. `WasmDropCtx` carries `Persistence::save_state` (so `on_dehydrate` serializes there); `WasmCtx` carries the send surface — the ctx types the hooks already used as `Replaceable`.
+1. **`WasmActor` gains two lifecycle hooks.** The original `on_dehydrate(&mut self, &mut WasmDropCtx)` is corrected by the amendment above to `on_dehydrate(&self, &mut WasmDropCtx) -> Result<(), String>`; `on_rehydrate(&mut self, &mut WasmCtx, PriorState)` remains. `WasmDropCtx` carries only `Persistence::save_state`; `WasmCtx` carries the restore-side send surface.
 
-2. **`ErasedWasmActor` gains the erased pair.** `erased_on_dehydrate(&mut self, &mut WasmDropCtx<'_>)` and `erased_on_rehydrate(&mut self, &mut WasmCtx<'_>, PriorState<'_>)`, joining `erased_wire` / `erased_unwire`. The concrete ctx types keep the trait object-safe.
+2. **`ErasedWasmActor` gains the erased pair.** The amendment changes `erased_on_dehydrate` to the same shared, fallible signature; `erased_on_rehydrate(&mut self, &mut WasmCtx, PriorState)` remains. The concrete ctx types keep the trait object-safe.
 
 3. **`#[actor]` forwards them uniformly.** Every `ErasedWasmActor` impl forwards the erased pair to the type's `WasmActor::on_dehydrate` / `on_rehydrate` — the same unconditional forwarding it already emits for `wire` / `unwire`. No flag, no per-type branch.
 

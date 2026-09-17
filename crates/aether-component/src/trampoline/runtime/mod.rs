@@ -217,7 +217,7 @@ impl NativeActor for WasmTrampoline {
     /// ADR-0038 splice invariants hold because the trampoline's
     /// inbox is the framework binding, which outlives the
     /// `Component` swap. `on_dehydrate` runs on the old instance,
-    /// `take_saved_state` lifts any rehydration bundle, the new
+    /// the fallible dehydration call lifts any rehydration bundle, the new
     /// module instantiates against the same binding, and
     /// `on_rehydrate` runs on the fresh side.
     #[handler::single]
