@@ -3,10 +3,7 @@ use std::mem;
 use wasmtime::Store;
 
 use super::instantiate::Placement;
-use super::{
-    Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, PreparedComponentEffects, SMALL_REGION_BYTES,
-    StateBundle,
-};
+use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES, StateBundle};
 use crate::mail::MailboxId;
 use crate::mail::registry::PreparedAliasRoute;
 
@@ -96,8 +93,8 @@ impl Component {
         self.store.data_mut().take_pending_alias_retirements()
     }
 
-    pub fn take_prepared_effects(&mut self) -> PreparedComponentEffects {
-        self.store.data_mut().take_prepared_effects()
+    pub fn publish_prepared_effects(&mut self) {
+        self.store.data_mut().publish_prepared_effects();
     }
 
     /// Write the prior-state bytes into a delivery region (ADR-0095, via

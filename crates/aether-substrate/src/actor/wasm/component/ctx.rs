@@ -1,4 +1,4 @@
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::mem;
 use std::sync::Arc;
 
@@ -137,9 +137,10 @@ pub struct ComponentCtx {
     /// through the registry owner and fans a departure notice out to its
     /// watchers — the teardown mirror of the publish path.
     pending_alias_retirements: Vec<MailboxId>,
-    /// `Some` only while a replacement candidate runs init and rehydrate.
-    /// The candidate owns this buffer; dropping its Store aborts every effect.
-    prepared_effects: RefCell<Option<Vec<PreparedComponentEffect>>>,
+    /// Candidate effects remain here until the accepted replacement publishes
+    /// them. Dropping the candidate Store discards them without egress.
+    effect_mode: EffectMode,
+    prepared_effects: Vec<PreparedComponentEffect>,
     /// ADR-0163 §3 asset load window. `Some` for a component loaded
     /// through the trampoline (installed before `Component::instantiate`,
     /// so the guest's `init` and `wire` can pull assets); the
@@ -207,43 +208,10 @@ enum PreparedComponentEffect {
     },
 }
 
-/// Guest effects captured during candidate initialization and restoration.
-/// No sent trace, routing, hub egress, or guest log publication occurs until
-/// the successful replacement consumes this value.
-pub struct PreparedComponentEffects {
-    registry: Arc<Registry>,
-    queue: Arc<Mailer>,
-    outbound: Arc<HubOutbound>,
-    effects: Vec<PreparedComponentEffect>,
-}
-
-impl PreparedComponentEffects {
-    pub fn publish(self) {
-        for effect in self.effects {
-            match effect {
-                PreparedComponentEffect::Mail { mail, identity } => {
-                    self.queue.record_sent(
-                        mail.mail_id,
-                        mail.root,
-                        mail.parent_mail,
-                        identity,
-                        mail.recipient,
-                        mail.kind,
-                    );
-                    ComponentCtx::dispatch_routed_mail(&self.registry, &self.queue, mail, identity);
-                }
-                PreparedComponentEffect::SessionReply { session, kind_name, payload, origin, correlation } => {
-                    self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation);
-                }
-                PreparedComponentEffect::EngineReply { engine, mailbox, kind, payload, count, correlation } => {
-                    self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
-                }
-                PreparedComponentEffect::Log { level, target, message } => {
-                    log_install::emit_host_event(level, &target, &message);
-                }
-            }
-        }
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EffectMode {
+    Dispatch,
+    Capture,
 }
 
 /// Issue iamacoffeepot/aether#1465: starting value of
@@ -282,7 +250,8 @@ impl ComponentCtx {
             pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
             pending_alias_retirements: Vec::new(),
-            prepared_effects: RefCell::new(None),
+            effect_mode: EffectMode::Dispatch,
+            prepared_effects: Vec::new(),
             load_window: None,
         }
     }
@@ -294,42 +263,70 @@ impl ComponentCtx {
     ///
     /// Panics if preparation is already active for this context.
     pub fn begin_replacement_preparation(&mut self) {
-        assert!(self.prepared_effects.get_mut().is_none(), "replacement preparation already active");
-        *self.prepared_effects.get_mut() = Some(Vec::new());
+        assert!(self.effect_mode == EffectMode::Dispatch, "replacement preparation already active");
+        assert!(self.prepared_effects.is_empty(), "replacement preparation has unpublished effects");
+        self.effect_mode = EffectMode::Capture;
     }
 
-    /// Take the effects captured while the replacement candidate was prepared.
+    /// Publish effects captured during candidate init and restoration, in guest
+    /// call order. Draining in place retains the candidate's buffer allocation.
     ///
     /// # Panics
     ///
     /// Panics if preparation was not active for this context.
-    pub fn take_prepared_effects(&mut self) -> PreparedComponentEffects {
-        PreparedComponentEffects {
-            registry: Arc::clone(&self.registry),
-            queue: Arc::clone(&self.queue),
-            outbound: Arc::clone(&self.outbound),
-            effects: self.prepared_effects.get_mut().take().expect("replacement preparation must be active"),
+    pub fn publish_prepared_effects(&mut self) {
+        assert!(self.effect_mode == EffectMode::Capture, "replacement preparation must be active");
+        self.effect_mode = EffectMode::Dispatch;
+        for effect in self.prepared_effects.drain(..) {
+            match effect {
+                PreparedComponentEffect::Mail { mail, identity } => {
+                    self.queue.record_sent(
+                        mail.mail_id,
+                        mail.root,
+                        mail.parent_mail,
+                        identity,
+                        mail.recipient,
+                        mail.kind,
+                    );
+                    Self::dispatch_routed_mail(&self.registry, &self.queue, mail, identity);
+                }
+                PreparedComponentEffect::SessionReply { session, kind_name, payload, origin, correlation } => {
+                    self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation);
+                }
+                PreparedComponentEffect::EngineReply { engine, mailbox, kind, payload, count, correlation } => {
+                    self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
+                }
+                PreparedComponentEffect::Log { level, target, message } => {
+                    log_install::emit_host_event(level, &target, &message);
+                }
+            }
         }
     }
 
     pub fn emit_session_reply(
-        &self,
+        &mut self,
         session: SessionToken,
         kind_name: String,
         payload: Vec<u8>,
         origin: Option<String>,
         correlation: u64,
     ) {
-        let mut buffer = self.prepared_effects.borrow_mut();
-        if let Some(effects) = buffer.as_mut() {
-            effects.push(PreparedComponentEffect::SessionReply { session, kind_name, payload, origin, correlation });
-        } else {
-            self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation);
+        match self.effect_mode {
+            EffectMode::Capture => {
+                self.prepared_effects.push(PreparedComponentEffect::SessionReply {
+                    session,
+                    kind_name,
+                    payload,
+                    origin,
+                    correlation,
+                });
+            }
+            EffectMode::Dispatch => self.outbound.egress_to_session(session, &kind_name, payload, origin, correlation),
         }
     }
 
     pub fn emit_engine_reply(
-        &self,
+        &mut self,
         engine: EngineId,
         mailbox: MailboxId,
         kind: MailKind,
@@ -337,20 +334,25 @@ impl ComponentCtx {
         count: u32,
         correlation: u64,
     ) {
-        let mut buffer = self.prepared_effects.borrow_mut();
-        if let Some(effects) = buffer.as_mut() {
-            effects.push(PreparedComponentEffect::EngineReply { engine, mailbox, kind, payload, count, correlation });
-        } else {
-            self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
+        match self.effect_mode {
+            EffectMode::Capture => self.prepared_effects.push(PreparedComponentEffect::EngineReply {
+                engine,
+                mailbox,
+                kind,
+                payload,
+                count,
+                correlation,
+            }),
+            EffectMode::Dispatch => {
+                self.outbound.egress_to_engine_mailbox(engine, mailbox, kind, payload, count, correlation);
+            }
         }
     }
 
-    pub fn emit_guest_log(&self, level: u32, target: String, message: String) {
-        let mut buffer = self.prepared_effects.borrow_mut();
-        if let Some(effects) = buffer.as_mut() {
-            effects.push(PreparedComponentEffect::Log { level, target, message });
-        } else {
-            log_install::emit_host_event(level, &target, &message);
+    pub fn emit_guest_log(&mut self, level: u32, target: String, message: String) {
+        match self.effect_mode {
+            EffectMode::Capture => self.prepared_effects.push(PreparedComponentEffect::Log { level, target, message }),
+            EffectMode::Dispatch => log_install::emit_host_event(level, &target, &message),
         }
     }
 
@@ -508,7 +510,7 @@ impl ComponentCtx {
     /// routes to the component's inbox, warn-drops dropped/unknown
     /// mailboxes, or bubbles unknown ids up to the hub-substrate when
     /// a `HubOutbound` is wired (ADR-0037).
-    pub fn send(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
+    pub fn send(&mut self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
         // ADR-0042: mint a fresh correlation_id for this send and
         // stash it on `last_correlation` so `prev_correlation_p32`
         // can return it to the guest. The minted id rides on the
@@ -539,7 +541,14 @@ impl ComponentCtx {
     /// send_detached`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
     /// guest-carried dispatch identity, resolved the same way as in `send`.
-    pub fn send_detached(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
+    pub fn send_detached(
+        &mut self,
+        recipient: MailboxId,
+        kind: MailKind,
+        payload: Vec<u8>,
+        count: u32,
+        from: MailboxId,
+    ) {
         let correlation = self.mint_correlation();
         let identity = self.dispatch_identity(from);
         let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
@@ -568,7 +577,7 @@ impl ComponentCtx {
     /// request, so it must not advance the counter `prev_correlation_p32`
     /// reports.
     pub(crate) fn reply(
-        &self,
+        &mut self,
         recipient: MailboxId,
         kind: MailKind,
         payload: Vec<u8>,
@@ -608,7 +617,7 @@ impl ComponentCtx {
     // source + the `origin` name read it directly.
     #[allow(clippy::too_many_arguments)]
     fn send_routed(
-        &self,
+        &mut self,
         recipient: MailboxId,
         kind: MailKind,
         payload: Vec<u8>,
@@ -640,8 +649,8 @@ impl ComponentCtx {
         let mail =
             Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(mail_id, root, parent_mail);
 
-        if let Some(effects) = self.prepared_effects.borrow_mut().as_mut() {
-            effects.push(PreparedComponentEffect::Mail { mail, identity });
+        if self.effect_mode == EffectMode::Capture {
+            self.prepared_effects.push(PreparedComponentEffect::Mail { mail, identity });
             return;
         }
 
@@ -786,5 +795,28 @@ impl ComponentCtx {
         self.in_flight_mail_id.set(MailId::NONE);
         self.in_flight_root.set(MailId::NONE);
         self.reply_correlation.set(Source::NO_CORRELATION);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use aether_data::Uuid;
+
+    #[test]
+    fn publishing_keeps_candidate_effect_buffer_allocation() {
+        let registry = Arc::new(Registry::new());
+        let queue = Arc::new(Mailer::new(Arc::clone(&registry)));
+        let mut ctx = ComponentCtx::new(MailboxId(1), registry, queue, HubOutbound::disconnected());
+        ctx.begin_replacement_preparation();
+        ctx.emit_session_reply(SessionToken(Uuid::from_u128(1)), "test.reply".to_owned(), vec![1], None, 1);
+
+        let capacity = ctx.prepared_effects.capacity();
+        assert!(capacity > 0);
+        ctx.publish_prepared_effects();
+
+        assert!(ctx.prepared_effects.is_empty());
+        assert_eq!(ctx.prepared_effects.capacity(), capacity);
+        assert!(ctx.effect_mode == EffectMode::Dispatch);
     }
 }

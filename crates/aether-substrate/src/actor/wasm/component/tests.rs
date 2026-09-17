@@ -1306,7 +1306,7 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
     let unknown = MailboxId(0xDEAD_BEEF_u64);
     let kind = aether_data::KindId(0xABCD_u64);
@@ -1340,7 +1340,7 @@ fn unknown_recipient_without_outbound_warn_drops() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
     ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, MailboxId::NONE);
     assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
@@ -1361,7 +1361,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Inbound lineage: the chassis-driven tick chain we're "in"
     // when the wasm guest's on_tick handler fires its outbound.
@@ -1393,7 +1393,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
     // No `set_in_flight` call.
 
     ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, MailboxId::NONE);
@@ -1420,7 +1420,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
@@ -1586,7 +1586,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     let (captured, sink_id) = register_lineage_capture_sink(&registry, "inline_self_origin_sink");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == self` (a normally-addressed actor).
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
@@ -1606,7 +1606,7 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == an inline-child alias` distinct from the component's own id.
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
@@ -1665,9 +1665,8 @@ fn prepared_component_effects_abort_without_egress_and_publish_in_order() {
     accepted.send(recipient, kind, vec![4], 1, sender);
     accepted.emit_session_reply(session, "test.reply".to_owned(), vec![5], None, 25);
     accepted.emit_engine_reply(engine, recipient, kind, vec![6], 1, 26);
-    let effects = accepted.take_prepared_effects();
-    assert!(rx.try_recv().is_err(), "taking prepared effects is not publication");
-    effects.publish();
+    assert!(rx.try_recv().is_err(), "prepared effects remain private until publication");
+    accepted.publish_prepared_effects();
 
     assert!(matches!(
         rx.try_recv().expect("released mail egress"),
@@ -1685,6 +1684,12 @@ fn prepared_component_effects_abort_without_egress_and_publish_in_order() {
             if engine_id == engine && mailbox_id == recipient && payload == vec![6]
     ));
     assert!(rx.try_recv().is_err(), "each accepted effect publishes once");
+
+    accepted.send(recipient, kind, vec![7], 1, sender);
+    assert!(matches!(
+        rx.try_recv().expect("ordinary dispatch resumes after publication"),
+        EgressEvent::UnresolvedMail { payload, correlation_id: 2, .. } if payload == vec![7]
+    ));
 }
 
 #[test]
@@ -1712,7 +1717,7 @@ fn prepared_component_reply_keeps_echo_and_lineage() {
     ctx.reply(recipient, aether_data::KindId(0x6137), vec![9], 1, 42, sender);
     assert!(observed.lock().unwrap().is_empty(), "prepared reply cannot reach a local recipient");
 
-    ctx.take_prepared_effects().publish();
+    ctx.publish_prepared_effects();
     let received = observed.lock().unwrap();
     assert_eq!(received.len(), 1);
     assert_eq!(received[0].0.correlation_id, 42, "reply echoes its inbound correlation");

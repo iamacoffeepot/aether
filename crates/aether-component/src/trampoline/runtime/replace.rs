@@ -10,7 +10,7 @@ use aether_substrate::actor::native::{
     Dispatch, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, PreparedComponentEffects};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::registry::PreparedAliasRoute;
@@ -25,8 +25,7 @@ use super::state::WasmTrampolineState;
 
 /// A candidate whose fallible construction and restoration have completed.
 /// Dropping this value aborts without changing the resident component or
-/// publishing guest effects. The later journal admission slice can retain it
-/// across its own fence without inventing a second replacement path.
+/// publishing guest effects.
 struct PreparedReplacement {
     component: Component,
     module: Module,
@@ -34,7 +33,6 @@ struct PreparedReplacement {
     wasm_bytes: Arc<[u8]>,
     type_tag: Option<u64>,
     capabilities: ComponentCapabilities,
-    effects: PreparedComponentEffects,
 }
 
 impl WasmTrampolineState {
@@ -307,7 +305,6 @@ impl WasmTrampolineState {
         }
 
         Ok(PreparedReplacement {
-            effects: new_component.take_prepared_effects(),
             component: new_component,
             module,
             actor_caps: actors,
@@ -318,8 +315,7 @@ impl WasmTrampolineState {
     }
 
     fn commit_replace(&mut self, prepared: PreparedReplacement) -> ReplaceResult {
-        let PreparedReplacement { component, module, actor_caps, wasm_bytes, type_tag, capabilities, effects } =
-            prepared;
+        let PreparedReplacement { component, module, actor_caps, wasm_bytes, type_tag, capabilities } = prepared;
         if let Some(mut old) = self.component.take() {
             // Acceptance is final. A contained teardown trap is diagnostic.
             old.unwire();
@@ -362,7 +358,7 @@ impl WasmTrampolineState {
         let seeded = self.mailer.cost_table().seed(self.mailbox, &handler_kinds);
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
-        effects.publish();
+        self.component.as_mut().expect("replacement component installed").publish_prepared_effects();
         ReplaceResult::Ok { capabilities }
     }
 
