@@ -18,7 +18,9 @@ use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_kinds::{
+    DescribeComponent, DescribeComponentResult, LoadComponent, LoadResult, ReplaceComponent, ReplaceResult,
+};
 use aether_test_fixtures_kinds::{CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND};
 
 const SINK: &str = "test.bloomery.reactor.sink";
@@ -502,17 +504,27 @@ fn reactor_bundle_replace_restores_generated_peers() {
     };
     let sink = load_export(&mut harness, &wasm_path, "sink-replace", SINK, Vec::new());
 
-    let publisher =
-        load_export_result(&mut harness, &wasm_path, "must-not-spawn-publisher", SOURCE_PUBLISHER, Vec::new());
-    assert!(
-        matches!(publisher, LoadResult::Err { .. }),
-        "generated publisher peers must not be independently spawnable: {publisher:?}"
-    );
-    let witness = load_export_result(&mut harness, &wasm_path, "must-not-spawn-witness", SOURCE_WITNESS, Vec::new());
-    assert!(
-        matches!(witness, LoadResult::Err { .. }),
-        "generated witness peers must not be independently spawnable: {witness:?}"
-    );
+    for (name, export) in [("public-publisher", SOURCE_PUBLISHER), ("public-witness", SOURCE_WITNESS)] {
+        let peer = load_export(&mut harness, &wasm_path, name, export, Vec::new());
+        let described = harness
+            .execute(vec![(
+                "describe",
+                HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DescribeComponent { name: peer }),
+            )])
+            .expect("describe public reactor peer")
+            .reply::<DescribeComponentResult>("describe")
+            .expect("decode peer description");
+        let capabilities = match described {
+            DescribeComponentResult::Ok { capabilities } => capabilities,
+            DescribeComponentResult::Err { error } => {
+                panic!("generated reactor peer {export} must be describable: {error}")
+            }
+        };
+        assert!(
+            capabilities.handlers.iter().any(|handler| handler.id == PreparedPrefix::ID),
+            "generated reactor peer {export} must advertise its PreparedPrefix handler"
+        );
+    }
 
     let (cluster, mailbox_id) = load_cluster_full(&mut harness, &wasm_path, "reactor-replace", sink.clone());
     let program = digest_ref::<Program>(1);

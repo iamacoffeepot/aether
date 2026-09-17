@@ -1,8 +1,6 @@
 //! Finish an `export!` generator pipeline by emitting a no-generator `export!`.
 //!
-//! Types that appear in `exports` but not in `actors` are generated inline
-//! factories. They stay reachable to replacement reconstruction and are not
-//! independently spawnable module exports.
+//! Every generated export has an actor descriptor and is publicly selectable.
 
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -120,30 +118,15 @@ fn parse_export_types(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
 
 fn expand(input: EmitInput) -> syn::Result<TokenStream2> {
     let EmitInput { boot, default, actor_types, types } = input;
-    let (public, reconstruct_extras) = split_public_and_reconstruct(&actor_types, &types);
-    if public.is_empty() {
-        return Err(syn::Error::new(Span::call_site(), "export! generators produced no public export types"));
+    if let Some(missing) = types.iter().find(|ty| !actor_types.iter().any(|actor| type_in(ty, actor))) {
+        return Err(syn::Error::new_spanned(missing, "generated export has no actor descriptor"));
     }
-    let rest: Vec<&Type> = public
+    let rest: Vec<&Type> = types
         .iter()
-        .copied()
         .filter(|ty| default.as_ref().is_none_or(|default| !type_in(default, ty)))
         .filter(|ty| boot.as_ref().is_none_or(|boot| !type_in(boot, ty)))
         .collect();
-    if reconstruct_extras.is_empty() {
-        emit_public_export(boot.as_ref(), default.as_ref(), &rest)
-    } else {
-        emit_with_reconstruct(boot.as_ref(), default.as_ref(), &rest, &reconstruct_extras)
-    }
-}
-
-fn split_public_and_reconstruct<'a>(actor_types: &'a [Type], types: &'a [Type]) -> (Vec<&'a Type>, Vec<&'a Type>) {
-    if actor_types.is_empty() {
-        return (types.iter().collect(), Vec::new());
-    }
-    let public = types.iter().filter(|ty| actor_types.iter().any(|actor| type_in(ty, actor))).collect();
-    let extras = types.iter().filter(|ty| !actor_types.iter().any(|actor| type_in(ty, actor))).collect();
-    (public, extras)
+    emit_public_export(boot.as_ref(), default.as_ref(), &rest)
 }
 
 fn emit_public_export(boot: Option<&Type>, default: Option<&Type>, rest: &[&Type]) -> syn::Result<TokenStream2> {
@@ -171,66 +154,6 @@ fn emit_public_export(boot: Option<&Type>, default: Option<&Type>, rest: &[&Type
     })
 }
 
-fn emit_with_reconstruct(
-    boot: Option<&Type>,
-    default: Option<&Type>,
-    rest: &[&Type],
-    reconstruct: &[&Type],
-) -> syn::Result<TokenStream2> {
-    Ok(match (boot, default) {
-        (Some(boot), Some(default)) => {
-            quote! {
-                ::aether_actor::__export_multi_internal!(
-                    @boot #boot ;
-                    @default #default ;
-                    @all #boot, #default #(, #rest)*
-                    ; @reconstruct #(#reconstruct),*
-                );
-            }
-        }
-        (None, Some(default)) => {
-            quote! {
-                ::aether_actor::__export_multi_internal!(
-                    @no_boot ;
-                    @default #default ;
-                    @all #default #(, #rest)*
-                    ; @reconstruct #(#reconstruct),*
-                );
-            }
-        }
-        (Some(_), None) if rest.is_empty() => {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "export! boot-only modules need at least one non-boot export",
-            ));
-        }
-        (Some(boot), None) => {
-            quote! {
-                ::aether_actor::__export_multi_internal!(
-                    @boot #boot ;
-                    @no_default ;
-                    @all #boot #(, #rest)*
-                    ; @reconstruct #(#reconstruct),*
-                );
-            }
-        }
-        (None, None) if rest.len() == 1 => {
-            let ty = rest[0];
-            quote! { ::aether_actor::__export_internal!(#ty ; @reconstruct #(#reconstruct),*); }
-        }
-        (None, None) => {
-            quote! {
-                ::aether_actor::__export_multi_internal!(
-                    @no_boot ;
-                    @no_default ;
-                    @all #(#rest),*
-                    ; @reconstruct #(#reconstruct),*
-                );
-            }
-        }
-    })
-}
-
 fn type_in(needle: &Type, haystack: &Type) -> bool {
     quote!(#needle).to_string() == quote!(#haystack).to_string()
 }
@@ -255,11 +178,11 @@ mod tests {
         .expect("ordinary emit");
         let compact = compact(&tokens);
         assert!(compact.contains("export!(default=Probe,Sink"));
-        assert!(!compact.contains("@reconstruct"));
+        assert!(!compact.contains("__export_multi_internal!"));
     }
 
     #[test]
-    fn generated_peers_are_reconstruct_only() {
+    fn generated_peers_are_public_exports() {
         let tokens = expand(EmitInput {
             boot: None,
             default: Some(parse_quote!(Probe)),
@@ -267,6 +190,8 @@ mod tests {
                 parse_quote!(Probe),
                 parse_quote!(Publisher),
                 parse_quote!(__AetherBloomeryReactorCluster),
+                parse_quote!(__AetherBloomeryReactorPeer_n1),
+                parse_quote!(__AetherBloomeryReactorPeer_n2),
                 parse_quote!(Sink),
             ],
             types: vec![
@@ -277,30 +202,36 @@ mod tests {
                 parse_quote!(Sink),
             ],
         })
-        .expect("reconstruct emit");
+        .expect("public peer emit");
         let compact = compact(&tokens);
-        assert!(compact.contains("@defaultProbe"));
-        assert!(compact.contains("@allProbe,__AetherBloomeryReactorCluster,Sink"));
-        assert!(!compact.contains("@allProbe,__AetherBloomeryReactorCluster,__AetherBloomeryReactorPeer_n1,Sink"));
-        assert!(compact.contains("@reconstruct__AetherBloomeryReactorPeer_n1,__AetherBloomeryReactorPeer_n2"));
-        assert!(!compact.contains("init_typed"));
+        assert!(compact.contains("export!(default=Probe,__AetherBloomeryReactorCluster,__AetherBloomeryReactorPeer_n1,__AetherBloomeryReactorPeer_n2,Sink"));
     }
 
     #[test]
-    fn reactor_only_keeps_a_single_public_export() {
+    fn reactor_only_keeps_coordinator_default_with_public_peer() {
         let tokens = expand(EmitInput {
             boot: None,
-            default: None,
-            actor_types: vec![parse_quote!(Publisher), parse_quote!(__AetherBloomeryReactorCluster)],
+            default: Some(parse_quote!(__AetherBloomeryReactorCluster)),
+            actor_types: vec![
+                parse_quote!(__AetherBloomeryReactorCluster),
+                parse_quote!(__AetherBloomeryReactorPeer_n1),
+            ],
             types: vec![parse_quote!(__AetherBloomeryReactorCluster), parse_quote!(__AetherBloomeryReactorPeer_n1)],
         })
         .expect("reactor-only emit");
         let compact = compact(&tokens);
-        assert!(
-            compact.contains(
-                "__export_internal!(__AetherBloomeryReactorCluster;@reconstruct__AetherBloomeryReactorPeer_n1)"
-            )
-        );
-        assert!(!compact.contains("__export_multi_internal!"));
+        assert!(compact.contains("export!(default=__AetherBloomeryReactorCluster,__AetherBloomeryReactorPeer_n1"));
+    }
+
+    #[test]
+    fn generated_export_requires_actor_descriptor() {
+        let error = expand(EmitInput {
+            boot: None,
+            default: None,
+            actor_types: vec![parse_quote!(__AetherBloomeryReactorCluster)],
+            types: vec![parse_quote!(__AetherBloomeryReactorCluster), parse_quote!(__AetherBloomeryReactorPeer_n1)],
+        })
+        .expect_err("a public peer needs a descriptor");
+        assert!(error.to_string().contains("generated export has no actor descriptor"));
     }
 }

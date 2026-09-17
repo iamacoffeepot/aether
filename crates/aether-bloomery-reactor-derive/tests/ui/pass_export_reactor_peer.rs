@@ -1,5 +1,4 @@
-// Reactor-only export rewrites to the coordinator plus a hidden peer factory.
-// The peer stays out of `actors`, so emit keeps it reconstruct-only.
+// Reactor-only export rewrites to a default coordinator and public peer.
 
 use aether_actor::export;
 use aether_bloomery_kinds::{HeadMoved, Tree};
@@ -27,9 +26,10 @@ impl Reactor for Publisher {
 macro_rules! RequirePeerFactory {
     (@aether_export_generate
         { remaining_generators: [$($next:path),*] }
-        { boot: none, default: none, actors: [
+        { boot: none, default: { $default:ty }, actors: [
             { ty: { $publisher:ty } namespace: "test.bloomery.export.reactor_peer" extensions: [aether_bloomery_reactor {}] }
             { ty: { $coordinator:ty } namespace: "aether.bloomery.reactor" extensions: [] }
+            { ty: { $peer_actor:ty } namespace: "test.bloomery.export.reactor_peer" extensions: [] }
         ], exports: [{ $cluster_export:ty } { $peer:ty }] }
     ) => {
         const _: fn() = || {
@@ -37,18 +37,21 @@ macro_rules! RequirePeerFactory {
             let _: PhantomData<Publisher> = PhantomData::<$publisher>;
             let _: PhantomData<$coordinator> = PhantomData::<$cluster_export>;
             let _: PhantomData<$peer> = PhantomData::<$peer>;
+            let _: PhantomData<$default> = PhantomData::<$coordinator>;
+            let _: PhantomData<$peer_actor> = PhantomData::<$peer>;
         };
         aether_actor::__export_continue! {
             remaining_generators: [$($next),*]
-            boot: none default: none
+            boot: none default: { $default }
             actors: [
                 { ty: { $publisher } namespace: "test.bloomery.export.reactor_peer" extensions: [aether_bloomery_reactor {}] }
                 { ty: { $coordinator } namespace: "aether.bloomery.reactor" extensions: [] }
+                { ty: { $peer_actor } namespace: "test.bloomery.export.reactor_peer" extensions: [] }
             ]
             exports: [{ $cluster_export } { $peer }]
         }
     };
-    ($($unexpected:tt)*) => { compile_error!("reactor-only peer factory was omitted from exports or added to actors"); };
+    ($($unexpected:tt)*) => { compile_error!("reactor-only peer was not a public actor or coordinator default changed"); };
 }
 
 export!(Publisher, generators = [aether_bloomery_reactor::bundle_reactors, RequirePeerFactory]);
