@@ -120,6 +120,17 @@ impl Error for PrepareError {
     }
 }
 
+impl PrepareError {
+    /// The last retained entry is a different stored kind than this arm's trigger.
+    ///
+    /// Generated evaluation treats this as a decline of that arm, not a
+    /// poisoned owner. A storage-decode failure stays an error.
+    #[must_use]
+    pub fn is_unknown_trigger(&self) -> bool {
+        matches!(self, Self::Trigger(DecodeError::KindMismatch { .. }))
+    }
+}
+
 pub fn seq_mismatch(expected: Seq, actual: Seq) -> PrepareError {
     let cursor = Seq(expected.0.saturating_sub(1));
     if actual.0 > expected.0 {

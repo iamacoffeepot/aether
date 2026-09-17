@@ -1,0 +1,5 @@
+error: #[rule] needs a typed trigger parameter after `&self`
+  --> tests/ui/fail_no_trigger.rs:19:5
+   |
+19 |     fn publish(&self) -> PublicationProposal {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

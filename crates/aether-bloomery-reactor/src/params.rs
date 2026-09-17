@@ -1,9 +1,10 @@
 //! Type-level parameter lists a signature macro can emit.
 //!
-//! Authors write `heads: Heads` and `current: CurrentCompilation`. The macro
-//! emits [`Arg`] chains with inferred role markers. Rust selects the view or
-//! guard implementation from each concrete parameter type. Distinct role
-//! markers keep the impls from overlapping.
+//! Authors write `heads: Heads` and `current: CurrentCompilation`. The
+//! signature macro emits [`Arg`] chains with inferred role markers (`Arg<_, T,
+//! Rest>`). Rust selects the view or guard implementation from each concrete
+//! parameter type. Distinct role markers keep the impls from overlapping. The
+//! macro does not classify type names.
 
 use core::marker::PhantomData;
 

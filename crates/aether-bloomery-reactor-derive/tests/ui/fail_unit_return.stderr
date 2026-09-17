@@ -1,0 +1,5 @@
+error: #[rule] methods return exactly one mail-capable typed output; unit is unsupported
+  --> tests/ui/fail_unit_return.rs:13:5
+   |
+13 |     fn publish(&self, _change: HeadMoved<Tree>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

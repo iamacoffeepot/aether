@@ -1,0 +1,252 @@
+//! Signature-based evaluation: named guards, shared views, and refutable triggers.
+
+use std::error::Error;
+
+use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
+use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Owner, Params, PrepareError, Reactor, Trigger, reactor};
+use aether_bloomery_view::Heads;
+use aether_data::{Kind, Storage, StorageData};
+
+const CURRENT: Head<Program> = Head::new("current");
+const SOURCE: Head<Tree> = Head::new("source");
+
+struct CurrentCompilation {
+    program: Ref<Program>,
+}
+
+impl Guard<HeadMoved<Tree>> for CurrentCompilation {
+    type Views = Heads;
+
+    fn resolve(_trigger: &HeadMoved<Tree>, heads: &Heads) -> Option<Self> {
+        Some(Self { program: heads.get(&CURRENT)? })
+    }
+}
+
+struct CurrentSource;
+
+impl Guard<Compilation> for CurrentSource {
+    type Views = Heads;
+
+    fn resolve(trigger: &Compilation, heads: &Heads) -> Option<Self> {
+        let current = heads.get(&SOURCE)?;
+        let source = match trigger {
+            Compilation::Succeeded { source, .. } | Compilation::Failed { source } => *source,
+        };
+        if current.digest().as_bytes() != &source {
+            return None;
+        }
+        Some(Self)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, aether_data::Storage)]
+#[kind(name = "test.bloomery.reactor.compilation")]
+enum Compilation {
+    Succeeded { source: [u8; 32], output: [u8; 32] },
+    Failed { source: [u8; 32] },
+}
+
+#[aether_data::kind(name = "test.bloomery.reactor.publication", eq)]
+struct PublicationProposal {
+    marker: u32,
+    digest: [u8; 32],
+}
+
+impl Output for PublicationProposal {}
+
+struct SourcePublisher;
+
+#[reactor]
+impl Reactor for SourcePublisher {
+    const NAME: &'static str = "source.publisher";
+
+    #[rule]
+    fn publish_source(
+        &self,
+        change: HeadMoved<Tree>,
+        current: CurrentCompilation,
+        heads: Heads,
+    ) -> PublicationProposal {
+        PublicationProposal { marker: 1, digest: *change.to().digest().as_bytes() }.with_heads(heads, current.program)
+    }
+
+    #[rule]
+    fn note_heads(&self, change: HeadMoved<Tree>, heads: Heads) -> PublicationProposal {
+        PublicationProposal { marker: 2, digest: *change.to().digest().as_bytes() }.at_cursor(heads.cursor())
+    }
+}
+
+impl PublicationProposal {
+    fn with_heads(self, heads: Heads, program: Ref<Program>) -> Self {
+        assert_eq!(heads.get(&CURRENT), Some(program));
+        self
+    }
+
+    fn at_cursor(self, cursor: Seq) -> Self {
+        assert!(cursor.0 > 0);
+        self
+    }
+}
+
+struct CompilationPublisher;
+
+#[reactor]
+impl Reactor for CompilationPublisher {
+    const NAME: &'static str = "compilation.publisher";
+
+    #[rule]
+    fn publish_compiled(
+        &self,
+        Compilation::Succeeded { output, .. }: Compilation,
+        _current: CurrentSource,
+    ) -> PublicationProposal {
+        PublicationProposal { marker: 10, digest: output }
+    }
+
+    #[rule]
+    fn ignore_failed(&self, Compilation::Failed { source }: Compilation) -> PublicationProposal {
+        PublicationProposal { marker: 11, digest: source }
+    }
+}
+
+fn digest_ref<K>(byte: u8) -> Ref<K> {
+    Ref::from_digest(Digest::from_bytes([byte; 32]))
+}
+
+fn entry_for<K: Storage + Clone>(seq: u64, event: &K) -> Result<Entry, Box<dyn Error>> {
+    Ok(Entry {
+        seq: Seq(seq),
+        kind: K::NAME.to_owned(),
+        cause: None,
+        recorded_at_millis: 0,
+        bytes: K::encode_storage(&StorageData::from_value(event.clone()))?,
+    })
+}
+
+fn moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
+    entry_for(seq, &Head::<K>::new(name).move_to(to))
+}
+
+#[test]
+fn named_guard_declines_without_body_checks() -> Result<(), Box<dyn Error>> {
+    // Bug: a missing current head is checked in the arm body, or becomes an error,
+    // or it also suppresses a sibling arm that did not name the guard.
+    let tree = digest_ref::<Tree>(1);
+    let mut owner = Owner::new();
+    owner.push(&[moved(1, "source", tree)?])?;
+    let intents = SourcePublisher.evaluate(&mut owner)?;
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].decode::<PublicationProposal>().expect("unguarded arm").marker, 2);
+    Ok(())
+}
+
+#[test]
+fn named_guard_and_direct_heads_publish() -> Result<(), Box<dyn Error>> {
+    // Bug: the signature guard is not enough and the arm still needs a stale-head
+    // conditional, or Heads is a different instance than the guard's view.
+    let program = digest_ref::<Program>(1);
+    let tree = digest_ref::<Tree>(2);
+    let mut owner = Owner::new();
+    owner.push(&[moved(1, "current", program)?, moved(2, "source", tree)?])?;
+    let intents = SourcePublisher.evaluate(&mut owner)?;
+    assert_eq!(intents.len(), 2);
+    let first = intents[0].decode::<PublicationProposal>().expect("mail-capable output");
+    let second = intents[1].decode::<PublicationProposal>().expect("mail-capable output");
+    assert_eq!(first.marker, 1);
+    assert_eq!(first.digest, [2; 32]);
+    assert_eq!(second.marker, 2);
+    assert_eq!(intents[0].kind_name(), PublicationProposal::NAME);
+    Ok(())
+}
+
+#[test]
+fn two_arms_share_the_folded_view_across_events() -> Result<(), Box<dyn Error>> {
+    // Bug: evaluating two arms rebuilds Heads, or a later event mutates the first
+    // evaluation's owned proposal.
+    let program = digest_ref::<Program>(1);
+    let first_tree = digest_ref::<Tree>(2);
+    let later_tree = digest_ref::<Tree>(3);
+    let mut owner = Owner::new();
+    owner.push(&[moved(1, "current", program)?, moved(2, "source", first_tree)?])?;
+    let first = SourcePublisher.evaluate(&mut owner)?;
+    assert_eq!(first.len(), 2);
+    let first_digest = first[0].decode::<PublicationProposal>().expect("first").digest;
+
+    owner.push(&[moved(3, "source", later_tree)?])?;
+    let second = SourcePublisher.evaluate(&mut owner)?;
+    assert_eq!(second.len(), 2);
+    assert_eq!(second[0].decode::<PublicationProposal>().expect("later").digest, [3; 32]);
+    assert_eq!(first[0].decode::<PublicationProposal>().expect("retained").digest, first_digest);
+    Ok(())
+}
+
+#[test]
+fn refutable_trigger_selects_the_matching_arm() -> Result<(), Box<dyn Error>> {
+    // Bug: both enum cases run, or a failed match is an error instead of a decline.
+    let source = digest_ref::<Tree>(4);
+    let mut owner = Owner::new();
+    owner.push(&[
+        moved(1, "source", source)?,
+        entry_for(2, &Compilation::Succeeded { source: [4; 32], output: [9; 32] })?,
+    ])?;
+    let intents = CompilationPublisher.evaluate(&mut owner)?;
+    assert_eq!(intents.len(), 1);
+    assert_eq!(intents[0].decode::<PublicationProposal>().expect("success").marker, 10);
+
+    owner.push(&[entry_for(3, &Compilation::Failed { source: [4; 32] })?])?;
+    let failed = CompilationPublisher.evaluate(&mut owner)?;
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].decode::<PublicationProposal>().expect("failed").marker, 11);
+    Ok(())
+}
+
+#[test]
+fn stale_source_guard_declines_without_body_checks() -> Result<(), Box<dyn Error>> {
+    // Bug: a compilation for an older source is published because the arm body
+    // compares heads itself, or the guard is treated as suspended work.
+    let live = digest_ref::<Tree>(5);
+    let mut owner = Owner::new();
+    owner.push(&[
+        moved(1, "source", live)?,
+        entry_for(2, &Compilation::Succeeded { source: [1; 32], output: [8; 32] })?,
+    ])?;
+    let intents = CompilationPublisher.evaluate(&mut owner)?;
+    assert_eq!(intents.len(), 1, "the independent unguarded arm still runs");
+    assert_eq!(intents[0].decode::<PublicationProposal>().expect("head observation").marker, 2);
+    Ok(())
+}
+
+#[test]
+fn unmatched_stored_kind_declines_rather_than_failing() -> Result<(), Box<dyn Error>> {
+    // Bug: a compilation event errors a source-head reactor instead of declining.
+    let mut owner = Owner::new();
+    owner.push(&[entry_for(1, &Compilation::Failed { source: [1; 32] })?])?;
+    let intents = SourcePublisher.evaluate(&mut owner)?;
+    assert!(intents.is_empty());
+    Ok(())
+}
+
+#[test]
+fn visit_arms_exposes_each_rule() {
+    struct Names(Vec<&'static str>);
+    impl ArmVisitor for Names {
+        fn visit<T, L, O>(&mut self, name: &'static str)
+        where
+            T: Trigger,
+            L: Params<T>,
+            O: Output,
+        {
+            self.0.push(name);
+        }
+    }
+
+    let mut names = Names(Vec::new());
+    SourcePublisher::visit_arms(&mut names);
+    assert_eq!(names.0, ["publish_source", "note_heads"]);
+}
+
+#[test]
+fn empty_owner_is_an_error() {
+    let error = SourcePublisher.evaluate(&mut Owner::new()).expect_err("empty");
+    assert!(matches!(error, PrepareError::Empty), "{error}");
+}

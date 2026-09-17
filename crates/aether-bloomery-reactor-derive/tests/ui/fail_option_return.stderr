@@ -1,0 +1,5 @@
+error: #[rule] methods return exactly one mail-capable typed output; `Option` is unsupported
+  --> tests/ui/fail_option_return.rs:20:52
+   |
+20 |     fn publish(&self, _change: HeadMoved<Tree>) -> Option<PublicationProposal> {
+   |                                                    ^^^^^^^^^^^^^^^^^^^^^^^^^^^

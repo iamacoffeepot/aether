@@ -1,0 +1,5 @@
+error: #[rule] parameters are owned trigger, view, and guard values; engine context and borrowed parameters are unsupported
+  --> tests/ui/fail_context.rs:22:55
+   |
+22 |     fn publish(&self, _change: HeadMoved<Tree>, _ctx: &mut EngineCtx) -> PublicationProposal {
+   |                                                       ^^^^^^^^^^^^^^
