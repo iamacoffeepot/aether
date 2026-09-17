@@ -117,8 +117,19 @@ or regression in live input violates the application contract: request
 system-wide shutdown through the existing shutdown mechanism. Do not sort or
 repair a broken live stream by silently fetching the missing entries.
 
-Use a growable ring buffer (`VecDeque<JournalEntry>`) for pending payloads.
-Allocate more capacity when it fills; preserve every pending payload and arrival order.
+Use two coordinated stores for pending input: a ring of fixed-size event
+descriptors and shared byte backing storage for their payloads. Descriptors
+contain sequence, numeric `KindId`, cause, timestamp, and payload offset/length.
+Follow the existing mail ring prior art in
+`aether-substrate/src/mail/ring.rs` and
+`actor/native/binding/outbound.rs`: store payloads in the shared ring when
+they fit, and fall back to an owned allocation when the ring is full or a
+payload is oversized. Preserve FIFO across both storage forms. Never overwrite
+a live ring region. Consuming an event releases its descriptor and associated
+storage together. Adapt the wrap/reclamation invariants to the views owner's
+single-owner queue; this does not authorize edits to the engine mail ring or
+its concurrency mechanics. Test wraparound, allocation fallback, mixed-storage
+FIFO, reclamation, and empty/oversized payloads.
 do not introduce a heap for reordering or a new engine backpressure policy.
 The queue can grow while preparation is blocked. Sequence-range overflow
 and journal rereads are a deferred optimization, not
