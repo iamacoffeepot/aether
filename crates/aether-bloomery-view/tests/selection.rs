@@ -91,7 +91,7 @@ fn each_event_uses_its_predecessor_prefix_across_set_and_bundle_moves() -> Resul
             actual.iter().map(|selected| (selected.head.clone(), selected.artifact)).collect::<Vec<_>>(),
             expected
         );
-        heads.apply(&entries[(event - 1) as usize])?;
+        heads.apply(&entries[usize::try_from(event - 1)?])?;
     }
 
     let before_set_change = select_reactors(&heads, Seq(7), &SET_ROOT, &KERNEL, kernel_only_ref, &kernel_only)?;
