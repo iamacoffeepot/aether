@@ -73,6 +73,40 @@ pub struct Journal {
     identity: JournalIdentity,
 }
 
+/// Typed batch and exact prospective entries awaiting a fenced append.
+///
+/// Preparation writes nothing and does not reserve the head. Dropping this
+/// value aborts the append. Its entries are immutable; a later commit inserts
+/// these same envelopes after validating the batch against the current prefix.
+pub struct PreparedAppend {
+    batch: Batch,
+    identity: JournalIdentity,
+    expect_head: Seq,
+    recorded_at_millis: u64,
+    entries: Vec<Entry>,
+    range: Range<Seq>,
+}
+
+impl PreparedAppend {
+    /// Exact envelopes that [`Journal::commit_prepared`] will insert.
+    #[must_use]
+    pub fn entries(&self) -> &[Entry] {
+        &self.entries
+    }
+
+    /// The prospective sequence range, exclusive at the end.
+    #[must_use]
+    pub fn range(&self) -> Range<Seq> {
+        self.range.clone()
+    }
+
+    /// Prefixed bytes of an artifact staged by this batch, if present.
+    #[must_use]
+    pub fn staged_blob(&self, digest: &Digest) -> Option<&[u8]> {
+        self.batch.staged_blob(digest)
+    }
+}
+
 impl Journal {
     /// Open a file-backed journal with [`SystemClock`].
     ///
@@ -167,6 +201,98 @@ impl Journal {
         let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
         Ok(range)
+    }
+
+    /// Freeze the exact entries for a typed batch before attempting to append.
+    ///
+    /// This checks the current head and SQLite integer bounds without writing
+    /// or reserving the prefix. The timestamp is sampled once; a later
+    /// [`Self::commit_prepared`] uses it even if the clock advances. Citation,
+    /// recognized head-move, and SQL constraint checks still run at commit.
+    ///
+    /// # Errors
+    ///
+    /// [`AppendError::HeadMoved`] when the head has already changed, or
+    /// [`AppendError::Journal`] on a backend or integer-range failure.
+    pub fn prepare_append(&self, expect_head: Seq, batch: Batch) -> Result<PreparedAppend, AppendError> {
+        let head = self.head()?;
+        if head != expect_head {
+            return Err(AppendError::HeadMoved { actual: head });
+        }
+
+        let recorded_at_millis = self.clock.now_millis();
+        if !batch.is_empty() {
+            sqlite_i64(recorded_at_millis)?;
+        }
+        for staged in &batch.staged {
+            sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
+        }
+
+        let first = head.0.checked_add(1).ok_or(JournalError::IntegerRange)?;
+        let end = first
+            .checked_add(u64::try_from(batch.events.len()).map_err(|_| JournalError::IntegerRange)?)
+            .ok_or(JournalError::IntegerRange)?;
+        let entries = batch
+            .events
+            .iter()
+            .enumerate()
+            .map(|(offset, draft)| {
+                let seq = Seq(first
+                    .checked_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?)
+                    .ok_or(JournalError::IntegerRange)?);
+                sqlite_i64(seq.0)?;
+                draft.cause.map(|cause| sqlite_i64(cause.0)).transpose()?;
+                Ok(Entry {
+                    seq,
+                    kind: draft.kind.clone(),
+                    cause: draft.cause,
+                    recorded_at_millis,
+                    bytes: draft.bytes.clone(),
+                })
+            })
+            .collect::<Result<Vec<_>, JournalError>>()?;
+
+        Ok(PreparedAppend {
+            batch,
+            identity: self.identity(),
+            expect_head,
+            recorded_at_millis,
+            entries,
+            range: Seq(first)..Seq(end),
+        })
+    }
+
+    /// Append exactly the entries of a prepared typed batch.
+    ///
+    /// Rejects a different journal allocation before touching SQLite, then
+    /// rechecks the head inside an immediate transaction. Artifacts, citations,
+    /// recognized head moves, and event constraints retain the ordinary
+    /// append path's all-or-nothing validation. The clock is not resampled.
+    ///
+    /// # Errors
+    ///
+    /// [`AppendError::WrongJournal`] when prepared for another allocation;
+    /// [`AppendError::HeadMoved`] when the fence became stale; the same
+    /// citation, head-move, and backend errors as [`Self::append`] otherwise.
+    pub fn commit_prepared(&mut self, prepared: PreparedAppend) -> Result<Range<Seq>, AppendError> {
+        if prepared.identity != self.identity {
+            return Err(AppendError::WrongJournal);
+        }
+        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let head = head_of(&tx)?;
+        if head != prepared.expect_head {
+            return Err(AppendError::HeadMoved { actual: head });
+        }
+        if prepared.batch.is_empty() {
+            tx.commit()?;
+            return Ok(prepared.range);
+        }
+
+        insert_staged(&tx, &prepared.batch, prepared.recorded_at_millis)?;
+        verify_citations(&tx, &prepared.batch)?;
+        insert_prepared_entries(&tx, &prepared.entries)?;
+        tx.commit()?;
+        Ok(prepared.range)
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.
@@ -300,19 +426,46 @@ fn insert_events(
     if events.is_empty() {
         return Ok(Seq(first)..Seq(first));
     }
-    let recorded_at = sqlite_i64(recorded_at_millis)?;
     {
         let mut stmt = tx
             .prepare("INSERT INTO entries (seq, kind, cause, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4, ?5)")?;
         for (offset, draft) in events.iter().enumerate() {
             let seq = first.saturating_add(u64::try_from(offset).map_err(|_| JournalError::IntegerRange)?);
-            let seq_i64 = sqlite_i64(seq)?;
-            let cause = draft.cause.map(|c| sqlite_i64(c.0)).transpose()?;
-            stmt.execute(params![seq_i64, draft.kind, cause, recorded_at, draft.bytes])?;
+            insert_entry(&mut stmt, Seq(seq), &draft.kind, draft.cause, recorded_at_millis, &draft.bytes)?;
         }
     }
     let last_exclusive = first.saturating_add(u64::try_from(events.len()).map_err(|_| JournalError::IntegerRange)?);
     Ok(Seq(first)..Seq(last_exclusive))
+}
+
+fn insert_prepared_entries(tx: &Transaction<'_>, entries: &[Entry]) -> Result<(), JournalError> {
+    if entries.is_empty() {
+        return Ok(());
+    }
+    let mut stmt =
+        tx.prepare("INSERT INTO entries (seq, kind, cause, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4, ?5)")?;
+    for entry in entries {
+        insert_entry(&mut stmt, entry.seq, &entry.kind, entry.cause, entry.recorded_at_millis, &entry.bytes)?;
+    }
+    Ok(())
+}
+
+fn insert_entry(
+    stmt: &mut rusqlite::Statement<'_>,
+    seq: Seq,
+    kind: &str,
+    cause: Option<Seq>,
+    recorded_at_millis: u64,
+    bytes: &[u8],
+) -> Result<(), JournalError> {
+    stmt.execute(params![
+        sqlite_i64(seq.0)?,
+        kind,
+        cause.map(|cause| sqlite_i64(cause.0)).transpose()?,
+        sqlite_i64(recorded_at_millis)?,
+        bytes,
+    ])?;
+    Ok(())
 }
 
 fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendError> {
@@ -434,6 +587,8 @@ impl From<rusqlite::Error> for JournalError {
 /// Failure to append a batch.
 #[derive(Debug)]
 pub enum AppendError {
+    /// The prepared batch belongs to a different journal allocation.
+    WrongJournal,
     /// `expect_head` was stale; `actual` is the head that was read inside the transaction.
     HeadMoved {
         /// Head observed inside the append transaction.
@@ -464,6 +619,7 @@ pub enum AppendError {
 impl fmt::Display for AppendError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::WrongJournal => write!(f, "prepared append belongs to another journal"),
             Self::HeadMoved { actual } => write!(f, "journal head moved; actual head is {actual}"),
             Self::DanglingRef { digest, expected } => {
                 write!(f, "dangling ref {digest} expected kind {expected}")
@@ -480,7 +636,9 @@ impl fmt::Display for AppendError {
 impl Error for AppendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::HeadMoved { .. } | Self::DanglingRef { .. } | Self::PrefixMismatch { .. } => None,
+            Self::WrongJournal | Self::HeadMoved { .. } | Self::DanglingRef { .. } | Self::PrefixMismatch { .. } => {
+                None
+            }
             Self::InvalidHeadMoved(error) => Some(error),
             Self::Journal(error) => Some(error),
         }

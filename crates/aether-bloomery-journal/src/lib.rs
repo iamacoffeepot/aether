@@ -9,7 +9,9 @@
 //!   The digest covers the kind, so a digest names one kind and one payload.
 //!
 //! Events are [`aether_data::Storage`] kinds. The only write is a [`Batch`] of
-//! staged artifacts plus events; [`Journal::append`] is the only judge.
+//! staged artifacts plus events; [`Journal::append`] and the fenced
+//! [`Journal::prepare_append`] / [`Journal::commit_prepared`] pair are the only
+//! write routes.
 //! Citations are typed [`Ref`] values collected by a derive-emitted walk.
 //! The one recognized exception is `bloomery.head_moved`: `append` decodes
 //! that kind from the draft as [`aether_bloomery_kinds::RecordedHeadMove`]
@@ -35,4 +37,4 @@ pub use artifact::split_artifact;
 pub use batch::{Batch, BatchError};
 pub use clock::{Clock, SystemClock};
 pub use draft::{Draft, DraftError};
-pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity};
+pub use journal::{AppendError, GetError, Journal, JournalError, JournalIdentity, PreparedAppend};

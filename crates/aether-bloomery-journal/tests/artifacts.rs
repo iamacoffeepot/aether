@@ -4,7 +4,7 @@ mod common;
 
 use std::error::Error;
 
-use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text};
+use aether_bloomery_journal::{Batch, Digest, GetError, Journal, OpaqueBytes, Seq, Utf8Text, artifact_blob};
 use aether_data::Kind;
 use common::FixedClock;
 
@@ -12,6 +12,39 @@ use common::FixedClock;
 #[kind(name = "test.journal.note")]
 struct Note {
     text: String,
+}
+
+#[test]
+fn an_artifact_only_preparation_has_no_entries_and_keeps_the_event_head() -> Result<(), Box<dyn Error>> {
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(11)))?;
+    let mut batch = Batch::new();
+    let staged = batch.stage_bytes(b"artifact only");
+    let prepared = journal.prepare_append(Seq(0), batch)?;
+
+    assert!(prepared.entries().is_empty());
+    assert_eq!(prepared.range(), Seq(1)..Seq(1));
+    assert_eq!(
+        prepared.staged_blob(&staged.digest()),
+        Some(artifact_blob(OpaqueBytes::ID, b"artifact only").as_slice())
+    );
+    assert_eq!(journal.get_bytes(&staged.digest())?, None);
+    assert_eq!(journal.commit_prepared(prepared)?, Seq(1)..Seq(1));
+    assert_eq!(journal.head()?, Seq(0));
+    assert_eq!(journal.get_bytes(&staged.digest())?, Some((OpaqueBytes::ID, b"artifact only".to_vec())));
+    Ok(())
+}
+
+#[test]
+fn an_empty_preparation_has_an_empty_range_and_writes_nothing() -> Result<(), Box<dyn Error>> {
+    let mut journal = Journal::open_in_memory_with_clock(Box::new(FixedClock(11)))?;
+    let prepared = journal.prepare_append(Seq(0), Batch::new())?;
+
+    assert!(prepared.entries().is_empty());
+    assert_eq!(prepared.range(), Seq(1)..Seq(1));
+    assert_eq!(journal.commit_prepared(prepared)?, Seq(1)..Seq(1));
+    assert_eq!(journal.head()?, Seq(0));
+    assert!(journal.read(Seq(0), 1)?.is_empty());
+    Ok(())
 }
 
 #[test]
