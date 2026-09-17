@@ -1,5 +1,6 @@
 //! Two named owners answer isolated, correlated pages from their own files.
 
+use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -59,7 +60,7 @@ struct Marker {
     value: u64,
 }
 
-fn seed(path: &std::path::Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
+fn seed(path: &Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
     let mut journal = Journal::open_with_clock(path, Box::new(FixedClock)).expect("create seed journal");
     let mut batch = Batch::new();
     for (index, note) in notes.iter().enumerate() {
