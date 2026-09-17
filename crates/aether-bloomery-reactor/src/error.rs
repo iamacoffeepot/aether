@@ -88,6 +88,27 @@ pub enum PrepareError {
         /// Codec error.
         source: Box<dyn Error + 'static>,
     },
+    /// The stream/activation token was empty.
+    InvalidStream,
+    /// The input named a different stream than this cluster is bound to.
+    StreamMismatch {
+        /// Token already bound to the cluster.
+        bound: String,
+        /// Token on the refused input.
+        actual: String,
+    },
+    /// An `EventBatch`'s `from`/`through` does not match its entries.
+    InvalidRange {
+        /// Declared first sequence.
+        from: Seq,
+        /// Declared last sequence.
+        through: Seq,
+    },
+    /// A previous fold failed; the cluster cannot admit further input.
+    PoisonedCluster {
+        /// Last cursor trusted before the failed fold.
+        last_trusted_cursor: Seq,
+    },
 }
 
 impl fmt::Display for PrepareError {
@@ -120,6 +141,16 @@ impl fmt::Display for PrepareError {
             Self::MissingSnapshot { view } => write!(f, "prepared prefix is missing snapshot {view}"),
             Self::DuplicateSnapshot { view } => write!(f, "prepared prefix repeats snapshot {view}"),
             Self::Snapshot { view, source } => write!(f, "prepared snapshot {view} failed: {source}"),
+            Self::InvalidStream => write!(f, "reactor stream token must be non-empty"),
+            Self::StreamMismatch { bound, actual } => {
+                write!(f, "reactor stream mismatch: bound {bound}, got {actual}")
+            }
+            Self::InvalidRange { from, through } => {
+                write!(f, "reactor event batch range {from}..={through} does not match entries")
+            }
+            Self::PoisonedCluster { last_trusted_cursor } => {
+                write!(f, "reactor cluster is poisoned after a failed fold at seq {last_trusted_cursor}")
+            }
         }
     }
 }
@@ -138,19 +169,24 @@ impl Error for PrepareError {
             | Self::CursorContract { .. }
             | Self::Poisoned { .. }
             | Self::MissingSnapshot { .. }
-            | Self::DuplicateSnapshot { .. } => None,
+            | Self::DuplicateSnapshot { .. }
+            | Self::InvalidStream
+            | Self::StreamMismatch { .. }
+            | Self::InvalidRange { .. }
+            | Self::PoisonedCluster { .. } => None,
         }
     }
 }
 
 impl PrepareError {
-    /// The last retained entry is a different stored kind than this arm's trigger.
+    /// The last retained entry is a different stored kind or typed
+    /// specialization than this arm's trigger.
     ///
     /// Generated evaluation treats this as a decline of that arm, not a
     /// poisoned owner. A storage-decode failure stays an error.
     #[must_use]
     pub fn is_unknown_trigger(&self) -> bool {
-        matches!(self, Self::Trigger(DecodeError::KindMismatch { .. }))
+        matches!(self, Self::Trigger(error) if error.is_unmatched())
     }
 }
 

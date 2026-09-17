@@ -213,7 +213,9 @@ impl Journal {
     /// # Errors
     ///
     /// [`DecodeError::KindMismatch`] when the stored name is not `K::NAME`.
-    /// [`DecodeError::Storage`] when TLV decode fails.
+    /// [`DecodeError::SpecializationMismatch`] when the payload is a different
+    /// typed specialization of that stored kind. [`DecodeError::Storage`] when
+    /// TLV decode fails.
     pub fn decode<K: Storage>(entry: &Entry) -> Result<K, DecodeError> {
         entry.decode()
     }

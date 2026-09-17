@@ -136,7 +136,7 @@ fn prepared_prefix_installs_every_snapshot_without_refolding() -> Result<(), Box
     assert!(views.iter().any(|view| view.name == <Heads as Kind>::NAME));
     assert!(views.iter().any(|view| view.name == Tally::NAME));
 
-    let mut peer = PreparedPrefix::from_parts(&source, views).into_owner::<SourcePublisher>()?;
+    let mut peer = PreparedPrefix::from_parts("test", &source, views).into_owner::<SourcePublisher>()?;
     let intents = SourcePublisher.evaluate(&mut peer)?;
     assert_eq!(intents.len(), 1);
     let publication = intents[0].decode::<Publication>().expect("guarded");
@@ -148,7 +148,7 @@ fn prepared_prefix_installs_every_snapshot_without_refolding() -> Result<(), Box
 #[test]
 fn missing_required_snapshot_is_an_error() -> Result<(), Box<dyn Error>> {
     let (_owner, source) = owner_with_current_and_source()?;
-    let error = PreparedPrefix::from_parts(&source, Vec::new())
+    let error = PreparedPrefix::from_parts("test", &source, Vec::new())
         .into_owner::<SourcePublisher>()
         .err()
         .expect("missing snapshots");
@@ -161,8 +161,10 @@ fn duplicate_snapshot_names_are_rejected() -> Result<(), Box<dyn Error>> {
     let (owner, source) = owner_with_current_and_source()?;
     let mut views = snapshot_reactor::<SourcePublisher>(&owner)?;
     views.push(views[0].clone());
-    let error =
-        PreparedPrefix::from_parts(&source, views).into_owner::<SourcePublisher>().err().expect("duplicate snapshots");
+    let error = PreparedPrefix::from_parts("test", &source, views)
+        .into_owner::<SourcePublisher>()
+        .err()
+        .expect("duplicate snapshots");
     assert!(matches!(error, PrepareError::DuplicateSnapshot { .. }), "{error}");
     Ok(())
 }
@@ -178,7 +180,7 @@ fn wrong_prefix_snapshot_is_an_error() -> Result<(), Box<dyn Error>> {
     aether_bloomery_reactor::warm_reactor::<SourcePublisher>(&mut early)?;
     let early_views = snapshot_reactor::<SourcePublisher>(&early)?;
 
-    let error = PreparedPrefix::from_parts(&source, early_views)
+    let error = PreparedPrefix::from_parts("test", &source, early_views)
         .into_owner::<SourcePublisher>()
         .err()
         .expect("wrong-prefix snapshots");
@@ -193,8 +195,10 @@ fn malformed_snapshot_bytes_are_rejected() -> Result<(), Box<dyn Error>> {
         PublishedView { name: String::from(<Heads as Kind>::NAME), bytes: vec![0xff, 0x00, 0x01] },
         PublishedView { name: String::from(Tally::NAME), bytes: vec![0xff, 0x00, 0x01] },
     ];
-    let error =
-        PreparedPrefix::from_parts(&source, views).into_owner::<SourcePublisher>().err().expect("malformed snapshots");
+    let error = PreparedPrefix::from_parts("test", &source, views)
+        .into_owner::<SourcePublisher>()
+        .err()
+        .expect("malformed snapshots");
     assert!(matches!(error, PrepareError::Snapshot { .. }), "{error}");
     Ok(())
 }

@@ -7,16 +7,18 @@
 //! [`aether_bloomery_reactor::CLUSTER_NAMESPACE`].
 //! `ReactorOutputSink` is the external mailbox that records typed outputs.
 
-use core::convert::Infallible;
+use core::error::Error;
+use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
 use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_bloomery_reactor::{And, BundledView, Guard, reactor};
+use aether_bloomery_reactor::{And, BundledView, EvaluatedResult, Guard, PreparedResult, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
 use aether_test_fixtures_kinds::{
-    CollectReactorOutputs, CollectReactorOutputsResult, ReactorGuardedPublication, ReactorOpenPublication,
+    CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication,
+    ReactorOpenPublication,
 };
 
 const CURRENT: Head<Program> = Head::new("current");
@@ -39,8 +41,19 @@ struct FoldTallyWire {
     id: u32,
 }
 
+#[derive(Debug)]
+pub struct FoldBoom;
+
+impl fmt::Display for FoldBoom {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("fold boom")
+    }
+}
+
+impl Error for FoldBoom {}
+
 impl View for FoldTally {
-    type Error = Infallible;
+    type Error = FoldBoom;
 
     fn empty() -> Self {
         Self { cursor: Seq(0), folds: 0, id: FOLD_IDS.fetch_add(1, Ordering::Relaxed) }
@@ -51,6 +64,9 @@ impl View for FoldTally {
     }
 
     fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
+        if entries.iter().any(|entry| entry.kind == REACTOR_FOLD_FAIL_KIND) {
+            return Err(FoldBoom);
+        }
         self.folds = self.folds.saturating_add(1);
         if let Some(last) = entries.last() {
             self.cursor = last.seq;
@@ -131,6 +147,8 @@ impl Reactor for SourceWitness {
 pub struct ReactorOutputSink {
     guarded: Vec<ReactorGuardedPublication>,
     open: Vec<ReactorOpenPublication>,
+    prepared: Vec<PreparedResult>,
+    evaluated: Vec<EvaluatedResult>,
 }
 
 #[actor]
@@ -138,7 +156,7 @@ impl WasmActor for ReactorOutputSink {
     const NAMESPACE: &'static str = "test.bloomery.reactor.sink";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self { guarded: Vec::new(), open: Vec::new() })
+        Ok(Self { guarded: Vec::new(), open: Vec::new(), prepared: Vec::new(), evaluated: Vec::new() })
     }
 
     #[handler::single]
@@ -151,10 +169,25 @@ impl WasmActor for ReactorOutputSink {
         self.open.push(publication);
     }
 
+    #[handler::single]
+    fn on_prepared(&mut self, _ctx: &mut WasmCtx<'_>, prepared: PreparedResult) {
+        self.prepared.push(prepared);
+    }
+
+    #[handler::single]
+    fn on_evaluated(&mut self, _ctx: &mut WasmCtx<'_>, evaluated: EvaluatedResult) {
+        self.evaluated.push(evaluated);
+    }
+
     #[handler::manual]
     fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectReactorOutputs) {
         if ctx.reply_target().is_some() {
-            ctx.reply(&CollectReactorOutputsResult { guarded: self.guarded.clone(), open: self.open.clone() });
+            ctx.reply(&CollectReactorOutputsResult {
+                guarded: self.guarded.clone(),
+                open: self.open.clone(),
+                prepared: self.prepared.clone(),
+                evaluated: self.evaluated.clone(),
+            });
         }
     }
 }

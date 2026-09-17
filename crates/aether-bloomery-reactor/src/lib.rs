@@ -9,8 +9,9 @@
 //! trigger; later parameters are direct published views or named [`Guard`]s.
 //! Rust infers each parameter's role from the [`Arg`] impls — the macro emits
 //! `Arg<_, T, Rest>` and does not classify type names. A refutable trigger
-//! pattern or [`Guard::resolve`] returning [`None`] declines that arm; it is
-//! not suspended work. Each invoked arm returns exactly one [`Output`].
+//! pattern, a well-formed event of a different typed specialization, or
+//! [`Guard::resolve`] returning [`None`] declines that arm; it is not
+//! suspended work. Each invoked arm returns exactly one [`Output`].
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
 //! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
@@ -19,11 +20,16 @@
 //! bloomery reactor extension on exported paths, keeps ordinary actors in the
 //! export list, and generates one views coordinator ([`CLUSTER_NAMESPACE`])
 //! plus inline reactor peers. Reactor envelopes stay on their original types.
-//! The
-//! coordinator folds shared views once per cluster, mails an owned prepared
-//! prefix to each peer, and each peer resolves guards locally and sends typed
-//! outputs to a configured external mailbox. Evaluation encodes outputs
-//! through the mail codec and does not execute or append them.
+//! The coordinator binds a caller-supplied stream token, folds shared views
+//! once per cluster, mails an owned prepared prefix to each peer, and each
+//! peer resolves guards locally and sends typed outputs to a configured
+//! external mailbox. Live [`Event`] delivery folds n through n and freezes
+//! that prefix before n+1 can change what n's peers receive. [`EventBatch`]
+//! is fold-only warmup: every ordered entry is processed and no live arm
+//! runs. Explicit [`PreparedResult`] / [`EvaluatedResult`] messages describe
+//! preparation and evaluation; lifecycle settlement is not success.
+//! Evaluation encodes outputs through the mail codec and does not execute
+//! or append them.
 //!
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
 //! lists, view visitors, actor wrappers, and mail encoding are implementation
@@ -90,6 +96,7 @@ extern crate alloc;
 extern crate self as aether_bloomery_reactor;
 
 mod bundle;
+mod cluster;
 mod direct;
 mod error;
 mod evaluate;
@@ -105,9 +112,10 @@ mod views;
 pub use aether_bloomery_reactor_derive::__reactor_export_generate;
 pub use aether_bloomery_reactor_derive::{reactor, rule};
 pub use bundle::{
-    ClusterConfig, ClusterStatus, ClusterStatusQuery, JournalEntry, PreparedPrefix, PublishedView, PushEntries,
-    PushResult, extend_snapshots, snapshot_reactor, warm_reactor,
+    ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch, JournalEntry, PeerEvaluated,
+    PreparedPrefix, PreparedResult, PublishedView, extend_snapshots, snapshot_reactor, warm_reactor,
 };
+pub use cluster::Cluster;
 pub use direct::Direct;
 pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};

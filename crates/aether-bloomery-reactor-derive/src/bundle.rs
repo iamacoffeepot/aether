@@ -319,8 +319,11 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
 }
 
 fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
-    let push_fn = format_ident!("__aether_{views}_push_and_prepare");
+    let live_fn = format_ident!("__aether_{views}_fold_live");
+    let warmup_fn = format_ident!("__aether_{views}_fold_warmup");
     let emit_fn = format_ident!("__aether_{views}_emit_outputs");
+    let ack_prepared_fn = format_ident!("__aether_{views}_ack_prepared");
+    let ack_evaluated_fn = format_ident!("__aether_{views}_ack_evaluated");
     let peer_structs = peers.iter().map(|peer| expand_peer(views, peer, &emit_fn));
     let spawn_peers = peers.iter().map(|peer| {
         let ty = &peer.peer;
@@ -332,21 +335,17 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
             );
         }
     });
-    let send_peers = peers.iter().map(|peer| {
-        let ty = &peer.peer;
-        let subname = &peer.subname;
-        quote! {
-            if let Some(peer) = ctx.child_as::<#ty>(#subname) {
-                peer.send(ctx, &prepared);
-            }
-        }
-    });
-    let prepare = preparation_fn(&push_fn, peers);
+    let live = live_fn_tokens(&live_fn, peers);
+    let warmup = warmup_fn_tokens(&warmup_fn, peers);
     let emit = emit_outputs_fn(&emit_fn);
+    let ack = ack_fn_tokens(&ack_prepared_fn, &ack_evaluated_fn);
+    let event = event_handler_tokens(&live_fn, &ack_prepared_fn, &ack_evaluated_fn, peers);
+    let batch = batch_handler_tokens(&warmup_fn, &ack_prepared_fn);
     quote! {
         struct #views {
-            owner: ::aether_bloomery_reactor::Owner,
+            cluster: ::aether_bloomery_reactor::Cluster,
             output: ::aether_actor::__macro_internals::String,
+            ack: ::aether_actor::__macro_internals::String,
         }
 
         #[::aether_actor::actor]
@@ -359,38 +358,35 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                 _ctx: &mut ::aether_actor::WasmInitCtx<'_>,
             ) -> Result<Self, ::aether_actor::ActorInitError> {
                 Ok(Self {
-                    owner: ::aether_bloomery_reactor::Owner::new(),
+                    cluster: ::aether_bloomery_reactor::Cluster::new(),
                     output: config.output,
+                    ack: config.ack,
                 })
             }
 
             fn wire(&mut self, ctx: &mut ::aether_actor::WireCtx<'_, '_>) {
-                let config = ::aether_bloomery_reactor::ClusterConfig { output: self.output.clone() };
+                let config = ::aether_bloomery_reactor::ClusterConfig {
+                    output: self.output.clone(),
+                    ack: self.ack.clone(),
+                };
                 #(#spawn_peers)*
             }
 
-            #[handler::manual]
-            fn on_push(
+            #event
+
+            #batch
+
+            #[handler::single]
+            fn on_peer_evaluated(
                 &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
-                push: ::aether_bloomery_reactor::PushEntries,
+                ctx: &mut ::aether_actor::WasmCtx<'_>,
+                outcome: ::aether_bloomery_reactor::PeerEvaluated,
             ) {
-                use ::aether_actor::OutboundReply;
-                let mut result = Ok(self.owner.cursor().0);
-                for item in push.entries {
-                    match #push_fn(&mut self.owner, item) {
-                        Ok(prepared) => {
-                            #(#send_peers)*
-                            result = Ok(self.owner.cursor().0);
-                        }
-                        Err(error) => {
-                            result = Err(error);
-                            break;
-                        }
-                    }
-                }
-                if ctx.reply_target().is_some() {
-                    ctx.reply(&::aether_bloomery_reactor::PushResult::from_prepare(result));
+                let Some(source) = ctx.source_mailbox() else {
+                    return;
+                };
+                if let Some(evaluated) = self.cluster.note_peer(source, &outcome) {
+                    #ack_evaluated_fn(ctx, &self.ack, &evaluated);
                 }
             }
 
@@ -402,23 +398,203 @@ fn expand_cluster(views: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
             ) {
                 use ::aether_actor::OutboundReply;
                 if ctx.reply_target().is_some() {
-                    ctx.reply(&::aether_bloomery_reactor::ClusterStatus { cursor: self.owner.cursor().0 });
+                    ctx.reply(&self.cluster.status());
                 }
             }
         }
 
-        #prepare
+        #live
+        #warmup
+        #ack
         #emit
         #(#peer_structs)*
     }
 }
 
-fn preparation_fn(push_fn: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
-    let warm_reactors = peers.iter().map(|peer| {
+fn event_handler_tokens(
+    live_fn: &Ident,
+    ack_prepared_fn: &Ident,
+    ack_evaluated_fn: &Ident,
+    peers: &[ReactorPeer],
+) -> TokenStream2 {
+    let delivery = peer_delivery_tokens(peers, ack_evaluated_fn);
+    quote! {
+        #[handler::manual]
+        fn on_event(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            event: ::aether_bloomery_reactor::Event,
+        ) {
+            use ::aether_actor::OutboundReply;
+            let before = self.cluster.owner().cursor();
+            if let Err(error) = self.cluster.check_admit(&event.stream) {
+                let result = ::aether_bloomery_reactor::PreparedResult::from_error(
+                    event.stream,
+                    before.0,
+                    &error,
+                );
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
+            let stream = event.stream;
+            match #live_fn(self.cluster.owner_mut(), stream.clone(), event.entry) {
+                Ok(prepared) => {
+                    self.cluster.bind_stream(stream.clone());
+                    self.cluster.trust_cursor();
+                    let result = ::aether_bloomery_reactor::PreparedResult::ok(
+                        stream.clone(),
+                        prepared.seq,
+                    );
+                    #ack_prepared_fn(ctx, &self.ack, &result);
+                    if ctx.reply_target().is_some() {
+                        ctx.reply(&result);
+                    }
+                    #delivery
+                    if let Some(evaluated) = self.cluster.start_live(stream, prepared.seq, &expected) {
+                        #ack_evaluated_fn(ctx, &self.ack, &evaluated);
+                    }
+                }
+                Err(error) => {
+                    if self.cluster.owner().cursor() != before || self.cluster.owner().is_poisoned() {
+                        self.cluster.mark_poisoned();
+                        self.cluster.bind_stream(stream.clone());
+                    }
+                    let result = ::aether_bloomery_reactor::PreparedResult::from_error(
+                        stream,
+                        self.cluster.owner().cursor().0,
+                        &error,
+                    );
+                    #ack_prepared_fn(ctx, &self.ack, &result);
+                    if ctx.reply_target().is_some() {
+                        ctx.reply(&result);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn batch_handler_tokens(warmup_fn: &Ident, ack_prepared_fn: &Ident) -> TokenStream2 {
+    quote! {
+        #[handler::manual]
+        fn on_batch(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            batch: ::aether_bloomery_reactor::EventBatch,
+        ) {
+            use ::aether_actor::OutboundReply;
+            let before = self.cluster.owner().cursor();
+            if let Err(error) = self.cluster.check_admit(&batch.stream) {
+                let result = ::aether_bloomery_reactor::PreparedResult::from_error(
+                    batch.stream,
+                    before.0,
+                    &error,
+                );
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
+            if let Err(error) = batch.validate() {
+                let result = ::aether_bloomery_reactor::PreparedResult::from_error(
+                    batch.stream,
+                    before.0,
+                    &error,
+                );
+                #ack_prepared_fn(ctx, &self.ack, &result);
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&result);
+                }
+                return;
+            }
+            let mut fold = Ok(());
+            for item in batch.entries {
+                if let Err(error) = #warmup_fn(self.cluster.owner_mut(), item) {
+                    fold = Err(error);
+                    break;
+                }
+            }
+            match fold {
+                Ok(()) => {
+                    self.cluster.bind_stream(batch.stream.clone());
+                    self.cluster.trust_cursor();
+                    let result = ::aether_bloomery_reactor::PreparedResult::ok(
+                        batch.stream,
+                        self.cluster.owner().cursor().0,
+                    );
+                    #ack_prepared_fn(ctx, &self.ack, &result);
+                    if ctx.reply_target().is_some() {
+                        ctx.reply(&result);
+                    }
+                }
+                Err(error) => {
+                    if self.cluster.owner().cursor() != before || self.cluster.owner().is_poisoned() {
+                        self.cluster.mark_poisoned();
+                        self.cluster.bind_stream(batch.stream.clone());
+                    }
+                    let result = ::aether_bloomery_reactor::PreparedResult::from_error(
+                        batch.stream,
+                        self.cluster.owner().cursor().0,
+                        &error,
+                    );
+                    #ack_prepared_fn(ctx, &self.ack, &result);
+                    if ctx.reply_target().is_some() {
+                        ctx.reply(&result);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn peer_delivery_tokens(peers: &[ReactorPeer], ack_evaluated_fn: &Ident) -> TokenStream2 {
+    let peer_count = peers.len();
+    let peer_lookups = peers.iter().enumerate().map(|(index, peer)| {
+        let ty = &peer.peer;
+        let subname = &peer.subname;
+        let ident = format_ident!("__aether_peer_{index}");
+        quote! {
+            let #ident = ctx.child_as::<#ty>(#subname);
+        }
+    });
+    let send_peers = peers.iter().enumerate().map(|(index, _peer)| {
+        let ident = format_ident!("__aether_peer_{index}");
+        quote! {
+            if let Some(peer) = #ident {
+                expected.push(peer.id());
+                peer.send(ctx, &prepared);
+            }
+        }
+    });
+    quote! {
+        #(#peer_lookups)*
+        let mut expected = ::aether_bloomery_reactor::__macro_internals::Vec::new();
+        #(#send_peers)*
+        if expected.len() != #peer_count {
+            let evaluated = ::aether_bloomery_reactor::EvaluatedResult::from_error(
+                stream,
+                prepared.seq,
+                "reactor peer is missing",
+            );
+            #ack_evaluated_fn(ctx, &self.ack, &evaluated);
+            return;
+        }
+    }
+}
+
+fn warm_tokens(peers: &[ReactorPeer]) -> impl Iterator<Item = TokenStream2> + '_ {
+    peers.iter().map(|peer| {
         let reactor = &peer.reactor;
         quote! { ::aether_bloomery_reactor::warm_reactor::<#reactor>(owner)?; }
-    });
-    let snapshot_reactors = peers.iter().map(|peer| {
+    })
+}
+
+fn snapshot_tokens(peers: &[ReactorPeer]) -> impl Iterator<Item = TokenStream2> + '_ {
+    peers.iter().map(|peer| {
         let reactor = &peer.reactor;
         quote! {
             ::aether_bloomery_reactor::extend_snapshots(
@@ -426,18 +602,67 @@ fn preparation_fn(push_fn: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
                 ::aether_bloomery_reactor::snapshot_reactor::<#reactor>(owner)?,
             )?;
         }
-    });
+    })
+}
+
+fn live_fn_tokens(live_fn: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
+    let preceding = warm_tokens(peers);
+    let through_n = warm_tokens(peers);
+    let snapshot_reactors = snapshot_tokens(peers);
     quote! {
-        fn #push_fn(
+        fn #live_fn(
             owner: &mut ::aether_bloomery_reactor::Owner,
+            stream: ::aether_actor::__macro_internals::String,
             item: ::aether_bloomery_reactor::JournalEntry,
         ) -> Result<::aether_bloomery_reactor::PreparedPrefix, ::aether_bloomery_reactor::PrepareError> {
+            #(#preceding)*
+            let entry = item.to_entry();
+            owner.push(::core::slice::from_ref(&entry))?;
+            #(#through_n)*
+            let mut views = ::aether_bloomery_reactor::__macro_internals::Vec::new();
+            #(#snapshot_reactors)*
+            Ok(::aether_bloomery_reactor::PreparedPrefix::from_parts(stream, &entry, views))
+        }
+    }
+}
+
+fn warmup_fn_tokens(warmup_fn: &Ident, peers: &[ReactorPeer]) -> TokenStream2 {
+    let warm_reactors = warm_tokens(peers);
+    quote! {
+        fn #warmup_fn(
+            owner: &mut ::aether_bloomery_reactor::Owner,
+            item: ::aether_bloomery_reactor::JournalEntry,
+        ) -> Result<(), ::aether_bloomery_reactor::PrepareError> {
             let entry = item.to_entry();
             owner.push(::core::slice::from_ref(&entry))?;
             #(#warm_reactors)*
-            let mut views = ::aether_bloomery_reactor::__macro_internals::Vec::new();
-            #(#snapshot_reactors)*
-            Ok(::aether_bloomery_reactor::PreparedPrefix::from_parts(&entry, views))
+            Ok(())
+        }
+    }
+}
+
+fn ack_fn_tokens(ack_prepared_fn: &Ident, ack_evaluated_fn: &Ident) -> TokenStream2 {
+    quote! {
+        fn #ack_prepared_fn<M: ::aether_actor::ReplyMode>(
+            ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+            ack: &str,
+            payload: &::aether_bloomery_reactor::PreparedResult,
+        ) {
+            use ::aether_actor::MailSender;
+            if !ack.is_empty() {
+                ctx.send_to_named(ack, payload);
+            }
+        }
+
+        fn #ack_evaluated_fn<M: ::aether_actor::ReplyMode>(
+            ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+            ack: &str,
+            payload: &::aether_bloomery_reactor::EvaluatedResult,
+        ) {
+            use ::aether_actor::MailSender;
+            if !ack.is_empty() {
+                ctx.send_to_named(ack, payload);
+            }
         }
     }
 }
@@ -468,13 +693,21 @@ fn expand_peer(views: &Ident, peer: &ReactorPeer, emit_fn: &Ident) -> TokenStrea
                 ctx: &mut ::aether_actor::WasmCtx<'_>,
                 prepared: ::aether_bloomery_reactor::PreparedPrefix,
             ) {
-                let Ok(mut owner) = prepared.into_owner::<#reactor>() else {
-                    return;
+                let stream = prepared.stream.clone();
+                let seq = prepared.seq;
+                let outcome = match prepared.into_owner::<#reactor>() {
+                    Err(error) => ::aether_bloomery_reactor::PeerEvaluated::from_error(stream, seq, &error),
+                    Ok(mut owner) => match <#reactor as ::aether_bloomery_reactor::Reactor>::evaluate(&self.reactor, &mut owner) {
+                        Err(error) => ::aether_bloomery_reactor::PeerEvaluated::from_error(stream, seq, &error),
+                        Ok(intents) => {
+                            #emit_fn::<#reactor>(ctx, &self.output, &intents);
+                            ::aether_bloomery_reactor::PeerEvaluated::ok(stream, seq)
+                        }
+                    },
                 };
-                let Ok(intents) = <#reactor as ::aether_bloomery_reactor::Reactor>::evaluate(&self.reactor, &mut owner) else {
-                    return;
-                };
-                #emit_fn::<#reactor>(ctx, &self.output, &intents);
+                if let Some(parent) = ctx.source_mailbox() {
+                    ctx.send_to(parent, &outcome);
+                }
             }
         }
     }
@@ -521,7 +754,7 @@ fn emit_outputs_fn(emit_fn: &Ident) -> TokenStream2 {
                 intents,
                 seen: ::aether_bloomery_reactor::__macro_internals::BTreeSet::new(),
             };
-            R::visit_arms(&mut emit);
+            <R as ::aether_bloomery_reactor::Reactor>::visit_arms(&mut emit);
         }
     }
 }

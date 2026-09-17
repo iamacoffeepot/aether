@@ -33,15 +33,15 @@ fn the_canonical_encoding_of_one_fixed_head_moved_is_pinned() -> Result<(), Box<
     assert_eq!(recorded.value.to(), Digest::from_bytes([0x11; 32]));
     assert_eq!(HeadMoved::<Tree>::decode_storage(&payload)?.value, fixture_event());
     match HeadMoved::<Program>::decode_storage(&payload) {
-        Err(StorageError::Invariant { kind: "Head", reason: "kind-mismatch" }) => {}
-        other => panic!("expected typed kind-mismatch, got {other:?}"),
+        Err(StorageError::TypeMismatch { expected, actual }) if expected == Program::ID && actual == Tree::ID => {}
+        other => panic!("expected typed specialization mismatch, got {other:?}"),
     }
 
     let mut wire = Vec::new();
     fixture_event().encode(&mut wire)?;
     match HeadMoved::<Program>::decode(&mut wire.as_slice()) {
-        Err(WireError::Message(message)) if message == "kind-mismatch" => {}
-        other => panic!("expected wire kind-mismatch, got {other:?}"),
+        Err(WireError::Message(message)) if message.contains("type-mismatch") => {}
+        other => panic!("expected wire type-mismatch, got {other:?}"),
     }
     Ok(())
 }

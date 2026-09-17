@@ -52,6 +52,9 @@ fn storage_encode_panic(name: &str) -> ! {
 fn head_wire_err(error: StorageError) -> WireError {
     match error {
         StorageError::Invariant { reason, .. } => WireError::Message(String::from(reason)),
+        StorageError::TypeMismatch { expected, actual } => {
+            WireError::Message(alloc::format!("type-mismatch: expected {expected}, got {actual}"))
+        }
         other => WireError::Message(alloc::format!("{other}")),
     }
 }
@@ -74,6 +77,9 @@ fn recorded_move_from_flat(flat: FlatHeadMoved) -> Result<RecordedHeadMove, Stor
 
 fn typed_move_from_flat<K: Kind>(flat: FlatHeadMoved) -> Result<HeadMoved<K>, StorageError> {
     let recorded = recorded_move_from_flat(flat)?;
+    if recorded.head().kind() != K::ID {
+        return Err(StorageError::TypeMismatch { expected: K::ID, actual: recorded.head().kind() });
+    }
     Ok(HeadMoved::from_parts(Head::from_recorded(recorded.head().clone())?, Ref::from_digest(recorded.to())))
 }
 

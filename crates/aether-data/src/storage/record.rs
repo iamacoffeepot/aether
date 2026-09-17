@@ -15,6 +15,7 @@ use alloc::vec::Vec;
 use core::error::Error as StdError;
 use core::fmt;
 
+use crate::KindId;
 use crate::wire;
 
 /// One unrecognized TLV record, preserved verbatim so a re-encode can
@@ -50,6 +51,15 @@ pub enum StorageError {
     /// The bytes decoded, but the value breaks its type's invariant.
     /// Raised by validated newtypes on decode; never by the codec itself.
     Invariant { kind: &'static str, reason: &'static str },
+    /// The payload is a well-formed value of a shared stored kind, but not
+    /// the requested typed specialization. Matching layers treat this as an
+    /// unmatched trigger; it is not a broken invariant.
+    TypeMismatch {
+        /// Kind id the caller asked to specialize as.
+        expected: KindId,
+        /// Kind id stored on the payload discriminator.
+        actual: KindId,
+    },
 }
 
 impl fmt::Display for StorageError {
@@ -70,6 +80,9 @@ impl fmt::Display for StorageError {
             Self::UnknownVariant { hash } => write!(f, "storage: unknown enum variant {hash:#018x}"),
             Self::NestingTooDeep => f.write_str("storage: nested flattening exceeded depth cap"),
             Self::Invariant { kind, reason } => write!(f, "storage: {kind} invariant violated: {reason}"),
+            Self::TypeMismatch { expected, actual } => {
+                write!(f, "storage: type mismatch: expected {expected}, got {actual}")
+            }
         }
     }
 }

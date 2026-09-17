@@ -227,6 +227,36 @@ fn unmatched_stored_kind_declines_rather_than_failing() -> Result<(), Box<dyn Er
 }
 
 #[test]
+fn well_formed_head_moved_specialization_declines_rather_than_failing() -> Result<(), Box<dyn Error>> {
+    // Bug: HeadMoved<Program> shares bloomery.head_moved with HeadMoved<Tree>
+    // and a source-head reactor treats the payload discriminator as a storage
+    // error instead of an unmatched trigger.
+    let mut owner = Owner::new();
+    owner.push(&[moved(1, "current", digest_ref::<Program>(1))?])?;
+    let intents = SourcePublisher.evaluate(&mut owner)?;
+    assert!(intents.is_empty());
+    assert_eq!(owner.cursor(), Seq(1));
+    Ok(())
+}
+
+#[test]
+fn malformed_matching_head_moved_is_an_error() -> Result<(), Box<dyn Error>> {
+    // Bug: a corrupt bloomery.head_moved payload is declined as unmatched.
+    let mut owner = Owner::new();
+    owner.push(&[Entry {
+        seq: Seq(1),
+        kind: HeadMoved::<Tree>::NAME.to_owned(),
+        cause: None,
+        recorded_at_millis: 0,
+        bytes: vec![0xff, 0x00],
+    }])?;
+    let error = SourcePublisher.evaluate(&mut owner).expect_err("malformed payload");
+    assert!(!error.is_unknown_trigger(), "{error}");
+    assert!(matches!(error, PrepareError::Trigger(_)), "{error}");
+    Ok(())
+}
+
+#[test]
 fn visit_arms_exposes_each_rule() {
     struct Names(Vec<&'static str>);
     impl ArmVisitor for Names {

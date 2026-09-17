@@ -486,6 +486,9 @@ pub struct DrainEditorInputsResult {
     pub inputs: Vec<ObservedEditorInput>,
 }
 
+/// Stored kind name that makes the reactor fixture's shared fold refuse.
+pub const REACTOR_FOLD_FAIL_KIND: &str = "test.bloomery.reactor.fold_fail";
+
 /// Output of a reactor arm whose named current-head guard resolved.
 #[aether_data::kind(name = "aether.test_fixtures.reactor_guarded_publication", eq)]
 pub struct ReactorGuardedPublication {
@@ -510,9 +513,13 @@ impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
 #[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs", default)]
 pub struct CollectReactorOutputs;
 
-/// Recorded publications one cluster sent to its external output mailbox.
+/// Reply to [`CollectReactorOutputs`]: recorded publications and correlated
+/// preparation/evaluation acknowledgments one cluster sent to its configured
+/// output and ack mailboxes.
 #[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs_result", eq)]
 pub struct CollectReactorOutputsResult {
     pub guarded: Vec<ReactorGuardedPublication>,
     pub open: Vec<ReactorOpenPublication>,
+    pub prepared: Vec<aether_bloomery_reactor::PreparedResult>,
+    pub evaluated: Vec<aether_bloomery_reactor::EvaluatedResult>,
 }
