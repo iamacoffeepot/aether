@@ -4,7 +4,10 @@ use std::path::PathBuf;
 
 use aether_actor::actor;
 use aether_bloomery_journal::Journal;
-use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq};
+use aether_bloomery_kinds::{
+    JournalEntry, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq,
+    artifact_digest,
+};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
@@ -52,6 +55,22 @@ impl NativeActor for JournalActor {
         match self.journal.head() {
             Ok(head) => ReadHeadResult::Ok { head: head.0 },
             Err(error) => ReadHeadResult::Err { message: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_read_artifact(&self, _ctx: &mut NativeCtx<'_>, request: ReadArtifact) -> ReadArtifactResult {
+        let digest = request.digest;
+        match self.journal.get_bytes(&digest) {
+            Ok(Some((kind, bytes))) if artifact_digest(kind, &bytes) == digest => {
+                ReadArtifactResult::Found { digest, kind, bytes }
+            }
+            Ok(Some(_)) => ReadArtifactResult::Err {
+                digest,
+                message: "stored artifact bytes do not match the requested digest".into(),
+            },
+            Ok(None) => ReadArtifactResult::Missing { digest },
+            Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
         }
     }
 }

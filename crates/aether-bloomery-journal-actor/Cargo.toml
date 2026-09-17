@@ -17,6 +17,7 @@ aether-substrate = { path = "../aether-substrate" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+rusqlite.workspace = true
 tempfile = "3"
 
 [lints]

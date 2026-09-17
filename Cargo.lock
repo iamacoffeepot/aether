@@ -157,6 +157,7 @@ dependencies = [
  "aether-data",
  "aether-kinds",
  "aether-substrate",
+ "rusqlite",
  "tempfile",
 ]
 
