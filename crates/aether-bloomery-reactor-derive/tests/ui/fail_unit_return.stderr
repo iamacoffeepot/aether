@@ -1,5 +1,5 @@
 error: #[rule] methods return exactly one mail-capable typed output; unit is unsupported
-  --> tests/ui/fail_unit_return.rs:13:5
+  --> tests/ui/fail_unit_return.rs:10:5
    |
-13 |     fn publish(&self, _change: HeadMoved<Tree>) {}
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 |     fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) {}
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

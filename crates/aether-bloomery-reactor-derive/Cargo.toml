@@ -26,16 +26,5 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 trybuild = "1"
 
-# trybuild fixtures compile as independent crates and name these crates in
-# source the machete scan of this proc-macro package never opens.
-[package.metadata.cargo-machete]
-ignored = [
-    "aether-bloomery-kinds", # aether-suppression-request: used by tests/ui fixtures, invisible to a source-only scan of this crate
-    "aether-bloomery-reactor", # aether-suppression-request: used by tests/ui fixtures, invisible to a source-only scan of this crate
-    "aether-bloomery-view", # aether-suppression-request: used by tests/ui fixtures, invisible to a source-only scan of this crate
-    "aether-data", # aether-suppression-request: used by tests/ui fixtures, invisible to a source-only scan of this crate
-    "serde", # aether-suppression-request: used through #[aether_data::kind] in tests/ui fixtures
-]
-
 [lints]
 workspace = true

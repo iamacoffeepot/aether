@@ -1,7 +1,4 @@
-#![allow(unused)]
-
-use aether_bloomery_kinds::{HeadMoved, Tree};
-use aether_bloomery_reactor::{Output, Reactor, reactor};
+use aether_bloomery_reactor::{Output, reactor};
 
 #[aether_data::kind(name = "test.bloomery.reactor.ui.ctx_out", eq)]
 struct PublicationProposal {
@@ -15,11 +12,11 @@ struct EngineCtx;
 struct SourcePublisher;
 
 #[reactor]
-impl Reactor for SourcePublisher {
+impl aether_bloomery_reactor::Reactor for SourcePublisher {
     const NAME: &'static str = "source.publisher";
 
     #[rule]
-    fn publish(&self, _change: HeadMoved<Tree>, _ctx: &mut EngineCtx) -> PublicationProposal {
+    fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>, _ctx: &mut EngineCtx) -> PublicationProposal {
         PublicationProposal { marker: 1 }
     }
 }
