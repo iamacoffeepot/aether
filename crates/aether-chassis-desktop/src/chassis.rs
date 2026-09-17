@@ -10,6 +10,7 @@
 //! vocabulary in `aether-window`; the chassis only constructs and runs that
 //! application.
 
+use std::collections::HashMap;
 use std::io;
 use std::mem;
 use std::sync::Arc;
@@ -174,7 +175,7 @@ impl BootableChassis for DesktopChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
-            restrictions_by_slot: Default::default(),
+            restrictions_by_slot: HashMap::new(),
         };
         // ADR-0161 R3: render no longer composes on the pooled `with_actor`
         // path on desktop — the driver boots the pumped `aether.render` actor

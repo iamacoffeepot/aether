@@ -16,6 +16,7 @@
 //! harness *cap set* by convergent declaration rather than by routing the
 //! deliberate embedder through a chassis ceremony it does not want.
 
+use std::collections::HashMap;
 use std::io;
 use std::mem;
 use std::sync::Arc;
@@ -111,7 +112,7 @@ impl BootableChassis for HarnessChassis {
                 engine: Arc::clone(&boot.engine),
                 linker: Arc::clone(&boot.linker),
                 hub_outbound: Arc::clone(&boot.outbound),
-                restrictions_by_slot: Default::default(),
+                restrictions_by_slot: HashMap::new(),
             })
             .with_actor::<TcpCapability>(())
             .with_actor::<TextCapability>(())

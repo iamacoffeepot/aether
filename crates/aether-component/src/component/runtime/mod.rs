@@ -474,6 +474,7 @@ mod tests {
             registry: Arc::clone(&registry),
             mailer: Arc::clone(&mailer),
             outbound,
+            restrictions_by_slot: HashMap::new(),
             registry_subscription: Some(registry.subscribe_inventory::<ComponentHostCapability>(subscriber, mailer)),
             last_egressed_inventory: None,
             default_name_counter: 0,

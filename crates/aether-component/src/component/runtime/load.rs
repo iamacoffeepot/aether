@@ -717,6 +717,7 @@ mod tests {
             registry,
             mailer,
             outbound,
+            restrictions_by_slot: HashMap::new(),
             registry_subscription: None,
             last_egressed_inventory: None,
             default_name_counter: 0,

@@ -16,6 +16,7 @@
 //! namespace) was deleted as a kind in Phase 4 — no replacement, no MCP
 //! path until issue 603 §F2 revives the per-domain shape.
 
+use std::collections::HashMap;
 use std::mem;
 use std::sync::Arc;
 use std::time::Duration;
@@ -146,7 +147,7 @@ impl BootableChassis for HeadlessChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
-            restrictions_by_slot: Default::default(),
+            restrictions_by_slot: HashMap::new(),
         };
 
         // Boot order is declaration order. `into_common_boot` reads the
