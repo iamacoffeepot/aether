@@ -10,6 +10,7 @@ description = "Instanced native owner of a Bloomery journal and its read mailbox
 aether-actor = { path = "../aether-actor" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-data = { path = "../aether-data" }
 aether-substrate = { path = "../aether-substrate" }
 
 [dev-dependencies]
