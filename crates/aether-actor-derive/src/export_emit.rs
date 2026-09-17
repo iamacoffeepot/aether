@@ -184,7 +184,7 @@ fn emit_with_reconstruct(
                     @boot #boot ;
                     @default #default ;
                     @all #boot, #default #(, #rest)*
-                    ; @reconstruct #(#reconstruct),+
+                    ; @reconstruct #(#reconstruct),*
                 );
             }
         }
@@ -194,7 +194,7 @@ fn emit_with_reconstruct(
                     @no_boot ;
                     @default #default ;
                     @all #default #(, #rest)*
-                    ; @reconstruct #(#reconstruct),+
+                    ; @reconstruct #(#reconstruct),*
                 );
             }
         }
@@ -210,21 +210,21 @@ fn emit_with_reconstruct(
                     @boot #boot ;
                     @no_default ;
                     @all #boot #(, #rest)*
-                    ; @reconstruct #(#reconstruct),+
+                    ; @reconstruct #(#reconstruct),*
                 );
             }
         }
         (None, None) if rest.len() == 1 => {
             let ty = rest[0];
-            quote! { ::aether_actor::__export_internal!(#ty ; @reconstruct #(#reconstruct),+); }
+            quote! { ::aether_actor::__export_internal!(#ty ; @reconstruct #(#reconstruct),*); }
         }
         (None, None) => {
             quote! {
                 ::aether_actor::__export_multi_internal!(
                     @no_boot ;
                     @no_default ;
-                    @all #(#rest),+
-                    ; @reconstruct #(#reconstruct),+
+                    @all #(#rest),*
+                    ; @reconstruct #(#reconstruct),*
                 );
             }
         }
@@ -273,6 +273,7 @@ mod tests {
                 parse_quote!(Probe),
                 parse_quote!(__AetherBloomeryReactorCluster),
                 parse_quote!(__AetherBloomeryReactorPeer_n1),
+                parse_quote!(__AetherBloomeryReactorPeer_n2),
                 parse_quote!(Sink),
             ],
         })
@@ -281,7 +282,7 @@ mod tests {
         assert!(compact.contains("@defaultProbe"));
         assert!(compact.contains("@allProbe,__AetherBloomeryReactorCluster,Sink"));
         assert!(!compact.contains("@allProbe,__AetherBloomeryReactorCluster,__AetherBloomeryReactorPeer_n1,Sink"));
-        assert!(compact.contains("@reconstruct__AetherBloomeryReactorPeer_n1"));
+        assert!(compact.contains("@reconstruct__AetherBloomeryReactorPeer_n1,__AetherBloomeryReactorPeer_n2"));
         assert!(!compact.contains("init_typed"));
     }
 
