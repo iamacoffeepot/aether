@@ -22,8 +22,10 @@ extern crate alloc;
 
 mod heads;
 mod publish;
+mod selection;
 mod view;
 
 pub use heads::{HeadFoldError, Heads};
 pub use publish::{Publish, PublishError};
+pub use selection::{SelectedReactor, SelectionError, select_reactors};
 pub use view::View;
