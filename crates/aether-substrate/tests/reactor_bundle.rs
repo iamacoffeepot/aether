@@ -66,10 +66,6 @@ fn live_event<K: Kind + 'static>(stream: &str, seq: u64, name: &'static str, to:
 /// A guest can finish `wire` even when an inline peer could not obtain its
 /// host alias. Preparation must expose that failure before folding anything.
 #[test]
-#[allow(
-    clippy::disallowed_methods,
-    reason = "the direct multi-export Component test selects a guest type by its namespace tag"
-)]
 fn reactor_bundle_peer_spawn_failure_refuses_batch_and_live_event() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
@@ -105,7 +101,7 @@ fn reactor_bundle_peer_spawn_failure_refuses_batch_and_live_event() {
         &module,
         ctx,
         &config.encode_into_bytes(),
-        Some(aether_data::mailbox_id_from_name(CLUSTER_NAMESPACE).0),
+        Some(aether_data::ActorId::singleton(CLUSTER_NAMESPACE).0),
     )
     .expect("instantiate generated coordinator");
     component.wire().expect("generated wire returns after peer allocation failure");
