@@ -7,7 +7,7 @@ use aether_bloomery_kinds::{
     Digest, Entry, Head, HeadMoved, KERNEL_HEAD, OpaqueBytes, REACTORS_HEAD, ReactorSet, Ref, Seq, Tree,
 };
 use aether_bloomery_reactor::Owner;
-use aether_data::{Kind, Storage, StorageData};
+use aether_data::{Kind, Storage, StorageData, storage_kind_id_from_name};
 
 fn reference<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))
@@ -16,7 +16,7 @@ fn reference<K>(byte: u8) -> Ref<K> {
 fn moved<K: Kind + 'static>(seq: u64, head: &Head<K>, to: Ref<K>) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {
         seq: Seq(seq),
-        kind: HeadMoved::<K>::NAME.to_owned(),
+        kind: HeadMoved::<K>::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(head.move_to(to)))?,
@@ -55,8 +55,13 @@ fn only_conventional_set_root_and_byte_head_moves_reconcile() -> Result<(), Box<
 fn other_typed_specializations_and_unrelated_events_decline() -> Result<(), Box<dyn Error>> {
     let mut owner = Owner::new();
     assert!(evaluate(&mut owner, moved(1, &Head::<Tree>::new("source"), reference(1))?)?.is_empty());
-    let unrelated =
-        Entry { seq: Seq(2), kind: "test.unrelated".to_owned(), cause: None, recorded_at_millis: 0, bytes: Vec::new() };
+    let unrelated = Entry {
+        seq: Seq(2),
+        kind: storage_kind_id_from_name("test.unrelated"),
+        cause: None,
+        recorded_at_millis: 0,
+        bytes: Vec::new(),
+    };
     assert!(evaluate(&mut owner, unrelated)?.is_empty());
     assert_eq!(
         evaluate(&mut owner, moved(3, &REACTORS_HEAD, reference(3))?)?,

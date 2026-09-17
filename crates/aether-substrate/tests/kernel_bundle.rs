@@ -64,7 +64,7 @@ fn reference<K>(byte: u8) -> Ref<K> {
 fn moved<K: Kind + 'static>(seq: u64, head: &Head<K>, to: Ref<K>) -> JournalEntry {
     JournalEntry {
         seq,
-        kind: HeadMoved::<K>::NAME.to_owned(),
+        kind: HeadMoved::<K>::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(head.move_to(to))).expect("storage encode"),
