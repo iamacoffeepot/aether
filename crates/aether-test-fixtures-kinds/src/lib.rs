@@ -526,7 +526,7 @@ pub struct CollectReactorOutputsResult {
 }
 
 /// Test-only journal provider contents, supplied when its WASM actor loads.
-#[aether_data::kind(name = "aether.test_fixtures.reactor_journal_config")]
+#[aether_data::kind(name = "aether.test_fixtures.reactor_journal_config", default)]
 pub struct ReactorJournalConfig {
     pub head: u64,
     pub entries: Vec<aether_bloomery_reactor::JournalEntry>,
