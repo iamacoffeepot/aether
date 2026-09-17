@@ -71,6 +71,7 @@ in the active Codex surface with `/mcp`.
 
 ## Coding Rules
 
+- Do not encode an implicit state machine through `Option` presence. Use `Option<T>` when absence of the value is meaningful; if `None` versus `Some` selects an execution mode or lifecycle phase, prefer an explicit named state and keep storage separate. For example, use an explicit effect-capture mode with a `Vec` rather than `Option<Vec<_>>` where `None` means dispatch and `Some` means capture. Clear or drain reusable buffers while retaining their allocation when appropriate.
 - Preserve user changes. Never revert edits you did not make unless the user explicitly asks.
 - Prefer `rg`/`rg --files` for repository search.
 - Use `apply_patch` for manual edits.
