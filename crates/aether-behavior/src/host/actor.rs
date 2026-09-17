@@ -16,7 +16,6 @@
 //! reload walk (#2694), re-instantiating only the host's own script.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
 use aether_actor::{
     ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
@@ -773,7 +772,7 @@ mod tests {
         assert!(host.slot.is_none());
         assert!(host.wrapped_child.is_none());
 
-        host.apply_rehydrate(&bundle.encode());
+        host.apply_rehydrate(&bundle.try_encode().expect("test bundle encodes"));
 
         assert_eq!(host.wrapped_child, Some(MailboxId(0x1234_5678)));
         assert!(host.slot.is_some(), "the resident script re-instantiates on reload");
@@ -796,7 +795,7 @@ mod tests {
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
-        host.apply_rehydrate_with_attach(&bundle.encode(), |host| {
+        host.apply_rehydrate_with_attach(&bundle.try_encode().expect("test bundle encodes"), |host| {
             host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH);
         });
 

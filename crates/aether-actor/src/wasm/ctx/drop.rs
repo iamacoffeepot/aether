@@ -71,6 +71,7 @@ impl Persistence for WasmDropCtx<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::vec;
 
     #[test]
     fn capturing_context_retains_last_deposit() {

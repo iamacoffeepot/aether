@@ -47,7 +47,6 @@ use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
 /// returns `Some((version, bytes))` for the single host `save_state`;
 /// with no inline children that is byte-identical to the parent's own
 /// blob.
-#[must_use]
 pub fn dehydrate(
     registry: &Registry,
     run_parent_dehydrate: impl FnOnce(&mut WasmDropCtx<'_>) -> Result<(), String>,
