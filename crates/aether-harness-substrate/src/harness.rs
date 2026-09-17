@@ -31,6 +31,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
+use aether_component::ComponentRestrictions;
 use aether_data::{Kind, KindId, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
@@ -331,6 +332,7 @@ pub struct SubstrateHarnessBuilder {
     poll_cap: Option<Duration>,
     render_hook: Option<HookFactory>,
     component_host: bool,
+    component_host_restrictions: HashMap<MailboxId, ComponentRestrictions>,
     compose: Vec<ComposeFn>,
     scheduler_tuning: SchedulerTuning,
 }
@@ -349,6 +351,7 @@ impl Default for SubstrateHarnessBuilder {
             poll_cap: None,
             render_hook: None,
             component_host: false,
+            component_host_restrictions: HashMap::new(),
             compose: Vec::new(),
             scheduler_tuning: SchedulerTuning::default(),
         }
@@ -576,6 +579,17 @@ impl SubstrateHarnessBuilder {
         self
     }
 
+    /// Compose the component host with lifecycle flags for exact requested slots.
+    #[must_use]
+    pub fn with_component_host_restrictions(
+        mut self,
+        restrictions_by_slot: HashMap<MailboxId, ComponentRestrictions>,
+    ) -> Self {
+        self.component_host = true;
+        self.component_host_restrictions = restrictions_by_slot;
+        self
+    }
+
     /// Boot the harness. Overrides applied via the builder methods flow
     /// through to `SubstrateBoot::build` and the chassis-side sink
     /// wiring; the composed cap set is exactly the basics plus what the
@@ -620,6 +634,7 @@ impl SubstrateHarness {
             poll_cap,
             render_hook,
             component_host,
+            component_host_restrictions,
             compose,
             scheduler_tuning,
         } = builder;
@@ -670,6 +685,7 @@ impl SubstrateHarness {
             events_tx,
             namespace_roots,
             component_host,
+            component_host_restrictions,
             compose,
             // Issue #2509: the teardown gate honors the same resolved cap
             // (env knob or programmatic override) as the settlement-await

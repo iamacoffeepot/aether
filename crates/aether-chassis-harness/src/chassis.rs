@@ -111,6 +111,7 @@ impl BootableChassis for HarnessChassis {
                 engine: Arc::clone(&boot.engine),
                 linker: Arc::clone(&boot.linker),
                 hub_outbound: Arc::clone(&boot.outbound),
+                restrictions_by_slot: Default::default(),
             })
             .with_actor::<TcpCapability>(())
             .with_actor::<TextCapability>(())

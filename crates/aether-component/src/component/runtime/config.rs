@@ -1,8 +1,12 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use aether_substrate::actor::wasm::component::ComponentCtx;
+use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::outbound::HubOutbound;
 use wasmtime::{Engine, Linker};
+
+use crate::ComponentRestrictions;
 
 /// Composer-supplied construction params for `ComponentHostCapability`
 /// (ADR-0156 §3). These are live wasmtime / egress handles the composer
@@ -18,4 +22,7 @@ pub struct ComponentHostParams {
     pub engine: Arc<Engine>,
     pub linker: Arc<Linker<ComponentCtx>>,
     pub hub_outbound: Arc<HubOutbound>,
+    /// Host-owned lifecycle flags for exact requested trampoline slots.
+    /// Unlisted slots use [`ComponentRestrictions::NONE`].
+    pub restrictions_by_slot: HashMap<MailboxId, ComponentRestrictions>,
 }

@@ -146,6 +146,7 @@ impl BootableChassis for HeadlessChassis {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
+            restrictions_by_slot: Default::default(),
         };
 
         // Boot order is declaration order. `into_common_boot` reads the

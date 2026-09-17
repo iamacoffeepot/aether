@@ -9,11 +9,12 @@
 //! `aether.control.platform_info` was deleted entirely (Phase 4).
 
 use std::any::Any;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_component::{ComponentHostCapability, ComponentHostParams};
+use aether_component::{ComponentHostCapability, ComponentHostParams, ComponentRestrictions};
 use aether_data::Kind;
 use aether_data::KindId;
 use aether_fs::{FsCapability, NamespaceRoots};
@@ -236,6 +237,8 @@ pub struct SubstrateHarnessEnv {
     /// `replace` / `drop` have no recipient — benches that never touch
     /// wasm skip the cap entirely.
     pub component_host: bool,
+    /// Composer-owned restrictions for requested component slots.
+    pub component_host_restrictions: HashMap<MailboxId, ComponentRestrictions>,
     /// Caller-supplied capability composition, applied to the chassis
     /// [`Builder`] after the harness basics (trace dispatch, the harness cap,
     /// lifecycle, headless window) in push order. The harness gives the
@@ -299,6 +302,7 @@ impl SubstrateHarnessChassis {
             events_tx,
             namespace_roots,
             component_host,
+            component_host_restrictions,
             compose,
             teardown_budget,
         } = env;
@@ -426,6 +430,7 @@ impl SubstrateHarnessChassis {
                 engine: Arc::clone(&boot.engine),
                 linker: Arc::clone(&boot.linker),
                 hub_outbound: Arc::clone(&boot.outbound),
+                restrictions_by_slot: component_host_restrictions,
             });
         }
         // ADR-0161 R4/R5: the pumped render path composes no build-time

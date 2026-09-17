@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
+use aether_actor::{Addressable, Manual, OutboundReply, ReplyMode, Single, root_mailbox};
 use aether_data::{Kind, KindDescriptor};
 use aether_kinds::{
     ComponentCapabilities, DropComponent, DropResult, LoadComponent, LoadComponentUnder, ReplaceComponent,
@@ -59,8 +59,16 @@ enum LoadPlacement {
 
 impl PreparedLoad {
     fn requested_config(&self, state: &ComponentHostCapabilityState) -> WasmTrampolineConfig {
+        let parent = match &self.placement {
+            LoadPlacement::ComponentHost => root_mailbox::<ComponentHostCapability>(),
+            LoadPlacement::Under { parent, .. } => *parent,
+        };
         WasmTrampolineConfig {
-            prohibit: ComponentRestrictions::NONE,
+            prohibit: state
+                .restrictions_by_slot
+                .get(&WasmTrampoline::resolve(parent.0, &self.name))
+                .copied()
+                .unwrap_or(ComponentRestrictions::NONE),
             engine: Arc::clone(&state.engine),
             linker: Arc::clone(&state.linker),
             module: self.module.clone(),
