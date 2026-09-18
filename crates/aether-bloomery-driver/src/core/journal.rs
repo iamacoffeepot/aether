@@ -1,8 +1,8 @@
 //! Journal view: the folds, their shared cursor, and the fenced write queue.
 //!
 //! The core learns the journal only from [`ReadEvents`](aether_bloomery_kinds::ReadEvents)
-//! pages. Each entry folds into both [`Heads`](aether_bloomery_view::Heads) and
-//! [`Requests`](aether_bloomery_view::Requests); pages continue until the cursor
+//! pages. Each entry folds into both [`Heads`] and
+//! [`Requests`]; pages continue until the cursor
 //! reaches the page's `head`. At most one [`AppendRecords`](aether_bloomery_kinds::AppendRecords)
 //! is in flight, fenced at the cursor, and writing decisions come from a FIFO
 //! of pending writes, made only when the core is caught up with no write in

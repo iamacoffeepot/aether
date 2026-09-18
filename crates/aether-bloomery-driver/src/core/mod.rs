@@ -2,7 +2,7 @@
 //!
 //! [`ProgramCore::start`] is the only constructor, and it returns the first
 //! journal read, so no core exists that has not begun catching up.
-//! [`ProgramCore::call`] accepts one [`Call`](aether_bloomery_kinds::Call);
+//! [`ProgramCore::call`] accepts one [`Call`];
 //! the shell stores its deferred reply under the returned [`CallerId`]
 //! before it performs the commands. Each command kind has one typed reply
 //! method, and a reply whose ticket the core is not waiting on returns no
