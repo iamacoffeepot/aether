@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use crate::{AppendError, Batch, Journal};
 use aether_actor::actor;
 use aether_bloomery_kinds::{
-    JournalEntry, MoveHead, MoveHeadResult, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead,
-    ReadHeadResult, RecordedHeadMove, Seq, artifact_digest,
+    JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadEvents,
+    ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, artifact_digest,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -76,16 +76,35 @@ impl NativeActor for JournalActor {
 
     #[handler::single]
     fn on_move_head(&mut self, _ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
-        let (head, artifact_bytes, citations, expected_seq) = request.into_parts();
+        let (head, to, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
-        let artifact = batch.stage_move_head(&head, &artifact_bytes, citations);
-        if let Err(error) = batch.push_event(&RecordedHeadMove::new(head, artifact), None) {
+        if let Err(error) = batch.push_event(&RecordedHeadMove::new(head, to), None) {
             return MoveHeadResult::Err { message: error.to_string() };
         }
+
         match self.journal.append(Seq(expected_seq), &batch) {
-            Ok(range) => MoveHeadResult::Committed { seq: range.start.0, artifact },
+            Ok(range) => MoveHeadResult::Committed { seq: range.start.0 },
             Err(AppendError::HeadMoved { actual }) => MoveHeadResult::Conflict { actual: actual.0 },
             Err(error) => MoveHeadResult::Err { message: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_publish(&mut self, _ctx: &mut NativeCtx<'_>, request: Publish) -> PublishResult {
+        let (artifacts, moves, expected_seq) = request.into_parts();
+        let mut batch = Batch::new();
+        let artifacts = artifacts.into_iter().map(|artifact| batch.stage_artifact(artifact)).collect();
+        for moved in &moves {
+            if let Err(error) = batch.push_event(moved, None) {
+                return PublishResult::Err { message: error.to_string() };
+            }
+        }
+
+        // `append` returns `head+1 .. head+n+1`, and `head+1 .. head+1` for no events.
+        match self.journal.append(Seq(expected_seq), &batch) {
+            Ok(range) => PublishResult::Committed { head: range.end.0.saturating_sub(1), artifacts },
+            Err(AppendError::HeadMoved { actual }) => PublishResult::Conflict { actual: actual.0 },
+            Err(error) => PublishResult::Err { message: error.to_string() },
         }
     }
 }
