@@ -6,7 +6,7 @@ use aether_bloomery_kinds::{
     Digest, Entry, Head, Mode, OpaqueBytes, Program, ProgramHeadMoved, ProgramName, RecordedHead, RecordedHeadMove,
     Ref, Seq, Tree,
 };
-use aether_bloomery_view::{HeadFoldError, Heads, View};
+use aether_bloomery_view::{HeadFoldError, Heads, SequenceError, View};
 use aether_data::{Kind, Storage, StorageData};
 
 const PAGE: usize = 256;
@@ -157,7 +157,7 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
 
     let gap = heads.apply(&moved(3, "trim", later)?).expect_err("gap must refuse");
     match gap {
-        HeadFoldError::Gap { expected, actual } => {
+        HeadFoldError::Sequence(SequenceError::Gap { expected, actual }) => {
             assert_eq!(expected, Seq(2));
             assert_eq!(actual, Seq(3));
         }
@@ -166,7 +166,7 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
 
     let duplicate = heads.apply(&moved(1, "trim", later)?).expect_err("duplicate must refuse");
     match duplicate {
-        HeadFoldError::Duplicate { expected, actual } => {
+        HeadFoldError::Sequence(SequenceError::Duplicate { expected, actual }) => {
             assert_eq!(expected, Seq(2));
             assert_eq!(actual, Seq(1));
         }
@@ -176,7 +176,7 @@ fn rejected_input_leaves_cursor_and_bindings_unchanged() -> Result<(), Box<dyn E
     heads.apply(&moved(2, "trim", to)?)?;
     let backwards = heads.apply(&moved(1, "trim", later)?).expect_err("backwards must refuse");
     match backwards {
-        HeadFoldError::Backwards { expected, actual } => {
+        HeadFoldError::Sequence(SequenceError::Backwards { expected, actual }) => {
             assert_eq!(expected, Seq(3));
             assert_eq!(actual, Seq(1));
         }
