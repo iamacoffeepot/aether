@@ -22,6 +22,10 @@ history with fold-only `EventBatch`, and starts live `Event` delivery after
 the boundary. `EvaluatedResult` acknowledges live peer evaluation; mere
 preparation or lifecycle settlement is not that acknowledgment. Delivery
 for a cluster cannot advance past `N` until evaluation of `N` is known.
+The SQLite store and its native owner actor live together in
+`aether-bloomery-journal`. The feeder reads through portable owner mail in
+`aether_bloomery_kinds::journal`, without a separate journal-actor crate or
+feature split.
 
 A move at `N` requests activation. The predecessor must evaluate `N` before
 the successor receives live `N+1`. If loading or warmup rejects, the move

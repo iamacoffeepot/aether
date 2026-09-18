@@ -14,12 +14,12 @@ or chassis changes.
 
 | Order | Deliverable | Proposed surface |
 | --- | --- | --- |
-| W1 | Atomic move-head command on journal owner | `aether-bloomery-journal-actor`, `aether-bloomery-kinds` |
+| W1 | Atomic move-head command on journal owner | `aether-bloomery-journal`, `aether-bloomery-kinds` |
 | W2 | Requests, receipts, attribution, and native driver | `aether-bloomery-kinds`, `aether-bloomery-program`, `aether-bloomery-reactor` |
 | W3 | Executor selection without a required member | `aether-bloomery-kinds`, `aether-bloomery-view` |
 | W4 | Native feeder and side-by-side routes | new `aether-bloomery-feeder` |
 | W5 | Activate and retire program executors | feeder and kinds crates |
-| W6 | Genesis through the application layer | feeder and journal-owner crates; chassis integration deferred |
+| W6 | Genesis through the application layer | feeder and journal crates; chassis integration deferred |
 | W7 | Restart and boundary trace tests | feeder and driver tests |
 
 Each order depends on the preceding contract unless a scoped issue proves
@@ -32,7 +32,10 @@ of the earlier W8; they do not dispatch W1–W7.
 artifact and appends its head move in one journal batch. Reply with the
 committed sequence or the actual head when the fence loses. This is the
 author-facing update path, not raw batch mail. Prove failure leaves neither
-a partial artifact binding nor an apparent move.
+a partial artifact binding nor an apparent move. The SQLite `Journal` and
+native owner actor share `aether-bloomery-journal`; portable request/reply
+mail belongs in `aether_bloomery_kinds::journal`. Do not split the owner into
+a separate crate or feature.
 
 **W2 — Durable request and receipt path.** Define `Requested`, `Transition`,
 and `Fault` kinds and a native driver that resolves an input closure and
