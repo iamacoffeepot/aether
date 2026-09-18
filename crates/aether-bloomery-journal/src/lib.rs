@@ -30,7 +30,9 @@
 //! native bundle driver's own records and head moves, each under its own
 //! cause. All three fence on the whole journal's last stored sequence;
 //! `MoveHead` / `Publish` carry no cause, and `AppendRecords` is the one
-//! write that does.
+//! write that does. It also answers [`aether_bloomery_kinds::WatchHead`], a
+//! bounded long poll that is answered once a committed write moves the head
+//! past `after`.
 
 mod actor;
 mod artifact;
@@ -38,8 +40,9 @@ mod batch;
 mod clock;
 mod draft;
 mod journal;
+mod watch;
 
-pub use actor::JournalActor;
+pub use actor::{JournalActor, MAX_HEAD_WATCHERS};
 pub use aether_bloomery_kinds::{
     DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
     hash_bytes,
