@@ -4,10 +4,13 @@
 //! mail, and [`MoveHead`] / [`Publish`] / [`AppendRecords`] are the three
 //! fenced write commands — the last is the one that carries a journal cause.
 //! [`WatchHead`] is a long-poll watch on the head, answered once a
-//! committed write moves it past the requested boundary.
+//! committed write moves it past the requested boundary. [`ReadClosure`]
+//! reads an artifact's transitive closure over the journal's stored citation
+//! edges under a validated [`ClosureLimit`], never truncating.
 
 mod append;
 mod artifact;
+mod closure;
 mod watch;
 mod write;
 
@@ -20,6 +23,7 @@ use crate::{Digest, Entry, Seq};
 
 pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
+pub use closure::{ClosureLimit, ClosureLimitError, ReadClosure, ReadClosureResult};
 pub use watch::{WatchHead, WatchHeadResult};
 pub use write::{MoveHead, MoveHeadResult, Publish, PublishResult};
 

@@ -1,4 +1,4 @@
-//! Store-side artifact helpers that stay in the journal: DDL and blob split.
+//! Store-side artifact helpers that stay in the journal: DDL (artifacts and citation edges) and blob split.
 //!
 //! Kinds, framing, and digests live in `aether-bloomery-kinds`. `split_artifact`
 //! stays here because it is the store's read side and returns [`JournalError`].
@@ -15,6 +15,15 @@ CREATE TABLE IF NOT EXISTS artifacts (
     recorded_at_millis INTEGER NOT NULL,
     bytes BLOB NOT NULL
 );
+";
+
+/// Citation edges recorded when an artifact is first stored; the closure walk reads them.
+pub const CITATIONS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS citations (
+    from_digest BLOB NOT NULL CHECK (length(from_digest) = 32),
+    to_digest BLOB NOT NULL CHECK (length(to_digest) = 32),
+    PRIMARY KEY (from_digest, to_digest)
+) WITHOUT ROWID;
 ";
 
 /// Split a stored blob into its kind prefix and payload.

@@ -4,12 +4,12 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use crate::watch::Watchers;
-use crate::{AppendError, Batch, Journal};
+use crate::{AppendError, Batch, Closure, Journal};
 use aether_actor::{Manual, actor};
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult,
-    ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq,
-    WatchHead, WatchHeadResult, artifact_digest,
+    ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult, ReadHead,
+    ReadHeadResult, RecordedHeadMove, Seq, WatchHead, WatchHeadResult, artifact_digest,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -84,6 +84,19 @@ impl NativeActor for JournalActor {
             },
             Ok(None) => ReadArtifactResult::Missing { digest },
             Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
+        }
+    }
+
+    /// Read an artifact's transitive closure under the requested byte limit.
+    /// A plain read: writes nothing and wakes no watcher.
+    #[handler::single]
+    fn on_read_closure(&self, _ctx: &mut NativeCtx<'_>, request: ReadClosure) -> ReadClosureResult {
+        let ReadClosure { root, limit_bytes } = request;
+        match self.journal.read_closure(&root, limit_bytes) {
+            Ok(Closure::Found(artifacts)) => ReadClosureResult::Found { root, artifacts },
+            Ok(Closure::Missing(digest)) => ReadClosureResult::Missing { root, digest },
+            Ok(Closure::TooLarge) => ReadClosureResult::TooLarge { root, limit_bytes },
+            Err(error) => ReadClosureResult::Err { root, message: error.to_string() },
         }
     }
 
