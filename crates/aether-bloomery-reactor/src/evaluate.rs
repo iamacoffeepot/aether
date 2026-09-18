@@ -8,13 +8,12 @@
 
 use alloc::vec::Vec;
 
-use aether_data::Kind;
+use aether_data::{Kind, KindId};
 
 use crate::error::PrepareError;
 use crate::owner::Owner;
 use crate::params::Params;
 use crate::trigger::Trigger;
-use crate::views::PublishSet;
 
 /// Marker for a mail-capable arm output.
 ///
@@ -29,21 +28,28 @@ pub trait Output: Kind + 'static {}
 /// runs an executor.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Intent {
-    kind_name: &'static str,
+    rule: &'static str,
+    kind: KindId,
     bytes: Vec<u8>,
 }
 
 impl Intent {
-    /// Encode `output` through the mail codec.
+    /// Encode `output` through the mail codec under `rule`.
     #[must_use]
-    pub fn from_output<O: Output>(output: &O) -> Self {
-        Self { kind_name: O::NAME, bytes: output.encode_into_bytes() }
+    pub fn from_output<O: Output>(rule: &'static str, output: &O) -> Self {
+        Self { rule, kind: O::ID, bytes: output.encode_into_bytes() }
     }
 
-    /// Stored kind name of the output.
+    /// Rule that produced the output.
     #[must_use]
-    pub const fn kind_name(&self) -> &'static str {
-        self.kind_name
+    pub const fn rule(&self) -> &'static str {
+        self.rule
+    }
+
+    /// Mail kind id of the output.
+    #[must_use]
+    pub const fn kind(&self) -> KindId {
+        self.kind
     }
 
     /// Mail-codec payload.
@@ -52,13 +58,19 @@ impl Intent {
         &self.bytes
     }
 
-    /// Decode as `O` when the kind name matches.
+    /// Decode as `O` when the kind id matches.
     #[must_use]
     pub fn decode<O: Output>(&self) -> Option<O> {
-        if self.kind_name != O::NAME {
+        if self.kind != O::ID {
             return None;
         }
         O::decode_from_bytes(&self.bytes)
+    }
+
+    /// Take the rule, kind, and payload.
+    #[must_use]
+    pub fn into_parts(self) -> (&'static str, KindId, Vec<u8>) {
+        (self.rule, self.kind, self.bytes)
     }
 }
 
@@ -73,7 +85,6 @@ pub trait ArmVisitor {
     where
         T: Trigger,
         L: Params<T>,
-        L::Views: PublishSet,
         O: Output;
 }
 
@@ -85,7 +96,7 @@ pub trait ArmVisitor {
 /// This construction check does not prove arbitrary Rust bodies side-effect
 /// free; direct implementations of this lower-level trait are not checked.
 pub trait Reactor: Sized + 'static {
-    /// Stable mailbox namespace for the generated inline peer of this reactor.
+    /// Stable reactor identity inside the bundle, validated as a `ReactorName`.
     const NAMESPACE: &'static str;
 
     /// Describe each rule's trigger, parameter list, and output type.
@@ -118,6 +129,8 @@ impl Owner {
 
 #[doc(hidden)]
 pub mod __macro_internals {
+    pub use aether_bloomery_kinds::{ReactorName, RuleName};
     pub use alloc::collections::BTreeSet;
+    pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
 }

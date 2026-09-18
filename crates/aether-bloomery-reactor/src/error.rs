@@ -1,7 +1,6 @@
 //! Failures while pushing a prefix or folding retained views.
 
 use alloc::boxed::Box;
-use alloc::string::String;
 use core::error::Error;
 use core::fmt;
 
@@ -71,44 +70,6 @@ pub enum PrepareError {
         /// Last cursor trusted for that view, if any.
         last_trusted_cursor: Seq,
     },
-    /// A required published snapshot was absent from the prepared prefix.
-    MissingSnapshot {
-        /// Stable published name of the view.
-        view: &'static str,
-    },
-    /// The prepared prefix listed the same published view twice.
-    DuplicateSnapshot {
-        /// Published name that appeared more than once.
-        view: String,
-    },
-    /// Publish-codec encode or decode failed for a snapshot.
-    Snapshot {
-        /// Stable published name of the view.
-        view: &'static str,
-        /// Codec error.
-        source: Box<dyn Error + 'static>,
-    },
-    /// The stream/activation token was empty.
-    InvalidStream,
-    /// The input named a different stream than this cluster is bound to.
-    StreamMismatch {
-        /// Token already bound to the cluster.
-        bound: String,
-        /// Token on the refused input.
-        actual: String,
-    },
-    /// An `EventBatch`'s `from`/`through` does not match its entries.
-    InvalidRange {
-        /// Declared first sequence.
-        from: Seq,
-        /// Declared last sequence.
-        through: Seq,
-    },
-    /// A previous fold failed; the cluster cannot admit further input.
-    PoisonedCluster {
-        /// Last cursor trusted before the failed fold.
-        last_trusted_cursor: Seq,
-    },
 }
 
 impl fmt::Display for PrepareError {
@@ -138,19 +99,6 @@ impl fmt::Display for PrepareError {
             Self::Poisoned { view, last_trusted_cursor } => {
                 write!(f, "view {view} is unusable after seq {last_trusted_cursor}")
             }
-            Self::MissingSnapshot { view } => write!(f, "prepared prefix is missing snapshot {view}"),
-            Self::DuplicateSnapshot { view } => write!(f, "prepared prefix repeats snapshot {view}"),
-            Self::Snapshot { view, source } => write!(f, "prepared snapshot {view} failed: {source}"),
-            Self::InvalidStream => write!(f, "reactor stream token must be non-empty"),
-            Self::StreamMismatch { bound, actual } => {
-                write!(f, "reactor stream mismatch: bound {bound}, got {actual}")
-            }
-            Self::InvalidRange { from, through } => {
-                write!(f, "reactor event batch range {from}..={through} does not match entries")
-            }
-            Self::PoisonedCluster { last_trusted_cursor } => {
-                write!(f, "reactor cluster is poisoned after a failed fold at seq {last_trusted_cursor}")
-            }
         }
     }
 }
@@ -159,7 +107,7 @@ impl Error for PrepareError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
             Self::Trigger(error) => Some(error),
-            Self::Advance { source, .. } | Self::Snapshot { source, .. } => Some(source.as_ref()),
+            Self::Advance { source, .. } => Some(source.as_ref()),
             Self::Empty
             | Self::Gap { .. }
             | Self::Duplicate { .. }
@@ -167,13 +115,7 @@ impl Error for PrepareError {
             | Self::Overflow
             | Self::NonzeroEmpty { .. }
             | Self::CursorContract { .. }
-            | Self::Poisoned { .. }
-            | Self::MissingSnapshot { .. }
-            | Self::DuplicateSnapshot { .. }
-            | Self::InvalidStream
-            | Self::StreamMismatch { .. }
-            | Self::InvalidRange { .. }
-            | Self::PoisonedCluster { .. } => None,
+            | Self::Poisoned { .. } => None,
         }
     }
 }

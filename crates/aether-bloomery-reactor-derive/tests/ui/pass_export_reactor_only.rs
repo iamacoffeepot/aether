@@ -27,5 +27,5 @@ export!(Publisher, generators = [aether_bloomery_reactor::bundle_reactors]);
 
 fn main() {
     let _ = Publisher::NAMESPACE;
-    let _ = aether_bloomery_reactor::CLUSTER_NAMESPACE;
+    let _ = aether_bloomery_reactor::REACTOR_NAMESPACE;
 }

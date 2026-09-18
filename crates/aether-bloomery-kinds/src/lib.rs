@@ -1,4 +1,4 @@
-//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, driver records, driver mail, and journal entry envelopes.
+//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, driver records, driver mail, reactor mail, and journal entry envelopes.
 //!
 //! `#![no_std]` + `alloc`. The journal, the Git projection, and WASM programs
 //! cite these types without linking `SQLite`.
@@ -36,6 +36,9 @@ pub use program::{
     Program, ProgramHeadMoved, ProgramName, ProgramNameError, ProgramRef, ReactorName, ReactorNameError, Refusal,
     RequestSource, Requested, RuleName, RuleNameError, Transition,
 };
-pub use reactor::{ReactorSet, ReactorSetError};
+pub use reactor::{
+    Evaluated, Event, ReactorIntent, ReactorSet, ReactorSetError, Status, StatusQuery, Warm, WarmEntries,
+    WarmEntriesError, Warmed,
+};
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};

@@ -1,31 +1,25 @@
 //! Reactor-bundle fixture: two source-publication reactors share one views
-//! owner inside a WASM cluster.
+//! owner inside a digest-loaded root.
 //!
 //! Authors declare reactors and guards. `export!(…, generators = [bundle_reactors])`
-//! keeps ordinary actors (including imported names) and generates one views
-//! coordinator plus inline peers. Load the coordinator at
-//! [`aether_bloomery_reactor::CLUSTER_NAMESPACE`].
-//! `ReactorOutputSink` is the external mailbox that records typed outputs.
+//! generates one root at [`aether_bloomery_reactor::REACTOR_NAMESPACE`]. Load it
+//! under the journal artifact digest with empty config.
 
 use core::error::Error;
 use core::fmt;
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
-use aether_bloomery_reactor::{And, BundledView, EvaluatedResult, Guard, PreparedResult, reactor};
+use aether_bloomery_reactor::{And, Guard, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
-use aether_test_fixtures_kinds::{
-    CollectReactorOutputs, CollectReactorOutputsResult, REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication,
-    ReactorOpenPublication,
-};
+use aether_test_fixtures_kinds::{REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication, ReactorOpenPublication};
 
 const CURRENT: Head<Program> = Head::new("current");
 static FOLD_IDS: AtomicU32 = AtomicU32::new(1);
 
 /// Shared published fold used by both reactors. `empty` mints a cluster-local
-/// id so two reactors sharing one owner emit the same id, and two cluster
+/// id so two reactors sharing one owner emit the same id, and two root
 /// instances do not.
 #[derive(Clone, Debug)]
 pub struct FoldTally {
@@ -90,10 +84,6 @@ impl Publish for FoldTally {
     }
 }
 
-impl BundledView for FoldTally {
-    const NAME: &'static str = "test.bloomery.reactor.fold_tally";
-}
-
 struct CurrentCompilation {
     program: Ref<Program>,
     fold_id: u32,
@@ -143,58 +133,4 @@ impl Reactor for SourceWitness {
     }
 }
 
-/// External output mailbox for one loaded cluster.
-pub struct ReactorOutputSink {
-    guarded: Vec<ReactorGuardedPublication>,
-    open: Vec<ReactorOpenPublication>,
-    prepared: Vec<PreparedResult>,
-    evaluated: Vec<EvaluatedResult>,
-}
-
-#[actor]
-impl WasmActor for ReactorOutputSink {
-    const NAMESPACE: &'static str = "test.bloomery.reactor.sink";
-
-    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Self { guarded: Vec::new(), open: Vec::new(), prepared: Vec::new(), evaluated: Vec::new() })
-    }
-
-    #[handler::single]
-    fn on_guarded(&mut self, _ctx: &mut WasmCtx<'_>, publication: ReactorGuardedPublication) {
-        self.guarded.push(publication);
-    }
-
-    #[handler::single]
-    fn on_open(&mut self, _ctx: &mut WasmCtx<'_>, publication: ReactorOpenPublication) {
-        self.open.push(publication);
-    }
-
-    #[handler::single]
-    fn on_prepared(&mut self, _ctx: &mut WasmCtx<'_>, prepared: PreparedResult) {
-        self.prepared.push(prepared);
-    }
-
-    #[handler::single]
-    fn on_evaluated(&mut self, _ctx: &mut WasmCtx<'_>, evaluated: EvaluatedResult) {
-        self.evaluated.push(evaluated);
-    }
-
-    #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectReactorOutputs) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CollectReactorOutputsResult {
-                guarded: self.guarded.clone(),
-                open: self.open.clone(),
-                prepared: self.prepared.clone(),
-                evaluated: self.evaluated.clone(),
-            });
-        }
-    }
-}
-
-aether_actor::export!(
-    default = ReactorOutputSink,
-    SourcePublisher,
-    SourceWitness,
-    generators = [aether_bloomery_reactor::bundle_reactors],
-);
+aether_actor::export!(SourcePublisher, SourceWitness, generators = [aether_bloomery_reactor::bundle_reactors],);

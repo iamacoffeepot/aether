@@ -156,7 +156,7 @@ fn named_guard_and_direct_heads_publish() -> Result<(), Box<dyn Error>> {
     assert_eq!(first.marker, 1);
     assert_eq!(first.digest, [2; 32]);
     assert_eq!(second.marker, 2);
-    assert_eq!(intents[0].kind_name(), PublicationProposal::NAME);
+    assert_eq!(intents[0].kind(), PublicationProposal::ID);
     Ok(())
 }
 
@@ -264,7 +264,6 @@ fn visit_arms_exposes_each_rule() {
         where
             T: Trigger,
             L: Params<T>,
-            L::Views: aether_bloomery_reactor::PublishSet,
             O: Output,
         {
             self.0.push(name);

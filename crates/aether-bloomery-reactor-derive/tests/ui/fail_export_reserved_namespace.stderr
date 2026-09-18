@@ -1,4 +1,4 @@
-error: NAMESPACE `aether.bloomery.reactor` is reserved for the generated views coordinator
+error: NAMESPACE `aether.bloomery.reactor` is reserved for the generated reactor root
   --> tests/ui/fail_export_reserved_namespace.rs:14:1
    |
 14 | #[reactor]

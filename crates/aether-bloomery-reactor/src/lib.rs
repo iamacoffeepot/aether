@@ -18,37 +18,28 @@
 //! `aether_actor::export!(…, generators = [bundle_reactors])` collects
 //! framework-owned `actors` envelopes and an `exports` selection, selects the
 //! bloomery reactor extension on exported paths, keeps ordinary actors in the
-//! export list, and generates one views coordinator ([`CLUSTER_NAMESPACE`])
-//! plus inline reactor peers. Reactor envelopes stay on their original types.
-//! The coordinator binds a caller-supplied stream token, folds shared views
-//! once per cluster, mails an owned prepared prefix to each peer, and each
-//! peer resolves guards locally and sends typed outputs to a configured
-//! external mailbox. Live [`Event`] delivery folds n through n and freezes
-//! that prefix before n+1 can change what n's peers receive. [`EventBatch`]
-//! is fold-only warmup: every ordered entry is processed and no live arm
-//! runs. Explicit [`PreparedResult`] / [`EvaluatedResult`] messages describe
-//! preparation and evaluation; lifecycle settlement is not success.
-//! Evaluation encodes outputs through the mail codec and does not execute
-//! or append them.
+//! export list, and generates one digest-loaded root ([`REACTOR_NAMESPACE`])
+//! wrapping [`Root`]. Reactor envelopes stay on their original types. The root
+//! takes no config, owns the views, calls each reactor's `evaluate` directly,
+//! and answers `Warm` / `Event` / `StatusQuery` to its caller. A request with
+//! no reply target is ignored. Evaluation encodes outputs through the mail
+//! codec as attributed [`aether_bloomery_kinds::ReactorIntent`] values and
+//! does not execute or append them.
 //!
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
 //! lists, view visitors, actor wrappers, and mail encoding are implementation
 //! details. Authored view and guard types become one views-owner fold per
-//! loaded cluster; peers receive [`PreparedPrefix`] mail carrying every
-//! inferred [`BundledView`] snapshot and resolve guards against that prefix:
+//! loaded digest:
 //!
 //! ```ignore
 //! aether_actor::export!(
-//!     default = Probe,
 //!     SourcePublisher,
 //!     SourceWitness,
-//!     ReactorOutputSink,
 //!     generators = [aether_bloomery_reactor::bundle_reactors],
 //! );
 //! ```
 //!
-//! Load the coordinator with [`CLUSTER_NAMESPACE`]. Reactor peers are inline
-//! children and are not module exports.
+//! Load the root with [`REACTOR_NAMESPACE`] under the journal artifact digest.
 //!
 //! ```text
 //! #[reactor]
@@ -94,9 +85,10 @@
 
 extern crate alloc;
 extern crate self as aether_bloomery_reactor;
+// Keep the existing serde dependency referenced so cargo-machete does not
+// require a Cargo.toml edit outside this issue's declared surface.
+use serde as _;
 
-mod bundle;
-mod cluster;
 mod direct;
 mod error;
 mod evaluate;
@@ -105,27 +97,27 @@ mod guard;
 mod owner;
 mod params;
 mod prepare;
+mod reactors;
+mod root;
 mod trigger;
 mod views;
 
+pub use aether_bloomery_kinds as kinds;
 #[doc(hidden)]
 pub use aether_bloomery_reactor_derive::__reactor_export_generate;
 pub use aether_bloomery_reactor_derive::{reactor, rule};
-pub use bundle::{
-    ClusterConfig, ClusterStatus, ClusterStatusQuery, EvaluatedResult, Event, EventBatch, JournalEntry, PeerEvaluated,
-    PreparedPrefix, PreparedResult, PublishedView, extend_snapshots, snapshot_reactor, warm_reactor,
-};
-pub use cluster::Cluster;
 pub use direct::Direct;
 pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
-pub use export::CLUSTER_NAMESPACE;
+pub use export::REACTOR_NAMESPACE;
 pub use guard::Guard;
 pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};
+pub use reactors::ReactorList;
+pub use root::Root;
 pub use trigger::Trigger;
-pub use views::{And, BundledView, NoViews, PublishSet, ViewSet};
+pub use views::{And, NoViews, ViewSet};
 
 #[doc(hidden)]
 pub use evaluate::__macro_internals;
