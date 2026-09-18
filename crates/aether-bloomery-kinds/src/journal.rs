@@ -3,9 +3,120 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::KindId;
+use aether_data::{Citations, Cites, KindId, Storage, StorageData, StorageError};
 
-use crate::{Digest, Entry, Seq};
+use crate::{Digest, Entry, Head, RecordedHead, Seq};
+
+/// One portable citation collected from an encoded artifact.
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema)]
+pub struct MoveHeadCitation {
+    kind: KindId,
+    bytes: Vec<u8>,
+}
+
+impl MoveHeadCitation {
+    /// Expected kind of the cited artifact.
+    #[must_use]
+    pub const fn kind(&self) -> KindId {
+        self.kind
+    }
+
+    /// Identity bytes of the cited artifact. The journal checks their width.
+    #[must_use]
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Take the citation's kind and identity bytes without copying them.
+    #[must_use]
+    pub fn into_parts(self) -> (KindId, Vec<u8>) {
+        (self.kind, self.bytes)
+    }
+}
+
+/// Publish one encoded value and move its typed head in a fenced journal append.
+///
+/// The typed constructor collects citations, but a decoded mail is untrusted:
+/// the journal verifies every supplied citation and the destination, not that
+/// the supplied list is complete for arbitrary encoded payloads.
+#[aether_data::kind(name = "aether.bloomery.journal.move_head", eq, no_serde)]
+pub struct MoveHead {
+    head: RecordedHead,
+    artifact_bytes: Vec<u8>,
+    citations: Vec<MoveHeadCitation>,
+    expected_seq: u64,
+}
+
+impl MoveHead {
+    /// Encode `value` and collect its citations for one atomic publication.
+    ///
+    /// The head and value must have the same storage kind:
+    ///
+    /// ```compile_fail
+    /// use aether_bloomery_kinds::{Head, MoveHead, Program, Tree};
+    /// let head = Head::<Program>::new("main");
+    /// let _ = MoveHead::new(&head, &Tree::empty(), 0);
+    /// ```
+    ///
+    /// # Errors
+    ///
+    /// Returns a storage error if `value` cannot be encoded.
+    pub fn new<K: Storage + Clone + Cites>(head: &Head<K>, value: &K, expected_seq: u64) -> Result<Self, StorageError> {
+        let mut citations = Citations::default();
+        value.cites(&mut citations);
+        Ok(Self {
+            head: RecordedHead::from(head),
+            artifact_bytes: K::encode_storage(&StorageData::from_value(value.clone()))?,
+            citations: citations
+                .into_vec()
+                .into_iter()
+                .map(|citation| MoveHeadCitation { kind: citation.kind, bytes: citation.bytes })
+                .collect(),
+            expected_seq,
+        })
+    }
+
+    /// Head to move after the artifact is admitted.
+    #[must_use]
+    pub const fn head(&self) -> &RecordedHead {
+        &self.head
+    }
+
+    /// Encoded storage payload without its kind prefix.
+    #[must_use]
+    pub fn artifact_bytes(&self) -> &[u8] {
+        &self.artifact_bytes
+    }
+
+    /// Citations walked from the typed value.
+    #[must_use]
+    pub fn citations(&self) -> &[MoveHeadCitation] {
+        &self.citations
+    }
+
+    /// Whole-journal sequence expected by the caller.
+    #[must_use]
+    pub const fn expected_seq(&self) -> u64 {
+        self.expected_seq
+    }
+
+    /// Take the encoded publication and its fence without copying payload bytes.
+    #[must_use]
+    pub fn into_parts(self) -> (RecordedHead, Vec<u8>, Vec<MoveHeadCitation>, u64) {
+        (self.head, self.artifact_bytes, self.citations, self.expected_seq)
+    }
+}
+
+/// Outcome of a single fenced publication attempt.
+#[aether_data::kind(name = "aether.bloomery.journal.move_head_result", eq, no_serde)]
+pub enum MoveHeadResult {
+    /// The event was appended at `seq`, and `artifact` names the admitted value.
+    Committed { seq: u64, artifact: Digest },
+    /// The supplied whole-journal fence was stale; nothing was written.
+    Conflict { actual: u64 },
+    /// Artifact admission or the journal backend refused the append.
+    Err { message: String },
+}
 
 /// One recorded entry carried over mail. Payload bytes retain their storage encoding.
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema, serde::Serialize, serde::Deserialize)]
