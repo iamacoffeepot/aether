@@ -156,9 +156,9 @@ impl World {
         self.oversized.insert(root);
     }
 
-    /// Script one bundle's load outcome, overriding the successful default.
-    pub fn script_load(&mut self, bundle: Digest, outcome: Result<MailboxId, String>) {
-        self.loads.insert(bundle, outcome);
+    /// Leave one bundle's load unanswered so the test feeds it by hand.
+    pub fn hold_load(&mut self, bundle: Digest) {
+        self.loads.remove(&bundle);
     }
 
     /// Script one request's invoke reply.

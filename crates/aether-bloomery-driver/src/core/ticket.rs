@@ -10,7 +10,7 @@
 macro_rules! tickets {
     ($( $name:ident => $kind:literal, )*) => {
         $(
-            #[aether_data::kind(name = $kind, copy, eq)]
+            #[aether_data::kind(name = $kind, copy, eq, no_serde)]
             pub struct $name(u64);
 
             impl $name {

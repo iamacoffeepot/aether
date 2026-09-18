@@ -58,6 +58,13 @@ pub struct Active {
     pub closure: Option<Vec<ClosureArtifact>>,
 }
 
+impl Active {
+    /// A request just made active, before its name check.
+    pub fn new(seq: u64) -> Self {
+        Self { seq, declaration: None, closure: None }
+    }
+}
+
 /// One digest's state, active request, and waiting FIFO.
 #[derive(Debug)]
 pub struct DigestQueue {
@@ -70,11 +77,6 @@ impl DigestQueue {
     /// The active request's seq, if one is driving this digest.
     pub fn active_seq(&self) -> Option<u64> {
         self.active.as_ref().map(|active| active.seq)
-    }
-
-    /// Whether `seq` is already driving or waiting on this digest.
-    pub fn tracks(&self, seq: u64) -> bool {
-        self.active_seq() == Some(seq) || self.waiting.contains(&seq)
     }
 }
 

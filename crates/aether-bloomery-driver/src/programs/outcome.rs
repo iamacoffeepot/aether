@@ -6,9 +6,7 @@
 //! back, every caller waiting on the request is answered with the outcome
 //! entry's own seq and record.
 
-use aether_bloomery_kinds::{
-    AppendRecords, CallOutcome, Digest, DriverRecord, EncodedArtifact, Fault, FaultReason, Seq,
-};
+use aether_bloomery_kinds::{AppendRecords, CallOutcome, DriverRecord, EncodedArtifact, Fault, FaultReason, Seq};
 use aether_bloomery_view::Outcome as RecordedOutcome;
 
 use crate::core::{AppendTicket, CallerId, Command, PendingWrite, ProgramCore};
@@ -50,19 +48,16 @@ impl ProgramCore {
         out.push(Command::Append { ticket, request: AppendRecords::new(artifacts, vec![record], fence) });
     }
 
-    /// Record a fault for one active request, then release its digest queue.
-    pub(crate) fn fault_request(&mut self, bundle: Digest, seq: u64, reason: FaultReason, out: &mut Vec<Command>) {
+    /// Queue a fault for one request. Returns `false` after aborting when the
+    /// request is missing from the fold.
+    pub(crate) fn record_fault(&mut self, seq: u64, reason: FaultReason, out: &mut Vec<Command>) -> bool {
         let Some((program, input)) = self.request_data(seq) else {
             self.abort(format!("cannot fault request {seq}: it is missing from the journal fold"), out);
-            return;
+            return false;
         };
         let record = DriverRecord::Fault { cause: seq, record: Fault { program, input, reason } };
         self.journal.queue_back(PendingWrite::Outcome { request: seq, artifacts: Vec::new(), record });
-        self.finish_active(bundle, out);
-        if self.aborted {
-            return;
-        }
-        self.pump(out);
+        true
     }
 
     /// Answer every waiter whose request now has a recorded outcome.

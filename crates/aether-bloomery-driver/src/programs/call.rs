@@ -23,25 +23,7 @@ impl ProgramCore {
     /// `Requested` write. Calls that repeat a queued-but-unrecorded key join
     /// that write instead of queueing a duplicate the fold would reject.
     pub(crate) fn handle_call(&mut self, caller: CallerId, call: Call, out: &mut Vec<Command>) {
-        let source = RequestSource::Native { origin: call.origin.clone(), key: call.key };
-        if let Some(found) = self.journal.requests().find(None, &source) {
-            let same = found.requested().program.name() == &call.name && found.requested().input == call.input;
-            let seq = found.seq().0;
-            let bundle = found.requested().program.bundle();
-            let outcome = found.outcome().cloned();
-            if !same {
-                out.push(Command::Answer {
-                    caller,
-                    outcome: CallOutcome::Refused { key: call.key, reason: CallRefusal::KeyReused },
-                });
-                return;
-            }
-            if let Some(recorded) = outcome {
-                out.push(answer_command(call.key, caller, &recorded));
-            } else {
-                self.waiters.entry(seq).or_insert_with(|| (call.key, Vec::new())).1.push(caller);
-                self.ensure_pipelined(bundle, seq, out);
-            }
+        if self.settle_recorded(&[caller], &call, out) {
             return;
         }
         match self.journal.claim_requested(&call, caller) {
@@ -56,34 +38,38 @@ impl ProgramCore {
         }
     }
 
+    /// Settle `callers` against a request the fold already records under
+    /// `call`'s key. Returns `false` when the key is unrecorded.
+    ///
+    /// A different name or input is refused `KeyReused`; a recorded outcome
+    /// answers at once; otherwise the callers wait on the request. A recorded
+    /// request without an outcome is always already in this life's pipeline
+    /// or has its outcome write queued (prior-life requests are faulted
+    /// before any call is handled), so waiting is enough: starting it again
+    /// would invoke it twice.
+    fn settle_recorded(&mut self, callers: &[CallerId], call: &Call, out: &mut Vec<Command>) -> bool {
+        let source = RequestSource::Native { origin: call.origin.clone(), key: call.key };
+        let Some(found) = self.journal.requests().find(None, &source) else {
+            return false;
+        };
+        let same = found.requested().program.name() == &call.name && found.requested().input == call.input;
+        let seq = found.seq().0;
+        let outcome = found.outcome().cloned();
+        match outcome {
+            _ if !same => out.extend(callers.iter().map(|&caller| Command::Answer {
+                caller,
+                outcome: CallOutcome::Refused { key: call.key, reason: CallRefusal::KeyReused },
+            })),
+            Some(recorded) => out.extend(callers.iter().map(|&caller| answer_command(call.key, caller, &recorded))),
+            None => self.waiters.entry(seq).or_insert_with(|| (call.key, Vec::new())).1.extend_from_slice(callers),
+        }
+        true
+    }
+
     /// Derive a queued `Requested` write: repeat the dedup lookup and head
     /// resolution against the current folds, then append under the fence.
     pub(crate) fn derive_requested(&mut self, callers: Vec<CallerId>, call: Call, out: &mut Vec<Command>) {
-        let source = RequestSource::Native { origin: call.origin.clone(), key: call.key };
-        if let Some(found) = self.journal.requests().find(None, &source) {
-            let same = found.requested().program.name() == &call.name && found.requested().input == call.input;
-            let seq = found.seq().0;
-            let bundle = found.requested().program.bundle();
-            let outcome = found.outcome().cloned();
-            if !same {
-                for caller in callers {
-                    out.push(Command::Answer {
-                        caller,
-                        outcome: CallOutcome::Refused { key: call.key, reason: CallRefusal::KeyReused },
-                    });
-                }
-                return;
-            }
-            if let Some(recorded) = outcome {
-                for caller in callers {
-                    out.push(answer_command(call.key, caller, &recorded));
-                }
-            } else {
-                for caller in callers {
-                    self.waiters.entry(seq).or_insert_with(|| (call.key, Vec::new())).1.push(caller);
-                }
-                self.ensure_pipelined(bundle, seq, out);
-            }
+        if self.settle_recorded(&callers, &call, out) {
             return;
         }
         let Some(binding) = self.journal.heads().get(&call.program) else {
@@ -95,8 +81,11 @@ impl ProgramCore {
             }
             return;
         };
-        let requested =
-            Requested { program: ProgramRef::new(binding.digest(), call.name.clone()), input: call.input, source };
+        let requested = Requested {
+            program: ProgramRef::new(binding.digest(), call.name.clone()),
+            input: call.input,
+            source: RequestSource::Native { origin: call.origin.clone(), key: call.key },
+        };
         let ticket = self.mint(AppendTicket::mint);
         let fence = self.journal.cursor();
         let append =

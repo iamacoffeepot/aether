@@ -34,135 +34,98 @@ impl ProgramCore {
     /// that finds no active request drives the digest from its current
     /// state; otherwise it waits its turn in the FIFO.
     pub(crate) fn enqueue_request(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
-        if self.bundles.queue(&bundle).is_none() {
+        let Some(queue) = self.bundles.queue_mut(&bundle) else {
             let ticket = self.mint(ArtifactTicket::mint);
             self.artifact_reads.insert(ticket, bundle);
             self.bundles.insert(
                 bundle,
-                DigestQueue {
-                    state: DigestState::Reading,
-                    active: Some(Active { seq, declaration: None, closure: None }),
-                    waiting: VecDeque::new(),
-                },
+                DigestQueue { state: DigestState::Reading, active: Some(Active::new(seq)), waiting: VecDeque::new() },
             );
             out.push(Command::ReadArtifact { ticket, request: ReadArtifact { digest: bundle } });
             return;
+        };
+        queue.waiting.push_back(seq);
+        if queue.active.is_none() {
+            self.release(bundle, out);
         }
-        let activate = {
-            let queue = self.bundles.queue_mut(&bundle).expect("queue exists, checked above");
-            if queue.active.is_some() {
-                queue.waiting.push_back(seq);
+    }
+
+    /// Release a digest's active request, then start its waiters in FIFO
+    /// order until one is left waiting on a reply.
+    ///
+    /// A waiter that finishes at once (an unavailable digest or an unknown
+    /// name) queues its fault and the loop moves to the next, so a long
+    /// queue behind a failed bundle drains without recursion.
+    pub(crate) fn release(&mut self, bundle: Digest, out: &mut Vec<Command>) {
+        while let Some(queue) = self.bundles.queue_mut(&bundle) {
+            queue.active = None;
+            let Some(seq) = queue.waiting.pop_front() else {
+                break;
+            };
+            queue.active = Some(Active::new(seq));
+            if !self.start_active(bundle, seq, out) {
+                break;
+            }
+        }
+        if !self.aborted {
+            self.pump(out);
+        }
+    }
+
+    /// Start a newly active request from its digest's state.
+    ///
+    /// Returns `true` when the request finished at once with a queued fault,
+    /// `false` when it is waiting on a reply or the core aborted.
+    fn start_active(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) -> bool {
+        match self.bundles.queue(&bundle).map(|queue| &queue.state) {
+            Some(DigestState::Declared { .. } | DigestState::Ready { .. }) => self.check_name(bundle, seq, out),
+            Some(DigestState::Unavailable { reason }) => {
+                let reason = reason.clone();
+                self.record_fault(seq, FaultReason::BundleUnavailable { reason }, out)
+            }
+            Some(DigestState::Reading | DigestState::Loading { .. }) | None => {
+                self.abort(format!("request {seq} became active while its bundle was mid-read or mid-load"), out);
                 false
-            } else {
-                queue.active = Some(Active { seq, declaration: None, closure: None });
-                true
             }
-        };
-        if activate {
-            self.drive_active(bundle, out);
-        }
-    }
-
-    /// Start `seq`'s pipeline unless it is already driving or waiting.
-    pub(crate) fn ensure_pipelined(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
-        let running = self.bundles.queue(&bundle).is_some_and(|queue| queue.tracks(seq));
-        if !running {
-            self.enqueue_request(bundle, seq, out);
-        }
-    }
-
-    /// Advance a digest's active request from the digest's current state.
-    pub(crate) fn drive_active(&mut self, bundle: Digest, out: &mut Vec<Command>) {
-        let next = {
-            let Some(queue) = self.bundles.queue_mut(&bundle) else {
-                return;
-            };
-            let Some(seq) = queue.active_seq() else {
-                return;
-            };
-            match &queue.state {
-                DigestState::Reading | DigestState::Loading { .. } => None,
-                DigestState::Declared { .. } | DigestState::Ready { .. } => Some((seq, None)),
-                DigestState::Unavailable { reason } => Some((seq, Some(reason.clone()))),
-            }
-        };
-        let Some((seq, unavailable)) = next else {
-            return;
-        };
-        match unavailable {
-            Some(reason) => {
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
-            }
-            None => self.check_name(bundle, out),
         }
     }
 
     /// Check the active request's name against the decoded declarations,
     /// then read the input's closure. An unknown name faults without any
     /// closure read or load; the bundle stays usable for its other programs.
-    pub(crate) fn check_name(&mut self, bundle: Digest, out: &mut Vec<Command>) {
-        let Some(seq) = self.active_seq_for(&bundle) else {
-            return;
-        };
+    ///
+    /// Returns `true` when the request finished with a queued fault.
+    fn check_name(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) -> bool {
         let Some((program, input)) = self.request_data(seq) else {
             self.abort(format!("active request {seq} is missing from the journal fold"), out);
-            return;
+            return false;
         };
-        let state = self.bundles.queue(&bundle).map(|queue| &queue.state);
-        let declared = if let Some(DigestState::Declared { programs, .. } | DigestState::Ready { programs, .. }) = state
-        {
-            programs.iter().find(|declared| declared.name == *program.name()).cloned()
-        } else {
+        let Some(DigestState::Declared { programs, .. } | DigestState::Ready { programs, .. }) =
+            self.bundles.queue(&bundle).map(|queue| &queue.state)
+        else {
             self.abort(format!("request {seq} reached the name check with no declarations"), out);
-            return;
+            return false;
         };
+        let declared = programs.iter().find(|declared| declared.name == *program.name()).cloned();
         let Some(declaration) = declared else {
-            self.fault_request(
-                bundle,
-                seq,
-                FaultReason::BundleUnavailable {
-                    reason: Detail::new(format!("bundle has no program named {}", program.name().as_str())),
-                },
-                out,
-            );
-            return;
+            let reason = Detail::new(format!("bundle has no program named {}", program.name().as_str()));
+            return self.record_fault(seq, FaultReason::BundleUnavailable { reason }, out);
         };
-        let stored = self.bundles.queue_mut(&bundle).is_some_and(|queue| {
-            if queue.active_seq() == Some(seq) {
-                if let Some(active) = queue.active.as_mut() {
-                    active.declaration = Some(declaration);
-                }
-                true
-            } else {
-                false
-            }
-        });
-        if !stored {
+        let Some(active) = self.active_mut(&bundle, seq) else {
             self.abort(format!("request {seq} lost its digest queue during the name check"), out);
-            return;
-        }
+            return false;
+        };
+        active.declaration = Some(declaration);
         let ticket = self.mint(ClosureTicket::mint);
         self.closure_reads.insert(ticket, (bundle, seq));
         out.push(Command::ReadClosure { ticket, request: ReadClosure { root: input, limit_bytes: self.limit } });
+        false
     }
 
-    /// Release a digest's active request and drive the next waiter, if any.
-    pub(crate) fn finish_active(&mut self, bundle: Digest, out: &mut Vec<Command>) {
-        let advanced = {
-            let Some(queue) = self.bundles.queue_mut(&bundle) else {
-                return;
-            };
-            queue.active = None;
-            match queue.waiting.pop_front() {
-                Some(seq) => {
-                    queue.active = Some(Active { seq, declaration: None, closure: None });
-                    true
-                }
-                None => false,
-            }
-        };
-        if advanced {
-            self.drive_active(bundle, out);
+    /// Fault the active request, then release its digest to the next waiter.
+    fn fail_active(&mut self, bundle: Digest, seq: u64, reason: FaultReason, out: &mut Vec<Command>) {
+        if self.record_fault(seq, reason, out) {
+            self.release(bundle, out);
         }
     }
 
@@ -172,41 +135,28 @@ impl ProgramCore {
             self.abort("bundle artifact reply arrived with no active request".to_string(), out);
             return;
         };
-        match result {
-            ReadArtifactResult::Found { kind, bytes, .. } if kind == OpaqueBytes::ID => match programs(&bytes) {
-                Ok(declared) => {
-                    if !self.set_digest_state(bundle, DigestState::Declared { programs: declared, wasm: bytes }, out) {
-                        return;
-                    }
-                    self.check_name(bundle, out);
-                }
-                Err(reason) => {
-                    if !self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
-                        return;
-                    }
-                    self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
-                }
-            },
+        let declared = match result {
+            ReadArtifactResult::Found { kind, bytes, .. } if kind == OpaqueBytes::ID => {
+                programs(&bytes).map(|programs| (programs, bytes))
+            }
             ReadArtifactResult::Found { kind, .. } => {
-                let reason = Detail::new(format!("bundle artifact has kind {}, expected opaque bytes", kind.0));
-                if !self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
-                    return;
-                }
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
+                Err(Detail::new(format!("bundle artifact has kind {}, expected opaque bytes", kind.0)))
             }
-            ReadArtifactResult::Missing { .. } => {
-                let reason = Detail::new("bundle artifact is missing");
-                if !self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
-                    return;
+            ReadArtifactResult::Missing { .. } => Err(Detail::new("bundle artifact is missing")),
+            ReadArtifactResult::Err { message, .. } => Err(Detail::new(message)),
+        };
+        match declared {
+            Ok((programs, wasm)) => {
+                if self.set_digest_state(bundle, DigestState::Declared { programs, wasm }, out)
+                    && self.check_name(bundle, seq, out)
+                {
+                    self.release(bundle, out);
                 }
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
             }
-            ReadArtifactResult::Err { message, .. } => {
-                let reason = Detail::new(message);
-                if !self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
-                    return;
+            Err(reason) => {
+                if self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
+                    self.fail_active(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
                 }
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
             }
         }
     }
@@ -225,13 +175,13 @@ impl ProgramCore {
         }
         match result {
             ReadClosureResult::Missing { .. } => {
-                self.fault_request(bundle, seq, FaultReason::InputMissing, out);
+                self.fail_active(bundle, seq, FaultReason::InputMissing, out);
             }
             ReadClosureResult::TooLarge { limit_bytes, .. } => {
-                self.fault_request(bundle, seq, FaultReason::ClosureTooLarge { limit_bytes: limit_bytes.get() }, out);
+                self.fail_active(bundle, seq, FaultReason::ClosureTooLarge { limit_bytes: limit_bytes.get() }, out);
             }
             ReadClosureResult::Err { message, .. } => {
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason: Detail::new(message) }, out);
+                self.fail_active(bundle, seq, FaultReason::BundleUnavailable { reason: Detail::new(message) }, out);
             }
             ReadClosureResult::Found { artifacts, .. } => {
                 self.continue_found_closure(bundle, seq, artifacts, out);
@@ -264,10 +214,9 @@ impl ProgramCore {
             }
             LoadOutcome::Failed { error } => {
                 let reason = Detail::new(error);
-                if !self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
-                    return;
+                if self.set_digest_state(bundle, DigestState::Unavailable { reason: reason.clone() }, out) {
+                    self.fail_active(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
                 }
-                self.fault_request(bundle, seq, FaultReason::BundleUnavailable { reason }, out);
             }
         }
     }
@@ -282,7 +231,7 @@ impl ProgramCore {
             Invoked::Completed { seq, .. } | Invoked::Refused { seq, .. } | Invoked::Rejected { seq, .. } => *seq,
         };
         if invoked_seq != seq {
-            self.fault_request(
+            self.fail_active(
                 bundle,
                 seq,
                 FaultReason::ProtocolViolation {
@@ -297,10 +246,10 @@ impl ProgramCore {
                 self.continue_completed(bundle, seq, result, staged, out);
             }
             Invoked::Refused { refusal, .. } => {
-                self.fault_request(bundle, seq, FaultReason::from(refusal), out);
+                self.fail_active(bundle, seq, FaultReason::from(refusal), out);
             }
             Invoked::Rejected { reason, .. } => {
-                self.fault_request(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
+                self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
             }
         }
     }
@@ -313,6 +262,11 @@ impl ProgramCore {
     /// The active request's declaration, resolved by its name check.
     fn active_declaration(&self, bundle: &Digest) -> Option<Program> {
         self.bundles.queue(bundle)?.active.as_ref()?.declaration.clone()
+    }
+
+    /// The active request's slot, when `seq` is the one driving the digest.
+    fn active_mut(&mut self, bundle: &Digest, seq: u64) -> Option<&mut Active> {
+        self.bundles.queue_mut(bundle)?.active.as_mut().filter(|active| active.seq == seq)
     }
 
     /// Replace one digest's state, aborting when its queue is missing.
@@ -342,11 +296,11 @@ impl ProgramCore {
             return;
         };
         let Some(member) = artifacts.iter().find(|artifact| artifact.digest() == input) else {
-            self.fault_request(bundle, seq, FaultReason::InputMissing, out);
+            self.fail_active(bundle, seq, FaultReason::InputMissing, out);
             return;
         };
         if member.kind() != declaration.input {
-            self.fault_request(
+            self.fail_active(
                 bundle,
                 seq,
                 FaultReason::BundleUnavailable {
@@ -360,20 +314,11 @@ impl ProgramCore {
             );
             return;
         }
-        let stored = self.bundles.queue_mut(&bundle).is_some_and(|queue| {
-            if queue.active_seq() == Some(seq) {
-                if let Some(active) = queue.active.as_mut() {
-                    active.closure = Some(artifacts);
-                }
-                true
-            } else {
-                false
-            }
-        });
-        if !stored {
+        let Some(active) = self.active_mut(&bundle, seq) else {
             self.abort(format!("request {seq} lost its digest queue during its closure read"), out);
             return;
-        }
+        };
+        active.closure = Some(artifacts);
         let next = match self.bundles.queue_mut(&bundle) {
             None => None,
             Some(queue) => match replace(&mut queue.state, DigestState::Reading) {
@@ -411,12 +356,7 @@ impl ProgramCore {
             self.abort(format!("request {seq} is missing from the journal fold"), out);
             return;
         };
-        let closure = match self.bundles.queue_mut(&bundle) {
-            Some(queue) if queue.active_seq() == Some(seq) => {
-                queue.active.as_mut().and_then(|active| active.closure.take())
-            }
-            _ => None,
-        };
+        let closure = self.active_mut(&bundle, seq).and_then(|active| active.closure.take());
         let Some(closure) = closure else {
             self.abort(format!("request {seq} reached invoke with no closure"), out);
             return;
@@ -457,15 +397,11 @@ impl ProgramCore {
                     declaration.result.0
                 )
             };
-            self.fault_request(bundle, seq, FaultReason::ProtocolViolation { reason: Detail::new(reason) }, out);
+            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason: Detail::new(reason) }, out);
             return;
         }
         let record = DriverRecord::Transition { cause: seq, record: Transition { program, input, result } };
         self.journal.queue_back(PendingWrite::Outcome { request: seq, artifacts: staged, record });
-        self.finish_active(bundle, out);
-        if self.aborted {
-            return;
-        }
-        self.pump(out);
+        self.release(bundle, out);
     }
 }

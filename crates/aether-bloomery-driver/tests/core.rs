@@ -6,8 +6,7 @@
 
 mod support;
 
-use aether_bloomery_driver::Command;
-use aether_bloomery_driver::InvokeTicket;
+use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoked,
     OpaqueBytes, ReadEventsResult, Utf8Text, artifact_digest,
@@ -388,21 +387,35 @@ fn missing_closure_member_faults_input_missing() {
 
 #[test]
 fn failed_load_faults_and_is_never_retried() {
-    // Catches a reload loop over a deterministically failing digest.
+    // Catches a reload loop over a deterministically failing digest, and a
+    // request stranded in the queue behind the failed load.
     let (mut world, initial) = World::open();
     let fixed = fixtures(&mut world);
-    world.script_load(fixed.bundle, Err("boom".to_string()));
+    world.hold_load(fixed.bundle);
     let manual = world.drive(initial);
     assert!(manual.is_empty());
+
     let (_, first) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
     let manual = world.drive(first);
+    let [Command::Load { ticket, .. }] = manual.as_slice() else {
+        panic!("expected exactly one manual load, got {manual:?}");
+    };
+    let ticket = *ticket;
+    let (_, queued) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 2));
+    let manual = world.drive(queued);
+    assert!(manual.is_empty(), "the queued request waits behind the load");
+
+    let failed = world.core.on_loaded(ticket, LoadOutcome::Failed { error: "boom".to_string() });
+    let manual = world.drive(failed);
     assert!(manual.is_empty());
-    let (_, second) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 2));
-    let manual = world.drive(second);
+    let (_, later) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 3));
+    let manual = world.drive(later);
     assert!(manual.is_empty());
+
+    assert!(world.abort.is_none());
     assert_eq!(world.reads_seen, [fixed.bundle], "the bundle is read once");
     assert_eq!(world.loads_seen, [fixed.bundle], "the bundle is loaded once");
-    assert_eq!(world.answers.len(), 2);
+    assert_eq!(world.answers.len(), 3);
     for (_, outcome) in &world.answers {
         let CallOutcome::Fault { fault, .. } = outcome else {
             panic!("expected a fault, got {outcome:?}");
@@ -412,6 +425,35 @@ fn failed_load_faults_and_is_never_retried() {
         };
         assert_eq!(reason.as_str(), "boom", "the recorded reason is reused");
     }
+}
+
+#[test]
+fn repeat_while_the_outcome_is_written_waits_instead_of_reinvoking() {
+    // Catches a retry that arrives between `Invoked` and the outcome's
+    // read-back starting the request's pipeline again (a second invocation).
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+    let (first, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    let ticket = invoke_ticket(&manual);
+
+    let mut commands =
+        world.core.on_invoked(ticket, Invoked::Completed { seq: 2, result: fixed.result, staged: vec![fixed.staged] });
+    let (repeat, repeated) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    commands.extend(repeated);
+    let manual = world.drive(commands);
+
+    assert!(manual.is_empty(), "no second invoke: {manual:?}");
+    assert!(world.abort.is_none());
+    assert_eq!(world.invokes_seen.len(), 1);
+    assert_eq!(world.closures_seen.len(), 1);
+    assert_eq!(world.answers.len(), 2);
+    assert_eq!(world.answers[0].0, first);
+    assert_eq!(world.answers[1].0, repeat);
+    assert!(matches!(&world.answers[0].1, CallOutcome::Transition { key: 1, seq: 3, .. }));
+    assert_eq!(world.answers[0].1, world.answers[1].1, "both callers get the recorded outcome");
 }
 
 #[test]

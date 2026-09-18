@@ -11,13 +11,7 @@ aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-data = { path = "../aether-data", features = ["derive"] }
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 wasmparser = "0.246"
-
-[dev-dependencies]
-aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-aether-bloomery-program = { path = "../aether-bloomery-program" }
-aether-data = { path = "../aether-data", features = ["derive"] }
 
 [lints]
 workspace = true
