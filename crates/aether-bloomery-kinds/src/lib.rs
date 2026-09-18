@@ -1,4 +1,4 @@
-//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, and journal entry envelopes.
+//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, driver records, and journal entry envelopes.
 //!
 //! `#![no_std]` + `alloc`. The journal, the Git projection, and WASM programs
 //! cite these types without linking `SQLite`.
@@ -13,6 +13,7 @@ mod digest;
 mod entry;
 mod head;
 mod journal;
+mod lifecycle;
 mod program;
 mod reactor;
 mod reference;
@@ -26,9 +27,11 @@ pub use journal::{
     ArtifactCitation, EncodedArtifact, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact,
     ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
 };
+pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{
-    ClosureArtifact, Detail, DetailError, Fault, FaultReason, Invoke, Invoked, Mode, Program, ProgramHeadMoved,
-    ProgramName, ProgramNameError, ProgramRef, Refusal, Transition,
+    ClosureArtifact, Detail, DetailError, Fault, FaultReason, Invoke, Invoked, Mode, NativeOrigin, NativeOriginError,
+    Program, ProgramHeadMoved, ProgramName, ProgramNameError, ProgramRef, ReactorName, ReactorNameError, Refusal,
+    RequestSource, Requested, RuleName, RuleNameError, Transition,
 };
 pub use reactor::{ReactorSet, ReactorSetError};
 pub use reference::Ref;
