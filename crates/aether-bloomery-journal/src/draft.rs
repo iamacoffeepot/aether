@@ -3,13 +3,13 @@
 use std::error::Error;
 use std::fmt;
 
-use aether_data::{Citation, Citations, Cites, Storage, StorageData, StorageError};
+use aether_data::{Citation, Citations, Cites, KindId, Storage, StorageData, StorageError};
 
 use crate::Seq;
 
 /// An encoded event ready to append. There is no public path from raw bytes into the log.
 pub struct Draft {
-    pub(crate) kind: String,
+    pub(crate) kind: KindId,
     pub(crate) cause: Option<Seq>,
     pub(crate) bytes: Vec<u8>,
     pub(crate) cites: Vec<Citation>,
@@ -28,7 +28,7 @@ impl Draft {
         let mut sink = Citations::default();
         event.cites(&mut sink);
         let bytes = K::encode_storage(&StorageData::from_value(event.clone())).map_err(DraftError::Storage)?;
-        Ok(Self { kind: K::NAME.to_owned(), cause, bytes, cites: sink.into_vec() })
+        Ok(Self { kind: K::ID, cause, bytes, cites: sink.into_vec() })
     }
 
     /// Citations collected from the event at construction.

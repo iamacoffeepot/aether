@@ -18,7 +18,7 @@ fn moved<K: Kind + 'static>(seq: u64, head: &Head<K>, to: Ref<K>) -> Result<Entr
     let event = head.move_to(to);
     Ok(Entry {
         seq: Seq(seq),
-        kind: aether_bloomery_kinds::HeadMoved::<K>::NAME.to_owned(),
+        kind: aether_bloomery_kinds::HeadMoved::<K>::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: aether_bloomery_kinds::HeadMoved::<K>::encode_storage(&StorageData::from_value(event))?,
