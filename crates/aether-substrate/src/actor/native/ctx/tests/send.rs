@@ -5,12 +5,12 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Emit, Manual, OutboundReply};
+use aether_actor::{Emit, Manual, OutboundReply, Single};
 use aether_data::{MailId, MailboxId};
 
-use crate::actor::native::NativeCtx;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::{DeferredReply, NativeCtx, TaskDone};
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, StubActor};
@@ -118,14 +118,36 @@ fn emit_routes_detached_at_source_and_drops_when_sourceless() {
     assert!(rx.try_recv().is_err(), "a sourceless emit routes nothing — the emission drops");
 }
 
+/// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple
+/// so `_assert_cast_kind_repliable`'s parameter count stays under clippy's
+/// `too_many_arguments` threshold without a suppression.
+type CastOnlyTaskDones =
+    (TaskDone<CastOnly, ()>, TaskDone<CastOnly, ()>, TaskDone<CastOnly, ()>, TaskDone<CastOnly, ()>);
+
 /// Type-level proof (ADR-0100): a `Pod`-without-`Serialize` cast kind
 /// is repliable through every native reply entry point — the bounds
 /// relaxed from `K: Kind + serde::Serialize` to `K: Kind`. Never
 /// called; the compile is the assertion. If a reply bound regains a
-/// `serde::Serialize` half, this stops compiling.
+/// `serde::Serialize` half, this stops compiling. Covers the direct
+/// entry points (`OutboundReply::reply`, `reply_to`, `reply_to_target`)
+/// and the offload reply paths (`DeferredReply::reply` and every
+/// `TaskDone::resolve*`) alike.
 #[allow(dead_code)]
-fn _assert_cast_kind_repliable(ctx: &mut NativeCtx<'_, Manual>, sender: Source) {
+fn _assert_cast_kind_repliable(
+    ctx: &mut NativeCtx<'_, Manual>,
+    sender: Source,
+    deferred: DeferredReply,
+    task_dones: CastOnlyTaskDones,
+    task_ctx: &mut NativeCtx<'_, Single>,
+) {
     OutboundReply::reply(ctx, &CastOnly { code: 2 });
     OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
     ctx.reply_to_target(sender, &CastOnly { code: 4 }, MailId::NONE, None);
+
+    let (task_resolve, task_resolve_with, task_resolve_value, task_resolve_err) = task_dones;
+    deferred.reply(task_ctx, &CastOnly { code: 5 });
+    task_resolve.resolve(task_ctx);
+    task_resolve_with.resolve_with(task_ctx, |output, _context| *output);
+    task_resolve_value.resolve_value(task_ctx, &CastOnly { code: 6 });
+    task_resolve_err.resolve_err(task_ctx, &CastOnly { code: 7 });
 }

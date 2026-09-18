@@ -91,7 +91,7 @@ impl TaskQueue {
     /// *this* caller (iamacoffeepot/aether#1031).
     pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, work: F)
     where
-        O: Kind + serde::Serialize + Send + 'static,
+        O: Kind + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
         M: aether_actor::ReplyMode,
     {

@@ -328,7 +328,7 @@ impl DeferredReply {
     pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, M, A>, reply: &R)
     where
         M: ReplyMode,
-        R: Kind + serde::Serialize,
+        R: Kind,
     {
         let root = self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
         ctx.reply_to_target(self.reply_to, reply, root, None);
@@ -426,7 +426,7 @@ impl<O, C> TaskDone<O, C> {
     /// `output` into the reply value, so this is the common one-liner.
     pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, Single, A>)
     where
-        O: Kind + serde::Serialize,
+        O: Kind,
     {
         ctx.reply_to_target(self.reply_to, &self.output, self.hold_root(), None);
         self.release();
@@ -438,7 +438,7 @@ impl<O, C> TaskDone<O, C> {
     /// output (and context, when present) than the raw `output`.
     pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, f: F)
     where
-        R: Kind + serde::Serialize,
+        R: Kind,
         F: FnOnce(&O, &C) -> R,
     {
         let reply = f(&self.output, &self.context);
@@ -456,7 +456,7 @@ impl<O, C> TaskDone<O, C> {
     /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
     pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, reply: &R)
     where
-        R: Kind + serde::Serialize,
+        R: Kind,
     {
         ctx.reply_to_target(self.reply_to, reply, self.hold_root(), None);
         self.release();
@@ -478,7 +478,7 @@ impl<O, C> TaskDone<O, C> {
     /// failure rather than a result.
     pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, err: &E)
     where
-        E: Kind + serde::Serialize,
+        E: Kind,
     {
         ctx.reply_to_target(self.reply_to, err, self.hold_root(), None);
         self.release();
