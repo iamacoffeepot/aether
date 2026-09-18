@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use crate::Journal;
+use crate::{AppendError, Batch, Journal};
 use aether_actor::actor;
 use aether_bloomery_kinds::{
-    JournalEntry, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq,
-    artifact_digest,
+    JournalEntry, MoveHead, MoveHeadResult, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead,
+    ReadHeadResult, RecordedHeadMove, Seq, artifact_digest,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -71,6 +71,20 @@ impl NativeActor for JournalActor {
             },
             Ok(None) => ReadArtifactResult::Missing { digest },
             Err(error) => ReadArtifactResult::Err { digest, message: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_move_head(&mut self, _ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
+        let mut batch = Batch::new();
+        let artifact = batch.stage_move_head(&request);
+        if let Err(error) = batch.push_event(&RecordedHeadMove::new(request.head().clone(), artifact), None) {
+            return MoveHeadResult::Err { message: error.to_string() };
+        }
+        match self.journal.append(Seq(request.expected_seq()), &batch) {
+            Ok(range) => MoveHeadResult::Committed { seq: range.start.0, artifact },
+            Err(AppendError::HeadMoved { actual }) => MoveHeadResult::Conflict { actual: actual.0 },
+            Err(error) => MoveHeadResult::Err { message: error.to_string() },
         }
     }
 }

@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Digest, OpaqueBytes, Ref, Utf8Text, artifact_blob, hash_bytes};
+use aether_bloomery_kinds::{Digest, MoveHead, OpaqueBytes, Ref, Utf8Text, artifact_blob, hash_bytes};
 use aether_data::{Citation, Citations, Cites, Kind, Storage, StorageData, StorageError};
 
 use crate::Seq;
@@ -51,6 +51,18 @@ impl Batch {
         value.cites(&mut sink);
         let payload = K::encode_storage(&StorageData::from_value(value.clone())).map_err(BatchError::Storage)?;
         Ok(Ref::from_digest(self.insert_blob(artifact_blob(K::ID, &payload), sink.into_vec())))
+    }
+
+    /// Stage the encoded value carried by typed MoveHead mail.
+    pub(crate) fn stage_move_head(&mut self, command: &MoveHead) -> Digest {
+        self.insert_blob(
+            artifact_blob(command.head().kind(), command.artifact_bytes()),
+            command
+                .citations()
+                .iter()
+                .map(|citation| Citation { kind: citation.kind(), bytes: citation.bytes().to_vec() })
+                .collect(),
+        )
     }
 
     /// Encode `event` and push it.

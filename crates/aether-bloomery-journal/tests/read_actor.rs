@@ -6,8 +6,11 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::actor;
-use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, Seq};
-use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
+use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, Ref, Seq};
+use aether_bloomery_kinds::{
+    Digest, Head, JournalEntry, MoveHead, MoveHeadResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
+    RecordedHeadMove,
+};
 use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -58,6 +61,13 @@ struct Note {
 #[kind(name = "test.bloomery.journal_actor.marker")]
 struct Marker {
     value: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.journal_actor.linked_note")]
+struct LinkedNote {
+    title: String,
+    note: Ref<Note>,
 }
 
 fn seed(path: &Path, notes: &[&str]) -> Vec<aether_bloomery_journal::Entry> {
@@ -212,4 +222,64 @@ fn invalid_path_fails_actor_birth() {
     let result = chassis.spawn_actor::<JournalActor>(Subname::Named("invalid"), invalid_path, ()).finish();
     assert!(matches!(result, Err(SpawnError::InitFailed(_))), "invalid path must fail birth: {result:?}");
     assert!(chassis.resolve_actor::<JournalActor>("invalid").is_none());
+}
+
+#[test]
+fn move_head_mail_publishes_atomically_and_reuses_identical_content() {
+    let temp = tempfile::tempdir().expect("temporary journal directory");
+    let path = temp.path().join("journal.sqlite");
+    let (note, wrong_kind) = {
+        let mut journal = Journal::open(&path).expect("create journal");
+        let mut batch = Batch::new();
+        let note = batch.stage_encoded(&Note { text: "existing".into() }).expect("stage cited note");
+        let wrong_kind = batch.stage_encoded(&Marker { value: 9 }).expect("stage other kind");
+        journal.append(Seq(0), &batch).expect("seed citations");
+        (note, wrong_kind.digest())
+    };
+
+    let (registry, mailer) = bare_substrate();
+    let (caller, rx) = caller(&registry, "test.journal_actor.move_caller");
+    let chassis = boot_test_chassis_with::<TestAnchor>(&registry, &mailer, (), ());
+    let actor =
+        chassis.spawn_actor::<JournalActor>(Subname::Named("publication"), path.clone(), ()).finish().expect("birth");
+    let head = Head::<LinkedNote>::new("main");
+    let value = LinkedNote { title: "published".into(), note };
+    let command = MoveHead::new(&head, &value, 0).expect("encode publication");
+    request(&registry, actor, caller, 1, &command);
+    let MoveHeadResult::Committed { seq: 1, artifact } = reply::<MoveHeadResult>(&rx, 1) else {
+        panic!("publication was refused");
+    };
+    let journal = Journal::open(&path).expect("read publication");
+    assert_eq!(journal.head().expect("head"), Seq(1));
+    assert_eq!(journal.get::<LinkedNote>(&artifact).expect("read value"), Some(value.clone()));
+    let events = journal.read(Seq(0), 10).expect("read move");
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0].cause, None);
+    let moved = events[0].decode::<RecordedHeadMove>().expect("decode move");
+    assert_eq!(moved.head().kind(), LinkedNote::ID);
+    assert_eq!(moved.head().as_str(), "main");
+    assert_eq!(moved.to(), artifact);
+
+    let stale_value = LinkedNote { title: "stale".into(), note };
+    let stale = MoveHead::new(&head, &stale_value, 0).expect("encode stale publication");
+    let stale_digest = aether_bloomery_kinds::artifact_digest(stale.head().kind(), stale.artifact_bytes());
+    request(&registry, actor, caller, 2, &stale);
+    assert_eq!(reply::<MoveHeadResult>(&rx, 2), MoveHeadResult::Conflict { actual: 1 });
+    assert_eq!(journal.get_bytes(&stale_digest).expect("read stale artifact"), None);
+
+    for (correlation, target) in
+        [(3, Ref::<Note>::from_digest(Digest::from_bytes([5; 32]))), (4, Ref::<Note>::from_digest(wrong_kind))]
+    {
+        let refused = MoveHead::new(&head, &LinkedNote { title: format!("refused-{correlation}"), note: target }, 1)
+            .expect("encode invalid citation");
+        let refused_digest = aether_bloomery_kinds::artifact_digest(refused.head().kind(), refused.artifact_bytes());
+        request(&registry, actor, caller, correlation, &refused);
+        assert!(matches!(reply::<MoveHeadResult>(&rx, correlation), MoveHeadResult::Err { .. }));
+        assert_eq!(journal.head().expect("head after refusal"), Seq(1));
+        assert_eq!(journal.get_bytes(&refused_digest).expect("read refused artifact"), None);
+    }
+
+    request(&registry, actor, caller, 5, &MoveHead::new(&head, &value, 1).expect("encode repeated publication"));
+    assert_eq!(reply::<MoveHeadResult>(&rx, 5), MoveHeadResult::Committed { seq: 2, artifact });
+    assert_eq!(journal.head().expect("head after reuse"), Seq(2));
 }
