@@ -4,6 +4,7 @@ use alloc::collections::BTreeMap;
 use core::error::Error;
 use core::fmt;
 
+use crate::sequence::{SequenceError, check_next};
 use crate::view::View;
 use aether_bloomery_kinds::{
     DecodeError, Digest, Entry, Head, HeadNameError, Program, ProgramHeadMoved, RecordedHead, RecordedHeadMove, Ref,
@@ -45,17 +46,12 @@ impl Heads {
     ///
     /// # Errors
     ///
-    /// [`HeadFoldError::Gap`], [`HeadFoldError::Duplicate`], or
-    /// [`HeadFoldError::Backwards`] when `entry.seq` is not the next sequence.
-    /// [`HeadFoldError::Decode`] when a recognized move does not decode.
-    /// [`HeadFoldError::Name`] when a historical program name is not a valid
-    /// [`Head`] name. [`HeadFoldError::Overflow`] when the next sequence does not
-    /// fit in [`Seq`]. On error, cursor and bindings are unchanged.
+    /// [`HeadFoldError::Sequence`] when `entry.seq` is not the next contiguous
+    /// sequence. [`HeadFoldError::Decode`] when a recognized move does not
+    /// decode. [`HeadFoldError::Name`] when a historical program name is not
+    /// a valid [`Head`] name. On error, cursor and bindings are unchanged.
     pub fn apply(&mut self, entry: &Entry) -> Result<(), HeadFoldError> {
-        let expected = next_seq(self.cursor)?;
-        if entry.seq != expected {
-            return Err(seq_error(self.cursor, expected, entry.seq));
-        }
+        check_next(self.cursor, entry.seq)?;
 
         let binding = binding_from(entry)?;
         if let Some((head, digest)) = binding {
@@ -108,29 +104,8 @@ impl View for Heads {
 /// Failure to fold one journal entry into [`Heads`].
 #[derive(Debug)]
 pub enum HeadFoldError {
-    /// `entry.seq` is past the next contiguous sequence.
-    Gap {
-        /// Sequence the fold required.
-        expected: Seq,
-        /// Sequence on the refused entry.
-        actual: Seq,
-    },
-    /// `entry.seq` repeats the last applied sequence.
-    Duplicate {
-        /// Sequence the fold required.
-        expected: Seq,
-        /// Sequence on the refused entry.
-        actual: Seq,
-    },
-    /// `entry.seq` is before the next contiguous sequence and is not the last applied sequence.
-    Backwards {
-        /// Sequence the fold required.
-        expected: Seq,
-        /// Sequence on the refused entry.
-        actual: Seq,
-    },
-    /// The next sequence does not fit in [`Seq`].
-    Overflow,
+    /// `entry.seq` was not the next contiguous sequence.
+    Sequence(SequenceError),
     /// A recognized move's payload did not decode.
     Decode(DecodeError),
     /// A historical [`ProgramHeadMoved`] name is not a valid [`Head`] name.
@@ -140,16 +115,7 @@ pub enum HeadFoldError {
 impl fmt::Display for HeadFoldError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Gap { expected, actual } => {
-                write!(f, "journal fold gap: expected seq {expected}, got {actual}")
-            }
-            Self::Duplicate { expected, actual } => {
-                write!(f, "journal fold duplicate: expected seq {expected}, got {actual}")
-            }
-            Self::Backwards { expected, actual } => {
-                write!(f, "journal fold backwards: expected seq {expected}, got {actual}")
-            }
-            Self::Overflow => write!(f, "journal fold sequence overflow"),
+            Self::Sequence(error) => write!(f, "{error}"),
             Self::Decode(error) => write!(f, "{error}"),
             Self::Name(error) => write!(f, "historical program head name is not a valid head name: {error}"),
         }
@@ -159,10 +125,16 @@ impl fmt::Display for HeadFoldError {
 impl Error for HeadFoldError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
+            Self::Sequence(error) => Some(error),
             Self::Decode(error) => Some(error),
             Self::Name(error) => Some(error),
-            Self::Gap { .. } | Self::Duplicate { .. } | Self::Backwards { .. } | Self::Overflow => None,
         }
+    }
+}
+
+impl From<SequenceError> for HeadFoldError {
+    fn from(error: SequenceError) -> Self {
+        Self::Sequence(error)
     }
 }
 
@@ -175,20 +147,6 @@ impl From<DecodeError> for HeadFoldError {
 impl From<HeadNameError> for HeadFoldError {
     fn from(error: HeadNameError) -> Self {
         Self::Name(error)
-    }
-}
-
-fn next_seq(cursor: Seq) -> Result<Seq, HeadFoldError> {
-    cursor.0.checked_add(1).map(Seq).ok_or(HeadFoldError::Overflow)
-}
-
-fn seq_error(cursor: Seq, expected: Seq, actual: Seq) -> HeadFoldError {
-    if actual.0 > expected.0 {
-        HeadFoldError::Gap { expected, actual }
-    } else if actual == cursor && cursor.0 != 0 {
-        HeadFoldError::Duplicate { expected, actual }
-    } else {
-        HeadFoldError::Backwards { expected, actual }
     }
 }
 
