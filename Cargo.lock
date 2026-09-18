@@ -145,7 +145,6 @@ dependencies = [
  "aether-bloomery-program",
  "aether-bloomery-view",
  "aether-data",
- "serde",
  "wasmparser 0.246.2",
 ]
 
