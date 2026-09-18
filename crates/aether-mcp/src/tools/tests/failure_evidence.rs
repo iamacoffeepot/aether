@@ -5,7 +5,7 @@ use std::collections::VecDeque;
 use std::future::Future;
 use std::pin::Pin;
 
-use rmcp::model::{Content, RawContent};
+use rmcp::model::ContentBlock;
 use tokio::time::sleep;
 
 use crate::args::{
@@ -66,7 +66,7 @@ fn args() -> CollectFailureEvidenceArgs {
 }
 
 fn result_json(result: &CallToolResult) -> serde_json::Value {
-    let RawContent::Text(text) = &result.content[0].raw else {
+    let ContentBlock::Text(text) = &result.content[0] else {
         panic!("the first failure-evidence block must be text");
     };
     serde_json::from_str(&text.text).expect("inline failure-evidence JSON")
@@ -373,7 +373,7 @@ fn fleet_projection_keeps_only_the_selected_live_and_dead_rows() {
 
 #[test]
 fn oversized_json_uses_the_whole_response_spill_before_images() {
-    let image = Content::image("cG5n", "image/png");
+    let image = ContentBlock::image("cG5n", "image/png");
     let result = failure_evidence_result_with_spill("oversized".into(), vec![image.clone()], |tool, body| {
         assert_eq!(tool, "collect_failure_evidence");
         assert_eq!(body, "oversized");
@@ -402,10 +402,10 @@ fn frame_argument_builder_forbids_mutation_checks_and_host_writes() {
 
 #[test]
 fn frame_projection_requires_exactly_one_inline_image() {
-    let image = Content::image("cG5n", "image/png");
+    let image = ContentBlock::image("cG5n", "image/png");
     let projected = project_failure_evidence_capture(CallToolResult::success(vec![
         image.clone(),
-        Content::text("{\"verdict\":null}"),
+        ContentBlock::text("{\"verdict\":null}"),
     ]))
     .expect("one image plus capture text is valid");
     let FailureEvidenceValue::Frame { summary, images } = projected else {
@@ -433,7 +433,7 @@ async fn multiple_frame_images_are_recorded_as_an_error_and_not_emitted() {
             delay: Duration::ZERO,
             result: Ok(FailureEvidenceValue::Frame {
                 summary: serde_json::json!({"image_content_blocks": 2}),
-                images: vec![Content::image("a", "image/png"), Content::image("b", "image/png")],
+                images: vec![ContentBlock::image("a", "image/png"), ContentBlock::image("b", "image/png")],
             }),
         },
     ]);
@@ -461,7 +461,7 @@ async fn frame_is_non_mutating_and_json_precedes_the_inline_png() {
     let mut request = args();
     request.frame =
         Some(FailureEvidenceFrameArgs { window_id: "42".into(), scale: Some(0.5), max_dimension: Some(320) });
-    let image = Content::image("cG5n", "image/png");
+    let image = ContentBlock::image("cG5n", "image/png");
     let mut source = FakeSource::with_replies([
         json_reply(serde_json::json!({"alive": []})),
         FakeReply {
@@ -492,7 +492,7 @@ async fn frame_is_non_mutating_and_json_precedes_the_inline_png() {
             max_dimension: Some(320),
         }
     );
-    assert!(matches!(result.content[0].raw, RawContent::Text(_)));
+    assert!(matches!(&result.content[0], ContentBlock::Text(_)));
     assert_eq!(result.content[1], image);
     assert_eq!(result_json(&result)["frame"]["observation"]["status"], "ok");
 }

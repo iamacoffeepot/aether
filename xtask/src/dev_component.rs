@@ -11,7 +11,7 @@ use cargo_metadata::{Metadata, MetadataCommand};
 use clap::Args;
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use rmcp::ServiceExt;
-use rmcp::model::{CallToolRequestParams, RawContent};
+use rmcp::model::CallToolRequestParams;
 use rmcp::transport::StreamableHttpClientTransport;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -119,10 +119,7 @@ impl ToolCaller for McpToolCaller {
             let text = result
                 .content
                 .iter()
-                .filter_map(|content| match &content.raw {
-                    RawContent::Text(text) => Some(text.text.as_str()),
-                    _ => None,
-                })
+                .filter_map(|content| content.as_text().map(|text| text.text.as_str()))
                 .collect::<Vec<_>>()
                 .join("\n");
             if result.is_error == Some(true) {
