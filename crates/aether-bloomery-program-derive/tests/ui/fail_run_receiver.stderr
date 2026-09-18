@@ -1,0 +1,25 @@
+error: #[program] run must not take a receiver; Program::run is associated
+  --> tests/ui/fail_run_receiver.rs:26:12
+   |
+26 |     fn run(&self, input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+   |            ^^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/fail_run_receiver.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Env` and `Pure`
+ --> tests/ui/fail_run_receiver.rs:2:31
+  |
+2 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                               ^^^           ^^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_run_receiver.rs:2:36
+  |
+2 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                                    ^^^^^^^

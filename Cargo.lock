@@ -165,7 +165,25 @@ name = "aether-bloomery-program"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-bloomery-kinds",
+ "aether-bloomery-program-derive",
  "aether-data",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "wasmparser 0.246.2",
+]
+
+[[package]]
+name = "aether-bloomery-program-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
+ "proc-macro2",
+ "quote",
+ "syn",
+ "trybuild",
 ]
 
 [[package]]
@@ -927,6 +945,16 @@ dependencies = [
  "aether-data",
  "bytemuck",
  "serde",
+]
+
+[[package]]
+name = "aether-test-fixtures-program"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
 ]
 
 [[package]]
