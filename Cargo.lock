@@ -138,6 +138,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-driver"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-bloomery-view",
+ "aether-data",
+ "serde",
+ "wasmparser 0.246.2",
+]
+
+[[package]]
 name = "aether-bloomery-journal"
 version = "0.3.0-alpha"
 dependencies = [
