@@ -26,8 +26,9 @@ pub use driver::{AwaitProcessed, Call, CallOutcome, CallProgram, CallRefusal, Pr
 pub use entry::{DecodeError, Entry, Seq};
 pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
 pub use journal::{
-    ArtifactCitation, EncodedArtifact, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact,
-    ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
+    AppendRecords, AppendRecordsResult, ArtifactCitation, DriverRecord, EncodedArtifact, JournalEntry, MoveHead,
+    MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead,
+    ReadHeadResult,
 };
 pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{

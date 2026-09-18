@@ -1,8 +1,10 @@
 //! Portable journal mail and the exact stored-entry envelope.
 //!
 //! Read mail lives here. [`EncodedArtifact`] carries one encoded value over
-//! mail, and [`MoveHead`] / [`Publish`] are the two fenced write commands.
+//! mail, and [`MoveHead`] / [`Publish`] / [`AppendRecords`] are the three
+//! fenced write commands — the last is the one that carries a journal cause.
 
+mod append;
 mod artifact;
 mod write;
 
@@ -13,6 +15,7 @@ use aether_data::KindId;
 
 use crate::{Digest, Entry, Seq};
 
+pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
 pub use write::{MoveHead, MoveHeadResult, Publish, PublishResult};
 

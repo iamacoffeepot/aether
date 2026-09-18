@@ -136,10 +136,12 @@ impl Journal {
     /// inserted, every citation is verified against the expected prefix,
     /// each draft with the `bloomery.head_moved` id is decoded as
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
-    /// verified against the recorded head kind, then events are inserted.
-    /// Any refusal rolls the whole transaction back. An empty
-    /// batch is `Ok` of an empty range and writes nothing. The returned
-    /// range is `head+1 .. head+n+1` (end exclusive).
+    /// verified against the recorded head kind, every digest the batch
+    /// requires (a `Transition`'s input and result) is checked for existence
+    /// (no prefix), then events are inserted. Any refusal rolls the whole
+    /// transaction back. An empty batch is `Ok` of an empty range and
+    /// writes nothing. The returned range is `head+1 .. head+n+1` (end
+    /// exclusive).
     ///
     /// # Errors
     ///
@@ -150,6 +152,8 @@ impl Journal {
     /// prefix is not the expected kind.
     /// [`AppendError::InvalidHeadMoved`] when a draft identified as
     /// `bloomery.head_moved` does not decode as the canonical event.
+    /// [`AppendError::MissingArtifact`] when a digest the batch requires
+    /// is neither staged nor stored.
     /// [`AppendError::Journal`] wrapping [`JournalError::CorruptCitation`]
     /// when a citation's identity bytes are not 32 bytes.
     /// [`AppendError::Journal`] on a backend or constraint failure.
@@ -341,7 +345,19 @@ fn verify_citations(tx: &Transaction<'_>, batch: &Batch) -> Result<(), AppendErr
             .map_err(AppendError::InvalidHeadMoved)?;
         verify_prefix(&mut stmt, &mut seen, *event.to().as_bytes(), event.head().kind())?;
     }
+
+    for digest in &batch.required {
+        verify_exists(&mut stmt, *digest)?;
+    }
     Ok(())
+}
+
+fn verify_exists(stmt: &mut rusqlite::Statement<'_>, digest: Digest) -> Result<(), AppendError> {
+    let found: Option<Vec<u8>> = stmt.query_row(params![digest.as_bytes().as_slice()], |row| row.get(0)).optional()?;
+    match found {
+        Some(_) => Ok(()),
+        None => Err(AppendError::MissingArtifact { digest }),
+    }
 }
 
 fn verify_prefix(
@@ -480,6 +496,12 @@ pub enum AppendError {
     },
     /// A draft named `bloomery.head_moved` did not decode as the canonical event.
     InvalidHeadMoved(StorageError),
+    /// A digest the batch requires (a `Transition`'s input or result) is
+    /// neither staged in this batch nor already stored.
+    MissingArtifact {
+        /// The required digest.
+        digest: Digest,
+    },
     /// Backend or constraint failure; the transaction did not commit.
     Journal(JournalError),
 }
@@ -495,6 +517,7 @@ impl fmt::Display for AppendError {
                 write!(f, "prefix mismatch for {digest}: expected {expected}, actual {actual}")
             }
             Self::InvalidHeadMoved(error) => write!(f, "bloomery.head_moved did not decode: {error}"),
+            Self::MissingArtifact { digest } => write!(f, "missing artifact {digest}"),
             Self::Journal(error) => write!(f, "{error}"),
         }
     }
@@ -503,7 +526,10 @@ impl fmt::Display for AppendError {
 impl Error for AppendError {
     fn source(&self) -> Option<&(dyn Error + 'static)> {
         match self {
-            Self::HeadMoved { .. } | Self::DanglingRef { .. } | Self::PrefixMismatch { .. } => None,
+            Self::HeadMoved { .. }
+            | Self::DanglingRef { .. }
+            | Self::PrefixMismatch { .. }
+            | Self::MissingArtifact { .. } => None,
             Self::InvalidHeadMoved(error) => Some(error),
             Self::Journal(error) => Some(error),
         }
