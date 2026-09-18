@@ -2,8 +2,10 @@
 //!
 //! Both commands carry `expected_seq`, the whole-journal fence: the journal's
 //! last stored sequence as the caller observed it, or zero for an empty
-//! journal. A stale fence writes nothing. No mail carries a journal cause;
-//! every event these commands append is uncaused.
+//! journal. A stale fence writes nothing. Neither carries a journal cause;
+//! every event `MoveHead` / `Publish` appends is uncaused. The native
+//! bundle driver's caused records and head moves append instead through
+//! [`crate::AppendRecords`] (`journal::append`).
 
 use alloc::string::String;
 use alloc::vec;

@@ -22,13 +22,14 @@ pub struct Batch {
     pub(crate) staged: Vec<Staged>,
     seen: HashSet<Digest>,
     pub(crate) events: Vec<Draft>,
+    pub(crate) required: Vec<Digest>,
 }
 
 impl Batch {
     /// Empty batch.
     #[must_use]
     pub fn new() -> Self {
-        Self { staged: Vec::new(), seen: HashSet::new(), events: Vec::new() }
+        Self { staged: Vec::new(), seen: HashSet::new(), events: Vec::new(), required: Vec::new() }
     }
 
     /// Stage `payload` as [`OpaqueBytes`]. Identical blob bytes in one batch are one entry.
@@ -86,6 +87,15 @@ impl Batch {
         self.events.push(draft);
     }
 
+    /// Require that `digest` be stored or staged when `append` commits.
+    ///
+    /// Existence only, no prefix. `Transition.input` / `.result` use this:
+    /// their stored kind is known only from the cited program at runtime,
+    /// so no citation walk can cover them.
+    pub(crate) fn require_artifact(&mut self, digest: Digest) {
+        self.required.push(digest);
+    }
+
     /// Citations recorded on the staged blob named by `digest`.
     #[must_use]
     pub fn staged_citations(&self, digest: &Digest) -> Option<&[Citation]> {
@@ -98,10 +108,10 @@ impl Batch {
         self.lookup(digest).map(|staged| staged.bytes.as_slice())
     }
 
-    /// True when the batch stages nothing and carries no events.
+    /// True when the batch stages nothing, carries no events, and requires no artifact.
     #[must_use]
     pub fn is_empty(&self) -> bool {
-        self.staged.is_empty() && self.events.is_empty()
+        self.staged.is_empty() && self.events.is_empty() && self.required.is_empty()
     }
 
     fn lookup(&self, digest: &Digest) -> Option<&Staged> {

@@ -5,8 +5,9 @@ use std::path::PathBuf;
 use crate::{AppendError, Batch, Journal};
 use aether_actor::actor;
 use aether_bloomery_kinds::{
-    JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadEvents,
-    ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq, artifact_digest,
+    AppendRecords, AppendRecordsResult, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult,
+    ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq,
+    artifact_digest,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -105,6 +106,58 @@ impl NativeActor for JournalActor {
             Ok(range) => PublishResult::Committed { head: range.end.0.saturating_sub(1), artifacts },
             Err(AppendError::HeadMoved { actual }) => PublishResult::Conflict { actual: actual.0 },
             Err(error) => PublishResult::Err { message: error.to_string() },
+        }
+    }
+
+    #[handler::single]
+    fn on_append_records(&mut self, _ctx: &mut NativeCtx<'_>, request: AppendRecords) -> AppendRecordsResult {
+        let (artifacts, records, expected_seq) = request.into_parts();
+
+        for record in &records {
+            let cause = match record {
+                DriverRecord::Requested { cause, .. } => *cause,
+                DriverRecord::Transition { cause, .. }
+                | DriverRecord::Fault { cause, .. }
+                | DriverRecord::Activated { cause, .. }
+                | DriverRecord::ActivationRejected { cause, .. }
+                | DriverRecord::ReactionFailed { cause, .. }
+                | DriverRecord::HeadMoved { cause, .. } => Some(*cause),
+            };
+            if let Some(cause) = cause
+                && !(1..=expected_seq).contains(&cause)
+            {
+                return AppendRecordsResult::Err {
+                    message: format!("cause {cause} is outside the fenced prefix 1..={expected_seq}"),
+                };
+            }
+        }
+
+        let mut batch = Batch::new();
+        let artifacts = artifacts.into_iter().map(|artifact| batch.stage_artifact(artifact)).collect();
+
+        for record in records {
+            let result = match record {
+                DriverRecord::Requested { cause, record } => batch.push_event(&record, cause.map(Seq)),
+                DriverRecord::Transition { cause, record } => {
+                    batch.require_artifact(record.input);
+                    batch.require_artifact(record.result);
+                    batch.push_event(&record, Some(Seq(cause)))
+                }
+                DriverRecord::Fault { cause, record } => batch.push_event(&record, Some(Seq(cause))),
+                DriverRecord::Activated { cause, record } => batch.push_event(&record, Some(Seq(cause))),
+                DriverRecord::ActivationRejected { cause, record } => batch.push_event(&record, Some(Seq(cause))),
+                DriverRecord::ReactionFailed { cause, record } => batch.push_event(&record, Some(Seq(cause))),
+                DriverRecord::HeadMoved { cause, record } => batch.push_event(&record, Some(Seq(cause))),
+            };
+            if let Err(error) = result {
+                return AppendRecordsResult::Err { message: error.to_string() };
+            }
+        }
+
+        match self.journal.append(Seq(expected_seq), &batch) {
+            Ok(range) => AppendRecordsResult::Committed { head: range.end.0.saturating_sub(1), artifacts },
+            Err(AppendError::HeadMoved { actual }) => AppendRecordsResult::Conflict { actual: actual.0 },
+            Err(error) => AppendRecordsResult::Err { message: error.to_string() },
         }
     }
 }
