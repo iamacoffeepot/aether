@@ -1151,7 +1151,7 @@ macro_rules! __export_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            $crate::wasm::inline::compose::reconstruct_inline_children(
+            let restored = $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -1176,7 +1176,7 @@ macro_rules! __export_internal {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; $component)
                 },
             );
-            0
+            if restored.is_err() { 1 } else { 0 }
         }
     };
 
@@ -1842,7 +1842,7 @@ macro_rules! __export_multi_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            $crate::wasm::inline::compose::reconstruct_inline_children(
+            let restored = $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -1864,7 +1864,7 @@ macro_rules! __export_multi_internal {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; $($component),+)
                 },
             );
-            0
+            if restored.is_err() { 1 } else { 0 }
         }
     };
 

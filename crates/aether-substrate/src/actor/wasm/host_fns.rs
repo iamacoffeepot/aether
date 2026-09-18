@@ -13,7 +13,6 @@ use wasmtime::{Caller, Linker};
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
-use crate::runtime::log_install;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -85,19 +84,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // lineage onto the guest's send by default; `detached != 0`
             // (the guest's `send_detached`) opts out and starts a fresh
             // causal chain.
-            let ctx = caller.data();
             // Issue 1987: the guest carried its own dispatch identity as
             // `from`; validate it is in-cluster (own id or a registered
             // inline-child alias) before trusting it as origin — a zero or
             // foreign value falls back to the component's own id, so a guest
             // cannot spoof a foreign origin.
-            let identity = resolve_dispatch_identity(ctx, MailboxId(from));
+            let identity = resolve_dispatch_identity(caller.data(), MailboxId(from));
             let recipient = MailboxId(recipient);
             let kind = KindId(kind);
             if detached == 0 {
-                ctx.send(recipient, kind, payload, count, identity);
+                caller.data_mut().send(recipient, kind, payload, count, identity);
             } else {
-                ctx.send_detached(recipient, kind, payload, count, identity);
+                caller.data_mut().send_detached(recipient, kind, payload, count, identity);
             }
             0
         },
@@ -633,13 +631,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 
             // A reply handle is one-shot: take (not resolve) so the
             // entry is removed here, capping the table at in-flight
-            // replies rather than lifetime traffic. The mutable
-            // borrow ends with this statement, before the `&self`
-            // uses below.
+            // replies rather than lifetime traffic.
             let Some(entry) = caller.data_mut().reply_table.take(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
-            let ctx = caller.data();
             // ADR-0042: echo the inbound correlation on every reply
             // path so the originating actor's handler can match its
             // own reply to the request it sent out of a busy inbox.
@@ -647,18 +642,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let kind = KindId(kind);
             match entry.addr {
                 SourceAddr::Session(token) => {
-                    let Some(kind_name) = ctx.registry.kind_name(kind) else {
+                    let Some(kind_name) = caller.data().registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
                     };
-                    let origin = ctx.registry.mailbox_name(ctx.sender);
-                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation);
+                    let origin = caller.data().registry.mailbox_name(caller.data().sender);
+                    caller.data_mut().emit_session_reply(token, kind_name, payload, origin, correlation);
                 }
                 SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
                     // have passed a bogus one and we'd rather return
                     // a meaningful status than silently enqueue mail
                     // that the receiver can't decode.
-                    if ctx.registry.kind_name(kind).is_none() {
+                    if caller.data().registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
                     // Issue iamacoffeepot/aether#1465: `reply` (not
@@ -673,8 +668,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // Issue 1987: the reply's lineage identity is the
                     // guest-carried `from`, validated in-cluster (a zero /
                     // foreign value falls back to the component's own id).
-                    let identity = resolve_dispatch_identity(ctx, MailboxId(from));
-                    ctx.reply(mbox, kind, payload, count, correlation, identity);
+                    let identity = resolve_dispatch_identity(caller.data(), MailboxId(from));
+                    caller.data_mut().reply(mbox, kind, payload, count, correlation, identity);
                 }
                 SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
                     // ADR-0037 Phase 2: reply to a component on
@@ -684,10 +679,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // can't decode. The hub forwards the frame to
                     // the target engine's connection as
                     // `HubToEngine::MailById`.
-                    if ctx.registry.kind_name(kind).is_none() {
+                    if caller.data().registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
+                    caller.data_mut().emit_engine_reply(engine_id, mailbox_id, kind, payload, count, correlation);
                 }
                 SourceAddr::None => {
                     // Shouldn't happen — `ReplyEntry`s only get
@@ -800,7 +795,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let Some(message) = copy(message_ptr, message_len) else {
                 return;
             };
-            log_install::emit_host_event(level, &target, &message);
+            caller.data_mut().emit_guest_log(level, target, message);
         },
     )?;
 

@@ -93,18 +93,22 @@ impl Component {
         self.store.data_mut().take_pending_alias_retirements()
     }
 
+    pub fn publish_prepared_effects(&mut self) {
+        self.store.data_mut().publish_prepared_effects();
+    }
+
     /// Write the prior-state bytes into a delivery region (ADR-0095, via
-    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. Returns
-    /// `Ok(())` if the instance doesn't export `on_rehydrate` (ADR-0016 §3: the
-    /// bundle is silently discarded when no handler claims it).
+    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. A saved bundle
+    /// requires a restore export; silently discarding it would
+    /// accept a successor that cannot reconstruct the predecessor's state.
     ///
     /// ADR-0016 §4 specifies that a trap here aborts the replace, so errors are
-    /// propagated rather than contained (unlike `on_dehydrate` / `unwire`). A
+    /// propagated rather than contained (unlike `unwire`). A
     /// region that can't be allocated, or a bundle past the deliverable ceiling,
     /// propagates as an `Err` too.
     pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
         let Some(f) = self.on_rehydrate.clone() else {
-            return Ok(());
+            return Err(wasmtime::Error::msg("cannot rehydrate saved state: guest exports no on_rehydrate_p32"));
         };
         let len = bundle.bytes.len();
         // Wasm32 ABI carries `u32` byte lengths; bundle bytes are
@@ -132,7 +136,10 @@ impl Component {
         if !bundle.bytes.is_empty() {
             self.memory.write(&mut self.store, ptr as usize, &bundle.bytes)?;
         }
-        f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
+        let status = f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
+        if status != 0 {
+            return Err(wasmtime::Error::msg(format!("on_rehydrate returned failure status {status}")));
+        }
         Ok(())
     }
 
