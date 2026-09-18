@@ -114,7 +114,7 @@ pub use guard::Guard;
 pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};
 pub use prepare::{Prepared, prepare};
-pub use reactors::ReactorList;
+pub use reactors::{EvaluateFail, ReactorList};
 pub use root::Root;
 pub use trigger::Trigger;
 pub use views::{And, NoViews, ViewSet};

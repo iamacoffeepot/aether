@@ -76,6 +76,7 @@ fn reply<K: Kind>(harness: &mut SubstrateHarness, address: &str, mail: &impl Kin
 
 #[test]
 fn reactor_root_loads_by_digest_and_answers_its_caller() {
+    // Catches a root that isn't loadable by digest with empty config, or whose replies or intents don't decode over mail.
     let Some((mut harness, wasm_path)) = boot() else {
         return;
     };

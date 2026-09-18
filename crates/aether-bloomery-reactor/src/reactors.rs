@@ -16,8 +16,11 @@ mod sealed {
 }
 
 /// First reactor that failed while evaluating a live event.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvaluateFail {
+    /// Reactor whose evaluation failed.
     pub reactor: ReactorName,
+    /// Why it failed.
     pub reason: Detail,
 }
 

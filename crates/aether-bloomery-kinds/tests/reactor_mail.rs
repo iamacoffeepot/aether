@@ -37,6 +37,8 @@ fn warm_entries_refuse_empty_and_non_dense_batches_on_construct_and_decode() {
     assert_eq!(WarmEntries::new(Vec::new()), Err(WarmEntriesError::Empty));
     assert_eq!(WarmEntries::new(vec![entry(0)]), Err(WarmEntriesError::ZeroFirst));
     assert_eq!(WarmEntries::new(vec![entry(1), entry(3)]), Err(WarmEntriesError::NotDense));
+    // A batch ending at the last representable seq is still dense.
+    assert!(WarmEntries::new(vec![entry(u64::MAX - 1), entry(u64::MAX)]).is_ok());
 }
 
 #[test]

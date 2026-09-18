@@ -87,13 +87,13 @@ impl<L: ReactorList> Root<L> {
         }
     }
 
+    /// Push then fold; any failure poisons the root, so a `Poisoned` reply always matches its state.
     fn push_and_fold(&mut self, entries: &[Entry], last_trusted: u64) -> Result<(), PrepareError> {
-        self.owner.push(entries)?;
-        if let Err(error) = L::warm_all(&mut self.owner) {
-            self.health = Health::Poisoned { last_trusted, reason: fold_reason(&error) };
-            return Err(error);
+        let result = self.owner.push(entries).and_then(|()| L::warm_all(&mut self.owner));
+        if let Err(error) = &result {
+            self.health = Health::Poisoned { last_trusted, reason: fold_reason(error) };
         }
-        Ok(())
+        result
     }
 }
 

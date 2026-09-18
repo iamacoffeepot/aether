@@ -93,14 +93,11 @@ impl WarmEntries {
         if first.seq < 1 {
             return Err(WarmEntriesError::ZeroFirst);
         }
-        let mut expected = first.seq;
-        for entry in entries {
-            if entry.seq != expected {
-                return Err(WarmEntriesError::NotDense);
-            }
-            expected = expected.checked_add(1).ok_or(WarmEntriesError::NotDense)?;
+        if entries.windows(2).all(|pair| pair[0].seq.checked_add(1) == Some(pair[1].seq)) {
+            Ok(())
+        } else {
+            Err(WarmEntriesError::NotDense)
         }
-        Ok(())
     }
 }
 

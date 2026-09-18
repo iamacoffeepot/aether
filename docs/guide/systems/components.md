@@ -86,9 +86,9 @@ takes no config. It answers `Warm`, `Event`, and `StatusQuery` to the caller
 `#[rule]` idents are checked at compile time as `ReactorName` / `RuleName`.
 Reactor envelopes stay on their original types in `actors`; their other extensions
 are not copied onto the root. `type Alias = T` is not followed. No-generator
-`export!` forms are unchanged. The root is not a `boot` actor. A reactor-only
-module names the generated root as `default` so `export: Some("aether.bloomery.reactor")`
-resolves.
+`export!` forms are unchanged. The root is not a `boot` actor. When `export!`
+names no `default`, the generated root becomes the default, as the program
+root does, so `export: Some("aether.bloomery.reactor")` resolves.
 
 ```rust
 aether_actor::export!(
