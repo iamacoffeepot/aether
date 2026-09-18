@@ -37,10 +37,12 @@ a partial artifact binding nor an apparent move.
 **W2 — Durable request and receipt path.** Define `Requested`, `Transition`,
 and `Fault` kinds and a native driver that resolves an input closure and
 sends tracked execution to a selected executor. Reactor output must carry
-trigger cause and rule identity to the writer. Prove the writer deduplicates
-by `(cause, reactor, rule)` from the journal fold, and every receipt names
-one request. Timeouts and crashes leave a recoverable open or faulted
-attempt. Do not claim exactly-once execution merely from tracked mail.
+trigger cause and rule identity to the writer. Native feeder requests carry
+a stable native origin and journal cause instead of a WASM reactor identity.
+Prove the writer deduplicates each source identity and cause from the journal
+fold, and every receipt names one request. Timeouts and crashes leave a
+recoverable open or faulted attempt. Require at-least-once execution and
+durable-record deduplication; tracked mail alone proves neither.
 
 **W3 — Executor selection.** Define a set and prefix selector parallel to
 the reactor selector, with an empty set valid. Bind a declaration separately
@@ -87,7 +89,7 @@ properties already established by current handlers.
 
 PR #6141 landed the prefix selector. PRs #6140, #6142, #6143, and #6147
 were reverted by #6172 on main `b4b7e41`. PRs #6170, #6148, #6165,
-and #6163 are closed; #6146 is being closed. Do not resurrect the kernel,
+#6163, and #6146 are closed. Do not resurrect the kernel,
 required-member check, in-place replacement transaction, protected slot,
 held preparation, or pending-ring queue as prerequisites of these orders.
 

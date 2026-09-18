@@ -42,12 +42,15 @@ in ordinary bundles. No bundle is mandatory at genesis or thereafter.
 Proposed declarations are `core.cluster.activate { cluster, artifact }` and
 `core.cluster.retire { cluster }`, executed first by the native feeder. An
 activation result is `Activated | Rejected { reason }`; neither result is a
-head move. A request records the trigger cause, reactor instance, rule, and
-input reference. The driver chooses the executor, records a `Transition`
-for a completed result or `Fault` for an unfinished attempt, and can derive
-open requests from the journal after restart. A durable reaction identity
-must let the writer reject a duplicate `(cause, reactor, rule)` by fold.
-These are proposed kinds and responsibilities, not current API claims.
+head move. Reactor-originated requests record the trigger cause, reactor
+instance, rule, and input reference. Feeder-originated requests record the
+journal cause, a stable native origin, and input reference, without inventing
+a WASM reactor identity for the feeder. The driver chooses the executor,
+records a `Transition` for a completed result or `Fault` for an unfinished
+attempt, and derives open requests from the journal after restart. The
+writer deduplicates durable requests by their full recorded source identity
+and cause. These are proposed kinds and responsibilities, not current API
+claims.
 
 Executor selection should mirror reactor selection through an `ExecutorSet`
 with no required member. The declaration identifies a program; an artifact
@@ -58,10 +61,12 @@ work require their own decisions and plans.
 
 ## Proofs required before implementation claims
 
-1. **Attribution and deduplication.** Show the emitted mail preserves trigger
-   sequence, reactor instance, and rule through recording, and that a replay
-   derives at most one durable request for that identity. Do not infer source
-   identity from reply correlation alone.
+1. **Attribution and deduplication.** Show reactor mail preserves trigger
+   sequence, instance, and rule, while feeder requests preserve a stable
+   native origin and journal cause. A replay must derive at most one durable
+   request for each full source identity and cause. Distinguish operations
+   if one native origin can request more than one for the same cause. Do not
+   infer source identity from reply correlation alone.
 2. **Crash recovery.** Inject crashes between request, execution, receipt,
    load, warmup, and route flip. Derive the same selected route and every open
    reaction from the journal. A `Fault` cannot be mistaken for a completed
@@ -97,7 +102,7 @@ design. ADR-0016's ordinary replacement contract still applies to ordinary
 replacement users.
 
 As of `origin/main` `b4b7e41`, PR #6141 has landed. PRs #6140, #6142,
-#6143, and #6147 were reverted by #6172. PRs #6170, #6148, #6165, and
-#6163 are closed; #6146 is being closed. This history is disposition, not a
+#6143, and #6147 were reverted by #6172. PRs #6170, #6148, #6165,
+#6163, and #6146 are closed. This history is disposition, not a
 new implementation order. The companion [work orders](bloomery-reactor-set-work-orders.md)
 list the remaining proposed slices.

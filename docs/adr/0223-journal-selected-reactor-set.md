@@ -57,10 +57,13 @@ Lifecycle requests and outcomes are journal facts with cause and identity.
 The proposed `core.cluster.activate` and `core.cluster.retire` programs use
 the durable `Requested` → execution → `Transition` path; a `Fault` records
 an attempt that did not finish. Activation yields `Activated` or
-`Rejected { reason }`. Each recorded reaction must identify its trigger,
-reactor instance, and rule so a restart can derive outstanding work and
-deduplicate by fold. The exact encoding, source validation, and recovery
-proof belong to the companion design and bounded implementation plans.
+`Rejected { reason }`. Reactor-originated requests identify their trigger,
+reactor instance, and rule. Native feeder requests identify the journal
+cause and a stable native origin; they do not claim a WASM reactor identity.
+The writer deduplicates durable records by their source identity and cause,
+while a restart derives outstanding work from the fold. Exact encoding,
+source validation, and recovery proof belong to the companion design and
+bounded implementation plans.
 
 ## Consequences
 
@@ -72,9 +75,9 @@ proof belong to the companion design and bounded implementation plans.
   even when no policy bundle is selected.
 - Component replacement defects remain real for ordinary hot reload and
   should be addressed on their own merits, outside this reactor-set arc.
-- Exact-once live evaluation, attribution, instance reuse, and crash recovery
-  are requirements to demonstrate. This ADR does not assert they already
-  hold in the current implementation.
+- At-least-once execution with durable-record deduplication, attribution,
+  instance reuse, and crash recovery are requirements to demonstrate. This
+  ADR does not assert they already hold in the current implementation.
 - This decision authorizes no engine or chassis change. Application
   composition and bootstrap wiring need a separate scoped decision.
 
