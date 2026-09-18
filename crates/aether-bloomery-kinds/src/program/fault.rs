@@ -5,8 +5,8 @@
 //! 2. Whatever the wrapped thing did (tests failed, compiler errored) is a
 //!    result, expressed in the result kind.
 //! 3. Faults are about the attempt, never the subject. The reason set is closed.
-//! 4. An executor may return only `Refused`, `InputMissing`, `InputDecode`. The
-//!    driver assigns the rest from outside. Executors never write events.
+//! 4. A program may return only `Refused`, `InputMissing`, `InputDecode`. The
+//!    driver assigns the rest from outside. Programs never write events.
 //! 5. A fault carries no blobs. Bounded inline detail only; text is a
 //!    [`Detail`]. Truncation happens in [`Detail::new`]; decode of a stored
 //!    blob past the cap refuses.
@@ -19,9 +19,8 @@ use alloc::string::String;
 use core::error::Error as StdError;
 use core::fmt;
 
-use crate::program::Program;
-use crate::program::name::ExecutorName;
-use crate::{Digest, Ref};
+use crate::Digest;
+use crate::program::reference::ProgramRef;
 
 /// Why [`Detail`] decode refused a stored blob.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -86,9 +85,8 @@ impl Detail {
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "bloomery.fault")]
 pub struct Fault {
-    pub program: Ref<Program>,
+    pub program: ProgramRef,
     pub input: Digest,
-    pub executor: ExecutorName,
     pub reason: FaultReason,
 }
 
@@ -99,13 +97,13 @@ pub enum FaultReason {
     InputMissing,
     /// The input blob had the declared kind but did not decode.
     InputDecode,
-    /// The executor declined to attempt. Bounded reason.
+    /// The program declined to attempt. Bounded reason.
     Refused { reason: Detail },
-    /// The executor panicked. Caught by the driver.
+    /// The program panicked. Caught by the driver.
     Panicked { message: Detail },
     /// Reserved: the driver enforces no timeout in this brick.
     TimedOut { after_millis: u64 },
-    /// Reserved: no out-of-process executor exists in this brick.
+    /// Reserved: no out-of-process program exists in this brick.
     Crashed { stderr_tail: Detail },
 }
 

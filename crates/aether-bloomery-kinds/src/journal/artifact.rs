@@ -2,9 +2,9 @@
 
 use alloc::vec::Vec;
 
-use aether_data::{Citations, Cites, KindId, Storage, StorageData, StorageError};
+use aether_data::{Citations, Cites, Kind, KindId, Storage, StorageData, StorageError};
 
-use crate::{Digest, artifact_digest};
+use crate::{Digest, OpaqueBytes, Utf8Text, artifact_digest};
 
 /// One portable citation collected from an encoded artifact.
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema)]
@@ -63,6 +63,22 @@ impl EncodedArtifact {
                 .map(|citation| ArtifactCitation { kind: citation.kind, bytes: citation.bytes })
                 .collect(),
         })
+    }
+
+    /// Stage `payload` as [`OpaqueBytes`] with no citations.
+    ///
+    /// The digest matches `Batch::stage_bytes`: `artifact_blob(OpaqueBytes::ID, payload)`.
+    #[must_use]
+    pub fn opaque_bytes(payload: &[u8]) -> Self {
+        Self { kind: OpaqueBytes::ID, bytes: payload.to_vec(), citations: Vec::new() }
+    }
+
+    /// Stage UTF-8 `text` as [`Utf8Text`] with no citations.
+    ///
+    /// The digest matches `Batch::stage_text`: `artifact_blob(Utf8Text::ID, text.as_bytes())`.
+    #[must_use]
+    pub fn text(text: &str) -> Self {
+        Self { kind: Utf8Text::ID, bytes: text.as_bytes().to_vec(), citations: Vec::new() }
     }
 
     /// Storage kind of the encoded value; the stored blob's prefix.

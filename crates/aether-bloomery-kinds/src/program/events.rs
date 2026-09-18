@@ -1,7 +1,8 @@
 //! Events that bind a name to a program and that record one execution of it.
 
 use crate::program::Program;
-use crate::program::name::{ExecutorName, ProgramName};
+use crate::program::name::ProgramName;
+use crate::program::reference::ProgramRef;
 use crate::{Digest, Ref};
 
 /// Points the head string `name` at a declaration. Last move wins. First
@@ -15,15 +16,16 @@ pub struct ProgramHeadMoved {
 }
 
 /// One execution, recorded. Written only by the driver.
+///
+/// The bundle digest on [`ProgramRef`] names the code that ran.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "bloomery.transition")]
 pub struct Transition {
-    pub program: Ref<Program>,
+    pub program: ProgramRef,
     /// An artifact whose kind is `program.input`. Untyped because that kind is
-    /// known only from the cited [`Program`] at runtime.
+    /// known only from the cited program at runtime.
     pub input: Digest,
     /// An artifact whose kind is `program.result`. Untyped because that kind is
-    /// known only from the cited [`Program`] at runtime.
+    /// known only from the cited program at runtime.
     pub result: Digest,
-    pub executor: ExecutorName,
 }

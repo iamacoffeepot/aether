@@ -27,8 +27,8 @@ pub use journal::{
     ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult,
 };
 pub use program::{
-    Detail, DetailError, ExecutorName, ExecutorNameError, Fault, FaultReason, Mode, Program, ProgramHeadMoved,
-    ProgramName, ProgramNameError, Transition,
+    ClosureArtifact, Detail, DetailError, Fault, FaultReason, Invoke, Invoked, Mode, Program, ProgramHeadMoved,
+    ProgramName, ProgramNameError, ProgramRef, Refusal, Transition,
 };
 pub use reactor::{ReactorSet, ReactorSetError};
 pub use reference::Ref;
