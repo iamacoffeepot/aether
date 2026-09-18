@@ -1,7 +1,5 @@
 //! Two-program WASM bundle for the program-root `SubstrateHarness` test.
 
-#![allow(clippy::unused_self)]
-
 use aether_actor::export;
 use aether_bloomery_kinds::{Mode, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::kinds::Detail;
@@ -19,7 +17,6 @@ struct SummarizeResult {
     text: Ref<Utf8Text>,
 }
 
-#[allow(dead_code)]
 struct Summarize;
 
 #[program]
@@ -48,7 +45,6 @@ struct RefuseResult {
     marker: u32,
 }
 
-#[allow(dead_code)]
 struct Refuse;
 
 #[program]
@@ -65,3 +61,6 @@ impl Program for Refuse {
 }
 
 export!(Summarize, Refuse, generators = [aether_bloomery_program::bundle_programs]);
+
+const _: Summarize = Summarize;
+const _: Refuse = Refuse;

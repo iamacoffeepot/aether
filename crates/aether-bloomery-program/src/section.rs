@@ -71,10 +71,17 @@ pub const fn write_program_record<const N: usize>(
     out
 }
 
-#[allow(clippy::cast_possible_truncation)]
 const fn u16_len(bytes: &[u8]) -> u16 {
-    assert!(bytes.len() <= u16::MAX as usize, "aether-bloomery-program: program name or intent exceeds u16::MAX");
-    bytes.len() as u16
+    let mut len = 0u16;
+    let mut index = 0;
+    while index < bytes.len() {
+        len = match len.checked_add(1) {
+            Some(next) => next,
+            None => panic!("aether-bloomery-program: program name or intent exceeds u16::MAX"),
+        };
+        index += 1;
+    }
+    len
 }
 
 const fn write_u16_le(out: &mut [u8], pos: &mut usize, value: u16) {
@@ -108,13 +115,13 @@ const fn write_slice(out: &mut [u8], pos: &mut usize, bytes: &[u8]) {
 pub enum DeclarationsError {
     /// The remaining bytes were shorter than a record header or declared field.
     Truncated,
-    /// The record version byte is not [`SECTION_VERSION`].
+    /// The record version byte is not 1.
     UnsupportedVersion(u8),
     /// A name or intent field was not UTF-8.
     InvalidUtf8,
     /// The name field is not a valid [`ProgramName`].
     InvalidName,
-    /// The mode byte is not [`MODE_PURE`] or [`MODE_SAMPLED`].
+    /// The mode byte is not 0 (`Pure`) or 1 (`Sampled`).
     UnknownMode(u8),
 }
 
@@ -132,7 +139,7 @@ impl fmt::Display for DeclarationsError {
 
 impl StdError for DeclarationsError {}
 
-/// Decode concatenated [`aether.bloomery.programs`] records.
+/// Decode concatenated `aether.bloomery.programs` custom-section records.
 ///
 /// # Errors
 ///

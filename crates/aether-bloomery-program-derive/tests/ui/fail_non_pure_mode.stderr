@@ -1,5 +1,25 @@
 error: #[program] requires `const MODE: Mode = Mode::Pure`
-  --> tests/ui/fail_non_pure_mode.rs:23:24
+  --> tests/ui/fail_non_pure_mode.rs:21:24
    |
-23 |     const MODE: Mode = Mode::Sampled;
+21 |     const MODE: Mode = Mode::Sampled;
    |                        ^^^^^^^^^^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/fail_non_pure_mode.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Env` and `Pure`
+ --> tests/ui/fail_non_pure_mode.rs:2:31
+  |
+2 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                               ^^^           ^^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_non_pure_mode.rs:2:36
+  |
+2 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                                    ^^^^^^^

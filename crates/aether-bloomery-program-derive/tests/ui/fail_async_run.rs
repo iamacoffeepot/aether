@@ -1,5 +1,3 @@
-#![allow(unused_imports)]
-
 use aether_bloomery_kinds::{Mode, Refusal};
 use aether_bloomery_program::{Env, Program, Pure, program};
 
