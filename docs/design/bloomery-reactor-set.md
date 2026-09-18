@@ -24,7 +24,8 @@ preparation or lifecycle settlement is not that acknowledgment. Delivery
 for a cluster cannot advance past `N` until evaluation of `N` is known.
 The SQLite store and its native owner actor live together in
 `aether-bloomery-journal`. The feeder reads through portable owner mail in
-`aether_bloomery_kinds::journal`, without a separate journal-actor crate or
+the private `journal` module in `aether-bloomery-kinds`, with its mail types
+re-exported at the crate root, without a separate journal-actor crate or
 feature split.
 
 A move at `N` requests activation. The predecessor must evaluate `N` before

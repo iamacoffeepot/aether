@@ -26,7 +26,8 @@ activation receipts, and reaction progress are folds over recorded entries.
 Runtime actors may cache those folds, but must reconstruct them after restart.
 The SQLite `Journal` store and its native owner actor share the
 `aether-bloomery-journal` crate. Portable owner mail types belong in
-`aether_bloomery_kinds::journal`; there is no separate journal-actor crate.
+the private `journal` module in `aether-bloomery-kinds`, with those types
+re-exported at the crate root; there is no separate journal-actor crate.
 
 A `ReactorSet` contains cluster heads and may be empty. No member is reserved
 or required. For an event at sequence `N`, select the set and each member's

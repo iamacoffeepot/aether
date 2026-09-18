@@ -34,7 +34,8 @@ committed sequence or the actual head when the fence loses. This is the
 author-facing update path, not raw batch mail. Prove failure leaves neither
 a partial artifact binding nor an apparent move. The SQLite `Journal` and
 native owner actor share `aether-bloomery-journal`; portable request/reply
-mail belongs in `aether_bloomery_kinds::journal`. Do not split the owner into
+mail belongs in the private `journal` module in `aether-bloomery-kinds`,
+with those types re-exported at the crate root. Do not split the owner into
 a separate crate or feature.
 
 **W2 — Durable request and receipt path.** Define `Requested`, `Transition`,
