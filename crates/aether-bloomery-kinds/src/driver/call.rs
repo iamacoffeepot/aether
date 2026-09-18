@@ -38,7 +38,7 @@ pub enum CallOutcome {
         /// The recorded value: the reply is the record.
         fault: Fault,
     },
-    /// Nothing was recorded: the journal refused the `Requested` append before an attempt could start.
+    /// Nothing was recorded for this call; `reason` says why.
     Refused {
         /// Echoes the request's idempotency key.
         key: u64,
