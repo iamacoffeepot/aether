@@ -22,8 +22,12 @@
 //! and is not a SQL column.
 //!
 //! [`JournalActor`] is the native owner for one named journal path. It answers
-//! read, head, artifact, and typed [`aether_bloomery_kinds::MoveHead`] publication mail while keeping its
-//! journal handle inside the actor.
+//! read, head, and artifact mail plus two fenced writes while keeping its
+//! journal handle inside the actor: [`aether_bloomery_kinds::MoveHead`] moves
+//! one head to an already-stored artifact, and
+//! [`aether_bloomery_kinds::Publish`] stages encoded artifacts and appends head
+//! moves in one atomic batch. Both fence on the whole journal's last stored
+//! sequence, and neither carries a journal cause.
 
 mod actor;
 mod artifact;
