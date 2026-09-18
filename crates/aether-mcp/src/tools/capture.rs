@@ -9,7 +9,7 @@ use aether_kinds::{
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD;
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content};
+use rmcp::model::{CallToolResult, ContentBlock};
 
 use crate::args::{CaptureCheckSpec, CaptureFrameArgs};
 
@@ -305,18 +305,18 @@ pub(super) fn capture_content(
     similarity_score: Option<f32>,
     similarity_pass: Option<bool>,
     options: CaptureImageOptions,
-) -> Result<Vec<Content>, McpError> {
+) -> Result<Vec<ContentBlock>, McpError> {
     let mut content = Vec::new();
     if options.include_image {
         let png = resize_capture_png(original_png, options)?;
-        content.push(Content::image(STANDARD.encode(png), "image/png"));
+        content.push(ContentBlock::image(STANDARD.encode(png), "image/png"));
     }
     // Surface the verdict as a JSON text block so the caller reads the
     // reductions' results without decoding the PNG (iamacoffeepot/aether#1777).
     if let Some(verdict) = verdict {
         let json =
             serde_json::to_string(verdict).map_err(|error| internal_msg(&format!("verdict serialize: {error}")))?;
-        content.push(Content::text(json));
+        content.push(ContentBlock::text(json));
     }
     // Surface the similarity verdict as its own JSON block when a
     // `similarity` check ran (iamacoffeepot/aether#1780).
@@ -326,7 +326,7 @@ pub(super) fn capture_content(
             "similarity_pass": similarity_pass,
         }))
         .map_err(|error| internal_msg(&format!("similarity serialize: {error}")))?;
-        content.push(Content::text(json));
+        content.push(ContentBlock::text(json));
     }
     Ok(content)
 }
@@ -449,7 +449,7 @@ pub(super) async fn capture_frame(mcp: &Mcp, args: CaptureFrameArgs) -> Result<C
                     };
                     let json = serde_json::to_string(&saved)
                         .map_err(|error| internal_msg(&format!("saved serialize: {error}")))?;
-                    Ok(Content::text(json))
+                    Ok(ContentBlock::text(json))
                 })
                 .transpose()?;
             let mut content =

@@ -208,8 +208,8 @@ fn checks_default_to_verdict_without_image() {
     let content = capture_content(&[], Some(&verdict), None, None, options).expect("verdict content");
 
     assert_eq!(content.len(), 1);
-    assert!(content[0].raw.as_image().is_none());
-    assert!(content[0].raw.as_text().expect("verdict text").text.contains("\"width\":2"));
+    assert!(content[0].as_image().is_none());
+    assert!(content[0].as_text().expect("verdict text").text.contains("\"width\":2"));
 }
 
 /// Plain captures retain image content by default, and no resize returns the
@@ -222,7 +222,7 @@ fn plain_capture_defaults_to_original_image_content() {
     let content = capture_content(&png, None, None, None, options).expect("image content");
 
     assert_eq!(content.len(), 1);
-    let image = content[0].raw.as_image().expect("image content");
+    let image = content[0].as_image().expect("image content");
     assert_eq!(STANDARD.decode(&image.data).expect("base64 image"), png);
 }
 
@@ -235,8 +235,8 @@ fn include_image_overrides_checks_default() {
     let options = resolve_capture_image_options(None, None, Some(true), true).expect("override options");
     let content = capture_content(&png, Some(&verdict), None, None, options).expect("capture content");
 
-    assert!(content[0].raw.as_image().is_some());
-    assert!(content[1].raw.as_text().is_some());
+    assert!(content[0].as_image().is_some());
+    assert!(content[1].as_text().is_some());
 }
 
 /// Explicitly suppressing the image without verdict, similarity, or save data
@@ -262,7 +262,7 @@ fn emitted_image_round_trips_with_bounded_dimensions_and_pixels() {
     );
     let options = CaptureImageOptions { scale: 0.5, max_dimension: 768, include_image: true };
     let content = capture_content(&png, None, None, None, options).expect("resized image content");
-    let image = content[0].raw.as_image().expect("image content");
+    let image = content[0].as_image().expect("image content");
     let decoded = decode_synthetic_png(&STANDARD.decode(&image.data).expect("base64 image"));
 
     assert_eq!(decoded.dimensions, image_dimensions(2, 1));

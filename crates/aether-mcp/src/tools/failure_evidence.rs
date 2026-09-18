@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::time::Duration;
 
 use rmcp::ErrorData as McpError;
-use rmcp::model::{CallToolResult, Content, RawContent};
+use rmcp::model::{CallToolResult, ContentBlock};
 use serde_json::Value;
 use tokio::time::{self, Instant};
 
@@ -43,7 +43,7 @@ pub(super) enum FailureEvidenceQuery {
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum FailureEvidenceValue {
     Json(Value),
-    Frame { summary: Value, images: Vec<Content> },
+    Frame { summary: Value, images: Vec<ContentBlock> },
 }
 
 pub(super) trait FailureEvidenceSource {
@@ -173,9 +173,9 @@ pub(super) fn project_failure_evidence_capture(result: CallToolResult) -> Result
     let mut images = Vec::new();
     let mut capture_text = Vec::new();
     for content in result.content {
-        match &content.raw {
-            RawContent::Image(_) => images.push(content),
-            RawContent::Text(text) => capture_text.push(text.text.clone()),
+        match &content {
+            ContentBlock::Image(_) => images.push(content),
+            ContentBlock::Text(text) => capture_text.push(text.text.clone()),
             _ => return Err("capture_frame returned an unexpected non-image content block".into()),
         }
     }
@@ -261,7 +261,7 @@ async fn run_observation<S: FailureEvidenceSource>(
     query: FailureEvidenceQuery,
     deadline: Instant,
     observation_timeout: Duration,
-) -> (FailureEvidenceObservation, Vec<Content>) {
+) -> (FailureEvidenceObservation, Vec<ContentBlock>) {
     let remaining = deadline.saturating_duration_since(Instant::now());
     if remaining.is_zero() {
         return (FailureEvidenceObservation::BudgetExhausted, Vec::new());
@@ -286,11 +286,11 @@ async fn run_observation<S: FailureEvidenceSource>(
 
 pub(super) fn failure_evidence_result_with_spill(
     body: String,
-    images: Vec<Content>,
+    images: Vec<ContentBlock>,
     spill: impl FnOnce(&str, String) -> String,
 ) -> CallToolResult {
     let mut content = Vec::with_capacity(1 + images.len());
-    content.push(Content::text(spill("collect_failure_evidence", body)));
+    content.push(ContentBlock::text(spill("collect_failure_evidence", body)));
     content.extend(images);
     CallToolResult::success(content)
 }
