@@ -2,7 +2,7 @@
 //!
 //! A program is a stateless function over an injected closure, the same
 //! injected-data sandbox reactors use. The native driver sends
-//! [`Invoke`]; [`invoke`] runs one [`Program`] and replies [`Invoked`].
+//! [`Invoke`]; [`invoke()`] runs one [`Program`] and replies [`Invoked`].
 //! Only native code writes journal records. A program's identity is its
 //! bundle digest plus name, not a stored declaration digest.
 //!
