@@ -80,7 +80,10 @@ pub trait ArmVisitor {
 /// Authored reactor: named rules, inferred dependencies, pure evaluation.
 ///
 /// `#[reactor]` generates this impl. Authors write `const NAMESPACE` and `#[rule]`
-/// methods; they do not implement these methods by hand.
+/// methods on a unit struct, so the authored reactor cannot store per-instance
+/// state. Rules receive only their prepared trigger, view, and guard values.
+/// This construction check does not prove arbitrary Rust bodies side-effect
+/// free; direct implementations of this lower-level trait are not checked.
 pub trait Reactor: Sized + 'static {
     /// Stable mailbox namespace for the generated inline peer of this reactor.
     const NAMESPACE: &'static str;
