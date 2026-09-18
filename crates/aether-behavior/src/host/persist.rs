@@ -41,16 +41,18 @@ pub struct HostPersist {
 }
 
 impl HostPersist {
-    /// Encode for fallible dehydration without discarding an error.
-    pub fn try_encode(&self) -> Result<Vec<u8>, alloc::string::String> {
-        let body = wire::to_vec(self).map_err(|error| alloc::format!("host state encode failed: {error}"))?;
+    /// Encode to the host's parent state bytes: a [`HOST_PERSIST_VERSION`]
+    /// byte then the `aether_data::wire` body.
+    #[must_use]
+    pub fn encode(&self) -> Vec<u8> {
+        let body = wire::to_vec(self).unwrap_or_default();
         let mut out = Vec::with_capacity(1 + body.len());
         out.push(HOST_PERSIST_VERSION);
         out.extend_from_slice(&body);
-        Ok(out)
+        out
     }
 
-    /// Decode a bundle written by [`Self::try_encode`]. `None` on an empty buffer,
+    /// Decode a bundle written by [`Self::encode`]. `None` on an empty buffer,
     /// an unrecognized version byte, or a malformed body — the host boots
     /// fresh (fail-open) in each case.
     #[must_use]
@@ -80,7 +82,7 @@ mod tests {
             script_state: vec![1, 2, 3, 4],
             wrapped_child_id: 0xDEAD_BEEF,
         };
-        let encoded = bundle.try_encode().expect("test bundle encodes");
+        let encoded = bundle.encode();
         assert_eq!(HostPersist::decode(&encoded), Some(bundle));
 
         // Empty and wrong-version buffers both fail open to `None`.

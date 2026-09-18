@@ -13,6 +13,7 @@ use wasmtime::{Caller, Linker};
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
+use crate::runtime::log_install;
 
 /// Status codes returned by the `reply_mail` host fn (ADR-0013 §3).
 /// `0` is success; non-zero values distinguish call-site errors
@@ -63,9 +64,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          detached: u32,
          from: u64|
          -> u32 {
-            if caller.data_mut().deny_dehydration_effect("send_mail") {
-                return 1;
-            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return 1; // guest exports no memory
             };
@@ -84,18 +82,19 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // lineage onto the guest's send by default; `detached != 0`
             // (the guest's `send_detached`) opts out and starts a fresh
             // causal chain.
+            let ctx = caller.data();
             // Issue 1987: the guest carried its own dispatch identity as
             // `from`; validate it is in-cluster (own id or a registered
             // inline-child alias) before trusting it as origin — a zero or
             // foreign value falls back to the component's own id, so a guest
             // cannot spoof a foreign origin.
-            let identity = resolve_dispatch_identity(caller.data(), MailboxId(from));
+            let identity = resolve_dispatch_identity(ctx, MailboxId(from));
             let recipient = MailboxId(recipient);
             let kind = KindId(kind);
             if detached == 0 {
-                caller.data_mut().send(recipient, kind, payload, count, identity);
+                ctx.send(recipient, kind, payload, count, identity);
             } else {
-                caller.data_mut().send_detached(recipient, kind, payload, count, identity);
+                ctx.send_detached(recipient, kind, payload, count, identity);
             }
             0
         },
@@ -132,9 +131,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
-            if caller.data_mut().deny_dehydration_effect("spawn_sibling") {
-                return 0;
-            }
             // Copy subname + config out of guest memory, ending the
             // immutable borrow before the `data_mut` stage below.
             let copied = {
@@ -233,9 +229,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          config_ptr: u32,
          config_len: u32|
          -> u64 {
-            if caller.data_mut().deny_dehydration_effect("spawn_sibling_scoped") {
-                return 0;
-            }
             let parent = MailboxId(parent);
             if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
                 tracing::warn!(
@@ -341,9 +334,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
-            if caller.data_mut().deny_dehydration_effect("spawn_inline_child") {
-                return 0;
-            }
             // Copy the subname out of guest memory (empty for `Counter`),
             // ending the immutable memory borrow before the reads below.
             let subname_prefix = {
@@ -431,9 +421,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          subname_ptr: u32,
          subname_len: u32|
          -> u64 {
-            if caller.data_mut().deny_dehydration_effect("spawn_inline_child_scoped") {
-                return 0;
-            }
             let parent = MailboxId(parent);
             if parent != caller.data().sender && !is_own_cluster_alias(caller.data(), parent) {
                 tracing::warn!(
@@ -524,9 +511,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "despawn_inline_child_p32",
         |mut caller: Caller<'_, ComponentCtx>, alias: u64| -> u32 {
-            if caller.data_mut().deny_dehydration_effect("despawn_inline_child") {
-                return 1;
-            }
             let alias = MailboxId(alias);
             let ctx = caller.data();
             if !is_own_cluster_alias(ctx, alias) {
@@ -575,17 +559,13 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 return SAVE_STATE_TOO_LARGE;
             }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
-                caller.data_mut().save_state_error = Some("save_state: guest exports no memory".to_owned());
                 return SAVE_STATE_NO_MEMORY;
             };
             let data = memory.data(&caller);
             let start = ptr as usize;
             let end = match start.checked_add(len as usize) {
                 Some(e) if e <= data.len() => e,
-                _ => {
-                    caller.data_mut().save_state_error = Some("save_state: pointer out of bounds".to_owned());
-                    return SAVE_STATE_OOB;
-                }
+                _ => return SAVE_STATE_OOB,
             };
             let bytes = data[start..end].to_vec();
             let ctx = caller.data_mut();
@@ -615,9 +595,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
-            if caller.data_mut().deny_dehydration_effect("reply_mail") {
-                return REPLY_OOB;
-            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return REPLY_OOB;
             };
@@ -631,10 +608,13 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
 
             // A reply handle is one-shot: take (not resolve) so the
             // entry is removed here, capping the table at in-flight
-            // replies rather than lifetime traffic.
+            // replies rather than lifetime traffic. The mutable
+            // borrow ends with this statement, before the `&self`
+            // uses below.
             let Some(entry) = caller.data_mut().reply_table.take(sender) else {
                 return REPLY_UNKNOWN_HANDLE;
             };
+            let ctx = caller.data();
             // ADR-0042: echo the inbound correlation on every reply
             // path so the originating actor's handler can match its
             // own reply to the request it sent out of a busy inbox.
@@ -642,18 +622,18 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let kind = KindId(kind);
             match entry.addr {
                 SourceAddr::Session(token) => {
-                    let Some(kind_name) = caller.data().registry.kind_name(kind) else {
+                    let Some(kind_name) = ctx.registry.kind_name(kind) else {
                         return REPLY_KIND_NOT_FOUND;
                     };
-                    let origin = caller.data().registry.mailbox_name(caller.data().sender);
-                    caller.data_mut().emit_session_reply(token, kind_name, payload, origin, correlation);
+                    let origin = ctx.registry.mailbox_name(ctx.sender);
+                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation);
                 }
                 SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might
                     // have passed a bogus one and we'd rather return
                     // a meaningful status than silently enqueue mail
                     // that the receiver can't decode.
-                    if caller.data().registry.kind_name(kind).is_none() {
+                    if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
                     // Issue iamacoffeepot/aether#1465: `reply` (not
@@ -668,8 +648,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // Issue 1987: the reply's lineage identity is the
                     // guest-carried `from`, validated in-cluster (a zero /
                     // foreign value falls back to the component's own id).
-                    let identity = resolve_dispatch_identity(caller.data(), MailboxId(from));
-                    caller.data_mut().reply(mbox, kind, payload, count, correlation, identity);
+                    let identity = resolve_dispatch_identity(ctx, MailboxId(from));
+                    ctx.reply(mbox, kind, payload, count, correlation, identity);
                 }
                 SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
                     // ADR-0037 Phase 2: reply to a component on
@@ -679,10 +659,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     // can't decode. The hub forwards the frame to
                     // the target engine's connection as
                     // `HubToEngine::MailById`.
-                    if caller.data().registry.kind_name(kind).is_none() {
+                    if ctx.registry.kind_name(kind).is_none() {
                         return REPLY_KIND_NOT_FOUND;
                     }
-                    caller.data_mut().emit_engine_reply(engine_id, mailbox_id, kind, payload, count, correlation);
+                    ctx.outbound.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, count, correlation);
                 }
                 SourceAddr::None => {
                     // Shouldn't happen — `ReplyEntry`s only get
@@ -730,9 +710,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // (`Component::instantiate` falls back to a generic "init
     // returned <rc> without staging an error" diagnostic).
     linker.func_wrap("aether", "init_failed_p32", |mut caller: Caller<'_, ComponentCtx>, ptr: u32, len: u32| {
-        if caller.data_mut().deny_dehydration_effect("init_failed") {
-            return;
-        }
         let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
             return;
         };
@@ -774,9 +751,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          target_len: u32,
          message_ptr: u32,
          message_len: u32| {
-            if caller.data_mut().deny_dehydration_effect("log_event") {
-                return;
-            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return;
             };
@@ -795,7 +769,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             let Some(message) = copy(message_ptr, message_len) else {
                 return;
             };
-            caller.data_mut().emit_guest_log(level, target, message);
+            log_install::emit_host_event(level, &target, &message);
         },
     )?;
 
@@ -827,9 +801,6 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         "aether",
         "asset_fetch_p32",
         |mut caller: Caller<'_, ComponentCtx>, name_ptr: u32, name_len: u32| -> wasmtime::Result<u64> {
-            if caller.data_mut().deny_dehydration_effect("asset_fetch") {
-                return Err(wasmtime::Error::msg("asset_fetch is forbidden during dehydration"));
-            }
             let name = read_guest_utf8(&mut caller, name_ptr, name_len)?;
             let bytes = {
                 let ctx = caller.data_mut();

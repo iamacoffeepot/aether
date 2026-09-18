@@ -15,13 +15,12 @@
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{ReplaceComponent, ReplaceResult};
     use aether_test_fixtures_kinds::{
         Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
-        InlineProbe, TagSpawnQuery,
+        InlineProbe, TagSpawnQuery, TagSpawnReport,
     };
 
-    use aether_harness_fleet::{FleetHarness, dist_component_available, read_component_wasm};
+    use aether_harness_fleet::{FleetHarness, dist_component_available};
 
     /// Load `inline_child`, address its inline child by the rendered
     /// lineage name over the wire, and assert the child replied
@@ -176,9 +175,10 @@ mod tests {
     }
 
     /// `InlineConfiguredChild` permits only `InlineConfiguredParent`.
-    /// Replacing that entry with `InlineTagParent` cannot reconstruct its
-    /// child under the new placement. The replacement is rejected before the
-    /// resident parent retires, so the old child and its state remain usable.
+    /// Replacing that entry with `InlineTagParent` must therefore leave the
+    /// old descendant alias unserved instead of reviving it under a newly
+    /// forbidden parent. A query to the new root proves the replacement is
+    /// live while the rejected descendant stays absent.
     #[test]
     fn fleetharness_replace_rejects_descendant_under_newly_disallowed_parent() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -194,38 +194,19 @@ mod tests {
             CONFIGURED_CHILD_INITIAL,
             "the exact-placement child is resident before replacement",
         );
-        harness.send(engine, &child_addr, &Bump);
-        let moved = CONFIGURED_CHILD_INITIAL + 1;
-        assert_eq!(count(&mut harness, engine, &child_addr), moved);
 
-        let replies = harness.send(
-            engine,
-            "aether.component",
-            &ReplaceComponent {
-                mailbox_id: parent.mailbox_id,
-                wasm: read_component_wasm("aether_test_fixtures_bundle"),
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                export: Some("test.inline.tag_parent".to_owned()),
-            },
-        );
-        let [reply] = replies.as_slice() else {
-            panic!("replacement should reply exactly once, got {}", replies.len());
-        };
-        assert_eq!(reply.kind, ReplaceResult::ID);
-        match ReplaceResult::decode_from_bytes(&reply.payload).expect("replacement reply decodes") {
-            ReplaceResult::Err { error } => {
-                assert!(error.contains("on_rehydrate failed"), "unexpected replacement refusal: {error}");
-            }
-            ReplaceResult::Ok { .. } => panic!("replacement must reject the child under a forbidden parent"),
-        }
+        harness.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.tag_parent");
 
-        assert_eq!(count(&mut harness, engine, &child_addr), moved, "rejection preserves the resident child's state");
-        harness.send(engine, &child_addr, &Bump);
-        assert_eq!(count(&mut harness, engine, &child_addr), moved + 1, "the resident child still handles mail");
+        let child_replies = harness.send(engine, &child_addr, &CountQuery);
+        assert!(child_replies.is_empty(), "a child forbidden beneath the replacement entry actor must stay absent");
 
         let parent_replies = harness.send(engine, &parent.addr, &TagSpawnQuery);
-        assert!(parent_replies.is_empty(), "the original parent remains resident instead of the tag parent");
+        let parent_reply = match parent_replies.as_slice() {
+            [one] => one,
+            other => panic!("the replacement parent should reply exactly once, got {}", other.len()),
+        };
+        assert_eq!(parent_reply.kind, TagSpawnReport::ID, "the live replacement replies with TagSpawnReport");
+        TagSpawnReport::decode_from_bytes(&parent_reply.payload).expect("the replacement parent's report decodes");
     }
 
     /// Send a `CountQuery` to `recipient` and decode the single

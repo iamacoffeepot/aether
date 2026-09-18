@@ -196,7 +196,8 @@ pub trait WasmActor:
     type Persist: aether_data::Kind;
 
     /// Save-side hot-swap hook (ADR-0040 / ADR-0101). Runs once on the
-    /// old instance while it is still live, before retirement. Default no-op; override to serialize state the
+    /// old instance immediately before a `replace_component` swap, after
+    /// [`Lifecycle::unwire`](crate::Lifecycle::unwire). Default no-op; override to serialize state the
     /// replacement instance recovers through [`Self::on_rehydrate`].
     /// Prefer
     /// [`WasmDropCtx::save_state_kind`][crate::model::ctx::Persistence::save_state_kind]
@@ -205,11 +206,11 @@ pub trait WasmActor:
     /// only when persisting a non-kind blob or driving an explicit
     /// migration off the leading id.
     ///
-    /// The hook must preserve logical guest state, including through interior
-    /// mutability and on failure. Its context provides persistence only.
-    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+    /// Concrete `&mut WasmDropCtx<'_>` — the ctx that carries
+    /// `Persistence::save_state` and outbound mail, with the reply /
+    /// resolve surfaces intentionally absent.
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
         let _ = ctx;
-        Ok(())
     }
 
     /// Restore-side hot-swap hook (ADR-0040 / ADR-0101). Runs after
@@ -297,7 +298,7 @@ pub trait ErasedWasmActor {
     fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
-    fn erased_on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String>;
+    fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
 
     /// Forwards to [`WasmActor::on_rehydrate`].
     fn erased_on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, prior: crate::PriorState<'_>);
@@ -1089,22 +1090,43 @@ macro_rules! __export_internal {
             let Some(instance) = (unsafe { __AETHER_COMPONENT.get_mut() }) else {
                 return 1;
             };
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(NAMESPACE)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        <$component as $crate::Addressable>::NAMESPACE,
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: run the parent's `on_dehydrate` and every
             // resident inline child's into a single composite, then call
             // the host `save_state` once. With no inline children the
             // composite is byte-identical to the parent's own blob, so a
             // childless component dehydrates exactly as before; a parent
             // that saves nothing and has no children skips the host save.
-            let __aether_user_state = match $crate::wasm::inline::compose::dehydrate(
+            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
+                mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
-            ) {
-                Ok(state) => state,
-                Err(_) => return 1,
+            );
+            let __aether_state = {
+                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
+                // entrypoint, matching the registry's interior-mutability
+                // invariant.
+                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
+                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
-            let __aether_state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), __aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx = $crate::WasmDropCtx::__new();
+                let mut ctx: $crate::WasmDropCtx<'_> =
+                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
                 ctx.save_state(version, &bytes);
             }
             0
@@ -1140,7 +1162,9 @@ macro_rules! __export_internal {
             // parent, then reconstruct each inline child by type. For a
             // childless component the bundle decomposes to the raw parent
             // blob, so the parent sees the identical `PriorState` it would
-            // have before. An unknown tag is logged + skipped.
+            // have before. A single-actor module's reconstructable type set
+            // is just `$component` (an inline child of any other type is
+            // not in the `export!` set; its tag is logged + skipped).
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {
@@ -1151,7 +1175,7 @@ macro_rules! __export_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            let restored = $crate::wasm::inline::compose::reconstruct_inline_children(
+            $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -1176,31 +1200,19 @@ macro_rules! __export_internal {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; $component)
                 },
             );
-            if restored.is_err() { 1 } else { 0 }
+            0
         }
     };
 
-    // Public exports preserve their direct reconstruction path. Private
-    // actors use linked `#[actor]` factories after the public candidates
-    // fail to match. A rejected child returns `false` for the caller to log.
+    // Reconstruct one inline child by matching its persisted type tag
+    // against the module's exported type set (ADR-0114 §5). For each
+    // candidate type whose `hash(NAMESPACE)` matches, validate the
+    // replacement module's current placement facts against the effective
+    // parent, then re-`init` it and restore its state through the
+    // parent-aware compose helper. An unmatched or rejected child returns
+    // `false` so the caller logs + skips it.
     (@reconstruct_child $registry:ident, $parent:ident, $child:ident ; $($candidate:ty),+) => {{
         let mut __aether_reconstructed = false;
-        let mut __aether_matches = 0usize;
-        $(
-            if $child.type_tag
-                == $crate::__macro_internals::mailbox_id_from_name(
-                    <$candidate as $crate::Addressable>::NAMESPACE,
-                )
-                .0
-            {
-                __aether_matches += 1;
-            }
-        )+
-        if __aether_matches == 0 {
-            $crate::wasm::inline::factory::reconstruct_registered_child($registry, $parent, $child)
-        } else if __aether_matches != 1 {
-            false
-        } else {
         $(
             if $child.type_tag
                 == $crate::__macro_internals::mailbox_id_from_name(
@@ -1223,13 +1235,13 @@ macro_rules! __export_internal {
             }
         )+
         __aether_reconstructed
-        }
     }};
 
     // Resolve one inline child to *spawn* by matching a runtime actor-type
-    // tag against the module's public exported type set (issue 2692). Linked
-    // private reconstruction factories are not independently spawnable here.
-    // Emits a non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
+    // tag against the module's exported type set (issue 2692) — the spawn
+    // sibling of `@reconstruct_child`, a second consumer of the same
+    // `$($candidate)` list, not a second copy of the table. Emits a
+    // non-capturing closure that coerces to `wasm::inline::SpawnByTagFn`; the
     // module's init shims install it on `__AETHER_INLINE`. The matched branch
     // allocates the child's alias via the host `spawn_inline_child` host fn
     // THEN runs the shared decode + init core; an unmatched tag returns
@@ -1782,20 +1794,41 @@ macro_rules! __export_multi_internal {
             let Some(instance) = (unsafe { __AETHER_MULTI.get_mut() }) else {
                 return 1;
             };
+            // ADR-0114 addressing amendment: the cluster self-identity is the
+            // real folded id captured at `init` / `wire` — the same id
+            // `receive` derives for `WasmCtx`, so a `send::<R>` from the save
+            // hook resolves correctly at any lineage depth. Fall back to
+            // `hash(namespace)` only before any shim has run.
+            let mailbox_id = {
+                let captured = __AETHER_INLINE.self_id();
+                if captured != 0 {
+                    captured
+                } else {
+                    $crate::__macro_internals::mailbox_id_from_name(
+                        instance.erased_namespace(),
+                    )
+                    .0
+                }
+            };
             // ADR-0114 §5: compose the parent + every inline child into one
             // composite, then `save_state` once (the boxed instance's
             // dehydrate routes through `erased_on_dehydrate`). Childless ⇒
             // byte-identical to the boxed parent's own blob.
-            let __aether_user_state = match $crate::wasm::inline::compose::dehydrate(
+            let __aether_user_state = $crate::wasm::inline::compose::dehydrate(
+                mailbox_id,
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
-            ) {
-                Ok(state) => state,
-                Err(_) => return 1,
+            );
+            let __aether_state = {
+                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
+                // entrypoint, matching the registry's interior-mutability
+                // invariant.
+                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
+                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
             };
-            let __aether_state = $crate::compose_state_envelope(__AETHER_INLINE.request_contexts(), __aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx = $crate::WasmDropCtx::__new();
+                let mut ctx: $crate::WasmDropCtx<'_> =
+                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
                 ctx.save_state(version, &bytes);
             }
             0
@@ -1829,9 +1862,9 @@ macro_rules! __export_multi_internal {
                 }
             };
             // ADR-0114 §5: decompose, restore the boxed parent, then
-            // reconstruct each inline child by its saved actor tag. Public
-            // exports match directly; private actors use linked factories.
-            // Childless ⇒ the boxed parent sees the identical `PriorState`.
+            // reconstruct each inline child by matching its type tag against
+            // every exported type. Childless ⇒ the boxed parent sees the
+            // identical `PriorState`.
             let prior_bytes: &[u8] = if len == 0 {
                 &[]
             } else {
@@ -1842,7 +1875,7 @@ macro_rules! __export_multi_internal {
             let (__aether_contexts, __aether_user_version, __aether_user_bytes) =
                 $crate::split_state_envelope(version, prior_bytes);
             __AETHER_INLINE.restore_request_contexts(__aether_contexts);
-            let restored = $crate::wasm::inline::compose::reconstruct_inline_children(
+            $crate::wasm::inline::compose::reconstruct_inline_children(
                 __aether_user_version,
                 &__aether_user_bytes,
                 &__AETHER_INLINE,
@@ -1864,7 +1897,7 @@ macro_rules! __export_multi_internal {
                     $crate::__export_internal!(@reconstruct_child registry, parent, child ; $($component),+)
                 },
             );
-            if restored.is_err() { 1 } else { 0 }
+            0
         }
     };
 

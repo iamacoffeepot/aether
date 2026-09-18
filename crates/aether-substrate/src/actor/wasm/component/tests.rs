@@ -379,8 +379,9 @@ const WAT_WIRE_TRAPS: &str = r#"
                 unreachable))
     "#;
 
-/// WAT whose `unwire` traps. Teardown remains best effort, unlike
-/// the fallible dehydration preparation hook.
+/// WAT whose `unwire` traps. Tests that `Component::unwire`
+/// contains the trap (logs but doesn't propagate), same pattern
+/// as `on_dehydrate`'s trap-is-contained behaviour.
 const WAT_UNWIRE_TRAPS: &str = r#"
         (module
             (memory (export "memory") 1)
@@ -407,73 +408,6 @@ const WAT_SAVES_STATE: &str = r#"
                     (i32.const 4)))  ;; len
                 i32.const 0))
     "#;
-
-#[test]
-fn dehydration_trap_clears_transient_guard() {
-    let mut component = instantiate(
-        r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_dehydrate") (result i32) unreachable))
-    "#,
-    );
-    assert!(component.on_dehydrate().expect_err("trap must reject dehydration").to_string().contains("trapped"));
-    assert!(!component.store.data().dehydration_active);
-    assert!(component.store.data().dehydration_violation.is_none());
-}
-
-#[test]
-fn nonzero_dehydration_status_rejects_preparation() {
-    let mut component = instantiate(
-        r#"
-        (module
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_dehydrate") (result i32) i32.const 1))
-    "#,
-    );
-    assert!(
-        component.on_dehydrate().expect_err("nonzero status must reject dehydration").to_string().contains("status 1")
-    );
-    assert!(!component.store.data().dehydration_active);
-}
-
-#[test]
-fn forbidden_mail_rejects_dehydration_even_when_guest_ignores_status() {
-    let mut component = instantiate(
-        r#"
-        (module
-            (import "aether" "send_mail_p32" (func $send (param i64 i64 i32 i32 i32 i32 i64) (result i32)))
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_dehydrate") (result i32)
-                (drop (call $send
-                    (i64.const 1) (i64.const 2) (i32.const 0) (i32.const 0)
-                    (i32.const 1) (i32.const 0) (i64.const 0)))
-                i32.const 0))
-    "#,
-    );
-    let error = component.on_dehydrate().expect_err("ignored host error still rejects dehydration");
-    assert!(error.to_string().contains("send_mail"));
-    assert!(!component.store.data().dehydration_active);
-}
-
-#[test]
-fn ignored_oversize_save_rejects_dehydration() {
-    let mut component = instantiate(
-        r#"
-        (module
-            (import "aether" "save_state_p32" (func $save (param i32 i32 i32) (result i32)))
-            (memory (export "memory") 1)
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_dehydrate") (result i32)
-                (drop (call $save (i32.const 1) (i32.const 0) (i32.const 2097152)))
-                i32.const 0))
-    "#,
-    );
-    assert!(component.on_dehydrate().expect_err("oversize save must reject dehydration").to_string().contains("cap"));
-}
 
 /// ADR-0016 save-side: `on_dehydrate` attempts a save larger than
 /// the 1 MiB cap. The host fn records the error on the ctx and
@@ -591,7 +525,7 @@ fn wat_replies(kind_id: u64) -> String {
 fn on_dehydrate_invokes_export_and_writes_marker() {
     let mut component = instantiate(WAT_HOOKS);
     assert_eq!(component.read_u32(200), 0);
-    component.on_dehydrate().expect("dehydration succeeds");
+    component.on_dehydrate();
     assert_eq!(component.read_u32(200), 0x11);
 }
 
@@ -599,7 +533,7 @@ fn on_dehydrate_invokes_export_and_writes_marker() {
 fn on_dehydrate_on_component_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
     // Just needs to not panic. No marker to check.
-    assert!(component.on_dehydrate().expect("missing hook is a no-op").is_none());
+    component.on_dehydrate();
 }
 
 /// ADR-0090 / ADR-0095: `Component::instantiate` places `config_bytes` in a
@@ -768,10 +702,13 @@ fn instantiate_config_without_allocator_returns_clean_error() {
 #[test]
 fn on_dehydrate_save_state_populates_bundle() {
     let mut component = instantiate(WAT_SAVES_STATE);
-    let bundle = component.on_dehydrate().expect("dehydration succeeds").expect("bundle saved");
+    assert!(component.take_saved_state().is_none());
+    component.on_dehydrate();
+    let bundle = component.take_saved_state().expect("bundle saved");
     assert_eq!(bundle.version, 7);
     assert_eq!(bundle.bytes, vec![0xDE, 0xAD, 0xBE, 0xEF]);
-    assert!(component.store.data().saved_state.is_none());
+    // take_saved_state is destructive.
+    assert!(component.take_saved_state().is_none());
 }
 
 /// Issue 584 Phase 2b: `Component::wire` invokes the guest's
@@ -897,16 +834,18 @@ fn deliver_to_guest_without_allocator_dropped() {
 #[test]
 fn on_dehydrate_save_state_without_export_leaves_bundle_empty() {
     let mut component = instantiate(WAT_NO_HOOKS);
-    assert!(component.on_dehydrate().expect("missing hook is a no-op").is_none());
-    assert!(component.store.data().save_state_error.is_none());
+    component.on_dehydrate();
+    assert!(component.take_saved_state().is_none());
+    assert!(component.take_save_error().is_none());
 }
 
 #[test]
 fn save_state_over_cap_records_error_and_no_bundle() {
     let mut component = instantiate(WAT_SAVES_TOO_LARGE);
-    let err = component.on_dehydrate().expect_err("oversize save fails dehydration");
-    assert!(err.to_string().contains("exceeds"), "got: {err}");
-    assert!(component.store.data().saved_state.is_none());
+    component.on_dehydrate();
+    let err = component.take_save_error().expect("error recorded");
+    assert!(err.contains("exceeds"), "got: {err}");
+    assert!(component.take_saved_state().is_none());
 }
 
 #[test]
@@ -920,27 +859,11 @@ fn call_on_rehydrate_writes_bytes_and_invokes_hook() {
 }
 
 #[test]
-fn call_on_rehydrate_without_export_rejects_saved_state() {
+fn call_on_rehydrate_without_export_is_noop() {
     let mut component = instantiate(WAT_NO_HOOKS);
     let bundle = StateBundle { version: 1, bytes: vec![9, 9, 9] };
-    let error = component.call_on_rehydrate(&bundle).expect_err("saved state requires a restore export");
-    assert!(error.to_string().contains("no on_rehydrate_p32"));
-}
-
-#[test]
-fn call_on_rehydrate_rejects_nonzero_guest_status() {
-    let wat = format!(
-        r#"(module
-            (memory (export "memory") 1)
-            {WAT_REALLOC}
-            (func (export "receive_p32") (param i64 i32 i32 i32 i32 i64 i64) (result i32) i32.const 0)
-            (func (export "on_rehydrate_p32") (param i32 i32 i32) (result i32) i32.const 7))"#
-    );
-    let mut component = instantiate(&wat);
-    let error = component
-        .call_on_rehydrate(&StateBundle { version: 0, bytes: Vec::new() })
-        .expect_err("nonzero restore status rejects the candidate");
-    assert!(error.to_string().contains("status 7"));
+    // Silently discards the bundle per ADR-0016 §3.
+    component.call_on_rehydrate(&bundle).expect("noop ok");
 }
 
 #[test]
@@ -1306,7 +1229,7 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
     let unknown = MailboxId(0xDEAD_BEEF_u64);
     let kind = aether_data::KindId(0xABCD_u64);
@@ -1340,7 +1263,7 @@ fn unknown_recipient_without_outbound_warn_drops() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
     ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, MailboxId::NONE);
     assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
@@ -1361,7 +1284,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Inbound lineage: the chassis-driven tick chain we're "in"
     // when the wasm guest's on_tick handler fires its outbound.
@@ -1393,7 +1316,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
     // No `set_in_flight` call.
 
     ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, MailboxId::NONE);
@@ -1420,7 +1343,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
@@ -1586,7 +1509,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     let (captured, sink_id) = register_lineage_capture_sink(&registry, "inline_self_origin_sink");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == self` (a normally-addressed actor).
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
@@ -1606,7 +1529,7 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
 
     // `from == an inline-child alias` distinct from the component's own id.
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
@@ -1636,92 +1559,4 @@ fn pending_inline_alias_is_trusted_before_owner_publication() {
         !host_fns::is_own_cluster_alias(&ctx, MailboxId(aether_data::with_tag(Tag::Mailbox, 0xF0E1))),
         "a local prepared fact does not admit an unrelated identity"
     );
-}
-
-#[test]
-fn prepared_component_effects_abort_without_egress_and_publish_in_order() {
-    use aether_data::{EngineId, SessionToken, Uuid};
-
-    let (outbound, rx) = HubOutbound::attached_loopback();
-    let registry = Arc::new(Registry::new());
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
-    let sender = MailboxId(0x6134);
-    let recipient = MailboxId(0x6135);
-    let kind = aether_data::KindId(0x6136);
-    let session = SessionToken(Uuid::from_u128(0x6137));
-    let engine = EngineId(Uuid::from_u128(0x6138));
-
-    let mut rejected = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), Arc::clone(&outbound));
-    rejected.begin_replacement_preparation();
-    rejected.send(recipient, kind, vec![1], 1, sender);
-    rejected.emit_session_reply(session, "test.reply".to_owned(), vec![2], None, 23);
-    rejected.emit_engine_reply(engine, recipient, kind, vec![3], 1, 24);
-    assert!(rx.try_recv().is_err(), "candidate effects stay private while preparing");
-    drop(rejected);
-    assert!(rx.try_recv().is_err(), "dropping a rejected candidate publishes nothing");
-
-    let mut accepted = ComponentCtx::new(sender, registry, mailer, outbound);
-    accepted.begin_replacement_preparation();
-    accepted.send(recipient, kind, vec![4], 1, sender);
-    accepted.emit_session_reply(session, "test.reply".to_owned(), vec![5], None, 25);
-    accepted.emit_engine_reply(engine, recipient, kind, vec![6], 1, 26);
-    assert!(rx.try_recv().is_err(), "prepared effects remain private until publication");
-    accepted.publish_prepared_effects();
-
-    assert!(matches!(
-        rx.try_recv().expect("released mail egress"),
-        EgressEvent::UnresolvedMail { recipient_mailbox_id, kind_id, payload, source_mailbox_id, correlation_id: 1, .. }
-            if recipient_mailbox_id == recipient && kind_id == kind && payload == vec![4] && source_mailbox_id == Some(sender)
-    ));
-    assert!(matches!(
-        rx.try_recv().expect("released session reply"),
-        EgressEvent::ToSession { session: target, payload, correlation_id: 25, .. }
-            if target == session && payload == vec![5]
-    ));
-    assert!(matches!(
-        rx.try_recv().expect("released engine reply"),
-        EgressEvent::ToEngineMailbox { engine_id, mailbox_id, payload, correlation_id: 26, .. }
-            if engine_id == engine && mailbox_id == recipient && payload == vec![6]
-    ));
-    assert!(rx.try_recv().is_err(), "each accepted effect publishes once");
-
-    accepted.send(recipient, kind, vec![7], 1, sender);
-    assert!(matches!(
-        rx.try_recv().expect("ordinary dispatch resumes after publication"),
-        EgressEvent::UnresolvedMail { payload, correlation_id: 2, .. } if payload == vec![7]
-    ));
-}
-
-#[test]
-fn prepared_component_reply_keeps_echo_and_lineage() {
-    let registry = Arc::new(Registry::new());
-    let observed = Arc::new(Mutex::new(Vec::new()));
-    let captured = Arc::clone(&observed);
-    let recipient = registry
-        .try_register_inbox(
-            &boot_authority(),
-            "prepared.reply.target",
-            Arc::new(move |dispatch: OwnedDispatch| {
-                captured.lock().unwrap().push((dispatch.sender, dispatch.mail_id, dispatch.root, dispatch.parent_mail));
-                dispatch.discharge();
-            }),
-        )
-        .expect("register reply target");
-    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let sender = MailboxId(0x6134);
-    let mut ctx = ComponentCtx::new(sender, registry, mailer, HubOutbound::disconnected());
-    let parent = MailId::new(MailboxId(0x6135), 7);
-    let root = MailId::new(MailboxId(0x6136), 8);
-    ctx.begin_replacement_preparation();
-    ctx.set_in_flight(parent, root);
-    ctx.reply(recipient, aether_data::KindId(0x6137), vec![9], 1, 42, sender);
-    assert!(observed.lock().unwrap().is_empty(), "prepared reply cannot reach a local recipient");
-
-    ctx.publish_prepared_effects();
-    let received = observed.lock().unwrap();
-    assert_eq!(received.len(), 1);
-    assert_eq!(received[0].0.correlation_id, 42, "reply echoes its inbound correlation");
-    assert_eq!(received[0].1.sender, sender, "lineage records the guest origin");
-    assert_eq!(received[0].2, root, "reply inherits the in-flight root");
-    assert_eq!(received[0].3, Some(parent), "reply keeps the parent mail");
 }

@@ -39,9 +39,6 @@ serde = { workspace = true, default-features = false, features = ["alloc"] }
 # we don't pull `tracing-subscriber`.
 tracing = { workspace = true, default-features = false }
 
-[target.'cfg(target_family = "wasm")'.dependencies]
-inventory = { workspace = true }
-
 [dev-dependencies]
 # Examples migrate from kind-typed `Mailbox` resolutions to actor-
 # typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers

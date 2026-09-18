@@ -72,23 +72,15 @@ fn probe_child_alias<K: Kind>(harness: &mut SubstrateHarness, child_addr: &str, 
 /// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
-    assert_child_state_survives_replace("inline_child_stateful", "test.inline.stateful_parent", false);
-}
-
-#[test]
-fn replace_preserves_private_inline_child_state_without_public_export() {
-    assert_child_state_survives_replace("inline_child_private", "test.inline.parent", true);
-}
-
-fn assert_child_state_survives_replace(fixture_name: &str, parent_export: &str, private_child: bool) {
     use aether_actor::Addressable;
 
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FIXTURE_NAME: &str = "inline_child_stateful";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{fixture_name}", aether_component::WasmTrampoline::NAMESPACE);
+    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
     // The child's first-class lineage address: the parent's rendered name
     // plus the inline-child node (ADR-0114). The parent spawns it under
     // the `Named("widget")` subname in `wire`.
@@ -96,27 +88,6 @@ fn assert_child_state_survives_replace(fixture_name: &str, parent_export: &str, 
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-
-    if private_child {
-        let refused = harness
-            .execute(vec![(
-                "private_load",
-                HarnessOp::send_and_await_reply(
-                    "aether.component",
-                    &LoadComponent {
-                        wasm: wasm.clone(),
-                        name: Some("private-child-selector".to_owned()),
-                        config: Vec::new(),
-                        export: Some("test.inline.child".to_owned()),
-                    },
-                ),
-            )])
-            .expect("private selector result");
-        assert!(
-            matches!(refused.reply::<LoadResult>("private_load").expect("private load reply"), LoadResult::Err { .. }),
-            "the private child must not appear in the module's public actor manifest"
-        );
-    }
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
     // its mailbox id for the replace. The name override keeps the registered
@@ -129,16 +100,16 @@ fn assert_child_state_survives_replace(fixture_name: &str, parent_export: &str, 
                 "aether.component",
                 &LoadComponent {
                     wasm,
-                    name: Some(fixture_name.to_owned()),
+                    name: Some(FIXTURE_NAME.to_owned()),
                     config: Vec::new(),
-                    export: Some(parent_export.to_owned()),
+                    export: Some("test.inline.stateful_parent".to_owned()),
                 },
             ),
         )])
         .expect("load sequence");
     let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("{parent_export} load failed: {error}"),
+        LoadResult::Err { error } => panic!("inline_child_stateful load failed: {error}"),
     };
 
     // Bump the *child's* counter to 2 (mail demuxed to the child's alias),

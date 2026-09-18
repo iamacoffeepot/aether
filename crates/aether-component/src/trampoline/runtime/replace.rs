@@ -23,18 +23,6 @@ use crate::trampoline::WasmTrampoline;
 use super::config::WasmTrampolineConfig;
 use super::state::WasmTrampolineState;
 
-/// A candidate whose fallible construction and restoration have completed.
-/// Dropping this value aborts without changing the resident component or
-/// publishing guest effects.
-struct PreparedReplacement {
-    component: Component,
-    module: Module,
-    actor_caps: Vec<ActorInputs>,
-    wasm_bytes: Arc<[u8]>,
-    type_tag: Option<u64>,
-    capabilities: ComponentCapabilities,
-}
-
 impl WasmTrampolineState {
     /// Publish the logical inline-child routes a guest call staged. The
     /// owner batch is reserved admission; completion is a later no-reply
@@ -204,13 +192,9 @@ impl WasmTrampolineState {
             })
     }
 
-    fn prepare_replace(
-        &mut self,
-        ctx: &mut NativeCtx<'_>,
-        payload: ReplaceComponent,
-    ) -> Result<PreparedReplacement, String> {
+    pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
         if self.prohibit.contains(LifecycleFlags::REPLACE) {
-            return Err("component replacement prohibited by native bootstrap".to_owned());
+            return ReplaceResult::Err { error: "component replacement prohibited by native bootstrap".to_owned() };
         }
 
         // `payload.wasm` is the new module bytes; `mailbox_id` is
@@ -218,20 +202,30 @@ impl WasmTrampolineState {
         // this mail to us, so the field is informational).
         let _ = payload.mailbox_id;
 
-        let module =
-            Module::new(&self.engine, &payload.wasm).map_err(|error| format!("invalid wasm module: {error}"))?;
+        let module = match Module::new(&self.engine, &payload.wasm) {
+            Ok(m) => m,
+            Err(e) => {
+                return ReplaceResult::Err { error: format!("invalid wasm module: {e}") };
+            }
+        };
 
         // ADR-0033 / ADR-0096 / ADR-0097: parse every exported type's
         // capability group from the new wasm. The full `actors` set
         // refreshes `self.actor_caps` below so post-replace sibling
         // spawns see the new module's types.
-        let actors = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)?;
+        let actors = match kind_manifest::read_actor_inputs_from_bytes(&payload.wasm) {
+            Ok(a) => a,
+            Err(error) => return ReplaceResult::Err { error },
+        };
 
         // ADR-0096: resolve the effective tag the replacement
         // instantiates plus the capability group to advertise —
         // export-named, or the trampoline's current hosted type for a
         // bare replace. See [`Self::resolve_replace_target`].
-        let (mut capabilities, effective_tag) = self.resolve_replace_target(payload.export.as_deref(), &actors)?;
+        let (mut capabilities, effective_tag) = match self.resolve_replace_target(payload.export.as_deref(), &actors) {
+            Ok(resolved) => resolved,
+            Err(error) => return ReplaceResult::Err { error },
+        };
 
         // ADR-0163 §3 (#3984): re-index the replacement module's assets into
         // a load window. Its catalog feeds the post-swap
@@ -241,19 +235,36 @@ impl WasmTrampolineState {
         // so the window closes after instantiate). A malformed asset section
         // fails the replace loudly, before the swap runs.
         let new_wasm_bytes: Arc<[u8]> = Arc::from(payload.wasm.as_slice());
-        let load_window = asset_manifest::LoadWindow::index(Arc::clone(&new_wasm_bytes))?;
+        let load_window = match asset_manifest::LoadWindow::index(Arc::clone(&new_wasm_bytes)) {
+            Ok(window) => window,
+            Err(error) => return ReplaceResult::Err { error },
+        };
         capabilities.assets = load_window.catalog();
 
-        // The existing dehydration ABI is now a read-only, fallible prepare
-        // step. Keep the predecessor resident and wired through all candidate
-        // work; an error here or below leaves it usable at the same address.
-        let saved = self
-            .component
-            .as_mut()
-            .map(Component::on_dehydrate)
-            .transpose()
-            .map_err(|error| format!("on_dehydrate failed: {error}"))?
-            .flatten();
+        // Run unwire then on_dehydrate on the old instance and lift
+        // any saved-state bundle. If the trampoline is currently
+        // empty (post-DropComponent — load-after-drop refill),
+        // there's no prior wasm to drain; the new instance starts
+        // from scratch. Issue 584 Phase 2b: unwire fires first so
+        // the old instance can announce its retirement before the
+        // swap.
+        let saved = if let Some(mut old) = self.component.take() {
+            old.unwire();
+            old.on_dehydrate();
+            if let Some(err) = old.take_save_error() {
+                // Restore the old component so the trampoline isn't
+                // accidentally emptied by a save-state failure.
+                self.component = Some(old);
+                return ReplaceResult::Err { error: err };
+            }
+            let saved = old.take_saved_state();
+            // Old component drops at end of scope — the `Component`'s
+            // own `Drop` releases the wasm store.
+            drop(old);
+            saved
+        } else {
+            None
+        };
 
         // Build a fresh `ComponentCtx` for the new instance — same
         // mailer + registry/outbound/input references, new
@@ -266,7 +277,6 @@ impl WasmTrampolineState {
             Arc::clone(&self.outbound),
         );
         substrate_ctx.install_binding(ctx.transport_arc());
-        substrate_ctx.begin_replacement_preparation();
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
@@ -276,56 +286,58 @@ impl WasmTrampolineState {
         // bytes into the new instance's typed `init`, the same way
         // the load path does. Empty means "no config"; a typed-config
         // guest decodes its `Self::Config` from these bytes.
-        let mut new_component =
-            Component::instantiate(&self.engine, &self.linker, &module, substrate_ctx, &payload.config, effective_tag)
-                .map_err(|error| format!("wasm instantiation failed: {error}"))?;
+        let mut new_component = match Component::instantiate(
+            &self.engine,
+            &self.linker,
+            &module,
+            substrate_ctx,
+            &payload.config,
+            effective_tag,
+        ) {
+            Ok(c) => c,
+            Err(e) => {
+                return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
+            }
+        };
         // ADR-0163 §3 (#3984): replace re-runs `init` but not `wire`, so the
         // load window's job ends once the replacement instantiated — close
         // it, retaining the catalog metadata for the instance's life.
         new_component.close_load_window();
 
-        if let Some(bundle) = saved {
-            new_component.call_on_rehydrate(&bundle).map_err(|error| format!("on_rehydrate failed: {error}"))?;
-        }
-
-        // Rehydrated inline children keep their existing published aliases.
-        // New alias changes and detached births require fallible owner
-        // admission that this handler cannot guarantee before its success
-        // reply, so reject that topology before retiring the predecessor.
-        if !new_component.drain_pending_spawns().is_empty() {
-            return Err(
-                "replacement candidate requested sibling births during preparation; topology admission is unsupported"
-                    .to_owned(),
-            );
-        }
-        if !new_component.drain_pending_aliases().is_empty()
-            || !new_component.drain_pending_alias_retirements().is_empty()
-        {
-            return Err("replacement candidate changed inline-child aliases during preparation; topology admission is unsupported".to_owned());
-        }
-
-        Ok(PreparedReplacement {
-            component: new_component,
-            module,
-            actor_caps: actors,
-            wasm_bytes: new_wasm_bytes,
-            type_tag: effective_tag,
-            capabilities,
-        })
-    }
-
-    fn commit_replace(&mut self, prepared: PreparedReplacement) -> ReplaceResult {
-        let PreparedReplacement { component, module, actor_caps, wasm_bytes, type_tag, capabilities } = prepared;
-        if let Some(mut old) = self.component.take() {
-            // Acceptance is final. A contained teardown trap is diagnostic.
-            old.unwire();
-        }
-
-        self.component = Some(component);
+        // ADR-0097: the new module is now resident — retain it (and
+        // the refreshed per-type cap map) so sibling spawns after this
+        // replace re-instantiate the new code, not the old.
         self.module = module;
-        self.actor_caps = actor_caps;
-        self.wasm_bytes = wasm_bytes;
-        self.type_tag = type_tag;
+        self.actor_caps = actors;
+        // ADR-0163 §3 (#3984): future sibling spawns index the new module's
+        // assets, not the replaced module's.
+        self.wasm_bytes = new_wasm_bytes;
+        // ADR-0096: track the actor type this trampoline now hosts, so
+        // a later bare (`export: None`) replace reuses the *current*
+        // type rather than reverting to the original load's. A bare
+        // replace leaves this unchanged (`effective_tag == self.type_tag`).
+        self.type_tag = effective_tag;
+
+        // ADR-0016 §4: rehydrate the new instance if the old one
+        // produced a bundle. A failed rehydrate still installs the
+        // new component (the old one is already gone) and surfaces
+        // the error so the agent decides whether to roll forward.
+        if let Some(bundle) = saved
+            && let Err(e) = new_component.call_on_rehydrate(&bundle)
+        {
+            let (aliases, retired) =
+                (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
+            self.component = Some(new_component);
+            self.stage_inline_aliases(ctx, aliases);
+            self.stage_inline_alias_retirements(ctx, retired);
+            return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
+        }
+
+        let (aliases, retired) =
+            (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
+        self.component = Some(new_component);
+        self.stage_inline_aliases(ctx, aliases);
+        self.stage_inline_alias_retirements(ctx, retired);
 
         // iamacoffeepot/aether#1037: re-register the trampoline's
         // capabilities against the post-replace handler set. The
@@ -358,15 +370,7 @@ impl WasmTrampolineState {
         let seeded = self.mailer.cost_table().seed(self.mailbox, &handler_kinds);
         CostCells::try_with_mut(|cells| cells.seed(seeded));
 
-        self.component.as_mut().expect("replacement component installed").publish_prepared_effects();
         ReplaceResult::Ok { capabilities }
-    }
-
-    pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
-        match self.prepare_replace(ctx, payload) {
-            Ok(prepared) => self.commit_replace(prepared),
-            Err(error) => ReplaceResult::Err { error },
-        }
     }
 }
 

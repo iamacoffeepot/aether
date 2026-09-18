@@ -150,7 +150,7 @@ mod tests {
             "test.activation.recipient",
             forward_to_envelope_sender(recipient_tx),
         );
-        let (mut ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), sender);
+        let (ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let parent = MailId::new(MailboxId(0x0041_4502), 7);
         let root = MailId::new(MailboxId(0x0041_4503), 9);
@@ -220,7 +220,7 @@ mod tests {
             "test.mixed.recipient",
             forward_to_envelope_sender(recipient_tx),
         );
-        let (mut ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), component);
+        let (ctx, binding) = component_ctx_with_binding(Arc::clone(&registry), Arc::clone(&mailer), component);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         binding.hold_outbound_for_activation();
@@ -261,7 +261,7 @@ mod tests {
             "test.activation.reject",
             forward_to_envelope_sender(recipient_tx),
         );
-        let (mut ctx, binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
+        let (ctx, binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         binding.hold_outbound_for_activation();
@@ -287,7 +287,7 @@ mod tests {
             "test.activation.live",
             forward_to_envelope_sender(recipient_tx),
         );
-        let (mut ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
+        let (ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         ctx.send(recipient, KindId(0x0041_4522), vec![6], 1, MailboxId::NONE);

@@ -21,12 +21,9 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, Mail, MailSender, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx,
-    actor,
+    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
-use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, TickObserved,
-};
+use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 /// Entry export — the first type in the `export!` list. Holds a counter
 /// that must survive `replace_component`.
@@ -59,9 +56,8 @@ impl WasmActor for Counter {
     /// Save-side hot-swap hook: serialize the live counter so the
     /// replacement instance can pick it up. `CountReport` doubles as the
     /// wire shape of the saved bundle.
-    fn on_dehydrate(&self, ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
         ctx.save_state_kind::<CountReport>(0, &CountReport { count: self.count });
-        Ok(())
     }
 
     /// Restore-side hot-swap hook: recover the counter the predecessor
@@ -86,14 +82,6 @@ impl WasmActor for Sidecar {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Sidecar)
-    }
-
-    /// Replacement rejection fixture: a candidate emits mail and a guest
-    /// log before trapping. Neither effect may escape its preparation buffer.
-    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
-        ctx.send_to_named::<TickObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &TickObserved { count: 6134 });
-        tracing::info!(target: "aether_test_fixture_rejected_rehydrate", "candidate_before_rehydrate_trap");
-        panic!("intentional Sidecar rehydrate failure");
     }
 
     #[fallback]

@@ -455,12 +455,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // hooks (or its own hand-written ones, carried in `lifecycle_methods`).
     let generated_state_hooks = if state_type.is_some() {
         quote! {
-            fn on_dehydrate(&self, __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>) -> ::core::result::Result<(), ::aether_actor::__macro_internals::String> {
+            fn on_dehydrate(&mut self, __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>) {
                 let __aether_state = self.dehydrate();
                 ::aether_actor::Persistence::save_state_kind::<
                     <Self as ::aether_actor::WasmActor>::Persist,
                 >(__aether_ctx, 0, &__aether_state);
-                ::core::result::Result::Ok(())
             }
 
             fn on_rehydrate(
@@ -545,23 +544,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     };
 
     let export_desc = emit_actor_export_desc(self_ty, namespace_expr);
-    // A linked static needs a concrete type. Generic actor implementations
-    // have no monomorphization to register until a caller selects one.
-    let reconstruction_factory = if generics.params.is_empty() {
-        quote! {
-            #[cfg(target_family = "wasm")]
-            ::aether_actor::__macro_internals::inventory::submit! {
-                ::aether_actor::wasm::inline::factory::ReconstructionFactory {
-                    namespace: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
-                    type_tag: ::aether_actor::ActorTypeTag::of::<#self_ty>(),
-                    placement: <#self_ty>::__AETHER_PLACEMENT,
-                    reconstruct: ::aether_actor::wasm::inline::compose::reconstruct_one_child_at_parent::<#self_ty>,
-                }
-            }
-        }
-    } else {
-        quote! {}
-    };
 
     Ok(quote! {
         #actor_impl
@@ -664,10 +646,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.as_single());
             }
             fn erased_on_dehydrate(
-                &self,
+                &mut self,
                 __aether_ctx: &mut ::aether_actor::WasmDropCtx<'_>,
-            ) -> ::core::result::Result<(), ::aether_actor::__macro_internals::String> {
-                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx)
+            ) {
+                <#self_ty as ::aether_actor::WasmActor>::on_dehydrate(self, __aether_ctx);
             }
             fn erased_on_rehydrate(
                 &mut self,
@@ -681,7 +663,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #kind_retention_statics
 
         #export_desc
-        #reconstruction_factory
     })
 }
 

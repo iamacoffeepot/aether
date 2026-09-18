@@ -42,27 +42,6 @@ fn install_inline_child_reports_init_failure() {
     );
 }
 
-#[test]
-fn install_inline_child_rejects_zero_alias_before_init() {
-    let registry = Registry::new();
-    STUB_INIT_CONFIG.set(None);
-
-    let result = install_inline_child::<StubChild>(
-        &registry,
-        MailboxId::NONE,
-        ActorTypeTag::of::<StubChild>().0,
-        String::from("child"),
-        false,
-        0,
-        Vec::new(),
-        StubConfig { value: 42 },
-    );
-
-    assert!(matches!(result, Err(SpawnError::AliasAllocationFailed)));
-    assert_eq!(STUB_INIT_CONFIG.get(), None, "a zero alias stops before child init");
-    assert!(registry.child_metas().is_empty(), "a zero alias stops before registry insertion");
-}
-
 /// Step 3: subname validation parity with `spawn_child` — a
 /// separator-bearing `Named` subname is rejected up front with
 /// [`SpawnError::SubnameInvalid`], before any host round-trip (so the

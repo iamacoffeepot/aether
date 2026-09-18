@@ -17,8 +17,7 @@
 //! child's address over the real wire and assert the *child* (not the
 //! parent) replied. `InlineChild` is `Instanced` (the `spawn_inline_child`
 //! bound); it is not in the `export!` list because an inline child is
-//! constructed in-process by the parent, not instantiated by the host. It
-//! also carries a counter for private-child replacement regression coverage.
+//! constructed in-process by the parent, not instantiated by the host.
 //!
 //! # `InlineStatefulParent` / `InlineStatefulChild`
 //!
@@ -27,7 +26,8 @@
 //! `InlineStatefulChild` in `wire` via `ctx.spawn_inline_child`. The
 //! child declares `type State = InlineCounterState` (ADR-0113), so the
 //! `#[actor]` macro generates its hot-swap hooks; both types are in the
-//! public `export!` list, exercising the direct public reconstruction path.
+//! `export!` list so the rehydrate path can reconstruct the child by type
+//! after a `replace_component` swap.
 //!
 //! Consumers load this actor from the `inline_child` bundle with
 //! `export: Some("test.inline.stateful_parent")`.
@@ -92,7 +92,7 @@ use aether_test_fixtures_kinds::{
     InlineConfiguredChildConfig, InlineEcho, InlineProbe, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
 };
 
-/// Durable state the inline child fixtures carry across `replace_component`.
+/// Durable state the `InlineStatefulChild` carries across `replace_component`.
 /// Uses the `aether.test_fixtures.inline_counter_state` shape so the macro
 /// frames it via `save_state_kind` on dehydrate and recovers it via
 /// `decode_kind` on rehydrate.
@@ -137,39 +137,16 @@ impl WasmActor for InlineParent {
 }
 
 /// Inline child for the basic `InlineParent` fixture. Its exact placement
-/// matches the only actor that constructs it. It remains private to the
-/// module's export list while retaining state across replacement.
-pub struct InlineChild {
-    count: u32,
-}
+/// matches the only actor that constructs it. `Instanced` satisfies the
+/// `spawn_inline_child` bound; it is not exported.
+pub struct InlineChild;
 
 #[actor(instanced, child_of(InlineParent))]
 impl WasmActor for InlineChild {
     const NAMESPACE: &'static str = "test.inline.child";
-    type State = InlineCounterState;
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(InlineChild { count: 0 })
-    }
-
-    fn dehydrate(&self) -> InlineCounterState {
-        InlineCounterState { count: self.count }
-    }
-
-    fn rehydrate(&mut self, state: InlineCounterState) {
-        self.count = state.count;
-    }
-
-    #[handler::single]
-    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
-        self.count += 1;
-    }
-
-    #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&CountReport { count: self.count });
-        }
+        Ok(InlineChild)
     }
 
     /// Answer an `InlineProbe` addressed to the child's alias with the
