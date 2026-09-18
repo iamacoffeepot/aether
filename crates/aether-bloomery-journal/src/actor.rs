@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::Journal;
 use aether_actor::actor;
-use aether_bloomery_journal::Journal;
 use aether_bloomery_kinds::{
     JournalEntry, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq,
     artifact_digest,

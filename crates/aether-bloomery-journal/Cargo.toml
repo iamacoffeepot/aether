@@ -7,13 +7,17 @@ publish = false
 description = "Append-only SQLite log of typed Storage events and content-addressed artifacts (ADR-0220)."
 
 [dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-substrate = { path = "../aether-substrate" }
 rusqlite = { workspace = true }
 
 [dev-dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-kinds = { path = "../aether-kinds" }
+aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 tempfile = "3"
 
 [lints]

@@ -23,7 +23,6 @@ members = [
     "crates/aether-bloomery-reactor",
     "crates/aether-bloomery-reactor-derive",
     "crates/aether-bloomery-journal",
-    "crates/aether-bloomery-journal-actor",
     "crates/aether-bloomery-kinds",
     "crates/aether-bloomery-program",
     "crates/aether-http-derive",
@@ -136,7 +135,6 @@ default-members = [
     "crates/aether-bloomery-reactor",
     "crates/aether-bloomery-reactor-derive",
     "crates/aether-bloomery-journal",
-    "crates/aether-bloomery-journal-actor",
     "crates/aether-bloomery-kinds",
     "crates/aether-bloomery-program",
 ]

@@ -1,4 +1,4 @@
-//! Portable journal query mail and the exact stored-entry envelope.
+//! Portable journal mail and the exact stored-entry envelope.
 
 use alloc::string::String;
 use alloc::vec::Vec;

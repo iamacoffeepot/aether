@@ -6,8 +6,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::actor;
-use aether_bloomery_journal::{Batch, Journal, Seq};
-use aether_bloomery_journal_actor::JournalActor;
+use aether_bloomery_journal::{Batch, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
