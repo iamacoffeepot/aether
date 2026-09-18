@@ -5,7 +5,7 @@ use alloc::vec::Vec;
 
 use aether_data::KindId;
 
-use crate::{Entry, Seq};
+use crate::{Digest, Entry, Seq};
 
 /// One recorded entry carried over mail. Payload bytes retain their storage encoding.
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Schema, serde::Serialize, serde::Deserialize)]
@@ -90,4 +90,37 @@ pub enum ReadHeadResult {
     Ok { head: u64 },
     /// Journal backend failure.
     Err { message: String },
+}
+
+/// Query one content-addressed artifact through its journal owner.
+#[aether_data::kind(name = "aether.bloomery.journal.read_artifact", copy, eq, no_serde)]
+pub struct ReadArtifact {
+    /// Digest of the kind-prefixed stored blob.
+    pub digest: Digest,
+}
+
+/// Kind and unprefixed payload of one stored artifact, or an explicit refusal.
+#[aether_data::kind(name = "aether.bloomery.journal.read_artifact_result", eq, no_serde)]
+pub enum ReadArtifactResult {
+    /// Stored bytes whose kind and payload hash to the requested digest.
+    Found {
+        /// Requested digest.
+        digest: Digest,
+        /// Stored artifact kind.
+        kind: KindId,
+        /// Stored payload after the eight-byte kind prefix.
+        bytes: Vec<u8>,
+    },
+    /// No artifact exists at the requested digest.
+    Missing {
+        /// Requested digest.
+        digest: Digest,
+    },
+    /// Corrupt stored bytes or a journal backend failure.
+    Err {
+        /// Requested digest.
+        digest: Digest,
+        /// Human-readable failure.
+        message: String,
+    },
 }
