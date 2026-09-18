@@ -1,7 +1,7 @@
 //! Generated reactor-bundle WASM: stream-bound Event/EventBatch, shared views,
 //! guard decline, and isolated clusters.
 //!
-//! Loads the compiled `aether_test_fixtures_bundle` wasm. A skip when the
+//! Loads the compiled `aether_test_fixtures_reactor` wasm. A skip when the
 //! artifact is absent is not proof of this wiring.
 
 use std::fs;
@@ -125,7 +125,7 @@ fn evaluated_ok_seqs(report: &CollectReactorOutputsResult) -> Vec<u64> {
 }
 
 fn boot() -> Option<(SubstrateHarness, PathBuf)> {
-    let wasm_path = require_wasm("aether_test_fixtures_bundle")?;
+    let wasm_path = require_wasm("aether_test_fixtures_reactor")?;
     let harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     Some((harness, wasm_path))
 }

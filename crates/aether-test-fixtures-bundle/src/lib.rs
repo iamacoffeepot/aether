@@ -1,7 +1,7 @@
 //! The main test-fixture bundle: the bulk of the workspace's wasm
 //! fixtures consolidated into one ADR-0096 multi-actor module. One
 //! `src/<name>.rs` module per former fixture; a single
-//! `export!(default = Probe, …, generators = [bundle_reactors])` packs all of
+//! `export!(default = Probe, …)` packs all of
 //! them into one cdylib, with `Probe` the opted-in default (ADR-0138) so a
 //! bare `load` of `aether_test_fixtures_bundle.wasm` instantiates it. The
 //! integration tests load this one wasm and select an in-bundle actor with
@@ -24,7 +24,6 @@ mod matrix_sweep;
 mod multi_actor;
 mod peer_routing;
 mod probe;
-mod reactor_cluster;
 mod source_observer;
 mod stateful_replace;
 mod tcp_load_probe;
@@ -46,7 +45,6 @@ pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
-pub use reactor_cluster::{ReactorOutputSink, SourcePublisher, SourceWitness};
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
@@ -90,10 +88,6 @@ aether_actor::export!(
     Counter,
     Sidecar,
     TcpLoadProbe,
-    SourcePublisher,
-    SourceWitness,
-    ReactorOutputSink,
-    generators = [aether_bloomery_reactor::bundle_reactors],
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

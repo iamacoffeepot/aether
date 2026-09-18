@@ -1,5 +1,5 @@
-//! Generated reactor-bundle fixture: two source-publication reactors share one
-//! views owner inside a WASM cluster.
+//! Reactor-bundle fixture: two source-publication reactors share one views
+//! owner inside a WASM cluster.
 //!
 //! Authors declare reactors and guards. `export!(…, generators = [bundle_reactors])`
 //! keeps ordinary actors (including imported names) and generates one views
@@ -191,3 +191,10 @@ impl WasmActor for ReactorOutputSink {
         }
     }
 }
+
+aether_actor::export!(
+    default = ReactorOutputSink,
+    SourcePublisher,
+    SourceWitness,
+    generators = [aether_bloomery_reactor::bundle_reactors],
+);

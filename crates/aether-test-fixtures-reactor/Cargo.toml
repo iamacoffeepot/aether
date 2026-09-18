@@ -1,0 +1,23 @@
+[package]
+name = "aether-test-fixtures-reactor"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM fixture for reactor bundles. Structural discovery (cdylib +
+# aether-actor) includes it in `cargo xtask build-wasm`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+aether-bloomery-view = { path = "../aether-bloomery-view" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+serde = { workspace = true, default-features = false, features = ["derive"] }
+
+[lints]
+workspace = true

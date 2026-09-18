@@ -14,9 +14,20 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 
 [dev-dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
+aether-component = { path = "../aether-component" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-kinds = { path = "../aether-kinds" }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+aether-test-fixtures-reactor = { path = "../aether-test-fixtures-reactor" }
+
+# The tests load this fixture's built wasm by stem, so the cargo edge exists
+# solely for determinator and dist pre-build visibility.
+[package.metadata.cargo-machete]
+ignored = ["aether-test-fixtures-reactor"] # aether-suppression-request: the fixture edge exists for determinator/dist visibility (its wasm is loaded by stem, never imported)
 
 [lints]
 workspace = true
