@@ -82,8 +82,7 @@ pub struct ChildEntry {
     /// the guest inline-child registry.
     pub alias_id: u64,
     /// The actor-type tag (`mailbox_id_from_name(NAMESPACE)`) the
-    /// rehydrate reconstruct resolves against public exports or linked
-    /// private-actor factories.
+    /// rehydrate reconstruct matches against the module's exported types.
     pub type_tag: u64,
     /// Whether the original spawn used a counter discriminator.
     pub is_counter: bool,

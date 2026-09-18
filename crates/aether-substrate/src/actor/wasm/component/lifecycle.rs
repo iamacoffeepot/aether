@@ -39,34 +39,26 @@ impl Component {
         }
     }
 
-    /// Prepare migration state while the predecessor remains live. Any guest
-    /// trap, nonzero status, save rejection, or forbidden effect aborts the
-    /// operation; the caller may then keep using the predecessor.
-    pub fn on_dehydrate(&mut self) -> wasmtime::Result<Option<StateBundle>> {
-        let Some(hook) = self.on_dehydrate.clone() else {
-            return Ok(None);
-        };
+    /// Invoke the guest's `on_dehydrate` hook if it exports one.
+    /// Wasmtime traps (guest panics, unreachable) are caught and
+    /// logged rather than propagated — per ADR-0015, a panicking
+    /// hook must not stall teardown.
+    pub fn on_dehydrate(&mut self) {
+        if let Some(f) = self.on_dehydrate.clone()
+            && let Err(e) = f.call(&mut self.store, ())
         {
-            let ctx = self.store.data_mut();
-            ctx.saved_state = None;
-            ctx.save_state_error = None;
-            ctx.dehydration_violation = None;
-            ctx.dehydration_active = true;
+            tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
         }
-        let call = hook.call(&mut self.store, ());
-        let ctx = self.store.data_mut();
-        ctx.dehydration_active = false;
-        let violation = ctx.dehydration_violation.take();
-        let save_error = ctx.save_state_error.take();
-        let saved = ctx.saved_state.take();
-        if let Some(error) = violation.or(save_error) {
-            return Err(wasmtime::Error::msg(format!("dehydration rejected: {error}")));
-        }
-        let status = call.map_err(|error| wasmtime::Error::msg(format!("dehydration trapped: {error}")))?;
-        if status != 0 {
-            return Err(wasmtime::Error::msg(format!("dehydration returned status {status}")));
-        }
-        Ok(saved)
+    }
+
+    /// Extract the state bundle the guest deposited via `save_state`
+    /// during `on_dehydrate`. Returns `None` if `save_state` was never
+    /// called (component doesn't implement migration, or the hook is
+    /// a no-op). Called by the control plane *after* `on_dehydrate`
+    /// runs on the old instance — the bundle has to outlive the
+    /// store.
+    pub fn take_saved_state(&mut self) -> Option<StateBundle> {
+        self.store.data_mut().saved_state.take()
     }
 
     /// ADR-0097: drain every sibling-spawn request the guest staged via
@@ -93,22 +85,26 @@ impl Component {
         self.store.data_mut().take_pending_alias_retirements()
     }
 
-    pub fn publish_prepared_effects(&mut self) {
-        self.store.data_mut().publish_prepared_effects();
+    /// Extract a failure recorded by `save_state` (size cap, OOB).
+    /// `None` on clean saves and on components that didn't attempt a
+    /// save. Checked by the control plane to decide whether to abort
+    /// the replace (ADR-0016 §4).
+    pub fn take_save_error(&mut self) -> Option<String> {
+        self.store.data_mut().save_state_error.take()
     }
 
     /// Write the prior-state bytes into a delivery region (ADR-0095, via
-    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. A saved bundle
-    /// requires a restore export; silently discarding it would
-    /// accept a successor that cannot reconstruct the predecessor's state.
+    /// `place`) and invoke `on_rehydrate(version, ptr, len)`. Returns
+    /// `Ok(())` if the instance doesn't export `on_rehydrate` (ADR-0016 §3: the
+    /// bundle is silently discarded when no handler claims it).
     ///
     /// ADR-0016 §4 specifies that a trap here aborts the replace, so errors are
-    /// propagated rather than contained (unlike `unwire`). A
+    /// propagated rather than contained (unlike `on_dehydrate` / `unwire`). A
     /// region that can't be allocated, or a bundle past the deliverable ceiling,
     /// propagates as an `Err` too.
     pub fn call_on_rehydrate(&mut self, bundle: &StateBundle) -> wasmtime::Result<()> {
         let Some(f) = self.on_rehydrate.clone() else {
-            return Err(wasmtime::Error::msg("cannot rehydrate saved state: guest exports no on_rehydrate_p32"));
+            return Ok(());
         };
         let len = bundle.bytes.len();
         // Wasm32 ABI carries `u32` byte lengths; bundle bytes are
@@ -136,10 +132,7 @@ impl Component {
         if !bundle.bytes.is_empty() {
             self.memory.write(&mut self.store, ptr as usize, &bundle.bytes)?;
         }
-        let status = f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
-        if status != 0 {
-            return Err(wasmtime::Error::msg(format!("on_rehydrate returned failure status {status}")));
-        }
+        f.call(&mut self.store, (bundle.version, ptr, byte_len))?;
         Ok(())
     }
 

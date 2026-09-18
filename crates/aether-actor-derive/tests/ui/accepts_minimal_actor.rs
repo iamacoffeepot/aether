@@ -34,9 +34,4 @@ impl aether_actor::WasmActor for Minimal {
     fn on_ping(&mut self, _ctx: &mut aether_actor::WasmCtx<'_>, _ping: Ping) {}
 }
 
-fn main() {
-    let _: for<'a> fn(
-        &Minimal,
-        &mut aether_actor::WasmDropCtx<'a>,
-    ) -> Result<(), aether_actor::__macro_internals::String> = <Minimal as aether_actor::WasmActor>::on_dehydrate;
-}
+fn main() {}

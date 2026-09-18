@@ -11,7 +11,6 @@
 //! fixture wasm and sets `AETHER_REQUIRE_RUNTIME=1`, flipping the skip
 //! into a hard panic so a missing pre-build is loud.
 
-use std::error::Error;
 use std::fs;
 use std::path::Path;
 
@@ -637,108 +636,6 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
         "the counter must survive the multi-actor replace via on_dehydrate / on_rehydrate; \
          got {post_count:?} (0 means the hooks did not run through the boxed instance)",
     );
-}
-
-#[test]
-fn rejected_candidates_preserve_the_stateful_predecessor_and_publish_no_candidate_mail() -> Result<(), Box<dyn Error>> {
-    use aether_actor::Addressable;
-
-    let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
-        return Ok(());
-    };
-    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let address = format!("aether.component/{}:transactional_counter", WasmTrampoline::NAMESPACE);
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.clone(),
-                    name: Some("transactional_counter".to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.stateful.counter".to_owned()),
-                },
-            ),
-        )])
-        .expect("load counter");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode load result") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("counter load failed: {error}"),
-    };
-    harness
-        .execute(vec![("bump", HarnessOp::send_and_settle::<Bump>(address.as_str(), &Bump))])
-        .expect("bump predecessor");
-
-    let failed_init = harness
-        .execute(vec![(
-            "replace",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm: wasm.clone(),
-                    drain_timeout_ms: None,
-                    config: vec![0xff],
-                    export: Some("test.probe_with_config".to_owned()),
-                },
-            ),
-        )])
-        .expect("replace with malformed candidate config");
-    assert!(matches!(failed_init.reply::<ReplaceResult>("replace")?, ReplaceResult::Err { .. }));
-    let after_init = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
-        .expect("query predecessor after rejected init");
-    assert_eq!(after_init.reply::<CountReport>("query")?, CountReport { count: 1 });
-
-    let failed_rehydrate = harness
-        .execute(vec![(
-            "replace",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm: wasm.clone(),
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: Some("test.stateful.sidecar".to_owned()),
-                },
-            ),
-        )])
-        .expect("replace with trapping candidate");
-    assert!(matches!(failed_rehydrate.reply::<ReplaceResult>("replace")?, ReplaceResult::Err { .. }));
-    assert_eq!(
-        harness.count_observed(TICK_OBSERVED),
-        0,
-        "mail emitted by the candidate before its rehydrate trap must be discarded",
-    );
-    let after_rehydrate = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
-        .expect("query predecessor after rejected rehydrate");
-    assert_eq!(after_rehydrate.reply::<CountReport>("query")?, CountReport { count: 1 });
-
-    let accepted = harness
-        .execute(vec![(
-            "replace",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &ReplaceComponent {
-                    mailbox_id,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: Some("test.stateful.counter".to_owned()),
-                },
-            ),
-        )])
-        .expect("replace with healthy candidate");
-    assert!(matches!(accepted.reply::<ReplaceResult>("replace")?, ReplaceResult::Ok { .. }));
-    let restored = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(address.as_str(), &CountQuery))])
-        .expect("query accepted successor");
-    assert_eq!(restored.reply::<CountReport>("query")?, CountReport { count: 1 });
-    Ok(())
 }
 
 /// ADR-0113: a single-actor component carries its declared `type State`

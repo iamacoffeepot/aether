@@ -1,26 +1,105 @@
 # Replacement failure states
 
-`replace_component` now prepares a successor while the old guest remains usable. A `ReplaceResult::Err` means the preparation was rejected: the old guest, its stable mailbox and inline-child routes, and its registered capabilities remain in place. If the slot was already empty after `drop_component`, it remains empty. Read [Component registry](../component-registry.md) for normal load, replace, and drop behavior.
+`replace_component` preserves a trampoline mailbox on success, but an error is
+not a universal rollback signal. The old guest, an empty slot, or the new guest
+can remain depending on which phase failed. Introspection can also describe a
+retained capability snapshot rather than the guest that is actually installed.
 
-| Phase | Result on failure |
-|---|---|
-| Module compile, manifest, export, or asset validation | No guest lifecycle hook runs; prior slot and descriptions stay unchanged. |
-| Read-only `on_dehydrate` | A trap, nonzero status, forbidden effect, or failed state save rejects preparation while the predecessor is still wired. |
-| Candidate `init` or `on_rehydrate` | The private candidate and its outbound mail, replies, and log events are discarded. The predecessor continues to answer at its original address. |
-| Candidate topology | New aliases, alias retirements, and detached sibling births requested during preparation are rejected until owner admission can be guaranteed atomically. Existing inline aliases survive a successful reconstruction. |
-| Accepted replacement | Old `unwire` runs, then the successor, module metadata, capabilities, and cost cells become current. Buffered candidate effects are released once. |
+Read [Component registry](../component-registry.md) first for normal load,
+replace, and drop behavior.
 
-The same `on_dehydrate`/`save_state` ABI captures state before old `unwire`. The SDK exposes an immutable actor borrow and a persistence-only context for this preparation step. Guest authors must also avoid logical mutation through interior mutability or raw Wasm; the host can block imported effects but cannot prove every instruction is pure. A saved bundle requires a working restore export. Required inline-child reconstruction failures reject the candidate. An intentional typed-state schema mismatch handled by the guest's migration policy can still boot fresh under [ADR-0113](../../../adr/0113-kind-typed-actor-state.md).
+## Phase-dependent residue
 
-An `unwire` trap after acceptance is logged and contained. It does not turn an accepted replacement into an error that suggests rollback. Native DROP and REPLACE restrictions continue to apply to the slot, including an empty slot after a permitted drop.
+| Failure phase | Guest left behind | Capability/introspection risk |
+|---|---|---|
+| new wasm compile, manifest parse, or export selection | prior slot is unchanged: old guest or an already-empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
+| `save_state` host-call rejection during dehydrate | old guest object is restored after its unwire/dehydrate hooks already ran | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
+| new guest instantiation failure after old guest was taken | trampoline can be empty | old capability registry and MCP cache can remain even though no guest is live |
+| new guest rehydrate failure | new guest remains installed despite `Err` | capability re-registration has not run; old substrate and MCP descriptions can remain |
+| successful replacement | new guest remains and new capabilities are registered | MCP refreshes its cache from the success result |
 
-To investigate a rejected replacement, keep the returned error together with the requested content hash, export, config, and mailbox id. A harmless application query can confirm the predecessor's state. `describe_component` is useful for capability comparison, but the MCP process can return a cached description; use a live query when liveness matters. An empty slot can be refilled through `replace_component` when replacement is allowed.
+The exact phase matters more than the generic `Err` shape. Do not say
+“replacement rolled back” unless a current behavioral observation proves the
+old guest still serves the mailbox.
 
-The same-handler result covers one component replacement. It is not an atomic commit with a separate journal append or other external transaction; that boundary requires its own prepare/commit coordination.
+An `unwire` or `on_dehydrate` guest trap is different: those traps are logged
+and contained rather than returned as `ReplaceResult::Err`, and replacement
+continues. Only a rejected `save_state` host call is surfaced at that phase. If
+the later replacement succeeds, do not mistake an earlier hook-trap log for a
+rolled-back splice.
+
+## Why `describe_component` can mislead
+
+There are two description layers:
+
+1. `aether-mcp` returns a process-local cache hit immediately. It refreshes that
+   cache on successful load/replace, but retains the prior entry on replace
+   error.
+2. On a cache miss addressed by lineage name, the substrate returns its
+   capability registry entry. Some post-splice failures happen before that
+   entry is removed or replaced.
+
+After a failed replacement, restarting only `aether-mcp` can bypass its cache
+and still obtain a stale substrate registry entry. Kind presence and cost rows
+can likewise outlive or disagree with the currently installed guest. Treat all
+of them as snapshots, not liveness or binary-identity proof.
+
+## Recovery protocol
+
+After any replace error:
+
+1. Stop further lifecycle mutation on that mailbox.
+2. Record the exact selector/hash, export, config, mailbox id, error, logs, and
+   pre-replace capabilities.
+3. Call `describe_component` by lineage only as supporting evidence; label a
+   cache hit or live-registry reply as potentially stale.
+4. Use one known side-effect-free application query that distinguishes the old
+   and new build when such a query exists.
+5. If no safe discriminating probe exists, classify the slot as indeterminate.
+6. On a task-owned engine, prefer terminating and recreating the engine from
+   known hashes over repeated splice attempts.
+7. On a shared engine, stop and report the indeterminate mailbox to its owner.
+   Do not drop, refill, or retry by guess.
+
+A roll-forward by known-good hash is appropriate only after the owner accepts
+the current state and the mailbox is still safe to mutate. There is no drain
+knob to reach for: the splice is structural, so no argument slows or retries it.
+
+## Designing a discriminating probe
+
+A useful probe:
+
+- is documented as read-only or idempotent;
+- has a bounded reply;
+- is handled differently by the candidate builds or proves required state;
+- does not depend on a kind that may itself be stale only in the MCP encode
+  cache;
+- records its exact request and reply as evidence.
+
+If the only available operation mutates application state, do not use it merely
+to answer “which guest is installed?” Recreate an owned engine or escalate a
+shared one instead.
+
+## Success verification
+
+Even after `ReplaceResult::Ok`:
+
+- retain the exact content hash used;
+- compare returned capabilities with the expected actor export;
+- run a harmless live probe;
+- confirm downstream senders still address the stable lineage;
+- treat a mutable registry name only as provenance context, not selected-byte
+  identity.
 
 ## Source routes
 
-- Transaction preparation and commit: `crates/aether-component/src/trampoline/runtime/replace.rs`
-- Candidate effect capture: `crates/aether-substrate/src/actor/wasm/component/ctx.rs`
-- Guest restoration status: `crates/aether-substrate/src/actor/wasm/component/lifecycle.rs`
-- MCP replace result and cache refresh: `crates/aether-mcp/src/tools/components.rs`
+- Phase transitions and capability registration:
+  `crates/aether-component/src/trampoline/runtime/replace.rs`
+- Substrate live component description:
+  `crates/aether-component/src/component/runtime/mod.rs`
+- MCP replace result and cache update:
+  `crates/aether-mcp/src/tools/components.rs`
+- MCP description cache and live fallback:
+  `crates/aether-mcp/src/tools/describe.rs`
+- Live kind cache contract:
+  [ADR-0091](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0091-live-kind-schemas-on-the-inventory-cap.md)

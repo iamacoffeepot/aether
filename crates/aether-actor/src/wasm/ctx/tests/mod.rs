@@ -73,7 +73,7 @@ impl ErasedWasmActor for FailingChild {
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
         unreachable!()
     }
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {
         unreachable!()
     }
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {
@@ -133,9 +133,7 @@ impl ErasedWasmActor for SucceedingChild {
     }
     fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
-        Ok(())
-    }
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
 }
 
@@ -211,9 +209,7 @@ impl ErasedWasmActor for StubChild {
     }
     fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
-        Ok(())
-    }
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
 }
 
@@ -319,9 +315,7 @@ impl ErasedWasmActor for LifecycleProbe {
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
         PROBE_UNWIRE_COUNT.set(PROBE_UNWIRE_COUNT.get() + 1);
     }
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
-        Ok(())
-    }
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
 }
 
@@ -377,9 +371,7 @@ impl ErasedWasmActor for NestingParent {
             .expect("the nested by-tag spawn during wire succeeds");
     }
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
-        Ok(())
-    }
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
 }
 
@@ -415,9 +407,7 @@ impl ErasedWasmActor for RecordingTarget {
 
     fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
 
-    fn erased_on_dehydrate(&self, _ctx: &mut WasmDropCtx<'_>) -> Result<(), String> {
-        Ok(())
-    }
+    fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
 
     fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
 }
