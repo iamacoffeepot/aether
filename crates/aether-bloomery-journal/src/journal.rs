@@ -136,8 +136,8 @@ impl Journal {
     /// inserted, every citation is verified against the expected prefix,
     /// each draft with the `bloomery.head_moved` id is decoded as
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
-    /// verified against the recorded head kind, every digest a caller
-    /// required with [`Batch::require_artifact`] is checked for existence
+    /// verified against the recorded head kind, every digest the batch
+    /// requires (a `Transition`'s input and result) is checked for existence
     /// (no prefix), then events are inserted. Any refusal rolls the whole
     /// transaction back. An empty batch is `Ok` of an empty range and
     /// writes nothing. The returned range is `head+1 .. head+n+1` (end
@@ -152,8 +152,8 @@ impl Journal {
     /// prefix is not the expected kind.
     /// [`AppendError::InvalidHeadMoved`] when a draft identified as
     /// `bloomery.head_moved` does not decode as the canonical event.
-    /// [`AppendError::MissingArtifact`] when a digest required by
-    /// [`Batch::require_artifact`] is neither staged nor stored.
+    /// [`AppendError::MissingArtifact`] when a digest the batch requires
+    /// is neither staged nor stored.
     /// [`AppendError::Journal`] wrapping [`JournalError::CorruptCitation`]
     /// when a citation's identity bytes are not 32 bytes.
     /// [`AppendError::Journal`] on a backend or constraint failure.
@@ -496,7 +496,7 @@ pub enum AppendError {
     },
     /// A draft named `bloomery.head_moved` did not decode as the canonical event.
     InvalidHeadMoved(StorageError),
-    /// A digest a caller required with [`Batch::require_artifact`] is
+    /// A digest the batch requires (a `Transition`'s input or result) is
     /// neither staged in this batch nor already stored.
     MissingArtifact {
         /// The required digest.
