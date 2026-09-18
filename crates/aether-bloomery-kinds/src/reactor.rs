@@ -55,8 +55,7 @@ impl Clusters {
 ///
 /// Each member is a moving `Head<OpaqueBytes>`, not a pinned artifact digest.
 /// Selection resolves every member at the event's historical boundary. An
-/// empty set is encodable; the selector refuses one that omits its required
-/// kernel head.
+/// empty set is encodable and selects no members when its set root is bound.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "bloomery.reactor_set")]
 pub struct ReactorSet {
