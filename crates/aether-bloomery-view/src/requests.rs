@@ -74,7 +74,7 @@ impl Requests {
         } else if entry.kind == ReactionFailed::ID {
             self.apply_reaction_failed(entry)?;
         } else if entry.kind == RecordedHeadMove::ID {
-            self.apply_head_move(entry);
+            self.apply_head_move(entry)?;
         }
 
         self.cursor = entry.seq;
@@ -176,11 +176,13 @@ impl Requests {
         Ok(())
     }
 
-    fn apply_head_move(&mut self, entry: &Entry) {
+    fn apply_head_move(&mut self, entry: &Entry) -> Result<(), RequestFoldError> {
         // The move's payload is not decoded here; decoding it is `Heads`' job.
         if let Some(cause) = entry.cause {
+            check_cause_in_range(entry.seq, cause)?;
             self.raise_watermark(cause);
         }
+        Ok(())
     }
 
     fn raise_watermark(&mut self, cause: Seq) {
