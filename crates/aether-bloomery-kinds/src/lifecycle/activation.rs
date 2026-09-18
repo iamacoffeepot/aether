@@ -40,9 +40,10 @@ impl StdError for LiveFromError {}
 struct LiveFrom(u64);
 
 impl LiveFrom {
-    // The `#[storage(validate)]` derive always calls `check(&inner)`; the
-    // signature must take a reference to match that call site.
-    #[allow(clippy::trivially_copy_pass_by_ref)]
+    // The `#[storage(validate)]` derive's generated schema/leaves/element/wire
+    // impls always call `check(&inner)` with `inner: u64`, so this signature
+    // is fixed by the macro's calling convention, not a choice made here.
+    #[allow(clippy::trivially_copy_pass_by_ref)] // aether-suppression-request: `#[storage(validate)]` always calls `check(&inner)`; the signature must take a reference to match that call site, same as every other validated newtype in this crate.
     fn check(value: &u64) -> Result<(), LiveFromError> {
         if *value == 0 {
             Err(LiveFromError::Zero)
