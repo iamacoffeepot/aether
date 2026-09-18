@@ -20,13 +20,18 @@
 //! [`JournalIdentity`] is a process-local allocation token minted by each
 //! constructor so a view registry can detect replacement. It is not persisted
 //! and is not a SQL column.
+//!
+//! [`JournalActor`] is the native owner for one named journal path. It answers
+//! read and head mail while keeping its journal handle inside the actor.
 
+mod actor;
 mod artifact;
 mod batch;
 mod clock;
 mod draft;
 mod journal;
 
+pub use actor::JournalActor;
 pub use aether_bloomery_kinds::{
     DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
     hash_bytes,
