@@ -4,7 +4,9 @@ use std::collections::HashSet;
 use std::error::Error;
 use std::fmt;
 
-use aether_bloomery_kinds::{Digest, MoveHead, OpaqueBytes, Ref, Utf8Text, artifact_blob, hash_bytes};
+use aether_bloomery_kinds::{
+    Digest, MoveHeadCitation, OpaqueBytes, RecordedHead, Ref, Utf8Text, artifact_blob, hash_bytes,
+};
 use aether_data::{Citation, Citations, Cites, Kind, Storage, StorageData, StorageError};
 
 use crate::Seq;
@@ -53,14 +55,21 @@ impl Batch {
         Ok(Ref::from_digest(self.insert_blob(artifact_blob(K::ID, &payload), sink.into_vec())))
     }
 
-    /// Stage the encoded value carried by typed MoveHead mail.
-    pub(crate) fn stage_move_head(&mut self, command: &MoveHead) -> Digest {
+    /// Stage the encoded value carried by typed `MoveHead` mail.
+    pub(crate) fn stage_move_head(
+        &mut self,
+        head: &RecordedHead,
+        artifact_bytes: &[u8],
+        citations: Vec<MoveHeadCitation>,
+    ) -> Digest {
         self.insert_blob(
-            artifact_blob(command.head().kind(), command.artifact_bytes()),
-            command
-                .citations()
-                .iter()
-                .map(|citation| Citation { kind: citation.kind(), bytes: citation.bytes().to_vec() })
+            artifact_blob(head.kind(), artifact_bytes),
+            citations
+                .into_iter()
+                .map(|citation| {
+                    let (kind, bytes) = citation.into_parts();
+                    Citation { kind, bytes }
+                })
                 .collect(),
         )
     }

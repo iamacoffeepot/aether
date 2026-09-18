@@ -26,6 +26,12 @@ impl MoveHeadCitation {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Take the citation's kind and identity bytes without copying them.
+    #[must_use]
+    pub fn into_parts(self) -> (KindId, Vec<u8>) {
+        (self.kind, self.bytes)
+    }
 }
 
 /// Publish one encoded value and move its typed head in a fenced journal append.
@@ -92,6 +98,12 @@ impl MoveHead {
     #[must_use]
     pub const fn expected_seq(&self) -> u64 {
         self.expected_seq
+    }
+
+    /// Take the encoded publication and its fence without copying payload bytes.
+    #[must_use]
+    pub fn into_parts(self) -> (RecordedHead, Vec<u8>, Vec<MoveHeadCitation>, u64) {
+        (self.head, self.artifact_bytes, self.citations, self.expected_seq)
     }
 }
 

@@ -22,7 +22,7 @@
 //! and is not a SQL column.
 //!
 //! [`JournalActor`] is the native owner for one named journal path. It answers
-//! read, head, artifact, and typed MoveHead publication mail while keeping its
+//! read, head, artifact, and typed [`aether_bloomery_kinds::MoveHead`] publication mail while keeping its
 //! journal handle inside the actor.
 
 mod actor;

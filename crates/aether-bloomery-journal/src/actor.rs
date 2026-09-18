@@ -76,12 +76,13 @@ impl NativeActor for JournalActor {
 
     #[handler::single]
     fn on_move_head(&mut self, _ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
+        let (head, artifact_bytes, citations, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
-        let artifact = batch.stage_move_head(&request);
-        if let Err(error) = batch.push_event(&RecordedHeadMove::new(request.head().clone(), artifact), None) {
+        let artifact = batch.stage_move_head(&head, &artifact_bytes, citations);
+        if let Err(error) = batch.push_event(&RecordedHeadMove::new(head, artifact), None) {
             return MoveHeadResult::Err { message: error.to_string() };
         }
-        match self.journal.append(Seq(request.expected_seq()), &batch) {
+        match self.journal.append(Seq(expected_seq), &batch) {
             Ok(range) => MoveHeadResult::Committed { seq: range.start.0, artifact },
             Err(AppendError::HeadMoved { actual }) => MoveHeadResult::Conflict { actual: actual.0 },
             Err(error) => MoveHeadResult::Err { message: error.to_string() },
