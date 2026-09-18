@@ -17,7 +17,6 @@ use aether_substrate::mail::registry::PreparedAliasRoute;
 use aether_substrate::mail::{CostCells, KindId, MailboxId};
 use wasmtime::Module;
 
-use crate::LifecycleFlags;
 use crate::trampoline::WasmTrampoline;
 
 use super::config::WasmTrampolineConfig;
@@ -87,7 +86,6 @@ impl WasmTrampolineState {
             .map(|actor| actor.capabilities.clone())
             .unwrap_or_default();
         let config = WasmTrampolineConfig {
-            prohibit: LifecycleFlags::NONE,
             engine: Arc::clone(&self.engine),
             linker: Arc::clone(&self.linker),
             module: self.module.clone(),
@@ -193,10 +191,6 @@ impl WasmTrampolineState {
     }
 
     pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
-        if self.prohibit.contains(LifecycleFlags::REPLACE) {
-            return ReplaceResult::Err { error: "component replacement prohibited by native bootstrap".to_owned() };
-        }
-
         // `payload.wasm` is the new module bytes; `mailbox_id` is
         // the trampoline's own id (the agent already addressed
         // this mail to us, so the field is informational).
