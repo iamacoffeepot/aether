@@ -1,0 +1,5 @@
+error: #[program] run must not take a receiver; Program::run is associated
+  --> tests/ui/fail_run_receiver.rs:28:12
+   |
+28 |     fn run(&self, input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+   |            ^^^^^

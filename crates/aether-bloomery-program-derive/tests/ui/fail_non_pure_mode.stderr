@@ -1,0 +1,5 @@
+error: #[program] requires `const MODE: Mode = Mode::Pure`
+  --> tests/ui/fail_non_pure_mode.rs:23:24
+   |
+23 |     const MODE: Mode = Mode::Sampled;
+   |                        ^^^^^^^^^^^^^

@@ -1,0 +1,5 @@
+error: #[program] run is synchronous; remove `async`
+  --> tests/ui/fail_async_run.rs:28:5
+   |
+28 |     async fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+   |     ^^^^^

@@ -8,10 +8,14 @@ description = "Portable guest SDK for bloomery WASM programs: Program, Env, and 
 
 [dependencies]
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program-derive = { path = "../aether-bloomery-program-derive" }
 aether-data = { path = "../aether-data" }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-kinds = { path = "../aether-kinds" }
+wasmparser = "0.246"
 
 [lints]
 workspace = true

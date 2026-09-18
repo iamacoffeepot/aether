@@ -1,0 +1,29 @@
+[package]
+name = "aether-bloomery-program-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Proc macros for bloomery program authoring and bundle_programs export generation."
+
+# Proc-macro home for `#[program]` / `__program_export_generate`. Kept separate
+# from `aether-bloomery-program` because a proc-macro crate must opt into
+# `proc-macro = true` and can export nothing else. The runtime crate
+# re-exports both so a consumer depends on one crate.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+
+[dev-dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+trybuild = "1"
+
+[lints]
+workspace = true

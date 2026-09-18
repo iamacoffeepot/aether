@@ -1,0 +1,33 @@
+#![allow(unused_imports)]
+
+use aether_bloomery_kinds::{Mode, Refusal};
+use aether_bloomery_program::{Env, Program, Pure, program};
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.ui.async.input")]
+struct In {
+    n: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.ui.async.result")]
+struct Out {
+    n: u32,
+}
+
+struct AsyncProg;
+
+#[program]
+impl Program for AsyncProg {
+    const NAME: &'static str = "test.program.async";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Fails because run is async.";
+    type Input = In;
+    type Result = Out;
+
+    async fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+        Ok(input)
+    }
+}
+
+fn main() {}

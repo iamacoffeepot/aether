@@ -1,0 +1,21 @@
+[package]
+name = "aether-test-fixtures-program"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM fixture for the program bundle root: two `#[program]`s exported through
+# `bundle_programs`. Structural discovery (cdylib + aether-actor) includes it
+# in `cargo xtask build-wasm`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+
+[lints]
+workspace = true

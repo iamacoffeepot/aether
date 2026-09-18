@@ -2,11 +2,13 @@
 
 use alloc::collections::BTreeMap;
 use alloc::format;
+use alloc::string::String;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::str;
 
 use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, Ref, Refusal, Utf8Text};
-use aether_data::{Cites, Storage};
+use aether_data::{Cites, Kind, Storage};
 
 use crate::kinds::Detail;
 
@@ -41,6 +43,20 @@ impl Env<Pure> {
             return Err(Refusal::InputDecode);
         }
         K::decode_storage(artifact.bytes()).map(|data| data.value).map_err(|_| Refusal::InputDecode)
+    }
+
+    /// Load UTF-8 text `r` from the injected closure.
+    ///
+    /// # Errors
+    ///
+    /// [`Refusal::InputMissing`] when the digest is absent.
+    /// [`Refusal::InputDecode`] when the kind prefix differs or the payload is not UTF-8.
+    pub fn read_text(&self, r: Ref<Utf8Text>) -> Result<String, Refusal> {
+        let artifact = self.closure.get(&r.digest()).ok_or(Refusal::InputMissing)?;
+        if artifact.kind() != Utf8Text::ID {
+            return Err(Refusal::InputDecode);
+        }
+        str::from_utf8(artifact.bytes()).map(String::from).map_err(|_| Refusal::InputDecode)
     }
 
     /// Stage `payload` as [`OpaqueBytes`]. Identical payloads yield one artifact.

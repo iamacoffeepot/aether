@@ -25,6 +25,7 @@ members = [
     "crates/aether-bloomery-journal",
     "crates/aether-bloomery-kinds",
     "crates/aether-bloomery-program",
+    "crates/aether-bloomery-program-derive",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
     "crates/aether-derive",
@@ -67,6 +68,7 @@ members = [
     "crates/aether-test-fixtures-defaultless",
     "crates/aether-test-fixtures-boot",
     "crates/aether-test-fixtures-behavior",
+    "crates/aether-test-fixtures-program",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
