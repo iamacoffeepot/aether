@@ -1,4 +1,4 @@
-//! Validated dotted names for programs and executors.
+//! Validated dotted names for programs.
 
 use alloc::string::String;
 use core::error::Error as StdError;
@@ -88,8 +88,7 @@ macro_rules! dotted_name {
 
         impl StdError for $Error {}
 
-        /// Validated dotted name. Two types so a program name and an executor
-        /// name cannot be swapped in a record.
+        /// Validated dotted name.
         #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, aether_data::Storage)]
         #[storage(validate)]
         pub struct $Name(String);
@@ -120,11 +119,10 @@ macro_rules! dotted_name {
 }
 
 dotted_name!(ProgramName, ProgramNameError);
-dotted_name!(ExecutorName, ExecutorNameError);
 
 #[cfg(test)]
 mod tests {
-    use super::{ExecutorName, NAME_MAX_BYTES, ProgramName, ProgramNameError};
+    use super::{NAME_MAX_BYTES, ProgramName, ProgramNameError};
 
     #[test]
     fn each_rule_refuses_and_accepts_its_neighbour() {
@@ -145,7 +143,5 @@ mod tests {
         assert_eq!(ProgramName::new("a."), Err(ProgramNameError::BadSegment));
         assert_eq!(ProgramName::new(".a"), Err(ProgramNameError::BadSegment));
         assert_eq!(ProgramName::new("_a"), Err(ProgramNameError::BadSegment));
-        assert!(ExecutorName::new("a.b").is_ok());
-        assert!(ExecutorName::new("a..b").is_err());
     }
 }

@@ -4,12 +4,11 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Program declarations, in-process executors, and the driver that records transitions and faults."
+description = "Portable guest SDK for bloomery WASM programs: Program, Env, and invoke mail."
 
 [dependencies]
-aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
-aether-data = { path = "../aether-data", features = ["derive"] }
+aether-data = { path = "../aether-data" }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }

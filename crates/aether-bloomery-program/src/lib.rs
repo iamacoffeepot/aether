@@ -1,22 +1,23 @@
-//! Program declarations, in-process executors, and the driver that records one
-//! execution as a transition or a fault.
+//! Portable guest SDK for bloomery WASM programs.
 //!
-//! [`kinds::Program`] is the declaration as data. [`Program`] is its typed
-//! mirror. [`declaration`] is the bridge: the same bytes every call, so the
-//! same digest.
+//! A program is a stateless function over an injected closure, the same
+//! injected-data sandbox reactors use. The native driver sends
+//! [`Invoke`]; [`invoke()`] runs one [`Program`] and replies [`Invoked`].
+//! Only native code writes journal records. A program's identity is its
+//! bundle digest plus name, not a stored declaration digest.
+//!
+//! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
-mod apply;
+#![no_std]
+
+extern crate alloc;
+
 mod declare;
-mod execute;
-mod read;
-mod registry;
-mod staging;
-
-pub use apply::{Applied, ApplyError, apply};
-pub use declare::{Program, declaration, digest};
-pub use execute::{Execute, Refusal};
-pub use read::{ReadArtifacts, ReadError};
-pub use registry::Executors;
-pub use staging::{Execution, FinishError, Staging};
+mod env;
+mod invoke;
 
 pub use aether_bloomery_kinds as kinds;
+pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
+pub use declare::{Program, declaration};
+pub use env::{Env, Pure};
+pub use invoke::invoke;
