@@ -105,7 +105,7 @@ fn digest_ref<K>(byte: u8) -> Ref<K> {
 fn entry_for<K: Storage + Clone>(seq: u64, event: &K) -> Result<Entry, Box<dyn Error>> {
     Ok(Entry {
         seq: Seq(seq),
-        kind: K::NAME.to_owned(),
+        kind: K::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: K::encode_storage(&StorageData::from_value(event.clone()))?,

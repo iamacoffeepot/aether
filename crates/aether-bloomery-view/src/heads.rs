@@ -193,10 +193,10 @@ fn seq_error(cursor: Seq, expected: Seq, actual: Seq) -> HeadFoldError {
 }
 
 fn binding_from(entry: &Entry) -> Result<Option<(RecordedHead, Digest)>, HeadFoldError> {
-    if entry.kind == RecordedHeadMove::NAME {
+    if entry.kind == RecordedHeadMove::ID {
         let event = entry.decode::<RecordedHeadMove>()?;
         Ok(Some((event.head().clone(), event.to())))
-    } else if entry.kind == ProgramHeadMoved::NAME {
+    } else if entry.kind == ProgramHeadMoved::ID {
         let event = entry.decode::<ProgramHeadMoved>()?;
         Ok(Some((RecordedHead::new(Program::ID, event.name.as_str())?, event.program.digest())))
     } else {

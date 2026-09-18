@@ -10,6 +10,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_bloomery_kinds::{Entry, Seq};
+use aether_data::KindId;
 
 use crate::error::PrepareError;
 use crate::evaluate::{ArmVisitor, Output, Reactor};
@@ -37,8 +38,8 @@ pub struct ClusterConfig {
 pub struct JournalEntry {
     /// Dense sequence assigned by the store.
     pub seq: u64,
-    /// Stored kind name.
-    pub kind: String,
+    /// Stored kind id.
+    pub kind: KindId,
     /// Optional causing sequence.
     pub cause: Option<u64>,
     /// Wall clock at insert; folds ignore it.
@@ -54,7 +55,7 @@ impl JournalEntry {
     pub fn from_entry(entry: &Entry) -> Self {
         Self {
             seq: entry.seq.0,
-            kind: entry.kind.clone(),
+            kind: entry.kind,
             cause: entry.cause.map(|seq| seq.0),
             recorded_at_millis: entry.recorded_at_millis,
             bytes: entry.bytes.clone(),
@@ -66,7 +67,7 @@ impl JournalEntry {
     pub fn to_entry(&self) -> Entry {
         Entry {
             seq: Seq(self.seq),
-            kind: self.kind.clone(),
+            kind: self.kind,
             cause: self.cause.map(Seq),
             recorded_at_millis: self.recorded_at_millis,
             bytes: self.bytes.clone(),
@@ -346,8 +347,8 @@ pub struct PreparedPrefix {
     pub stream: String,
     /// Trigger sequence.
     pub seq: u64,
-    /// Stored trigger kind name.
-    pub kind: String,
+    /// Stored trigger kind id.
+    pub kind: KindId,
     /// Optional causing sequence.
     pub cause: Option<u64>,
     /// Wall clock at insert.
@@ -366,7 +367,7 @@ impl PreparedPrefix {
         Self {
             stream: stream.into(),
             seq: entry.seq.0,
-            kind: entry.kind.clone(),
+            kind: entry.kind,
             cause: entry.cause.map(|seq| seq.0),
             recorded_at_millis: entry.recorded_at_millis,
             bytes: entry.bytes.clone(),
@@ -379,7 +380,7 @@ impl PreparedPrefix {
     pub fn to_entry(&self) -> Entry {
         Entry {
             seq: Seq(self.seq),
-            kind: self.kind.clone(),
+            kind: self.kind,
             cause: self.cause.map(Seq),
             recorded_at_millis: self.recorded_at_millis,
             bytes: self.bytes.clone(),
