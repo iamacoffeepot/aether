@@ -77,3 +77,9 @@ pub fn reply<K: Kind>(rx: &mpsc::Receiver<OwnedDispatch>, correlation: u64) -> K
     assert_eq!(dispatch.sender.correlation_id, correlation);
     K::decode_from_bytes(dispatch.payload.bytes()).expect("decode reply")
 }
+
+/// The "still parked" check: assert that no reply lands within a short wait.
+#[allow(dead_code)] // aether-suppression-request: only watch_head_actor.rs calls this; each sibling actor_support consumer (read_actor, write_actor, append_records_actor) is its own compiled integration-test binary and lints dead_code separately
+pub fn no_reply(rx: &mpsc::Receiver<OwnedDispatch>) {
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "expected no reply, but one arrived");
+}

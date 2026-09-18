@@ -28,7 +28,7 @@ pub use head::{Head, HeadMoved, HeadNameError, RecordedHead, RecordedHeadMove};
 pub use journal::{
     AppendRecords, AppendRecordsResult, ArtifactCitation, DriverRecord, EncodedArtifact, JournalEntry, MoveHead,
     MoveHeadResult, Publish, PublishResult, ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead,
-    ReadHeadResult,
+    ReadHeadResult, WatchHead, WatchHeadResult,
 };
 pub use lifecycle::{Activated, ActivationRejected, LiveFromError, ReactionFailed};
 pub use program::{

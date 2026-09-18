@@ -3,9 +3,12 @@
 //! Read mail lives here. [`EncodedArtifact`] carries one encoded value over
 //! mail, and [`MoveHead`] / [`Publish`] / [`AppendRecords`] are the three
 //! fenced write commands — the last is the one that carries a journal cause.
+//! [`WatchHead`] is a long-poll watch on the head, answered once a
+//! committed write moves it past the requested boundary.
 
 mod append;
 mod artifact;
+mod watch;
 mod write;
 
 use alloc::string::String;
@@ -17,6 +20,7 @@ use crate::{Digest, Entry, Seq};
 
 pub use append::{AppendRecords, AppendRecordsResult, DriverRecord};
 pub use artifact::{ArtifactCitation, EncodedArtifact};
+pub use watch::{WatchHead, WatchHeadResult};
 pub use write::{MoveHead, MoveHeadResult, Publish, PublishResult};
 
 /// One recorded entry carried over mail. Payload bytes retain their storage encoding.

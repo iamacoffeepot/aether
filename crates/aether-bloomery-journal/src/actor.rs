@@ -1,13 +1,15 @@
 //! Native journal owner and ordinary request/reply handlers.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
+use crate::watch::Watchers;
 use crate::{AppendError, Batch, Journal};
-use aether_actor::actor;
+use aether_actor::{Manual, actor};
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, DriverRecord, JournalEntry, MoveHead, MoveHeadResult, Publish, PublishResult,
     ReadArtifact, ReadArtifactResult, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, RecordedHeadMove, Seq,
-    artifact_digest,
+    WatchHead, WatchHeadResult, artifact_digest,
 };
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -15,9 +17,16 @@ use aether_substrate::chassis::error::BootError;
 /// Maximum number of entries one read mail can return.
 pub const MAX_READ_EVENTS: u32 = 128;
 
+/// Maximum number of parked `WatchHead` replies. Journal writes and watches
+/// are unauthenticated (ADR-0226 Consequences), and the one expected watcher
+/// is the ADR-0226 driver, so this bounds an otherwise easy leak rather than
+/// anticipating real concurrent demand.
+pub const MAX_HEAD_WATCHERS: usize = 64;
+
 /// One independently named, file-backed journal owner.
 pub struct JournalActor {
     journal: Journal,
+    watchers: Watchers,
 }
 
 #[actor(instanced, root)]
@@ -27,7 +36,10 @@ impl NativeActor for JournalActor {
     const NAMESPACE: &'static str = "aether.bloomery.journal";
 
     fn init(path: PathBuf, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { journal: Journal::open(&path).map_err(|error| BootError::Other(Box::new(error)))? })
+        Ok(Self {
+            journal: Journal::open(&path).map_err(|error| BootError::Other(Box::new(error)))?,
+            watchers: Watchers::new(),
+        })
     }
 
     #[handler::single]
@@ -76,14 +88,14 @@ impl NativeActor for JournalActor {
     }
 
     #[handler::single]
-    fn on_move_head(&mut self, _ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
+    fn on_move_head(&mut self, ctx: &mut NativeCtx<'_>, request: MoveHead) -> MoveHeadResult {
         let (head, to, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
         if let Err(error) = batch.push_event(&RecordedHeadMove::new(head, to), None) {
             return MoveHeadResult::Err { message: error.to_string() };
         }
 
-        match self.journal.append(Seq(expected_seq), &batch) {
+        match self.commit(ctx, Seq(expected_seq), &batch) {
             Ok(range) => MoveHeadResult::Committed { seq: range.start.0 },
             Err(AppendError::HeadMoved { actual }) => MoveHeadResult::Conflict { actual: actual.0 },
             Err(error) => MoveHeadResult::Err { message: error.to_string() },
@@ -91,7 +103,7 @@ impl NativeActor for JournalActor {
     }
 
     #[handler::single]
-    fn on_publish(&mut self, _ctx: &mut NativeCtx<'_>, request: Publish) -> PublishResult {
+    fn on_publish(&mut self, ctx: &mut NativeCtx<'_>, request: Publish) -> PublishResult {
         let (artifacts, moves, expected_seq) = request.into_parts();
         let mut batch = Batch::new();
         let artifacts = artifacts.into_iter().map(|artifact| batch.stage_artifact(artifact)).collect();
@@ -102,7 +114,7 @@ impl NativeActor for JournalActor {
         }
 
         // `append` returns `head+1 .. head+n+1`, and `head+1 .. head+1` for no events.
-        match self.journal.append(Seq(expected_seq), &batch) {
+        match self.commit(ctx, Seq(expected_seq), &batch) {
             Ok(range) => PublishResult::Committed { head: range.end.0.saturating_sub(1), artifacts },
             Err(AppendError::HeadMoved { actual }) => PublishResult::Conflict { actual: actual.0 },
             Err(error) => PublishResult::Err { message: error.to_string() },
@@ -110,7 +122,7 @@ impl NativeActor for JournalActor {
     }
 
     #[handler::single]
-    fn on_append_records(&mut self, _ctx: &mut NativeCtx<'_>, request: AppendRecords) -> AppendRecordsResult {
+    fn on_append_records(&mut self, ctx: &mut NativeCtx<'_>, request: AppendRecords) -> AppendRecordsResult {
         let (artifacts, records, expected_seq) = request.into_parts();
 
         for record in &records {
@@ -154,10 +166,49 @@ impl NativeActor for JournalActor {
             }
         }
 
-        match self.journal.append(Seq(expected_seq), &batch) {
+        match self.commit(ctx, Seq(expected_seq), &batch) {
             Ok(range) => AppendRecordsResult::Committed { head: range.end.0.saturating_sub(1), artifacts },
             Err(AppendError::HeadMoved { actual }) => AppendRecordsResult::Conflict { actual: actual.0 },
             Err(error) => AppendRecordsResult::Err { message: error.to_string() },
         }
+    }
+
+    /// Long-poll watch on the head (ADR-0226 decision 10): answered at once
+    /// when the head is already past `after`, otherwise parked until
+    /// [`Self::commit`] wakes it.
+    #[handler::manual]
+    fn on_watch_head(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: WatchHead) {
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+
+        let head = match self.journal.head() {
+            Ok(head) => head,
+            Err(error) => {
+                owed.reply(ctx, &WatchHeadResult::Err { message: error.to_string() });
+                return;
+            }
+        };
+
+        if head.0 > request.after {
+            owed.reply(ctx, &WatchHeadResult::Advanced { head: head.0 });
+            return;
+        }
+
+        if let Err(owed) = self.watchers.park(request.after, owed) {
+            owed.reply(
+                ctx,
+                &WatchHeadResult::Err { message: format!("watcher table is full (max {MAX_HEAD_WATCHERS})") },
+            );
+        }
+    }
+}
+
+impl JournalActor {
+    /// The one caller of [`Journal::append`]. Wakes every watcher the
+    /// commit's head passed; never reached on a conflict or refusal, so a
+    /// write that doesn't commit wakes nobody.
+    fn commit(&mut self, ctx: &mut NativeCtx<'_>, expected: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
+        let range = self.journal.append(expected, batch)?;
+        self.watchers.wake(ctx, range.end.0.saturating_sub(1));
+        Ok(range)
     }
 }
