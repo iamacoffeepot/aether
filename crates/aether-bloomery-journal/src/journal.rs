@@ -9,15 +9,16 @@ use std::slice;
 use std::str;
 use std::sync::Arc;
 
-use aether_bloomery_kinds::RecordedHeadMove;
+use aether_bloomery_kinds::{ClosureLimit, RecordedHeadMove};
 use aether_data::wire::WireDecode;
 use aether_data::{Kind, KindId, Storage, StorageError, storage_kind_id_from_name};
 use rusqlite::types::ValueRef;
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params, params_from_iter};
 
-use crate::artifact::{ARTIFACTS_DDL, split_artifact};
+use crate::artifact::{ARTIFACTS_DDL, CITATIONS_DDL, split_artifact};
 use crate::batch::Batch;
 use crate::clock::{Clock, SystemClock};
+use crate::closure::{Closure, walk_closure};
 use crate::draft::Draft;
 use crate::{DecodeError, Digest, Entry, Seq};
 
@@ -133,7 +134,10 @@ impl Journal {
     ///
     /// One `BEGIN IMMEDIATE` transaction: a stale fence returns
     /// [`AppendError::HeadMoved`] and writes nothing. Staged blobs are
-    /// inserted, every citation is verified against the expected prefix,
+    /// inserted, and a blob stored for the first time records its citation
+    /// edges in the same transaction (a blob already stored keeps the edges
+    /// it was first stored with), every citation is verified against the
+    /// expected prefix,
     /// each draft with the `bloomery.head_moved` id is decoded as
     /// [`aether_bloomery_kinds::RecordedHeadMove`] and its destination is
     /// verified against the recorded head kind, every digest the batch
@@ -175,6 +179,26 @@ impl Journal {
         let range = insert_events(&tx, head, &batch.events, recorded_at_millis)?;
         tx.commit()?;
         Ok(range)
+    }
+
+    /// Read `root` and every artifact it transitively cites, under `limit`.
+    ///
+    /// One read snapshot. The walk is breadth-first over the stored citation
+    /// edges: the root first, then each member's children in ascending digest
+    /// byte order, each distinct artifact once. The budget is the sum of each
+    /// member's stored blob length (kind prefix plus payload), checked before
+    /// the member's bytes load; a total equal to `limit` fits. Over the limit
+    /// is [`Closure::TooLarge`] and nothing is returned. Artifacts stored
+    /// before the journal recorded citation edges have none, so their closure
+    /// is the artifact alone.
+    ///
+    /// # Errors
+    ///
+    /// [`JournalError::ArtifactDigestMismatch`] when a member's stored kind
+    /// and payload do not hash to its digest. [`JournalError`] on a backend or
+    /// corrupt-blob failure.
+    pub fn read_closure(&self, root: &Digest, limit: ClosureLimit) -> Result<Closure, JournalError> {
+        walk_closure(&self.conn, *root, limit)
     }
 
     /// Entries with `seq > since`, ascending, at most `limit`.
@@ -291,9 +315,16 @@ fn insert_staged(tx: &Transaction<'_>, batch: &Batch, recorded_at_millis: u64) -
     let mut stmt = tx.prepare(
         "INSERT OR IGNORE INTO artifacts (digest, size_bytes, recorded_at_millis, bytes) VALUES (?1, ?2, ?3, ?4)",
     )?;
+    let mut edges = tx.prepare("INSERT OR IGNORE INTO citations (from_digest, to_digest) VALUES (?1, ?2)")?;
     for staged in &batch.staged {
         let size_bytes = sqlite_i64(u64::try_from(staged.bytes.len()).map_err(|_| JournalError::IntegerRange)?)?;
-        stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at, staged.bytes])?;
+        if stmt.execute(params![staged.digest.as_bytes().as_slice(), size_bytes, recorded_at, staged.bytes])? == 0 {
+            continue;
+        }
+        for citation in &staged.citations {
+            let to: [u8; 32] = citation.bytes.as_slice().try_into().map_err(|_| JournalError::CorruptCitation)?;
+            edges.execute(params![staged.digest.as_bytes().as_slice(), to.as_slice()])?;
+        }
     }
     Ok(())
 }
@@ -389,6 +420,7 @@ fn verify_prefix(
 fn prepare_schema(conn: &Connection) -> Result<(), JournalError> {
     conn.execute_batch(ENTRIES_DDL)?;
     conn.execute_batch(ARTIFACTS_DDL)?;
+    conn.execute_batch(CITATIONS_DDL)?;
     Ok(())
 }
 
@@ -436,6 +468,8 @@ pub enum JournalError {
     /// A citation's identity bytes are not 32 bytes. The journal does not
     /// pad or truncate.
     CorruptCitation,
+    /// A stored artifact's kind and payload do not hash to its digest.
+    ArtifactDigestMismatch(Digest),
 }
 
 impl fmt::Display for JournalError {
@@ -447,6 +481,7 @@ impl fmt::Display for JournalError {
             Self::CorruptArtifact => write!(f, "stored artifact is shorter than the eight-byte kind prefix"),
             Self::CorruptEntryKind(reason) => write!(f, "stored entry kind is corrupt: {reason}"),
             Self::CorruptCitation => write!(f, "citation identity is not 32 bytes"),
+            Self::ArtifactDigestMismatch(digest) => write!(f, "stored artifact bytes do not hash to {digest}"),
         }
     }
 }
@@ -459,7 +494,8 @@ impl Error for JournalError {
             | Self::CorruptArtifactDigest
             | Self::CorruptArtifact
             | Self::CorruptEntryKind(_)
-            | Self::CorruptCitation => None,
+            | Self::CorruptCitation
+            | Self::ArtifactDigestMismatch(_) => None,
         }
     }
 }
