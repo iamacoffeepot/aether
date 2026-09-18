@@ -6,8 +6,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::actor;
-use aether_bloomery_journal::{Batch, Clock, Draft, Journal, Seq};
-use aether_bloomery_journal_actor::JournalActor;
+use aether_bloomery_journal::{Batch, Clock, Draft, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult};
 use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;

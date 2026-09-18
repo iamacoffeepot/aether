@@ -2,8 +2,8 @@
 
 use std::path::PathBuf;
 
+use crate::Journal;
 use aether_actor::actor;
-use aether_bloomery_journal::Journal;
 use aether_bloomery_kinds::{JournalEntry, ReadEvents, ReadEventsResult, ReadHead, ReadHeadResult, Seq};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
