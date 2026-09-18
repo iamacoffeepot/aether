@@ -15,7 +15,7 @@ enum NameRule {
     BadSegment,
 }
 
-fn parse_dotted_name(value: &str) -> Result<(), NameRule> {
+const fn parse_dotted_name(value: &str) -> Result<(), NameRule> {
     if value.is_empty() {
         return Err(NameRule::Empty);
     }
@@ -25,18 +25,39 @@ fn parse_dotted_name(value: &str) -> Result<(), NameRule> {
     if !value.is_ascii() {
         return Err(NameRule::NotAscii);
     }
-    if !value.split('.').all(valid_segment) {
-        return Err(NameRule::BadSegment);
+    let bytes = value.as_bytes();
+    let mut start = 0;
+    let mut index = 0;
+    loop {
+        if index == bytes.len() || bytes[index] == b'.' {
+            if !valid_segment_bytes(bytes, start, index) {
+                return Err(NameRule::BadSegment);
+            }
+            if index == bytes.len() {
+                return Ok(());
+            }
+            start = index + 1;
+        }
+        index += 1;
     }
-    Ok(())
 }
 
-fn valid_segment(segment: &str) -> bool {
-    let mut chars = segment.chars();
-    let Some(first) = chars.next() else {
+const fn valid_segment_bytes(bytes: &[u8], start: usize, end: usize) -> bool {
+    if start >= end {
         return false;
-    };
-    first.is_ascii_lowercase() && chars.all(|ch| ch.is_ascii_lowercase() || ch.is_ascii_digit() || ch == '_')
+    }
+    if !bytes[start].is_ascii_lowercase() {
+        return false;
+    }
+    let mut index = start + 1;
+    while index < end {
+        let byte = bytes[index];
+        if !(byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'_') {
+            return false;
+        }
+        index += 1;
+    }
+    true
 }
 
 macro_rules! dotted_name {
@@ -109,6 +130,12 @@ macro_rules! dotted_name {
             #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
+            }
+
+            /// Whether `value` is a valid dotted name of this kind.
+            #[must_use]
+            pub const fn is_valid(value: &str) -> bool {
+                matches!(parse_dotted_name(value), Ok(()))
             }
 
             fn check(value: &str) -> Result<(), $Error> {

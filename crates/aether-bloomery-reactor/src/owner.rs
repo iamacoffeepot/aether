@@ -6,12 +6,11 @@ use alloc::vec::Vec;
 use core::any::{Any, TypeId, type_name};
 
 use aether_bloomery_kinds::{Entry, Seq};
-use aether_bloomery_view::View;
 
 use crate::error::{PrepareError, seq_mismatch};
 use crate::params::Params;
 use crate::trigger::Trigger;
-use crate::views::{ErasedView, ViewCtor, ViewSet, box_view};
+use crate::views::{ErasedView, ViewCtor, ViewSet};
 
 /// Portable owner of inferred view instances.
 ///
@@ -74,13 +73,6 @@ impl Owner {
         Ok(())
     }
 
-    /// One prepared event whose views are installed separately rather than folded
-    /// from this prefix. Used by reactor peers that receive owned snapshots.
-    #[must_use]
-    pub fn from_prepared(entry: Entry) -> Self {
-        Self { prefix: alloc::vec![entry], slots: BTreeMap::new() }
-    }
-
     /// Fold `S` to the current cursor, constructing missing views from empty.
     ///
     /// # Errors
@@ -94,38 +86,6 @@ impl Owner {
     #[must_use]
     pub fn get<V: 'static>(&self) -> Option<&V> {
         self.slot_ref(TypeId::of::<V>())?.downcast_ref()
-    }
-
-    /// Install an already-folded view at the current cursor.
-    ///
-    /// # Errors
-    ///
-    /// [`PrepareError::CursorContract`] when `view` is not at this prefix.
-    pub fn install_published<V: View + Send + 'static>(&mut self, view: V) -> Result<(), PrepareError> {
-        self.install_erased(TypeId::of::<V>(), type_name::<V>(), box_view(view))
-    }
-
-    pub(crate) fn install_erased(
-        &mut self,
-        id: TypeId,
-        name: &'static str,
-        boxed: Box<dyn ErasedView>,
-    ) -> Result<(), PrepareError> {
-        let target = self.cursor();
-        let actual = boxed.cursor();
-        if actual != target {
-            return Err(PrepareError::CursorContract {
-                view: name,
-                last_trusted_cursor: actual,
-                expected: target,
-                actual,
-            });
-        }
-        self.slots.insert(
-            id,
-            CachedView { poisoned: false, last_trusted_cursor: actual, type_name: name, inner: Some(boxed) },
-        );
-        Ok(())
     }
 
     /// Decode the last retained entry as `T` and resolve an inferred parameter

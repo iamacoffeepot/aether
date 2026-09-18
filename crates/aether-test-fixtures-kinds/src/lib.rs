@@ -509,18 +509,3 @@ pub struct ReactorOpenPublication {
 }
 
 impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
-
-/// Drain recorded reactor outputs from the fixture sink.
-#[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs", default)]
-pub struct CollectReactorOutputs;
-
-/// Reply to [`CollectReactorOutputs`]: recorded publications and correlated
-/// preparation/evaluation acknowledgments one cluster sent to its configured
-/// output and ack mailboxes.
-#[aether_data::kind(name = "aether.test_fixtures.collect_reactor_outputs_result", eq)]
-pub struct CollectReactorOutputsResult {
-    pub guarded: Vec<ReactorGuardedPublication>,
-    pub open: Vec<ReactorOpenPublication>,
-    pub prepared: Vec<aether_bloomery_reactor::PreparedResult>,
-    pub evaluated: Vec<aether_bloomery_reactor::EvaluatedResult>,
-}

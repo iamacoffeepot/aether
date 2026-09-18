@@ -1,0 +1,11 @@
+error[E0080]: evaluation panicked: reactor NAMESPACE is not a valid ReactorName
+  --> tests/ui/fail_invalid_names.rs:15:37
+   |
+15 |     const NAMESPACE: &'static str = "Bad.Name";
+   |                                     ^^^^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: reactor rule name is not a valid RuleName
+  --> tests/ui/fail_invalid_names.rs:30:8
+   |
+30 |     fn _hidden(&self, _change: HeadMoved<Tree>) -> Publication {
+   |        ^^^^^^^ evaluation of `_` failed here

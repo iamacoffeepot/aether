@@ -80,12 +80,15 @@ type's namespace plus optional namespaced extensions) and `exports` (the types
 the module will bind). Ordinary actors have no extra extension; `#[reactor]` adds
 `aether_bloomery_reactor`. `bundle_reactors` selects that extension on exported
 paths, keeps ordinary actors in `exports`, and replaces selected reactors with one
-hidden views coordinator loaded at `aether.bloomery.reactor` (`CLUSTER_NAMESPACE`).
+digest-named root at `aether.bloomery.reactor` (`REACTOR_NAMESPACE`). The root
+takes no config. It answers `Warm`, `Event`, and `StatusQuery` to the caller
+(`Warmed` / `Evaluated` / `Status`). `#[reactor]` `const NAMESPACE` values and
+`#[rule]` idents are checked at compile time as `ReactorName` / `RuleName`.
 Reactor envelopes stay on their original types in `actors`; their other extensions
-are not copied onto the coordinator. `type Alias = T` is not followed. Peer
-namespaces stay on each `#[reactor]` `const NAMESPACE`. No-generator `export!`
-forms are unchanged. The coordinator is not a `boot` actor and does not silently
-become the default of a mixed defaultless module.
+are not copied onto the root. `type Alias = T` is not followed. No-generator
+`export!` forms are unchanged. The root is not a `boot` actor. When `export!`
+names no `default`, the generated root becomes the default, as the program
+root does, so `export: Some("aether.bloomery.reactor")` resolves.
 
 ```rust
 aether_actor::export!(
@@ -93,7 +96,6 @@ aether_actor::export!(
     ProbeWithConfig,
     SourcePublisher,
     SourceWitness,
-    ReactorOutputSink,
     generators = [aether_bloomery_reactor::bundle_reactors],
 );
 ```

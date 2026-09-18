@@ -16,15 +16,39 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
     let arm_evals = rules.iter().map(expand_arm_eval);
     let export_desc = emit_reactor_export_desc(&self_ty, &namespace);
     let unit_check = quote_spanned! { self_ty.span() => const _: #self_ty = #self_ty; };
+    let namespace_assert = quote_spanned! { namespace.span() =>
+        const _: () = ::core::assert!(
+            ::aether_bloomery_reactor::__macro_internals::ReactorName::is_valid(#namespace),
+            "reactor NAMESPACE is not a valid ReactorName"
+        );
+    };
+    let rule_asserts = rules.iter().map(|rule| {
+        let ident = &rule.ident;
+        let name = ident.to_string();
+        quote_spanned! { ident.span() =>
+            const _: () = ::core::assert!(
+                ::aether_bloomery_reactor::__macro_internals::RuleName::is_valid(#name),
+                "reactor rule name is not a valid RuleName"
+            );
+        }
+    });
 
     quote! {
         #(#attrs)*
         #unit_check
+        #namespace_assert
+        #(#rule_asserts)*
 
         #(#attrs)*
         impl #self_ty {
             #(#inherent_rules)*
             #(#helpers)*
+        }
+
+        impl ::core::default::Default for #self_ty {
+            fn default() -> Self {
+                #self_ty
+            }
         }
 
         #(#attrs)*
@@ -97,6 +121,7 @@ fn expand_arm_eval(rule: &Rule) -> TokenStream2 {
                 if matches!(&__aether_reactor_trigger, #test_pat) {
                     let __aether_reactor_output = self.#ident(__aether_reactor_trigger, #(#call_args),*);
                     intents.push(::aether_bloomery_reactor::Intent::from_output::<#output_ty>(
+                        stringify!(#ident),
                         &__aether_reactor_output,
                     ));
                 }
