@@ -17,9 +17,6 @@ use crate::actor::MAX_HEAD_WATCHERS;
 
 /// Parked `WatchHead` replies, keyed by the exclusive sequence boundary
 /// they are waiting to pass.
-///
-/// `pub`, not `pub(crate)`: the enclosing `mod watch;` is itself private to
-/// the crate, so this is already crate-local without a redundant modifier.
 pub struct Watchers {
     by_after: BTreeMap<u64, Vec<DeferredReply>>,
     count: usize,

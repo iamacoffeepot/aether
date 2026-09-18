@@ -4,11 +4,13 @@ mod actor_support;
 
 use std::path::Path;
 use std::sync::{Arc, mpsc};
+use std::time::Duration;
 
 use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, Seq};
 use aether_bloomery_kinds::{
-    AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin, Publish,
-    PublishResult, RecordedHeadMove, Ref, RequestSource, Requested, WatchHead, WatchHeadResult,
+    AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin,
+    ProgramName, ProgramRef, Publish, PublishResult, RecordedHeadMove, Ref, RequestSource, Requested, WatchHead,
+    WatchHeadResult,
 };
 use aether_data::MailboxId;
 use aether_substrate::Subname;
@@ -16,7 +18,7 @@ use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_test_chassis_with};
 
-use actor_support::{TestAnchor, caller, no_reply, reply, request};
+use actor_support::{TestAnchor, caller, reply, request};
 
 #[derive(Clone, Debug, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.bloomery.watch_head.note")]
@@ -89,23 +91,25 @@ impl Fixture {
     }
 }
 
-fn out_of_fence_append_records(expected_seq: u64, bad_cause: u64) -> AppendRecords {
-    let requested = Requested {
-        program: aether_bloomery_kinds::ProgramRef::new(
+/// The "still parked" check: no reply lands within a short wait.
+fn no_reply(rx: &mpsc::Receiver<OwnedDispatch>) {
+    assert!(rx.recv_timeout(Duration::from_millis(200)).is_err(), "expected no reply, but one arrived");
+}
+
+/// One `Requested` record under `cause`, distinct per `key`.
+fn requested(cause: Option<u64>, key: u64, expected_seq: u64) -> AppendRecords {
+    let record = Requested {
+        program: ProgramRef::new(
             Digest::from_bytes([1; 32]),
-            aether_bloomery_kinds::ProgramName::new("bloomery.test.watch_head.program").expect("program name"),
+            ProgramName::new("bloomery.test.watch_head.program").expect("program name"),
         ),
         input: Digest::from_bytes([2; 32]),
         source: RequestSource::Native {
             origin: NativeOrigin::new("test.watch_head.driver").expect("native origin"),
-            key: 1,
+            key,
         },
     };
-    AppendRecords::new(
-        Vec::new(),
-        vec![DriverRecord::Requested { cause: Some(bad_cause), record: requested }],
-        expected_seq,
-    )
+    AppendRecords::new(Vec::new(), vec![DriverRecord::Requested { cause, record }], expected_seq)
 }
 
 #[test]
@@ -136,7 +140,7 @@ fn a_parked_watch_wakes_on_commit_not_on_conflict_or_refusal() {
     assert_eq!(fixture.publish(3, &stale), PublishResult::Conflict { actual: 1 });
     no_reply(&fixture.watcher_replies);
 
-    let refused = fixture.append_records(4, &out_of_fence_append_records(1, 99));
+    let refused = fixture.append_records(4, &requested(Some(99), 1, 1));
     assert!(matches!(refused, AppendRecordsResult::Err { .. }), "out-of-fence cause must be refused: {refused:?}");
     no_reply(&fixture.watcher_replies);
 
@@ -162,20 +166,7 @@ fn each_parked_watch_is_answered_exactly_once() {
     fixture.send_watch(caller_b, 10, 1);
     fixture.send_watch(caller_b, 11, 5);
 
-    let committed = fixture.append_records(3, &{
-        let requested = Requested {
-            program: aether_bloomery_kinds::ProgramRef::new(
-                Digest::from_bytes([1; 32]),
-                aether_bloomery_kinds::ProgramName::new("bloomery.test.watch_head.program2").expect("program name"),
-            ),
-            input: Digest::from_bytes([3; 32]),
-            source: RequestSource::Native {
-                origin: NativeOrigin::new("test.watch_head.driver2").expect("native origin"),
-                key: 1,
-            },
-        };
-        AppendRecords::new(Vec::new(), vec![DriverRecord::Requested { cause: None, record: requested }], 1)
-    });
+    let committed = fixture.append_records(3, &requested(None, 1, 1));
     assert_eq!(committed, AppendRecordsResult::Committed { head: 2, artifacts: Vec::new() });
 
     assert_eq!(reply::<WatchHeadResult>(&fixture.watcher_replies, 2), WatchHeadResult::Advanced { head: 2 });
