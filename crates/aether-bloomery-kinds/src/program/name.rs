@@ -1,4 +1,4 @@
-//! Validated dotted names for programs.
+//! Validated dotted names for programs, reactors, rules, and native request origins.
 
 use alloc::string::String;
 use core::error::Error as StdError;
@@ -119,6 +119,9 @@ macro_rules! dotted_name {
 }
 
 dotted_name!(ProgramName, ProgramNameError);
+dotted_name!(ReactorName, ReactorNameError);
+dotted_name!(RuleName, RuleNameError);
+dotted_name!(NativeOrigin, NativeOriginError);
 
 #[cfg(test)]
 mod tests {

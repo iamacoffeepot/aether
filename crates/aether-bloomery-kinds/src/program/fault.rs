@@ -105,6 +105,14 @@ pub enum FaultReason {
     TimedOut { after_millis: u64 },
     /// Reserved: no out-of-process program exists in this brick.
     Crashed { stderr_tail: Detail },
+    /// The input's transitive closure exceeded the driver's byte cap. Nothing was loaded.
+    ClosureTooLarge { limit_bytes: u64 },
+    /// A failure before `Invoke`: a load error, an unreadable section, an unknown program name, or the wrong input kind.
+    BundleUnavailable { reason: Detail },
+    /// A failure after `Invoke`: `Invoked::Rejected`, or a result whose prefix doesn't match the declaration.
+    ProtocolViolation { reason: Detail },
+    /// The request was outstanding when the engine stopped.
+    Interrupted,
 }
 
 #[cfg(test)]
