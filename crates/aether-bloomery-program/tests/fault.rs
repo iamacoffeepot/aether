@@ -52,7 +52,7 @@ fn refusal_and_panic_each_write_one_fault_and_no_extra_artifacts() -> Result<(),
     let entries = journal.read(before, 16)?;
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0].seq, seq);
-    assert_eq!(entries[0].kind, Fault::NAME);
+    assert_eq!(entries[0].kind, Fault::ID);
     let fault = Journal::decode::<Fault>(&entries[0])?;
     assert!(matches!(fault.reason, FaultReason::Refused { .. }));
     assert_eq!(journal.head()?, Seq(before.0 + 1));
@@ -67,7 +67,7 @@ fn refusal_and_panic_each_write_one_fault_and_no_extra_artifacts() -> Result<(),
     };
     let entries = journal.read(before, 16)?;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].kind, Fault::NAME);
+    assert_eq!(entries[0].kind, Fault::ID);
     let fault = Journal::decode::<Fault>(&entries[0])?;
     match fault.reason {
         FaultReason::Panicked { message } => assert!(message.as_str().contains("trim panicked")),
@@ -118,7 +118,7 @@ fn a_missing_input_is_a_fault_and_writes_nothing_else() -> Result<(), Box<dyn Er
     };
     let entries = journal.read(before, 16)?;
     assert_eq!(entries.len(), 1);
-    assert_eq!(entries[0].kind, Fault::NAME);
+    assert_eq!(entries[0].kind, Fault::ID);
     let fault = Journal::decode::<Fault>(&entries[0])?;
     assert_eq!(fault.reason, FaultReason::InputMissing);
     assert_eq!(journal.head()?, Seq(before.0 + 1));

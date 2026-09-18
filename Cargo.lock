@@ -141,8 +141,11 @@ dependencies = [
 name = "aether-bloomery-journal"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-bloomery-kinds",
  "aether-data",
+ "aether-kinds",
+ "aether-substrate",
  "rusqlite",
  "tempfile",
 ]
@@ -152,6 +155,7 @@ name = "aether-bloomery-kinds"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-data",
+ "serde",
  "sha2",
  "unicode-normalization",
 ]

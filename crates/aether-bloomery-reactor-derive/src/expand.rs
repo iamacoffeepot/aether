@@ -15,8 +15,12 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
     let visits = rules.iter().map(expand_visit);
     let arm_evals = rules.iter().map(expand_arm_eval);
     let export_desc = emit_reactor_export_desc(&self_ty, &namespace);
+    let unit_check = quote_spanned! { self_ty.span() => const _: #self_ty = #self_ty; };
 
     quote! {
+        #(#attrs)*
+        #unit_check
+
         #(#attrs)*
         impl #self_ty {
             #(#inherent_rules)*

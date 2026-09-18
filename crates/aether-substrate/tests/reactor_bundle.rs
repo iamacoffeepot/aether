@@ -32,7 +32,7 @@ fn journal_moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) ->
     let event = Head::<K>::new(name).move_to(to);
     JournalEntry {
         seq,
-        kind: aether_bloomery_kinds::HeadMoved::<K>::NAME.to_owned(),
+        kind: aether_bloomery_kinds::HeadMoved::<K>::ID,
         cause: None,
         recorded_at_millis: 0,
         bytes: aether_bloomery_kinds::HeadMoved::<K>::encode_storage(&StorageData::from_value(event))
@@ -41,7 +41,7 @@ fn journal_moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) ->
 }
 
 fn fold_fail(seq: u64) -> JournalEntry {
-    JournalEntry { seq, kind: REACTOR_FOLD_FAIL_KIND.to_owned(), cause: None, recorded_at_millis: 0, bytes: Vec::new() }
+    JournalEntry { seq, kind: REACTOR_FOLD_FAIL_KIND, cause: None, recorded_at_millis: 0, bytes: Vec::new() }
 }
 
 fn live_event<K: Kind + 'static>(stream: &str, seq: u64, name: &'static str, to: Ref<K>) -> Event {
