@@ -100,15 +100,13 @@ impl ProgramCore {
     /// queue takes the request. The folded request must equal what was
     /// written; anything else means the journal bytes cannot be trusted.
     pub(crate) fn activate_committed(&mut self, out: &mut Vec<Command>) {
-        let seqs: Vec<u64> = self.activations.keys().copied().collect();
-        for seq in seqs {
+        while let Some((seq, activation)) = self.activations.pop_first() {
             let Some(found) = self.journal.requests().get(Seq(seq)) else {
                 self.abort(format!("committed request {seq} is missing from the journal fold"), out);
                 return;
             };
             let bundle = found.requested().program.bundle();
             let recorded = found.requested().clone();
-            let activation = self.activations.remove(&seq).expect("activation collected from the map above");
             let source = RequestSource::Native { origin: activation.call.origin.clone(), key: activation.call.key };
             let same = recorded.program.name() == &activation.call.name
                 && recorded.input == activation.call.input
