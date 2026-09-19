@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-18
+- **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
 
 ## Context
 
@@ -36,7 +37,8 @@ Bloomery rewrite has not been deployed.
 1. **A program is part of a WASM bundle.** A bundle is one WASM artifact
    that carries one or more programs, written as
    `#[program] impl Program for X` and exported with
-   `export!(…, generators = [aether_bloomery_program::bundle_programs])`.
+   `export!(…, generators = [aether_bloomery_bundle::bundle])`, the one
+   generator for programs and reactors (ADR-0225 decision 8).
    The bundle's digest is its identity. A program is identified by
    `ProgramRef { bundle: Digest, name: ProgramName }`, and `ProgramName`
    is unique within a bundle, enforced at compile time. A head names a
@@ -65,7 +67,7 @@ Bloomery rewrite has not been deployed.
    The closure is transitive. The driver caps its size and records a
    `Fault` rather than invoking a program whose closure exceeds the cap.
 
-4. **The declaration lives in the bundle.** `bundle_programs` writes
+4. **The declaration lives in the bundle.** The `bundle` generator writes
    every program's `Program` declaration into an
    `aether.bloomery.programs` custom section. The driver reads that
    section from the artifact bytes to check that a program name exists
@@ -75,7 +77,7 @@ Bloomery rewrite has not been deployed.
 5. **Addressing.** The driver loads each bundle once per engine with
    `aether.component.load` (`LoadComponent`), using `name` set to the
    bundle digest in lowercase hex and `export` set to the generated root
-   namespace `aether.bloomery.program`. The root's address is
+   namespace `aether.bloomery.bundle`. The root's address is
    `aether.component/aether.embedded:<digest>`. For each `Invoke`, the
    root spawns an inline child
    ([ADR-0114](0114-inline-child-actors.md), `spawn_inline_child`) with

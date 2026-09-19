@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-18
 - **Amended:** 2026-09-19 — decision 9's reactor restart point is the higher of the reaction and activation watermarks; decision 11's `Processed` also waits for requests at or below `through` (issue #6208).
+- **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
 
 ## Context
 
@@ -69,8 +70,12 @@ Nothing on main can carry any of this yet:
    §5 and ADR-0225 §1. The driver never sends `DropComponent`, because the
    name stays registered and a dropped digest could never be loaded
    again. Retiring an instance means the driver stops routing to it.
-   Dormant instances stay loaded. A digest serves one role. A digest
-   already loaded in the other role fails without a second load.
+   Dormant instances stay loaded. A digest has one root, which serves
+   every role its bundle declares (ADR-0225 decision 8). The driver
+   loads the digest the first time either role needs it, and the other
+   role reuses that root. A role the bundle doesn't declare is refused
+   from the missing custom section before any load: a program request
+   faults with `BundleUnavailable`, and an activation is rejected.
 
 3. **Programs.** For each request, the driver:
    1. resolves the program head (see decisions 7 and 11);
@@ -260,8 +265,9 @@ Nothing on main can carry any of this yet:
   means one slow reactor holds up every later seq, and one `Invoke` per
   root serializes each bundle's programs.
 - **Dormant instances hold memory.** They stay loaded for the engine's
-  lifetime. A poisoned digest stays poisoned until restart, so moving a
-  head back to it is rejected.
+  lifetime. A poisoned digest stays poisoned for reactor routing until
+  restart, so moving a reactor-set head back to it is rejected. Its
+  programs keep answering.
 - **The poison pill is deferred.** A trapping reactor crash-loops the
   engine on restart until the pre-delivery watermark record exists.
   Programs don't crash-loop, because they are faulted `Interrupted`.

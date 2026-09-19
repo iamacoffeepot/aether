@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-18
+- **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (decision 8).
 
 ## Context
 
@@ -42,15 +43,16 @@ bundle side of that boundary.
 
 ## Decision
 
-1. **One root per bundle, named by digest.** `bundle_reactors` generates
-   one root actor at export namespace `aether.bloomery.reactor`. The driver
+1. **One root per bundle, named by digest.** The `bundle` generator
+   generates one root actor at export namespace `aether.bloomery.bundle`
+   (decision 8). The driver
    loads it once per engine with `aether.component.load` (`LoadComponent`).
    `name` is the lowercase-hex `Digest` of
    `artifact_digest(OpaqueBytes::ID, wasm)`. That is the journal artifact
    digest, a sha256 over the artifact prefix plus the payload. It is not
    the raw sha256 of the WASM bytes. Reactor-set members are
    `Head<OpaqueBytes>`, so this is the digest a head resolves to. `config` is
-   empty, and `export` is `Some("aether.bloomery.reactor")`. The root's
+   empty, and `export` is `Some("aether.bloomery.bundle")`. The root's
    address is `aether.component/aether.embedded:<digest>`.
 
 2. **The root is one actor.** It owns the views and calls each reactor's
@@ -104,7 +106,7 @@ bundle side of that boundary.
    [ADR-0010](0010-runtime-component-loading.md)). A bundle built against
    a changed protocol schema can't load beside older ones.
 
-6. **The declaration lives in the bundle.** `bundle_reactors` writes an
+6. **The declaration lives in the bundle.** The `bundle` generator writes an
    `aether.bloomery.reactors` custom section. For each reactor it records
    the reactor name, and for each rule the rule name, the trigger kind, and
    the output kind. The layout follows #6180's `aether.bloomery.programs`.
@@ -115,10 +117,22 @@ bundle side of that boundary.
    validated as a `ReactorName` at compile time. Rule names are validated
    as `RuleName`s the same way.
 
-8. **Program and reactor roots can't share an `export!`.** Both would
-   claim the digest name. `bundle_programs` and `bundle_reactors` each
-   reject the other's reserved root namespace, and the error appears at
-   compile time.
+8. **One generator, one root, programs and reactors together.** A bundle
+   provides programs, reactors, or both. `#[program]` and `#[reactor]`
+   still validate and tag their types, and one export generator,
+   `aether_bloomery_bundle::bundle`, replaces `bundle_programs` and
+   `bundle_reactors`. It reads both tags from the `export!` set and
+   generates the single root at `aether.bloomery.bundle`, with the
+   program handlers (`Invoke`, `Invoked`) when the bundle has programs
+   and the reactor handlers (`Warm`, `Event`, `StatusQuery`) when it has
+   reactors. It writes each present role's custom section. A module with
+   neither is a compile error. The handled kinds don't overlap, so each
+   handler answers its own caller and nothing routes between roles. The
+   program root's state moves into a library type beside
+   `aether_bloomery_reactor::Root`, so the generated root stays a thin
+   shell. Each role keeps its own state inside the root, so a poisoned
+   reactor stays poisoned in the reactor state and the bundle's programs
+   keep answering.
 
 9. **Retiring an instance only stops routing to it.** The driver stops
    routing events to a retired instance. The instance is never dropped,
@@ -130,7 +144,14 @@ bundle side of that boundary.
 
 - Reactors and programs load the same way: once per engine, under the
   journal artifact digest, with no configuration. Each answers its caller,
-  and native code does all journal writes.
+  and native code does all journal writes. A bundle that provides both
+  loads once and has one address.
+- In a bundle that provides both roles, program invocations and reactor
+  evaluation run in one instance, so each waits behind the other. A
+  bundle that provides one role is unaffected.
+- A program-only bundle links the reactor runtime through the
+  `aether-bloomery-bundle` facade. The unused code is stripped from the
+  WASM, so the cost is compile time.
 - A WASM trap in a reactor root calls `fatal_abort` and kills the whole
   substrate ([ADR-0063](0063-fail-fast-on-abnormal-component-lifecycle.md);
   `crates/aether-component/src/trampoline/runtime/mod.rs`, the
@@ -170,6 +191,20 @@ bundle side of that boundary.
 
 ## Alternatives considered
 
+- **Separate program and reactor roots that can't share an `export!`**
+  (this ADR's decision 8 before the 2026-09-19 amendment). Rejected: a
+  feature whose rules call its own programs would need two bundle
+  crates, and upgrading the pair would take two head moves. The failure
+  isolation it seemed to buy doesn't exist, because a trap kills the
+  substrate either way and poison is reactor state.
+- **One module loaded as two instances with role-qualified names**
+  (`program.<digest>`, `reactor.<digest>`). Rejected: it splits one
+  bundle across two addresses and two memories, and restart recovery
+  would adopt each role separately.
+- **A routing root with the role roots as inline children.** Rejected: a
+  child's reply returns to the root, so the root would relay every
+  reactor reply. It has the same single-instance cost as one root and
+  adds a layer.
 - **Per-reactor peer actors (today's shape).** Rejected: every peer runs
   in the same WASM instance. They buy no isolation but cost a snapshot
   encode and decode per event.
