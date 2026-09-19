@@ -4,6 +4,8 @@
 //! journal is fully deterministic: seeded moves and records take the first
 //! seqs, and every core append lands where the test says it does.
 
+#[path = "support/program_world.rs"]
+mod program_world;
 mod support;
 
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
@@ -12,7 +14,8 @@ use aether_bloomery_kinds::{
     OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
 };
 use aether_data::{Kind, KindId};
-use support::{LIMIT_BYTES, ROOT, World, call, digest, requested, transition};
+use program_world::{ROOT, call, fault, requested, transition};
+use support::{LIMIT_BYTES, World, digest};
 
 const PROGRAM: &str = "test.program";
 const HEAD: &str = "programs";
@@ -104,7 +107,7 @@ fn startup_faults_prior_life_requests_once_and_invokes_nothing() {
     world.seed(None, &requested(bundle, PROGRAM, input, ORIGIN, 1));
     world.seed(None, &requested(bundle, PROGRAM, input, ORIGIN, 2));
     world.seed(None, &requested(bundle, PROGRAM, input, ORIGIN, 3));
-    world.seed(Some(4), &support::fault(bundle, PROGRAM, input, FaultReason::Interrupted));
+    world.seed(Some(4), &fault(bundle, PROGRAM, input, FaultReason::Interrupted));
     let manual = world.drive(initial);
     assert!(manual.is_empty(), "startup needs no service replies: {manual:?}");
     assert!(world.abort.is_none());
@@ -674,7 +677,7 @@ fn refused_transition_append_records_a_protocol_violation() {
     assert!(world.abort.is_none());
     assert_eq!(world.appends.len(), 3, "requested, refused transition, violation fault");
     assert!(matches!(world.appends[1].records(), [DriverRecord::Transition { cause: 2, .. }]));
-    let expected = support::fault(
+    let expected = fault(
         fixed.bundle,
         PROGRAM,
         fixed.input,

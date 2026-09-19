@@ -20,11 +20,28 @@ use aether_bloomery_kinds::{
 };
 
 use crate::bundles::BundleTable;
+use crate::reactors::{CommittedRouting, Routing};
 
-pub use command::{Command, LoadOutcome};
+pub use command::{BundleRole, Command, LoadOutcome};
 pub use journal::EVENTS_PAGE;
-pub use journal::{Journal, PendingWrite, RequestedClaim};
-pub use ticket::{AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EventsTicket, InvokeTicket, LoadTicket};
+pub use journal::{Journal, PendingWrite, PlannedRecord, RequestedClaim};
+pub use ticket::{
+    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket, LoadTicket,
+    StatusTicket, WarmTicket, WatchTicket,
+};
+
+/// Why the core read one artifact.
+#[derive(Debug, Clone, Copy)]
+pub enum ArtifactRead {
+    /// A program bundle's wasm.
+    ProgramBundle(Digest),
+    /// A reactor bundle's wasm.
+    ReactorBundle(Digest),
+    /// A reactor set's stored membership.
+    ReactorSet(Digest),
+    /// The destination of the `SetHead` the current seq is checking.
+    SetHeadDestination,
+}
 
 /// One committed `Requested` whose pipeline has not started yet.
 #[derive(Debug)]
@@ -40,6 +57,7 @@ pub struct Activation {
 pub struct ProgramCore {
     pub(crate) journal: Journal,
     pub(crate) bundles: BundleTable,
+    pub(crate) routing: Routing,
     pub(crate) limit: ClosureLimit,
     pub(crate) next_ticket: u64,
     pub(crate) recovered: bool,
@@ -47,7 +65,7 @@ pub struct ProgramCore {
     pub(crate) held: VecDeque<(CallerId, Call)>,
     pub(crate) waiters: BTreeMap<u64, (u64, Vec<CallerId>)>,
     pub(crate) activations: BTreeMap<u64, Activation>,
-    pub(crate) artifact_reads: BTreeMap<ArtifactTicket, Digest>,
+    pub(crate) artifact_reads: BTreeMap<ArtifactTicket, ArtifactRead>,
     pub(crate) closure_reads: BTreeMap<ClosureTicket, (Digest, u64)>,
     pub(crate) loads: BTreeMap<LoadTicket, Digest>,
     pub(crate) invokes: BTreeMap<InvokeTicket, (Digest, u64)>,
@@ -60,6 +78,7 @@ impl ProgramCore {
         let mut core = Self {
             journal: Journal::new(),
             bundles: BundleTable::default(),
+            routing: Routing::new(),
             limit,
             next_ticket: 0,
             recovered: false,
@@ -102,10 +121,14 @@ impl ProgramCore {
         if self.aborted {
             return out;
         }
-        if self.journal.read_ticket() != Some(ticket) {
+        if self.journal.read_ticket() == Some(ticket) {
+            self.journal.set_read_ticket(None);
+        } else if let Some(read) = self.routing.read.take_if(|read| read.ticket == ticket) {
+            self.continue_routing_events(&read, result, &mut out);
+            return out;
+        } else {
             return out;
         }
-        self.journal.set_read_ticket(None);
         match result {
             ReadEventsResult::Err { message, .. } => {
                 self.abort(format!("journal read failed: {message}"), &mut out);
@@ -151,10 +174,23 @@ impl ProgramCore {
         if self.aborted {
             return out;
         }
-        let Some(bundle) = self.artifact_reads.remove(&ticket) else {
+        let Some(read) = self.artifact_reads.remove(&ticket) else {
             return out;
         };
-        self.continue_artifact(bundle, result, &mut out);
+        match read {
+            ArtifactRead::ProgramBundle(bundle) => {
+                self.continue_artifact(bundle, result, &mut out);
+            }
+            ArtifactRead::ReactorBundle(bundle) => {
+                self.continue_reactor_artifact(bundle, result, &mut out);
+            }
+            ArtifactRead::ReactorSet(digest) => {
+                self.continue_set_artifact(digest, result, &mut out);
+            }
+            ArtifactRead::SetHeadDestination => {
+                self.continue_destination_artifact(result, &mut out);
+            }
+        }
         out
     }
 
@@ -186,70 +222,108 @@ impl ProgramCore {
         };
         match result {
             AppendRecordsResult::Committed { head, .. } => {
-                if head <= self.journal.cursor() {
-                    self.abort(
-                        format!("journal committed an append at head {head} behind cursor {}", self.journal.cursor()),
-                        &mut out,
-                    );
-                    return out;
-                }
-                if let PendingWrite::RequestedCall { callers, call } = write {
-                    self.activations.insert(head, Activation { callers, call });
-                }
-                self.journal.set_target(head);
-                self.emit_read(&mut out);
+                self.append_committed(write, head, &mut out);
             }
             AppendRecordsResult::Conflict { actual } => {
-                if actual <= self.journal.cursor() {
-                    self.abort(
-                        format!("journal reported conflict at {actual} behind cursor {}", self.journal.cursor()),
-                        &mut out,
-                    );
-                    return out;
-                }
-                self.journal.queue_front(write);
-                self.journal.set_target(actual);
-                self.emit_read(&mut out);
+                self.append_conflict(write, actual, &mut out);
             }
-            AppendRecordsResult::Err { message } => match write {
-                PendingWrite::RequestedCall { callers, call } => {
-                    let reason = Detail::new(&message);
-                    for caller in callers {
-                        out.push(Command::Answer {
-                            caller,
-                            outcome: CallOutcome::Refused {
-                                key: call.key,
-                                reason: CallRefusal::Journal { reason: reason.clone() },
-                            },
-                        });
-                    }
-                    self.pump(&mut out);
-                }
-                PendingWrite::Outcome { request, record: DriverRecord::Transition { .. }, .. } => {
-                    let Some((program, input)) = self.request_data(request) else {
-                        self.abort(format!("cannot re-record the refused transition for request {request}"), &mut out);
-                        return out;
-                    };
-                    let record = DriverRecord::Fault {
-                        cause: request,
-                        record: Fault {
-                            program,
-                            input,
-                            reason: FaultReason::ProtocolViolation { reason: Detail::new(message) },
-                        },
-                    };
-                    self.journal.queue_front(PendingWrite::Outcome { request, artifacts: Vec::new(), record });
-                    self.pump(&mut out);
-                }
-                PendingWrite::Outcome { .. } => {
-                    self.abort(format!("journal refused a fault append: {message}"), &mut out);
-                }
-                PendingWrite::Startup => {
-                    self.abort(format!("journal refused the startup batch: {message}"), &mut out);
-                }
-            },
+            AppendRecordsResult::Err { message } => {
+                self.append_refused(write, message, &mut out);
+            }
         }
         out
+    }
+
+    /// Record one committed append and read back its range.
+    fn append_committed(&mut self, write: PendingWrite, head: u64, out: &mut Vec<Command>) {
+        if head <= self.journal.cursor() {
+            self.abort(
+                format!("journal committed an append at head {head} behind cursor {}", self.journal.cursor()),
+                out,
+            );
+            return;
+        }
+        match write {
+            PendingWrite::RequestedCall { callers, call } => {
+                self.activations.insert(head, Activation { callers, call });
+            }
+            PendingWrite::Routing { trigger, .. } => {
+                let Some(records) = self.routing.appending.take() else {
+                    self.abort(format!("routing batch for {trigger} committed with no derived records"), out);
+                    return;
+                };
+                let start = self.journal.cursor() + 1;
+                if u64::try_from(records.len()).ok() != Some(head - self.journal.cursor()) {
+                    self.abort(
+                        format!("routing batch for {trigger} committed at head {head} for {} records", records.len()),
+                        out,
+                    );
+                    return;
+                }
+                self.routing.committed = Some(CommittedRouting { records, start });
+            }
+            _ => {}
+        }
+        self.journal.set_target(head);
+        self.emit_read(out);
+    }
+
+    /// Requeue one conflicted append at the front and refold to the actual head.
+    fn append_conflict(&mut self, write: PendingWrite, actual: u64, out: &mut Vec<Command>) {
+        if actual <= self.journal.cursor() {
+            self.abort(format!("journal reported conflict at {actual} behind cursor {}", self.journal.cursor()), out);
+            return;
+        }
+        if matches!(write, PendingWrite::Routing { .. }) {
+            self.routing.appending = None;
+        }
+        self.journal.queue_front(write);
+        self.journal.set_target(actual);
+        self.emit_read(out);
+    }
+
+    /// Answer one refused append: refuse its callers, re-record its transition, or abort.
+    fn append_refused(&mut self, write: PendingWrite, message: String, out: &mut Vec<Command>) {
+        match write {
+            PendingWrite::RequestedCall { callers, call } => {
+                let reason = Detail::new(&message);
+                for caller in callers {
+                    out.push(Command::Answer {
+                        caller,
+                        outcome: CallOutcome::Refused {
+                            key: call.key,
+                            reason: CallRefusal::Journal { reason: reason.clone() },
+                        },
+                    });
+                }
+                self.pump(out);
+            }
+            PendingWrite::Outcome { request, record: DriverRecord::Transition { .. }, .. } => {
+                let Some((program, input)) = self.request_data(request) else {
+                    self.abort(format!("cannot re-record the refused transition for request {request}"), out);
+                    return;
+                };
+                let record = DriverRecord::Fault {
+                    cause: request,
+                    record: Fault {
+                        program,
+                        input,
+                        reason: FaultReason::ProtocolViolation { reason: Detail::new(message) },
+                    },
+                };
+                self.journal.queue_front(PendingWrite::Outcome { request, artifacts: Vec::new(), record });
+                self.pump(out);
+            }
+            PendingWrite::Outcome { .. } => {
+                self.abort(format!("journal refused a fault append: {message}"), out);
+            }
+            PendingWrite::Startup => {
+                self.abort(format!("journal refused the startup batch: {message}"), out);
+            }
+            PendingWrite::Routing { trigger, .. } => {
+                self.abort(format!("journal refused the routing batch for {trigger}: {message}"), out);
+            }
+        }
     }
 
     /// Feed one load outcome. Unknown tickets return no commands.
@@ -261,7 +335,13 @@ impl ProgramCore {
         let Some(bundle) = self.loads.remove(&ticket) else {
             return out;
         };
-        self.continue_loaded(bundle, outcome, &mut out);
+        if self.bundles.instance(&bundle).is_some() {
+            self.continue_reactor_loaded(bundle, outcome, &mut out);
+        } else if self.bundles.queue(&bundle).is_some() {
+            self.continue_loaded(bundle, outcome, &mut out);
+        } else {
+            self.abort(format!("load reply arrived for unknown bundle {bundle}"), &mut out);
+        }
         out
     }
 
@@ -298,7 +378,7 @@ impl ProgramCore {
     }
 
     /// Issue the next journal page read from the cursor.
-    fn emit_read(&mut self, out: &mut Vec<Command>) {
+    pub(crate) fn emit_read(&mut self, out: &mut Vec<Command>) {
         let ticket = self.mint(EventsTicket::mint);
         self.journal.set_read_ticket(Some(ticket));
         out.push(Command::ReadEvents {
@@ -327,14 +407,23 @@ impl ProgramCore {
         self.pump(out);
     }
 
-    /// Activate committed requests, answer ready waiters, and drain held calls.
+    /// Activate committed requests, advance routing over its read-back, answer
+    /// ready waiters, drain held calls, and drive routing while work is ready.
     pub(crate) fn on_recovered_synced(&mut self, out: &mut Vec<Command>) {
         self.activate_committed(out);
         if self.aborted {
             return;
         }
+        self.routing_read_back(out);
+        if self.aborted {
+            return;
+        }
         self.answer_ready(out);
         self.drain_held(out);
+        if self.aborted {
+            return;
+        }
+        self.drive_routing(out);
     }
 
     /// Handle every call held while catching up or recovering, in FIFO order.
@@ -358,6 +447,7 @@ impl ProgramCore {
                     self.derive_outcome(request, artifacts, record, out);
                 }
                 PendingWrite::Startup => self.derive_startup(out),
+                PendingWrite::Routing { trigger, plan } => self.derive_routing(trigger, plan, out),
             }
             if self.aborted {
                 return;

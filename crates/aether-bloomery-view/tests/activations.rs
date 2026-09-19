@@ -92,3 +92,32 @@ fn a_gap_is_refused() -> Result<(), Box<dyn Error>> {
     assert!(matches!(activations.get(&head), Some(HeadActivation::Live(activated)) if activated.live_from() == Seq(1)));
     Ok(())
 }
+
+#[test]
+fn watermark_is_the_highest_activation_cause() -> Result<(), Box<dyn Error>> {
+    // Catches keying on the entry's own seq instead of its cause, and lowering on a later smaller cause.
+    let head = Head::<OpaqueBytes>::new("main");
+    let mut activations = Activations::new();
+    assert_eq!(activations.watermark(), Seq(0));
+
+    activations.apply(&entry_for(1, None, &Activated::new(head.clone(), digest(1), Seq(1))?)?)?;
+    assert_eq!(activations.watermark(), Seq(0), "an uncaused activation raises nothing");
+    activations.apply(&filler(2)?)?;
+    activations.apply(&filler(3)?)?;
+    activations.apply(&entry_for(
+        4,
+        Some(3),
+        &ActivationRejected { head: head.clone(), bundle: digest(2), reason: Detail::new("rejected") },
+    )?)?;
+    assert_eq!(activations.watermark(), Seq(3), "a rejection raises to its cause, not its seq");
+    activations.apply(&entry_for(5, Some(3), &Activated::new(head.clone(), digest(3), Seq(4))?)?)?;
+    assert_eq!(activations.watermark(), Seq(3), "an equal cause holds the watermark");
+    activations.apply(&filler(6)?)?;
+    activations.apply(&entry_for(
+        7,
+        Some(2),
+        &ActivationRejected { head, bundle: digest(4), reason: Detail::new("rejected again") },
+    )?)?;
+    assert_eq!(activations.watermark(), Seq(3), "a later smaller cause never lowers the watermark");
+    Ok(())
+}

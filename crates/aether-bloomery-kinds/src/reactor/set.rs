@@ -63,6 +63,9 @@ pub struct ReactorSet {
 }
 
 impl ReactorSet {
+    /// The reactor-set root head the driver selects from and rules move.
+    pub const ROOT: Head<Self> = Head::new("core.reactors");
+
     /// Accept members already in strictly increasing head-name order.
     ///
     /// # Errors

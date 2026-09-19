@@ -16,6 +16,8 @@ use std::collections::{BTreeMap, VecDeque};
 use aether_bloomery_kinds::{ClosureArtifact, Detail, Digest, Program};
 use aether_data::MailboxId;
 
+use super::{Instance, InstanceState};
+
 /// Lifecycle state of one bundle digest.
 #[derive(Debug)]
 pub enum DigestState {
@@ -80,23 +82,74 @@ impl DigestQueue {
     }
 }
 
-/// Digest-keyed bundle states. The reactor role and its "a digest serves one
-/// role" check arrive with reactor routing; this table serves programs.
+/// One digest's claimed role. A digest serves one role by construction.
+#[derive(Debug)]
+pub enum Bundle {
+    /// A program digest with its request queue.
+    Program(DigestQueue),
+    /// A reactor digest with its instance.
+    Reactor(Instance),
+}
+
+/// Digest-keyed bundle states, one role per digest (ADR-0226 decision 2).
 #[derive(Debug, Default)]
 pub struct BundleTable {
-    queues: BTreeMap<Digest, DigestQueue>,
+    bundles: BTreeMap<Digest, Bundle>,
 }
 
 impl BundleTable {
+    /// The program queue for `bundle`, if it serves the program role.
     pub fn queue(&self, bundle: &Digest) -> Option<&DigestQueue> {
-        self.queues.get(bundle)
+        match self.bundles.get(bundle) {
+            Some(Bundle::Program(queue)) => Some(queue),
+            _ => None,
+        }
     }
 
+    /// The program queue for `bundle`, if it serves the program role.
     pub fn queue_mut(&mut self, bundle: &Digest) -> Option<&mut DigestQueue> {
-        self.queues.get_mut(bundle)
+        match self.bundles.get_mut(bundle) {
+            Some(Bundle::Program(queue)) => Some(queue),
+            _ => None,
+        }
     }
 
+    /// The reactor instance for `bundle`, if it serves the reactor role.
+    pub fn instance(&self, bundle: &Digest) -> Option<&Instance> {
+        match self.bundles.get(bundle) {
+            Some(Bundle::Reactor(instance)) => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// The reactor instance for `bundle`, if it serves the reactor role.
+    pub fn instance_mut(&mut self, bundle: &Digest) -> Option<&mut Instance> {
+        match self.bundles.get_mut(bundle) {
+            Some(Bundle::Reactor(instance)) => Some(instance),
+            _ => None,
+        }
+    }
+
+    /// Set the state of `bundle`'s reactor instance, if it serves the reactor role.
+    pub fn set_reactor_state(&mut self, bundle: &Digest, state: InstanceState) {
+        if let Some(instance) = self.instance_mut(bundle) {
+            instance.state = state;
+        }
+    }
+
+    /// Insert a program queue, claiming the digest for the program role.
     pub fn insert(&mut self, bundle: Digest, queue: DigestQueue) {
-        self.queues.insert(bundle, queue);
+        self.bundles.insert(bundle, Bundle::Program(queue));
+    }
+
+    /// Claim `bundle` for the reactor role, or borrow its instance.
+    ///
+    /// Returns `None` when the digest already serves the program role; the
+    /// caller rejects without a second load.
+    pub fn claim_reactor(&mut self, bundle: Digest) -> Option<&Instance> {
+        match self.bundles.entry(bundle).or_insert_with(|| Bundle::Reactor(Instance::new())) {
+            Bundle::Reactor(instance) => Some(instance),
+            Bundle::Program(_) => None,
+        }
     }
 }

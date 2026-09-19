@@ -4,13 +4,14 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 publish = false
-description = "Sans-io program core for the native bundle driver: journal folds in, driver commands out (ADR-0226)."
+description = "Sans-io driver core for the native bundle driver: journal folds in, driver commands out (ADR-0226)."
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-component = { path = "../aether-component", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }

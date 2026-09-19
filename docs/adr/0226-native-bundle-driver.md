@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-18
+- **Amended:** 2026-09-19 — decision 9's reactor restart point is the higher of the reaction and activation watermarks; decision 11's `Processed` also waits for requests at or below `through` (issue #6208).
 
 ## Context
 
@@ -201,13 +202,19 @@ Nothing on main can carry any of this yet:
      (ADR-0220: "A retry is a new event"). The reason is that a trap
      kills the substrate. Re-running a trapping program automatically
      would crash-loop the engine.
-   - **Reactors.** After a restart, every root is gone. The reaction
-     watermark is the highest cause among reaction-sourced records:
-     `Requested` with a `Reaction` source, caused head moves, and
-     `ReactionFailed`. The driver loads the instances the current set
-     selects. It warms each one fold-only from seq 1 through the
-     watermark, then evaluates live after it. A seq's records commit in
-     one batch, so no seq is half-recorded.
+   - **Reactors.** After a restart, every root is gone. Restart
+     replays from max(reaction watermark, activation watermark). The
+     reaction watermark is the highest cause among reaction-sourced
+     records: `Requested` with a `Reaction` source, caused head moves,
+     and `ReactionFailed`. The activation watermark is the highest
+     cause among `Activated` and `ActivationRejected` records: an
+     activation-only batch still moves the restart fence. The driver
+     loads the instances the current set selects. It warms each one
+     fold-only from seq 1 through the watermark, then evaluates live
+     after it. A seq's records commit in one batch, so no seq is
+     half-recorded. Per-digest failures during the warm reject every
+     head the digest serves at the watermark cause, without stopping
+     the restart.
    - **Adopting a loaded root.** `StatusQuery` is only for a root that
      is already loaded, meaning `LoadComponent` failed with
      `SubnameInUse`. The driver resumes from that root's cursor.
@@ -237,8 +244,10 @@ Nothing on main can carry any of this yet:
       program, name, and input is answered from the first request's
       recorded outcome. A repeated `(origin, key)` for a different request
       is a caller bug: it is answered `Refused`, and nothing is recorded.
-    - `AwaitProcessed { through }` gets `Processed` once every entry
-      through `through` has been routed and its records appended.
+    - `AwaitProcessed { through }` gets `Processed` once its bound is
+      quiescent: routing has passed `through`, no routing write is
+      queued or in flight, and no request at or below `through` is
+      still outstanding.
 
     The driver pulls events with `ReadEvents` and uses `WatchHead` to
     wake. Its outbound mail is `LoadComponent`, the root protocols of

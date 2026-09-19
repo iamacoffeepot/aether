@@ -1,23 +1,45 @@
 //! Journal view: the folds, their shared cursor, and the fenced write queue.
 //!
 //! The core learns the journal only from [`ReadEvents`](aether_bloomery_kinds::ReadEvents)
-//! pages. Each entry folds into both [`Heads`] and
-//! [`Requests`]; pages continue until the cursor
-//! reaches the page's `head`. At most one [`AppendRecords`](aether_bloomery_kinds::AppendRecords)
-//! is in flight, fenced at the cursor, and writing decisions come from a FIFO
-//! of pending writes, made only when the core is caught up with no write in
-//! flight. A fold error aborts: it reports a history the driver could not have
+//! pages. Each entry folds into [`Heads`], [`Requests`], and [`Activations`];
+//! pages continue until the cursor reaches the page's `head`. At most one
+//! [`AppendRecords`](aether_bloomery_kinds::AppendRecords) is in flight,
+//! fenced at the cursor, and writing decisions come from a FIFO of pending
+//! writes, made only when the core is caught up with no write in flight. A
+//! fold error aborts: it reports a history the driver could not have
 //! produced, so the view cannot be trusted.
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{Call, DriverRecord, EncodedArtifact, JournalEntry};
-use aether_bloomery_view::{Heads, Requests};
+use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHead};
+use aether_bloomery_view::{Activations, Heads, Requests};
 
 use super::ticket::{AppendTicket, CallerId, EventsTicket};
 
 /// Entries per journal page. Matches the journal owner's `MAX_READ_EVENTS`.
 pub const EVENTS_PAGE: u32 = 128;
+
+/// One planned routing record: ready to append, or a `SetHead` awaiting its
+/// compare-and-swap at derivation.
+#[derive(Debug, Clone)]
+pub enum PlannedRecord {
+    /// A record decided during routing, appended unchanged.
+    Ready(DriverRecord),
+    /// A `SetHead` intent whose destination is stored under the head's kind.
+    /// Derivation checks the compare-and-swap against the journal view's
+    /// `Heads` plus earlier moves in the same batch; a pass becomes
+    /// `HeadMoved`, a failure becomes `ReactionFailed` for this intent alone.
+    SetHead {
+        /// Trigger or catch-up seq causing the move or its failure.
+        cause: u64,
+        /// Bundle whose rule returned the intent.
+        bundle: Digest,
+        /// Reactor that returned the intent.
+        reactor: ReactorName,
+        /// The move to attempt.
+        set_head: SetHead,
+    },
+}
 
 /// One write waiting for, or holding, the fenced append slot.
 #[derive(Debug)]
@@ -42,6 +64,14 @@ pub enum PendingWrite {
     },
     /// One startup batch. Recomputed from the outstanding set on conflict.
     Startup,
+    /// One routing batch. Re-derived from the carried plan on conflict, so
+    /// each `SetHead` swap is checked again against the refolded view.
+    Routing {
+        /// Trigger seq whose records this batch carries.
+        trigger: u64,
+        /// Records in append order.
+        plan: Vec<PlannedRecord>,
+    },
 }
 
 /// How a new call relates to an already-queued `Requested`.
@@ -60,6 +90,7 @@ pub enum RequestedClaim {
 pub struct Journal {
     heads: Heads,
     requests: Requests,
+    activations: Activations,
     cursor: u64,
     target: Option<u64>,
     read_ticket: Option<EventsTicket>,
@@ -73,6 +104,7 @@ impl Journal {
         Self {
             heads: Heads::new(),
             requests: Requests::new(),
+            activations: Activations::new(),
             cursor: 0,
             target: None,
             read_ticket: None,
@@ -88,6 +120,10 @@ impl Journal {
 
     pub fn requests(&self) -> &Requests {
         &self.requests
+    }
+
+    pub fn activations(&self) -> &Activations {
+        &self.activations
     }
 
     /// Last folded sequence; the fence for the next write.
@@ -128,6 +164,9 @@ impl Journal {
             self.requests
                 .apply(&folded)
                 .map_err(|error| format!("requests fold rejected journal entry {}: {error}", entry.seq))?;
+            self.activations
+                .apply(&folded)
+                .map_err(|error| format!("activations fold rejected journal entry {}: {error}", entry.seq))?;
             self.cursor = entry.seq;
         }
         Ok(())
@@ -143,6 +182,12 @@ impl Journal {
 
     pub fn has_startup_queued(&self) -> bool {
         self.pending.iter().any(|write| matches!(write, PendingWrite::Startup))
+    }
+
+    /// Whether a routing write is queued or in flight.
+    pub fn has_routing_write(&self) -> bool {
+        matches!(self.in_flight, Some(PendingWrite::Routing { .. }))
+            || self.pending.iter().any(|write| matches!(write, PendingWrite::Routing { .. }))
     }
 
     /// Pop the next write when one may be decided: caught up, none in flight.

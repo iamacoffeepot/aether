@@ -41,6 +41,10 @@ tickets! {
     AppendTicket => "aether.bloomery.driver.ticket.append",
     LoadTicket => "aether.bloomery.driver.ticket.load",
     InvokeTicket => "aether.bloomery.driver.ticket.invoke",
+    WatchTicket => "aether.bloomery.driver.ticket.watch",
+    WarmTicket => "aether.bloomery.driver.ticket.warm",
+    EvaluateTicket => "aether.bloomery.driver.ticket.evaluate",
+    StatusTicket => "aether.bloomery.driver.ticket.status",
 }
 
 /// Caller handle minted by [`ProgramCore::call`](crate::ProgramCore::call).

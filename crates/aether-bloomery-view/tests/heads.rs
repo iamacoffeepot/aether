@@ -242,3 +242,20 @@ fn incremental_fold_across_chunks_matches_rebuild_from_zero() -> Result<(), Box<
     assert_eq!(chunked.get(&fill), rebuilt.get(&fill));
     Ok(())
 }
+
+#[test]
+fn recorded_lookup_keeps_kind_and_name_apart() -> Result<(), Box<dyn Error>> {
+    // Catches a lookup keyed on the name alone, so a tree head answers for a same-named bundle head.
+    let bundle = Digest::from_bytes([1; 32]);
+    let tree = Digest::from_bytes([2; 32]);
+    let mut heads = Heads::new();
+    heads.apply(&moved(1, "main", Ref::<OpaqueBytes>::from_digest(bundle))?)?;
+    heads.apply(&moved(2, "main", Ref::<Tree>::from_digest(tree))?)?;
+
+    let bundle_head = RecordedHead::new(OpaqueBytes::ID, "main")?;
+    let tree_head = RecordedHead::new(Tree::ID, "main")?;
+    assert_eq!(heads.binding(&bundle_head), Some(bundle));
+    assert_eq!(heads.binding(&tree_head), Some(tree));
+    assert_eq!(heads.binding(&RecordedHead::new(Program::ID, "main")?), None);
+    Ok(())
+}
