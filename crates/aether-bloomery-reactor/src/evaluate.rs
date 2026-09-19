@@ -20,7 +20,15 @@ use crate::trigger::Trigger;
 /// Implement this for kinds that override [`Kind::encode_into_bytes`] with a
 /// real mail codec. Do not implement it for [`aether_data::Storage`] types;
 /// those panic on positional encoding and stay on the checked storage path.
+/// `CallProgram` and `SetHead` are the only kinds the driver applies, and any
+/// other output is recorded as `ReactionFailed` (ADR-0226 decision 6).
 pub trait Output: Kind + 'static {}
+
+/// A rule output carrying the ADR-0226 decision 6 call-program intent.
+impl Output for aether_bloomery_kinds::CallProgram {}
+
+/// A rule output carrying the ADR-0226 decision 6 set-head intent.
+impl Output for aether_bloomery_kinds::SetHead {}
 
 /// One typed output produced by an invoked arm.
 ///
