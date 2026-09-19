@@ -189,6 +189,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    // `seen_ns[i]` is `reactors[i]`'s literal namespace; both grow together below.
     let mut reactors = Vec::new();
     let mut seen_ns = Vec::new();
     for export_ty in &exports {
@@ -234,7 +235,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
 
     let root = format_ident!("{ROOT_IDENT}");
     let generated = expand_root(&root, &reactors);
-    let sections = reactors.iter().copied().map(expand_section);
+    let sections = reactors.iter().zip(&seen_ns).map(|(entry, namespace)| expand_section(&entry.ty, namespace));
     let boot_tokens = optional_type_tokens(boot.as_ref());
     let default_tokens = default.as_ref().map_or_else(|| quote! { { #root } }, |ty| quote! { { #ty } });
     let actor_tokens = actors.iter().map(envelope_tokens);
@@ -377,11 +378,7 @@ fn expand_root(root: &Ident, reactors: &[&Envelope]) -> TokenStream2 {
 // `aether_bloomery_kinds::REACTORS_SECTION`. The derive crate cannot read that
 // const (runtime → derive dependency), so the literal is copied here, as
 // `REACTOR_NAMESPACE` is above.
-fn expand_section(entry: &Envelope) -> TokenStream2 {
-    let ty = &entry.ty;
-    let NamespaceTok::Lit(namespace) = &entry.namespace else {
-        return TokenStream2::new();
-    };
+fn expand_section(ty: &Type, namespace: &str) -> TokenStream2 {
     let key = format!("{namespace}:{}", quote!(#ty));
     let hash = fnv1a_64(key.as_bytes());
     let len_ident = format_ident!("__AETHER_BLOOMERY_REACTOR_SECTION_LEN_{hash:016X}");
