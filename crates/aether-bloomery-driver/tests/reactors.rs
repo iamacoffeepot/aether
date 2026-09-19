@@ -100,7 +100,9 @@ fn move_head(
 
 #[test]
 fn await_processed_waits_for_a_live_append_it_is_woken_for() -> Result<(), Box<dyn Error>> {
-    // Catches a warn-dropped WatchHeadResult (routing never wakes for another writer's append, so the barrier never answers), an unhandled AwaitProcessed, and a barrier answered before its bound is routed.
+    // Catches a warn-dropped `WatchHeadResult` (routing never wakes for another
+    // writer's append, so the barrier never answers), an unhandled
+    // `AwaitProcessed`, and a barrier answered before its bound is routed.
     let temp = tempfile::tempdir()?;
     let path = temp.path().join("driver.sqlite");
     let staged = seed_barrier_journal(&path)?;
@@ -130,7 +132,12 @@ fn await_processed_waits_for_a_live_append_it_is_woken_for() -> Result<(), Box<d
 
 #[test]
 fn reactor_set_move_activates_and_its_call_program_records_requested_then_transition() -> Result<(), Box<dyn Error>> {
-    // Catches a warn-dropped Warmed/Evaluated (routing stalls and settle times out), a reactor loaded under the program export, a reply routed to the wrong continuation, a reaction Requested that is uncaused, carries a Native source, or resolves its bundle at the wrong boundary, a Transition not caused by the reaction's Requested, and a barrier that answers between Requested and Transition.
+    // Catches a warn-dropped `Warmed` / `Evaluated` (routing stalls and `settle`
+    // times out), a reactor loaded under the program export, a reply routed to
+    // the wrong continuation, a reaction `Requested` that is uncaused, carries a
+    // `Native` source, or resolves its bundle at the wrong boundary, a
+    // `Transition` not caused by the reaction's `Requested`, and a barrier that
+    // answers between `Requested` and `Transition`.
     let Some(reactor_path) = require_wasm("aether_test_fixtures_reactor_call") else {
         return Ok(());
     };
@@ -158,8 +165,8 @@ fn reactor_set_move_activates_and_its_call_program_records_requested_then_transi
         ),
         3
     );
-    let h = settle(&registry, driver, driver_inbox, &driver_rx, &mut correlations, 3);
-    assert_eq!(h, 4);
+    let activated = settle(&registry, driver, driver_inbox, &driver_rx, &mut correlations, 3);
+    assert_eq!(activated, 4);
     let entries = read_all(&path)?;
     assert_eq!(entries.len(), 4);
     assert_eq!(entries[3].seq, Seq(4));
@@ -174,18 +181,18 @@ fn reactor_set_move_activates_and_its_call_program_records_requested_then_transi
             journal_inbox,
             &journal_rx,
             &mut correlations,
-            &MoveHead::new(&input_head, Ref::from_digest(seed.input), h)
+            &MoveHead::new(&input_head, Ref::from_digest(seed.input), activated)
         ),
-        h + 1
+        activated + 1
     );
-    let final_head = settle(&registry, driver, driver_inbox, &driver_rx, &mut correlations, h + 1);
-    assert_eq!(final_head, h + 3);
+    let final_head = settle(&registry, driver, driver_inbox, &driver_rx, &mut correlations, activated + 1);
+    assert_eq!(final_head, activated + 3);
     assert_eq!(journal_head(&path)?, Seq(final_head));
     let entries = read_all(&path)?;
-    let requested_entry = &entries[usize::try_from(h + 1)?];
-    assert_eq!(requested_entry.seq, Seq(h + 2));
+    let requested_entry = &entries[usize::try_from(activated + 1)?];
+    assert_eq!(requested_entry.seq, Seq(activated + 2));
     assert_eq!(requested_entry.kind, Requested::ID);
-    assert_eq!(requested_entry.cause, Some(Seq(h + 1)));
+    assert_eq!(requested_entry.cause, Some(Seq(activated + 1)));
     let requested = Journal::decode::<Requested>(requested_entry)?;
     assert_eq!(
         requested.source,
@@ -199,24 +206,15 @@ fn reactor_set_move_activates_and_its_call_program_records_requested_then_transi
     assert_eq!(requested.program.bundle(), seed.program);
     assert_eq!(requested.program.name().as_str(), SUMMARIZE_PROGRAM);
     assert_eq!(requested.input, seed.input);
-    let transition_entry = &entries[usize::try_from(h + 2)?];
-    assert_eq!(transition_entry.seq, Seq(h + 3));
+    let transition_entry = &entries[usize::try_from(activated + 2)?];
+    assert_eq!(transition_entry.seq, Seq(activated + 3));
     assert_eq!(transition_entry.kind, Transition::ID);
-    assert_eq!(transition_entry.cause, Some(Seq(h + 2)));
+    assert_eq!(transition_entry.cause, Some(Seq(activated + 2)));
     let transition = Journal::decode::<Transition>(transition_entry)?;
     assert_eq!(transition.program, requested.program);
     assert!(Journal::open(&path)?.get_bytes(&transition.result)?.is_some(), "the staged result is stored");
-    let mut requested_count = 0;
-    for entry in &entries {
-        if entry.kind == Requested::ID {
-            requested_count += 1;
-        }
-        assert!(
-            entry.kind != ReactionFailed::ID && entry.kind != ActivationRejected::ID && entry.kind != Fault::ID,
-            "unexpected failure record at seq {}",
-            entry.seq
-        );
-    }
-    assert_eq!(requested_count, 1);
+    assert_eq!(entries.iter().filter(|entry| entry.kind == Requested::ID).count(), 1);
+    let failures = [ReactionFailed::ID, ActivationRejected::ID, Fault::ID];
+    assert!(entries.iter().all(|entry| !failures.contains(&entry.kind)), "no failure records");
     Ok(())
 }
