@@ -2,8 +2,18 @@
 //! head into a `CallProgram` for the summarize program.
 
 use aether_bloomery_kinds::{CallProgram, HeadMoved, ProgramName};
-use aether_bloomery_reactor::reactor;
+use aether_bloomery_reactor::{Guard, NoViews, reactor};
 use aether_test_fixtures_kinds::{SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
+
+struct SummarizeName(ProgramName);
+
+impl Guard<HeadMoved<SummarizeInput>> for SummarizeName {
+    type Views = NoViews;
+
+    fn resolve(_trigger: &HeadMoved<SummarizeInput>, (): ()) -> Option<Self> {
+        ProgramName::new(SUMMARIZE_PROGRAM).ok().map(Self)
+    }
+}
 
 pub struct SummarizeCaller;
 
@@ -12,12 +22,8 @@ impl Reactor for SummarizeCaller {
     const NAMESPACE: &'static str = "test.bloomery.summarize.caller";
 
     #[rule]
-    fn call_summarize(&self, change: HeadMoved<SummarizeInput>) -> CallProgram {
-        CallProgram {
-            program: SUMMARIZE_BUNDLE,
-            name: ProgramName::new(SUMMARIZE_PROGRAM).expect("SUMMARIZE_PROGRAM is const-asserted valid"),
-            input: change.to().digest(),
-        }
+    fn call_summarize(&self, change: HeadMoved<SummarizeInput>, name: SummarizeName) -> CallProgram {
+        CallProgram { program: SUMMARIZE_BUNDLE, name: name.0, input: change.to().digest() }
     }
 }
 
