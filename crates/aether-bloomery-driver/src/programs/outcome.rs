@@ -62,18 +62,15 @@ impl ProgramCore {
 
     /// Answer every waiter whose request now has a recorded outcome.
     pub(crate) fn answer_ready(&mut self, out: &mut Vec<Command>) {
-        let mut answered = Vec::new();
-        for (seq, (key, _)) in &self.waiters {
-            let outcome = self.journal.requests().get(Seq(*seq)).and_then(|found| found.outcome().cloned());
-            if let Some(outcome) = outcome {
-                answered.push((*seq, *key, outcome));
-            }
-        }
-        for (seq, key, outcome) in answered {
-            let (_, callers) = self.waiters.remove(&seq).expect("waiters collected from the map above");
+        let requests = self.journal.requests();
+        self.waiters.retain(|seq, (key, callers)| {
+            let Some(outcome) = requests.get(Seq(*seq)).and_then(|found| found.outcome()) else {
+                return true;
+            };
             for caller in callers {
-                out.push(answer_command(key, caller, &outcome));
+                out.push(answer_command(*key, *caller, outcome));
             }
-        }
+            false
+        });
     }
 }
