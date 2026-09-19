@@ -71,6 +71,7 @@ members = [
     "crates/aether-test-fixtures-behavior",
     "crates/aether-test-fixtures-program",
     "crates/aether-test-fixtures-reactor",
+    "crates/aether-test-fixtures-reactor-call",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
