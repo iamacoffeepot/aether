@@ -37,8 +37,9 @@ pub use program::{
     RequestSource, Requested, RuleName, RuleNameError, Transition,
 };
 pub use reactor::{
-    Evaluated, Event, ReactorIntent, ReactorSet, ReactorSetError, Status, StatusQuery, Warm, WarmEntries,
-    WarmEntriesError, Warmed,
+    Evaluated, Event, REACTORS_SECTION, ReactorDeclaration, ReactorDeclarationError, ReactorDeclarationsError,
+    ReactorIntent, ReactorSet, ReactorSetError, RuleDeclaration, RuleRecord, Status, StatusQuery, Warm, WarmEntries,
+    WarmEntriesError, Warmed, reactor_declarations, reactor_record_len, write_reactor_record,
 };
 pub use reference::Ref;
 pub use tree::{Name, NameError, Node, Path, PathError, Tree, TreeError};

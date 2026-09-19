@@ -24,7 +24,10 @@
 //! and answers `Warm` / `Event` / `StatusQuery` to its caller. A request with
 //! no reply target is ignored. Evaluation encodes outputs through the mail
 //! codec as attributed [`aether_bloomery_kinds::ReactorIntent`] values and
-//! does not execute or append them.
+//! does not execute or append them. `bundle_reactors` also pins each selected
+//! reactor's const-assembled declaration record into the
+//! `aether.bloomery.reactors` custom section, so native readers can decode
+//! reactor names and rule kinds from artifact bytes before loading.
 //!
 //! Authors keep ordinary function signatures. Generated `Arg<_, T, Rest>`
 //! lists, view visitors, actor wrappers, and mail encoding are implementation

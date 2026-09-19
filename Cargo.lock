@@ -219,6 +219,7 @@ dependencies = [
  "aether-test-fixtures-kinds",
  "aether-test-fixtures-reactor",
  "serde",
+ "wasmparser 0.246.2",
 ]
 
 [[package]]

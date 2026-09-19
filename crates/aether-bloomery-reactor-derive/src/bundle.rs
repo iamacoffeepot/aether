@@ -8,6 +8,8 @@ use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
 use syn::{Ident, LitStr, Path, Token, Type, braced, bracketed};
 
+use crate::export_desc::fnv1a_64;
+
 // Keep in lockstep with `aether_bloomery_reactor::REACTOR_NAMESPACE`. The derive
 // crate cannot read that const (runtime → derive dependency), so reserved-namespace
 // detection compares against this copy.
@@ -232,6 +234,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
 
     let root = format_ident!("{ROOT_IDENT}");
     let generated = expand_root(&root, &reactors);
+    let sections = reactors.iter().copied().map(expand_section);
     let boot_tokens = optional_type_tokens(boot.as_ref());
     let default_tokens = default.as_ref().map_or_else(|| quote! { { #root } }, |ty| quote! { { #ty } });
     let actor_tokens = actors.iter().map(envelope_tokens);
@@ -239,6 +242,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let rest = remaining_generators.iter();
     Ok(quote! {
         #generated
+        #(#sections)*
         ::aether_actor::__export_continue! {
             remaining_generators: [ #(#rest),* ]
             boot: #boot_tokens
@@ -366,5 +370,32 @@ fn expand_root(root: &Ident, reactors: &[&Envelope]) -> TokenStream2 {
                 ctx.reply(&self.inner.status());
             }
         }
+    }
+}
+
+// The link-section name below stays in lockstep with
+// `aether_bloomery_kinds::REACTORS_SECTION`. The derive crate cannot read that
+// const (runtime → derive dependency), so the literal is copied here, as
+// `REACTOR_NAMESPACE` is above.
+fn expand_section(entry: &Envelope) -> TokenStream2 {
+    let ty = &entry.ty;
+    let NamespaceTok::Lit(namespace) = &entry.namespace else {
+        return TokenStream2::new();
+    };
+    let key = format!("{namespace}:{}", quote!(#ty));
+    let hash = fnv1a_64(key.as_bytes());
+    let len_ident = format_ident!("__AETHER_BLOOMERY_REACTOR_SECTION_LEN_{hash:016X}");
+    let bytes_ident = format_ident!("__AETHER_BLOOMERY_REACTOR_SECTION_BYTES_{hash:016X}");
+    let section_ident = format_ident!("__AETHER_BLOOMERY_REACTOR_SECTION_{hash:016X}");
+    quote! {
+        const #len_ident: usize = <#ty as ::aether_bloomery_reactor::Reactor>::DECLARATION.len();
+        const #bytes_ident: [u8; #len_ident] =
+            ::aether_bloomery_reactor::__macro_internals::record_array::<#len_ident>(
+                <#ty as ::aether_bloomery_reactor::Reactor>::DECLARATION,
+            );
+        const _: &[u8] = &#bytes_ident;
+        #[cfg(target_family = "wasm")]
+        #[unsafe(link_section = "aether.bloomery.reactors")]
+        static #section_ident: [u8; #len_ident] = #bytes_ident;
     }
 }

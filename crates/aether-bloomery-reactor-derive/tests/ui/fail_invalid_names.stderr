@@ -9,3 +9,61 @@ error[E0080]: evaluation panicked: reactor rule name is not a valid RuleName
    |
 30 |     fn _hidden(&self, _change: HeadMoved<Tree>) -> Publication {
    |        ^^^^^^^ evaluation of `_` failed here
+
+error[E0080]: evaluation panicked: aether-bloomery-kinds: reactor name is not a valid ReactorName
+  --> tests/ui/fail_invalid_names.rs:13:1
+   |
+13 | #[reactor]
+   | ^^^^^^^^^^ evaluation of `<BadNamespace as aether_bloomery_reactor::Reactor>::DECLARATION` failed inside this call
+   |
+note: inside `write_reactor_record::<38>`
+  --> $RUST/core/src/panic.rs
+   |
+   |         $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: $WORKSPACE/crates/aether-bloomery-kinds/src/reactor/declaration.rs
+   |
+   |     assert!(ReactorName::is_valid(name), "aether-bloomery-kinds: reactor name is not a valid ReactorName");
+   |     ------------------------------------------------------------------------------------------------------ in this macro invocation
+
+note: erroneous constant encountered
+  --> tests/ui/fail_invalid_names.rs:13:1
+   |
+13 | #[reactor]
+   | ^^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `reactor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0080]: evaluation panicked: aether-bloomery-kinds: reactor rule name is not a valid RuleName
+  --> tests/ui/fail_invalid_names.rs:25:1
+   |
+25 | #[reactor]
+   | ^^^^^^^^^^ evaluation of `<HiddenRule as aether_bloomery_reactor::Reactor>::DECLARATION` failed inside this call
+   |
+note: inside `write_reactor_record::<50>`
+  --> $WORKSPACE/crates/aether-bloomery-kinds/src/reactor/declaration.rs
+   |
+   |     check_rule_names(rules);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+note: inside `kinds::reactor::declaration::check_rule_names`
+  --> $RUST/core/src/panic.rs
+   |
+   |           $crate::panicking::panic_fmt($crate::const_format_args!($($t)+));
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the failure occurred here
+   |
+  ::: $WORKSPACE/crates/aether-bloomery-kinds/src/reactor/declaration.rs
+   |
+   | /         assert!(
+   | |             RuleName::is_valid(rules[index].name),
+   | |             "aether-bloomery-kinds: reactor rule name is not a valid RuleName"
+   | |         );
+   | |_________- in this macro invocation
+
+note: erroneous constant encountered
+  --> tests/ui/fail_invalid_names.rs:25:1
+   |
+25 | #[reactor]
+   | ^^^^^^^^^^
+   |
+   = note: this note originates in the attribute macro `reactor` (in Nightly builds, run with -Z macro-backtrace for more info)
