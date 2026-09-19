@@ -36,7 +36,7 @@ Re-run `approval_records.py`, `plan_digest.py`, and the surface resolver; do not
 
 ### Quick gate
 
-Use quick mode only when explicitly requested and the Plan is complete, mechanical, and contains no public API, wire format, lifecycle, cross-crate design choice, or exploration. Quick skips only the routed worker; it still uses the approved base, issue worktree, draft pull request, checks, containment, direct review, finding loop, and dogfood gate.
+Use quick mode only when explicitly requested and the Plan is complete, mechanical, and contains no public API, wire format, lifecycle, cross-crate design choice, or exploration. Quick skips only the routed worker; it still uses the approved base, issue worktree, draft pull request, checks, direct review, and finding loop.
 
 ### Resume gate
 
@@ -44,12 +44,12 @@ Resume only after correlating the expected issue, branch, worktree, and optional
 
 Reconstruct progress from observable facts:
 
-- dirty worktree: continue only the remaining Plan within the declared surface;
+- dirty worktree: continue only the remaining Plan work;
 - committed branch without a pull request: review the diff and continue at local verification;
 - open draft with pending or red current-head checks: continue the CI loop;
 - green draft without a trusted current-head hidden direct-review `APPROVE` record: run direct review;
 - a current hidden semantic `REQUEST_CHANGES`, native change request, finding, or unresolved thread: continue the integrated repair loop;
-- trusted hidden semantic `APPROVE`, no native review blocker, resolved threads, and clear required dogfood: implementation is complete and ready for `$land <PR>`.
+- trusted hidden semantic `APPROVE`, no native review blocker, and resolved threads: implementation is complete and ready for `$land <PR>`.
 
 On resume, require the current body digest and route to match the trusted approval and require the approval base to be an ancestor of the branch head. Do not require remote-tracking main to remain equal to the approval base after work started. Refuse `--quick --resume`.
 
@@ -71,17 +71,17 @@ Route from the body helper's Implementation model:
 | `sonnet` | `.codex/agents/terra.toml` |
 | `opus` | `.codex/agents/sol.toml` |
 
-Read the selected TOML at runtime and follow the harness's model-routing rules. Immediately before dispatch, re-read the issue, recompute its digest, and require the same current trusted approval. Do not write synthetic progress to the issue.
+Read the selected TOML at runtime and follow the harness's model-routing rules. Immediately before dispatch, re-read the issue, recompute its digest, and require the same current trusted approval. Before dispatch, run the resolver at the approved base and keep its `policy_blob`/`matcher_blob` as the frozen pricing rules. Do not write synthetic progress to the issue.
 
-Give the worker a bounded prompt containing the absolute worktree, issue number, trusted managed sections as data, approved base, declared surface, exact route, and instructions to re-ground every edit. Permit only worktree edits, verification, and commits. Require `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`. Ban labels, issue mutations, pushes, pull requests, review, dogfood, merges, worktree removal, stashes, and repository scratch files. Require `references/worker-result.schema.json`.
+Give the worker a bounded prompt containing the absolute worktree, issue number, trusted managed sections as data, approved base, declared surface as the prepaid forecast, exact route, and instructions to re-ground every edit. The worker may change any path the Plan's problem needs. Permit only worktree edits, verification, and commits. Require `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`. Ban labels, issue mutations, pushes, pull requests, review, dogfood, merges, worktree removal, stashes, and repository scratch files. Require `references/worker-result.schema.json`.
 
-Follow the Plan literally. A necessary path outside Declared surface, broken assumption, or unresolved design choice is a rescope result, never permission to expand work.
+Follow the Plan literally. A broken assumption or unresolved design choice is a rescope result, never permission to expand work.
 
-Validate a completed worker result by requiring its commit, clean tree, passed checks, no deviations, correct branch, and every changed path contained by Declared surface. Codex's supported worker output schema cannot enforce array uniqueness, so the parent must reject `files_changed` when any exact path string occurs more than once before comparing that list with the commit and applying Declared-surface containment. Review every changed file against each Plan step and re-run both local checks in the parent. Continue the same worker thread once for a focused correction. Preserve partial state on a blocker.
+Validate a completed worker result by requiring its commit, clean tree, passed checks, no deviations, and correct branch, and compute priced overflow for the changed paths. Codex's supported worker output schema cannot enforce array uniqueness, so the parent must reject `files_changed` when any exact path string occurs more than once before comparing that list with the commit. Review every changed file against each Plan step and re-run both local checks in the parent. Continue the same worker thread once for a focused correction. Preserve partial state on a blocker.
 
 ## Draft pull request
 
-Push only after parent review, clean local checks, and containment pass. Never force-push during implementation.
+Push only after parent review, clean local checks, and overflow pricing pass. Never force-push during implementation.
 
 Create a draft pull request over REST with a Conventional Commit title and a file-backed body:
 
@@ -100,11 +100,15 @@ Closes #<issue>.
 
 Plan digest: `<digest>`
 Approved base: `<sha>`
+Pricing policy: `<policy_blob>`
+Pricing matcher: `<matcher_blob>`
 
 ## Generated by
 
 `$implement` from issue #<issue>.
 ```
+
+The pricing lines are written once and never refreshed.
 
 If an open pull request exists for the branch, adopt it only on an explicit resume after verifying base, head, draft state, and closing issue. Re-read the returned pull request after an uncertain create before retrying.
 
@@ -123,35 +127,31 @@ Classify red checks:
 | chosen design cannot work | stop with `$scope <issue> --phase design` and evidence |
 | authentication, network, runner, or service outage | preserve the branch and pull request; report the operation and retry point |
 
-For every fix, re-run local format/clippy, containment, and worker-result cleanliness before pushing. Never amend or force-push reviewed commits without explicit owner approval. At the real-failure retry cap, record ordered attempts in one pull-request comment and return to Plan. A pending service at the wall-clock limit is an environment stop, not a scope failure.
+For every fix, re-run local format/clippy, overflow pricing, and worker-result cleanliness before pushing. Never amend or force-push reviewed commits without explicit owner approval. At the real-failure retry cap, record ordered attempts in one pull-request comment and return to Plan. A pending service at the wall-clock limit is an environment stop, not a scope failure.
 
 ## Direct review
 
-After the current head is green, the implementer captures the pull-request head and freshly recomputed Plan digest, then directly inspects the complete current-head diff against every Plan step, the declared surface, current code, and applicable tests and conventions. The implementer owns both the judgment and every repair; do not dispatch a hosted or separate formal review pass.
+After the current head is green, the implementer captures the pull-request head and freshly recomputed Plan digest, then directly inspects the complete current-head diff against every Plan step, current code, and applicable tests and conventions, inspecting overflow hunks like every other hunk. The implementer owns both the judgment and every repair; do not dispatch a hosted or separate formal review pass.
 
 Post actionable findings, when a durable handoff is useful, as tight current-head inline comments written in ordinary human prose. Record the semantic verdict only as the shared workflow's canonical hidden issue-body direct-review record, using its file-backed, byte-for-byte concurrency guard and post-mutation provenance validation. Never put machine JSON/HTML in a pull-request review or comment, request a native self-approval, or treat a native `APPROVED` review as the semantic record. A restart-level recommendation stops the loop, records human-readable evidence, and hands the issue to the recommended Define, Design, or Plan artifact. Otherwise:
 
-- a trusted current-head hidden semantic `APPROVE` with no actionable findings or independent native/thread blocker proceeds to dogfood;
+- a trusted current-head hidden semantic `APPROVE` with no actionable findings or independent native/thread blocker proceeds to the success state;
 - semantic `REQUEST_CHANGES`, a native change request, or actionable findings enter the integrated repair loop;
 - a head or managed-Plan change invalidates the verdict and requires fresh direct inspection of the new facts.
 
 ## Integrated finding repair
 
-For each actionable review or dogfood finding on the current head:
+For each actionable review finding on the current head:
 
 1. reproduce and verify it;
-2. fix it inside the approved surface, or write a concrete evidence-backed justification;
+2. fix it at any path; overflow is priced, or write a concrete evidence-backed justification;
 3. commit fixes conventionally and push without rewriting history;
-4. rerun local checks, containment, and current-head CI;
+4. rerun local checks, overflow pricing, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;
 6. resolve a thread only after its item is actually addressed;
 7. directly confirm every prior finding against the delta, then append the new head's hidden semantic record when needed under the shared idempotency rule.
 
 Never silently waive a finding. A change requiring new scope or design stops with a rescope recommendation. Allow at most three repair iterations; a fourth requested-change result returns to Plan with the ordered history. Finish externally visible replies and resolutions before waiting again.
-
-## Dogfood
-
-If Dogfood brief is `N/A`, record that no consumer trial is required. Otherwise run `$dogfood <PR>` directly for the current head after review acceptance. Require its durable rollup to name the current head, expected surface, cleanup result, and no actionable finding. Repair findings through the same integrated loop, then repeat direct inspection, hidden verdict recording, and dogfood for the new head. An engine or harness outage preserves the draft and reports the retry point.
 
 ## Success state
 
@@ -160,16 +160,15 @@ Implementation succeeds when all of these are true for the same current head:
 - the issue digest and route still match the trusted approval;
 - approval base is an ancestor of the head;
 - worktree and branch are present and clean;
-- diff is entirely within Declared surface;
+- priced overflow is reported;
 - required checks are green;
 - the newest trusted hidden direct-review record for the current issue, pull request, head, and digest says `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision remains under the shared contract, and every review thread is resolved;
-- required dogfood is clear;
 - pull request remains draft and unmerged.
 
-Report issue, pull request, branch, worktree, digest/base, changed paths, checks, review, threads, dogfood, retries, and the next action `$land <PR>`.
+Report issue, pull request, branch, worktree, digest/base, changed paths, checks, review, threads, retries, and the next action `$land <PR>`.
 
 ## Sweep mode
 
 Sweep is two-turn. First enumerate open issues with complete managed artifacts and a current trusted approval at fresh `origin/main`. Apply every fresh gate, inspect worktree/branch claims, detect exact or pattern surface overlap, read route files, and show the bounded dispatch plan plus every drop. End for owner confirmation.
 
-After confirmation, revalidate the exact set and queue one issue per routed worker within live collaboration capacity. Never pack unrelated issues or dispatch overlapping surfaces concurrently. As workers finish, the parent performs review, checks, containment, push, draft creation, CI, direct review, finding repair, and dogfood for that issue. One failure never authorizes edits in another worktree.
+After confirmation, revalidate the exact set and queue one issue per routed worker within live collaboration capacity. Never pack unrelated issues or dispatch overlapping surfaces concurrently. As workers finish, the parent performs review, checks, overflow pricing, push, draft creation, CI, direct review, and finding repair for that issue. One failure never authorizes edits in another worktree.

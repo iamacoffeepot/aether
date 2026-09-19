@@ -7,6 +7,13 @@ executing the matcher from an arbitrary fetched commit (a PR head, say) would
 hand the tier decision to that commit's author. This wrapper adds Codex's
 Plan-to-Ready validation and evidence; it deliberately does not carry a second
 glob implementation.
+
+Approval mode (`--targets-file`) validates that every Plan target is covered
+by the declared surface and resolves the surface tier. Changed mode
+(`--changed-file`) prices the surface overflow: the changed paths that no
+surface glob matches, each resolved with the same per-path policy lookup, plus
+the most restrictive tier overall. Both modes report the `policy_blob` and
+`matcher_blob` identities of the objects they executed.
 """
 
 from __future__ import annotations
@@ -164,7 +171,7 @@ def _read_list(path: Path, *, kind: str) -> list[str]:
     return entries
 
 
-def _load_snapshot(repo_argument: str, ref_argument: str) -> tuple[str, dict[str, Any], Any, list[str]]:
+def _load_snapshot(repo_argument: str, ref_argument: str) -> tuple[str, dict[str, Any], Any, list[str], str, str]:
     try:
         repo = Path(repo_argument).expanduser().resolve(strict=True)
     except OSError as error:
@@ -185,6 +192,27 @@ def _load_snapshot(repo_argument: str, ref_argument: str) -> tuple[str, dict[str
     if resolved != ref:
         raise ResolverError(f"--ref must identify the commit object itself (resolved {ref} to {resolved})")
     _require_upstream_ancestry(repo, ref)
+
+    policy_blob = (
+        _run_git(
+            repo,
+            ["rev-parse", "--verify", "--end-of-options", f"{ref}:{POLICY_PATH}"],
+            operation=f"reading blob id of {POLICY_PATH} at {ref}",
+        )
+        .decode("ascii", errors="strict")
+        .strip()
+        .lower()
+    )
+    matcher_blob = (
+        _run_git(
+            repo,
+            ["rev-parse", "--verify", "--end-of-options", f"{ref}:{CANONICAL_PATH}"],
+            operation=f"reading blob id of {CANONICAL_PATH} at {ref}",
+        )
+        .decode("ascii", errors="strict")
+        .strip()
+        .lower()
+    )
 
     canonical_bytes = _run_git(
         repo,
@@ -244,11 +272,11 @@ def _load_snapshot(repo_argument: str, ref_argument: str) -> tuple[str, dict[str
     if not tracked or len(tracked) != len(set(tracked)):
         raise ResolverError(f"the tree at {ref} is empty or contains duplicate paths")
 
-    return ref, namespace, policy, tracked
+    return ref, namespace, policy, tracked, policy_blob, matcher_blob
 
 
 def resolve(repo: str, ref: str, surface_file: str, targets_file: str) -> dict[str, object]:
-    resolved_ref, canonical, policy, tracked = _load_snapshot(repo, ref)
+    resolved_ref, canonical, policy, tracked, policy_blob, matcher_blob = _load_snapshot(repo, ref)
     surfaces = _read_list(Path(surface_file), kind="surface")
     targets = _read_list(Path(targets_file), kind="target")
     universe = sorted(set(tracked).union(targets))
@@ -319,6 +347,8 @@ def resolve(repo: str, ref: str, surface_file: str, targets_file: str) -> dict[s
     overall = max((entry["tier"] for entry in surface_results), key=lambda tier: rank.get(tier, len(rank)))
     return {
         "default": default,
+        "matcher_blob": matcher_blob,
+        "policy_blob": policy_blob,
         "ref": resolved_ref,
         "surface_path_count": len(allowed_paths),
         "surfaces": surface_results,
@@ -328,19 +358,81 @@ def resolve(repo: str, ref: str, surface_file: str, targets_file: str) -> dict[s
     }
 
 
+def resolve_overflow(repo: str, ref: str, surface_file: str, changed_file: str) -> dict[str, object]:
+    resolved_ref, canonical, policy, _tracked, policy_blob, matcher_blob = _load_snapshot(repo, ref)
+    surfaces = _read_list(Path(surface_file), kind="surface")
+    changed = _read_list(Path(changed_file), kind="target")
+    matchers = [(surface, canonical["compile_surface_glob"](surface)) for surface in surfaces]
+
+    # Identical to the root Cargo.lock carve-out in scripts/surface-match.py
+    # main (issue #3492): a root lockfile delta is the generated consequence
+    # of an in-surface manifest change, so it stays in-surface whenever the
+    # changed set itself contains a Cargo.toml that a declared glob matches.
+    manifest_changed_in_surface = any(
+        (path == "Cargo.toml" or path.endswith("/Cargo.toml"))
+        and any(matcher.match(path) for _, matcher in matchers)
+        for path in changed
+    )
+    overflow_paths = sorted(
+        path
+        for path in changed
+        if not any(matcher.match(path) for _, matcher in matchers)
+        and not (path == "Cargo.lock" and manifest_changed_in_surface)
+    )
+
+    default, rules = policy
+    overflow: list[dict[str, object]] = []
+    for path in overflow_paths:
+        matches = [
+            {"glob": glob, "tier": rule_tier}
+            for glob, matcher, rule_tier in rules
+            if matcher.match(path)
+        ]
+        overflow.append(
+            {
+                "matched_policy_rules": sorted(matches, key=lambda item: (item["glob"], item["tier"])),
+                "path": path,
+                "tier": canonical["tier_of"](path, policy),
+            }
+        )
+
+    rank = canonical["RANK"]
+    overall = (
+        max((entry["tier"] for entry in overflow), key=lambda tier: rank.get(tier, len(rank)))
+        if overflow
+        else None
+    )
+    return {
+        "changed_path_count": len(changed),
+        "default": default,
+        "matcher_blob": matcher_blob,
+        "overflow": overflow,
+        "policy_blob": policy_blob,
+        "ref": resolved_ref,
+        "tier": overall,
+    }
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", required=True, help="path to a Git worktree")
     parser.add_argument("--ref", required=True, help="full hexadecimal commit SHA to inspect")
     parser.add_argument("--surface-file", required=True, help="newline-delimited declared surface patterns")
-    parser.add_argument("--targets-file", required=True, help="newline-delimited concrete repository targets")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("--targets-file", help="newline-delimited concrete repository targets")
+    group.add_argument("--changed-file", help="newline-delimited changed repository paths to price as overflow")
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     arguments = _parser().parse_args(argv)
     try:
-        result = resolve(arguments.repo, arguments.ref, arguments.surface_file, arguments.targets_file)
+        if arguments.changed_file is not None:
+            result = resolve_overflow(
+                arguments.repo, arguments.ref, arguments.surface_file, arguments.changed_file
+            )
+        else:
+            result = resolve(arguments.repo, arguments.ref, arguments.surface_file, arguments.targets_file)
     except ResolverError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

@@ -56,7 +56,7 @@ Dogfood brief
 Side findings
 ```
 
-Preserve every other body byte, including the unmanaged prefix and hidden approval history. Replace existing managed spans in place and append missing spans in the order above. Omit Sub-issues, Depends on, and Side findings when empty; require the other five for a complete Plan.
+Preserve every other body byte, including the unmanaged prefix and hidden approval history. Replace existing managed spans in place and append missing spans in the order above. Omit Sub-issues, Depends on, Side findings, and Dogfood brief when empty; require the other four for a complete Plan. A legacy Dogfood brief is preserved.
 
 Before every full-body patch:
 
@@ -111,22 +111,9 @@ Put cross-issue ordering only under `## Depends on` as `- #<issue> — <reason>`
 
 ### Declared surface
 
-Emit one non-empty fenced list of narrow gitwildmatch paths. Each line is a concrete repository path or a literal directory prefix ending in one final `/**`. Reject comments, bullets, negation, absolute paths, backslashes, unsafe segments, duplicates, and broad escape hatches. Cover every concrete target and only intended roots; validate with the canonical matcher.
+Emit one non-empty fenced list of narrow gitwildmatch paths. Each line is a concrete repository path or a literal directory prefix ending in one final `/**`. Reject comments, bullets, negation, absolute paths, backslashes, unsafe segments, duplicates, and broad escape hatches. Cover every concrete target and only intended roots; validate with the canonical matcher. The surface is the prepaid forecast: a best-effort attempt to cover every file the work will touch, not only the Plan's named targets. Paths outside it are priced at landing, so a thorough forecast keeps overflow and its judgments small.
 
 A pure umbrella uses exactly `N/A — pure umbrella; no implementation PR`.
-
-### Dogfood brief
-
-Consumer-visible runtime work requires:
-
-```markdown
-- **medium**: drive | author | build-layer
-- **prompt**: <consumer task>
-- **surfaceUnderTest**: <public surface>
-- **expectedArtifact**: <observable result or none>
-```
-
-Workflow, tooling, refactor-only, test-only, or documentation work uses `N/A — <specific reason>`.
 
 ### Side findings
 
@@ -140,6 +127,6 @@ Split more than three separable changes or more than two separable crates. Use `
 
 Without explicit numbers, enumerate open non-pull-request issues lacking a complete Problem statement. With explicit numbers, retain the requested set but still apply close, block, and implementation-artifact gates. Print issue, title, captured base, derived artifact state, and every drop.
 
-On confirmation refresh all snapshots, use live agent capacity, route one issue to one fresh-context read-only drafter, and require structured proposed managed sections, dependencies, surface, dogfood, routing, ADR result, and grounding SHA. Validate each result and apply body writes serially. Drafting agents never mutate GitHub or implement.
+On confirmation refresh all snapshots, use live agent capacity, route one issue to one fresh-context read-only drafter, and require structured proposed managed sections, dependencies, surface, routing, ADR result, and grounding SHA. Validate each result and apply body writes serially. Drafting agents never mutate GitHub or implement.
 
 Report written sections, digest, surface, size/model, dependencies, ADR state, children, and Side-finding count. Point to `/approve <issue>`. Never write production code, create implementation artifacts, approve, or open a pull request.

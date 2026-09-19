@@ -7,11 +7,11 @@ lifecycle orchestration.
 
 On top of that baseline the repository keeps a set of scoped-issue skills —
 `scope`, `approve`, `implement`, `land`, and their neighbours — that add
-issue-body Plan artifacts, a digest-bound approval, an owned worktree, and
-head-bound review and dogfood evidence. They are checked in and current, and a
-session that invokes one is bound by its contract. They are not, however, the
-only route a change may take: a change that does not enter that pipeline lands
-as a plain reviewed PR on green CI.
+issue-body Plan artifacts, a digest-bound approval, an owned worktree,
+head-bound review evidence, and priced surface overflow. They are checked in
+and current, and a session that invokes one is bound by its contract. They are
+not, however, the only route a change may take: a change that does not enter
+that pipeline lands as a plain reviewed PR on green CI.
 
 The rest of this page describes the journey those skills define, because that is
 the part with invariants worth stating. It does not copy mutation procedures
@@ -32,7 +32,7 @@ Use the source that owns the question:
 | What arguments does a live tool accept? | The active tool schema, not a prose copy |
 | What does this running engine contain? | Live introspection such as `describe_kinds` and `describe_component` |
 | What work is approved? | For a scoped issue: its managed sections plus a trusted matching hidden approval record. Otherwise: the user's own request |
-| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, hidden direct-review record, native reviews, threads, dogfood evidence, and merge state |
+| Is a draft ready to land? | Its exact head, approval ancestry, actual diff, checks, hidden direct-review record, native reviews, threads, priced surface overflow, and merge state |
 | What does hosted automation do? | Checked-in workflow YAML plus current repository protection and check state |
 
 The guide is the digested, navigable explanation. When it disagrees with a
@@ -46,10 +46,10 @@ and their shared contracts. Those files are written for Codex's current tools;
 they do not runtime-translate Claude instructions.
 
 Claude Code uses `CLAUDE.md` and `.claude/skills/`. The two surfaces share the
-same issue-body artifact, approval, containment, review, and landing invariants,
-while command syntax, pause mechanics, worker routing, and worktree roots may
-differ. A prompt or task name cannot select a model or role that the active tool
-did not actually select.
+same issue-body artifact, approval, surface overflow pricing, review, and
+landing invariants, while command syntax, pause mechanics, worker routing, and
+worktree roots may differ. A prompt or task name cannot select a model or role
+that the active tool did not actually select.
 
 ## The durable journey
 
@@ -59,7 +59,7 @@ idea or rough issue
   → trusted hidden approval bound to Plan digest + exact base
   → owned issue worktree + branch
   → draft pull request closing the issue
-  → current-head checks + hidden direct review + native reviews + threads + required dogfood
+  → current-head checks + hidden direct review + native reviews + threads + priced surface overflow
   → explicitly authorized landing
   → merged pull request + closed issue + safe local cleanup
 ```
@@ -86,7 +86,7 @@ its own documented workflow and nothing adjacent.
 | Ground the problem, design, Plan, surface, and route | `scope` | Complete managed issue-body artifacts |
 | File selected unrelated scope observations | `scope-spinoff` | Linked unscoped issues |
 | Authorize a complete Plan | `approve` | A trusted hidden digest/base-bound record |
-| Implement approved work | `implement` | A reviewed, green draft PR with required dogfood clear |
+| Implement approved work | `implement` | A reviewed, green draft PR with priced overflow reported |
 | Audit existing code or a non-PR change | `review` | A read-only findings rollup |
 | Trial a public surface as a fresh consumer | `dogfood` | Durable evidence and a consumer-friction rollup |
 | Land an accepted draft | `land` | Merged PR, closed issue, and safe cleanup |
@@ -103,9 +103,9 @@ adjacent consequential action; implementation never implies landing.
 
 `scope` owns the managed sections for the problem statement, design notes,
 implementation plan, optional sub-issues and dependencies, declared surface,
-dogfood brief, and optional side findings. The Plan ends with exact `Size`,
-`Implementation model`, and `Routing reason` lines. Those body lines—not labels—
-select the implementation route.
+optional legacy-only dogfood brief, and optional side findings. The Plan ends
+with exact `Size`, `Implementation model`, and `Routing reason` lines. Those
+body lines—not labels—select the implementation route.
 
 Plan steps and acceptance criteria cite the symbol that defines a protocol
 value, never the value itself — exit codes, wire discriminants, ports, and
@@ -113,17 +113,18 @@ limits. The value is free to move; naming the symbol is what makes the move
 greppable, and a pinned numeral that later means something else is a silent
 mis-implementation.
 
-The declared surface bounds approval-policy resolution and the eventual PR
-diff. Declare it at crate granularity — `crates/<crate>/src/**` plus
+The declared surface is the prepaid forecast: it bounds approval-policy
+resolution, and paths outside it are priced at landing rather than forbidden.
+Declare it at crate granularity — `crates/<crate>/src/**` plus
 `crates/<crate>/tests/**` — and narrow to a module glob only when one crate
 hosts two genuinely separate things. Naming an individual file is a forecast of
 which files the work will touch, and that forecast is wrong often enough to be
 worth avoiding unless `approval-policy.toml` itself names that file. Read the
 policy for which files those are rather than copying the list; it moves. A
-necessary edit outside the declared surface
-is still evidence that the Plan must change, not permission to widen
-implementation. A pure umbrella declares that it has no implementation
-PR and closes only after its children and coordination obligations are complete.
+necessary edit outside the declared surface is overflow priced at landing, not
+evidence that the Plan must change. A pure umbrella declares that it has no
+implementation PR and closes only after its children and coordination
+obligations are complete.
 
 The canonical Plan digest covers the approval-bearing managed sections and
 their exact bytes. Side findings and unmanaged prose are outside that identity.
@@ -150,8 +151,8 @@ changes the digest; a different base needs another approval. Older records stay
 as history but do not authorize the current Plan.
 
 The policy tiers are `auto`, `judge`, and `human`. Their authority rules do not
-weaken structure, freshness, dependency, ADR, or containment gates. Approval
-does not edit scope or start implementation.
+weaken structure, freshness, dependency, ADR, or surface-grounding gates.
+Approval does not edit scope or start implementation.
 
 ## Implementation creates one reviewable artifact
 
@@ -164,17 +165,17 @@ worktree from that exact commit:
 
 The implementation follows the Plan literally, runs focused verification plus
 `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`, reviews
-the complete diff, checks every changed path against the declared surface, then
-plain-pushes and opens a draft PR that closes the issue. Existing artifacts are
-possible live ownership claims and require a verified resume, never opportunistic
-deletion or recreation.
+the complete diff, computes priced surface overflow, then plain-pushes and opens
+a draft PR that closes the issue. Existing artifacts are possible live ownership
+claims and require a verified resume, never opportunistic deletion or
+recreation.
 
 GitHub Actions proves the build/test tree. Current branch protection requires
 `CI pass` and `Lint title`; it does not configure required pull-request reviews.
 The checked-in [workflow README](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/README.md)
 owns the exact hosted inventory.
 
-## Review, findings, and dogfood are head-bound
+## Review and findings are head-bound
 
 After CI is green, the implementer directly inspects and repairs the complete
 current-head diff against the Plan. The implementer is the reviewer for this
@@ -200,27 +201,21 @@ Review acceptance has three separate gates:
 3. every review thread is resolved.
 
 Actionable findings enter the implementation's integrated repair loop. Verify
-each item, fix it within the approved surface or give a concrete justification,
-push an ordinary commit, rerun local checks and CI, reply to its anchored thread,
-and resolve the thread only after the disposition is visible. The changed head
-then needs fresh direct inspection and a new hidden record. A root-level or
-out-of-scope problem returns to the appropriate managed scope artifact instead
-of being silently waived.
-
-The issue's Dogfood brief says either why no consumer trial applies or defines
-the exact consumer task. A required run must identify the current head and
-surface, preserve its evidence, clean every run-owned engine, and have no
-actionable result. A corrective push makes older review and dogfood evidence
-stale.
+each item, fix it at any path; overflow is priced, or give a concrete
+justification, push an ordinary commit, rerun local checks and CI, reply to its
+anchored thread, and resolve the thread only after the disposition is visible.
+The changed head then needs fresh direct inspection and a new hidden record. A
+root-level or out-of-scope problem returns to the appropriate managed scope
+artifact instead of being silently waived.
 
 ## Conflicts preserve both intents
 
 Landing predicts the merge against current `main`. A content conflict is not
 permission to choose a resolution inside the landing step. Claude Code hands the
 draft to `/resolve <PR>`, which merges current `main` into the same branch,
-resolves every hunk in three-way context inside the approved surface, and drives
-the resulting head through checks, review, repair, and dogfood again. It does not
-rebase, force-push, open a second PR, or merge.
+resolves every hunk in three-way context at any path, with overflow priced at
+landing, and drives the resulting head through checks, review, and repair again.
+It does not rebase, force-push, open a second PR, or merge.
 
 Other surfaces stop with the exact conflict evidence and use their checked-in
 contract or explicit owner direction for the equivalent resolution. A genuinely
@@ -229,9 +224,9 @@ incompatible product intent returns to scope rather than manufacturing a merge.
 ## Landing is a separate authorization boundary
 
 A draft can be landable without being authorized to merge. `land` independently
-revalidates the current issue digest and approval, base ancestry, actual diff and
-declared surface, required checks, hidden semantic review and native review
-state, threads, dogfood, branch ownership, and predicted merge result.
+revalidates the current issue digest and approval, base ancestry, actual diff
+and priced surface overflow, required checks, hidden semantic review and native
+review state, threads, branch ownership, and predicted merge result.
 
 Only then does the explicitly authorized landing clear draft state and perform
 an ordinary squash merge. Cleanup starts only after GitHub confirms that named

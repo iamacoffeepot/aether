@@ -30,7 +30,7 @@ For pull-request mode:
 1. read the pull request over REST and require it open;
 2. capture exact base and head SHAs and fetch them;
 3. read the closing issue and recompute its Plan digest and Declared surface;
-4. require the approved base to be an ancestor of head and diff containment to pass;
+4. require the approved base to be an ancestor of head; compute the priced overflow and hand it to the spec-fidelity lens;
 5. abort and restart if the pull-request head changes before the rollup is returned.
 
 ## Five independent lenses
@@ -72,7 +72,7 @@ Do not replay all five lenses. Return a concise mapping from every prior finding
 Return exactly one verdict for the captured head:
 
 - `APPROVE`: no actionable required change remains;
-- `REQUEST_CHANGES`: one or more bounded findings can be repaired inside the approved Plan and surface.
+- `REQUEST_CHANGES`: one or more bounded findings can be repaired inside the approved Plan.
 
 Also return optional `rescope` separately from the native verdict. Use it only when the change is wrong at the root or cannot be repaired inside current authority:
 

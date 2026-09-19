@@ -235,8 +235,9 @@ status are independent facts.
 **Managed Plan**
 
 The scope-owned issue-body sections that define the problem, design,
-implementation steps, dependencies, declared surface, dogfood brief, and exact
-size/model routing lines. Their canonical digest is the approval identity.
+implementation steps, dependencies, declared surface, optional legacy-only
+dogfood brief, and exact size/model routing lines. Their canonical digest is
+the approval identity.
 
 **Approval record**
 
@@ -256,10 +257,15 @@ Native GitHub review decisions and unresolved threads are independent gates.
 
 **Landable draft**
 
-A draft pull request whose approval ancestry and declared-surface containment
-hold, required current-head checks pass, direct review accepts, native change
-requests and threads are clear, and required dogfood evidence is current. It
-still needs explicit landing authorization.
+A draft pull request whose approval ancestry holds, priced surface overflow is
+settled, required current-head checks pass, direct review accepts, and native
+change requests and threads are clear. It still needs explicit landing
+authorization.
+
+**Surface overflow**
+
+The changed paths outside the approved declared surface, each priced auto,
+judge, or human at landing against the rules frozen when work started.
 
 **Dogfood**
 

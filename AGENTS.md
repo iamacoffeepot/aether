@@ -15,7 +15,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Do not implement directly in the primary `main` checkout. Codex issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Other agent surfaces may use `.claude/worktrees/`; Codex issue work stays under `.agents/worktrees/`.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
-- An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and required dogfood evidence. Repair findings in the implementation loop; a new head must prove those facts again.
+- An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and priced surface overflow. Repair findings in the implementation loop; a new head must prove those facts again.
 - Landing is a separate explicitly authorized operation. Do not push to `main`, force-push reviewed branches, clear draft state, merge, or run destructive git commands without the workflow's required user approval.
 - Keep PRs focused: one concept per PR.
 

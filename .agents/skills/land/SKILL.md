@@ -1,6 +1,6 @@
 ---
 name: land
-description: "Land an approved Aether draft pull request after independently revalidating its current issue digest, ancestry, declared surface, checks, review, threads, and required dogfood, then reconcile the closing issue and clean its worktree."
+description: "Land an approved Aether draft pull request after independently revalidating its current issue digest, ancestry, surface overflow pricing, checks, review, and threads, then reconcile the closing issue and clean its worktree."
 ---
 
 # Land
@@ -27,7 +27,7 @@ Fetch `origin/main` without switching the caller's worktree. Read the pull reque
 - expected issue worktree/branch ownership or a documented already-cleaned local state;
 - Conventional Commit title.
 
-Read the closing issue body and edit provenance, migration-only comments when needed, current pull-request head, commits, changed files, check suites/runs, reviews, and review threads. Read dogfood evidence when the issue requires it. A failed or truncated read is a hard unknown, never a pass.
+Read the closing issue body and edit provenance, migration-only comments when needed, current pull-request head, commits, changed files, check suites/runs, reviews, and review threads. A failed or truncated read is a hard unknown, never a pass.
 
 ## Independent landing gates
 
@@ -39,9 +39,9 @@ Run `approval_records.py` and `plan_digest.py` on the current issue body and res
 
 The remote-tracking main commit may have advanced since approval; that alone does not stale an in-flight pull request. A changed issue digest, changed route, missing trusted record, or approval base outside head ancestry is ineligible and must return to scope or approval.
 
-### Surface containment
+### Surface overflow
 
-Parse Declared surface with the same strict rules and canonical matcher used during approval. Enumerate every changed path from the pull request's actual base comparison and require all paths inside the surface. Require the pull request to contain the scoped concept and no unrelated change. Re-run after any rebase and immediately before merge.
+Recompute the overflow at the approval base with `git diff --name-only --no-renames origin/main...<head>` and the resolver's changed mode, and verify the resolver's reported blobs against the frozen `Pricing policy:` and `Pricing matcher:` lines in the draft's `## Approval` section. When the lines are missing, state the derived blobs; when they differ, everything prices `human`. Apply the ADR override and the error → `human` rule. List auto-tier paths as settled by direct review. For judge-tier paths, read each path's current-head diff against the Plan and record `ACCEPT` or `REJECT: <reason>`; every one must be `ACCEPT`, and a `REJECT` makes the draft ineligible unless the owner accepts it. For human-tier paths, print them and stop for the owner's explicit confirmation naming this pull request; in a sweep the first-turn plan lists the overflow so that confirmation covers it. Then write the "Surface overflow" pull-request comment naming the head SHA and frozen blobs with one `<path> — <tier> — <settlement>` line per overflow path, or "None." when there is no overflow, editing the existing comment in place when present. The settlement is `listed` for auto, `ACCEPT` or `REJECT: <reason>` for judge, and `awaiting owner` or `confirmed by owner` for human. Confirm the diff implements the scoped concept and contains no unrelated change. Re-price overflow after any rebase and immediately before merge.
 
 ### Checks
 
@@ -52,10 +52,6 @@ Require every repository-required check for the current head to be completed suc
 Read the closing issue body and effective editor and validate its canonical hidden direct-review records under the shared workflow contract. Require the last trusted record matching the issue number, current pull-request number, head SHA, and freshly recomputed Plan digest to say `APPROVE`. A native self-approval is impossible and is never this gate; a payload from an untrusted effective body editor is not authority, and an earlier-head or earlier-digest record is stale. Never accept a machine-formatted pull-request review or comment as semantic review authority.
 
 Read paginated pull-request reviews only to evaluate native blockers separately. For each reviewer, take their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request and require none to be `CHANGES_REQUESTED`; the request remains active across later commits until that reviewer approves or GitHub reports it dismissed, and a hidden semantic record cannot clear it. Enumerate threads through GraphQL and require every review thread resolved. A failed or truncated body-provenance/review/thread read is ineligible, never an empty set.
-
-### Dogfood
-
-When Dogfood brief is `N/A`, record the explicit exemption. Otherwise require a durable dogfood rollup for the current head with the specified medium/surface, cleanup complete, and no actionable finding. A stale-head or ambiguous result is not sufficient.
 
 ## Predict merge state
 
@@ -80,13 +76,13 @@ Because a rebase rewrites reviewed commits, show the exact branch, old head, cur
 4. run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`;
 5. push with `--force-with-lease`, never plain force;
 6. wait for the new head's CI;
-7. run fresh direct inspection and append a new trusted hidden issue-body direct-review record for the rewritten head through the shared file-backed, concurrent-edit-safe procedure; require new dogfood evidence when applicable, no native review blocker, resolved threads, fresh containment, and every landing gate again.
+7. run fresh direct inspection and append a new trusted hidden issue-body direct-review record for the rewritten head through the shared file-backed, concurrent-edit-safe procedure; require no native review blocker, resolved threads, fresh overflow pricing, and every landing gate again.
 
 Do not run full local tests or distributions unless the user explicitly asks; CI is the full build engine.
 
 ## Clear draft and merge
 
-Immediately before mutation, re-read the pull request, issue body and editor provenance, migration-only approval comments when needed, head, checks, native reviews, threads, dogfood, merge prediction, and every gate. Abort on any change.
+Immediately before mutation, re-read the pull request, issue body and editor provenance, migration-only approval comments when needed, head, checks, native reviews, threads, overflow, merge prediction, and every gate. Abort on any change.
 
 1. Read the pull request node id.
 2. Use GraphQL `markPullRequestReadyForReview` and verify draft is false.
@@ -103,7 +99,7 @@ After confirmed merge, re-read the closing issue and require it closed by the pu
 
 Unless `--no-sweep` was passed, inspect the exact issue worktree. Remove it and delete its local branch only when the pull request is confirmed merged and the worktree is clean. Never force-remove a dirty or locked worktree. Report retained artifacts for `$sweep worktrees`.
 
-Report pull-request URL, merge SHA, approved digest/base, containment, checks, review, threads, dogfood, direct-versus-native merge, any rebase, issue closure, and cleanup.
+Report pull-request URL, merge SHA, approved digest/base, overflow, checks, review, threads, direct-versus-native merge, any rebase, issue closure, and cleanup.
 
 ## Sweep mode
 
@@ -112,7 +108,7 @@ Sweep is two-turn and serial.
 1. Enumerate open draft pull requests over REST.
 2. Correlate each with one closing issue and apply every gate.
 3. Predict clean/direct, behind/direct, behind/rebase requiring separate approval, or conflicted.
-4. Show the ordered sequence and all proposed mutations: clear draft, optional separately authorized rebase, squash merge, issue verification, worktree removal, and branch deletion.
+4. Show the ordered sequence, each candidate's priced overflow, and all proposed mutations: clear draft, optional separately authorized rebase, squash merge, issue verification, worktree removal, and branch deletion.
 5. End for confirmation.
 
 After confirmation, revalidate and land one at a time. Fetch and recompute every remaining candidate after each merge because main changed. A newly ineligible or conflicted pull request halts the sequence; report what landed and what remains. Never land in parallel.
