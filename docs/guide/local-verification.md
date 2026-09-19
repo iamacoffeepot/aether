@@ -110,16 +110,15 @@ remain in the job log.
 
 Branch protection currently requires two status checks: `CI pass` and `Lint
 title`. It does not configure required pull-request reviews. `CI pass` proves
-the applicable tree checks; it does not prove direct inspection, dogfood, or
-lifecycle readiness. Those are separate direct-drive facts: the implementer
-directly inspects and repairs the exact current-head diff and appends a hidden
+the applicable tree checks; it does not prove direct inspection or lifecycle
+readiness. Those are separate direct-drive facts: the implementer directly
+inspects and repairs the exact current-head diff and appends a hidden
 `aether-direct-review:v2` record to the closing issue body. That canonical line
 binds the issue, pull request, current head, current Plan digest, and verdict;
 its trust comes from effective owner/member/collaborator body-editor provenance.
 A push or managed-Plan change makes it stale. Pull-request reviews and comments
 remain ordinary human prose and never carry a machine JSON/HTML review marker.
-Native change requests and review threads stay independent blockers, and the
-scoped dogfood trial still runs when the issue body calls for one. Landing
+Native change requests and review threads stay independent blockers. Landing
 independently re-reads those facts before clearing draft state.
 
 Do not copy a list from a CI log into a shell and run it. Logs are evidence;

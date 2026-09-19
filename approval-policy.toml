@@ -130,6 +130,11 @@ tier = "human"
 glob = ".github/workflows/**"
 tier = "human"
 
+# The resolver executes this matcher, so it governs pricing.
+[[rules]]
+glob = "/scripts/surface-match.py"
+tier = "human"
+
 # Relaxing a tier here is an owner-signed one-line diff, so this policy file
 # self-lists as human.
 [[rules]]

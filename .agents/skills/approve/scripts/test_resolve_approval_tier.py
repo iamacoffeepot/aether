@@ -135,6 +135,32 @@ class ResolverFixture:
             text=True,
         )
 
+    def invoke_changed(
+        self, surfaces: list[str], changed: list[str], ref: str | None = None
+    ) -> subprocess.CompletedProcess[str]:
+        surface_file = self.root / "surfaces.txt"
+        changed_file = self.root / "changed.txt"
+        surface_file.write_text("\n".join(surfaces) + ("\n" if surfaces else ""), encoding="utf-8")
+        changed_file.write_text("\n".join(changed) + ("\n" if changed else ""), encoding="utf-8")
+        return subprocess.run(
+            [
+                sys.executable,
+                "-I",
+                str(Path(resolver.__file__)),
+                "--repo",
+                str(self.repo),
+                "--ref",
+                ref if ref is not None else self.ref,
+                "--surface-file",
+                str(surface_file),
+                "--changed-file",
+                str(changed_file),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+
 
 class ResolverTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -266,6 +292,85 @@ class ResolverTests(unittest.TestCase):
         completed = self.fixture.invoke(["Cargo.lock"], [".agents/Cargo.lock"])
         self.assertEqual(completed.returncode, 2)
         self.assertIn("outside the declared surface", completed.stderr)
+
+    def test_changed_mode_prices_each_out_of_surface_path(self) -> None:
+        # Catches an out-of-surface path escaping pricing, an in-surface path
+        # being charged, the overall tier not being the maximum, or the frozen
+        # identity naming an object other than the one priced.
+        completed = self.fixture.invoke_changed(
+            ["crates/aether-render/**"],
+            [
+                "crates/aether-render/src/lib.rs",
+                "docs/guide/page.md",
+                ".agents/skills/approve/SKILL.md",
+                "unclassified.txt",
+            ],
+        )
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        result = json.loads(completed.stdout)
+        self.assertEqual(result["changed_path_count"], 4)
+        self.assertEqual(
+            [(entry["path"], entry["tier"]) for entry in result["overflow"]],
+            [
+                (".agents/skills/approve/SKILL.md", "human"),
+                ("docs/guide/page.md", "auto"),
+                ("unclassified.txt", "judge"),
+            ],
+        )
+        self.assertEqual(result["tier"], "human")
+        expected_policy = self.fixture._git(
+            "rev-parse", f"{self.fixture.ref}:{resolver.POLICY_PATH}"
+        ).stdout.strip()
+        expected_matcher = self.fixture._git(
+            "rev-parse", f"{self.fixture.ref}:{resolver.CANONICAL_PATH}"
+        ).stdout.strip()
+        self.assertEqual(result["policy_blob"], expected_policy)
+        self.assertEqual(result["matcher_blob"], expected_matcher)
+
+        contained = self.fixture.invoke_changed(
+            ["crates/aether-render/**"],
+            ["crates/aether-render/src/lib.rs"],
+        )
+        self.assertEqual(contained.returncode, 0, contained.stderr)
+        contained_result = json.loads(contained.stdout)
+        self.assertEqual(contained_result["overflow"], [])
+        self.assertIsNone(contained_result["tier"])
+
+    def test_changed_mode_agrees_with_containment_cli(self) -> None:
+        # Catches the resolver's overflow drifting from the canonical
+        # containment rule, for example losing the #3492 carve-out so that
+        # every dependency bump escalates to the owner.
+        cases = [
+            (["crates/aether-kit/**"], ["crates/aether-kit/Cargo.toml", "Cargo.lock"]),
+            (["docs/guide/**"], ["Cargo.lock"]),
+            (["docs/guide/**"], ["crates/aether-kit/Cargo.toml", "Cargo.lock"]),
+        ]
+        script = str(ROOT / "scripts" / "surface-match.py")
+        policy_file = self.fixture.root / "cli-policy.toml"
+        policy_file.write_text(POLICY, encoding="utf-8")
+        for index, (surfaces, changed) in enumerate(cases):
+            with self.subTest(surfaces=surfaces, changed=changed):
+                completed = self.fixture.invoke_changed(surfaces, changed)
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                result = json.loads(completed.stdout)
+                resolver_pairs = sorted(
+                    (entry["path"], entry["tier"]) for entry in result["overflow"]
+                )
+                globs_file = self.fixture.root / f"cli-globs-{index}.txt"
+                changed_file = self.fixture.root / f"cli-changed-{index}.txt"
+                globs_file.write_text("\n".join(surfaces) + "\n", encoding="utf-8")
+                changed_file.write_text("\n".join(changed) + "\n", encoding="utf-8")
+                cli = subprocess.run(
+                    [sys.executable, "-I", script, str(globs_file), str(changed_file), str(policy_file)],
+                    check=False,
+                    capture_output=True,
+                    text=True,
+                )
+                self.assertEqual(cli.returncode, 0, cli.stderr)
+                cli_pairs = sorted(
+                    tuple(line.split("\t")) for line in cli.stdout.splitlines() if line
+                )
+                self.assertEqual(resolver_pairs, cli_pairs)
 
 
 if __name__ == "__main__":

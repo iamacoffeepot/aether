@@ -26,7 +26,7 @@ For pull-request mode:
 1. read the open pull request over REST and capture exact base and head SHAs;
 2. fetch those commits without switching the caller's checkout;
 3. read the closing issue, recompute Plan digest, validate trusted approval, and parse Declared surface;
-4. require approved-base ancestry and actual-diff containment;
+4. require approved-base ancestry; compute the priced overflow and hand it to the spec-fidelity lens;
 5. abort and restart if head changes before the result is returned.
 
 ## Five independent lenses
@@ -68,7 +68,7 @@ Do not replay all five lenses and do not invent ordinary findings on untouched c
 Return exactly one verdict for the captured head:
 
 - `APPROVE` — no required actionable change remains;
-- `REQUEST_CHANGES` — one or more bounded findings can be repaired inside the approved Plan and surface.
+- `REQUEST_CHANGES` — one or more bounded findings can be repaired inside the approved Plan.
 
 Return rescope separately when the root is wrong or repair exceeds current authority:
 
