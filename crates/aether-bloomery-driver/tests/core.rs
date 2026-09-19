@@ -9,7 +9,7 @@ mod support;
 use aether_bloomery_driver::{Command, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoked,
-    OpaqueBytes, ReadEventsResult, Utf8Text, artifact_digest,
+    OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
 };
 use aether_data::{Kind, KindId};
 use support::{LIMIT_BYTES, ROOT, World, call, digest, requested, transition};
@@ -17,6 +17,14 @@ use support::{LIMIT_BYTES, ROOT, World, call, digest, requested, transition};
 const PROGRAM: &str = "test.program";
 const HEAD: &str = "programs";
 const ORIGIN: &str = "test.origin";
+
+/// A test result kind citing one staged text, so a completed invocation's
+/// staged set legitimately holds more than the result alone (ADR-0224 §3).
+#[derive(Clone, aether_data::Storage)]
+#[kind(name = "test.program.cited.result")]
+struct CitedResult {
+    text: Ref<Utf8Text>,
+}
 
 /// One wasm bundle declaring the given programs: name, input kind, result kind, intent.
 fn wasm_bundle(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
@@ -480,6 +488,112 @@ fn mismatched_result_kind_is_a_protocol_violation_that_stages_nothing() {
     assert!(
         matches!(&world.answers[0].1, CallOutcome::Fault { fault, .. } if matches!(fault.reason, FaultReason::ProtocolViolation { .. }))
     );
+}
+
+#[test]
+fn result_citing_a_staged_text_records_every_staged_artifact() {
+    // Catches faulting a completed invocation for staging more than the
+    // result alone, when ADR-0224 §3 allows any staged set reachable from it.
+    let (mut world, initial) = World::open();
+    let bundle = world.store_bundle(&wasm_bundle(&[(PROGRAM, Utf8Text::ID, CitedResult::ID, "run it")]));
+    let input = world.store(Utf8Text::ID, b"input-text");
+    world.script_closure(input, vec![ClosureArtifact::new(Utf8Text::ID, b"input-text".to_vec())]);
+    world.seed_move(HEAD, bundle);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+
+    let text = EncodedArtifact::text("derived");
+    let result_value = CitedResult { text: Ref::from_digest(text.digest()) };
+    let result = EncodedArtifact::new(&result_value).expect("encode cited result");
+    world.script_invoke(
+        2,
+        Invoked::Completed { seq: 2, result: result.digest(), staged: vec![text.clone(), result.clone()] },
+    );
+    let (caller, commands) = world.core.call(call(HEAD, PROGRAM, input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    assert_eq!(world.appends.len(), 2);
+    assert_eq!(world.appends[1].artifacts(), [text, result.clone()]);
+    let expected = transition(bundle, PROGRAM, input, result.digest());
+    assert_eq!(world.appends[1].records(), [DriverRecord::Transition { cause: 2, record: expected.clone() }]);
+    assert_eq!(world.answers.as_slice(), [(caller, CallOutcome::Transition { key: 1, seq: 3, transition: expected })]);
+}
+
+#[test]
+fn staged_artifact_unreachable_from_the_result_is_a_protocol_violation_that_stages_nothing() {
+    // Catches recording an orphan from a bundle whose own `refuse_orphans`
+    // check was skipped or lied about — the driver re-checks it natively.
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+    let orphan = EncodedArtifact::text("orphan");
+    world.script_invoke(
+        2,
+        Invoked::Completed { seq: 2, result: fixed.result, staged: vec![fixed.staged.clone(), orphan.clone()] },
+    );
+    let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert_eq!(world.appends.len(), 2);
+    assert!(world.appends[1].artifacts().is_empty(), "a violation stages nothing");
+    let CallOutcome::Fault { fault, .. } = &world.answers[0].1 else {
+        panic!("expected a fault, got {:?}", world.answers[0].1);
+    };
+    let FaultReason::ProtocolViolation { reason } = &fault.reason else {
+        panic!("expected a protocol violation, got {:?}", fault.reason);
+    };
+    assert!(reason.as_str().contains(&orphan.digest().to_string()), "names the orphan digest: {reason:?}");
+}
+
+#[test]
+fn result_absent_from_staged_is_a_protocol_violation() {
+    // Catches recording a `Transition` whose result blob was never written.
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+    let missing_result = digest(200);
+    world.script_invoke(2, Invoked::Completed { seq: 2, result: missing_result, staged: vec![fixed.staged.clone()] });
+    let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert_eq!(world.appends.len(), 2);
+    assert!(world.appends[1].artifacts().is_empty(), "a violation stages nothing");
+    let CallOutcome::Fault { fault, .. } = &world.answers[0].1 else {
+        panic!("expected a fault, got {:?}", world.answers[0].1);
+    };
+    let FaultReason::ProtocolViolation { reason } = &fault.reason else {
+        panic!("expected a protocol violation, got {:?}", fault.reason);
+    };
+    assert!(reason.as_str().contains(&missing_result.to_string()), "names the missing result: {reason:?}");
+}
+
+#[test]
+fn duplicate_staged_digest_is_a_protocol_violation() {
+    // Catches a hostile staged list that repeats a blob rather than citing it.
+    let (mut world, initial) = World::open();
+    let fixed = fixtures(&mut world);
+    let manual = world.drive(initial);
+    assert!(manual.is_empty());
+    world.script_invoke(
+        2,
+        Invoked::Completed { seq: 2, result: fixed.result, staged: vec![fixed.staged.clone(), fixed.staged.clone()] },
+    );
+    let (_, commands) = world.core.call(call(HEAD, PROGRAM, fixed.input, ORIGIN, 1));
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert_eq!(world.appends.len(), 2);
+    assert!(world.appends[1].artifacts().is_empty(), "a violation stages nothing");
+    let CallOutcome::Fault { fault, .. } = &world.answers[0].1 else {
+        panic!("expected a fault, got {:?}", world.answers[0].1);
+    };
+    let FaultReason::ProtocolViolation { reason } = &fault.reason else {
+        panic!("expected a protocol violation, got {:?}", fault.reason);
+    };
+    assert!(reason.as_str().contains(&fixed.staged.digest().to_string()), "names the duplicated digest: {reason:?}");
 }
 
 #[test]
