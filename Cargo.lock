@@ -141,10 +141,17 @@ dependencies = [
 name = "aether-bloomery-driver"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-view",
+ "aether-component",
  "aether-data",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "aether-substrate",
+ "tempfile",
  "wasmparser 0.246.2",
 ]
 

@@ -18,14 +18,23 @@
 //! append the core reads its own records back before its next decision,
 //! and at most one fenced [`AppendRecords`](aether_bloomery_kinds::AppendRecords)
 //! is ever in flight.
+//!
+//! The [`BundleDriver`] actor is the native shell around the core. Native code
+//! spawns it over a born journal owner, passing the journal's id in
+//! [`DriverParams`]; it performs the core's commands as mail to the journal
+//! owner, the component host, and loaded program roots, and feeds each reply
+//! back through its ticketed continuation. A native `Call` is answered with
+//! exactly one `CallOutcome` once its outcome is recorded.
 
 #![forbid(unsafe_code)]
 
+mod actor;
 mod bundles;
 mod core;
 mod programs;
 mod recovery;
 
+pub use actor::{BundleDriver, DriverParams, ProgramBundleRoot};
 pub use core::{
     AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EventsTicket, InvokeTicket,
     LoadOutcome, LoadTicket, ProgramCore,
