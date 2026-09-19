@@ -11,7 +11,6 @@ aether-actor = { path = "../aether-actor" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
-aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-component = { path = "../aether-component", default-features = false }
 aether-data = { path = "../aether-data", features = ["derive"] }

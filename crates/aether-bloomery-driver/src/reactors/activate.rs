@@ -10,9 +10,7 @@ use aether_bloomery_view::{HeadActivation, Heads};
 use aether_data::Kind;
 
 use crate::bundles::InstanceState;
-use crate::core::{
-    ArtifactRead, ArtifactTicket, BundleRole, Command, LoadOutcome, LoadTicket, ProgramCore, WarmTicket,
-};
+use crate::core::{ArtifactRead, ArtifactTicket, Command, LoadOutcome, LoadTicket, ProgramCore, WarmTicket};
 use crate::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
 use crate::reactors::{
     ActivationPhase, ActivationStep, ActivationWork, CatchUp, Delivery, PlanOrder, RoutingRead, SeqPhase, WarmBatch,
@@ -86,7 +84,7 @@ impl ProgramCore {
                 let ticket = self.mint(LoadTicket::mint);
                 self.loads.insert(ticket, digest);
                 self.bundles.set_reactor_state(&digest, InstanceState::Loading);
-                out.push(Command::Load { ticket, bundle: digest, role: BundleRole::Reactor, wasm: bytes });
+                out.push(Command::Load { ticket, bundle: digest, wasm: bytes });
                 return;
             }
             ReadArtifactResult::Found { .. } => Detail::new("bundle artifact has the wrong kind"),

@@ -1,8 +1,8 @@
 //! Reactor-bundle fixture: two source-publication reactors share one views
 //! owner inside a digest-loaded root.
 //!
-//! Authors declare reactors and guards. `export!(…, generators = [bundle_reactors])`
-//! generates one root at [`aether_bloomery_reactor::REACTOR_NAMESPACE`]. Load it
+//! Authors declare reactors and guards. `export!(…, generators = [aether_bloomery_bundle::bundle])`
+//! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
 //! under the journal artifact digest with empty config.
 
 use core::error::Error;
@@ -133,4 +133,4 @@ impl Reactor for SourceWitness {
     }
 }
 
-aether_actor::export!(SourcePublisher, SourceWitness, generators = [aether_bloomery_reactor::bundle_reactors],);
+aether_actor::export!(SourcePublisher, SourceWitness, generators = [aether_bloomery_bundle::bundle],);

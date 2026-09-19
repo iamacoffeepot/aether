@@ -3,7 +3,7 @@
 //! Each reactor a bundle exports declares itself in one record: the reactor
 //! `NAMESPACE` plus, per `#[rule]`, the rule name and the trigger/output
 //! [`KindId`]s. `#[reactor]` assembles its record in const context with
-//! [`write_reactor_record`]; `bundle_reactors` pins one record per selected
+//! [`write_reactor_record`]; `aether_bloomery_bundle::bundle` pins one record per selected
 //! reactor into the section. wasm-ld concatenates same-named custom sections,
 //! so [`reactor_declarations`] walks concatenated records:
 //!

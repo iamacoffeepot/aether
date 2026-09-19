@@ -26,6 +26,8 @@ members = [
     "crates/aether-bloomery-kinds",
     "crates/aether-bloomery-program",
     "crates/aether-bloomery-program-derive",
+    "crates/aether-bloomery-bundle",
+    "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
     "crates/aether-http-derive",
     "crates/aether-data-derive",
@@ -72,6 +74,7 @@ members = [
     "crates/aether-test-fixtures-program",
     "crates/aether-test-fixtures-reactor",
     "crates/aether-test-fixtures-reactor-call",
+    "crates/aether-test-fixtures-mixed-bundle",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
@@ -142,6 +145,8 @@ default-members = [
     "crates/aether-bloomery-journal",
     "crates/aether-bloomery-kinds",
     "crates/aether-bloomery-program",
+    "crates/aether-bloomery-bundle",
+    "crates/aether-bloomery-bundle-derive",
     "crates/aether-bloomery-driver",
 ]
 exclude = [

@@ -15,17 +15,18 @@
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
 //! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
-//! `aether_actor::export!(…, generators = [bundle_reactors])` collects
-//! framework-owned `actors` envelopes and an `exports` selection, selects the
-//! bloomery reactor extension on exported paths, keeps ordinary actors in the
-//! export list, and generates one digest-loaded root ([`REACTOR_NAMESPACE`])
+//! `aether_actor::export!(…, generators = [aether_bloomery_bundle::bundle])`
+//! collects framework-owned `actors` envelopes and an `exports` selection,
+//! selects the bloomery reactor extension on exported paths, keeps ordinary
+//! actors in the export list, and generates one digest-loaded root at
+//! `aether.bloomery.bundle` (`aether_bloomery_kinds::BUNDLE_NAMESPACE`)
 //! wrapping [`Root`]. Reactor envelopes stay on their original types. The root
 //! takes no config, owns the views, calls each reactor's `evaluate` directly,
 //! and answers `Warm` / `Event` / `StatusQuery` to its caller. A request with
 //! no reply target is ignored. Evaluation encodes outputs through the mail
 //! codec as attributed [`aether_bloomery_kinds::ReactorIntent`] values and
-//! does not execute or append them. `bundle_reactors` also pins each selected
-//! reactor's const-assembled declaration record into the
+//! does not execute or append them. `aether_bloomery_bundle::bundle` also pins
+//! each selected reactor's const-assembled declaration record into the
 //! `aether.bloomery.reactors` custom section, so native readers can decode
 //! reactor names and rule kinds from artifact bytes before loading.
 //!
@@ -38,11 +39,11 @@
 //! aether_actor::export!(
 //!     SourcePublisher,
 //!     SourceWitness,
-//!     generators = [aether_bloomery_reactor::bundle_reactors],
+//!     generators = [aether_bloomery_bundle::bundle],
 //! );
 //! ```
 //!
-//! Load the root with [`REACTOR_NAMESPACE`] under the journal artifact digest.
+//! Load the root with `aether_bloomery_kinds::BUNDLE_NAMESPACE` under the journal artifact digest.
 //!
 //! ```text
 //! #[reactor]
@@ -95,7 +96,6 @@ use serde as _;
 mod direct;
 mod error;
 mod evaluate;
-mod export;
 mod guard;
 mod owner;
 mod params;
@@ -106,13 +106,10 @@ mod trigger;
 mod views;
 
 pub use aether_bloomery_kinds as kinds;
-#[doc(hidden)]
-pub use aether_bloomery_reactor_derive::__reactor_export_generate;
 pub use aether_bloomery_reactor_derive::{reactor, rule};
 pub use direct::Direct;
 pub use error::PrepareError;
 pub use evaluate::{ArmVisitor, Intent, Output, Reactor};
-pub use export::REACTOR_NAMESPACE;
 pub use guard::Guard;
 pub use owner::Owner;
 pub use params::{Arg, AsGuard, AsView, GuardArg, Nil, Params, ViewArg};

@@ -21,4 +21,4 @@ impl Reactor for SummarizeCaller {
     }
 }
 
-aether_actor::export!(SummarizeCaller, generators = [aether_bloomery_reactor::bundle_reactors]);
+aether_actor::export!(SummarizeCaller, generators = [aether_bloomery_bundle::bundle]);

@@ -1,4 +1,4 @@
-//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, driver records, driver mail, reactor mail, and journal entry envelopes.
+//! Shared vocabulary of bloomery kinds: digests, typed citations, leaf kinds, the tree, programs, heads, driver records, driver mail, reactor mail, journal entry envelopes, and bundle constants.
 //!
 //! `#![no_std]` + `alloc`. The journal, the Git projection, and WASM programs
 //! cite these types without linking `SQLite`.
@@ -9,6 +9,7 @@
 extern crate alloc;
 
 mod artifact;
+mod bundle;
 mod digest;
 mod driver;
 mod entry;
@@ -21,6 +22,7 @@ mod reference;
 mod tree;
 
 pub use artifact::{OpaqueBytes, Utf8Text, artifact_blob, artifact_digest, artifact_prefix, hash_bytes};
+pub use bundle::{BUNDLE_NAMESPACE, PROGRAMS_SECTION};
 pub use digest::Digest;
 pub use driver::{AwaitProcessed, Call, CallOutcome, CallProgram, CallRefusal, Processed, SetHead};
 pub use entry::{DecodeError, Entry, Seq};

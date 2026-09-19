@@ -1,7 +1,7 @@
 //! Pure evaluation of authored reactor arms against a retained [`Owner`].
 //!
 //! [`Reactor::evaluate`] is the in-process preparation/evaluation boundary the
-//! `bundle_reactors` export generator wraps. It does not execute intents, append
+//! `bundle` export generator wraps. It does not execute intents, append
 //! journal entries, or take an engine context. [`Output`] is the mail-capable
 //! marker: storage-derived kinds do not implement it, so evaluation cannot
 //! call their panicking positional codec.
@@ -85,7 +85,7 @@ impl Intent {
 /// Walks each authored rule's trigger, inferred parameter list, and output.
 ///
 /// The visitor, not the signature macro, reads associated types such as
-/// [`Params::Views`]. `bundle_reactors` uses this to collect shared views without
+/// [`Params::Views`]. The `bundle` export generator uses this to collect shared views without
 /// guessing from type names.
 pub trait ArmVisitor {
     /// Observe one rule.

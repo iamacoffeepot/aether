@@ -6,10 +6,9 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{
-    CallProgram, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, ProgramName, Ref, Tree,
-    artifact_digest,
+    BUNDLE_NAMESPACE, CallProgram, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, ProgramName,
+    Ref, Tree, artifact_digest,
 };
-use aether_bloomery_reactor::REACTOR_NAMESPACE;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -39,7 +38,7 @@ fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> String {
                     wasm,
                     name: Some(digest.clone()),
                     config: Vec::new(),
-                    export: Some(REACTOR_NAMESPACE.to_owned()),
+                    export: Some(BUNDLE_NAMESPACE.to_owned()),
                 },
             ),
         )])

@@ -209,12 +209,12 @@ impl World {
                 next.extend(self.wake_watches(head));
                 Step::More(next)
             }
-            Command::Load { ticket, bundle, role, wasm } => {
+            Command::Load { ticket, bundle, wasm } => {
                 self.loads_seen.push(bundle);
                 match self.loads.get(&bundle).cloned() {
                     Some(Ok(root)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded { root })),
                     Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
-                    None => Step::Manual(Command::Load { ticket, bundle, role, wasm }),
+                    None => Step::Manual(Command::Load { ticket, bundle, wasm }),
                 }
             }
             Command::Invoke { ticket, root, request } => {

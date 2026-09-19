@@ -1,15 +1,14 @@
-//! Proc macros for `#[program]` authoring and `bundle_programs` generation.
+//! Proc macros for `#[program]` authoring.
 //!
 //! `#[program]` sits on `impl Program for Name`, checks the author form, and
 //! emits the impl unchanged plus an export-descriptor companion so
-//! `bundle_programs` can select programs without reflecting on trait impls.
+//! `aether_bloomery_bundle::bundle` can select programs without reflecting on trait impls.
 
 #![forbid(unsafe_code)]
 
 use proc_macro::TokenStream;
 use syn::{ItemImpl, parse_macro_input};
 
-mod bundle;
 mod check;
 mod expand;
 mod export_desc;
@@ -31,12 +30,4 @@ pub fn program(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(def) => expand::expand(def).into(),
         Err(error) => error.to_compile_error().into(),
     }
-}
-
-/// Hidden `bundle_programs` export generator. Invoked by
-/// [`aether_bloomery_program::bundle_programs`], not by authors.
-#[doc(hidden)]
-#[proc_macro]
-pub fn __program_export_generate(input: TokenStream) -> TokenStream {
-    bundle::generate(input)
 }

@@ -40,8 +40,8 @@ mod programs;
 mod reactors;
 mod recovery;
 
-pub use actor::{BundleDriver, DriverParams, ProgramBundleRoot};
+pub use actor::{BundleDriver, BundleRoot, DriverParams};
 pub use core::{
-    AppendTicket, ArtifactTicket, BundleRole, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
-    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
+    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket, EventsTicket,
+    InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };

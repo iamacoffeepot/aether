@@ -4,7 +4,7 @@
 //! journal's id in [`DriverParams`]. `init` builds the [`ProgramCore`] and
 //! keeps its first commands; `wire` performs them once the mailbox is live.
 //! Commands go to the journal owner (reads, appends, and the watch), the
-//! component host (loads), program roots, and reactor roots. Inbound [`Call`]
+//! component host (loads) and bundle roots. Inbound [`Call`]
 //! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and parks
 //! the reply under its [`CallerId`]; each reply kind recovers its ticket from
 //! the request context and feeds the matching core continuation. Dropping the
@@ -13,7 +13,7 @@
 mod perform;
 mod root;
 
-pub use root::ProgramBundleRoot;
+pub use root::BundleRoot;
 
 use std::collections::HashMap;
 use std::mem;
@@ -56,8 +56,7 @@ pub struct DriverParams {
 /// call, once the outcome is recorded, and `aether.bloomery.driver.await_processed`
 /// with `Processed` once its bound is quiescent. It performs the core's commands
 /// as mail to the journal owner (including the watch), the component host,
-/// program roots, and reactor roots. One driver per engine; the type does
-/// not enforce it.
+/// and bundle roots. One driver per engine; the type does not enforce it.
 pub struct BundleDriver {
     core: ProgramCore,
     journal: MailboxId,

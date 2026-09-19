@@ -1,0 +1,10 @@
+error: NAMESPACE `aether.bloomery.bundle` is reserved for the generated bundle root
+  --> tests/ui/fail_export_reserved_namespace.rs:19:1
+   |
+19 | #[actor]
+   | ^^^^^^^^
+...
+46 | export!(Probe, Listed, generators = [aether_bloomery_bundle::bundle]);
+   | --------------------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::__export_collect` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)

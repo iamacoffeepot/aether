@@ -1,0 +1,10 @@
+error: bundle found no #[program] or #[reactor] exports in this export! set
+  --> tests/ui/fail_export_no_roles.rs:7:1
+   |
+ 7 | #[actor]
+   | ^^^^^^^^
+...
+19 | export!(Probe, generators = [aether_bloomery_bundle::bundle]);
+   | ------------------------------------------------------------- in this macro invocation
+   |
+   = note: this error originates in the macro `$crate::__bundle_export_generate` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)

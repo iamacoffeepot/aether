@@ -5,10 +5,9 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{
-    Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION, Ref, Status,
-    StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
+    BUNDLE_NAMESPACE, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION,
+    Ref, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
-use aether_bloomery_reactor::REACTOR_NAMESPACE;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -48,7 +47,7 @@ fn load_root(harness: &mut SubstrateHarness, wasm_path: &Path) -> (String, Strin
                     wasm,
                     name: Some(digest.clone()),
                     config: Vec::new(),
-                    export: Some(REACTOR_NAMESPACE.to_owned()),
+                    export: Some(BUNDLE_NAMESPACE.to_owned()),
                 },
             ),
         )])

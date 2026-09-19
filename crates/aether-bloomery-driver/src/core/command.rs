@@ -11,16 +11,6 @@ use super::ticket::{
     StatusTicket, WarmTicket, WatchTicket,
 };
 
-/// Which role a bundle digest serves. A digest serves one role; the bundle
-/// table makes the other role unrepresentable once one is claimed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BundleRole {
-    /// A program bundle, invoked per request.
-    Program,
-    /// A reactor bundle, warmed once and evaluated per seq.
-    Reactor,
-}
-
 /// One effect the shell performs on the core's behalf.
 ///
 /// `ReadEvents`, `ReadArtifact`, `ReadClosure`, `Append`, `Load`,
@@ -68,8 +58,6 @@ pub enum Command {
         ticket: LoadTicket,
         /// Content digest the bundle loads under.
         bundle: Digest,
-        /// Which role the digest serves.
-        role: BundleRole,
         /// The bundle's wasm bytes.
         wasm: Vec<u8>,
     },

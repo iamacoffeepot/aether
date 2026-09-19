@@ -4,11 +4,9 @@
 //! wasm-ld concatenates same-named custom sections, but a module may still
 //! carry several, so every payload with the section name contributes.
 
-use aether_bloomery_kinds::{Detail, Program};
+use aether_bloomery_kinds::{Detail, PROGRAMS_SECTION, Program};
 
 use wasmparser::{Parser, Payload};
-
-const SECTION_NAME: &str = "aether.bloomery.programs";
 
 /// Decode the programs a bundle declares.
 ///
@@ -28,7 +26,7 @@ pub fn programs(wasm: &[u8]) -> Result<Vec<Program>, Detail> {
     for payload in Parser::new(0).parse_all(wasm) {
         match payload {
             Err(error) => return Err(Detail::new(format!("bundle wasm does not parse: {error}"))),
-            Ok(Payload::CustomSection(reader)) if reader.name() == SECTION_NAME => {
+            Ok(Payload::CustomSection(reader)) if reader.name() == PROGRAMS_SECTION => {
                 section.extend_from_slice(reader.data());
             }
             Ok(_) => {}

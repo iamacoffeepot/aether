@@ -138,6 +138,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-bundle"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-bloomery-bundle-derive",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-bloomery-reactor",
+]
+
+[[package]]
+name = "aether-bloomery-bundle-derive"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-bloomery-reactor",
+ "aether-data",
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn",
+ "trybuild",
+]
+
+[[package]]
 name = "aether-bloomery-driver"
 version = "0.3.0-alpha"
 dependencies = [
@@ -145,7 +172,6 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
- "aether-bloomery-reactor",
  "aether-bloomery-view",
  "aether-component",
  "aether-data",
@@ -196,7 +222,6 @@ dependencies = [
 name = "aether-bloomery-program-derive"
 version = "0.3.0-alpha"
 dependencies = [
- "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
@@ -970,10 +995,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-mixed-bundle"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-bloomery-reactor",
+ "aether-component",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "aether-test-fixtures-kinds",
+ "wasmparser 0.246.2",
+]
+
+[[package]]
 name = "aether-test-fixtures-program"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
@@ -984,6 +1027,7 @@ name = "aether-test-fixtures-reactor"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-reactor",
  "aether-bloomery-view",
@@ -997,6 +1041,7 @@ name = "aether-test-fixtures-reactor-call"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-reactor",
  "aether-component",
