@@ -1,0 +1,26 @@
+[package]
+name = "aether-test-fixtures-reactor-call"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM fixture for a reactor rule that calls a program. Structural discovery
+# (cdylib + aether-actor) includes it in `cargo xtask build-wasm`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+
+[dev-dependencies]
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-component = { path = "../aether-component" }
+aether-kinds = { path = "../aether-kinds" }
+
+[lints]
+workspace = true

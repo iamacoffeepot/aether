@@ -991,6 +991,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-test-fixtures-reactor-call"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-kinds",
+ "aether-bloomery-reactor",
+ "aether-component",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-kinds",
+ "aether-test-fixtures-kinds",
+]
+
+[[package]]
 name = "aether-test-fixtures-split-cap"
 version = "0.3.0-alpha"
 dependencies = [

@@ -17,6 +17,7 @@ extern crate alloc;
 
 pub mod wire_corpus;
 
+use aether_bloomery_reactor::kinds::{Head, OpaqueBytes, ProgramName, Ref, Utf8Text};
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -509,3 +510,19 @@ pub struct ReactorOpenPublication {
 }
 
 impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
+
+/// Mirrors `aether-test-fixtures-program`'s private summarize input: the same
+/// name and shape, so the same digest.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.summarize.input")]
+pub struct SummarizeInput {
+    pub text: Ref<Utf8Text>,
+}
+
+/// Program-bundle head the summarize-caller reactor rule names.
+pub const SUMMARIZE_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.summarize.bundle");
+
+/// Program the summarize-caller reactor rule invokes.
+pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
+
+const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));
