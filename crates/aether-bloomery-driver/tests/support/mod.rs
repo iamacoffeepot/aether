@@ -256,7 +256,7 @@ impl World {
                     Step::Manual(Command::Evaluate { ticket, root, request })
                 }
             }
-            Command::QueryStatus { ticket, root } => match self.status.clone() {
+            Command::QueryStatus { ticket, root } => match self.status {
                 Some(status) => Step::More(self.core.on_status(ticket, &status)),
                 None => Step::Manual(Command::QueryStatus { ticket, root }),
             },

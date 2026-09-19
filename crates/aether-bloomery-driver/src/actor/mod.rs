@@ -3,9 +3,11 @@
 //! Native code spawns [`BundleDriver`] over a born journal owner, passing the
 //! journal's id in [`DriverParams`]. `init` builds the [`ProgramCore`] and
 //! keeps its first commands; `wire` performs them once the mailbox is live.
-//! Inbound [`Call`] mail defers its reply, is fed to the core, and parks the
-//! reply under its [`CallerId`]; each reply kind recovers its ticket from the
-//! request context and feeds the matching core continuation. Dropping the
+//! Commands go to the journal owner (reads, appends, and the watch), the
+//! component host (loads), program roots, and reactor roots. Inbound [`Call`]
+//! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and parks
+//! the reply under its [`CallerId`]; each reply kind recovers its ticket from
+//! the request context and feeds the matching core continuation. Dropping the
 //! actor abandons every parked reply.
 
 mod perform;
@@ -19,7 +21,8 @@ use std::mem;
 use aether_actor::{Manual, actor};
 use aether_bloomery_journal::MAX_READ_EVENTS;
 use aether_bloomery_kinds::{
-    AppendRecordsResult, Call, ClosureLimit, Invoked, ReadArtifactResult, ReadClosureResult, ReadEventsResult,
+    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Evaluated, Invoked, ReadArtifactResult, ReadClosureResult,
+    ReadEventsResult, Status, Warmed, WatchHeadResult,
 };
 use aether_data::MailboxId;
 use aether_kinds::LoadResult;
@@ -27,8 +30,8 @@ use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, Nat
 use aether_substrate::chassis::error::BootError;
 
 use crate::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EventsTicket, InvokeTicket,
-    LoadOutcome, LoadTicket, ProgramCore,
+    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket, EventsTicket,
+    InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };
 
 // Tripwire: the core reads the journal `EVENTS_PAGE` entries per page, and the
@@ -50,7 +53,10 @@ pub struct DriverParams {
 /// Native bundle driver over the sans-io program core.
 ///
 /// Answers `aether.bloomery.driver.call` with exactly one `CallOutcome` per
-/// call, once the outcome is recorded. One driver per engine; the type does
+/// call, once the outcome is recorded, and `aether.bloomery.driver.await_processed`
+/// with `Processed` once its bound is quiescent. It performs the core's commands
+/// as mail to the journal owner (including the watch), the component host,
+/// program roots, and reactor roots. One driver per engine; the type does
 /// not enforce it.
 pub struct BundleDriver {
     core: ProgramCore,
@@ -80,6 +86,14 @@ impl NativeActor for BundleDriver {
     fn on_call(&mut self, ctx: &mut NativeCtx<'_, Manual>, call: Call) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.call(call);
+        assert!(self.callers.insert(caller, owed).is_none(), "the core mints each CallerId once");
+        self.perform(ctx, commands);
+    }
+
+    #[handler::manual]
+    fn on_await_processed(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: AwaitProcessed) {
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+        let (caller, commands) = self.core.await_processed(request);
         assert!(self.callers.insert(caller, owed).is_none(), "the core mints each CallerId once");
         self.perform(ctx, commands);
     }
@@ -139,6 +153,42 @@ impl NativeActor for BundleDriver {
             return;
         };
         let commands = self.core.on_invoked(ticket, invoked);
+        self.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    fn on_watch_head_result(&mut self, ctx: &mut NativeCtx<'_>, result: WatchHeadResult) {
+        let Some(ticket) = ctx.take_context::<WatchTicket>() else {
+            return;
+        };
+        let commands = self.core.on_watched(ticket, result);
+        self.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    fn on_warmed(&mut self, ctx: &mut NativeCtx<'_>, warmed: Warmed) {
+        let Some(ticket) = ctx.take_context::<WarmTicket>() else {
+            return;
+        };
+        let commands = self.core.on_warmed(ticket, warmed);
+        self.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    fn on_evaluated(&mut self, ctx: &mut NativeCtx<'_>, evaluated: Evaluated) {
+        let Some(ticket) = ctx.take_context::<EvaluateTicket>() else {
+            return;
+        };
+        let commands = self.core.on_evaluated(ticket, evaluated);
+        self.perform(ctx, commands);
+    }
+
+    #[handler::single]
+    fn on_status(&mut self, ctx: &mut NativeCtx<'_>, status: Status) {
+        let Some(ticket) = ctx.take_context::<StatusTicket>() else {
+            return;
+        };
+        let commands = self.core.on_status(ticket, &status);
         self.perform(ctx, commands);
     }
 }

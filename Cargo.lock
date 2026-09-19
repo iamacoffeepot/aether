@@ -152,6 +152,7 @@ dependencies = [
  "aether-harness-substrate",
  "aether-kinds",
  "aether-substrate",
+ "aether-test-fixtures-kinds",
  "tempfile",
  "wasmparser 0.246.2",
 ]
