@@ -9,13 +9,11 @@
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{
-    ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReadArtifact,
-};
+use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes};
 use aether_bloomery_view::HeadActivation;
 
-use crate::bundles::InstanceState;
-use crate::core::{ArtifactRead, ArtifactTicket, Command, PendingWrite, PlannedRecord, ProgramCore};
+use crate::core::{Command, PendingWrite, PlannedRecord, ProgramCore};
+use crate::reactors::claim::Claim;
 use crate::reactors::{RestartPhase, RestartWork, RoutingRead};
 
 impl ProgramCore {
@@ -88,40 +86,30 @@ impl ProgramCore {
         else {
             return;
         };
-        let Some(digest) = warming.as_ref().map(|(digest, _)| *digest) else {
+        if warming.is_none() {
             let Some(next) = queued.pop_front() else {
                 self.finish_restart(out);
                 return;
             };
-            let digest = next.0;
             *warming = Some(next);
-            self.start_restart_digest(digest, out);
+        }
+        let Some(digest) = warming.as_ref().map(|(digest, _)| *digest) else {
             return;
         };
-        let ready =
-            self.bundles.instance(&digest).filter(|instance| matches!(instance.state, InstanceState::Ready { .. }));
-        let Some(cursor) = ready.map(|instance| instance.cursor) else {
-            self.abort(format!("restart digest {digest} is warming without a ready root"), out);
-            return;
-        };
-        if cursor < watermark {
-            self.emit_routing_read(cursor, RoutingRead::RestartWarm, out);
-        } else if let Some(RestartWork { phase: RestartPhase::Warming { warming, .. }, .. }) =
-            self.routing.restart.as_mut()
-        {
-            *warming = None;
+        match self.claim_reactor(digest, out) {
+            Claim::Refuse(reason) => self.fail_restart_digest(&reason),
+            Claim::Pending => {}
+            Claim::Ready { cursor } if cursor < watermark => {
+                self.emit_routing_read(cursor, RoutingRead::RestartWarm, out);
+            }
+            Claim::Ready { .. } => {
+                if let Some(RestartWork { phase: RestartPhase::Warming { warming, .. }, .. }) =
+                    self.routing.restart.as_mut()
+                {
+                    *warming = None;
+                }
+            }
         }
-    }
-
-    /// Read `digest`'s bundle for loading, unless it is already claimed as a program.
-    fn start_restart_digest(&mut self, digest: Digest, out: &mut Vec<Command>) {
-        if self.bundles.claim_reactor(digest).is_none() {
-            self.abort(format!("restart digest {digest} is claimed as a program bundle"), out);
-            return;
-        }
-        let ticket = self.mint(ArtifactTicket::mint);
-        self.artifact_reads.insert(ticket, ArtifactRead::ReactorBundle(digest));
-        out.push(Command::ReadArtifact { ticket, request: ReadArtifact { digest } });
     }
 
     /// Fold one restart page into routing `Heads`, trimmed to `W`.

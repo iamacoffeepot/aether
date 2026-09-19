@@ -1,9 +1,12 @@
-//! Bundle states and the programs-section reader.
+//! Bundle states and the declared-roles reader.
 
-mod instance;
+mod lifecycle;
+mod roles;
 mod section;
+mod state;
 mod table;
 
-pub use instance::{Instance, InstanceState};
-pub use section::programs;
-pub use table::{Active, BundleTable, DigestQueue, DigestState};
+pub use roles::{DeclaredRoles, Programs};
+pub use section::declared_roles;
+pub use state::LoadState;
+pub use table::{BundleTable, OutOfStep};

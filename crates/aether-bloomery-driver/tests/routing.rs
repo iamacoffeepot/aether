@@ -9,16 +9,16 @@ mod support;
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket};
+use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     AppendRecords, AwaitProcessed, Call, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
     Evaluated, FaultReason, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName, ProgramRef, ReactorIntent,
     ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName, SetHead, Status, Utf8Text,
     artifact_digest,
 };
-use aether_data::{Kind, KindId, MailboxId};
+use aether_data::{Kind, MailboxId};
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
-use support::{World, digest, program_head};
+use support::{World, bundle_wasm, digest, program_head, program_records, wasm_module};
 
 /// Mailbox the scripted program loads hand out.
 const ROOT: MailboxId = MailboxId(7);
@@ -28,6 +28,43 @@ fn store_program(world: &mut World, wasm: &[u8]) -> Digest {
     let digest = world.store(OpaqueBytes::ID, wasm);
     world.loads.insert(digest, Ok(ROOT));
     digest
+}
+
+/// Store one mixed program-and-reactor bundle, answering its load as `root`.
+fn store_mixed(world: &mut World, label: &[u8], root: MailboxId) -> Digest {
+    let wasm = bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &["test.reactor"], label);
+    let digest = world.store(OpaqueBytes::ID, &wasm);
+    world.loads.insert(digest, Ok(root));
+    digest
+}
+
+/// Script quiet completions for every unscripted seq up to `through`.
+fn script_quiet(world: &mut World, through: u64) {
+    for seq in 1..=through {
+        world.evaluates.entry(seq).or_insert(Evaluated::Completed { seq, intents: Vec::new() });
+    }
+}
+
+/// Script one text input's closure plus its completed invocation at `world.head() + 1`.
+fn script_call(world: &mut World, input_text: &[u8]) -> (Digest, u64) {
+    let input = world.store(Utf8Text::ID, input_text);
+    script_closure(world, input, vec![ClosureArtifact::new(Utf8Text::ID, input_text.to_vec())]);
+    let result = artifact_digest(OpaqueBytes::ID, b"result-bytes");
+    let staged = EncodedArtifact::opaque_bytes(b"result-bytes");
+    let seq = world.head() + 1;
+    world.invokes.insert(seq, Invoked::Completed { seq, result, staged: vec![staged] });
+    (input, seq)
+}
+
+/// One native call of `name` on `program` with `input`.
+fn program_call(program: &'static str, name: &str, input: Digest, key: u64) -> Call {
+    Call {
+        program: program_head(program),
+        name: ProgramName::new(name).expect("valid program name"),
+        input,
+        origin: NativeOrigin::new("test.origin").expect("valid origin"),
+        key,
+    }
 }
 
 fn reactor_name(name: &str) -> ReactorName {
@@ -186,7 +223,8 @@ fn unbound_program_head_becomes_a_single_reaction_failed() {
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let program_bundle = store_program(&mut world, b"program-wasm");
+    let program_bundle =
+        store_program(&mut world, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.seed_move("prog", program_bundle);
@@ -257,7 +295,8 @@ fn ordinals_count_within_one_rule() {
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let program_bundle = store_program(&mut world, b"program-wasm");
+    let program_bundle =
+        store_program(&mut world, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.seed_move("prog", program_bundle);
@@ -304,40 +343,6 @@ fn watch_wakes_routing_for_entries_others_append() {
     assert_eq!(watches_for(&world), vec![0, 1]);
 }
 
-/// One wasm bundle declaring one program: name, input kind, result kind.
-fn program_bundle(name: &str, input: KindId, result: KindId) -> Vec<u8> {
-    fn push_leb(mut value: u32, out: &mut Vec<u8>) {
-        while value >= 0x80 {
-            let byte = u8::try_from(value & 0x7f).expect("masked byte fits");
-            out.push(byte | 0x80);
-            value >>= 7;
-        }
-        out.push(u8::try_from(value).expect("final byte fits"));
-    }
-    let name = name.as_bytes();
-    let intent = b"run it";
-    let mut data = Vec::new();
-    data.push(1u8);
-    data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
-    data.extend_from_slice(name);
-    data.extend_from_slice(&input.0.to_le_bytes());
-    data.extend_from_slice(&result.0.to_le_bytes());
-    data.push(0u8);
-    data.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
-    data.extend_from_slice(intent);
-    let section_name = b"aether.bloomery.programs";
-    let mut section = Vec::new();
-    push_leb(u32::try_from(section_name.len()).expect("test section name fits"), &mut section);
-    section.extend_from_slice(section_name);
-    section.extend_from_slice(&data);
-    let mut wasm = b"\0asm".to_vec();
-    wasm.extend_from_slice(&1u32.to_le_bytes());
-    wasm.push(0);
-    push_leb(u32::try_from(section.len()).expect("test section fits"), &mut wasm);
-    wasm.extend_from_slice(&section);
-    wasm
-}
-
 /// Script one input's closure.
 fn script_closure(world: &mut World, root: Digest, artifacts: Vec<ClosureArtifact>) {
     world.closures.insert(root, artifacts);
@@ -359,7 +364,8 @@ fn two_heads_sharing_a_digest_get_one_delivery_per_seq() {
     let set = reactor_set(&["a", "b"]);
     let set_digest = world.store_set(&set);
     let shared = world.store_reactor(b"shared", MailboxId(101));
-    let program_bundle = store_program(&mut world, b"program-wasm");
+    let program_bundle =
+        store_program(&mut world, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
     world.seed_move("a", shared);
     world.seed_move("b", shared);
@@ -391,8 +397,14 @@ fn call_program_resolves_its_head_through_the_trigger_and_enters_the_pipeline() 
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let first = store_program(&mut world, b"program-one");
-    let second = store_program(&mut world, b"program-two");
+    let first = store_program(
+        &mut world,
+        &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program-one"),
+    );
+    let second = store_program(
+        &mut world,
+        &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program-two"),
+    );
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.seed_move("prog", first);
@@ -428,7 +440,8 @@ fn unsupported_intent_records_reaction_failed_and_keeps_siblings() {
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let program_bundle = store_program(&mut world, b"program-wasm");
+    let program_bundle =
+        store_program(&mut world, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.seed_move("prog", program_bundle);
@@ -540,30 +553,20 @@ fn refused_routing_append_aborts() {
 }
 
 #[test]
-fn a_digest_serves_one_role() {
-    // Catches a second load (`SubnameInUse`) or a cross-role invoke: a call
-    // naming a reactor digest faults without loading it as a program.
+fn a_call_on_a_reactor_only_digest_faults_before_any_load() {
+    // Catches an undeclared program role loaded or invoked instead of refused from the missing section.
     let (mut world, commands) = World::open();
-    let set = reactor_set(&["a"]);
-    let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    world.seed_set_root(set_digest);
-    world.seed_move("a", bundle_a);
-    for seq in [3, 4, 5] {
-        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
-    }
+    let reactor = world.store_reactor(b"reactor-only", MailboxId(101));
+    world.seed_move("prog", reactor);
     let manual = world.drive(commands);
     assert!(manual.is_empty());
 
-    let name = ProgramName::new("run").expect("valid program name");
-    let origin = NativeOrigin::new("test.origin").expect("valid origin");
-    let call = Call { program: program_head("a"), name, input: digest(9), origin, key: 1 };
+    let call = program_call("prog", "run", digest(9), 1);
     let (_caller, commands) = world.core.call(call);
     let manual = world.drive(commands);
     assert!(manual.is_empty());
     assert!(world.abort.is_none());
 
-    assert_eq!(world.loads_seen, vec![bundle_a], "no second load as a program");
     let faults: Vec<_> = world
         .appends
         .iter()
@@ -577,8 +580,225 @@ fn a_digest_serves_one_role() {
     let FaultReason::BundleUnavailable { reason } = &faults[0].reason else {
         panic!("expected an unavailable fault, got {:?}", faults[0].reason);
     };
-    assert!(reason.as_str().contains("reactor bundle"), "unexpected reason: {}", reason.as_str());
-    assert_eq!(world.events_for(bundle_a), vec![3, 4, 5]);
+    assert!(reason.as_str().contains("declares no programs"), "unexpected reason: {}", reason.as_str());
+    assert_eq!(world.reads_seen, vec![reactor]);
+    assert!(world.loads_seen.is_empty());
+    assert!(world.invokes_seen.is_empty());
+}
+
+#[test]
+fn a_mixed_digest_loaded_by_its_reactor_answers_a_call_from_the_same_root() {
+    // Catches a second load of a digest the other role already loaded (`SubnameInUse` in the engine).
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let mixed = store_mixed(&mut world, b"mixed", MailboxId(101));
+    world.seed_set_root(set_digest);
+    world.seed_move("a", mixed);
+    world.seed_move("prog", mixed);
+    script_quiet(&mut world, 8);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+    assert_eq!(activated_records(&world).len(), 1);
+
+    let (input, seq) = script_call(&mut world, b"input-text");
+    let call = program_call("prog", "run", input, 1);
+    let (_caller, commands) = world.core.call(call);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let transitions = world
+        .appends
+        .iter()
+        .flat_map(AppendRecords::records)
+        .filter(|record| matches!(record, DriverRecord::Transition { cause, .. } if *cause == seq))
+        .count();
+    assert_eq!(transitions, 1, "the call records one transition");
+    assert_eq!(world.loads_seen, vec![mixed]);
+    assert_eq!(world.reads_seen.iter().filter(|seen| **seen == mixed).count(), 1);
+    assert_eq!(world.invokes_seen.len(), 1);
+    assert_eq!(world.invokes_seen[0].0, MailboxId(101));
+    assert!(!world.warm_ranges_for(mixed).is_empty());
+}
+
+#[test]
+fn a_reactor_activation_waits_on_the_program_load_in_flight() {
+    // Catches a role that aborts or issues its own load when the other role's load is in flight (today's `Start::Busy`).
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let mixed = store_mixed(&mut world, b"mixed", MailboxId(101));
+    world.loads.remove(&mixed);
+    world.seed_set_root(set_digest);
+    world.seed_move("prog", mixed);
+    script_quiet(&mut world, 8);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+
+    let (input, _) = script_call(&mut world, b"input-text");
+    let call = program_call("prog", "run", input, 1);
+    let (_caller, commands) = world.core.call(call);
+    let manual = world.drive(commands);
+    let [Command::Load { ticket, bundle, .. }] = manual.as_slice() else {
+        panic!("expected exactly one manual load, got {manual:?}");
+    };
+    assert_eq!(*bundle, mixed);
+    let ticket = *ticket;
+
+    let moved = RecordedHeadMove::new(RecordedHead::from(&program_head("a")), mixed);
+    let wake = world.append_external(None, &moved);
+    let manual = world.drive(wake);
+    assert!(manual.is_empty(), "the activation waits on the program load: {manual:?}");
+    assert!(world.abort.is_none());
+
+    let follow = world.core.on_loaded(ticket, LoadOutcome::Loaded { root: MailboxId(101) });
+    let manual = world.drive(follow);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    assert_eq!(world.invokes_seen.len(), 1);
+    assert_eq!(world.invokes_seen[0].0, MailboxId(101));
+    let activated = activated_records(&world);
+    assert_eq!(activated.len(), 1);
+    assert_eq!(activated[0].1.head(), &program_head("a"));
+    assert_eq!(activated[0].1.bundle(), mixed);
+    assert_eq!(world.loads_seen, vec![mixed]);
+}
+
+#[test]
+fn a_call_waits_on_the_activation_load_in_flight() {
+    // Catches a program request that aborts or reloads while the reactor role's load is in flight.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let mixed = store_mixed(&mut world, b"mixed", MailboxId(101));
+    world.loads.remove(&mixed);
+    world.seed_set_root(set_digest);
+    world.seed_move("a", mixed);
+    world.seed_move("prog", mixed);
+    script_quiet(&mut world, 8);
+    let manual = world.drive(commands);
+    let [Command::Load { ticket, bundle, .. }] = manual.as_slice() else {
+        panic!("expected exactly one manual load, got {manual:?}");
+    };
+    assert_eq!(*bundle, mixed);
+    let ticket = *ticket;
+
+    let (input, seq) = script_call(&mut world, b"input-text");
+    let call = program_call("prog", "run", input, 1);
+    let (_caller, commands) = world.core.call(call);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty(), "the call waits on the activation load: {manual:?}");
+    assert_eq!(world.loads_seen, vec![mixed], "no second load");
+
+    let follow = world.core.on_loaded(ticket, LoadOutcome::Loaded { root: MailboxId(101) });
+    let manual = world.drive(follow);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    assert_eq!(world.invokes_seen.len(), 1);
+    assert_eq!(world.invokes_seen[0].0, MailboxId(101));
+    let warms = world.reactors.get(&MailboxId(101)).map(|reactor| reactor.warms.clone()).unwrap_or_default();
+    assert!(!warms.is_empty(), "the warm targets the same root");
+    let transitions = world
+        .appends
+        .iter()
+        .flat_map(AppendRecords::records)
+        .filter(|record| matches!(record, DriverRecord::Transition { cause, .. } if *cause == seq))
+        .count();
+    assert_eq!(transitions, 1, "the call records one transition");
+}
+
+#[test]
+fn a_poisoned_mixed_digest_still_answers_calls() {
+    // Catches reactor poison blocking the digest's programs (ADR-0226 consequence).
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let mixed = store_mixed(&mut world, b"mixed", MailboxId(101));
+    world.seed_set_root(set_digest);
+    world.seed_move("a", mixed);
+    world.seed_move("prog", mixed);
+    let manual = world.drive(commands);
+    let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
+        panic!("expected one held evaluate, got {manual:?}");
+    };
+    let ticket = *ticket;
+
+    let poisoned = Evaluated::Poisoned { seq: 3, last_trusted: 2, reason: Detail::new("boom") };
+    let follow = feed_evaluated(&mut world, ticket, poisoned);
+    let manual = world.drive(follow);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let (input, seq) = script_call(&mut world, b"input-text");
+    let call = program_call("prog", "run", input, 1);
+    let (_caller, commands) = world.core.call(call);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let transitions = world
+        .appends
+        .iter()
+        .flat_map(AppendRecords::records)
+        .filter(|record| matches!(record, DriverRecord::Transition { cause, .. } if *cause == seq))
+        .count();
+    assert_eq!(transitions, 1, "the call records one transition");
+    assert_eq!(world.invokes_seen.len(), 1);
+    assert_eq!(world.invokes_seen[0].0, MailboxId(101));
+    assert_eq!(world.loads_seen, vec![mixed]);
+}
+
+#[test]
+fn an_undecodable_section_blocks_both_roles() {
+    // Catches a malformed bundle trusted for its other role.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let programs = program_records(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")]);
+    let wasm = wasm_module(&[("aether.bloomery.programs", &programs), ("aether.bloomery.reactors", &[9])]);
+    let bad = world.store(OpaqueBytes::ID, &wasm);
+    world.seed_set_root(set_digest);
+    world.seed_move("prog", bad);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+
+    let call = program_call("prog", "run", digest(9), 1);
+    let (_caller, commands) = world.core.call(call);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let faults: Vec<_> = world
+        .appends
+        .iter()
+        .flat_map(AppendRecords::records)
+        .filter_map(|record| match record {
+            DriverRecord::Fault { record, .. } => Some(record.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(faults.len(), 1);
+    let FaultReason::BundleUnavailable { reason } = &faults[0].reason else {
+        panic!("expected an unavailable fault, got {:?}", faults[0].reason);
+    };
+    assert!(reason.as_str().contains("does not decode"), "unexpected reason: {}", reason.as_str());
+    let fault_reason = reason.as_str().to_string();
+
+    let moved = RecordedHeadMove::new(RecordedHead::from(&program_head("a")), bad);
+    let wake = world.append_external(None, &moved);
+    let manual = world.drive(wake);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    let rejected = rejected_records(&world);
+    assert_eq!(rejected.len(), 1);
+    assert_eq!(rejected[0].1.reason.as_str(), fault_reason, "both roles see the same reason");
+    assert_eq!(world.reads_seen.iter().filter(|seen| **seen == bad).count(), 1);
+    assert!(world.loads_seen.is_empty());
 }
 
 #[test]
@@ -590,7 +810,7 @@ fn await_processed_waits_for_routing_and_its_appends() {
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let wasm = program_bundle("test.program", Utf8Text::ID, OpaqueBytes::ID);
+    let wasm = bundle_wasm(&[("test.program", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program");
     let program_bundle = store_program(&mut world, &wasm);
     let input = world.store(Utf8Text::ID, b"input-text");
     script_closure(&mut world, input, vec![ClosureArtifact::new(Utf8Text::ID, b"input-text".to_vec())]);

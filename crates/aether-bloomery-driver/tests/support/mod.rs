@@ -418,3 +418,89 @@ pub fn digest(byte: u8) -> Digest {
 pub fn program_head(name: &'static str) -> Head<OpaqueBytes> {
     Head::new(name)
 }
+
+/// One wasm module carrying the given custom sections: name plus raw payload each.
+#[must_use]
+pub fn wasm_module(sections: &[(&str, &[u8])]) -> Vec<u8> {
+    fn push_leb(mut value: u32, out: &mut Vec<u8>) {
+        loop {
+            let byte = u8::try_from(value & 0x7f).expect("masked byte fits");
+            value >>= 7;
+            if value == 0 {
+                out.push(byte);
+                return;
+            }
+            out.push(byte | 0x80);
+        }
+    }
+    let mut wasm = b"\0asm".to_vec();
+    wasm.extend_from_slice(&1u32.to_le_bytes());
+    for (name, data) in sections {
+        let name = name.as_bytes();
+        let mut section = Vec::new();
+        push_leb(u32::try_from(name.len()).expect("test section name fits"), &mut section);
+        section.extend_from_slice(name);
+        section.extend_from_slice(data);
+        wasm.push(0);
+        push_leb(u32::try_from(section.len()).expect("test section fits"), &mut wasm);
+        wasm.extend_from_slice(&section);
+    }
+    wasm
+}
+
+/// Concatenated program declaration records: name, input kind, result kind, intent.
+#[must_use]
+pub fn program_records(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for (name, input, result, intent) in records {
+        let name = name.as_bytes();
+        let intent = intent.as_bytes();
+        data.push(1u8);
+        data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
+        data.extend_from_slice(name);
+        data.extend_from_slice(&input.0.to_le_bytes());
+        data.extend_from_slice(&result.0.to_le_bytes());
+        data.push(0u8);
+        data.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
+        data.extend_from_slice(intent);
+    }
+    data
+}
+
+/// Concatenated reactor declaration records, each with one `on_event` rule over opaque bytes.
+#[must_use]
+pub fn reactor_records(names: &[&str]) -> Vec<u8> {
+    let mut data = Vec::new();
+    for name in names {
+        let name = name.as_bytes();
+        let rule = b"on_event";
+        data.push(1u8);
+        data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
+        data.extend_from_slice(name);
+        data.extend_from_slice(&1u16.to_le_bytes());
+        data.extend_from_slice(&u16::try_from(rule.len()).expect("test rule fits").to_le_bytes());
+        data.extend_from_slice(rule);
+        data.extend_from_slice(&OpaqueBytes::ID.0.to_le_bytes());
+        data.extend_from_slice(&OpaqueBytes::ID.0.to_le_bytes());
+    }
+    data
+}
+
+/// One wasm bundle declaring the given programs and reactors, labelled for a distinct digest.
+///
+/// Each role section is emitted only when its list is non-empty; the
+/// `test.label` section carries `label` so that labels give distinct digests.
+#[must_use]
+pub fn bundle_wasm(programs: &[(&str, KindId, KindId, &str)], reactors: &[&str], label: &[u8]) -> Vec<u8> {
+    let program_bytes = program_records(programs);
+    let reactor_bytes = reactor_records(reactors);
+    let mut sections: Vec<(&str, &[u8])> = Vec::new();
+    if !programs.is_empty() {
+        sections.push(("aether.bloomery.programs", &program_bytes));
+    }
+    if !reactors.is_empty() {
+        sections.push(("aether.bloomery.reactors", &reactor_bytes));
+    }
+    sections.push(("test.label", label));
+    wasm_module(&sections)
+}

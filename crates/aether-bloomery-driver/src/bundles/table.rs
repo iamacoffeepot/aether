@@ -1,155 +1,115 @@
-//! Per-digest bundle states and request queues (ADR-0226 decision 3).
+//! Digest-keyed shared load lifecycle: one read, one load, one root per digest (ADR-0226 decision 2).
 //!
-//! The table maps each bundle digest to a state — `Reading`, `Declared`,
-//! `Loading`, `Ready`, or `Unavailable` — and a FIFO of request seqs. One
-//! request per digest is active from its section check until its `Invoked`
-//! reply or its pre-`Invoke` fault, so at most one `Invoke` is ever in
-//! flight per root. Requests for different digests proceed concurrently.
-//! Only the first request for a digest reads the bundle artifact; the
-//! decoded declarations stay cached for the engine's life, and the wasm
-//! bytes are held only until the load. A digest that fails to read, decode,
-//! or load becomes `Unavailable`: every later request for it faults with
-//! the recorded reason, and no read or load is issued again.
+//! Each transition moves the digest's [`LoadState`] out of the map, matches
+//! on it, and reinserts: a state that doesn't match is reinserted unchanged
+//! and the transition reports [`OutOfStep`]. There is no placeholder state
+//! and no panic path. [`BundleTable::finish_load`] is the only `Loading`
+//! exit, and it matches [`LoadOutcome`]
+//! exhaustively.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{ClosureArtifact, Detail, Digest, Program};
+use aether_bloomery_kinds::{Detail, Digest};
 use aether_data::MailboxId;
 
-use super::{Instance, InstanceState};
+use super::{DeclaredRoles, LoadState};
+use crate::core::LoadOutcome;
 
-/// Lifecycle state of one bundle digest.
+/// The load step a transition expected was not the digest's current state.
 #[derive(Debug)]
-pub enum DigestState {
-    /// A bundle artifact read is in flight for the active request.
-    Reading,
-    /// Section decoded; the wasm is held only until the load.
-    Declared {
-        /// Cached declarations.
-        programs: Vec<Program>,
-        /// Wasm bytes, moved into the load command.
-        wasm: Vec<u8>,
-    },
-    /// A load is in flight for the active request.
-    Loading {
-        /// Cached declarations, kept while the wasm loads.
-        programs: Vec<Program>,
-    },
-    /// Loaded; the root and declarations stay cached for the engine's life.
-    Ready {
-        /// Mailbox of the digest-named root.
-        root: MailboxId,
-        /// Cached declarations.
-        programs: Vec<Program>,
-    },
-    /// Read, decode, or load failed; fault everything with the reason.
-    Unavailable {
-        /// The recorded failure.
-        reason: Detail,
-    },
-}
+pub struct OutOfStep;
 
-/// The one request driving a digest, from its section check to its outcome.
-#[derive(Debug)]
-pub struct Active {
-    /// The `Requested` seq.
-    pub seq: u64,
-    /// The request's declaration, resolved by the name check.
-    pub declaration: Option<Program>,
-    /// The request's fetched closure, held for its `Invoke`.
-    pub closure: Option<Vec<ClosureArtifact>>,
-}
-
-impl Active {
-    /// A request just made active, before its name check.
-    pub fn new(seq: u64) -> Self {
-        Self { seq, declaration: None, closure: None }
-    }
-}
-
-/// One digest's state, active request, and waiting FIFO.
-#[derive(Debug)]
-pub struct DigestQueue {
-    pub state: DigestState,
-    pub active: Option<Active>,
-    pub waiting: VecDeque<u64>,
-}
-
-impl DigestQueue {
-    /// The active request's seq, if one is driving this digest.
-    pub fn active_seq(&self) -> Option<u64> {
-        self.active.as_ref().map(|active| active.seq)
-    }
-}
-
-/// One digest's claimed role. A digest serves one role by construction.
-#[derive(Debug)]
-pub enum Bundle {
-    /// A program digest with its request queue.
-    Program(DigestQueue),
-    /// A reactor digest with its instance.
-    Reactor(Instance),
-}
-
-/// Digest-keyed bundle states, one role per digest (ADR-0226 decision 2).
+/// Digest-keyed shared load lifecycle: one read, one load, one root per digest.
 #[derive(Debug, Default)]
 pub struct BundleTable {
-    bundles: BTreeMap<Digest, Bundle>,
+    states: BTreeMap<Digest, LoadState>,
 }
 
 impl BundleTable {
-    /// The program queue for `bundle`, if it serves the program role.
-    pub fn queue(&self, bundle: &Digest) -> Option<&DigestQueue> {
-        match self.bundles.get(bundle) {
-            Some(Bundle::Program(queue)) => Some(queue),
+    /// The digest's load state, if it has ever been seen.
+    pub fn state(&self, bundle: &Digest) -> Option<&LoadState> {
+        self.states.get(bundle)
+    }
+
+    /// The digest's loaded root, role-agnostic; `Some` only when `Ready`. #6222's adoption seam.
+    pub fn root(&self, bundle: &Digest) -> Option<MailboxId> {
+        match self.states.get(bundle) {
+            Some(LoadState::Ready { root, .. }) => Some(*root),
             _ => None,
         }
     }
 
-    /// The program queue for `bundle`, if it serves the program role.
-    pub fn queue_mut(&mut self, bundle: &Digest) -> Option<&mut DigestQueue> {
-        match self.bundles.get_mut(bundle) {
-            Some(Bundle::Program(queue)) => Some(queue),
-            _ => None,
+    /// Whether the digest's read or load is in flight (`Reading` or `Loading`).
+    pub fn pending(&self, bundle: &Digest) -> bool {
+        matches!(self.states.get(bundle), Some(LoadState::Reading | LoadState::Loading { .. }))
+    }
+
+    /// Insert `Reading` for an unseen digest; `true` when the caller must issue the read.
+    pub fn begin_read(&mut self, bundle: Digest) -> bool {
+        if self.states.contains_key(&bundle) {
+            return false;
+        }
+        self.states.insert(bundle, LoadState::Reading);
+        true
+    }
+
+    /// `Reading` -> `Declared` or `Unavailable`.
+    pub fn finish_read(
+        &mut self,
+        bundle: &Digest,
+        read: Result<(DeclaredRoles, Vec<u8>), Detail>,
+    ) -> Result<(), OutOfStep> {
+        match self.states.remove(bundle) {
+            Some(LoadState::Reading) => {
+                let state = match read {
+                    Ok((roles, wasm)) => LoadState::Declared { roles, wasm },
+                    Err(reason) => LoadState::Unavailable(reason),
+                };
+                self.states.insert(*bundle, state);
+                Ok(())
+            }
+            other => {
+                if let Some(state) = other {
+                    self.states.insert(*bundle, state);
+                }
+                Err(OutOfStep)
+            }
         }
     }
 
-    /// The reactor instance for `bundle`, if it serves the reactor role.
-    pub fn instance(&self, bundle: &Digest) -> Option<&Instance> {
-        match self.bundles.get(bundle) {
-            Some(Bundle::Reactor(instance)) => Some(instance),
-            _ => None,
+    /// `Declared` -> `Loading`, handing back the wasm; `None` (state unchanged) when not `Declared`.
+    pub fn begin_load(&mut self, bundle: &Digest) -> Option<Vec<u8>> {
+        match self.states.remove(bundle) {
+            Some(LoadState::Declared { roles, wasm }) => {
+                self.states.insert(*bundle, LoadState::Loading { roles });
+                Some(wasm)
+            }
+            other => {
+                if let Some(state) = other {
+                    self.states.insert(*bundle, state);
+                }
+                None
+            }
         }
     }
 
-    /// The reactor instance for `bundle`, if it serves the reactor role.
-    pub fn instance_mut(&mut self, bundle: &Digest) -> Option<&mut Instance> {
-        match self.bundles.get_mut(bundle) {
-            Some(Bundle::Reactor(instance)) => Some(instance),
-            _ => None,
-        }
-    }
-
-    /// Set the state of `bundle`'s reactor instance, if it serves the reactor role.
-    pub fn set_reactor_state(&mut self, bundle: &Digest, state: InstanceState) {
-        if let Some(instance) = self.instance_mut(bundle) {
-            instance.state = state;
-        }
-    }
-
-    /// Insert a program queue, claiming the digest for the program role.
-    pub fn insert(&mut self, bundle: Digest, queue: DigestQueue) {
-        self.bundles.insert(bundle, Bundle::Program(queue));
-    }
-
-    /// Claim `bundle` for the reactor role, or borrow its instance.
-    ///
-    /// Returns `None` when the digest already serves the program role; the
-    /// caller rejects without a second load.
-    pub fn claim_reactor(&mut self, bundle: Digest) -> Option<&Instance> {
-        match self.bundles.entry(bundle).or_insert_with(|| Bundle::Reactor(Instance::new())) {
-            Bundle::Reactor(instance) => Some(instance),
-            Bundle::Program(_) => None,
+    /// The one load transition: `Loading` -> `Ready { root }` or `Unavailable(error)`.
+    pub fn finish_load(&mut self, bundle: &Digest, outcome: LoadOutcome) -> Result<(), OutOfStep> {
+        match self.states.remove(bundle) {
+            Some(LoadState::Loading { roles }) => {
+                let state = match outcome {
+                    LoadOutcome::Loaded { root } => LoadState::Ready { root, roles },
+                    LoadOutcome::Failed { error } => LoadState::Unavailable(Detail::new(error)),
+                };
+                self.states.insert(*bundle, state);
+                Ok(())
+            }
+            other => {
+                if let Some(state) = other {
+                    self.states.insert(*bundle, state);
+                }
+                Err(OutOfStep)
+            }
         }
     }
 }

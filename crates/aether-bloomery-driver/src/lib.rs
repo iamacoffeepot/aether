@@ -2,9 +2,10 @@
 //!
 //! This crate holds both roles of the driver: startup recovery, `Call`
 //! handling, the per-digest program pipeline (section check, closure read,
-//! load, invoke), and `Transition` / `Fault` recording, plus the reactor
-//! half (journal following, membership, activation, live delivery, and
-//! reaction records). It owns every ADR-0226 program decision (decisions 3,
+//! invoke) over one load per digest serving both roles, and `Transition` /
+//! `Fault` recording, plus the reactor half (journal following, membership,
+//! activation, live delivery, and reaction records). It owns every ADR-0226
+//! program decision (decisions 3,
 //! 4, and 9 for programs, and 11 for `Call`) and every reactor routing
 //! decision (decisions 5-9 for reactors, and 10-11 for `WatchHead` and
 //! `AwaitProcessed`) as a state machine over the journal folds.
