@@ -2,9 +2,9 @@
 //!
 //! [`Reactor::evaluate`] is the in-process preparation/evaluation boundary the
 //! `bundle` export generator wraps. It does not execute intents, append
-//! journal entries, or take an engine context. [`Output`] is the mail-capable
-//! marker: storage-derived kinds do not implement it, so evaluation cannot
-//! call their panicking positional codec.
+//! journal entries, or take an engine context. [`Output`] is sealed to the
+//! two ADR-0226 decision 6 intents; the driver still refuses any other kind
+//! per intent for wasm not built through this crate.
 
 use alloc::vec::Vec;
 
@@ -15,14 +15,21 @@ use crate::owner::Owner;
 use crate::params::Params;
 use crate::trigger::Trigger;
 
-/// Marker for a mail-capable arm output.
+/// Marker for a rule output, sealed to the two ADR-0226 decision 6 intents.
 ///
-/// Implement this for kinds that override [`Kind::encode_into_bytes`] with a
-/// real mail codec. Do not implement it for [`aether_data::Storage`] types;
-/// those panic on positional encoding and stay on the checked storage path.
-/// `CallProgram` and `SetHead` are the only kinds the driver applies, and any
-/// other output is recorded as `ReactionFailed` (ADR-0226 decision 6).
-pub trait Output: Kind + 'static {}
+/// Only `CallProgram` and `SetHead` implement this marker, and no other crate
+/// can add an impl. The driver still refuses any other kind per intent, as the
+/// backstop for wasm not built through this crate.
+pub trait Output: Kind + sealed::Sealed + 'static {}
+
+/// Seals [`Output`] to the ADR-0226 decision 6 intents.
+mod sealed {
+    pub trait Sealed {}
+
+    impl Sealed for aether_bloomery_kinds::CallProgram {}
+
+    impl Sealed for aether_bloomery_kinds::SetHead {}
+}
 
 /// A rule output carrying the ADR-0226 decision 6 call-program intent.
 impl Output for aether_bloomery_kinds::CallProgram {}

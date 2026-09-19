@@ -1,5 +1,6 @@
 //! Parse `#[program] impl Program for Name`.
 
+use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
 
@@ -77,6 +78,12 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let name = name.ok_or_else(|| {
         syn::Error::new(item.self_ty.span(), "#[program] requires `const NAME: &'static str = \"…\"`")
     })?;
+    if let Err(error) = ProgramName::new(name.value()) {
+        return Err(syn::Error::new_spanned(
+            &name,
+            format!("#[program] NAME `{}` is not a valid ProgramName: {error}", name.value()),
+        ));
+    }
     let intent = intent.ok_or_else(|| {
         syn::Error::new(item.self_ty.span(), "#[program] requires `const INTENT: &'static str = \"…\"`")
     })?;

@@ -15,7 +15,7 @@ Derive the current state from durable artifacts:
 - a planned issue is approved only by a current trusted hidden approval record defined below;
 - an owned issue worktree or branch is implementation work in progress;
 - a draft pull request is the reviewable implementation artifact;
-- the current head's checks, trusted hidden direct-review verdict, native review blockers, review threads, declared-surface diff, and dogfood evidence determine whether it is landable;
+- the current head's checks, trusted hidden direct-review verdict, native review blockers, review threads, and priced surface overflow determine whether it is landable;
 - a merged pull request whose closing issue is closed is done.
 
 Never infer one fact from another. A branch does not prove approval, a green check does not prove review acceptance, and a closed issue does not prove that a named pull request merged.
@@ -35,7 +35,7 @@ Scope owns these exact H2 sections, in this order:
 ## Side findings
 ```
 
-`Sub-issues`, `Depends on`, and `Side findings` are optional. The other five sections are required for a planned issue. Reject duplicate managed headings.
+`Sub-issues`, `Depends on`, `Side findings`, and `Dogfood brief` are optional; `Dogfood brief` is legacy-only and new Plans omit it. The other four sections are required for a planned issue. Reject duplicate managed headings.
 
 The Implementation plan ends with exactly these three non-empty lines:
 
@@ -45,7 +45,7 @@ The Implementation plan ends with exactly these three non-empty lines:
 **Routing reason:** <one concise reason>
 ```
 
-The Plan digest includes, in scope-owned order, the exact UTF-8 spans for Problem statement, Design notes, Implementation plan, optional Sub-issues, optional Depends on, Declared surface, and Dogfood brief. It deliberately excludes Side findings and every unmanaged section. The only layout byte excluded from a managed span is one empty-line separator immediately before a following H2: the content line ending remains, while an additional blank line and the exact LF/CRLF spelling remain approval-bearing. Use `approve/scripts/plan_digest.py`; do not reproduce its parser or canonicalization in another skill.
+The Plan digest includes, in scope-owned order, the exact UTF-8 spans for Problem statement, Design notes, Implementation plan, optional Sub-issues, optional Depends on, Declared surface, and optional legacy-only Dogfood brief. A legacy Dogfood brief is still approval-bearing when present and never gated. The digest deliberately excludes Side findings and every unmanaged section. The only layout byte excluded from a managed span is one empty-line separator immediately before a following H2: the content line ending remains, while an additional blank line and the exact LF/CRLF spelling remain approval-bearing. Use `approve/scripts/plan_digest.py`; do not reproduce its parser or canonicalization in another skill.
 
 ## Trusted approval records
 
@@ -127,9 +127,9 @@ Use paginated REST endpoints for comments, issue timelines, pull requests, revie
 
 Before implementation, review, or landing, correlate the closing issue, base branch, head branch, and owned issue worktree. Reject ambiguous or duplicate associations. Always evaluate checks, reviews, and threads for the current head SHA.
 
-Declared-surface containment is a hard gate. Parse the issue's validated surface, enumerate `git diff --name-only <base>...<head>`, and reject every changed path not matched by the canonical surface matcher. Re-run containment after every corrective push and immediately before landing.
+Surface overflow is priced, never forbidden. Enumerate changed paths with `git diff --name-only --no-renames origin/main...<head>` and price the paths outside the approved surface with `resolve_approval_tier.py --ref <approval base_sha> --surface-file … --changed-file …`. An overflow path under `docs/adr/` that is a new ADR, or that edits an ADR not `Status: Proposed` at the base, prices `human`. An unsafe path spelling or any resolver error prices the whole overflow `human`. The pricing rules are frozen when work starts: `/implement` writes the resolver's `policy_blob` and `matcher_blob` once into the draft's `## Approval` section as `Pricing policy:` and `Pricing matcher:` lines, and `/land` requires the resolver's reported blobs at the approval base to equal them. Missing lines mean `/land` derives the blobs from the base and states them; a mismatch means everything prices `human`. Auto-tier overflow lands with the ordinary direct-review `APPROVE`; judge-tier overflow needs the landing agent's own `ACCEPT` for every path; human-tier overflow needs the owner's explicit confirmation naming the pull request, in the landing session. Every verdict and confirmation is bound to the head: re-price after every push and immediately before merge. `/land` records the result as one plain-prose "Surface overflow" pull-request comment, edited in place when it already exists, as evidence rather than authority.
 
-Review acceptance requires the newest trusted hidden direct-review artifact for the current issue, pull request, head, and digest to say `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision, and no unresolved review thread. These three gates are evaluated separately. Dogfood is required only when the issue's Dogfood brief is not an `N/A` artifact; its result must identify the current head and be clear of actionable findings.
+Review acceptance requires the newest trusted hidden direct-review artifact for the current issue, pull request, head, and digest to say `APPROVE`, no active per-reviewer native `CHANGES_REQUESTED` decision, and no unresolved review thread. These three gates are evaluated separately.
 
 ## Common mutations
 
@@ -152,5 +152,5 @@ Review-thread enumeration and resolution use the GraphQL `reviewThreads` query a
 - Re-read after an uncertain mutation before retrying, so a timeout cannot duplicate an issue, comment, pull request, review, or merge.
 - Preserve owned worktrees and branches on authentication, network, runner, or service failure. Report the concrete failing operation; do not encode the outage in issue metadata.
 - When implementation discovers a broken Plan assumption, hand the issue back with `$scope <issue> --phase plan` and evidence. Use `design` for a failed design choice and `define` for unclear intent.
-- Never expand the declared surface to make an implementation fit. Scope must revise the artifact and approval must be recomputed.
+- Never edit Declared surface from implementation, resolution, or landing; overflow is priced instead.
 - Do not merge, delete a worktree, or delete a branch until REST proves the named pull request merged and the worktree is clean.

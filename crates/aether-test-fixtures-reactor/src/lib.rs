@@ -1,5 +1,5 @@
-//! Reactor-bundle fixture: two source-publication reactors share one views
-//! owner inside a digest-loaded root.
+//! Reactor-bundle fixture: two reactors share one views owner inside a
+//! digest-loaded root, and both publish the triggering tree as a `SetHead`.
 //!
 //! Authors declare reactors and guards. `export!(…, generators = [aether_bloomery_bundle::bundle])`
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
@@ -7,32 +7,25 @@
 
 use core::error::Error;
 use core::fmt;
-use core::sync::atomic::{AtomicU32, Ordering};
 
-use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, SetHead, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
-use aether_test_fixtures_kinds::{REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication, ReactorOpenPublication};
+use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 
 const CURRENT: Head<Program> = Head::new("current");
-static FOLD_IDS: AtomicU32 = AtomicU32::new(1);
+const PUBLISHED: Head<Tree> = Head::new("published");
 
-/// Shared published fold used by both reactors. `empty` mints a cluster-local
-/// id so two reactors sharing one owner emit the same id, and two root
-/// instances do not.
+/// Shared published fold used by both reactors.
 #[derive(Clone, Debug)]
 pub struct FoldTally {
     cursor: Seq,
-    folds: u32,
-    id: u32,
 }
 
 #[derive(Clone, Debug, aether_data::Schema, serde::Serialize, serde::Deserialize)]
 struct FoldTallyWire {
     cursor: u64,
-    folds: u32,
-    id: u32,
 }
 
 #[derive(Debug)]
@@ -50,7 +43,7 @@ impl View for FoldTally {
     type Error = FoldBoom;
 
     fn empty() -> Self {
-        Self { cursor: Seq(0), folds: 0, id: FOLD_IDS.fetch_add(1, Ordering::Relaxed) }
+        Self { cursor: Seq(0) }
     }
 
     fn cursor(&self) -> Seq {
@@ -61,7 +54,6 @@ impl View for FoldTally {
         if entries.iter().any(|entry| entry.kind == REACTOR_FOLD_FAIL_KIND) {
             return Err(FoldBoom);
         }
-        self.folds = self.folds.saturating_add(1);
         if let Some(last) = entries.last() {
             self.cursor = last.seq;
         }
@@ -75,26 +67,24 @@ impl Publish for FoldTally {
     }
 
     fn encode(&self) -> Result<Vec<u8>, PublishError> {
-        Ok(encode_to_vec(&FoldTallyWire { cursor: self.cursor.0, folds: self.folds, id: self.id })?)
+        Ok(encode_to_vec(&FoldTallyWire { cursor: self.cursor.0 })?)
     }
 
     fn decode(bytes: &[u8]) -> Result<Self, PublishError> {
         let wire = decode_from_slice::<FoldTallyWire>(bytes)?;
-        Ok(Self { cursor: Seq(wire.cursor), folds: wire.folds, id: wire.id })
+        Ok(Self { cursor: Seq(wire.cursor) })
     }
 }
 
 struct CurrentCompilation {
     program: Ref<Program>,
-    fold_id: u32,
-    folds: u32,
 }
 
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     type Views = And<Heads, FoldTally>;
 
-    fn resolve(_trigger: &HeadMoved<Tree>, (heads, tally): (&Heads, &FoldTally)) -> Option<Self> {
-        Some(Self { program: heads.get(&CURRENT)?, fold_id: tally.id, folds: tally.folds })
+    fn resolve(_trigger: &HeadMoved<Tree>, (heads, _tally): (&Heads, &FoldTally)) -> Option<Self> {
+        Some(Self { program: heads.get(&CURRENT)? })
     }
 }
 
@@ -105,18 +95,9 @@ impl Reactor for SourcePublisher {
     const NAMESPACE: &'static str = "test.bloomery.source.publisher";
 
     #[rule]
-    fn publish_source(
-        &self,
-        change: HeadMoved<Tree>,
-        current: CurrentCompilation,
-        heads: Heads,
-    ) -> ReactorGuardedPublication {
+    fn publish_source(&self, change: HeadMoved<Tree>, current: CurrentCompilation, heads: Heads) -> SetHead {
         assert_eq!(heads.get(&CURRENT), Some(current.program));
-        ReactorGuardedPublication {
-            digest: *change.to().digest().as_bytes(),
-            fold_id: current.fold_id,
-            folds: current.folds,
-        }
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 
@@ -127,9 +108,9 @@ impl Reactor for SourceWitness {
     const NAMESPACE: &'static str = "test.bloomery.source.witness";
 
     #[rule]
-    fn note_heads(&self, change: HeadMoved<Tree>, tally: FoldTally) -> ReactorOpenPublication {
+    fn note_heads(&self, change: HeadMoved<Tree>, tally: FoldTally) -> SetHead {
         assert!(tally.cursor.0 > 0);
-        ReactorOpenPublication { digest: *change.to().digest().as_bytes(), fold_id: tally.id, folds: tally.folds }
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 

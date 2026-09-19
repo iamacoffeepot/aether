@@ -1,11 +1,7 @@
-use aether_bloomery_reactor::{Output, reactor};
+use aether_bloomery_kinds::{Head, SetHead, Tree};
+use aether_bloomery_reactor::reactor;
 
-#[aether_data::kind(name = "test.bloomery.reactor.ui.option_out", eq)]
-struct PublicationProposal {
-    marker: u32,
-}
-
-impl Output for PublicationProposal {}
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 struct SourcePublisher;
 
@@ -14,8 +10,8 @@ impl aether_bloomery_reactor::Reactor for SourcePublisher {
     const NAMESPACE: &'static str = "source.publisher";
 
     #[rule]
-    fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Option<PublicationProposal> {
-        Some(PublicationProposal { marker: 1 })
+    fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Option<SetHead> {
+        Some(SetHead::new(&PUBLISHED, None, change.to()))
     }
 }
 

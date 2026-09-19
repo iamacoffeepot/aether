@@ -6,4 +6,5 @@ fn ui() {
     t.compile_fail("tests/ui/fail_async_run.rs");
     t.compile_fail("tests/ui/fail_run_receiver.rs");
     t.compile_fail("tests/ui/fail_non_pure_mode.rs");
+    t.compile_fail("tests/ui/fail_invalid_name.rs");
 }

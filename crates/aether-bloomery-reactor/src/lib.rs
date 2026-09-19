@@ -56,7 +56,7 @@
 //!         change: HeadMoved<Tree>,
 //!         current: CurrentCompilation,
 //!         heads: Heads,
-//!     ) -> PublicationProposal { /* ... */ }
+//!     ) -> SetHead { /* ... */ }
 //! }
 //! ```
 //!

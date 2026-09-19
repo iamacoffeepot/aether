@@ -1,15 +1,10 @@
 // A mixed module must not use a reactor as the ordinary default.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
-use aether_bloomery_kinds::{HeadMoved, Tree};
-use aether_bloomery_reactor::{Output, Reactor, reactor};
+use aether_bloomery_kinds::{Head, HeadMoved, SetHead, Tree};
+use aether_bloomery_reactor::{Reactor, reactor};
 
-#[aether_data::kind(name = "test.bloomery.export.default_reactor_out", eq)]
-struct Publication {
-    marker: u32,
-}
-
-impl Output for Publication {}
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 pub struct Sink;
 
@@ -32,8 +27,8 @@ impl Reactor for Publisher {
     const NAMESPACE: &'static str = "test.bloomery.export.default_publisher";
 
     #[rule]
-    fn publish(&self, _change: HeadMoved<Tree>) -> Publication {
-        Publication { marker: 1 }
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 

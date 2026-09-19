@@ -1,11 +1,7 @@
-use aether_bloomery_reactor::{Output, reactor};
+use aether_bloomery_kinds::{Head, SetHead, Tree};
+use aether_bloomery_reactor::reactor;
 
-#[aether_data::kind(name = "test.bloomery.reactor.ui.named_state_out", eq)]
-struct PublicationProposal {
-    marker: u32,
-}
-
-impl Output for PublicationProposal {}
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 struct StatefulReactor {
     marker: u32,
@@ -16,8 +12,9 @@ impl aether_bloomery_reactor::Reactor for StatefulReactor {
     const NAMESPACE: &'static str = "stateful.named";
 
     #[rule]
-    fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
-        PublicationProposal { marker: self.marker }
+    fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> SetHead {
+        let _ = self.marker;
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 

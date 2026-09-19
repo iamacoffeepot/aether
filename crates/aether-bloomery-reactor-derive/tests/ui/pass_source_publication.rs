@@ -1,11 +1,12 @@
 // Named current-head guard plus a direct Heads parameter. The generated
 // Arg chain must typecheck with Rust inferring roles.
 
-use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, Program, Ref, SetHead, Tree};
 use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Params, Reactor, Trigger, reactor};
 use aether_bloomery_view::Heads;
 
 const CURRENT: Head<Program> = Head::new("current");
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 struct CurrentCompilation {
     program: Ref<Program>,
@@ -19,13 +20,6 @@ impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     }
 }
 
-#[aether_data::kind(name = "test.bloomery.reactor.ui.publication", eq)]
-struct PublicationProposal {
-    marker: u32,
-}
-
-impl Output for PublicationProposal {}
-
 struct SourcePublisher;
 
 #[reactor]
@@ -38,9 +32,9 @@ impl Reactor for SourcePublisher {
         change: HeadMoved<Tree>,
         current: CurrentCompilation,
         heads: Heads,
-    ) -> PublicationProposal {
-        let _ = (change, current, heads);
-        PublicationProposal { marker: 1 }
+    ) -> SetHead {
+        let _ = (current, heads);
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 

@@ -1,0 +1,25 @@
+error: #[program] NAME `Test.Program` is not a valid ProgramName: bad-segment
+  --> tests/ui/fail_invalid_name.rs:21:32
+   |
+21 |     const NAME: &'static str = "Test.Program";
+   |                                ^^^^^^^^^^^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/fail_invalid_name.rs:2:29
+  |
+2 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Env` and `Pure`
+ --> tests/ui/fail_invalid_name.rs:3:31
+  |
+3 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                               ^^^           ^^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_invalid_name.rs:3:36
+  |
+3 | use aether_bloomery_program::{Env, Program, Pure, program};
+  |                                    ^^^^^^^

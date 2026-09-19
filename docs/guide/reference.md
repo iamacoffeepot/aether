@@ -16,7 +16,7 @@ workflow state at once.
 | How must Codex work in this repository? | nearest `AGENTS.md`, active tool schema, `.agents/skills/` |
 | How must Claude Code work? | `CLAUDE.md`, `.claude/skills/`, and the active Claude tools |
 | What does CI currently run? | checked-in workflows and current check state |
-| What workflow state is durable now? | issue-body artifacts; owned worktree/branch/PR; current checks, reviews, threads, and dogfood |
+| What workflow state is durable now? | issue-body artifacts; owned worktree/branch/PR; current checks, reviews, and threads |
 
 This guide is the shared explanatory layer. Fix it when it drifts, but do not use
 old prose to override a live schema or current implementation.

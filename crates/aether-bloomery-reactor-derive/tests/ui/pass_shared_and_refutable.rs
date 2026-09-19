@@ -1,16 +1,17 @@
 // Two arms share Heads, and refutable enum trigger cases compile as declines.
 
-use aether_bloomery_kinds::{Head, HeadMoved, Tree};
-use aether_bloomery_reactor::{Guard, Output, Reactor, reactor};
+use aether_bloomery_kinds::{Digest, Head, HeadMoved, Ref, SetHead, Tree};
+use aether_bloomery_reactor::{Guard, Reactor, reactor};
 use aether_bloomery_view::Heads;
 
 const SOURCE: Head<Tree> = Head::new("source");
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 #[derive(Debug, Clone, PartialEq, aether_data::Storage)]
 #[kind(name = "test.bloomery.reactor.ui.compilation")]
 enum Compilation {
-    Succeeded { output: u32 },
-    Failed { code: u32 },
+    Succeeded { source: [u8; 32] },
+    Failed { source: [u8; 32] },
 }
 
 struct BoundSource;
@@ -31,13 +32,6 @@ impl Guard<Compilation> for BoundSource {
     }
 }
 
-#[aether_data::kind(name = "test.bloomery.reactor.ui.shared_out", eq)]
-struct PublicationProposal {
-    marker: u32,
-}
-
-impl Output for PublicationProposal {}
-
 struct Publisher;
 
 #[reactor]
@@ -45,27 +39,27 @@ impl Reactor for Publisher {
     const NAMESPACE: &'static str = "shared.publisher";
 
     #[rule]
-    fn from_heads(&self, _change: HeadMoved<Tree>, _heads: Heads) -> PublicationProposal {
-        PublicationProposal { marker: 1 }
+    fn from_heads(&self, change: HeadMoved<Tree>, _heads: Heads) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 
     #[rule]
-    fn from_guard(&self, _change: HeadMoved<Tree>, _bound: BoundSource) -> PublicationProposal {
-        PublicationProposal { marker: 2 }
+    fn from_guard(&self, change: HeadMoved<Tree>, _bound: BoundSource) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 
     #[rule]
     fn on_success(
         &self,
-        Compilation::Succeeded { output }: Compilation,
+        Compilation::Succeeded { source }: Compilation,
         _bound: BoundSource,
-    ) -> PublicationProposal {
-        PublicationProposal { marker: output }
+    ) -> SetHead {
+        SetHead::new(&PUBLISHED, None, Ref::from_digest(Digest::from_bytes(source)))
     }
 
     #[rule]
-    fn on_failure(&self, Compilation::Failed { code }: Compilation) -> PublicationProposal {
-        PublicationProposal { marker: code }
+    fn on_failure(&self, Compilation::Failed { source }: Compilation) -> SetHead {
+        SetHead::new(&PUBLISHED, None, Ref::from_digest(Digest::from_bytes(source)))
     }
 }
 

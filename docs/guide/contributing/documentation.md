@@ -189,7 +189,7 @@ Keep these concepts separate:
 
 - local formatting and lint feedback;
 - full CI build and test proof;
-- direct review, thread resolution, and dogfood evidence;
+- direct review and thread resolution;
 - landing a pull request;
 - packaging with `cargo xtask dist` or `cargo xtask package`;
 - publishing a versioned release.
@@ -198,7 +198,7 @@ Do not infer a hosted workflow from a skill, script, historical workflow name,
 or prose description. Confirm that its `.github/workflows/*.yml` entry point is
 present in the checked-in tree, then verify current branch protection before
 calling it a merge gate. Contributor lifecycle skills run directly and persist
-their own body, pull-request, review, thread, and dogfood facts. Only `CI pass`
+their own body, pull-request, review, and thread facts. Only `CI pass`
 and `Lint title` are required status checks, and required pull-request reviews
 are not configured.
 
