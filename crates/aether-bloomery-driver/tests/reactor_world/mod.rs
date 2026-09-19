@@ -12,7 +12,7 @@ use aether_bloomery_kinds::{
 };
 use aether_data::{Kind, MailboxId, Storage, StorageData};
 
-use crate::support::World;
+use crate::support::{World, bundle_wasm};
 
 /// One reactor set over the given member heads, in canonical order.
 ///
@@ -110,10 +110,11 @@ impl World {
         self.seed(None, &moved);
     }
 
-    /// Store one reactor wasm bundle and answer its loads with `root`.
+    /// Store one reactor-only wasm bundle, labelled for a distinct digest, and answer its loads with `root`.
     #[must_use]
-    pub fn store_reactor(&mut self, wasm: &[u8], root: MailboxId) -> Digest {
-        let digest = self.store(OpaqueBytes::ID, wasm);
+    pub fn store_reactor(&mut self, label: &[u8], root: MailboxId) -> Digest {
+        let wasm = bundle_wasm(&[], &["test.reactor"], label);
+        let digest = self.store(OpaqueBytes::ID, &wasm);
         self.script_load(digest, root);
         digest
     }

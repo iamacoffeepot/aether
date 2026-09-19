@@ -4,8 +4,8 @@ use std::iter::once;
 
 use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Evaluated, Event, JournalEntry, Status};
 
-use crate::bundles::InstanceState;
 use crate::core::{Command, EvaluateTicket, ProgramCore, StatusTicket};
+use crate::reactors::instance::Health;
 use crate::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
 use crate::reactors::{Delivery, PlanOrder};
 
@@ -74,10 +74,9 @@ impl ProgramCore {
         out
     }
 
-    /// Send `entry` to `digest`'s ready root.
+    /// Send `entry` to `digest`'s live root.
     pub(crate) fn deliver(&mut self, digest: Digest, delivery: Delivery, entry: JournalEntry, out: &mut Vec<Command>) {
-        let Some(&InstanceState::Ready { root }) = self.bundles.instance(&digest).map(|instance| &instance.state)
-        else {
+        let Some(root) = self.live_root(digest) else {
             self.abort(format!("event {} for digest {digest}, which has no ready root", entry.seq), out);
             return;
         };
@@ -98,9 +97,7 @@ impl ProgramCore {
                 return;
             }
             Evaluated::OutOfSequence { .. } => {
-                let Some(&InstanceState::Ready { root }) =
-                    self.bundles.instance(&digest).map(|instance| &instance.state)
-                else {
+                let Some(root) = self.live_root(digest) else {
                     self.abort(format!("out-of-sequence from digest {digest}, which has no ready root"), out);
                     return;
                 };
@@ -118,7 +115,7 @@ impl ProgramCore {
 
     /// Record that `digest`'s root has evaluated `seq`.
     pub(crate) fn advance_instance(&mut self, digest: Digest, seq: u64) {
-        if let Some(instance) = self.bundles.instance_mut(&digest) {
+        if let Some(instance) = self.routing.instances.get_mut(&digest) {
             instance.cursor = seq;
         }
     }
@@ -143,6 +140,8 @@ impl ProgramCore {
         if let Some(work) = self.routing.current.as_mut() {
             work.plan_reply(|index| PlanOrder::Live { digest, index }, planned);
         }
-        self.bundles.set_reactor_state(&digest, InstanceState::Poisoned(reason));
+        if let Some(instance) = self.routing.instances.get_mut(&digest) {
+            instance.health = Health::Poisoned(reason);
+        }
     }
 }

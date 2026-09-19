@@ -12,9 +12,9 @@ use aether_bloomery_kinds::{
     CallOutcome, CallRefusal, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoked,
     OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
 };
-use aether_data::{Kind, KindId};
+use aether_data::Kind;
 use program_world::{ROOT, call, fault, requested, transition};
-use support::{LIMIT_BYTES, World, digest};
+use support::{LIMIT_BYTES, World, bundle_wasm, digest};
 
 const PROGRAM: &str = "test.program";
 const HEAD: &str = "programs";
@@ -28,45 +28,6 @@ struct CitedResult {
     text: Ref<Utf8Text>,
 }
 
-/// One wasm bundle declaring the given programs: name, input kind, result kind, intent.
-fn wasm_bundle(records: &[(&str, KindId, KindId, &str)]) -> Vec<u8> {
-    fn push_leb(mut value: u32, out: &mut Vec<u8>) {
-        loop {
-            let byte = u8::try_from(value & 0x7f).expect("masked byte fits");
-            value >>= 7;
-            if value == 0 {
-                out.push(byte);
-                return;
-            }
-            out.push(byte | 0x80);
-        }
-    }
-    let mut data = Vec::new();
-    for (name, input, result, intent) in records {
-        let name = name.as_bytes();
-        let intent = intent.as_bytes();
-        data.push(1u8);
-        data.extend_from_slice(&u16::try_from(name.len()).expect("test name fits").to_le_bytes());
-        data.extend_from_slice(name);
-        data.extend_from_slice(&input.0.to_le_bytes());
-        data.extend_from_slice(&result.0.to_le_bytes());
-        data.push(0u8);
-        data.extend_from_slice(&u16::try_from(intent.len()).expect("test intent fits").to_le_bytes());
-        data.extend_from_slice(intent);
-    }
-    let name = b"aether.bloomery.programs";
-    let mut section = Vec::new();
-    push_leb(u32::try_from(name.len()).expect("test section name fits"), &mut section);
-    section.extend_from_slice(name);
-    section.extend_from_slice(&data);
-    let mut wasm = b"\0asm".to_vec();
-    wasm.extend_from_slice(&1u32.to_le_bytes());
-    wasm.push(0);
-    push_leb(u32::try_from(section.len()).expect("test section fits"), &mut wasm);
-    wasm.extend_from_slice(&section);
-    wasm
-}
-
 /// The standard fixtures: a bundle declaring [`PROGRAM`] (`Utf8Text` in,
 /// `OpaqueBytes` out) bound under [`HEAD`], with one text input's closure.
 struct Fixtures {
@@ -77,7 +38,7 @@ struct Fixtures {
 }
 
 fn fixtures(world: &mut World) -> Fixtures {
-    let wasm = wasm_bundle(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")]);
+    let wasm = bundle_wasm(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program");
     let bundle = world.store_bundle(&wasm);
     let input = world.store(Utf8Text::ID, b"input-text");
     world.script_closure(input, vec![ClosureArtifact::new(Utf8Text::ID, b"input-text".to_vec())]);
@@ -134,7 +95,8 @@ fn startup_faults_prior_life_requests_once_and_invokes_nothing() {
 fn calls_wait_for_the_startup_pass() {
     // Catches a new request being folded in as outstanding and faulted `Interrupted`.
     let (mut world, initial) = World::open();
-    let prior = world.store_bundle(&wasm_bundle(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")]));
+    let prior =
+        world.store_bundle(&bundle_wasm(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     let input = world.store(Utf8Text::ID, b"input-text");
     world.script_closure(input, vec![ClosureArtifact::new(Utf8Text::ID, b"input-text".to_vec())]);
     world.seed_move(HEAD, prior);
@@ -314,7 +276,8 @@ fn one_invoke_in_flight_per_root() {
 fn unknown_program_faults_before_closure_or_load() {
     // Catches a closure read or load for a program the bundle never declared.
     let (mut world, initial) = World::open();
-    let bundle = world.store_bundle(&wasm_bundle(&[("test.other", Utf8Text::ID, OpaqueBytes::ID, "other")]));
+    let bundle =
+        world.store_bundle(&bundle_wasm(&[("test.other", Utf8Text::ID, OpaqueBytes::ID, "other")], &[], b"program"));
     world.seed_move(HEAD, bundle);
     let input = world.store(Utf8Text::ID, b"input-text");
     let manual = world.drive(initial);
@@ -381,7 +344,8 @@ fn oversized_closure_faults_with_the_limit_and_loads_nothing() {
 fn missing_closure_member_faults_input_missing() {
     // Catches treating a dangling input digest as loadable.
     let (mut world, initial) = World::open();
-    let bundle = world.store_bundle(&wasm_bundle(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")]));
+    let bundle =
+        world.store_bundle(&bundle_wasm(&[(PROGRAM, Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_move(HEAD, bundle);
     let manual = world.drive(initial);
     assert!(manual.is_empty());
@@ -497,7 +461,8 @@ fn result_citing_a_staged_text_records_every_staged_artifact() {
     // Catches faulting a completed invocation for staging more than the
     // result alone, when ADR-0224 §3 allows any staged set reachable from it.
     let (mut world, initial) = World::open();
-    let bundle = world.store_bundle(&wasm_bundle(&[(PROGRAM, Utf8Text::ID, CitedResult::ID, "run it")]));
+    let bundle =
+        world.store_bundle(&bundle_wasm(&[(PROGRAM, Utf8Text::ID, CitedResult::ID, "run it")], &[], b"program"));
     let input = world.store(Utf8Text::ID, b"input-text");
     world.script_closure(input, vec![ClosureArtifact::new(Utf8Text::ID, b"input-text".to_vec())]);
     world.seed_move(HEAD, bundle);

@@ -8,8 +8,10 @@
 
 mod activate;
 mod batch;
+mod claim;
 mod deliver;
 mod follow;
+mod instance;
 mod intents;
 mod members;
 mod restart;
@@ -21,6 +23,7 @@ use aether_bloomery_kinds::{
 };
 use aether_bloomery_view::Heads;
 
+use self::instance::Instance;
 use self::intents::PlannedIntent;
 use crate::core::{CallerId, EvaluateTicket, EventsTicket, PlannedRecord, StatusTicket, WarmTicket, WatchTicket};
 
@@ -151,7 +154,7 @@ pub enum SeqPhase {
 /// One activation's phase.
 #[derive(Debug)]
 pub enum ActivationPhase {
-    /// Bundle artifact read or load outstanding.
+    /// Waiting on the digest's shared read or load, issued by either role.
     Loading,
     /// Paging the journal and sending `Warm` batches through `live_from - 1`.
     Warming,
@@ -318,6 +321,8 @@ pub struct Routing {
     pub warms: BTreeMap<WarmTicket, WarmBatch>,
     /// Outstanding status resyncs, by the digest queried.
     pub statuses: BTreeMap<StatusTicket, Digest>,
+    /// Reactor instances by digest, each live, poisoned, or untrusted.
+    pub instances: BTreeMap<Digest, Instance>,
     /// In-progress seq work, if any.
     pub current: Option<SeqWork>,
     /// In-progress restart work, if any.
@@ -341,6 +346,7 @@ impl Routing {
             deliveries: BTreeMap::new(),
             warms: BTreeMap::new(),
             statuses: BTreeMap::new(),
+            instances: BTreeMap::new(),
             current: None,
             restart: None,
             started: false,
@@ -363,5 +369,22 @@ impl Routing {
             ActivationWork { bundle, phase: ActivationPhase::CatchingUp(catch_up), .. } => Some((*bundle, catch_up)),
             _ => None,
         }
+    }
+
+    /// The digest whose shared read or load routing waits on, if any: the
+    /// activation's bundle while its phase is `Loading`, or the restart's
+    /// warming digest.
+    pub fn awaited(&self) -> Option<Digest> {
+        let loading = self
+            .activation()
+            .filter(|activation| matches!(activation.phase, ActivationPhase::Loading))
+            .map(|activation| activation.bundle);
+        if loading.is_some() {
+            return loading;
+        }
+        self.restart.as_ref().and_then(|restart| match &restart.phase {
+            RestartPhase::Warming { warming, .. } => warming.as_ref().map(|(digest, _)| *digest),
+            RestartPhase::Folding => None,
+        })
     }
 }

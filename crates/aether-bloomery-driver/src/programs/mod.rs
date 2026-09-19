@@ -3,3 +3,6 @@
 mod call;
 mod outcome;
 mod pipeline;
+mod queue;
+
+pub use queue::DigestQueue;

@@ -6,13 +6,10 @@ mod reactor_world;
 mod support;
 
 use aether_bloomery_driver::{Command, EvaluateTicket};
-use aether_bloomery_kinds::{
-    CallProgram, Detail, Digest, Evaluated, OpaqueBytes, ProgramName, ReactorIntent, ReactorName, RecordedHead,
-    RecordedHeadMove, RuleName, Warmed,
-};
+use aether_bloomery_kinds::{Detail, Digest, Evaluated, OpaqueBytes, RecordedHead, RecordedHeadMove, Utf8Text, Warmed};
 use aether_data::{Kind, MailboxId};
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
-use support::{World, digest, program_head};
+use support::{World, bundle_wasm, digest, program_head};
 
 /// Feed one held evaluation reply, sequencing the double behind it.
 fn feed_evaluated(world: &mut World, ticket: EvaluateTicket, evaluated: Evaluated) -> Vec<Command> {
@@ -198,30 +195,18 @@ fn shared_instance_past_the_owed_start_is_rejected() {
 }
 
 #[test]
-fn activation_on_a_program_digest_is_rejected_without_a_load() {
-    // Catches a program digest loaded as a reactor.
+fn activation_on_a_program_only_digest_is_rejected_before_any_load() {
+    // Catches an undeclared reactor role loaded instead of refused from the missing section.
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
     let reactor = world.store_reactor(b"reactor", MailboxId(101));
-    let program = world.store(OpaqueBytes::ID, b"program-wasm");
+    let program = world
+        .store(OpaqueBytes::ID, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
     world.seed_move("a", reactor);
     world.seed_move("prog", program);
-
-    let call = CallProgram {
-        program: program_head("prog"),
-        name: ProgramName::new("run").expect("valid program name"),
-        input: digest(9),
-    };
-    let intent = ReactorIntent::new(
-        ReactorName::new("r").expect("valid reactor name"),
-        RuleName::new("rule").expect("valid rule name"),
-        CallProgram::ID,
-        call.encode_into_bytes(),
-    );
-    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![intent] });
-    for seq in [4, 5, 6, 7] {
+    for seq in [3, 4, 5] {
         world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
     }
     let manual = world.drive(commands);
@@ -234,7 +219,10 @@ fn activation_on_a_program_digest_is_rejected_without_a_load() {
     assert!(world.abort.is_none());
 
     assert!(!world.loads_seen.contains(&program));
-    assert!(!rejected_records(&world).is_empty());
+    let rejected = rejected_records(&world);
+    let (_, record) =
+        rejected.iter().find(|(_, record)| record.bundle == program).expect("a is rejected for the program digest");
+    assert!(record.reason.as_str().contains("declares no reactors"), "unexpected reason: {:?}", record.reason);
 }
 
 #[test]

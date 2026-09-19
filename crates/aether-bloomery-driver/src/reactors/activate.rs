@@ -3,30 +3,17 @@
 use std::collections::VecDeque;
 
 use aether_bloomery_kinds::{
-    Activated, Detail, Digest, DriverRecord, Evaluated, Head, JournalEntry, OpaqueBytes, ReadArtifact,
-    ReadArtifactResult, Seq, Warm, WarmEntries, Warmed,
+    Activated, Detail, Digest, DriverRecord, Evaluated, Head, JournalEntry, OpaqueBytes, Seq, Warm, WarmEntries, Warmed,
 };
 use aether_bloomery_view::{HeadActivation, Heads};
-use aether_data::Kind;
 
-use crate::bundles::InstanceState;
-use crate::core::{ArtifactRead, ArtifactTicket, Command, LoadOutcome, LoadTicket, ProgramCore, WarmTicket};
+use crate::core::{Command, ProgramCore, WarmTicket};
+use crate::reactors::claim::Claim;
+use crate::reactors::instance::Health;
 use crate::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
 use crate::reactors::{
     ActivationPhase, ActivationStep, ActivationWork, CatchUp, Delivery, PlanOrder, RoutingRead, SeqPhase, WarmBatch,
 };
-
-/// How one changed head's activation starts.
-enum Start {
-    /// Reject the head without touching its digest.
-    Reject(Detail),
-    /// Read and load the digest first.
-    Load,
-    /// Warm the digest's ready root from its cursor.
-    Warm,
-    /// The digest's load is already in flight, which serial activation never leaves behind.
-    Busy,
-}
 
 /// Next step of an owed catch-up.
 enum CatchUpStep {
@@ -53,7 +40,7 @@ impl ProgramCore {
         };
         match warmed {
             Warmed::Folded { through } => {
-                let cursor = self.bundles.instance(&digest).map(|instance| instance.cursor);
+                let cursor = self.routing.instances.get(&digest).map(|instance| instance.cursor);
                 if through != last || cursor.map(|cursor| cursor + 1) != Some(first) {
                     let reason =
                         format!("warm of {digest} over {first}..={last} from {cursor:?} folded through {through}");
@@ -62,63 +49,14 @@ impl ProgramCore {
                 }
                 self.advance_instance(digest, through);
             }
-            Warmed::Poisoned { reason, .. } => self.fail_instance(digest, InstanceState::Poisoned, reason),
+            Warmed::Poisoned { reason, .. } => self.fail_reactor(digest, Health::Poisoned, reason),
             Warmed::OutOfSequence { first, expected } => {
                 let reason = Detail::new(format!("warm out-of-sequence: first {first}, expected {expected}"));
-                self.fail_instance(digest, InstanceState::Unavailable, reason);
+                self.fail_reactor(digest, Health::Untrusted, reason);
             }
         }
         self.drive_routing(&mut out);
         out
-    }
-
-    /// Continue one reactor bundle artifact read: load it, or mark the digest unavailable.
-    pub(crate) fn continue_reactor_artifact(
-        &mut self,
-        digest: Digest,
-        result: ReadArtifactResult,
-        out: &mut Vec<Command>,
-    ) {
-        let reason = match result {
-            ReadArtifactResult::Found { kind, bytes, .. } if kind == OpaqueBytes::ID => {
-                let ticket = self.mint(LoadTicket::mint);
-                self.loads.insert(ticket, digest);
-                self.bundles.set_reactor_state(&digest, InstanceState::Loading);
-                out.push(Command::Load { ticket, bundle: digest, wasm: bytes });
-                return;
-            }
-            ReadArtifactResult::Found { .. } => Detail::new("bundle artifact has the wrong kind"),
-            ReadArtifactResult::Missing { .. } => Detail::new("bundle artifact is missing"),
-            ReadArtifactResult::Err { message, .. } => Detail::new(message),
-        };
-        self.fail_instance(digest, InstanceState::Unavailable, reason);
-        self.drive_routing(out);
-    }
-
-    /// Continue one reactor load.
-    pub(crate) fn continue_reactor_loaded(&mut self, digest: Digest, outcome: LoadOutcome, out: &mut Vec<Command>) {
-        match outcome {
-            LoadOutcome::Loaded { root } => {
-                self.bundles.set_reactor_state(&digest, InstanceState::Ready { root });
-                if let Some(activation) = self.routing.current.as_mut().and_then(|work| work.activation.as_mut()) {
-                    activation.phase = ActivationPhase::Warming;
-                }
-            }
-            LoadOutcome::Failed { error } => self.fail_instance(digest, InstanceState::Unavailable, Detail::new(error)),
-        }
-        self.drive_routing(out);
-    }
-
-    /// Mark `digest` failed with `failed` and reject what waited on it: the
-    /// activation in progress while routing, or the restart's warming digest
-    /// before it.
-    fn fail_instance(&mut self, digest: Digest, failed: fn(Detail) -> InstanceState, reason: Detail) {
-        self.bundles.set_reactor_state(&digest, failed(reason.clone()));
-        if self.routing.started {
-            self.reject_activation(reason);
-        } else {
-            self.fail_restart_digest(&reason);
-        }
     }
 
     /// Compute the heads `N` changed and start activating them.
@@ -142,7 +80,20 @@ impl ProgramCore {
             Some(ActivationPhase::Warming) => self.drive_warming(out),
             Some(ActivationPhase::CatchingUp(_)) => self.drive_catch_up(out),
             Some(ActivationPhase::Loading) => {
-                self.abort("activation is loading with no read or load outstanding".to_string(), out);
+                let Some(activation) = self.routing.activation() else {
+                    return;
+                };
+                let (bundle, live_from) = (activation.bundle, activation.live_from);
+                match self.claim_activation(bundle, live_from, out) {
+                    Err(reason) => self.reject_activation(reason),
+                    Ok(phase) => {
+                        if let Some(activation) =
+                            self.routing.current.as_mut().and_then(|work| work.activation.as_mut())
+                        {
+                            activation.phase = phase;
+                        }
+                    }
+                }
             }
             None => match work.to_activate.get(work.activate_index).cloned() {
                 Some((head, bundle)) => self.start_activation(head, bundle, out),
@@ -155,7 +106,8 @@ impl ProgramCore {
         }
     }
 
-    /// Start activating one changed head: reject it, reuse its ready root, or read its bundle.
+    /// Start activating one changed head: reject it, wait on its shared read
+    /// or load, or warm its live root.
     ///
     /// The live-from is the head's owed start, or `N+1`. A root already past
     /// that start cannot evaluate the owed interval, so the head is rejected.
@@ -167,39 +119,35 @@ impl ProgramCore {
             Some(HeadActivation::Owed { from }) => from.0,
             _ => trigger + 1,
         };
-        let start = self.bundles.claim_reactor(bundle).map_or_else(
-            || Start::Reject(Detail::new("digest is loaded as a program bundle")),
-            |instance| match &instance.state {
-                InstanceState::Poisoned(reason) | InstanceState::Unavailable(reason) => Start::Reject(reason.clone()),
-                InstanceState::Ready { .. } if instance.cursor >= live_from => {
-                    Start::Reject(Detail::new("shared instance is past the owed start"))
+        let phase = match self.claim_activation(bundle, live_from, out) {
+            Err(reason) => {
+                if let Some(work) = self.routing.current.as_mut() {
+                    work.reject_head(head, bundle, reason);
                 }
-                InstanceState::Ready { .. } => Start::Warm,
-                InstanceState::Reading => Start::Load,
-                InstanceState::Loading => Start::Busy,
-            },
-        );
-        let load = matches!(start, Start::Load);
-        let Some(work) = self.routing.current.as_mut() else {
-            return;
-        };
-        let phase = match start {
-            Start::Reject(reason) => {
-                work.reject_head(head, bundle, reason);
                 return;
             }
-            Start::Busy => {
-                self.abort(format!("activation for {bundle} found its load already in flight"), out);
-                return;
-            }
-            Start::Warm => ActivationPhase::Warming,
-            Start::Load => ActivationPhase::Loading,
+            Ok(phase) => phase,
         };
-        work.activation = Some(ActivationWork { head, bundle, live_from, phase });
-        if load {
-            let ticket = self.mint(ArtifactTicket::mint);
-            self.artifact_reads.insert(ticket, ArtifactRead::ReactorBundle(bundle));
-            out.push(Command::ReadArtifact { ticket, request: ReadArtifact { digest: bundle } });
+        if let Some(work) = self.routing.current.as_mut() {
+            work.activation = Some(ActivationWork { head, bundle, live_from, phase });
+        }
+    }
+
+    /// Claim the activation's digest for the reactor role: refuse it, wait on
+    /// its shared read or load, or warm its live root from its cursor.
+    fn claim_activation(
+        &mut self,
+        bundle: Digest,
+        live_from: u64,
+        out: &mut Vec<Command>,
+    ) -> Result<ActivationPhase, Detail> {
+        match self.claim_reactor(bundle, out) {
+            Claim::Refuse(reason) => Err(reason),
+            Claim::Pending => Ok(ActivationPhase::Loading),
+            Claim::Ready { cursor } if cursor >= live_from => {
+                Err(Detail::new("shared instance is past the owed start"))
+            }
+            Claim::Ready { .. } => Ok(ActivationPhase::Warming),
         }
     }
 
@@ -212,7 +160,7 @@ impl ProgramCore {
             return;
         };
         let (trigger, digest, live_from) = (work.n, activation.bundle, activation.live_from);
-        let cursor = self.bundles.instance(&digest).map_or(0, |instance| instance.cursor);
+        let cursor = self.routing.instances.get(&digest).map_or(0, |instance| instance.cursor);
         if cursor + 1 < live_from {
             self.emit_routing_read(cursor, RoutingRead::Warm, out);
         } else if live_from > trigger {
@@ -246,8 +194,7 @@ impl ProgramCore {
                 return;
             }
         };
-        let Some(&InstanceState::Ready { root }) = self.bundles.instance(&digest).map(|instance| &instance.state)
-        else {
+        let Some(root) = self.live_root(digest) else {
             self.abort(format!("warm for digest {digest}, which has no ready root"), out);
             return;
         };
@@ -331,7 +278,7 @@ impl ProgramCore {
         let planned = match evaluated {
             _ if replied != cause => {
                 let reason = Detail::new(format!("catch-up evaluated seq {replied} does not match {cause}"));
-                self.fail_instance(digest, InstanceState::Unavailable, reason);
+                self.fail_reactor(digest, Health::Untrusted, reason);
                 return;
             }
             Evaluated::Completed { intents, .. } => {
@@ -344,12 +291,12 @@ impl ProgramCore {
                 vec![PlannedIntent::Ready(reaction_failed(cause, digest, Some(reactor), reason))]
             }
             Evaluated::Poisoned { reason, .. } => {
-                self.fail_instance(digest, InstanceState::Poisoned, reason);
+                self.fail_reactor(digest, Health::Poisoned, reason);
                 return;
             }
             Evaluated::OutOfSequence { .. } => {
                 let reason = Detail::new(format!("catch-up out-of-sequence at {cause}"));
-                self.fail_instance(digest, InstanceState::Unavailable, reason);
+                self.fail_reactor(digest, Health::Untrusted, reason);
                 return;
             }
         };
@@ -383,7 +330,7 @@ impl ProgramCore {
     }
 
     /// Reject the activation in progress with `reason`.
-    fn reject_activation(&mut self, reason: Detail) {
+    pub(crate) fn reject_activation(&mut self, reason: Detail) {
         let Some(work) = self.routing.current.as_mut() else {
             return;
         };

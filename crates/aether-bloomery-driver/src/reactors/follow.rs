@@ -98,16 +98,17 @@ impl ProgramCore {
         self.check_processed(out);
     }
 
-    /// Whether no routing reply, read, write, or load is outstanding.
+    /// Whether no routing reply, read, write, or awaited load is outstanding.
+    ///
+    /// A shared read or load holds routing only while the activation or
+    /// restart warm waits on that same digest; one issued for the program
+    /// role alone never blocks routing.
     fn routing_quiet(&self) -> bool {
         let routing = &self.routing;
-        let reading = self.artifact_reads.values().any(|read| {
-            matches!(
-                read,
-                ArtifactRead::ReactorSet(_) | ArtifactRead::ReactorBundle(_) | ArtifactRead::SetHeadDestination
-            )
-        });
-        let loading = self.loads.values().any(|digest| self.bundles.instance(digest).is_some());
+        let reading = self
+            .artifact_reads
+            .values()
+            .any(|read| matches!(read, ArtifactRead::ReactorSet(_) | ArtifactRead::SetHeadDestination));
         routing.read.is_none()
             && routing.deliveries.is_empty()
             && routing.warms.is_empty()
@@ -115,7 +116,7 @@ impl ProgramCore {
             && routing.committed.is_none()
             && !self.journal.has_routing_write()
             && !reading
-            && !loading
+            && !routing.awaited().is_some_and(|digest| self.bundles.pending(&digest))
     }
 
     /// Take one step on the in-progress seq.
@@ -147,7 +148,7 @@ impl ProgramCore {
         let prev = self.selection();
         let live = self.live_digests(&prev);
         for digest in live.keys() {
-            let cursor = self.bundles.instance(digest).map(|instance| instance.cursor);
+            let cursor = self.routing.instances.get(digest).map(|instance| instance.cursor);
             if cursor.map(|cursor| cursor + 1) != Some(next) {
                 self.abort(format!("live instance {digest} is at {cursor:?}, not ready for seq {next}"), out);
                 return;

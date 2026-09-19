@@ -20,6 +20,7 @@ use aether_bloomery_kinds::{
 };
 
 use crate::bundles::BundleTable;
+use crate::programs::DigestQueue;
 use crate::reactors::{CommittedRouting, Routing};
 
 pub use command::{Command, LoadOutcome};
@@ -33,10 +34,8 @@ pub use ticket::{
 /// Why the core read one artifact.
 #[derive(Debug, Clone, Copy)]
 pub enum ArtifactRead {
-    /// A program bundle's wasm.
-    ProgramBundle(Digest),
-    /// A reactor bundle's wasm.
-    ReactorBundle(Digest),
+    /// A bundle's wasm, read once for every role.
+    Bundle(Digest),
     /// A reactor set's stored membership.
     ReactorSet(Digest),
     /// The destination of the `SetHead` the current seq is checking.
@@ -57,6 +56,7 @@ pub struct Activation {
 pub struct ProgramCore {
     pub(crate) journal: Journal,
     pub(crate) bundles: BundleTable,
+    pub(crate) queues: BTreeMap<Digest, DigestQueue>,
     pub(crate) routing: Routing,
     pub(crate) limit: ClosureLimit,
     pub(crate) next_ticket: u64,
@@ -78,6 +78,7 @@ impl ProgramCore {
         let mut core = Self {
             journal: Journal::new(),
             bundles: BundleTable::default(),
+            queues: BTreeMap::new(),
             routing: Routing::new(),
             limit,
             next_ticket: 0,
@@ -178,11 +179,8 @@ impl ProgramCore {
             return out;
         };
         match read {
-            ArtifactRead::ProgramBundle(bundle) => {
-                self.continue_artifact(bundle, result, &mut out);
-            }
-            ArtifactRead::ReactorBundle(bundle) => {
-                self.continue_reactor_artifact(bundle, result, &mut out);
+            ArtifactRead::Bundle(bundle) => {
+                self.continue_bundle_artifact(bundle, result, &mut out);
             }
             ArtifactRead::ReactorSet(digest) => {
                 self.continue_set_artifact(digest, result, &mut out);
@@ -335,13 +333,7 @@ impl ProgramCore {
         let Some(bundle) = self.loads.remove(&ticket) else {
             return out;
         };
-        if self.bundles.instance(&bundle).is_some() {
-            self.continue_reactor_loaded(bundle, outcome, &mut out);
-        } else if self.bundles.queue(&bundle).is_some() {
-            self.continue_loaded(bundle, outcome, &mut out);
-        } else {
-            self.abort(format!("load reply arrived for unknown bundle {bundle}"), &mut out);
-        }
+        self.continue_bundle_loaded(bundle, outcome, &mut out);
         out
     }
 
