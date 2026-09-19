@@ -27,7 +27,7 @@ pub use aether_bloomery_program_derive::program;
 pub use declare::{Program, declaration};
 pub use env::{Env, Pure};
 pub use export::PROGRAM_NAMESPACE;
-pub use invoke::invoke;
+pub use invoke::{invoke, unreachable_staged};
 pub use section::{DeclarationsError, declarations};
 
 #[doc(hidden)]

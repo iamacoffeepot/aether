@@ -14,6 +14,7 @@ use aether_bloomery_kinds::{
     ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact, FaultReason, Invoke, Invoked, OpaqueBytes, Program,
     ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, Transition,
 };
+use aether_bloomery_program::unreachable_staged;
 use aether_data::{Kind, MailboxId};
 
 use crate::bundles::{Active, DigestQueue, DigestState, programs};
@@ -366,7 +367,14 @@ impl ProgramCore {
         out.push(Command::Invoke { ticket, root, request: Invoke::new(seq, program.name().clone(), input, closure) });
     }
 
-    /// Check a completed invocation's staged result, then record it.
+    /// Check a completed invocation's staged set against ADR-0224 §3, then
+    /// record it: no digest staged twice, `result` present among the staged
+    /// artifacts at the declaration's result kind, and every staged blob
+    /// reachable from `result` through staged citations. The bundle's own
+    /// claim is never trusted (ADR-0224 §7) — the driver walks the same
+    /// [`unreachable_staged`] check natively. The first broken rule becomes
+    /// the fault; a set that passes all four records one `Transition` whose
+    /// append carries the entire staged set.
     fn continue_completed(
         &mut self,
         bundle: Digest,
@@ -383,25 +391,45 @@ impl ProgramCore {
             self.abort(format!("request {seq} completed with no declaration"), out);
             return;
         };
-        let valid = staged.len() == 1
-            && staged.first().is_some_and(|staged| staged.digest() == result && staged.kind() == declaration.result);
-        if !valid {
-            let reason = if staged.len() != 1 {
-                format!("completed invocation staged {} artifacts, expected exactly one", staged.len())
-            } else if staged[0].digest() != result {
-                format!("staged artifact digest {} does not match result {result}", staged[0].digest())
-            } else {
-                format!(
-                    "staged artifact kind {} does not match declared result kind {}",
-                    staged[0].kind().0,
-                    declaration.result.0
-                )
-            };
-            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason: Detail::new(reason) }, out);
+        if let Some(digest) = duplicate_staged_digest(&staged) {
+            let reason = Detail::new(format!("staged artifact {digest} appears more than once"));
+            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
+            return;
+        }
+        let Some(result_artifact) = staged.iter().find(|artifact| artifact.digest() == result) else {
+            let reason = Detail::new(format!("result {result} is not among the staged artifacts"));
+            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
+            return;
+        };
+        if result_artifact.kind() != declaration.result {
+            let reason = Detail::new(format!(
+                "staged artifact kind {} does not match declared result kind {}",
+                result_artifact.kind().0,
+                declaration.result.0
+            ));
+            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
+            return;
+        }
+        if let Some(digest) = unreachable_staged(&staged, result) {
+            let reason = Detail::new(format!("staged artifact {digest} is not reachable from the result {result}"));
+            self.fail_active(bundle, seq, FaultReason::ProtocolViolation { reason }, out);
             return;
         }
         let record = DriverRecord::Transition { cause: seq, record: Transition { program, input, result } };
         self.journal.queue_back(PendingWrite::Outcome { request: seq, artifacts: staged, record });
         self.release(bundle, out);
     }
+}
+
+/// The first digest that appears twice in `staged`, walked iteratively.
+fn duplicate_staged_digest(staged: &[EncodedArtifact]) -> Option<Digest> {
+    let mut seen: Vec<Digest> = Vec::with_capacity(staged.len());
+    for artifact in staged {
+        let digest = artifact.digest();
+        if seen.contains(&digest) {
+            return Some(digest);
+        }
+        seen.push(digest);
+    }
+    None
 }

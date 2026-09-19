@@ -29,8 +29,7 @@ fn run<P: Program>(input: Digest, closure: Vec<ClosureArtifact>) -> Result<(Dige
 }
 
 fn refuse_orphans(staged: &[EncodedArtifact], root: Digest) -> Result<(), Refusal> {
-    let reachable = reachable_from(staged, root);
-    if let Some(digest) = staged.iter().map(EncodedArtifact::digest).find(|digest| !reachable.contains(digest)) {
+    if let Some(digest) = unreachable_staged(staged, root) {
         return Err(Refusal::Refused {
             reason: Detail::new(format!("staged blob {digest} is not reachable from the result")),
         });
@@ -38,7 +37,16 @@ fn refuse_orphans(staged: &[EncodedArtifact], root: Digest) -> Result<(), Refusa
     Ok(())
 }
 
-fn reachable_from(staged: &[EncodedArtifact], root: Digest) -> Vec<Digest> {
+/// The first staged digest that `root` cannot reach through staged citations.
+///
+/// ADR-0224 §3: a completed invocation's staged set is valid whenever every
+/// staged blob is reachable from the result, not only when the result is the
+/// lone staged artifact. The walk is iterative and shared by every caller
+/// that must check this rule — a program's own `refuse_orphans` and, per
+/// ADR-0224 §7, the native driver re-checking a bundle's claim rather than
+/// trusting it.
+#[must_use]
+pub fn unreachable_staged(staged: &[EncodedArtifact], root: Digest) -> Option<Digest> {
     let mut seen = Vec::new();
     let mut stack = alloc::vec![root];
     while let Some(digest) = stack.pop() {
@@ -59,5 +67,5 @@ fn reachable_from(staged: &[EncodedArtifact], root: Digest) -> Vec<Digest> {
             }
         }
     }
-    seen
+    staged.iter().map(EncodedArtifact::digest).find(|digest| !seen.contains(digest))
 }
