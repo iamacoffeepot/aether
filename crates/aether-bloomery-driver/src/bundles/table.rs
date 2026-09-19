@@ -4,7 +4,7 @@
 //! on it, and reinserts: a state that doesn't match is reinserted unchanged
 //! and the transition reports [`OutOfStep`]. There is no placeholder state
 //! and no panic path. [`BundleTable::finish_load`] is the only `Loading`
-//! exit, and it matches [`LoadOutcome`](crate::core::LoadOutcome)
+//! exit, and it matches [`LoadOutcome`]
 //! exhaustively.
 
 use std::collections::BTreeMap;

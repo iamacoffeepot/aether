@@ -16,8 +16,8 @@ use super::DeclaredRoles;
 /// Concatenates the payloads of every custom section named
 /// `aether.bloomery.programs` and every one named
 /// `aether.bloomery.reactors`, decoding the first with
-/// [`declarations`](aether_bloomery_program::declarations) and the second
-/// with [`reactor_declarations`](aether_bloomery_kinds::reactor_declarations).
+/// [`declarations`] and the second
+/// with [`reactor_declarations`].
 /// An absent section decodes to an empty list, so that role isn't declared.
 /// A bundle that does not parse, whose section does not decode, or that
 /// declares neither role is refused with the reason.
