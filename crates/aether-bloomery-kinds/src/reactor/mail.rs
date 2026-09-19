@@ -209,7 +209,7 @@ pub enum Evaluated {
 pub struct StatusQuery;
 
 /// Reply to [`StatusQuery`].
-#[aether_data::kind(name = "aether.bloomery.reactor.status", eq, no_serde)]
+#[aether_data::kind(name = "aether.bloomery.reactor.status", eq, copy, no_serde)]
 pub struct Status {
     cursor: u64,
     poisoned: bool,

@@ -1,6 +1,8 @@
 //! Barrier mail: wait until the driver's journal has processed through a sequence.
 
-/// Wait until the driver's journal head is at or past `through`.
+/// Wait until `through` is quiescent: routing has passed `through`, no routing
+/// write is queued or in flight, and no request at or below `through` is
+/// outstanding.
 #[aether_data::kind(name = "aether.bloomery.driver.await_processed", eq, copy, no_serde)]
 pub struct AwaitProcessed {
     pub through: u64,

@@ -23,6 +23,7 @@ wasmparser = "0.246"
 aether-component = { path = "../aether-component" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 tempfile = "3"
 
 [lints]
