@@ -1,6 +1,5 @@
 //! End-to-end: the driver loads the program fixture bundle by digest and records caused outcomes.
 
-#[path = "support/chassis.rs"]
 mod chassis;
 
 use std::error::Error;
