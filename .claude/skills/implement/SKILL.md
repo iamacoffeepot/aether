@@ -159,7 +159,7 @@ Never put machine JSON/HTML into a pull-request review or comment. The hidden se
 For every actionable review finding:
 
 1. reproduce and verify it;
-2. fix it at any path; overflow is priced, or record a concrete evidence-backed justification;
+2. fix it, at any path (overflow is priced at landing), or record a concrete evidence-backed justification;
 3. commit conventionally and plain-push;
 4. rerun local checks, overflow pricing, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;

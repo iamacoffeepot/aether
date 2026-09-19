@@ -37,7 +37,17 @@ Require the approved base commit to exist and be an ancestor of pull-request hea
 
 ### Surface overflow
 
-Recompute the overflow at the approval base with `git diff --name-only --no-renames origin/main...<head>` and the resolver's changed mode, and verify the resolver's reported blobs against the frozen `Pricing policy:` and `Pricing matcher:` lines in the draft's `## Approval` section. When the lines are missing, state the derived blobs; when they differ, everything prices `human`. Apply the ADR override and the error → `human` rule. List auto-tier paths as settled by direct review. For judge-tier paths, read each path's current-head diff against the Plan and record `ACCEPT` or `REJECT: <reason>`; every one must be `ACCEPT`, and a `REJECT` makes the draft ineligible unless the owner accepts it. For human-tier paths, print them and stop for the owner's explicit confirmation naming this pull request; in a sweep the first-turn plan lists the overflow so that confirmation covers it. Then write the "Surface overflow" pull-request comment naming the head SHA and frozen blobs with one `<path> — <tier> — <settlement>` line per overflow path, or "None." when there is no overflow, editing the existing comment in place when present. The settlement is `listed` for auto, `ACCEPT` or `REJECT: <reason>` for judge, and `awaiting owner` or `confirmed by owner` for human. Confirm the diff implements the scoped concept and contains no unrelated change. Re-price overflow after any main merge and immediately before merge.
+Price every changed path outside the approved surface:
+
+1. Recompute the overflow at the approval base with `git diff --name-only --no-renames origin/main...<head>` and the resolver's changed mode.
+2. Verify the resolver's reported blobs against the frozen `Pricing policy:` and `Pricing matcher:` lines in the draft's `## Approval` section. When the lines are missing, state the derived blobs; when they differ, everything prices `human`. Apply the ADR override and the error → `human` rule.
+3. Settle each path by tier:
+   - **auto** — listed; settled by direct review.
+   - **judge** — read the path's current-head diff against the Plan and record `ACCEPT` or `REJECT: <reason>`. Every one must be `ACCEPT`; a `REJECT` makes the draft ineligible unless the owner accepts it.
+   - **human** — print the paths and stop for the owner's explicit confirmation naming this pull request. In a sweep, the first-turn plan lists the overflow so that confirmation covers it.
+4. Write the "Surface overflow" pull-request comment naming the head SHA and frozen blobs, with one `<path> — <tier> — <settlement>` line per overflow path, or "None." when there is no overflow. Edit the existing comment in place when present. The settlement is `listed` for auto, `ACCEPT` or `REJECT: <reason>` for judge, and `awaiting owner` or `confirmed by owner` for human.
+
+Confirm the diff implements the scoped concept and contains no unrelated change. Re-price overflow after any main merge and immediately before merge.
 
 ### Checks
 

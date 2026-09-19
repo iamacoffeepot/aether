@@ -144,7 +144,7 @@ Post actionable findings, when a durable handoff is useful, as tight current-hea
 For each actionable review finding on the current head:
 
 1. reproduce and verify it;
-2. fix it at any path; overflow is priced, or write a concrete evidence-backed justification;
+2. fix it, at any path (overflow is priced at landing), or write a concrete evidence-backed justification;
 3. commit fixes conventionally and push without rewriting history;
 4. rerun local checks, overflow pricing, and current-head CI;
 5. reply to the anchored thread with the fix commit or justification;
