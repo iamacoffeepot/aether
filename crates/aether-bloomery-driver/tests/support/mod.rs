@@ -9,23 +9,24 @@
 //! interleavings (a second call before the first invoke answers, an append
 //! failure between two commits).
 
-use std::collections::{HashMap, HashSet, VecDeque};
+mod reactor;
 
-use aether_bloomery_driver::{CallerId, Command, LoadOutcome, ProgramCore};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
+use std::mem::take;
+
+use aether_bloomery_driver::WatchTicket;
+use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, ProgramCore};
 use aether_bloomery_kinds::{
-    Activated, ActivationRejected, AppendRecords, AppendRecordsResult, Call, CallOutcome, ClosureArtifact,
-    ClosureLimit, Digest, DriverRecord, EncodedArtifact, Fault, FaultReason, Head, Invoke, Invoked, JournalEntry,
-    NativeOrigin, OpaqueBytes, ProgramName, ProgramRef, ReactionFailed, ReadArtifact, ReadArtifactResult, ReadClosure,
-    ReadClosureResult, ReadEvents, ReadEventsResult, RecordedHead, RecordedHeadMove, RequestSource, Requested,
-    Transition, artifact_digest,
+    Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
+    Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
+    ReactionFailed, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult,
+    RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult, artifact_digest,
 };
 use aether_data::{Kind, KindId, MailboxId, Storage, StorageData};
+use reactor::Reactor;
 
 /// Byte budget every test core starts under: 1 MiB.
 pub const LIMIT_BYTES: u64 = 1024 * 1024;
-
-/// Mailbox the scripted loads hand out unless a test overrides them.
-pub const ROOT: MailboxId = MailboxId(7);
 
 /// One journal entry's truth: stored kind, cause, and storage bytes.
 type Truth = (KindId, Option<u64>, Vec<u8>);
@@ -43,21 +44,23 @@ pub struct World {
     /// Stored artifacts by digest: kind plus unprefixed payload.
     artifacts: HashMap<Digest, (KindId, Vec<u8>)>,
     /// Scripted closures by root digest.
-    closures: HashMap<Digest, Vec<ClosureArtifact>>,
+    pub closures: HashMap<Digest, Vec<ClosureArtifact>>,
     /// Roots whose closure read answers `TooLarge`.
-    oversized: HashSet<Digest>,
+    pub oversized: HashSet<Digest>,
     /// Scripted load outcomes by bundle digest.
-    loads: HashMap<Digest, Result<MailboxId, String>>,
+    pub loads: HashMap<Digest, Result<MailboxId, String>>,
     /// Scripted invoke replies by request seq.
-    invokes: HashMap<u64, Invoked>,
+    pub invokes: HashMap<u64, Invoked>,
     /// Closure budget the core started with, echoed in `TooLarge` replies.
-    limit: ClosureLimit,
+    pub limit: ClosureLimit,
     /// Answers collected from the core, in arrival order.
     pub answers: Vec<(CallerId, CallOutcome)>,
     /// Abort reason, when the core aborted.
     pub abort: Option<String>,
     /// Every append command the core emitted, including refused ones.
     pub appends: Vec<AppendRecords>,
+    /// Every append the journal committed, in commit order.
+    pub committed: Vec<AppendRecords>,
     /// Bundle digests the core asked to read, in order.
     pub reads_seen: Vec<Digest>,
     /// Closure roots the core asked to read, in order.
@@ -72,6 +75,24 @@ pub struct World {
     pub fail_next: Option<String>,
     /// When set, every journal read answers `Err`.
     pub fail_reads: Option<String>,
+    /// Parked watches: ticket and `after`, in arrival order.
+    pub parked: Vec<(WatchTicket, u64)>,
+    /// Every `WatchHead` boundary the core emitted, in order.
+    pub watches_seen: Vec<u64>,
+    /// Scripted reactor roots by mailbox, holding cursors and recordings.
+    pub reactors: HashMap<MailboxId, Reactor>,
+    /// Roots behind held `Evaluate` commands, so hand-fed replies sequence.
+    pub eval_roots: BTreeMap<EvaluateTicket, MailboxId>,
+    /// Barrier replies collected from the core, in arrival order.
+    pub processed: Vec<(CallerId, Processed)>,
+    /// Scripted warm replies by batch first seq.
+    pub warm_pages: BTreeMap<u64, Warmed>,
+    /// Default warm reply when the first seq is unscripted; `None` folds through the batch end.
+    pub warm_default: Option<Warmed>,
+    /// Scripted evaluation replies by event seq.
+    pub evaluates: BTreeMap<u64, Evaluated>,
+    /// Scripted status reply for every resync.
+    pub status: Option<Status>,
 }
 
 impl World {
@@ -96,6 +117,7 @@ impl World {
             answers: Vec::new(),
             abort: None,
             appends: Vec::new(),
+            committed: Vec::new(),
             reads_seen: Vec::new(),
             closures_seen: Vec::new(),
             loads_seen: Vec::new(),
@@ -103,6 +125,15 @@ impl World {
             conflict_next: None,
             fail_next: None,
             fail_reads: None,
+            parked: Vec::new(),
+            watches_seen: Vec::new(),
+            reactors: HashMap::new(),
+            eval_roots: BTreeMap::new(),
+            processed: Vec::new(),
+            warm_pages: BTreeMap::new(),
+            warm_default: None,
+            evaluates: BTreeMap::new(),
+            status: None,
         };
         (world, commands)
     }
@@ -138,34 +169,6 @@ impl World {
         digest
     }
 
-    /// Store one wasm bundle and answer its loads successfully.
-    #[must_use]
-    pub fn store_bundle(&mut self, wasm: &[u8]) -> Digest {
-        let digest = self.store(OpaqueBytes::ID, wasm);
-        self.loads.insert(digest, Ok(ROOT));
-        digest
-    }
-
-    /// Script one input's closure.
-    pub fn script_closure(&mut self, root: Digest, artifacts: Vec<ClosureArtifact>) {
-        self.closures.insert(root, artifacts);
-    }
-
-    /// Script one input's closure as too large.
-    pub fn script_oversized(&mut self, root: Digest) {
-        self.oversized.insert(root);
-    }
-
-    /// Leave one bundle's load unanswered so the test feeds it by hand.
-    pub fn hold_load(&mut self, bundle: Digest) {
-        self.loads.remove(&bundle);
-    }
-
-    /// Script one request's invoke reply.
-    pub fn script_invoke(&mut self, seq: u64, invoked: Invoked) {
-        self.invokes.insert(seq, invoked);
-    }
-
     /// Drive commands through the doubles to quiescence, returning the
     /// commands no double could answer (unscripted loads and invokes).
     pub fn drive(&mut self, commands: Vec<Command>) -> Vec<Command> {
@@ -198,15 +201,21 @@ impl World {
             }
             Command::Append { ticket, request } => {
                 let result = self.commit(&request);
+                let head = self.head();
+                if matches!(result, AppendRecordsResult::Committed { .. }) {
+                    self.committed.push(request.clone());
+                }
                 self.appends.push(request);
-                Step::More(self.core.on_appended(ticket, result))
+                let mut next = self.core.on_appended(ticket, result);
+                next.extend(self.wake_watches(head));
+                Step::More(next)
             }
-            Command::Load { ticket, bundle, wasm } => {
+            Command::Load { ticket, bundle, role, wasm } => {
                 self.loads_seen.push(bundle);
                 match self.loads.get(&bundle).cloned() {
                     Some(Ok(root)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded { root })),
                     Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
-                    None => Step::Manual(Command::Load { ticket, bundle, wasm }),
+                    None => Step::Manual(Command::Load { ticket, bundle, role, wasm }),
                 }
             }
             Command::Invoke { ticket, root, request } => {
@@ -216,8 +225,48 @@ impl World {
                     None => Step::Manual(Command::Invoke { ticket, root, request }),
                 }
             }
+            Command::WatchHead { ticket, request } => {
+                self.watches_seen.push(request.after);
+                if self.head() > request.after {
+                    let head = self.head();
+                    Step::More(self.core.on_watched(ticket, WatchHeadResult::Advanced { head }))
+                } else {
+                    self.parked.push((ticket, request.after));
+                    Step::More(Vec::new())
+                }
+            }
+            Command::Warm { ticket, root, request } => {
+                let first = request.entries().first();
+                let last = request.entries().last();
+                let scripted = self.warm_pages.get(&first).cloned();
+                let default = self.warm_default.clone();
+                let warmed = self.reactors.entry(root).or_default().warm(first, last, scripted, default.as_ref());
+                Step::More(self.core.on_warmed(ticket, warmed))
+            }
+            Command::Evaluate { ticket, root, request } => {
+                let seq = request.entry().seq;
+                let scripted = self.evaluates.get(&seq).cloned();
+                let reactor = self.reactors.entry(root).or_default();
+                if let Some(auto) = reactor.check_event(seq) {
+                    Step::More(self.core.on_evaluated(ticket, auto))
+                } else if let Some(scripted) = scripted {
+                    reactor.note_evaluated(&scripted);
+                    Step::More(self.core.on_evaluated(ticket, scripted))
+                } else {
+                    self.eval_roots.insert(ticket, root);
+                    Step::Manual(Command::Evaluate { ticket, root, request })
+                }
+            }
+            Command::QueryStatus { ticket, root } => match self.status.clone() {
+                Some(status) => Step::More(self.core.on_status(ticket, &status)),
+                None => Step::Manual(Command::QueryStatus { ticket, root }),
+            },
             Command::Answer { caller, outcome } => {
                 self.answers.push((caller, outcome));
+                Step::More(Vec::new())
+            }
+            Command::Processed { caller, reply } => {
+                self.processed.push((caller, reply));
                 Step::More(Vec::new())
             }
             Command::Abort { reason } => {
@@ -294,6 +343,25 @@ impl World {
             artifacts: request.artifacts().iter().map(EncodedArtifact::digest).collect(),
         }
     }
+
+    /// Wake every parked watch whose boundary the head has passed.
+    pub(crate) fn wake_watches(&mut self, head: u64) -> Vec<Command> {
+        let mut tickets = Vec::new();
+        let mut remaining = Vec::new();
+        for (ticket, after) in take(&mut self.parked) {
+            if head > after {
+                tickets.push(ticket);
+            } else {
+                remaining.push((ticket, after));
+            }
+        }
+        self.parked = remaining;
+        let mut next = Vec::new();
+        for ticket in tickets {
+            next.extend(self.core.on_watched(ticket, WatchHeadResult::Advanced { head }));
+        }
+        next
+    }
 }
 
 /// One stepped command: follow-up commands, or one for the test to feed by hand.
@@ -350,52 +418,4 @@ pub fn digest(byte: u8) -> Digest {
 #[must_use]
 pub fn program_head(name: &'static str) -> Head<OpaqueBytes> {
     Head::new(name)
-}
-
-/// One validated program name.
-///
-/// # Panics
-///
-/// Panics if the name breaks [`ProgramName`] rules.
-#[must_use]
-pub fn program_name(name: &str) -> ProgramName {
-    ProgramName::new(name).expect("valid test program name")
-}
-
-/// One validated native origin.
-///
-/// # Panics
-///
-/// Panics if the name breaks [`NativeOrigin`] rules.
-#[must_use]
-pub fn origin(name: &str) -> NativeOrigin {
-    NativeOrigin::new(name).expect("valid test origin")
-}
-
-/// One native call.
-#[must_use]
-pub fn call(program: &'static str, name: &str, input: Digest, origin: &str, key: u64) -> Call {
-    Call { program: program_head(program), name: program_name(name), input, origin: self::origin(origin), key }
-}
-
-/// One recorded request over a pinned bundle.
-#[must_use]
-pub fn requested(bundle: Digest, name: &str, input: Digest, origin: &str, key: u64) -> Requested {
-    Requested {
-        program: ProgramRef::new(bundle, program_name(name)),
-        input,
-        source: RequestSource::Native { origin: self::origin(origin), key },
-    }
-}
-
-/// One recorded execution.
-#[must_use]
-pub fn transition(bundle: Digest, name: &str, input: Digest, result: Digest) -> Transition {
-    Transition { program: ProgramRef::new(bundle, program_name(name)), input, result }
-}
-
-/// One recorded fault.
-#[must_use]
-pub fn fault(bundle: Digest, name: &str, input: Digest, reason: FaultReason) -> Fault {
-    Fault { program: ProgramRef::new(bundle, program_name(name)), input, reason }
 }

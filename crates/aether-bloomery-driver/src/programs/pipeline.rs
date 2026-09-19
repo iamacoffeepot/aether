@@ -19,7 +19,8 @@ use aether_data::{Kind, MailboxId};
 
 use crate::bundles::{Active, DigestQueue, DigestState, programs};
 use crate::core::{
-    ArtifactTicket, ClosureTicket, Command, InvokeTicket, LoadOutcome, LoadTicket, PendingWrite, ProgramCore,
+    ArtifactRead, ArtifactTicket, BundleRole, ClosureTicket, Command, InvokeTicket, LoadOutcome, LoadTicket,
+    PendingWrite, ProgramCore,
 };
 
 /// Next step for a request whose closure checked out.
@@ -35,9 +36,14 @@ impl ProgramCore {
     /// that finds no active request drives the digest from its current
     /// state; otherwise it waits its turn in the FIFO.
     pub(crate) fn enqueue_request(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
+        if self.bundles.instance(&bundle).is_some() {
+            let reason = Detail::new("digest is loaded as a reactor bundle");
+            self.record_fault(seq, FaultReason::BundleUnavailable { reason }, out);
+            return;
+        }
         let Some(queue) = self.bundles.queue_mut(&bundle) else {
             let ticket = self.mint(ArtifactTicket::mint);
-            self.artifact_reads.insert(ticket, bundle);
+            self.artifact_reads.insert(ticket, ArtifactRead::ProgramBundle(bundle));
             self.bundles.insert(
                 bundle,
                 DigestQueue { state: DigestState::Reading, active: Some(Active::new(seq)), waiting: VecDeque::new() },
@@ -346,7 +352,7 @@ impl ProgramCore {
             Next::Load(wasm) => {
                 let ticket = self.mint(LoadTicket::mint);
                 self.loads.insert(ticket, bundle);
-                out.push(Command::Load { ticket, bundle, wasm });
+                out.push(Command::Load { ticket, bundle, role: BundleRole::Program, wasm });
             }
         }
     }

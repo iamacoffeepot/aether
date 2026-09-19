@@ -19,19 +19,26 @@ use aether_data::Kind;
 pub struct Activations {
     cursor: Seq,
     heads: BTreeMap<Head<OpaqueBytes>, HeadActivation>,
+    watermark: Seq,
 }
 
 impl Activations {
     /// Empty fold: cursor `Seq(0)`, no heads seen.
     #[must_use]
     pub fn new() -> Self {
-        Self { cursor: Seq(0), heads: BTreeMap::new() }
+        Self { cursor: Seq(0), heads: BTreeMap::new(), watermark: Seq(0) }
     }
 
     /// Last applied sequence, or `Seq(0)` when nothing has been applied.
     #[must_use]
     pub const fn cursor(&self) -> Seq {
         self.cursor
+    }
+
+    /// The highest cause among `Activated` / `ActivationRejected` entries folded so far.
+    #[must_use]
+    pub const fn watermark(&self) -> Seq {
+        self.watermark
     }
 
     /// Apply `entry` as the next contiguous sequence.
@@ -54,6 +61,12 @@ impl Activations {
             self.apply_rejected(entry)?;
         } else if entry.kind == Activated::ID {
             self.apply_activated(entry)?;
+        }
+        if (entry.kind == ActivationRejected::ID || entry.kind == Activated::ID)
+            && let Some(cause) = entry.cause
+            && cause.0 > self.watermark.0
+        {
+            self.watermark = cause;
         }
 
         self.cursor = entry.seq;

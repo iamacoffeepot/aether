@@ -67,6 +67,12 @@ impl Heads {
         self.bindings.get(&RecordedHead::from(head)).copied().map(Ref::from_digest)
     }
 
+    /// Current binding of an untyped recorded head, if this prefix has seen a move for it.
+    #[must_use]
+    pub fn binding(&self, head: &RecordedHead) -> Option<Digest> {
+        self.bindings.get(head).copied()
+    }
+
     pub(crate) fn bindings(&self) -> &BTreeMap<RecordedHead, Digest> {
         &self.bindings
     }

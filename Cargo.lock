@@ -145,6 +145,7 @@ dependencies = [
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
  "aether-bloomery-program",
+ "aether-bloomery-reactor",
  "aether-bloomery-view",
  "aether-component",
  "aether-data",

@@ -1,10 +1,13 @@
-//! Sans-io program core for the native bundle driver (ADR-0226).
+//! Sans-io driver core for the native bundle driver (ADR-0226).
 //!
-//! This crate holds the program half of the driver: startup recovery, `Call`
-//! handling, the per-digest pipeline (section check, closure read, load,
-//! invoke), and `Transition` / `Fault` recording. It owns every ADR-0226
-//! program decision (decisions 3, 4, and 9 for programs, and 11 for `Call`)
-//! as a state machine over the journal folds.
+//! This crate holds both roles of the driver: startup recovery, `Call`
+//! handling, the per-digest program pipeline (section check, closure read,
+//! load, invoke), and `Transition` / `Fault` recording, plus the reactor
+//! half (journal following, membership, activation, live delivery, and
+//! reaction records). It owns every ADR-0226 program decision (decisions 3,
+//! 4, and 9 for programs, and 11 for `Call`) and every reactor routing
+//! decision (decisions 5-9 for reactors, and 10-11 for `WatchHead` and
+//! `AwaitProcessed`) as a state machine over the journal folds.
 //!
 //! The core is sans-io: calls and typed replies go in, [`Command`]s come
 //! out, and the core itself performs no mail, threads, or clock reads. The
@@ -32,10 +35,11 @@ mod actor;
 mod bundles;
 mod core;
 mod programs;
+mod reactors;
 mod recovery;
 
 pub use actor::{BundleDriver, DriverParams, ProgramBundleRoot};
 pub use core::{
-    AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EventsTicket, InvokeTicket,
-    LoadOutcome, LoadTicket, ProgramCore,
+    AppendTicket, ArtifactTicket, BundleRole, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket,
+    EventsTicket, InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,
 };
