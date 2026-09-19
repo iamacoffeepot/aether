@@ -14,6 +14,7 @@ use syn::{Ident, LitStr, Path, Token, Type, braced, bracketed};
 const PROGRAM_NAMESPACE: &str = "aether.bloomery.program";
 const ROOT_IDENT: &str = "__AetherBloomeryProgramRoot";
 const INVOCATION_IDENT: &str = "__AetherBloomeryProgramInvocation";
+const TABLE_IDENT: &str = "__AETHER_BLOOMERY_PROGRAM_TABLE";
 const PROGRAM_EXTENSION: &str = "aether_bloomery_program";
 const INVOCATION_NAMESPACE: &str = "aether.bloomery.program.invocation";
 
@@ -275,8 +276,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
 
     let root = format_ident!("{ROOT_IDENT}");
     let invocation = format_ident!("{INVOCATION_IDENT}");
-    let live = format_ident!("__AetherBloomeryProgramLive");
-    let bundle = expand_bundle(&root, &invocation, &live, &programs);
+    let bundle = expand_bundle(&root, &invocation, &programs);
     let boot_tokens = optional_type_tokens(boot.as_ref());
     // A program-only rewrite is one type. `export!(Root)` is the single-actor
     // form, which writes no ActorBoundary, so `export: Some(PROGRAM_NAMESPACE)`
@@ -353,27 +353,35 @@ fn fnv1a_64(bytes: &[u8]) -> u64 {
     hash
 }
 
-fn expand_bundle(root: &Ident, invocation: &Ident, live: &Ident, programs: &[ProgramEntry]) -> TokenStream2 {
-    let root_actor = expand_root(root, invocation, live, programs);
-    let invocation_actor = expand_invocation(root, invocation, programs);
+fn expand_bundle(root: &Ident, invocation: &Ident, programs: &[ProgramEntry]) -> TokenStream2 {
+    let table = format_ident!("{TABLE_IDENT}");
+    let table_static = expand_table(&table, programs);
+    let root_actor = expand_root(root, invocation, &table);
+    let invocation_actor = expand_invocation(root, invocation, &table);
     let sections = programs.iter().map(expand_section);
     quote! {
+        #table_static
         #root_actor
         #invocation_actor
         #(#sections)*
     }
 }
 
-fn expand_root(root: &Ident, invocation: &Ident, live: &Ident, programs: &[ProgramEntry]) -> TokenStream2 {
-    let name_lits = programs.iter().map(|program| &program.meta.name);
+fn expand_table(table: &Ident, programs: &[ProgramEntry]) -> TokenStream2 {
+    let entries = programs.iter().map(|program| {
+        let ty = &program.ty;
+        quote! { ::aether_bloomery_program::ProgramEntry::of::<#ty>() }
+    });
     quote! {
-        struct #live {
-            child: ::aether_actor::InlineChild<#invocation>,
-            reply: ::core::option::Option<::aether_actor::ReplyHandle>,
-        }
+        static #table: ::aether_bloomery_program::ProgramTable =
+            ::aether_bloomery_program::__macro_internals::program_table(&[#(#entries),*]);
+    }
+}
 
+fn expand_root(root: &Ident, invocation: &Ident, table: &Ident) -> TokenStream2 {
+    quote! {
         struct #root {
-            live: ::aether_bloomery_program::__macro_internals::BTreeMap<u64, #live>,
+            inner: ::aether_bloomery_program::Root<::core::option::Option<::aether_actor::ReplyHandle>>,
         }
 
         #[::aether_actor::actor]
@@ -383,7 +391,7 @@ fn expand_root(root: &Ident, invocation: &Ident, live: &Ident, programs: &[Progr
             fn init(
                 _ctx: &mut ::aether_actor::WasmInitCtx<'_>,
             ) -> Result<Self, ::aether_actor::ActorInitError> {
-                Ok(Self { live: ::aether_bloomery_program::__macro_internals::BTreeMap::new() })
+                Ok(Self { inner: ::aether_bloomery_program::Root::new(&#table) })
             }
 
             #[handler::manual]
@@ -393,39 +401,30 @@ fn expand_root(root: &Ident, invocation: &Ident, live: &Ident, programs: &[Progr
                 invoke: ::aether_bloomery_program::Invoke,
             ) {
                 use ::aether_actor::OutboundReply;
-                let seq = invoke.seq();
-                let reason = if !matches!(invoke.program().as_str(), #(#name_lits)|*) {
-                    ::core::option::Option::Some("unknown program")
-                } else if self.live.contains_key(&seq) {
-                    ::core::option::Option::Some("seq already live")
-                } else {
-                    ::core::option::Option::None
-                };
-                if let Some(reason) = reason {
-                    if ctx.reply_target().is_some() {
-                        ctx.reply(&::aether_bloomery_program::Invoked::Rejected {
-                            seq,
-                            reason: ::aether_bloomery_program::kinds::Detail::new(reason),
-                        });
-                    }
-                    return;
-                }
-                let seq_name = ::aether_bloomery_program::__macro_internals::ToString::to_string(&seq);
-                match ctx.spawn_inline_child::<#root, #invocation>(
-                    ::aether_actor::Subname::Named(&seq_name),
-                    &(),
-                ) {
-                    ::core::result::Result::Ok(child) => {
-                        let reply = ctx.reply_target();
-                        self.live.insert(seq, #live { child, reply });
-                        child.send(ctx, &invoke);
-                    }
-                    ::core::result::Result::Err(_) => {
+                match self.inner.admit(&invoke) {
+                    ::core::result::Result::Err(rejected) => {
                         if ctx.reply_target().is_some() {
-                            ctx.reply(&::aether_bloomery_program::Invoked::Rejected {
-                                seq,
-                                reason: ::aether_bloomery_program::kinds::Detail::new("failed to spawn invocation"),
-                            });
+                            ctx.reply(&rejected);
+                        }
+                    }
+                    ::core::result::Result::Ok(admission) => {
+                        let seq = admission.seq();
+                        let seq_name =
+                            ::aether_bloomery_program::__macro_internals::ToString::to_string(&seq);
+                        match ctx.spawn_inline_child::<#root, #invocation>(
+                            ::aether_actor::Subname::Named(&seq_name),
+                            &(),
+                        ) {
+                            ::core::result::Result::Ok(child) => {
+                                admission.start(child.id(), ctx.reply_target());
+                                child.send(ctx, &invoke);
+                            }
+                            ::core::result::Result::Err(_) => {
+                                let rejected = admission.spawn_failed();
+                                if ctx.reply_target().is_some() {
+                                    ctx.reply(&rejected);
+                                }
+                            }
                         }
                     }
                 }
@@ -438,31 +437,19 @@ fn expand_root(root: &Ident, invocation: &Ident, live: &Ident, programs: &[Progr
                 invoked: ::aether_bloomery_program::Invoked,
             ) {
                 use ::aether_actor::OutboundReply;
-                let seq = match &invoked {
-                    ::aether_bloomery_program::Invoked::Completed { seq, .. }
-                    | ::aether_bloomery_program::Invoked::Refused { seq, .. }
-                    | ::aether_bloomery_program::Invoked::Rejected { seq, .. } => *seq,
-                };
-                let Some(live) = self.live.remove(&seq) else {
+                let Some((child, reply)) = self.inner.finish(&invoked, ctx.source_mailbox()) else {
                     return;
                 };
-                if let Some(source) = ctx.source_mailbox()
-                    && !live.child.matches(source)
-                {
-                    self.live.insert(seq, live);
-                    return;
-                }
-                if let Some(reply) = live.reply {
+                if let Some(reply) = reply {
                     ctx.reply_to(reply, &invoked);
                 }
-                ctx.despawn_inline_child(live.child.id());
+                ctx.despawn_inline_child(child);
             }
         }
     }
 }
 
-fn expand_invocation(root: &Ident, invocation: &Ident, programs: &[ProgramEntry]) -> TokenStream2 {
-    let dispatch = expand_dispatch(programs);
+fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident) -> TokenStream2 {
     quote! {
         struct #invocation;
 
@@ -483,35 +470,13 @@ fn expand_invocation(root: &Ident, invocation: &Ident, programs: &[ProgramEntry]
                 invoke: ::aether_bloomery_program::Invoke,
             ) {
                 let _ = self;
-                let name = ::aether_bloomery_program::__macro_internals::String::from(invoke.program().as_str());
-                let invoked = #dispatch;
+                let invoked = ::aether_bloomery_program::dispatch(&#table, invoke);
                 if let Some(parent) = ctx.source_mailbox() {
                     ctx.send_to(parent, &invoked);
                 }
             }
         }
     }
-}
-
-fn expand_dispatch(programs: &[ProgramEntry]) -> TokenStream2 {
-    let mut dispatch = quote! {
-        ::aether_bloomery_program::Invoked::Rejected {
-            seq: invoke.seq(),
-            reason: ::aether_bloomery_program::kinds::Detail::new("unknown program"),
-        }
-    };
-    for program in programs.iter().rev() {
-        let name = &program.meta.name;
-        let ty = &program.ty;
-        dispatch = quote! {
-            if name.as_str() == #name {
-                ::aether_bloomery_program::invoke::<#ty>(invoke)
-            } else {
-                #dispatch
-            }
-        };
-    }
-    dispatch
 }
 
 fn expand_section(program: &ProgramEntry) -> TokenStream2 {

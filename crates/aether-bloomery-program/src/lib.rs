@@ -4,7 +4,8 @@
 //! injected-data sandbox reactors use. The native driver sends
 //! [`Invoke`]; [`invoke()`] runs one [`Program`] and replies [`Invoked`].
 //! Only native code writes journal records. A program's identity is its
-//! bundle digest plus name, not a stored declaration digest.
+//! bundle digest plus name, not a stored declaration digest. [`Root`] is the
+//! bundle root's state: the program table plus the live-seq table.
 //!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
@@ -17,6 +18,7 @@ mod declare;
 mod env;
 mod export;
 mod invoke;
+mod root;
 mod section;
 
 pub use aether_bloomery_kinds as kinds;
@@ -28,14 +30,15 @@ pub use declare::{Program, declaration};
 pub use env::{Env, Pure};
 pub use export::PROGRAM_NAMESPACE;
 pub use invoke::{invoke, unreachable_staged};
+pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch};
 pub use section::{DeclarationsError, declarations};
 
 #[doc(hidden)]
 pub mod __macro_internals {
     pub use aether_data::Kind;
-    pub use alloc::collections::BTreeMap;
-    pub use alloc::string::{String, ToString};
+    pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
 
+    pub use crate::root::program_table;
     pub use crate::section::{MODE_PURE, program_record_len, write_program_record};
 }
