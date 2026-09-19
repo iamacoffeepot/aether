@@ -5,8 +5,8 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{
-    Digest, Evaluated, Event, Head, JournalEntry, OpaqueBytes, Program, Ref, Status, StatusQuery, Tree, Warm,
-    WarmEntries, Warmed, artifact_digest,
+    Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION, Ref, Status,
+    StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
 use aether_bloomery_reactor::REACTOR_NAMESPACE;
 use aether_component::ComponentHostCapability;
@@ -15,6 +15,7 @@ use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_test_fixtures_kinds::{REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication, ReactorOpenPublication};
+use wasmparser::{Parser, Payload};
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
     Ref::from_digest(Digest::from_bytes([byte; 32]))
@@ -24,11 +25,10 @@ fn journal_moved<K: Kind + 'static>(seq: u64, name: &'static str, to: Ref<K>) ->
     let event = Head::<K>::new(name).move_to(to);
     JournalEntry {
         seq,
-        kind: aether_bloomery_kinds::HeadMoved::<K>::ID,
+        kind: HeadMoved::<K>::ID,
         cause: None,
         recorded_at_millis: 0,
-        bytes: aether_bloomery_kinds::HeadMoved::<K>::encode_storage(&StorageData::from_value(event))
-            .expect("storage encode"),
+        bytes: HeadMoved::<K>::encode_storage(&StorageData::from_value(event)).expect("storage encode"),
     }
 }
 
@@ -132,4 +132,43 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
     let status = reply::<Status>(&mut harness, &address, &StatusQuery, "status");
     assert!(status.poisoned());
     assert_eq!(status.cursor(), 2);
+}
+
+fn section_bytes(wasm: &[u8]) -> Vec<u8> {
+    let mut section = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        if let Payload::CustomSection(reader) = payload.expect("parse reactor fixture wasm")
+            && reader.name() == REACTORS_SECTION
+        {
+            section.extend_from_slice(reader.data());
+        }
+    }
+    section
+}
+
+#[test]
+fn bundle_section_declares_both_reactors_with_their_rule_kinds() {
+    // Catches the bundle not emitting, emitting for the generated root, or recording the wrong type's id.
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_reactor") else {
+        return;
+    };
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+    let decoded = reactor_declarations(&section_bytes(&wasm)).expect("aether.bloomery.reactors decodes");
+    assert_eq!(decoded.len(), 2, "the custom section lists both reactors");
+    let publisher = decoded
+        .iter()
+        .find(|declaration| declaration.name().as_str() == "test.bloomery.source.publisher")
+        .expect("publisher declaration");
+    assert_eq!(publisher.rules().len(), 1);
+    assert_eq!(publisher.rules()[0].name().as_str(), "publish_source");
+    assert_eq!(publisher.rules()[0].trigger(), HeadMoved::<Tree>::ID);
+    assert_eq!(publisher.rules()[0].output(), ReactorGuardedPublication::ID);
+    let witness = decoded
+        .iter()
+        .find(|declaration| declaration.name().as_str() == "test.bloomery.source.witness")
+        .expect("witness declaration");
+    assert_eq!(witness.rules().len(), 1);
+    assert_eq!(witness.rules()[0].name().as_str(), "note_heads");
+    assert_eq!(witness.rules()[0].trigger(), HeadMoved::<Tree>::ID);
+    assert_eq!(witness.rules()[0].output(), ReactorOpenPublication::ID);
 }

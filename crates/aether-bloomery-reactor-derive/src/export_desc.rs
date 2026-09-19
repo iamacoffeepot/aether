@@ -59,7 +59,7 @@ fn type_last_ident(ty: &Type) -> Option<&Ident> {
     }
 }
 
-fn fnv1a_64(bytes: &[u8]) -> u64 {
+pub fn fnv1a_64(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325;
     for byte in bytes {
         hash ^= u64::from(*byte);

@@ -2,10 +2,10 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote, quote_spanned};
-use syn::Ident;
 use syn::spanned::Spanned;
+use syn::{Ident, LitStr, Type};
 
-use crate::export_desc::emit_reactor_export_desc;
+use crate::export_desc::{emit_reactor_export_desc, fnv1a_64};
 use crate::parse::{Param, ReactorDef, Rule};
 use crate::pattern::match_test;
 
@@ -15,6 +15,13 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
     let visits = rules.iter().map(expand_visit);
     let arm_evals = rules.iter().map(expand_arm_eval);
     let export_desc = emit_reactor_export_desc(&self_ty, &namespace);
+    let (record_len_ident, record_rules) = declaration_parts(&namespace, &self_ty, &rules);
+    let declaration_len = quote! {
+        const #record_len_ident: usize = ::aether_bloomery_reactor::__macro_internals::reactor_record_len(
+            #namespace,
+            &[#(#record_rules),*],
+        );
+    };
     let unit_check = quote_spanned! { self_ty.span() => const _: #self_ty = #self_ty; };
     let namespace_assert = quote_spanned! { namespace.span() =>
         const _: () = ::core::assert!(
@@ -38,6 +45,7 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
         #unit_check
         #namespace_assert
         #(#rule_asserts)*
+        #declaration_len
 
         #(#attrs)*
         impl #self_ty {
@@ -54,6 +62,12 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
         #(#attrs)*
         impl ::aether_bloomery_reactor::Reactor for #self_ty {
             #name_const
+
+            const DECLARATION: &'static [u8] =
+                &::aether_bloomery_reactor::__macro_internals::write_reactor_record::<#record_len_ident>(
+                    #namespace,
+                    &[#(#record_rules),*],
+                );
 
             fn visit_arms(visitor: &mut impl ::aether_bloomery_reactor::ArmVisitor) {
                 #(#visits)*
@@ -74,6 +88,28 @@ pub fn expand(def: ReactorDef) -> TokenStream2 {
 
         #export_desc
     }
+}
+
+fn declaration_parts(namespace: &LitStr, self_ty: &Type, rules: &[Rule]) -> (Ident, Vec<TokenStream2>) {
+    let key = format!("{}:{}", namespace.value(), quote!(#self_ty));
+    let hash = fnv1a_64(key.as_bytes());
+    let len_ident = format_ident!("__AETHER_BLOOMERY_REACTOR_LEN_{hash:016X}");
+    let records = rules
+        .iter()
+        .map(|rule| {
+            let name = rule.ident.to_string();
+            let trigger_ty = &rule.trigger_ty;
+            let output_ty = &rule.output_ty;
+            quote! {
+                ::aether_bloomery_reactor::__macro_internals::RuleRecord::new(
+                    #name,
+                    <#trigger_ty as ::aether_bloomery_reactor::__macro_internals::Kind>::ID,
+                    <#output_ty as ::aether_bloomery_reactor::__macro_internals::Kind>::ID,
+                )
+            }
+        })
+        .collect();
+    (len_ident, records)
 }
 
 fn expand_rule_method(rule: &Rule) -> TokenStream2 {

@@ -23,6 +23,7 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-kinds = { path = "../aether-kinds" }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 aether-test-fixtures-reactor = { path = "../aether-test-fixtures-reactor" }
+wasmparser = "0.246"
 
 # The tests load this fixture's built wasm by stem, so the cargo edge exists
 # solely for determinator and dist pre-build visibility.

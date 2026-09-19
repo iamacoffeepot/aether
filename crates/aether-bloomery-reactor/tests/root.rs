@@ -5,7 +5,8 @@ use std::fmt;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
 use aether_bloomery_kinds::{
-    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, Seq, Tree, Warm, WarmEntries, Warmed,
+    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, Tree, Warm, WarmEntries,
+    Warmed, reactor_record_len, write_reactor_record,
 };
 use aether_bloomery_reactor::{Nil, Output, Owner, PrepareError, Reactor, Root, reactor};
 use aether_bloomery_view::{Publish, PublishError, View};
@@ -104,6 +105,9 @@ impl Reactor for Witness {
 
 struct BoomReactor;
 
+const BOOM_RULES: &[RuleRecord<'static>] = &[RuleRecord::new("note", HeadMoved::<Tree>::ID, Marker::ID)];
+const BOOM_LEN: usize = reactor_record_len("test.bloomery.root.boom", BOOM_RULES);
+
 impl Default for BoomReactor {
     fn default() -> Self {
         Self
@@ -112,6 +116,7 @@ impl Default for BoomReactor {
 
 impl Reactor for BoomReactor {
     const NAMESPACE: &'static str = "test.bloomery.root.boom";
+    const DECLARATION: &'static [u8] = &write_reactor_record::<BOOM_LEN>("test.bloomery.root.boom", BOOM_RULES);
 
     fn visit_arms(visitor: &mut impl aether_bloomery_reactor::ArmVisitor) {
         visitor.visit::<HeadMoved<Tree>, aether_bloomery_reactor::ViewArg<CountView>, Marker>("note");
