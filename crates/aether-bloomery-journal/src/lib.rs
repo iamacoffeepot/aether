@@ -51,7 +51,7 @@ mod draft;
 mod journal;
 mod watch;
 
-pub use actor::{JournalActor, MAX_HEAD_WATCHERS};
+pub use actor::{JournalActor, MAX_HEAD_WATCHERS, MAX_READ_EVENTS};
 pub use aether_bloomery_kinds::{
     DecodeError, Digest, Entry, OpaqueBytes, Ref, Seq, Utf8Text, artifact_blob, artifact_digest, artifact_prefix,
     hash_bytes,
