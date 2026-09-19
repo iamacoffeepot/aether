@@ -20,16 +20,12 @@ pub enum InstanceState {
         /// Mailbox of the digest-named reactor root.
         root: MailboxId,
     },
-    /// A fold failed; every later activation for it is rejected, and it is never reloaded.
-    Poisoned {
-        /// The recorded failure.
-        reason: Detail,
-    },
-    /// Read, decode, or load failed, or the cursor can no longer be trusted; never retried.
-    Unavailable {
-        /// The recorded failure.
-        reason: Detail,
-    },
+    /// A fold failed, for the recorded reason; every later activation for it
+    /// is rejected, and it is never reloaded.
+    Poisoned(Detail),
+    /// Read, decode, or load failed, or the cursor can no longer be trusted,
+    /// for the recorded reason; never retried.
+    Unavailable(Detail),
 }
 
 /// One reactor digest's state and driver-tracked cursor.
@@ -45,11 +41,5 @@ impl Instance {
     /// A claimed instance awaiting its artifact read, having folded nothing.
     pub fn new() -> Self {
         Self { state: InstanceState::Reading, cursor: 0 }
-    }
-}
-
-impl Default for Instance {
-    fn default() -> Self {
-        Self::new()
     }
 }

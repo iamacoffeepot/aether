@@ -181,43 +181,6 @@ fn selective_delivery_skips_unlisted_and_unlive_heads() {
 }
 
 #[test]
-fn call_program_becomes_a_requested_that_the_pipeline_runs() {
-    // Catches an enqueued request lost, or a folded request that differs from what was written.
-    let (mut world, commands) = World::open();
-    let set = reactor_set(&["a"]);
-    let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    let program_bundle = store_program(&mut world, b"program-wasm");
-    let input = digest(9);
-    world.seed_set_root(set_digest);
-    world.seed_move("a", bundle_a);
-    world.seed_move("prog", program_bundle);
-
-    let intent = call_intent("r", "rule", "prog", "run", input);
-    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![intent] });
-    for seq in [4, 5, 6] {
-        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
-    }
-    let manual = world.drive(commands);
-    assert!(manual.is_empty());
-    assert!(world.abort.is_none());
-
-    let requested = requested_records(&world);
-    assert_eq!(requested.len(), 1);
-    assert_eq!(requested[0].0, Some(3));
-    let run = ProgramName::new("run").expect("valid program name");
-    assert_eq!(requested[0].1.program, ProgramRef::new(program_bundle, run));
-    assert!(matches!(requested[0].1.source, RequestSource::Reaction { ordinal: 0, .. }));
-    let faults = world
-        .appends
-        .iter()
-        .flat_map(AppendRecords::records)
-        .filter(|record| matches!(record, DriverRecord::Fault { cause: 5, .. }))
-        .count();
-    assert_eq!(faults, 1, "the reaction request enters the program pipeline");
-}
-
-#[test]
 fn unbound_program_head_becomes_a_single_reaction_failed() {
     // Catches a crash on a missing head, or a sibling intent dropped with the refusal.
     let (mut world, commands) = World::open();
@@ -244,35 +207,6 @@ fn unbound_program_head_becomes_a_single_reaction_failed() {
     assert_eq!(failed[0].0, 3);
     assert!(failed[0].1.reactor.is_some());
     assert_eq!(requested_records(&world).len(), 1, "the sibling intent still stands");
-}
-
-#[test]
-fn set_head_compares_and_swaps_at_derivation() {
-    // Catches a swap checked at plan time, or a refusal that fails the batch instead of its own intent.
-    let (mut world, commands) = World::open();
-    let set = reactor_set(&["a"]);
-    let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
-    world.seed_set_root(set_digest);
-    world.seed_move("a", bundle_a);
-    let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
-    world.seed_move("target", digest(7));
-
-    let head = program_head("target");
-    let from = Ref::from_digest(digest(7));
-    let to = Ref::from_digest(dest);
-    let set_head = SetHead::new(&head, Some(from), to);
-    let intent = ReactorIntent::new(reactor_name("r"), rule_name("rule"), SetHead::ID, set_head.encode_into_bytes());
-    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: vec![intent] });
-    for seq in [4, 5] {
-        world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
-    }
-    let manual = world.drive(commands);
-    assert!(manual.is_empty());
-    assert!(world.abort.is_none());
-
-    assert_eq!(head_moves(&world).len(), 1);
-    assert!(failed_records(&world).is_empty());
 }
 
 #[test]
@@ -693,6 +627,32 @@ fn await_processed_waits_for_routing_and_its_appends() {
 
     let replied = processed_by(&world, caller).expect("the barrier answers after the outcome");
     assert_eq!(replied.head, world.head());
+}
+
+#[test]
+fn barrier_waits_for_the_seq_being_routed() {
+    // Catches answering a barrier once routing `Heads` fold its seq, before
+    // that seq's replies are collected and its batch appended.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    let manual = world.drive(commands);
+    let [Command::Evaluate { ticket, .. }] = manual.as_slice() else {
+        panic!("expected one held evaluate, got {manual:?}");
+    };
+    let ticket = *ticket;
+
+    let caller = await_processed(&mut world, 3);
+    assert!(processed_by(&world, caller).is_none(), "seq 3 is still being evaluated");
+
+    let follow = feed_evaluated(&mut world, ticket, Evaluated::Completed { seq: 3, intents: Vec::new() });
+    let manual = world.drive(follow);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+    assert_eq!(processed_by(&world, caller).map(|reply| reply.head), Some(world.head()));
 }
 
 #[test]

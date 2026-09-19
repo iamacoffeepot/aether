@@ -16,7 +16,7 @@ use std::collections::{BTreeMap, VecDeque};
 use aether_bloomery_kinds::{ClosureArtifact, Detail, Digest, Program};
 use aether_data::MailboxId;
 
-use super::Instance;
+use super::{Instance, InstanceState};
 
 /// Lifecycle state of one bundle digest.
 #[derive(Debug)]
@@ -130,6 +130,13 @@ impl BundleTable {
         }
     }
 
+    /// Set the state of `bundle`'s reactor instance, if it serves the reactor role.
+    pub fn set_reactor_state(&mut self, bundle: &Digest, state: InstanceState) {
+        if let Some(instance) = self.instance_mut(bundle) {
+            instance.state = state;
+        }
+    }
+
     /// Insert a program queue, claiming the digest for the program role.
     pub fn insert(&mut self, bundle: Digest, queue: DigestQueue) {
         self.bundles.insert(bundle, Bundle::Program(queue));
@@ -139,20 +146,10 @@ impl BundleTable {
     ///
     /// Returns `None` when the digest already serves the program role; the
     /// caller rejects without a second load.
-    pub fn claim_reactor(&mut self, bundle: Digest) -> Option<&mut Instance> {
-        use std::collections::btree_map::Entry;
-        match self.bundles.entry(bundle) {
-            Entry::Vacant(vacant) => {
-                let inserted = vacant.insert(Bundle::Reactor(Instance::new()));
-                match inserted {
-                    Bundle::Reactor(instance) => Some(instance),
-                    Bundle::Program(_) => unreachable!("just inserted a reactor bundle"),
-                }
-            }
-            Entry::Occupied(occupied) => match occupied.into_mut() {
-                Bundle::Reactor(instance) => Some(instance),
-                Bundle::Program(_) => None,
-            },
+    pub fn claim_reactor(&mut self, bundle: Digest) -> Option<&Instance> {
+        match self.bundles.entry(bundle).or_insert_with(|| Bundle::Reactor(Instance::new())) {
+            Bundle::Reactor(instance) => Some(instance),
+            Bundle::Program(_) => None,
         }
     }
 }

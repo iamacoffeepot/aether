@@ -16,8 +16,7 @@ use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
     AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, Detail, Digest, DriverRecord, Fault,
-    FaultReason, Invoked, ProgramRef, ReactorName, ReadArtifactResult, ReadClosureResult, ReadEvents, ReadEventsResult,
-    Seq, SetHead,
+    FaultReason, Invoked, ProgramRef, ReadArtifactResult, ReadClosureResult, ReadEvents, ReadEventsResult, Seq,
 };
 
 use crate::bundles::BundleTable;
@@ -31,8 +30,8 @@ pub use ticket::{
     StatusTicket, WarmTicket, WatchTicket,
 };
 
-/// Why the core read one artifact: program bundle, reactor bundle, reactor set, or `SetHead` destination.
-#[derive(Debug, Clone)]
+/// Why the core read one artifact.
+#[derive(Debug, Clone, Copy)]
 pub enum ArtifactRead {
     /// A program bundle's wasm.
     ProgramBundle(Digest),
@@ -40,17 +39,8 @@ pub enum ArtifactRead {
     ReactorBundle(Digest),
     /// A reactor set's stored membership.
     ReactorSet(Digest),
-    /// A `SetHead` destination check.
-    SetHeadDestination {
-        /// Trigger or catch-up seq causing the move or its failure.
-        cause: u64,
-        /// Bundle whose rule returned the intent.
-        bundle: Digest,
-        /// Reactor that returned the intent.
-        reactor: ReactorName,
-        /// The move to attempt.
-        set_head: SetHead,
-    },
+    /// The destination of the `SetHead` the current seq is checking.
+    SetHeadDestination,
 }
 
 /// One committed `Requested` whose pipeline has not started yet.
@@ -133,9 +123,8 @@ impl ProgramCore {
         }
         if self.journal.read_ticket() == Some(ticket) {
             self.journal.set_read_ticket(None);
-        } else if self.routing.read_ticket == Some(ticket) {
-            self.routing.read_ticket = None;
-            self.continue_routing_events(ticket, result, &mut out);
+        } else if let Some(read) = self.routing.read.take_if(|read| read.ticket == ticket) {
+            self.continue_routing_events(&read, result, &mut out);
             return out;
         } else {
             return out;
@@ -198,8 +187,8 @@ impl ProgramCore {
             ArtifactRead::ReactorSet(digest) => {
                 self.continue_set_artifact(digest, result, &mut out);
             }
-            ArtifactRead::SetHeadDestination { cause, bundle, reactor, set_head } => {
-                self.continue_destination_artifact(cause, bundle, reactor, set_head, result, &mut out);
+            ArtifactRead::SetHeadDestination => {
+                self.continue_destination_artifact(result, &mut out);
             }
         }
         out
@@ -259,23 +248,19 @@ impl ProgramCore {
                 self.activations.insert(head, Activation { callers, call });
             }
             PendingWrite::Routing { trigger, .. } => {
-                let Some(records) = self.routing.inflight_records.take() else {
-                    self.abort(format!("routing batch for {trigger} committed with no final records"), out);
-                    return;
-                };
-                let Some(live) = self.routing.inflight_live.take() else {
-                    self.abort(format!("routing batch for {trigger} committed with no live set"), out);
+                let Some(records) = self.routing.appending.take() else {
+                    self.abort(format!("routing batch for {trigger} committed with no derived records"), out);
                     return;
                 };
                 let start = self.journal.cursor() + 1;
-                if head != start + u64::try_from(records.len()).unwrap_or(u64::MAX) - 1 {
+                if u64::try_from(records.len()).ok() != Some(head - self.journal.cursor()) {
                     self.abort(
                         format!("routing batch for {trigger} committed at head {head} for {} records", records.len()),
                         out,
                     );
                     return;
                 }
-                self.routing.committed = Some(CommittedRouting { trigger, records, start, live });
+                self.routing.committed = Some(CommittedRouting { records, start });
             }
             _ => {}
         }
@@ -290,8 +275,7 @@ impl ProgramCore {
             return;
         }
         if matches!(write, PendingWrite::Routing { .. }) {
-            self.routing.inflight_records = None;
-            self.routing.inflight_live = None;
+            self.routing.appending = None;
         }
         self.journal.queue_front(write);
         self.journal.set_target(actual);
@@ -440,10 +424,6 @@ impl ProgramCore {
             return;
         }
         self.drive_routing(out);
-        if self.aborted {
-            return;
-        }
-        self.check_processed(out);
     }
 
     /// Handle every call held while catching up or recovering, in FIFO order.
@@ -467,9 +447,7 @@ impl ProgramCore {
                     self.derive_outcome(request, artifacts, record, out);
                 }
                 PendingWrite::Startup => self.derive_startup(out),
-                PendingWrite::Routing { trigger, plan, live } => {
-                    self.derive_routing(trigger, plan, live, out);
-                }
+                PendingWrite::Routing { trigger, plan } => self.derive_routing(trigger, plan, out),
             }
             if self.aborted {
                 return;

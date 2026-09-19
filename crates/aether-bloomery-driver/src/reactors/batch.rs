@@ -1,145 +1,92 @@
-//! Routing batches: compare-and-swap derivation and committed read-back (ADR-0226 decisions 6 and 8).
+//! Routing batches: planning, compare-and-swap derivation, and committed read-back (ADR-0226 decisions 6 and 8).
 
 use std::collections::BTreeMap;
 
-use aether_bloomery_kinds::{AppendRecords, Detail, Digest, DriverRecord, ReactionFailed, RecordedHead};
+use aether_bloomery_kinds::{AppendRecords, Detail, Digest, DriverRecord, RecordedHead, Seq};
+use aether_bloomery_view::Heads;
 
-use crate::bundles::InstanceState;
 use crate::core::{AppendTicket, Command, PendingWrite, PlannedRecord, ProgramCore};
-use crate::reactors::{PendingDestination, SeqPhase};
+use crate::reactors::CommittedRouting;
+use crate::reactors::intents::reaction_failed;
+
+/// Resolve a routing plan against `heads`, the journal view at the fence.
+///
+/// Each `SetHead` compares against the view plus the earlier moves in the
+/// same batch: a pass becomes `HeadMoved`, a mismatch fails that intent alone.
+fn resolve_plan(heads: &Heads, plan: &[PlannedRecord]) -> Vec<DriverRecord> {
+    let mut moved: BTreeMap<RecordedHead, Digest> = BTreeMap::new();
+    let mut records = Vec::with_capacity(plan.len());
+    for planned in plan {
+        let record = match planned {
+            PlannedRecord::Ready(record) => record.clone(),
+            PlannedRecord::SetHead { cause, bundle, reactor, set_head } => {
+                let current = moved.get(set_head.head()).copied().or_else(|| heads.binding(set_head.head()));
+                if current == set_head.from() {
+                    moved.insert(set_head.head().clone(), set_head.to());
+                    DriverRecord::HeadMoved { cause: *cause, record: set_head.to_move() }
+                } else {
+                    let reason = Detail::new("set_head compare-and-swap mismatch");
+                    reaction_failed(*cause, *bundle, Some(reactor.clone()), reason)
+                }
+            }
+        };
+        records.push(record);
+    }
+    records
+}
 
 impl ProgramCore {
-    /// Derive one queued routing batch against the synced view.
-    pub(crate) fn derive_routing(
-        &mut self,
-        trigger: u64,
-        plan: Vec<PlannedRecord>,
-        live: Vec<Digest>,
-        out: &mut Vec<Command>,
-    ) {
-        let mut batch_moves: BTreeMap<RecordedHead, Digest> = BTreeMap::new();
-        let mut final_records: Vec<DriverRecord> = Vec::with_capacity(plan.len());
-        for planned in &plan {
-            match planned {
-                PlannedRecord::Ready(record) => {
-                    final_records.push(record.clone());
-                }
-                PlannedRecord::SetHead { cause, bundle, reactor, set_head, destination_ok } => {
-                    if !destination_ok {
-                        let failed = DriverRecord::ReactionFailed {
-                            cause: *cause,
-                            record: ReactionFailed {
-                                bundle: *bundle,
-                                reactor: Some(reactor.clone()),
-                                reason: Detail::new("set_head destination check failed"),
-                            },
-                        };
-                        final_records.push(failed);
-                        continue;
-                    }
-                    let current = batch_moves
-                        .get(set_head.head())
-                        .copied()
-                        .or_else(|| self.journal.heads().binding(set_head.head()));
-                    if current == set_head.from() {
-                        batch_moves.insert(set_head.head().clone(), set_head.to());
-                        final_records.push(DriverRecord::HeadMoved { cause: *cause, record: set_head.to_move() });
-                    } else {
-                        let failed = DriverRecord::ReactionFailed {
-                            cause: *cause,
-                            record: ReactionFailed {
-                                bundle: *bundle,
-                                reactor: Some(reactor.clone()),
-                                reason: Detail::new("set_head compare-and-swap mismatch"),
-                            },
-                        };
-                        final_records.push(failed);
-                    }
-                }
-            }
-        }
-        self.routing.inflight_records = Some(final_records.clone());
-        self.routing.inflight_live = Some(live.clone());
-        let ticket = self.mint(AppendTicket::mint);
-        let fence = self.journal.cursor();
-        let append = AppendRecords::new(Vec::new(), final_records, fence);
-        self.journal.set_append(ticket, PendingWrite::Routing { trigger, plan, live });
-        out.push(Command::Append { ticket, request: append });
-    }
-
-    /// Advance `R` over the read-back routing batch and enqueue its requests.
-    pub(crate) fn routing_read_back(&mut self, out: &mut Vec<Command>) {
-        let Some(committed) = self.routing.committed.take() else {
-            return;
-        };
-        let trigger = committed.trigger;
-        let start = committed.start;
-        for (index, record) in committed.records.iter().enumerate() {
-            let seq = start + u64::try_from(index).unwrap_or(u64::MAX);
-            if let DriverRecord::Requested { cause, record: written } = record {
-                let Some(found) = self.journal.requests().get(aether_bloomery_kinds::Seq(seq)) else {
-                    self.abort(format!("committed request {seq} is missing from the journal fold"), out);
-                    return;
-                };
-                let same = found.requested() == written && found.cause().map(|cause| cause.0) == *cause;
-                if !same {
-                    self.abort(format!("committed request {seq} folded differently than written"), out);
-                    return;
-                }
-                self.enqueue_request(written.program.bundle(), seq, out);
-                if self.aborted {
-                    return;
-                }
-            }
-        }
-        for digest in &committed.live {
-            if let Some(instance) = self.bundles.instance_mut(digest)
-                && matches!(instance.state, InstanceState::Ready { .. })
-                && instance.cursor == trigger - 1
-            {
-                instance.cursor = trigger;
-            }
-        }
-        if !self.routing.started {
-            self.routing.started = true;
-        }
-        self.routing.page.retain(|entry| entry.seq != trigger);
-    }
-
-    /// Resolve pending destinations serially, then queue the seq's batch.
+    /// Take one planning step: check the next `SetHead` destination, or
+    /// queue the seq's batch and finish the seq.
+    ///
+    /// An empty plan appends nothing.
     pub(crate) fn drive_planning(&mut self, out: &mut Vec<Command>) {
-        let Some(work) = self.routing.current.as_ref() else {
-            return;
-        };
-        if work.phase != SeqPhase::Planning {
-            return;
-        }
-        if work.current_destination.is_some() {
-            return;
-        }
-        if !work.pending_setheads.is_empty() {
-            let mut queued: Vec<PendingDestination> =
-                self.routing.current.as_mut().expect("seq work").pending_setheads.drain(..).collect();
-            queued.sort_by(|left, right| left.order.cmp(&right.order));
-            if let Some(work) = self.routing.current.as_mut() {
-                work.pending_setheads = queued.into_iter().collect();
-            }
-            self.emit_next_destination(out);
+        if self.check_next_destination(out) {
             return;
         }
         let Some(work) = self.routing.current.take() else {
             return;
         };
-        let plan: Vec<PlannedRecord> = work.order.values().cloned().collect();
-        let live: Vec<Digest> = work.live.keys().copied().collect();
-        let trigger = work.n;
-        if plan.is_empty() {
-            self.routing.page.retain(|entry| entry.seq != trigger);
-            self.check_processed(out);
-            return;
+        let plan: Vec<PlannedRecord> = work.order.into_values().collect();
+        if !plan.is_empty() {
+            self.journal.queue_back(PendingWrite::Routing { trigger: work.n, plan });
+            self.pump(out);
         }
-        self.journal.queue_back(PendingWrite::Routing { trigger, plan, live });
-        self.routing.page.retain(|entry| entry.seq != trigger);
-        self.pump(out);
+    }
+
+    /// Derive one queued routing batch against the synced view and append it.
+    pub(crate) fn derive_routing(&mut self, trigger: u64, plan: Vec<PlannedRecord>, out: &mut Vec<Command>) {
+        let records = resolve_plan(self.journal.heads(), &plan);
+        self.routing.appending = Some(records.clone());
+        let ticket = self.mint(AppendTicket::mint);
+        let append = AppendRecords::new(Vec::new(), records, self.journal.cursor());
+        self.journal.set_append(ticket, PendingWrite::Routing { trigger, plan });
+        out.push(Command::Append { ticket, request: append });
+    }
+
+    /// Enqueue the read-back routing batch's requests into the program pipeline.
+    ///
+    /// Each folded request must equal what was written. A committed restart
+    /// batch also ends restart replay; live batches find routing started.
+    pub(crate) fn routing_read_back(&mut self, out: &mut Vec<Command>) {
+        let Some(CommittedRouting { records, start }) = self.routing.committed.take() else {
+            return;
+        };
+        for (seq, record) in (start..).zip(records) {
+            let DriverRecord::Requested { cause, record: written } = record else {
+                continue;
+            };
+            let folded = self.journal.requests().get(Seq(seq));
+            if !folded.is_some_and(|found| *found.requested() == written && found.cause().map(|cause| cause.0) == cause)
+            {
+                self.abort(format!("committed request {seq} folded differently than written"), out);
+                return;
+            }
+            self.enqueue_request(written.program.bundle(), seq, out);
+            if self.aborted {
+                return;
+            }
+        }
+        self.routing.started = true;
     }
 }

@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-18
+- **Amended:** 2026-09-19 — decision 9's reactor restart point is the higher of the reaction and activation watermarks; decision 11's `Processed` also waits for requests at or below `through` (issue #6208).
 
 ## Context
 

@@ -1,12 +1,23 @@
-//! Live delivery: `Event` fan-out, reply collection, and status resync (ADR-0226 decision 5).
+//! Delivery: `Event` sends, live replies, and status resync (ADR-0226 decision 5).
 
-use std::collections::BTreeMap;
+use std::iter::once;
 
-use aether_bloomery_kinds::{Detail, Digest, Evaluated, Event, Head, JournalEntry, OpaqueBytes, Status};
+use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Evaluated, Event, JournalEntry, Status};
 
 use crate::bundles::InstanceState;
 use crate::core::{Command, EvaluateTicket, ProgramCore, StatusTicket};
-use crate::reactors::{EvaluateContext, StatusContext};
+use crate::reactors::intents::{PlannedIntent, plan_intents, reaction_failed};
+use crate::reactors::{Delivery, PlanOrder};
+
+/// The seq an `Evaluated` reply answers.
+fn replied_seq(evaluated: &Evaluated) -> u64 {
+    match evaluated {
+        Evaluated::Completed { seq, .. }
+        | Evaluated::OutOfSequence { seq, .. }
+        | Evaluated::Poisoned { seq, .. }
+        | Evaluated::Failed { seq, .. } => *seq,
+    }
+}
 
 impl ProgramCore {
     /// Feed one evaluation reply. Unknown tickets return no commands.
@@ -15,152 +26,123 @@ impl ProgramCore {
         if self.aborted {
             return out;
         }
-        let Some(context) = self.routing.evaluates.remove(&ticket) else {
+        let Some(delivery) = self.routing.deliveries.remove(&ticket) else {
             return out;
         };
-        if context.head.is_some() {
-            self.handle_catchup_evaluated(context, evaluated, &mut out);
-        } else {
-            self.handle_live_evaluated(&context, evaluated, &mut out);
+        let Some(trigger) = self.routing.current.as_ref().map(|work| work.n) else {
+            self.abort("evaluation reply arrived with no seq in progress".to_string(), &mut out);
+            return out;
+        };
+        let replied = replied_seq(&evaluated);
+        match delivery {
+            Delivery::Live { digest } if replied != trigger => {
+                let reason = Detail::new(format!("evaluated seq {replied} does not match delivered seq {trigger}"));
+                self.poison_live(digest, reason, &mut out);
+            }
+            Delivery::Live { digest } => self.live_evaluated(digest, trigger, evaluated, &mut out),
+            Delivery::CatchUp { cause } => self.catch_up_evaluated(cause, replied, evaluated, &mut out),
         }
+        self.drive_routing(&mut out);
         out
     }
 
     /// Feed one status reply. Unknown tickets return no commands.
+    ///
+    /// A root still at `N-1` missed `Event(N)` and gets it again; any other
+    /// answer means its fold can no longer be trusted, so it is poisoned.
     pub fn on_status(&mut self, ticket: StatusTicket, status: &Status) -> Vec<Command> {
         let mut out = Vec::new();
         if self.aborted {
             return out;
         }
-        let Some(context) = self.routing.statuses.remove(&ticket) else {
+        let Some(digest) = self.routing.statuses.remove(&ticket) else {
             return out;
         };
-        let digest = context.digest;
-        let trigger = context.trigger;
-        let current = self.routing.current.as_ref().map(|work| work.n);
-        let Some(n) = current else {
+        let Some((trigger, entry)) = self.routing.current.as_ref().map(|work| (work.n, work.entry.clone())) else {
             self.abort(format!("status for {digest} arrived with no seq in progress"), &mut out);
             return out;
         };
-        if n != trigger {
-            self.abort(format!("status for trigger {trigger} arrived during seq {n}"), &mut out);
-            return out;
-        }
         if status.poisoned() {
-            let reason = Detail::new("reactor reports poisoned");
-            self.poison_live_digest(digest, trigger, reason, &mut out);
-            return out;
+            self.poison_live(digest, Detail::new("reactor reports poisoned"), &mut out);
+        } else if status.cursor() + 1 == trigger {
+            self.deliver(digest, Delivery::Live { digest }, entry, &mut out);
+        } else {
+            let reason = format!("status cursor {} after out-of-sequence for {trigger}", status.cursor());
+            self.poison_live(digest, Detail::new(reason), &mut out);
         }
-        if status.cursor() == trigger - 1 {
-            let Some(entry) = self.routing.current.as_ref().map(|work| work.entry.clone()) else {
-                self.abort("status resync found no seq work".to_string(), &mut out);
-                return out;
-            };
-            let root = self.bundles.instance(&digest).and_then(|instance| match instance.state {
-                InstanceState::Ready { root } => Some(root),
-                _ => None,
-            });
-            let Some(root) = root else {
-                self.abort(format!("status resync for unready digest {digest}"), &mut out);
-                return out;
-            };
-            let ticket = self.mint(EvaluateTicket::mint);
-            self.routing.evaluates.insert(ticket, EvaluateContext { digest, trigger, cause: trigger, head: None });
-            out.push(Command::Evaluate { ticket, root, request: Event::new(entry) });
-            return out;
-        }
-        let reason = Detail::new(format!(
-            "status cursor {} after out-of-sequence for {trigger}, expected {}",
-            status.cursor(),
-            trigger - 1
-        ));
-        self.poison_live_digest(digest, trigger, reason, &mut out);
+        self.drive_routing(&mut out);
         out
     }
 
-    /// Emit one live `Event(N)` per distinct digest, all in flight together.
-    pub(crate) fn emit_live_events(
-        &mut self,
-        trigger: u64,
-        entry: &JournalEntry,
-        live: &BTreeMap<Digest, Vec<Head<OpaqueBytes>>>,
-        out: &mut Vec<Command>,
-    ) -> Result<(), String> {
-        for digest in live.keys() {
-            let Some(instance) = self.bundles.instance(digest) else {
-                return Err(format!("live digest {digest} has no instance for seq {trigger}"));
-            };
-            let InstanceState::Ready { root } = instance.state else {
-                return Err(format!("live digest {digest} is not ready for seq {trigger}"));
-            };
-            if instance.cursor != trigger - 1 {
-                return Err(format!(
-                    "live instance {digest} cursor {} is not {} for seq {trigger}",
-                    instance.cursor,
-                    trigger - 1
-                ));
-            }
-            let ticket = self.mint(EvaluateTicket::mint);
-            self.routing
-                .evaluates
-                .insert(ticket, EvaluateContext { digest: *digest, trigger, cause: trigger, head: None });
-            out.push(Command::Evaluate { ticket, root, request: Event::new(entry.clone()) });
-        }
-        Ok(())
+    /// Send `entry` to `digest`'s ready root.
+    pub(crate) fn deliver(&mut self, digest: Digest, delivery: Delivery, entry: JournalEntry, out: &mut Vec<Command>) {
+        let Some(&InstanceState::Ready { root }) = self.bundles.instance(&digest).map(|instance| &instance.state)
+        else {
+            self.abort(format!("event {} for digest {digest}, which has no ready root", entry.seq), out);
+            return;
+        };
+        let ticket = self.mint(EvaluateTicket::mint);
+        self.routing.deliveries.insert(ticket, delivery);
+        out.push(Command::Evaluate { ticket, root, request: Event::new(entry) });
     }
 
-    /// Handle one live `Evaluated` reply by digest role and seq.
-    fn handle_live_evaluated(&mut self, context: &EvaluateContext, evaluated: Evaluated, out: &mut Vec<Command>) {
-        let digest = context.digest;
-        let trigger = context.trigger;
-        let reply_seq = match &evaluated {
-            Evaluated::Completed { seq, .. }
-            | Evaluated::OutOfSequence { seq, .. }
-            | Evaluated::Poisoned { seq, .. }
-            | Evaluated::Failed { seq, .. } => *seq,
-        };
-        if reply_seq != trigger {
-            let reason = Detail::new(format!("evaluated seq {reply_seq} does not match trigger {trigger}"));
-            self.poison_live_digest(digest, trigger, reason, out);
-            return;
-        }
-        match evaluated {
-            Evaluated::Completed { intents, .. } => {
-                self.map_live_completed(digest, trigger, intents, out);
-                if self.aborted {
-                    return;
-                }
-                if let Some(instance) = self.bundles.instance_mut(&digest) {
-                    instance.cursor = trigger;
-                }
-                self.drive_routing(out);
-            }
+    /// Plan one live reply to `Event(N)`.
+    fn live_evaluated(&mut self, digest: Digest, trigger: u64, evaluated: Evaluated, out: &mut Vec<Command>) {
+        let planned = match evaluated {
+            Evaluated::Completed { intents, .. } => plan_intents(digest, trigger, intents, &self.routing.heads),
             Evaluated::Failed { reactor, reason, .. } => {
-                self.map_live_failed(digest, trigger, reactor, reason, out);
-                if self.aborted {
-                    return;
-                }
-                if let Some(instance) = self.bundles.instance_mut(&digest) {
-                    instance.cursor = trigger;
-                }
-                self.drive_routing(out);
+                vec![PlannedIntent::Ready(reaction_failed(trigger, digest, Some(reactor), reason))]
             }
             Evaluated::Poisoned { reason, .. } => {
-                self.poison_live_digest(digest, trigger, reason, out);
+                self.poison_live(digest, reason, out);
+                return;
             }
             Evaluated::OutOfSequence { .. } => {
-                let Some(instance) = self.bundles.instance(&digest) else {
-                    self.abort(format!("out-of-sequence for unknown digest {digest}"), out);
-                    return;
-                };
-                let InstanceState::Ready { root } = instance.state else {
-                    self.abort(format!("out-of-sequence for unready digest {digest}"), out);
+                let Some(&InstanceState::Ready { root }) =
+                    self.bundles.instance(&digest).map(|instance| &instance.state)
+                else {
+                    self.abort(format!("out-of-sequence from digest {digest}, which has no ready root"), out);
                     return;
                 };
                 let ticket = self.mint(StatusTicket::mint);
-                self.routing.statuses.insert(ticket, StatusContext { digest, trigger });
+                self.routing.statuses.insert(ticket, digest);
                 out.push(Command::QueryStatus { ticket, root });
+                return;
             }
+        };
+        if let Some(work) = self.routing.current.as_mut() {
+            work.plan_reply(|index| PlanOrder::Live { digest, index }, planned);
         }
+        self.advance_instance(digest, trigger);
+    }
+
+    /// Record that `digest`'s root has evaluated `seq`.
+    pub(crate) fn advance_instance(&mut self, digest: Digest, seq: u64) {
+        if let Some(instance) = self.bundles.instance_mut(&digest) {
+            instance.cursor = seq;
+        }
+    }
+
+    /// Poison one live digest: fail its reaction and reject every head it served at `N`.
+    fn poison_live(&mut self, digest: Digest, reason: Detail, out: &mut Vec<Command>) {
+        let Some((cause, served)) = self.routing.current.as_ref().map(|work| (work.n, work.live.get(&digest).cloned()))
+        else {
+            self.abort(format!("poison for {digest} arrived with no seq in progress"), out);
+            return;
+        };
+        let Some(served) = served else {
+            self.abort(format!("poison for digest {digest}, which did not evaluate seq {cause}"), out);
+            return;
+        };
+        let failed = reaction_failed(cause, digest, None, reason.clone());
+        let rejected = served.into_iter().map(|head| DriverRecord::ActivationRejected {
+            cause,
+            record: ActivationRejected { head, bundle: digest, reason: reason.clone() },
+        });
+        let planned = once(failed).chain(rejected).map(PlannedIntent::Ready).collect();
+        if let Some(work) = self.routing.current.as_mut() {
+            work.plan_reply(|index| PlanOrder::Live { digest, index }, planned);
+        }
+        self.bundles.set_reactor_state(&digest, InstanceState::Poisoned(reason));
     }
 }

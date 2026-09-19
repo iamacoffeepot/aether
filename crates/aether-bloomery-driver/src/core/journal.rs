@@ -1,9 +1,8 @@
 //! Journal view: the folds, their shared cursor, and the fenced write queue.
 //!
 //! The core learns the journal only from [`ReadEvents`](aether_bloomery_kinds::ReadEvents)
-//! pages. Each entry folds into [`Heads`], [`Requests`], and
-//! [`Activations`](aether_bloomery_view::Activations); pages continue until
-//! the cursor reaches the page's `head`. At most one
+//! pages. Each entry folds into [`Heads`], [`Requests`], and [`Activations`];
+//! pages continue until the cursor reaches the page's `head`. At most one
 //! [`AppendRecords`](aether_bloomery_kinds::AppendRecords) is in flight,
 //! fenced at the cursor, and writing decisions come from a FIFO of pending
 //! writes, made only when the core is caught up with no write in flight. A
@@ -26,12 +25,12 @@ pub const EVENTS_PAGE: u32 = 128;
 pub enum PlannedRecord {
     /// A record decided during routing, appended unchanged.
     Ready(DriverRecord),
-    /// A `SetHead` intent whose destination check already ran. Derivation
-    /// checks the compare-and-swap against the journal view's `Heads` plus
-    /// earlier moves in the same batch; a pass becomes `HeadMoved`, a failure
-    /// becomes `ReactionFailed` for this intent alone.
+    /// A `SetHead` intent whose destination is stored under the head's kind.
+    /// Derivation checks the compare-and-swap against the journal view's
+    /// `Heads` plus earlier moves in the same batch; a pass becomes
+    /// `HeadMoved`, a failure becomes `ReactionFailed` for this intent alone.
     SetHead {
-        /// Trigger seq causing the move or its failure.
+        /// Trigger or catch-up seq causing the move or its failure.
         cause: u64,
         /// Bundle whose rule returned the intent.
         bundle: Digest,
@@ -39,8 +38,6 @@ pub enum PlannedRecord {
         reactor: ReactorName,
         /// The move to attempt.
         set_head: SetHead,
-        /// Whether the destination is stored under the head's kind.
-        destination_ok: bool,
     },
 }
 
@@ -74,8 +71,6 @@ pub enum PendingWrite {
         trigger: u64,
         /// Records in append order.
         plan: Vec<PlannedRecord>,
-        /// Distinct live digests that evaluated the trigger, in digest order.
-        live: Vec<Digest>,
     },
 }
 

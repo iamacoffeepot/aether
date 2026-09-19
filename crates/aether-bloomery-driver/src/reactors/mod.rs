@@ -16,119 +16,83 @@ mod restart;
 
 use std::collections::{BTreeMap, VecDeque};
 
-use aether_bloomery_kinds::{Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorSet};
+use aether_bloomery_kinds::{
+    ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, ReactorName, ReactorSet, SetHead,
+};
 use aether_bloomery_view::Heads;
 
-use crate::core::{
-    ArtifactTicket, CallerId, EvaluateTicket, EventsTicket, PlannedRecord, StatusTicket, WarmTicket, WatchTicket,
-};
+use self::intents::PlannedIntent;
+use crate::core::{CallerId, EvaluateTicket, EventsTicket, PlannedRecord, StatusTicket, WarmTicket, WatchTicket};
 
-/// Purpose of the one outstanding routing page read.
-#[derive(Debug)]
+/// Member heads selected at one prefix, each with its bound digest.
+pub type Selection = BTreeMap<Head<OpaqueBytes>, Digest>;
+
+/// Live digests, each with the heads it serves in head order.
+pub type Served = BTreeMap<Digest, Vec<Head<OpaqueBytes>>>;
+
+/// What the one outstanding routing page read is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoutingRead {
-    /// Steady entry fetch.
-    Steady {
-        /// Boundary the read started after.
-        after: u64,
-    },
-    /// Warm paging for one activation.
-    Warm {
-        /// Boundary the read started after.
-        after: u64,
-        /// Digest being warmed.
-        digest: Digest,
-        /// Head the activation serves.
-        head: Head<OpaqueBytes>,
-        /// Trigger seq whose batch will carry the activation.
-        trigger: u64,
-        /// First seq the instance will evaluate live.
-        live_from: u64,
-    },
-    /// Owed catch-up paging for one activation, folded from seq 1.
-    CatchUp {
-        /// Boundary the read started after.
-        after: u64,
-        /// Digest being caught up.
-        digest: Digest,
-        /// Head the activation serves.
-        head: Head<OpaqueBytes>,
-        /// Trigger seq whose batch will carry the activation.
-        trigger: u64,
-        /// First owed seq, delivered live.
-        live_from: u64,
-    },
-    /// Restart fold-only replay through `W`.
-    RestartFold {
-        /// Boundary the read started after.
-        after: u64,
-        /// Restart point.
-        watermark: u64,
-    },
-    /// Restart warm of one digest through `W`.
-    RestartWarm {
-        /// Boundary the read started after.
-        after: u64,
-        /// Digest being warmed.
-        digest: Digest,
-        /// Restart point.
-        watermark: u64,
-    },
+    /// The next entries to route.
+    Steady,
+    /// A warm page for the current activation.
+    Warm,
+    /// A catch-up page for the current activation, folded from seq 1.
+    CatchUp,
+    /// A restart fold page through the watermark.
+    RestartFold,
+    /// A restart warm page for the digest warming.
+    RestartWarm,
+}
+
+/// The one outstanding routing page read.
+#[derive(Debug)]
+pub struct PendingRead {
+    /// Ticket the page arrives under.
+    pub ticket: EventsTicket,
+    /// Boundary the read starts after.
+    pub after: u64,
+    /// What the page is for.
+    pub purpose: RoutingRead,
 }
 
 /// One committed routing batch awaiting read-back.
 #[derive(Debug)]
 pub struct CommittedRouting {
-    /// Trigger seq whose records this batch carries.
-    pub trigger: u64,
-    /// Final records in append order, after swap resolution.
+    /// Records in append order, after swap resolution.
     pub records: Vec<DriverRecord>,
     /// First seq the batch occupies.
     pub start: u64,
-    /// Distinct live digests that evaluated the trigger, in digest order.
-    pub live: Vec<Digest>,
 }
 
-/// Context for one outstanding live or catch-up evaluation.
-#[derive(Debug)]
-pub struct EvaluateContext {
-    /// Digest being evaluated.
-    pub digest: Digest,
-    /// Trigger seq whose batch will carry the reply's records.
-    pub trigger: u64,
-    /// Event seq delivered (`N` for live, `k` for catch-up).
-    pub cause: u64,
-    /// Head served for catch-up, or `None` for live fan-out.
-    pub head: Option<Head<OpaqueBytes>>,
+/// One outstanding `Event` delivery.
+#[derive(Debug, Clone, Copy)]
+pub enum Delivery {
+    /// Live `Event(N)` to one digest.
+    Live {
+        /// Digest evaluating `N`.
+        digest: Digest,
+    },
+    /// An owed `Event(cause)` to the current activation's digest.
+    CatchUp {
+        /// Seq delivered.
+        cause: u64,
+    },
 }
 
-/// Context for one outstanding warmup batch.
-#[derive(Debug)]
-pub struct WarmContext {
+/// One outstanding `Warm` batch.
+#[derive(Debug, Clone, Copy)]
+pub struct WarmBatch {
     /// Digest being warmed.
     pub digest: Digest,
-    /// Head the activation serves, or `None` for restart warm.
-    pub head: Option<Head<OpaqueBytes>>,
-    /// Trigger seq whose batch will carry the activation.
-    pub trigger: u64,
-    /// First seq the instance will evaluate live.
-    pub live_from: u64,
-    /// First seq in the sent batch.
+    /// First seq in the batch.
     pub first: u64,
-    /// Last seq in the sent batch.
+    /// Last seq in the batch.
     pub last: u64,
 }
 
-/// Context for one outstanding status resync.
-#[derive(Debug)]
-pub struct StatusContext {
-    /// Digest being queried.
-    pub digest: Digest,
-    /// Trigger seq awaiting the resync.
-    pub trigger: u64,
-}
-
 /// Where one planned record sorts in `N`'s batch.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PlanOrder {
     /// Live evaluation records, in ascending digest order then intent order.
     Live {
@@ -137,30 +101,40 @@ pub enum PlanOrder {
         /// Intent index within the reply, or the poisoned follow-up index.
         index: usize,
     },
-    /// Activation records, in head order then cause then intent order.
+    /// Activation records, in head order.
     Activation {
         /// Index into the seq's activation queue.
         head_index: usize,
-        /// Cause (`k` for catch-up, `u64::MAX` for the terminal activation).
-        cause: u64,
-        /// Intent index within the reply, or `usize::MAX` for the terminal.
-        index: usize,
+        /// The record's place within the head's activation.
+        step: ActivationStep,
     },
 }
 
-/// One `SetHead` awaiting its destination check, in plan order.
+/// A record's place within one head's activation: catch-up records, then its terminal record.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum ActivationStep {
+    /// A catch-up reply's record.
+    CatchUp {
+        /// Owed seq that caused it.
+        cause: u64,
+        /// Intent index within the reply.
+        index: usize,
+    },
+    /// The head's `Activated` or `ActivationRejected`.
+    Terminal,
+}
+
+/// One `SetHead` awaiting its destination check.
 #[derive(Debug, Clone)]
 pub struct PendingDestination {
-    /// Order key for the resolved record.
-    pub order: PlanOrder,
     /// Trigger or catch-up seq causing the move or its failure.
     pub cause: u64,
     /// Bundle whose rule returned the intent.
     pub bundle: Digest,
     /// Reactor that returned the intent.
-    pub reactor: aether_bloomery_kinds::ReactorName,
+    pub reactor: ReactorName,
     /// The move to attempt.
-    pub set_head: aether_bloomery_kinds::SetHead,
+    pub set_head: SetHead,
 }
 
 /// Per-seq phase for `N = R + 1`.
@@ -170,22 +144,33 @@ pub enum SeqPhase {
     Evaluating,
     /// Serial activation of changed heads.
     Activating,
-    /// All replies collected, resolving destinations and queueing the batch.
+    /// All replies collected, checking destinations and queueing the batch.
     Planning,
 }
 
 /// One activation's phase.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum ActivationPhase {
     /// Bundle artifact read or load outstanding.
     Loading,
     /// Paging the journal and sending `Warm` batches through `live_from - 1`.
     Warming,
-    /// Delivering owed `Event`s `live_from..=trigger` one at a time.
-    CatchingUp,
+    /// Delivering owed `Event`s `live_from..=N` one at a time.
+    CatchingUp(CatchUp),
 }
 
-/// One head's activation in progress.
+/// Owed catch-up in progress.
+#[derive(Debug)]
+pub struct CatchUp {
+    /// `Heads` folded from seq 1 through the last buffered entry, resolving each owed seq's `CallProgram`s.
+    pub scratch: Heads,
+    /// Next owed seq to deliver.
+    pub next: u64,
+    /// Buffered entries not yet folded, trimmed to `N`.
+    pub page: VecDeque<JournalEntry>,
+}
+
+/// The head being activated; its queue index is the seq's `activate_index`.
 #[derive(Debug)]
 pub struct ActivationWork {
     /// Head being activated.
@@ -194,20 +179,8 @@ pub struct ActivationWork {
     pub bundle: Digest,
     /// First seq the instance will evaluate live.
     pub live_from: u64,
-    /// Trigger seq whose batch carries the activation.
-    pub trigger: u64,
-    /// Index into the seq's activation queue, for ordering.
-    pub head_index: usize,
     /// Current phase.
     pub phase: ActivationPhase,
-    /// Scratch `Heads` folded from seq 1 through the catch-up cursor.
-    pub scratch: Heads,
-    /// Next owed seq to deliver.
-    pub next_k: u64,
-    /// Current catch-up page, trimmed to the trigger.
-    pub catchup_page: Vec<JournalEntry>,
-    /// Next entry in `catchup_page` to fold.
-    pub catchup_index: usize,
 }
 
 /// Work for `N = R + 1`.
@@ -218,60 +191,95 @@ pub struct SeqWork {
     /// Journal entry `N`.
     pub entry: JournalEntry,
     /// Selection at prefix `N-1`.
-    pub prev: BTreeMap<Head<OpaqueBytes>, Digest>,
-    /// Selection at prefix `N`, once `N` is applied.
-    pub curr: Option<BTreeMap<Head<OpaqueBytes>, Digest>>,
-    /// Live digests to evaluate and the heads each serves, in head order.
-    pub live: BTreeMap<Digest, Vec<Head<OpaqueBytes>>>,
+    pub prev: Selection,
+    /// Live digests evaluating `N` and the heads each serves.
+    pub live: Served,
     /// Current phase.
     pub phase: SeqPhase,
     /// Heads needing activation, in canonical head order.
     pub to_activate: Vec<(Head<OpaqueBytes>, Digest)>,
-    /// Next activation index to start.
+    /// Index of the head being activated, or of the next one to start.
     pub activate_index: usize,
     /// Activation in progress, if any.
     pub activation: Option<ActivationWork>,
     /// Accumulated plan in append order.
     pub order: BTreeMap<PlanOrder, PlannedRecord>,
     /// `SetHead`s awaiting destination checks, in plan order.
-    pub pending_setheads: VecDeque<PendingDestination>,
-    /// Destination read outstanding, with its order key.
-    pub current_destination: Option<(ArtifactTicket, PendingDestination)>,
+    pub destinations: BTreeMap<PlanOrder, PendingDestination>,
+    /// The `SetHead` whose destination read is outstanding.
+    pub checking: Option<(PlanOrder, PendingDestination)>,
 }
 
 impl SeqWork {
-    /// Empty work for `n`: no successor set, no activations, no plan.
-    pub fn new(
-        n: u64,
-        entry: JournalEntry,
-        prev: BTreeMap<Head<OpaqueBytes>, Digest>,
-        live: BTreeMap<Digest, Vec<Head<OpaqueBytes>>>,
-        phase: SeqPhase,
-    ) -> Self {
+    /// Work for `n` with its live fan-out already sent.
+    pub fn new(n: u64, entry: JournalEntry, prev: Selection, live: Served) -> Self {
         Self {
             n,
             entry,
             prev,
-            curr: None,
             live,
-            phase,
+            phase: SeqPhase::Evaluating,
             to_activate: Vec::new(),
             activate_index: 0,
             activation: None,
             order: BTreeMap::new(),
-            pending_setheads: VecDeque::new(),
-            current_destination: None,
+            destinations: BTreeMap::new(),
+            checking: None,
         }
+    }
+
+    /// Plan one reply's intents, keying each by its index within the reply.
+    pub fn plan_reply(&mut self, key: impl Fn(usize) -> PlanOrder, planned: Vec<PlannedIntent>) {
+        for (index, intent) in planned.into_iter().enumerate() {
+            match intent {
+                PlannedIntent::Ready(record) => {
+                    self.order.insert(key(index), PlannedRecord::Ready(record));
+                }
+                PlannedIntent::Destination(pending) => {
+                    self.destinations.insert(key(index), pending);
+                }
+            }
+        }
+    }
+
+    /// Plan one record at `step` of the head being activated.
+    pub fn plan_activation(&mut self, step: ActivationStep, record: PlannedRecord) {
+        self.order.insert(PlanOrder::Activation { head_index: self.activate_index, step }, record);
+    }
+
+    /// Plan the head's terminal record and move on to the next head.
+    pub fn finish_head(&mut self, record: DriverRecord) {
+        self.plan_activation(ActivationStep::Terminal, PlannedRecord::Ready(record));
+        self.activation = None;
+        self.activate_index += 1;
+    }
+
+    /// Reject the head at `activate_index`, dropping its catch-up records and
+    /// queued destination checks: the interval stays owed, so a later
+    /// activation evaluates it again.
+    pub fn reject_head(&mut self, head: Head<OpaqueBytes>, bundle: Digest, reason: Detail) {
+        let head_index = self.activate_index;
+        let kept = |order: &PlanOrder| !matches!(order, PlanOrder::Activation { head_index: indexed, .. } if *indexed == head_index);
+        self.order.retain(|order, _| kept(order));
+        self.destinations.retain(|order, _| kept(order));
+        let record =
+            DriverRecord::ActivationRejected { cause: self.n, record: ActivationRejected { head, bundle, reason } };
+        self.finish_head(record);
     }
 }
 
 /// Restart phase through `W`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum RestartPhase {
     /// Folding pages `1..=W` into routing `Heads` without delivering.
     Folding,
     /// Serially warming each selected digest through `W`.
-    Warming,
+    Warming {
+        /// Digests still to warm, with the heads each serves.
+        queued: VecDeque<(Digest, Vec<Head<OpaqueBytes>>)>,
+        /// The digest loading or warming, with the heads it serves.
+        warming: Option<(Digest, Vec<Head<OpaqueBytes>>)>,
+    },
 }
 
 /// Restart replay work through `W`.
@@ -281,14 +289,8 @@ pub struct RestartWork {
     pub watermark: u64,
     /// Current phase.
     pub phase: RestartPhase,
-    /// Distinct digests to warm, in first-head order, with served heads.
-    pub to_warm: Vec<(Digest, Vec<Head<OpaqueBytes>>)>,
-    /// Next warm index to start.
-    pub warm_index: usize,
-    /// Digest currently warming, if any.
-    pub warming: Option<Digest>,
-    /// Failed digests with served heads and reasons, for the restart batch.
-    pub failures: Vec<(Digest, Vec<Head<OpaqueBytes>>, String)>,
+    /// Heads whose digest failed to load or warm, with the digest and reason.
+    pub failures: Vec<(Head<OpaqueBytes>, Digest, Detail)>,
 }
 
 /// Reactor routing state over the routing cursor `R`.
@@ -299,27 +301,23 @@ pub struct Routing {
     /// Reactor-set cache by digest: `None` selects nothing.
     pub sets: BTreeMap<Digest, Option<ReactorSet>>,
     /// Outstanding routing page read, if any.
-    pub read_ticket: Option<EventsTicket>,
-    /// Purpose of the outstanding routing read.
-    pub read_purpose: Option<RoutingRead>,
-    /// Buffered steady page, trimmed to the journal-view cursor.
-    pub page: Vec<JournalEntry>,
+    pub read: Option<PendingRead>,
+    /// Buffered steady entries after `R`, trimmed to the journal-view cursor.
+    pub page: VecDeque<JournalEntry>,
     /// Outstanding `WatchHead`, if any.
     pub watch: Option<WatchTicket>,
     /// Barrier waiters: caller and `through`.
     pub awaiters: Vec<(CallerId, u64)>,
+    /// Derived records of the in-flight routing append, if any.
+    pub appending: Option<Vec<DriverRecord>>,
     /// Committed routing batch awaiting read-back, if any.
     pub committed: Option<CommittedRouting>,
-    /// Final records for the in-flight routing append, if any.
-    pub inflight_records: Option<Vec<DriverRecord>>,
-    /// Live digests for the in-flight routing append, if any.
-    pub inflight_live: Option<Vec<Digest>>,
-    /// Outstanding live and catch-up evaluations.
-    pub evaluates: BTreeMap<EvaluateTicket, EvaluateContext>,
+    /// Outstanding live and catch-up deliveries.
+    pub deliveries: BTreeMap<EvaluateTicket, Delivery>,
     /// Outstanding warmup batches.
-    pub warms: BTreeMap<WarmTicket, WarmContext>,
-    /// Outstanding status resyncs.
-    pub statuses: BTreeMap<StatusTicket, StatusContext>,
+    pub warms: BTreeMap<WarmTicket, WarmBatch>,
+    /// Outstanding status resyncs, by the digest queried.
+    pub statuses: BTreeMap<StatusTicket, Digest>,
     /// In-progress seq work, if any.
     pub current: Option<SeqWork>,
     /// In-progress restart work, if any.
@@ -334,15 +332,13 @@ impl Routing {
         Self {
             heads: Heads::new(),
             sets: BTreeMap::new(),
-            read_ticket: None,
-            read_purpose: None,
-            page: Vec::new(),
+            read: None,
+            page: VecDeque::new(),
             watch: None,
             awaiters: Vec::new(),
+            appending: None,
             committed: None,
-            inflight_records: None,
-            inflight_live: None,
-            evaluates: BTreeMap::new(),
+            deliveries: BTreeMap::new(),
             warms: BTreeMap::new(),
             statuses: BTreeMap::new(),
             current: None,
@@ -355,10 +351,17 @@ impl Routing {
     pub fn cursor(&self) -> u64 {
         self.heads.cursor().0
     }
-}
 
-impl Default for Routing {
-    fn default() -> Self {
-        Self::new()
+    /// The activation in progress, if any.
+    pub fn activation(&self) -> Option<&ActivationWork> {
+        self.current.as_ref()?.activation.as_ref()
+    }
+
+    /// The owed catch-up in progress, with the digest it delivers to.
+    pub fn catch_up(&self) -> Option<(Digest, &CatchUp)> {
+        match self.activation()? {
+            ActivationWork { bundle, phase: ActivationPhase::CatchingUp(catch_up), .. } => Some((*bundle, catch_up)),
+            _ => None,
+        }
     }
 }
