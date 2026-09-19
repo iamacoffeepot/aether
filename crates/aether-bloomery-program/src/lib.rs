@@ -23,7 +23,7 @@ mod section;
 pub use aether_bloomery_kinds as kinds;
 pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
 pub use aether_bloomery_program_derive::program;
-pub use declare::{Program, declaration};
+pub use declare::Program;
 pub use env::{Env, Pure};
 pub use invoke::{invoke, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch};
