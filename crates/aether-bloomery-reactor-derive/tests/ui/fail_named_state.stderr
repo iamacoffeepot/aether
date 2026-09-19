@@ -1,14 +1,14 @@
 error[E0423]: expected value, found struct `StatefulReactor`
-  --> tests/ui/fail_named_state.rs:15:43
+  --> tests/ui/fail_named_state.rs:11:43
    |
-15 | impl aether_bloomery_reactor::Reactor for StatefulReactor {
+11 | impl aether_bloomery_reactor::Reactor for StatefulReactor {
    |                                           ^^^^^^^^^^^^^^^ not a value
    |
 help: surround the struct literal with parentheses
    |
-15 ~ impl aether_bloomery_reactor::Reactor for (StatefulReactor {
-16 |     const NAMESPACE: &'static str = "stateful.named";
+11 ~ impl aether_bloomery_reactor::Reactor for (StatefulReactor {
+12 |     const NAMESPACE: &'static str = "stateful.named";
 ...
-21 |     }
-22 ~ })
+18 |     }
+19 ~ })
    |

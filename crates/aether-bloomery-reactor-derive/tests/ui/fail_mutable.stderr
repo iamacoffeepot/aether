@@ -1,5 +1,13 @@
 error: #[rule] methods take `&self`; mutable self is not supported
-  --> tests/ui/fail_mutable.rs:17:16
+  --> tests/ui/fail_mutable.rs:13:16
    |
-17 |     fn publish(&mut self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
+13 |     fn publish(&mut self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> SetHead {
    |                ^^^^^^^^^
+
+warning: unused import: `SetHead`
+ --> tests/ui/fail_mutable.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Head, SetHead, Tree};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

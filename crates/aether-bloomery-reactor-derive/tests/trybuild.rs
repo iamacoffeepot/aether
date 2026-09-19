@@ -17,4 +17,6 @@ fn ui() {
     t.compile_fail("tests/ui/fail_vec_return.rs");
     t.compile_fail("tests/ui/fail_unit_return.rs");
     t.compile_fail("tests/ui/fail_invalid_names.rs");
+    t.compile_fail("tests/ui/fail_unsupported_output.rs");
+    t.compile_fail("tests/ui/fail_foreign_output_impl.rs");
 }

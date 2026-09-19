@@ -1,5 +1,13 @@
 error: #[rule] methods are synchronous; remove `async`
-  --> tests/ui/fail_async.rs:17:5
+  --> tests/ui/fail_async.rs:13:5
    |
-17 |     async fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> PublicationProposal {
+13 |     async fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> SetHead {
    |     ^^^^^
+
+warning: unused import: `SetHead`
+ --> tests/ui/fail_async.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Head, SetHead, Tree};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
