@@ -14,8 +14,7 @@ mod reactor;
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::mem::take;
 
-use aether_bloomery_driver::WatchTicket;
-use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, ProgramCore};
+use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, LoadOutcome, ProgramCore, WatchTicket};
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AppendRecords, AppendRecordsResult, CallOutcome, ClosureArtifact, ClosureLimit,
     Digest, DriverRecord, EncodedArtifact, Evaluated, Head, Invoke, Invoked, JournalEntry, OpaqueBytes, Processed,
