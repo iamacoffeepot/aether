@@ -60,7 +60,7 @@ impl Program for Refuse {
     }
 }
 
-export!(Summarize, Refuse, generators = [aether_bloomery_program::bundle_programs]);
+export!(Summarize, Refuse, generators = [aether_bloomery_bundle::bundle]);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;

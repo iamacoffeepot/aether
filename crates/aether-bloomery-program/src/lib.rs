@@ -16,19 +16,15 @@ extern crate self as aether_bloomery_program;
 
 mod declare;
 mod env;
-mod export;
 mod invoke;
 mod root;
 mod section;
 
 pub use aether_bloomery_kinds as kinds;
 pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
-#[doc(hidden)]
-pub use aether_bloomery_program_derive::__program_export_generate;
 pub use aether_bloomery_program_derive::program;
 pub use declare::{Program, declaration};
 pub use env::{Env, Pure};
-pub use export::PROGRAM_NAMESPACE;
 pub use invoke::{invoke, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch};
 pub use section::{DeclarationsError, declarations};

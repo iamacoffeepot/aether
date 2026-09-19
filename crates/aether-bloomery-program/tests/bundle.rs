@@ -4,10 +4,10 @@ use std::error::Error;
 use std::fs;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, Ref, Refusal, Utf8Text,
-    artifact_digest,
+    BUNDLE_NAMESPACE, ClosureArtifact, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, Ref, Refusal,
+    Utf8Text, artifact_digest,
 };
-use aether_bloomery_program::{PROGRAM_NAMESPACE, declarations};
+use aether_bloomery_program::declarations;
 use aether_data::{Cites, Kind, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{ExecutionError, HarnessOp, SubstrateHarness, SubstrateHarnessError};
@@ -95,7 +95,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
                     wasm,
                     name: Some(digest.to_string()),
                     config: Vec::new(),
-                    export: Some(PROGRAM_NAMESPACE.to_owned()),
+                    export: Some(BUNDLE_NAMESPACE.to_owned()),
                 },
             ),
         )])

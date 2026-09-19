@@ -1,0 +1,33 @@
+[package]
+name = "aether-bloomery-bundle-derive"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Proc macro for the bloomery `bundle` export generator: one root for a bundle's programs and reactors."
+
+# Proc-macro home for `__bundle_export_generate`. Kept separate from
+# `aether-bloomery-bundle` because a proc-macro crate must opt into
+# `proc-macro = true` and can export nothing else. The facade crate
+# re-exports it so a consumer depends on one crate.
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = { workspace = true }
+quote = { workspace = true }
+syn = { workspace = true }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+
+[dev-dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+trybuild = "1"
+
+[lints]
+workspace = true

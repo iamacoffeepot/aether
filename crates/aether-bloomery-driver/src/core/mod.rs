@@ -22,7 +22,7 @@ use aether_bloomery_kinds::{
 use crate::bundles::BundleTable;
 use crate::reactors::{CommittedRouting, Routing};
 
-pub use command::{BundleRole, Command, LoadOutcome};
+pub use command::{Command, LoadOutcome};
 pub use journal::EVENTS_PAGE;
 pub use journal::{Journal, PendingWrite, PlannedRecord, RequestedClaim};
 pub use ticket::{

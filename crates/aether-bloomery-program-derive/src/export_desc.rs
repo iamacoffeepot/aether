@@ -1,7 +1,7 @@
 //! Bloomery extension on the framework-owned export descriptor envelope.
 //!
 //! `#[program]` emits the same companion shape as `#[actor]`, with an
-//! `aether_bloomery_program { … }` extension. `bundle_programs` selects that
+//! `aether_bloomery_program { … }` extension. `aether_bloomery_bundle::bundle` selects that
 //! extension; it does not own actor-vs-program discovery.
 
 use proc_macro2::TokenStream as TokenStream2;

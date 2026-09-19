@@ -1,6 +1,6 @@
 //! The program bundle root's state: its table plus the live-seq table.
 //!
-//! The root `bundle_programs` generates is a thin shell over [`Root`]: the
+//! The root the `bundle` generator generates is a thin shell over [`Root`]: the
 //! shell makes the actor calls (`spawn_inline_child`, `send`, `reply_to`,
 //! `despawn_inline_child`) while this module owns the program table, the
 //! rejections, the source-matched finish, and the per-name dispatch.
@@ -35,7 +35,7 @@ impl ProgramEntry {
     }
 }
 
-/// A bundle's programs: non-empty, names unique. Proved by `bundle_programs` at expansion.
+/// A bundle's programs: non-empty, names unique. Proved by the `bundle` generator at expansion.
 pub struct ProgramTable {
     entries: &'static [ProgramEntry],
 }

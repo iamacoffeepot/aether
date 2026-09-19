@@ -2,7 +2,7 @@
 //!
 //! `#[reactor]` sits on `impl Reactor for Name` and consumes `#[rule]` methods.
 //! It emits inherent rule methods plus a `Reactor` impl whose `evaluate` /
-//! `visit_arms` plus a framework descriptor extension so `bundle_reactors` can
+//! `visit_arms` plus a framework descriptor extension so `aether_bloomery_bundle::bundle` can
 //! wrap authored reactors without a second export macro. Parameter roles are
 //! inferred by Rust from `Arg<_, T, Rest>` — this crate does not classify view
 //! versus guard by type name.
@@ -17,7 +17,6 @@ use quote::quote_spanned;
 use syn::spanned::Spanned;
 use syn::{ItemImpl, parse_macro_input};
 
-mod bundle;
 mod check;
 mod expand;
 mod export_desc;
@@ -41,14 +40,6 @@ pub fn reactor(attr: TokenStream, item: TokenStream) -> TokenStream {
         Ok(def) => expand::expand(def).into(),
         Err(error) => error.to_compile_error().into(),
     }
-}
-
-/// Hidden `bundle_reactors` export generator. Invoked by
-/// [`aether_bloomery_reactor::bundle_reactors`], not by authors.
-#[doc(hidden)]
-#[proc_macro]
-pub fn __reactor_export_generate(input: TokenStream) -> TokenStream {
-    bundle::generate(input)
 }
 
 /// Marker consumed by [`macro@reactor`]. Reaching this expansion means the

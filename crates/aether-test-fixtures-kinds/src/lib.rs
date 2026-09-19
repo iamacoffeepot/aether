@@ -525,4 +525,7 @@ pub const SUMMARIZE_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.summari
 /// Program the summarize-caller reactor rule invokes.
 pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
 
+/// Bundle head the mixed fixture's reactor rule names for its own program.
+pub const MIXED_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.mixed.bundle");
+
 const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));

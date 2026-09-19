@@ -1,0 +1,16 @@
+[package]
+name = "aether-bloomery-bundle"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "Author facade for the bloomery `bundle` export generator."
+
+[dependencies]
+aether-bloomery-bundle-derive = { path = "../aether-bloomery-bundle-derive" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-bloomery-reactor = { path = "../aether-bloomery-reactor" }
+
+[lints]
+workspace = true

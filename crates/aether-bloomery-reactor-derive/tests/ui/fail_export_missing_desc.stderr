@@ -1,7 +1,0 @@
-error: cannot find macro `Plain` in this scope
- --> tests/ui/fail_export_missing_desc.rs:7:9
-  |
-7 | export!(Plain, generators = [aether_bloomery_reactor::bundle_reactors]);
-  |         ^^^^^
-  |
-  = note: `Plain` is in scope, but it is a struct, not a macro

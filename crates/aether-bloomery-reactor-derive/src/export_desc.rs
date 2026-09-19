@@ -1,7 +1,7 @@
 //! Bloomery extension on the framework-owned export descriptor envelope.
 //!
 //! `#[reactor]` emits the same companion shape as `#[actor]`, with an
-//! `aether_bloomery_reactor { }` extension. `bundle_reactors` selects that
+//! `aether_bloomery_reactor { }` extension. `aether_bloomery_bundle::bundle` selects that
 //! extension; it does not own actor-vs-reactor discovery.
 
 use proc_macro2::TokenStream as TokenStream2;

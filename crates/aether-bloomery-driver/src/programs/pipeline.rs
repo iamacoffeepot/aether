@@ -19,8 +19,8 @@ use aether_data::{Kind, MailboxId};
 
 use crate::bundles::{Active, DigestQueue, DigestState, programs};
 use crate::core::{
-    ArtifactRead, ArtifactTicket, BundleRole, ClosureTicket, Command, InvokeTicket, LoadOutcome, LoadTicket,
-    PendingWrite, ProgramCore,
+    ArtifactRead, ArtifactTicket, ClosureTicket, Command, InvokeTicket, LoadOutcome, LoadTicket, PendingWrite,
+    ProgramCore,
 };
 
 /// Next step for a request whose closure checked out.
@@ -352,7 +352,7 @@ impl ProgramCore {
             Next::Load(wasm) => {
                 let ticket = self.mint(LoadTicket::mint);
                 self.loads.insert(ticket, bundle);
-                out.push(Command::Load { ticket, bundle, role: BundleRole::Program, wasm });
+                out.push(Command::Load { ticket, bundle, wasm });
             }
         }
     }
