@@ -1,6 +1,5 @@
 //! End-to-end: the driver follows the reactor set over a live journal, activating bundles and recording reactions.
 
-#[path = "support/chassis.rs"]
 mod chassis;
 
 use std::error::Error;

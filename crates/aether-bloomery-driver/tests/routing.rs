@@ -4,7 +4,6 @@
 //! journal is fully deterministic: seeded moves and records take the first
 //! seqs, and every routing batch lands where the test says it does.
 
-#[path = "support/reactor_world.rs"]
 mod reactor_world;
 mod support;
 

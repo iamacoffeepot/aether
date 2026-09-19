@@ -2,7 +2,6 @@
 //!
 //! Each test names the bug it catches.
 
-#[path = "support/reactor_world.rs"]
 mod reactor_world;
 mod support;
 

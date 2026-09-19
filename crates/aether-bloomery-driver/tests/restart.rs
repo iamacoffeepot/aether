@@ -1,6 +1,5 @@
 //! Reactor restart scenarios: watermark recovery over one journal truth.
 
-#[path = "support/reactor_world.rs"]
 mod reactor_world;
 mod support;
 

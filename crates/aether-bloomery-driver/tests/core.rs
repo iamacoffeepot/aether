@@ -4,7 +4,6 @@
 //! journal is fully deterministic: seeded moves and records take the first
 //! seqs, and every core append lands where the test says it does.
 
-#[path = "support/program_world.rs"]
 mod program_world;
 mod support;
 
