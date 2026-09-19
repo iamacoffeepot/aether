@@ -1,9 +1,11 @@
 // Catches a mixed module that emits two roots, drops one role, or leaves a program or reactor in `exports`.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
-use aether_bloomery_kinds::{HeadMoved, Mode, Refusal, Tree};
+use aether_bloomery_kinds::{Head, HeadMoved, Mode, Refusal, SetHead, Tree};
 use aether_bloomery_program::{Env, Program, Pure, program};
-use aether_bloomery_reactor::{Output, Reactor, reactor};
+use aether_bloomery_reactor::{Reactor, reactor};
+
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 pub struct Probe;
 
@@ -46,13 +48,6 @@ impl Program for One {
     }
 }
 
-#[aether_data::kind(name = "test.bloomery.export.reactor_only_out", eq)]
-struct Publication {
-    marker: u32,
-}
-
-impl Output for Publication {}
-
 struct Publisher;
 
 #[reactor]
@@ -60,8 +55,8 @@ impl Reactor for Publisher {
     const NAMESPACE: &'static str = "test.bloomery.export.publisher";
 
     #[rule]
-    fn publish(&self, _change: HeadMoved<Tree>) -> Publication {
-        Publication { marker: 1 }
+    fn publish(&self, change: HeadMoved<Tree>) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 
