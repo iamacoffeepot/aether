@@ -1,8 +1,7 @@
 //! Const-assembled `aether.bloomery.programs` records and a `no_std` decoder.
 //!
-//! `declaration::<P>()` allocates and panics on a bad name, so it cannot run
-//! in const context. Each generated record is instead a documented byte layout
-//! assembled from the program `NAME` / `INTENT` literals and the input/result
+//! Each generated record is a documented const-assembled byte layout built
+//! from the program `NAME` / `INTENT` literals and the input/result
 //! [`KindId`]s. wasm-ld concatenates same-named custom sections, so the decoder
 //! walks concatenated records:
 //!
@@ -123,6 +122,8 @@ pub enum DeclarationsError {
     InvalidName,
     /// The mode byte is not 0 (`Pure`) or 1 (`Sampled`).
     UnknownMode(u8),
+    /// Two records share a program name.
+    DuplicateName(ProgramName),
 }
 
 impl fmt::Display for DeclarationsError {
@@ -133,6 +134,7 @@ impl fmt::Display for DeclarationsError {
             Self::InvalidUtf8 => f.write_str("program declaration field is not UTF-8"),
             Self::InvalidName => f.write_str("program declaration name is not a ProgramName"),
             Self::UnknownMode(mode) => write!(f, "unknown program mode {mode}"),
+            Self::DuplicateName(name) => write!(f, "program declaration repeats program {}", name.as_str()),
         }
     }
 }
@@ -144,12 +146,17 @@ impl StdError for DeclarationsError {}
 /// # Errors
 ///
 /// [`DeclarationsError`] when a record is truncated, versioned incorrectly,
-/// or carries an invalid name, UTF-8 field, or mode.
+/// or carries an invalid name, UTF-8 field, or mode, or when two records
+/// share a program name.
 pub fn declarations(section: &[u8]) -> Result<Vec<Program>, DeclarationsError> {
     let mut rest = section;
     let mut out = Vec::new();
     while !rest.is_empty() {
-        out.push(read_record(&mut rest)?);
+        let program = read_record(&mut rest)?;
+        if out.iter().any(|existing: &Program| existing.name == program.name) {
+            return Err(DeclarationsError::DuplicateName(program.name));
+        }
+        out.push(program);
     }
     Ok(out)
 }
@@ -212,8 +219,8 @@ fn read_len_prefixed_string(rest: &mut &[u8]) -> Result<String, DeclarationsErro
 mod tests {
     use aether_data::KindId;
 
-    use super::{MODE_PURE, declarations, program_record_len, write_program_record};
-    use crate::kinds::Mode;
+    use super::{DeclarationsError, MODE_PURE, declarations, program_record_len, write_program_record};
+    use crate::kinds::{Mode, ProgramName};
 
     #[test]
     fn concatenated_records_decode_name_ids_mode_and_intent() {
@@ -239,5 +246,22 @@ mod tests {
         assert_eq!(decoded[1].input, KindId(3));
         assert_eq!(decoded[1].result, KindId(4));
         assert_eq!(decoded[1].intent, "second");
+    }
+
+    #[test]
+    fn repeated_program_name_is_refused() {
+        // Catches a decoder that accepts duplicates, letting the driver's Programs::find silently pick the first.
+        const NAME: &[u8] = b"test.program.dup";
+        const INTENT: &[u8] = b"dup";
+        const LEN: usize = program_record_len(NAME, INTENT);
+        let first = write_program_record::<LEN>(NAME, 1, 2, MODE_PURE, INTENT);
+        let second = write_program_record::<LEN>(NAME, 3, 4, MODE_PURE, INTENT);
+        let mut section = first.to_vec();
+        section.extend_from_slice(&second);
+
+        assert_eq!(
+            declarations(&section),
+            Err(DeclarationsError::DuplicateName(ProgramName::new("test.program.dup").expect("valid test name")))
+        );
     }
 }
