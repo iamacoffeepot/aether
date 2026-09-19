@@ -29,7 +29,6 @@ REQUIRED = {
     "Design notes",
     "Implementation plan",
     "Declared surface",
-    "Dogfood brief",
 }
 H2 = re.compile(r"(?m)^## ([^\r\n]+)(?:\r?\n|$)")
 SIZE = re.compile(r"^\*\*Size:\*\* (s|m|l)$")

@@ -140,7 +140,7 @@ class PlanDigestTests(unittest.TestCase):
             plan_digest.digest_body(duplicate)
 
     def test_missing_empty_and_reordered_sections_are_rejected(self) -> None:
-        missing = BASE.replace("## Dogfood brief\n\nN/A — workflow-only change.\n\n", "")
+        missing = BASE.replace("## Declared surface\n\n```\n.agents/skills/**\n```\n\n", "")
         with self.assertRaisesRegex(plan_digest.PlanDigestError, "missing required"):
             plan_digest.digest_body(missing)
 
@@ -154,6 +154,22 @@ class PlanDigestTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(plan_digest.PlanDigestError, "scope-owned order"):
             plan_digest.digest_body(reordered)
+
+    def test_body_without_dogfood_brief_is_valid(self) -> None:
+        # Catches a new-style Plan without a Dogfood brief being rejected by approve.
+        without_dogfood = BASE.replace("## Dogfood brief\n\nN/A — workflow-only change.\n\n", "")
+        result = plan_digest.digest_body(without_dogfood)
+        self.assertEqual(result.size, "m")
+        self.assertEqual(result.model, "sonnet")
+        self.assertNotIn("Dogfood brief", result.sections)
+
+    def test_legacy_dogfood_body_digest_is_unchanged(self) -> None:
+        # Tripwire: making the Dogfood brief optional must not change any
+        # existing body's approval digest.
+        self.assertEqual(
+            plan_digest.digest_body(BASE).plan_sha256,
+            "b7ef1790e0dd03dec50f0fd1e22d3b597d1a618ab1b2cef2c68577e735f69c7d",
+        )
 
     def test_missing_duplicate_and_invalid_routing_lines_are_rejected(self) -> None:
         cases = {

@@ -491,26 +491,6 @@ pub struct DrainEditorInputsResult {
 pub const REACTOR_FOLD_FAIL_KIND: aether_data::KindId =
     aether_data::storage_kind_id_from_name("test.bloomery.reactor.fold_fail");
 
-/// Output of a reactor arm whose named current-head guard resolved.
-#[aether_data::kind(name = "aether.test_fixtures.reactor_guarded_publication", eq)]
-pub struct ReactorGuardedPublication {
-    pub digest: [u8; 32],
-    pub fold_id: u32,
-    pub folds: u32,
-}
-
-impl aether_bloomery_reactor::Output for ReactorGuardedPublication {}
-
-/// Output of a reactor arm that takes a published fold tally directly.
-#[aether_data::kind(name = "aether.test_fixtures.reactor_open_publication", eq)]
-pub struct ReactorOpenPublication {
-    pub digest: [u8; 32],
-    pub fold_id: u32,
-    pub folds: u32,
-}
-
-impl aether_bloomery_reactor::Output for ReactorOpenPublication {}
-
 /// Mirrors `aether-test-fixtures-program`'s private summarize input: the same
 /// name and shape, so the same digest.
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]

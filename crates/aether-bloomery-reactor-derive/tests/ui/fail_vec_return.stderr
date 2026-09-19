@@ -1,5 +1,13 @@
 error: #[rule] methods return exactly one mail-capable typed output; `Vec` is unsupported
-  --> tests/ui/fail_vec_return.rs:17:98
+  --> tests/ui/fail_vec_return.rs:13:97
    |
-17 |     fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Vec<PublicationProposal> {
-   |                                                                                                  ^^^^^^^^^^^^^^^^^^^^^^^^
+13 |     fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>) -> Vec<SetHead> {
+   |                                                                                                 ^^^^^^^^^^^^
+
+warning: unused import: `SetHead`
+ --> tests/ui/fail_vec_return.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Head, SetHead, Tree};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

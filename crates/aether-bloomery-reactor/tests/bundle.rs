@@ -6,14 +6,14 @@ use std::path::{Path, PathBuf};
 use aether_actor::Addressable;
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, Program, REACTORS_SECTION,
-    Ref, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
+    Ref, SetHead, Status, StatusQuery, Tree, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
-use aether_test_fixtures_kinds::{REACTOR_FOLD_FAIL_KIND, ReactorGuardedPublication, ReactorOpenPublication};
+use aether_test_fixtures_kinds::REACTOR_FOLD_FAIL_KIND;
 use wasmparser::{Parser, Payload};
 
 fn digest_ref<K>(byte: u8) -> Ref<K> {
@@ -97,11 +97,10 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
     match live {
         Evaluated::Completed { seq: 2, intents } => {
             assert_eq!(intents.len(), 2);
-            let guarded = ReactorGuardedPublication::decode_from_bytes(intents[0].bytes()).expect("guarded");
-            let open = ReactorOpenPublication::decode_from_bytes(intents[1].bytes()).expect("open");
-            assert_eq!(guarded.digest, [2; 32]);
-            assert_eq!(open.digest, [2; 32]);
-            assert_eq!(guarded.fold_id, open.fold_id);
+            let guarded = SetHead::decode_from_bytes(intents[0].bytes()).expect("guarded");
+            let open = SetHead::decode_from_bytes(intents[1].bytes()).expect("open");
+            assert_eq!(guarded.to(), Digest::from_bytes([2; 32]));
+            assert_eq!(open.to(), Digest::from_bytes([2; 32]));
             assert_eq!(intents[0].reactor().as_str(), "test.bloomery.source.publisher");
             assert_eq!(intents[1].reactor().as_str(), "test.bloomery.source.witness");
         }
@@ -117,7 +116,7 @@ fn reactor_root_loads_by_digest_and_answers_its_caller() {
     match declined {
         Evaluated::Completed { seq: 1, intents } => {
             assert_eq!(intents.len(), 1);
-            assert!(ReactorOpenPublication::decode_from_bytes(intents[0].bytes()).is_some());
+            assert!(SetHead::decode_from_bytes(intents[0].bytes()).is_some());
             assert_eq!(intents[0].reactor().as_str(), "test.bloomery.source.witness");
         }
         other => panic!("{other:?}"),
@@ -161,7 +160,7 @@ fn bundle_section_declares_both_reactors_with_their_rule_kinds() {
     assert_eq!(publisher.rules().len(), 1);
     assert_eq!(publisher.rules()[0].name().as_str(), "publish_source");
     assert_eq!(publisher.rules()[0].trigger(), HeadMoved::<Tree>::ID);
-    assert_eq!(publisher.rules()[0].output(), ReactorGuardedPublication::ID);
+    assert_eq!(publisher.rules()[0].output(), SetHead::ID);
     let witness = decoded
         .iter()
         .find(|declaration| declaration.name().as_str() == "test.bloomery.source.witness")
@@ -169,5 +168,5 @@ fn bundle_section_declares_both_reactors_with_their_rule_kinds() {
     assert_eq!(witness.rules().len(), 1);
     assert_eq!(witness.rules()[0].name().as_str(), "note_heads");
     assert_eq!(witness.rules()[0].trigger(), HeadMoved::<Tree>::ID);
-    assert_eq!(witness.rules()[0].output(), ReactorOpenPublication::ID);
+    assert_eq!(witness.rules()[0].output(), SetHead::ID);
 }

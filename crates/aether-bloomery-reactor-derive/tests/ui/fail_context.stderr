@@ -1,5 +1,13 @@
 error: #[rule] parameters are owned trigger, view, and guard values; engine context and borrowed parameters are unsupported
-  --> tests/ui/fail_context.rs:19:101
+  --> tests/ui/fail_context.rs:15:100
    |
-19 |     fn publish(&self, _change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>, _ctx: &mut EngineCtx) -> PublicationPr...
-   |                                                                                                     ^^^^^^^^^^^^^^
+15 |     fn publish(&self, change: aether_bloomery_kinds::HeadMoved<aether_bloomery_kinds::Tree>, _ctx: &mut EngineCtx) -> SetHead {
+   |                                                                                                    ^^^^^^^^^^^^^^
+
+warning: unused import: `SetHead`
+ --> tests/ui/fail_context.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Head, SetHead, Tree};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

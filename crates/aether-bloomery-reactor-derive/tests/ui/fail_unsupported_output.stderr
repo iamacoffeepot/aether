@@ -1,0 +1,54 @@
+error[E0277]: the trait bound `Publication: aether_bloomery_reactor::Output` is not satisfied
+  --> tests/ui/fail_unsupported_output.rs:18:52
+   |
+18 |     fn publish(&self, _change: HeadMoved<Tree>) -> Publication {
+   |                                ---------           ^^^^^^^^^^^ unsatisfied trait bound
+   |                                |
+   |                                required by a bound introduced by this call
+   |
+help: the trait `aether_bloomery_reactor::Output` is not implemented for `Publication`
+  --> tests/ui/fail_unsupported_output.rs:7:1
+   |
+ 7 | struct Publication {
+   | ^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `aether_bloomery_reactor::Output`
+  --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
+   |
+   | impl Output for aether_bloomery_kinds::CallProgram {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallProgram`
+...
+   | impl Output for aether_bloomery_kinds::SetHead {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHead`
+note: required by a bound in `visit`
+  --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
+   |
+   |     fn visit<T, L, O>(&mut self, name: &'static str)
+   |        ----- required by a bound in this associated function
+...
+   |         O: Output;
+   |            ^^^^^^ required by this bound in `ArmVisitor::visit`
+
+error[E0277]: the trait bound `Publication: aether_bloomery_reactor::Output` is not satisfied
+  --> tests/ui/fail_unsupported_output.rs:18:52
+   |
+18 |     fn publish(&self, _change: HeadMoved<Tree>) -> Publication {
+   |                                                    ^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `aether_bloomery_reactor::Output` is not implemented for `Publication`
+  --> tests/ui/fail_unsupported_output.rs:7:1
+   |
+ 7 | struct Publication {
+   | ^^^^^^^^^^^^^^^^^^
+help: the following other types implement trait `aether_bloomery_reactor::Output`
+  --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
+   |
+   | impl Output for aether_bloomery_kinds::CallProgram {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `CallProgram`
+...
+   | impl Output for aether_bloomery_kinds::SetHead {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `SetHead`
+note: required by a bound in `Intent::from_output`
+  --> $WORKSPACE/crates/aether-bloomery-reactor/src/evaluate.rs
+   |
+   |     pub fn from_output<O: Output>(rule: &'static str, output: &O) -> Self {
+   |                           ^^^^^^ required by this bound in `Intent::from_output`

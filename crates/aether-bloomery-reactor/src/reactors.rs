@@ -29,13 +29,16 @@ pub struct EvaluateFail {
 /// Implemented for [`Nil`] and `(R, Rest)`. The list is type-level: there is
 /// no runtime recursion.
 pub trait ReactorList: sealed::Sealed + Sized + 'static {
+    /// Each reactor's validated name in list order.
+    type Names: 'static;
+
     /// Convert every reactor and rule name once.
     ///
     /// # Errors
     ///
     /// [`Detail`] when a [`Reactor::NAMESPACE`] or rule ident is not a valid
     /// dotted name.
-    fn check_names() -> Result<(), Detail>;
+    fn names() -> Result<Self::Names, Detail>;
 
     /// Fold every reactor's views to the owner's cursor.
     ///
@@ -49,13 +52,15 @@ pub trait ReactorList: sealed::Sealed + Sized + 'static {
     /// # Errors
     ///
     /// [`EvaluateFail`] naming the reactor that failed.
-    fn evaluate_all(owner: &mut Owner) -> Result<Vec<ReactorIntent>, EvaluateFail>;
+    fn evaluate_all(owner: &mut Owner, names: &Self::Names) -> Result<Vec<ReactorIntent>, EvaluateFail>;
 }
 
 impl sealed::Sealed for Nil {}
 
 impl ReactorList for Nil {
-    fn check_names() -> Result<(), Detail> {
+    type Names = ();
+
+    fn names() -> Result<Self::Names, Detail> {
         Ok(())
     }
 
@@ -63,7 +68,7 @@ impl ReactorList for Nil {
         Ok(())
     }
 
-    fn evaluate_all(_owner: &mut Owner) -> Result<Vec<ReactorIntent>, EvaluateFail> {
+    fn evaluate_all(_owner: &mut Owner, _names: &Self::Names) -> Result<Vec<ReactorIntent>, EvaluateFail> {
         Ok(Vec::new())
     }
 }
@@ -71,14 +76,16 @@ impl ReactorList for Nil {
 impl<R: Reactor + Default, Rest: ReactorList> sealed::Sealed for (R, Rest) {}
 
 impl<R: Reactor + Default, Rest: ReactorList> ReactorList for (R, Rest) {
-    fn check_names() -> Result<(), Detail> {
-        reactor_name::<R>()?;
+    type Names = (ReactorName, Rest::Names);
+
+    fn names() -> Result<Self::Names, Detail> {
+        let reactor = reactor_name::<R>()?;
         let mut visitor = NameCheck { error: None };
         R::visit_arms(&mut visitor);
         if let Some(error) = visitor.error {
             return Err(error);
         }
-        Rest::check_names()
+        Ok((reactor, Rest::names()?))
     }
 
     fn warm_all(owner: &mut Owner) -> Result<(), PrepareError> {
@@ -86,18 +93,18 @@ impl<R: Reactor + Default, Rest: ReactorList> ReactorList for (R, Rest) {
         Rest::warm_all(owner)
     }
 
-    fn evaluate_all(owner: &mut Owner) -> Result<Vec<ReactorIntent>, EvaluateFail> {
-        let reactor = reactor_name::<R>().expect("Root::new accepted this NAMESPACE");
+    fn evaluate_all(owner: &mut Owner, names: &Self::Names) -> Result<Vec<ReactorIntent>, EvaluateFail> {
+        let (reactor, rest) = names;
         let mut intents = match R::default().evaluate(owner) {
-            Ok(intents) => match tag(&reactor, intents) {
+            Ok(intents) => match tag(reactor, intents) {
                 Ok(intents) => intents,
-                Err(reason) => return Err(EvaluateFail { reactor, reason }),
+                Err(reason) => return Err(EvaluateFail { reactor: reactor.clone(), reason }),
             },
             Err(reason) => {
-                return Err(EvaluateFail { reactor, reason: Detail::new(format!("{reason}")) });
+                return Err(EvaluateFail { reactor: reactor.clone(), reason: Detail::new(format!("{reason}")) });
             }
         };
-        match Rest::evaluate_all(owner) {
+        match Rest::evaluate_all(owner, rest) {
             Ok(rest) => {
                 intents.extend(rest);
                 Ok(intents)

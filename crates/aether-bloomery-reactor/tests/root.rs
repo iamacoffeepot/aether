@@ -1,25 +1,39 @@
 //! Native `Root` state machine: contiguity, poison, attribution, shared views.
 
+use std::cell::Cell;
 use std::error::Error;
 use std::fmt;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use aether_bloomery_kinds::{
-    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, Tree, Warm, WarmEntries,
-    Warmed, reactor_record_len, write_reactor_record,
+    Digest, Entry, Evaluated, Event, Head, HeadMoved, JournalEntry, Ref, RuleRecord, Seq, SetHead, Tree, Warm,
+    WarmEntries, Warmed, reactor_record_len, write_reactor_record,
 };
-use aether_bloomery_reactor::{Nil, Output, Owner, PrepareError, Reactor, Root, reactor};
+use aether_bloomery_reactor::{Nil, Owner, PrepareError, Reactor, Root, reactor};
 use aether_bloomery_view::{Publish, PublishError, View};
 use aether_data::{Kind, KindId, Storage, StorageData};
 
-static VIEW_ID: AtomicU32 = AtomicU32::new(1);
+const PUBLISHED: Head<Tree> = Head::new("published");
+
 static FAIL_B: AtomicBool = AtomicBool::new(false);
+
+thread_local! {
+    static VIEWS_BUILT: Cell<u32> = const { Cell::new(0) };
+    static ENTRIES_FOLDED: Cell<u64> = const { Cell::new(0) };
+}
+
+fn reset_counts() {
+    VIEWS_BUILT.with(|built| built.set(0));
+    ENTRIES_FOLDED.with(|folded| folded.set(0));
+}
+
+fn counts() -> (u32, u64) {
+    (VIEWS_BUILT.with(Cell::get), ENTRIES_FOLDED.with(Cell::get))
+}
 
 #[derive(Clone, Debug)]
 struct CountView {
     cursor: Seq,
-    folds: u32,
-    id: u32,
 }
 
 #[derive(Debug)]
@@ -37,7 +51,8 @@ impl View for CountView {
     type Error = Boom;
 
     fn empty() -> Self {
-        Self { cursor: Seq(0), folds: 0, id: VIEW_ID.fetch_add(1, Ordering::Relaxed) }
+        VIEWS_BUILT.with(|built| built.update(|count| count + 1));
+        Self { cursor: Seq(0) }
     }
 
     fn cursor(&self) -> Seq {
@@ -48,7 +63,7 @@ impl View for CountView {
         if entries.iter().any(|entry| entry.kind == KindId(0xdead)) {
             return Err(Boom);
         }
-        self.folds = self.folds.saturating_add(1);
+        ENTRIES_FOLDED.with(|folded| folded.update(|count| count + entries.len() as u64));
         if let Some(last) = entries.last() {
             self.cursor = last.seq;
         }
@@ -70,15 +85,6 @@ impl Publish for CountView {
     }
 }
 
-#[aether_data::kind(name = "test.bloomery.root.marker", eq)]
-struct Marker {
-    reactor: u32,
-    view_id: u32,
-    folds: u32,
-}
-
-impl Output for Marker {}
-
 struct Publisher;
 
 #[reactor]
@@ -86,8 +92,8 @@ impl Reactor for Publisher {
     const NAMESPACE: &'static str = "test.bloomery.root.publisher";
 
     #[rule]
-    fn publish(&self, _change: HeadMoved<Tree>, view: CountView) -> Marker {
-        Marker { reactor: 1, view_id: view.id, folds: view.folds }
+    fn publish(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 
@@ -98,14 +104,14 @@ impl Reactor for Witness {
     const NAMESPACE: &'static str = "test.bloomery.root.witness";
 
     #[rule]
-    fn note(&self, _change: HeadMoved<Tree>, view: CountView) -> Marker {
-        Marker { reactor: 2, view_id: view.id, folds: view.folds }
+    fn note(&self, change: HeadMoved<Tree>, _view: CountView) -> SetHead {
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 
 struct BoomReactor;
 
-const BOOM_RULES: &[RuleRecord<'static>] = &[RuleRecord::new("note", HeadMoved::<Tree>::ID, Marker::ID)];
+const BOOM_RULES: &[RuleRecord<'static>] = &[RuleRecord::new("note", HeadMoved::<Tree>::ID, SetHead::ID)];
 const BOOM_LEN: usize = reactor_record_len("test.bloomery.root.boom", BOOM_RULES);
 
 impl Default for BoomReactor {
@@ -119,7 +125,7 @@ impl Reactor for BoomReactor {
     const DECLARATION: &'static [u8] = &write_reactor_record::<BOOM_LEN>("test.bloomery.root.boom", BOOM_RULES);
 
     fn visit_arms(visitor: &mut impl aether_bloomery_reactor::ArmVisitor) {
-        visitor.visit::<HeadMoved<Tree>, aether_bloomery_reactor::ViewArg<CountView>, Marker>("note");
+        visitor.visit::<HeadMoved<Tree>, aether_bloomery_reactor::ViewArg<CountView>, SetHead>("note");
     }
 
     fn evaluate(&self, owner: &mut Owner) -> Result<Vec<aether_bloomery_reactor::Intent>, PrepareError> {
@@ -216,17 +222,19 @@ fn failing_reactor_yields_no_intents_and_views_advance() {
 #[test]
 fn warm_folds_without_evaluating() {
     // Catches evaluation during warmup and folding that skips entries.
-    VIEW_ID.store(1, Ordering::Relaxed);
+    reset_counts();
     let mut root = Pair::new().expect("names");
     let folded = root.warm(warm_of(vec![journal_moved(1, digest_ref(1)), journal_moved(2, digest_ref(2))]));
     assert!(matches!(folded, Warmed::Folded { through: 2 }), "{folded:?}");
+    assert_eq!(counts(), (1, 2));
     let live = root.event(Event::new(journal_moved(3, digest_ref(3))));
     match live {
         Evaluated::Completed { seq: 3, intents } => {
             for intent in &intents {
-                let marker = Marker::decode_from_bytes(intent.bytes()).expect("marker");
-                assert!(marker.folds >= 1, "rule saw the warmed prefix");
+                let published = SetHead::decode_from_bytes(intent.bytes()).expect("set-head");
+                assert_eq!(published.to(), Digest::from_bytes([3; 32]));
             }
+            assert_eq!(counts(), (1, 3));
         }
         other => panic!("{other:?}"),
     }
@@ -235,16 +243,13 @@ fn warm_folds_without_evaluating() {
 #[test]
 fn reactors_share_one_view_instance() {
     // Catches a per-reactor owner.
-    VIEW_ID.store(1, Ordering::Relaxed);
+    reset_counts();
     let mut root = Pair::new().expect("names");
     let live = root.event(Event::new(journal_moved(1, digest_ref(1))));
     match live {
         Evaluated::Completed { intents, .. } => {
             assert_eq!(intents.len(), 2);
-            let a = Marker::decode_from_bytes(intents[0].bytes()).expect("a");
-            let b = Marker::decode_from_bytes(intents[1].bytes()).expect("b");
-            assert_eq!(a.view_id, b.view_id);
-            assert_eq!(a.folds, b.folds);
+            assert_eq!(counts().0, 1);
         }
         other => panic!("{other:?}"),
     }
@@ -259,8 +264,8 @@ fn intents_carry_reactor_rule_and_mail_kind() {
         Evaluated::Completed { intents, .. } => {
             assert_eq!(intents[0].reactor().as_str(), "test.bloomery.root.publisher");
             assert_eq!(intents[0].rule().as_str(), "publish");
-            assert_eq!(intents[0].kind(), Marker::ID);
-            assert!(Marker::decode_from_bytes(intents[0].bytes()).is_some());
+            assert_eq!(intents[0].kind(), SetHead::ID);
+            assert!(SetHead::decode_from_bytes(intents[0].bytes()).is_some());
             assert_eq!(intents[1].reactor().as_str(), "test.bloomery.root.witness");
             assert_eq!(intents[1].rule().as_str(), "note");
         }

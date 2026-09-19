@@ -1,5 +1,13 @@
 error: #[rule] needs a typed trigger parameter after `&self`
-  --> tests/ui/fail_no_trigger.rs:17:5
+  --> tests/ui/fail_no_trigger.rs:13:5
    |
-17 |     fn publish(&self) -> PublicationProposal {
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+13 |     fn publish(&self) -> SetHead {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Digest`, `Ref`, and `SetHead`
+ --> tests/ui/fail_no_trigger.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Digest, Head, Ref, SetHead, Tree};
+  |                             ^^^^^^        ^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

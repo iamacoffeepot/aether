@@ -14,12 +14,12 @@ description = "Proc macros for bloomery program authoring."
 proc-macro = true
 
 [dependencies]
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 proc-macro2 = { workspace = true }
 quote = { workspace = true }
 syn = { workspace = true }
 
 [dev-dependencies]
-aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 trybuild = "1"

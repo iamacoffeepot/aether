@@ -5,17 +5,16 @@
 //! keeps its first commands; `wire` performs them once the mailbox is live.
 //! Commands go to the journal owner (reads, appends, and the watch), the
 //! component host (loads) and bundle roots. Inbound [`Call`]
-//! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and parks
-//! the reply under its [`CallerId`]; each reply kind recovers its ticket from
-//! the request context and feeds the matching core continuation. Dropping the
-//! actor abandons every parked reply.
+//! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and
+//! appends the reply to a parked list tagged with its [`CallerId`]; each
+//! reply kind recovers its ticket from the request context and feeds the
+//! matching core continuation. Dropping the actor abandons every parked reply.
 
 mod perform;
 mod root;
 
 pub use root::BundleRoot;
 
-use std::collections::HashMap;
 use std::mem;
 
 use aether_actor::{Manual, actor};
@@ -61,7 +60,7 @@ pub struct BundleDriver {
     core: ProgramCore,
     journal: MailboxId,
     startup: Vec<Command>,
-    callers: HashMap<CallerId, DeferredReply>,
+    callers: Vec<(CallerId, DeferredReply)>,
 }
 
 #[actor(instanced, root)]
@@ -73,7 +72,7 @@ impl NativeActor for BundleDriver {
     fn init(limit: ClosureLimit, params: DriverParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let DriverParams { journal } = params;
         let (core, startup) = ProgramCore::start(limit);
-        Ok(Self { core, journal, startup, callers: HashMap::new() })
+        Ok(Self { core, journal, startup, callers: Vec::new() })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -85,7 +84,7 @@ impl NativeActor for BundleDriver {
     fn on_call(&mut self, ctx: &mut NativeCtx<'_, Manual>, call: Call) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.call(call);
-        assert!(self.callers.insert(caller, owed).is_none(), "the core mints each CallerId once");
+        self.callers.push((caller, owed));
         self.perform(ctx, commands);
     }
 
@@ -93,7 +92,7 @@ impl NativeActor for BundleDriver {
     fn on_await_processed(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: AwaitProcessed) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.await_processed(request);
-        assert!(self.callers.insert(caller, owed).is_none(), "the core mints each CallerId once");
+        self.callers.push((caller, owed));
         self.perform(ctx, commands);
     }
 

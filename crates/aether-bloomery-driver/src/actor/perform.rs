@@ -5,10 +5,10 @@ use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, StatusQuery};
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadComponent;
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{DeferredReply, NativeCtx};
 
 use super::{BundleDriver, BundleRoot};
-use crate::Command;
+use crate::{CallerId, Command};
 
 impl BundleDriver {
     /// Perform each [`Command`] in order, then return.
@@ -59,17 +59,23 @@ impl BundleDriver {
                 Command::Answer { caller, outcome } => {
                     // A second answer for one caller drops: the caller already
                     // holds its exactly-once outcome, so no reply is owed.
-                    if let Some(owed) = self.callers.remove(&caller) {
+                    if let Some(owed) = self.take_parked(caller) {
                         owed.reply(ctx, &outcome);
                     }
                 }
                 Command::Processed { caller, reply } => {
-                    if let Some(owed) = self.callers.remove(&caller) {
+                    if let Some(owed) = self.take_parked(caller) {
                         owed.reply(ctx, &reply);
                     }
                 }
                 Command::Abort { reason } => ctx.fatal_abort(reason),
             }
         }
+    }
+
+    /// Take the parked reply tagged with `caller`, if one is still parked.
+    fn take_parked(&mut self, caller: CallerId) -> Option<DeferredReply> {
+        let index = self.callers.iter().position(|(parked, _)| *parked == caller)?;
+        Some(self.callers.swap_remove(index).1)
     }
 }

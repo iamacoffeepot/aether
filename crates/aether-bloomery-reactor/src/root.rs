@@ -2,7 +2,6 @@
 
 use alloc::format;
 use alloc::vec::Vec;
-use core::marker::PhantomData;
 use core::slice;
 
 use aether_bloomery_kinds::{Detail, Entry, Evaluated, Event, JournalEntry, Status, Warm, Warmed};
@@ -20,11 +19,11 @@ enum Health {
 pub struct Root<L: ReactorList> {
     owner: Owner,
     health: Health,
-    _list: PhantomData<L>,
+    names: L::Names,
 }
 
 impl<L: ReactorList> Root<L> {
-    /// Convert every reactor and rule name, then start empty and healthy.
+    /// Convert every reactor and rule name, keep the converted names, then start empty and healthy.
     ///
     /// # Errors
     ///
@@ -32,8 +31,7 @@ impl<L: ReactorList> Root<L> {
     /// refuses `init` on this error; `#[reactor]` const assertions make it
     /// unreachable for authored reactors.
     pub fn new() -> Result<Self, Detail> {
-        L::check_names()?;
-        Ok(Self { owner: Owner::new(), health: Health::Healthy, _list: PhantomData })
+        Ok(Self { owner: Owner::new(), health: Health::Healthy, names: L::names()? })
     }
 
     /// Cursor and poison flag.
@@ -81,7 +79,7 @@ impl<L: ReactorList> Root<L> {
         if let Err(error) = self.push_and_fold(slice::from_ref(&stored), last_trusted) {
             return Evaluated::Poisoned { seq, last_trusted, reason: fold_reason(&error) };
         }
-        match L::evaluate_all(&mut self.owner) {
+        match L::evaluate_all(&mut self.owner, &self.names) {
             Ok(intents) => Evaluated::Completed { seq, intents },
             Err(fail) => Evaluated::Failed { seq, reactor: fail.reactor, reason: fail.reason },
         }

@@ -2,13 +2,14 @@
 
 use std::error::Error;
 
-use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, Tree};
+use aether_bloomery_kinds::{Digest, Entry, Head, HeadMoved, Program, Ref, Seq, SetHead, Tree};
 use aether_bloomery_reactor::{ArmVisitor, Guard, Output, Owner, Params, PrepareError, Reactor, Trigger, reactor};
 use aether_bloomery_view::Heads;
 use aether_data::{Kind, Storage, StorageData};
 
 const CURRENT: Head<Program> = Head::new("current");
 const SOURCE: Head<Tree> = Head::new("source");
+const PUBLISHED: Head<Tree> = Head::new("published");
 
 struct CurrentCompilation {
     program: Ref<Program>,
@@ -46,14 +47,6 @@ enum Compilation {
     Failed { source: [u8; 32] },
 }
 
-#[aether_data::kind(name = "test.bloomery.reactor.publication", eq)]
-struct PublicationProposal {
-    marker: u32,
-    digest: [u8; 32],
-}
-
-impl Output for PublicationProposal {}
-
 struct SourcePublisher;
 
 #[reactor]
@@ -61,31 +54,15 @@ impl Reactor for SourcePublisher {
     const NAMESPACE: &'static str = "source.publisher";
 
     #[rule]
-    fn publish_source(
-        &self,
-        change: HeadMoved<Tree>,
-        current: CurrentCompilation,
-        heads: Heads,
-    ) -> PublicationProposal {
-        PublicationProposal { marker: 1, digest: *change.to().digest().as_bytes() }.with_heads(heads, current.program)
+    fn publish_source(&self, change: HeadMoved<Tree>, current: CurrentCompilation, heads: Heads) -> SetHead {
+        assert_eq!(heads.get(&CURRENT), Some(current.program));
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 
     #[rule]
-    fn note_heads(&self, change: HeadMoved<Tree>, heads: Heads) -> PublicationProposal {
-        PublicationProposal { marker: 2, digest: *change.to().digest().as_bytes() }.at_cursor(heads.cursor())
-    }
-}
-
-impl PublicationProposal {
-    fn with_heads(self, heads: Heads, program: Ref<Program>) -> Self {
-        assert_eq!(heads.get(&CURRENT), Some(program));
-        drop(heads);
-        self
-    }
-
-    fn at_cursor(self, cursor: Seq) -> Self {
-        assert!(cursor.0 > 0);
-        self
+    fn note_heads(&self, change: HeadMoved<Tree>, heads: Heads) -> SetHead {
+        assert!(heads.cursor().0 > 0);
+        SetHead::new(&PUBLISHED, None, change.to())
     }
 }
 
@@ -96,17 +73,13 @@ impl Reactor for CompilationPublisher {
     const NAMESPACE: &'static str = "compilation.publisher";
 
     #[rule]
-    fn publish_compiled(
-        &self,
-        Compilation::Succeeded { output, .. }: Compilation,
-        _current: CurrentSource,
-    ) -> PublicationProposal {
-        PublicationProposal { marker: 10, digest: output }
+    fn publish_compiled(&self, Compilation::Succeeded { output, .. }: Compilation, _current: CurrentSource) -> SetHead {
+        SetHead::new(&PUBLISHED, None, Ref::from_digest(Digest::from_bytes(output)))
     }
 
     #[rule]
-    fn ignore_failed(&self, Compilation::Failed { source }: Compilation) -> PublicationProposal {
-        PublicationProposal { marker: 11, digest: source }
+    fn ignore_failed(&self, Compilation::Failed { source }: Compilation) -> SetHead {
+        SetHead::new(&PUBLISHED, None, Ref::from_digest(Digest::from_bytes(source)))
     }
 }
 
@@ -137,7 +110,7 @@ fn named_guard_declines_without_body_checks() -> Result<(), Box<dyn Error>> {
     owner.push(&[moved(1, "source", tree)?])?;
     let intents = SourcePublisher.evaluate(&mut owner)?;
     assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].decode::<PublicationProposal>().expect("unguarded arm").marker, 2);
+    assert_eq!(intents[0].rule(), "note_heads");
     Ok(())
 }
 
@@ -151,12 +124,11 @@ fn named_guard_and_direct_heads_publish() -> Result<(), Box<dyn Error>> {
     owner.push(&[moved(1, "current", program)?, moved(2, "source", tree)?])?;
     let intents = SourcePublisher.evaluate(&mut owner)?;
     assert_eq!(intents.len(), 2);
-    let first = intents[0].decode::<PublicationProposal>().expect("mail-capable output");
-    let second = intents[1].decode::<PublicationProposal>().expect("mail-capable output");
-    assert_eq!(first.marker, 1);
-    assert_eq!(first.digest, [2; 32]);
-    assert_eq!(second.marker, 2);
-    assert_eq!(intents[0].kind(), PublicationProposal::ID);
+    assert_eq!(intents[0].rule(), "publish_source");
+    assert_eq!(intents[1].rule(), "note_heads");
+    let first = intents[0].decode::<SetHead>().expect("mail-capable output");
+    assert_eq!(first.to(), Digest::from_bytes([2; 32]));
+    assert_eq!(intents[0].kind(), SetHead::ID);
     Ok(())
 }
 
@@ -171,13 +143,13 @@ fn two_arms_share_the_folded_view_across_events() -> Result<(), Box<dyn Error>> 
     owner.push(&[moved(1, "current", program)?, moved(2, "source", first_tree)?])?;
     let first = SourcePublisher.evaluate(&mut owner)?;
     assert_eq!(first.len(), 2);
-    let first_digest = first[0].decode::<PublicationProposal>().expect("first").digest;
+    let first_to = first[0].decode::<SetHead>().expect("first").to();
 
     owner.push(&[moved(3, "source", later_tree)?])?;
     let second = SourcePublisher.evaluate(&mut owner)?;
     assert_eq!(second.len(), 2);
-    assert_eq!(second[0].decode::<PublicationProposal>().expect("later").digest, [3; 32]);
-    assert_eq!(first[0].decode::<PublicationProposal>().expect("retained").digest, first_digest);
+    assert_eq!(second[0].decode::<SetHead>().expect("later").to(), Digest::from_bytes([3; 32]));
+    assert_eq!(first[0].decode::<SetHead>().expect("retained").to(), first_to);
     Ok(())
 }
 
@@ -192,12 +164,13 @@ fn refutable_trigger_selects_the_matching_arm() -> Result<(), Box<dyn Error>> {
     ])?;
     let intents = CompilationPublisher.evaluate(&mut owner)?;
     assert_eq!(intents.len(), 1);
-    assert_eq!(intents[0].decode::<PublicationProposal>().expect("success").marker, 10);
+    assert_eq!(intents[0].rule(), "publish_compiled");
+    assert_eq!(intents[0].decode::<SetHead>().expect("success").to(), Digest::from_bytes([9; 32]));
 
     owner.push(&[entry_for(3, &Compilation::Failed { source: [4; 32] })?])?;
     let failed = CompilationPublisher.evaluate(&mut owner)?;
     assert_eq!(failed.len(), 1);
-    assert_eq!(failed[0].decode::<PublicationProposal>().expect("failed").marker, 11);
+    assert_eq!(failed[0].rule(), "ignore_failed");
     Ok(())
 }
 
