@@ -71,8 +71,8 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 ## Decision
 
 1. **Sync vs async is the `Env` parameter. Pure vs Sampled stays
-   `Mode`.** Rename today's `Env<Pure>` to `Env<Sync>` (same read/stage
-   API). Add `Env<Async, Caps>`. Two program traits:
+   `Mode`.** Rename today's `Env<Pure>` to `Env<Sync>`. Add
+   `Env<Async, Caps>`. Two program traits:
 
    ```rust
    trait Program {
@@ -104,14 +104,50 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    and require `Mode::Sampled`. Deterministic async caps (when added)
    are legal on `Mode::Pure`.
 
-2. **`async` / `await` is the mail FSM, not a blocking host import.**
+2. **Sync programs do not read. The driver injects their arguments
+   before `Invoke`.** Journal `ReadArtifact` / `ReadClosure` is mail
+   (ADR-0226 step 4). Putting that behind `Env<Sync>::read` would make
+   a synchronous `run` need to await. There is no second DI crate.
+
+   The dependency list is already on the input: `Input: Storage + Cites`
+   (`crates/aether-data/src/storage/cites.rs`). Every `Ref` the input
+   (transitively) cites is a required argument. The injector is the
+   native driver: it walks `Cites`, `ReadClosure`s under the byte cap,
+   and puts those blobs on `Invoke.closure`. Missing or oversized
+   closure is a driver `Fault`, not a guest await.
+
+   `Env<Sync>` can **stage** and **look up** what was injected. Lookup
+   is not I/O; a miss is `Refusal::InputMissing` (the injector failed
+   the citation graph). It never sends mail. Written:
+
+   ```rust
+   fn run(input: MuseTurnInput, env: &mut Env<Sync>) -> Result<MuseTurn, Refusal> {
+       let parent = match input.parent {
+           Some(r) => Some(env.injected(r)?), // map lookup, not a fetch
+           None => None,
+       };
+       // …
+   }
+   ```
+
+   `env.injected` is today's `Env<Pure>::read` renamed so it cannot be
+   mistaken for journal fetch. `Env<Async>` may later grow
+   `read(r).await` as on-demand fetch (ADR-0224's deferred lazy
+   closure). Sync `run` never gets that method.
+
+   A typed `Deps` argument (`fn run(input, deps: MuseTurnDeps, env)`)
+   is rejected as the framework: each program would need a custom
+   injector. `Cites` + `ReadClosure` is one injector for every
+   program.
+
+3. **`async` / `await` is the mail FSM, not a blocking host import.**
    `async fn run` means this invocation is a future held by the per-seq
    child (ADR-0224 §5, ADR-0225 decision 2). While the future is
    yielded, no handler is on the stack; the WASM instance can deliver
    other mail. `await` is legal only on a sanctioned Env send. It is not
    `wait_reply`, not `asyncify`, and not a Wasmtime-parked host function.
 
-3. **An await completes when that send's tree has settled.** The
+4. **An await completes when that send's tree has settled.** The
    sanctioned send is dispatched as its own causal root (`MailId` of that
    send). Nested work the recipient does — replies, streams,
    `spawn_inherit` workers — inherits that root. The invocation child
@@ -130,7 +166,7 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    program finished. Each `request` therefore has its own root so send A
    can settle before send B starts.
 
-4. **The `Invoke` chain stays open until `Invoked`.** `on_invoke`
+5. **The `Invoke` chain stays open until `Invoked`.** `on_invoke`
    returns at the first await. Without a hold, `Invoke`'s `Finished`
    would settle the request while the future is live. The child holds
    that chain (the ADR-0080 `SettlementHold` contract) until it replies
@@ -139,7 +175,7 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    engine stop while yielded is `Interrupted` (ADR-0226 decision 4), not
    a successful empty result.
 
-5. **Inbound replies land on `#[fallback]`, not a per-kind handler.**
+6. **Inbound replies land on `#[fallback]`, not a per-kind handler.**
    The invocation child cannot name every reply kind a program might
    await, and `Settled` is a different kind from the payload. Without
    `#[fallback]` the child is a strict receiver
@@ -158,12 +194,13 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    `Ready`. `Settled { root }` closes the bundle. Payload checks never
    decide that the send is done.
 
-6. **Sanctioned Env methods bound on ADR-0227 markers.** `http().fetch`
+7. **Sanctioned Env methods bound on ADR-0227 markers.** `http().fetch`
    requires `HttpCapability: Replies<Fetch, Reply = FetchResult>`. This
    ADR does not introduce those markers.
 
-7. **Programs send only through named Env cap methods.** `Env<Sync>` is
-   still read/stage. `Env<Async, Caps>` adds methods the SDK names, not
+8. **Programs send only through named Env cap methods.** `Env<Sync>`
+   stages and looks up injected artifacts (decision 2). `Env<Async, Caps>`
+   adds methods the SDK names, not
    `request::<R, K>()`, not `actor::<T>()`, not `send_to` /
    `send_to_named`. The first Sampled cap is HTTP:
 
@@ -182,7 +219,7 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    Bloomery driver, journal, reactor, and program-invoke kinds are not
    on this surface.
 
-8. **The generated invocation child is the only actor with a ctx during
+9. **The generated invocation child is the only actor with a ctx during
    `run`.** Authors never see it. That child may send only the kinds
    those Env methods name, and only to those cap mailboxes. `#[fallback]`
    is inbound (payloads + `Settled`). Same-module WASM can still call
@@ -199,7 +236,8 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   slot; it does not add those read caps. Sampled HTTP is the other
   occupant of `Env<Async>`.
 - `aether-bloomery-program` renames `Env<Pure>` to `Env<Sync>` and
-  gains `AsyncProgram` / `Env<Async, Caps>`. `#[program]` accepts
+  `read` to `injected`. `Env<Sync>` never fetches. `AsyncProgram` /
+  `Env<Async, Caps>` is the await surface. `#[program]` accepts
   `async fn run` for `Mode::Pure` or `Mode::Sampled`; it rejects
   `Env<Async>` on a synchronous `run` and `Env<Sync>` on `async fn
   run`. HTTP methods require `Mode::Sampled` plus `Caps` that include
@@ -229,6 +267,13 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 - **Tie `AsyncProgram` to `Mode::Sampled`.** Rejected: Pure async is
   real (deterministic caps, lazy `read`). `Mode` is memoization, not
   the `Env` parameter.
+- **`Env<Sync>::read` as on-demand journal fetch.** Rejected: that is
+  mail. Sync `run` cannot await it. Prefetch is the driver's
+  `ReadClosure`.
+- **Typed `Deps` struct per program as the injector API.** Rejected:
+  every program would need custom native construction. `Cites` on
+  `Input` plus one `ReadClosure` walk is the injector for all
+  programs.
 - **Restore `wait_reply` inside `run`.** Rejected: ADR-0074. Handlers
   do not park a worker.
 - **Native driver performs the HTTP lap; programs only flatten and
