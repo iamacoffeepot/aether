@@ -3,9 +3,13 @@
 - **Status:** Proposed
 - **Date:** 2026-09-20
 
-Amends [ADR-0224](0224-programs-are-wasm-bundles.md) (synchronous `Pure`
-only; deferred asynchronous `run` and `Sampled` effects through `Env`)
-and [ADR-0225](0225-reactor-bundles-load-by-digest.md) decision 2
+Amends [ADR-0224](0224-programs-are-wasm-bundles.md) (synchronous
+`Env<Pure>` and `Mode::Pure` only; deferred asynchronous `run` and
+`Sampled` effects through `Env`). Those two deferrals are **different
+axes**: `Mode` is memoization (`crates/aether-bloomery-kinds/src/program/mode.rs`);
+`Env<Sync>` vs `Env<Async>` is whether `run` can await mail. A program
+may be Pure and Async. Also amends
+[ADR-0225](0225-reactor-bundles-load-by-digest.md) decision 2
 (per-seq invocation children exist so asynchronous `run` can hold
 suspended state). Does not change
 [ADR-0226](0226-native-bundle-driver.md)'s `Invoke` / `Invoked` wire:
@@ -25,6 +29,11 @@ program cannot read the journal, send mail, or perform I/O. `#[program]`
 run` and anything but `Mode::Pure`. The generated invocation child
 (`crates/aether-bloomery-bundle-derive/src/expand/programs.rs`
 `on_invoke`) calls `dispatch` and replies `Invoked` in the same handler.
+`Mode` already means only "same input digest ⇒ same result digest"
+(`Pure`) vs "never memoized" (`Sampled`). It is not a synonym for
+sync vs async. Tying `AsyncProgram` to `Mode::Sampled` would forbid a
+Pure program that awaits a deterministic cap (lazy closure `read` as
+mail, ADR-0224's other deferred item).
 
 That is the right sandbox for a digest→digest function. It cannot
 express a program that needs a capability round-trip — the first
@@ -61,14 +70,39 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 
 ## Decision
 
-1. **Two program APIs, two environments.** `Program` stays
-   `fn run(input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal>`
-   with `Mode::Pure`. A new `AsyncProgram` is
-   `async fn run(input: Self::Input, env: &mut Env<Async, Self::Caps>) -> Result<Self::Result, Refusal>`
-   with `Mode::Sampled`. Pure programs are not colored `async`. An
-   `AsyncProgram` that never awaits still completes in the first
-   `on_invoke` and replies `Invoked` immediately. `Waiting` from a Pure
-   program is not representable: that trait has no yield.
+1. **Sync vs async is the `Env` parameter. Pure vs Sampled stays
+   `Mode`.** Rename today's `Env<Pure>` to `Env<Sync>` (same read/stage
+   API). Add `Env<Async, Caps>`. Two program traits:
+
+   ```rust
+   trait Program {
+       const MODE: Mode; // Pure or Sampled
+       fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal>;
+   }
+
+   trait AsyncProgram {
+       const MODE: Mode; // Pure or Sampled
+       type Caps;
+       async fn run(
+           input: Self::Input,
+           env: &mut Env<Async, Self::Caps>,
+       ) -> Result<Self::Result, Refusal>;
+   }
+   ```
+
+   `#[program]` pairs them: `fn run` takes `Env<Sync>` only; `async fn
+   run` takes `Env<Async, _>` only. `Env<Async>` on a synchronous `run`
+   does not compile. `async fn run` with `Env<Sync>` does not compile.
+   An `AsyncProgram` that never awaits still completes in the first
+   `on_invoke` and replies `Invoked` immediately.
+
+   `Mode::Pure` remains memoizable (same input digest ⇒ same result
+   digest) whether `run` is sync or async. `Mode::Sampled` is never
+   memoized. `Env<Sync>` has no effect methods, so `Mode::Sampled` on
+   `Program` (sync) is a compile error until a sync sampling surface
+   exists. HTTP and other non-deterministic caps live on `Env<Async>`
+   and require `Mode::Sampled`. Deterministic async caps (when added)
+   are legal on `Mode::Pure`.
 
 2. **`async` / `await` is the mail FSM, not a blocking host import.**
    `async fn run` means this invocation is a future held by the per-seq
@@ -128,10 +162,10 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    requires `HttpCapability: Replies<Fetch, Reply = FetchResult>`. This
    ADR does not introduce those markers.
 
-7. **Programs send only through named Env cap methods.** `Env<Pure>` is
+7. **Programs send only through named Env cap methods.** `Env<Sync>` is
    still read/stage. `Env<Async, Caps>` adds methods the SDK names, not
    `request::<R, K>()`, not `actor::<T>()`, not `send_to` /
-   `send_to_named`. The first cap is HTTP:
+   `send_to_named`. The first Sampled cap is HTTP:
 
    ```rust
    impl Env<Async, Caps> {
@@ -160,15 +194,18 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 ## Consequences
 
 - ADR-0224's deferred "asynchronous `run`, where `read` becomes an
-  on-demand fetch" is **not** this decision. Lazy closure `read` stays
-  deferred. This decision is the other deferred item: `Sampled` effects
-  through `Env`, realized as sanctioned mail, not as host-blocking
-  `read`.
-- `aether-bloomery-program` gains `AsyncProgram`, `Env<Async, Caps>`,
-  and the HTTP cap method. `#[program]` accepts `async fn run` when
-  `MODE` is `Sampled` and `Caps` is nonempty. The bundle generator
-  keeps the future on the invocation child, emits `#[fallback]`, holds
-  the `Invoke` chain, and replies `Invoked` when the future completes.
+  on-demand fetch" is a **Pure + Async** program: `Env<Async>` with
+  deterministic read caps, still `Mode::Pure`. This ADR opens that
+  slot; it does not add those read caps. Sampled HTTP is the other
+  occupant of `Env<Async>`.
+- `aether-bloomery-program` renames `Env<Pure>` to `Env<Sync>` and
+  gains `AsyncProgram` / `Env<Async, Caps>`. `#[program]` accepts
+  `async fn run` for `Mode::Pure` or `Mode::Sampled`; it rejects
+  `Env<Async>` on a synchronous `run` and `Env<Sync>` on `async fn
+  run`. HTTP methods require `Mode::Sampled` plus `Caps` that include
+  `Http`. The bundle generator keeps the future on the invocation
+  child, emits `#[fallback]`, holds the `Invoke` chain, and replies
+  `Invoked` when the future completes.
 - Reply typing is ADR-0227. This ADR only consumes `Replies` /
   `Streams` on sanctioned Env methods. `HttpCapability: Replies<Fetch>`
   still requires `on_fetch` to leave `#[handler::manual]` for
@@ -180,16 +217,18 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   so a bundle cannot mail Bloomery internals from `run` via the send
   import.
 - The driver FIFO (ADR-0226: one `Invoke` in flight per root) is
-  unchanged. Overlapping Sampled waits on one digest is follow-on, not
+  unchanged. Overlapping async waits on one digest is follow-on, not
   this ADR.
 - First consumer is a program that calls `env.http().fetch`. A Muse
   turn is one such program; it is not a new driver path.
 
 ## Alternatives considered
 
-- **Color every program `async fn`.** Rejected: Pure is a
-  digest→digest function with no await points. `Mode` already splits
-  memoization from effects.
+- **Color every program `async fn`.** Rejected: sync `Env<Sync>` stays
+  the default. Pure programs may be async; they are not required to be.
+- **Tie `AsyncProgram` to `Mode::Sampled`.** Rejected: Pure async is
+  real (deterministic caps, lazy `read`). `Mode` is memoization, not
+  the `Env` parameter.
 - **Restore `wait_reply` inside `run`.** Rejected: ADR-0074. Handlers
   do not park a worker.
 - **Native driver performs the HTTP lap; programs only flatten and
