@@ -31,7 +31,7 @@ run` and anything but `Mode::Pure`. The generated invocation child
 `on_invoke`) calls `dispatch` and replies `Invoked` in the same handler.
 `Mode` already means only "same input digest ⇒ same result digest"
 (`Pure`) vs "never memoized" (`Sampled`). It is not a synonym for
-sync vs async. Tying `AsyncProgram` to `Mode::Sampled` would forbid a
+sync vs async. Tying async `run` to `Mode::Sampled` would forbid a
 Pure program that awaits a deterministic cap (lazy closure `read` as
 mail, ADR-0224's other deferred item).
 
@@ -70,36 +70,47 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 
 ## Decision
 
-1. **Sync vs async is the `Env` parameter. Pure vs Sampled stays
-   `Mode`.** Rename today's `Env<Pure>` to `Env<Sync>`. Add
-   `Env<Async, Caps>`. Two program traits:
+1. **One `Program` trait. Sync vs async is the `run` form, paired with
+   `Env`.** Rename today's `Env<Pure>` to `Env<Sync>`. Add
+   `Env<Async, Caps>`. Rust cannot overload `fn run` and `async fn run`
+   on the same trait, so the SDK may keep two *private* supertraits for
+   the two signatures. Authors do not implement those. They write one
+   `#[program] impl Program for X` and one of these `run`s:
 
    ```rust
    trait Program {
-       const MODE: Mode; // Pure or Sampled
-       fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal>;
+       const NAME: &'static str;
+       const MODE: Mode; // Pure or Sampled — memoization, not I/O
+       const INTENT: &'static str;
+       type Input: Storage + Clone + Cites;
+       type Result: Storage + Clone + Cites;
+       type Caps = (); // unused on Env<Sync>
    }
 
-   trait AsyncProgram {
-       const MODE: Mode; // Pure or Sampled
-       type Caps;
-       async fn run(
-           input: Self::Input,
-           env: &mut Env<Async, Self::Caps>,
-       ) -> Result<Self::Result, Refusal>;
-   }
+   // in the same impl Program for Summarize:
+   fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal>;
+
+   // in the same impl Program for a Sampled HTTP program:
+   async fn run(
+       input: Self::Input,
+       env: &mut Env<Async, Self::Caps>,
+   ) -> Result<Self::Result, Refusal>;
    ```
 
-   `#[program]` pairs them: `fn run` takes `Env<Sync>` only; `async fn
-   run` takes `Env<Async, _>` only. `Env<Async>` on a synchronous `run`
-   does not compile. `async fn run` with `Env<Sync>` does not compile.
-   An `AsyncProgram` that never awaits still completes in the first
-   `on_invoke` and replies `Invoked` immediately.
+   `#[program]` pairs the form with the env: `fn run` takes `Env<Sync>`
+   only; `async fn run` takes `Env<Async, _>` only. The other pairing
+   does not compile. A sync `run` is invoked directly (no future). An
+   `async fn run` that never awaits still completes on the first poll
+   and replies `Invoked` immediately.
+
+   This is not OOP inheritance and not a public `AsyncProgram: Program`.
+   Shared declaration lives on `Program` (name, mode, input, result,
+   caps). Behavior is which `run` the impl writes.
 
    `Mode::Pure` remains memoizable (same input digest ⇒ same result
    digest) whether `run` is sync or async. `Mode::Sampled` is never
-   memoized. `Env<Sync>` has no effect methods, so `Mode::Sampled` on
-   `Program` (sync) is a compile error until a sync sampling surface
+   memoized. `Env<Sync>` has no effect methods, so `Mode::Sampled` with
+   a synchronous `run` is a compile error until a sync sampling surface
    exists. HTTP and other non-deterministic caps live on `Env<Async>`
    and require `Mode::Sampled`. Deterministic async caps (when added)
    are legal on `Mode::Pure`.
@@ -213,7 +224,7 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    }
    ```
 
-   `http()` exists only when `AsyncProgram::Caps` includes `Http`. The
+   `http()` exists only when `Caps` includes `Http`. The
    recipient is `HttpCapability`; the program never names a mailbox.
    Bloomery driver, journal, reactor, and program-invoke kinds are not
    on this surface.
@@ -234,15 +245,15 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   deterministic read caps, still `Mode::Pure`. This ADR opens that
   slot; it does not add those read caps. Sampled HTTP is the other
   occupant of `Env<Async>`.
-- `aether-bloomery-program` renames `Env<Pure>` to `Env<Sync>` and
-  `read` to `injected`. `Env<Sync>` never fetches. `AsyncProgram` /
-  `Env<Async, Caps>` is the await surface. `#[program]` accepts
-  `async fn run` for `Mode::Pure` or `Mode::Sampled`; it rejects
-  `Env<Async>` on a synchronous `run` and `Env<Sync>` on `async fn
-  run`. HTTP methods require `Mode::Sampled` plus `Caps` that include
-  `Http`. The bundle generator keeps the future on the invocation
-  child, emits `#[fallback]`, holds the `Invoke` chain, and replies
-  `Invoked` when the future completes.
+- `aether-bloomery-program` keeps one `Program` trait, renames
+  `Env<Pure>` to `Env<Sync>` and `read` to `injected`. `Env<Sync>`
+  never fetches. `Env<Async, Caps>` is the await surface. `#[program]`
+  accepts `fn run` + `Env<Sync>` or `async fn run` + `Env<Async, _>`
+  for `Mode::Pure` or `Mode::Sampled`; mixed pairings do not compile.
+  HTTP methods require `Mode::Sampled` plus `Caps` that include `Http`.
+  The bundle generator calls a sync `run` directly, or holds the
+  future for `async fn run`, emits `#[fallback]`, holds the `Invoke`
+  chain, and replies `Invoked` when that run finishes.
 - Reply typing is ADR-0227. This ADR only consumes `Replies` /
   `Streams` on sanctioned Env methods. `HttpCapability: Replies<Fetch>`
   still requires `on_fetch` to leave `#[handler::manual]` for
@@ -261,9 +272,15 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 
 ## Alternatives considered
 
-- **Color every program `async fn`.** Rejected: sync `Env<Sync>` stays
-  the default. Pure programs may be async; they are not required to be.
-- **Tie `AsyncProgram` to `Mode::Sampled`.** Rejected: Pure async is
+- **Color every program `async fn` on the public trait.** Rejected as
+  the authoring API: a sync `run` is a function, not a future the
+  invocation child must poll. The impl may still be `async fn` when
+  it needs `Env<Async>`.
+- **Public `AsyncProgram: Program` supertrait.** Rejected: that is two
+  traits for authors to pick, which is the `Read` / `AsyncRead` split.
+  Shared declaration stays on `Program`; `#[program]` selects the
+  private run supertrait. Rust has no implementation inheritance.
+- **Tie async `run` to `Mode::Sampled`.** Rejected: Pure async is
   real (deterministic caps, lazy `read`). `Mode` is memoization, not
   the `Env` parameter.
 - **`Env<Sync>::read` as on-demand journal fetch.** Rejected: that is
