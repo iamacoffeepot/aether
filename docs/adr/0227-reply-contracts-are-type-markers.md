@@ -1,4 +1,4 @@
-# ADR-0228: Reply Contracts Are Type Markers
+# ADR-0227: Reply Contracts Are Type Markers
 
 - **Status:** Proposed
 - **Date:** 2026-09-20
