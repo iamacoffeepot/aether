@@ -36,12 +36,11 @@ Pure program that awaits a deterministic cap (lazy closure `read` as
 mail, ADR-0224's other deferred item).
 
 That is the right sandbox for a digest→digest function. It cannot
-express a program that needs a capability round-trip — the first
-consumer is HTTP (`aether.http.fetch` → `aether.http.fetch_result`,
-`HttpCapability` in `crates/aether-http`). Putting that I/O in the
-native driver, or splitting one program into a flatten program and a
-parse program with the driver in between, makes the driver a
-per-program specialist and moves program logic out of the bundle.
+express a program that needs a round-trip during `run`. The first
+async need is on-demand artifact fetch (ADR-0224's deferred lazy
+`read`): the blob was not in the injected closure, journal read is
+mail, sync `run` cannot await it. Configurable caps (HTTP, …) are
+follow-on; this ADR does not add a `Caps` type parameter.
 
 Aether already has the mail FSM those programs need. Handlers do not
 block: `wait_reply` was retired ([ADR-0042](0042-synchronous-mail-wait.md),
@@ -71,11 +70,12 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 ## Decision
 
 1. **One `Program` trait. Sync vs async is the `run` form, paired with
-   `Env`.** Rename today's `Env<Pure>` to `Env<Sync>`. Add
-   `Env<Async, Caps>`. Rust cannot overload `fn run` and `async fn run`
-   on the same trait, so the SDK may keep two *private* supertraits for
-   the two signatures. Authors do not implement those. They write one
-   `#[program] impl Program for X` and one of these `run`s:
+   `Env`.** Rename today's `Env<Pure>` to `Env<Sync>`. Add `Env<Async>`
+   with no cap type parameter. Rust cannot overload `fn run` and
+   `async fn run` on the same trait, so the SDK may keep two *private*
+   supertraits for the two signatures. Authors do not implement those.
+   They write one `#[program] impl Program for X` and one of these
+   `run`s:
 
    ```rust
    trait Program {
@@ -84,36 +84,32 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
        const INTENT: &'static str;
        type Input: Storage + Clone + Cites;
        type Result: Storage + Clone + Cites;
-       type Caps = (); // unused on Env<Sync>
    }
 
-   // in the same impl Program for Summarize:
+   // Summarize, full closure already injected:
    fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal>;
 
-   // in the same impl Program for a Sampled HTTP program:
-   async fn run(
-       input: Self::Input,
-       env: &mut Env<Async, Self::Caps>,
-   ) -> Result<Self::Result, Refusal>;
+   // same program, fetch a cited blob that was not injected:
+   async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal>;
    ```
 
    `#[program]` pairs the form with the env: `fn run` takes `Env<Sync>`
-   only; `async fn run` takes `Env<Async, _>` only. The other pairing
-   does not compile. A sync `run` is invoked directly (no future). An
+   only; `async fn run` takes `Env<Async>` only. The other pairing does
+   not compile. A sync `run` is invoked directly (no future). An
    `async fn run` that never awaits still completes on the first poll
    and replies `Invoked` immediately.
 
    This is not OOP inheritance and not a public `AsyncProgram: Program`.
-   Shared declaration lives on `Program` (name, mode, input, result,
-   caps). Behavior is which `run` the impl writes.
+   Shared declaration lives on `Program` (name, mode, input, result).
+   Behavior is which `run` the impl writes.
 
    `Mode::Pure` remains memoizable (same input digest ⇒ same result
    digest) whether `run` is sync or async. `Mode::Sampled` is never
    memoized. `Env<Sync>` has no effect methods, so `Mode::Sampled` with
-   a synchronous `run` is a compile error until a sync sampling surface
-   exists. HTTP and other non-deterministic caps live on `Env<Async>`
-   and require `Mode::Sampled`. Deterministic async caps (when added)
-   are legal on `Mode::Pure`.
+   a synchronous `run` is a compile error until a sampling surface
+   exists. This ADR's `Env<Async>` methods are deterministic (artifact
+   fetch by digest), so they are legal on `Mode::Pure`. Sampled methods
+   (HTTP, …) are not in this slice.
 
 2. **Sync programs do not read. The driver injects their arguments
    before `Invoke`.** Journal `ReadArtifact` / `ReadClosure` is mail
@@ -141,9 +137,8 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    That shape is the existing Pure fixture
    (`crates/aether-test-fixtures-program/src/lib.rs`, `Summarize`).
    `env.injected` is today's `Env<Pure>::read` renamed so it cannot be
-   mistaken for journal fetch. `Env<Async>` may later grow
-   `read(r).await` as on-demand fetch (ADR-0224's deferred lazy
-   closure). Sync `run` never gets that method.
+   mistaken for journal fetch. Sync `run` never gets an awaitable
+   `read`.
 
    A typed `Deps` argument (`fn run(input, deps: SummarizeDeps, env)`)
    is rejected as the framework: each program would need a custom
@@ -204,60 +199,57 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    `Ready`. `Settled { root }` closes the bundle. Payload checks never
    decide that the send is done.
 
-7. **Sanctioned Env methods bound on ADR-0227 markers.** `http().fetch`
-   requires `HttpCapability: Replies<Fetch, Reply = FetchResult>`. This
-   ADR does not introduce those markers.
-
-8. **Programs send only through named Env cap methods.** `Env<Sync>`
-   stages and looks up injected artifacts (decision 2). `Env<Async, Caps>`
-   adds methods the SDK names, not
-   `request::<R, K>()`, not `actor::<T>()`, not `send_to` /
-   `send_to_named`. The first Sampled cap is HTTP:
+7. **`Env<Async>` baseline is injected lookup, stage, and awaitable
+   artifact read.** Same `injected` / `stage_*` as `Env<Sync>`. Plus:
 
    ```rust
-   impl Env<Async, Caps> {
-       fn http(&mut self) -> Http<'_> where Caps: HasHttp;
-   }
-   impl Http<'_> {
-       fn fetch(&mut self, req: &Fetch) -> Mail<FetchResult>
-       where HttpCapability: Replies<Fetch, Reply = FetchResult>;
+   impl Env<Async> {
+       async fn read<K: Storage>(&mut self, r: Ref<K>) -> Result<K, Refusal>;
+       async fn read_text(&mut self, r: Ref<Utf8Text>) -> Result<String, Refusal>;
    }
    ```
 
-   `http()` exists only when `Caps` includes `Http`. The
-   recipient is `HttpCapability`; the program never names a mailbox.
-   Bloomery driver, journal, reactor, and program-invoke kinds are not
-   on this surface.
+   If the digest is already in the injected map, `read` returns it
+   without mail (same as `injected`). If it is missing, the invocation
+   child sends the journal read for that digest (the same
+   `ReadArtifact` / closure-child path the driver uses in ADR-0226
+   step 4), and `.await` waits until that send's tree has settled
+   (decision 4). The reply kind is whatever that journal handler
+   declares (`Replies`, ADR-0227). A miss after settlement is still
+   `Refusal::InputMissing`. No `type Caps`. No `http()`. No
+   `request::<R, K>()`, `actor::<T>()`, or `send_to`.
 
-9. **The generated invocation child is the only actor with a ctx during
-   `run`.** Authors never see it. That child may send only the kinds
-   those Env methods name, and only to those cap mailboxes. `#[fallback]`
-   is inbound (payloads + `Settled`). Same-module WASM can still call
-   `send_mail_p32`; the host refuses invocation-child outbound that is
-   not on the declared cap list. The SDK contract is the sanctioned
-   methods. The substrate contract is that those are the only sends that
-   child is allowed to make.
+   ```rust
+   async fn run(input: SummarizeInput, env: &mut Env<Async>) -> Result<SummarizeResult, Refusal> {
+       let text = env.read_text(input.text).await?;
+       Ok(SummarizeResult { text: env.stage_text(&format!("summary:{text}")) })
+   }
+   ```
+
+8. **The generated invocation child is the only actor with a ctx during
+   `run`.** Authors never see it. For this slice it may send only the
+   journal-read kinds `Env<Async>::read` needs, and only to the journal
+   mailbox. `#[fallback]` is inbound (payloads + `Settled`). Same-module
+   WASM can still call `send_mail_p32`; the host refuses
+   invocation-child outbound that is not that read. Bloomery driver,
+   reactor, program-invoke, and HTTP are not on this surface.
 
 ## Consequences
 
 - ADR-0224's deferred "asynchronous `run`, where `read` becomes an
-  on-demand fetch" is a **Pure + Async** program: `Env<Async>` with
-  deterministic read caps, still `Mode::Pure`. This ADR opens that
-  slot; it does not add those read caps. Sampled HTTP is the other
-  occupant of `Env<Async>`.
+  on-demand fetch" **is** this slice: `Env<Async>::read`, `Mode::Pure`.
+  HTTP and a `Caps` parameter are follow-on.
 - `aether-bloomery-program` keeps one `Program` trait, renames
   `Env<Pure>` to `Env<Sync>` and `read` to `injected`. `Env<Sync>`
-  never fetches. `Env<Async, Caps>` is the await surface. `#[program]`
-  accepts `fn run` + `Env<Sync>` or `async fn run` + `Env<Async, _>`
-  for `Mode::Pure` or `Mode::Sampled`; mixed pairings do not compile.
-  HTTP methods require `Mode::Sampled` plus `Caps` that include `Http`.
-  The bundle generator calls a sync `run` directly, or holds the
-  future for `async fn run`, emits `#[fallback]`, holds the `Invoke`
-  chain, and replies `Invoked` when that run finishes.
-- Reply typing is ADR-0227. This ADR only consumes `Replies` /
-  `Streams` on sanctioned Env methods. `HttpCapability: Replies<Fetch>`
-  still requires `on_fetch` to leave `#[handler::manual]` for
-  `-> Pending<FetchResult>` (not this ADR).
+  never fetches. `Env<Async>` adds `read` / `read_text` that await a
+  journal fetch on a miss. `#[program]` accepts `fn run` + `Env<Sync>`
+  or `async fn run` + `Env<Async>`; mixed pairings do not compile. The
+  bundle generator calls a sync `run` directly, or holds the future
+  for `async fn run`, emits `#[fallback]`, holds the `Invoke` chain,
+  and replies `Invoked` when that run finishes.
+- Reply typing is ADR-0227. `read` consumes `Replies` on the journal
+  read handler. HTTP `on_fetch` / `Pending<FetchResult>` is not this
+  ADR.
 - Guest `subscribe_settlement` (mail of `Settled` to the invocation
   child) is required; it is native-only today (`subscribe_settlement_mail`
   in lifecycle, render, rpc).
@@ -267,8 +259,9 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
 - The driver FIFO (ADR-0226: one `Invoke` in flight per root) is
   unchanged. Overlapping async waits on one digest is follow-on, not
   this ADR.
-- First consumer is a program that calls `env.http().fetch`. A Muse
-  turn is one such program; it is not a new driver path.
+- First consumer is an async `Summarize`: `env.read_text(input.text).await`
+  with a closure that omitted the cited text. Muse / HTTP is not this
+  ADR.
 
 ## Alternatives considered
 
@@ -292,6 +285,13 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   programs.
 - **Restore `wait_reply` inside `run`.** Rejected: ADR-0074. Handlers
   do not park a worker.
+- **Configurable `type Caps` / `Env<Async, Caps>`.** Deferred: this
+  slice has one async surface (`read`). HTTP and other methods can
+  join `Env<Async>` later without a cap type parameter in the first
+  cut.
+- **HTTP `fetch` as the first `Env<Async>` method.** Deferred: it is
+  Sampled, needs `Replies<Fetch>` on a still-manual handler, and is
+  not required to prove await. Artifact `read` is.
 - **Native driver performs the HTTP lap; programs only flatten and
   parse.** Rejected: the driver becomes a per-program I/O specialist.
   The program sends mail. The driver still only `Invoke`s and records.
@@ -300,7 +300,8 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
   suspended state (ADR-0225 decision 2). Settlement-closed await needs
   that live actor. Replay makes `async` pointless.
 - **Generic `env.request::<R, K>()`.** Rejected: `R` can be Bloomery
-  internals. Named Env methods are the allowlist.
+  internals. The allowlist is the methods on `Env<Async>` (this slice:
+  `read` / `read_text`).
 - **Per-kind reply handlers on the invocation child.** Rejected: the
   child cannot enumerate reply kinds, and `Settled` would need its own
   arm anyway. `#[fallback]` plus the pending slot is the check.
