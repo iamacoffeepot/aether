@@ -20,6 +20,7 @@ mod kind_imports;
 mod manifest;
 mod native_expand;
 mod opts;
+mod reply_markers;
 mod wasm_expand;
 
 use proc_macro::TokenStream;
@@ -79,7 +80,8 @@ use wasm_expand::expand_wasm_actor;
 /// block. Reads the `#[handler]` / `#[fallback]` methods inside, then emits:
 ///
 /// - One `impl HandlesKind<K> for X` per handler kind (gates type-driven
-///   sender bounds — ADR-0075).
+///   sender bounds — ADR-0075), plus `Replies<K>` / `Streams<K>` when the
+///   handler's return class declares a reply contract (ADR-0227).
 /// - The dispatch table inherent method `__aether_dispatch` that the
 ///   `export!` shim's `receive_p32` calls.
 /// - The `aether.kinds.inputs` manifest consts (substrate reads them via

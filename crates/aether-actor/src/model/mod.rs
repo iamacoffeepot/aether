@@ -573,6 +573,28 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// obvious.
 pub trait HandlesKind<K: Kind>: Addressable {}
 
+/// Per-handler reply marker: `R: Replies<K, Reply = O>` means actor `R`
+/// accepts `K` and its single-reply handler returns kind `O`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not reply to `{K}` with a single typed kind",
+    label = "this reply bound is not satisfied",
+    note = "the handler may be silent, manual, or reply with a different kind"
+)]
+pub trait Replies<K: Kind>: HandlesKind<K> {
+    type Reply: Kind;
+}
+
+/// Per-handler stream marker: `R: Streams<K, Item = O>` means actor `R`
+/// accepts `K` and its multi-reply handler emits items of kind `O`.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not stream typed replies to `{K}`",
+    label = "this stream bound is not satisfied",
+    note = "the handler may be silent, manual, or reply with a different kind"
+)]
+pub trait Streams<K: Kind>: HandlesKind<K> {
+    type Item: Kind;
+}
+
 /// Per-published-kind marker: `P: Publishes<K>` means actor `P` is a
 /// source of kind `K` — it fans `K` out to whoever subscribed to it.
 /// The send-side mirror of [`HandlesKind`]: that marker says "this

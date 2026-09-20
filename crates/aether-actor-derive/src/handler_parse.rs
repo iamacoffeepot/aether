@@ -456,11 +456,12 @@ pub struct NativeActorHandlerFn {
     pub reply: HandlerReply,
     /// ADR-0112 / ADR-0134: the declared reply class (single / manual /
     /// multi). Selects the ctx view the dispatch arm passes and the
-    /// manifest reply tag. The multi emit kind `K` is not stored — the
-    /// native dispatch arm reads it off the handler's `Multi<K>` ctx
-    /// signature by inference, and the native reply manifest is the
-    /// inventory `HandlerEntry`, not the wasm `ReplyContract` record.
+    /// manifest reply tag.
     pub class: HandlerClass,
+    /// ADR-0134: the multi-class emit kind `K`, read off the `Multi<K>` ctx
+    /// marker. `Some` iff `class == Multi`; the dispatch arm still infers it
+    /// from the signature, while ADR-0227 uses it for `Streams`.
+    pub multi_kind: Option<Type>,
     /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]), replayed
     /// onto its dispatch arm, capability entry, measured-kind id, marker impl,
     /// and inventory submission.
@@ -813,6 +814,7 @@ pub fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
 /// ADR-0109: a `#[handler]`'s reply contract, read off its return type.
 /// The return type is the single source of truth for what a handler
 /// replies — there is no separate `#[handler(reply = X)]` annotation.
+#[derive(Clone)]
 pub enum HandlerReply {
     /// `-> ()` or no return type — fire-and-forget, replies nothing.
     None,

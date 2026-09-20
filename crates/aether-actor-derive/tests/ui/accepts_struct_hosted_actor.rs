@@ -1,9 +1,10 @@
 //! ADR-0123 struct-hosted `#[actor]` happy path: `#[actor(instanced, rt_ok)]`
 //! on a capability *struct* reads the sibling `rt_ok.rs` runtime module off disk,
 //! selects its `impl NativeActor` (gap-1 trait filter), lifts the `NAMESPACE` +
-//! the `on_ping` handler's `Ping` kind, and emits the always-on addressing
-//! markers plus the gap-3 `include_bytes!` rebuild edge — all of which must
-//! compile. The `Ping` kind the harvest lifts must resolve in this bin's scope.
+//! the handler kinds and reply contracts, and emits the always-on addressing
+//! and reply markers plus the gap-3 `include_bytes!` rebuild edge — all of
+//! which must compile. Every kind the harvest lifts must resolve in this bin's
+//! scope.
 
 use aether_actor::{Addressable, ChildOf, One, Root, actor};
 
@@ -21,6 +22,27 @@ struct Ping {
     seq: u32,
 }
 
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.pong_struct_hosted")]
+struct Pong {
+    seq: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.query_struct_hosted")]
+struct Query {
+    count: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
+#[kind(name = "test.row_struct_hosted")]
+struct Row {
+    index: u32,
+}
+
 pub struct Parent;
 
 impl Addressable for Parent {
@@ -34,6 +56,10 @@ pub struct Cap;
 fn main() {
     fn root<T: Root>() {}
     fn child<T: ChildOf<Parent>>() {}
+    fn replies<T: aether_actor::Replies<Ping, Reply = Pong>>() {}
+    fn streams<T: aether_actor::Streams<Query, Item = Row>>() {}
     root::<Cap>();
     child::<Cap>();
+    replies::<Cap>();
+    streams::<Cap>();
 }

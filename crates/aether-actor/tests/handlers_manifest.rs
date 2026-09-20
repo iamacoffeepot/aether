@@ -162,6 +162,13 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
     out
 }
 
+fn assert_replies<T: aether_actor::Replies<Ping, Reply = Pong>>() {}
+
+#[test]
+fn handler_return_type_emits_replies_marker() {
+    assert_replies::<ManifestProbe>();
+}
+
 #[test]
 fn manifest_const_round_trips_to_expected_records() {
     const LEN: usize = ManifestProbe::__AETHER_INPUTS_MANIFEST_LEN;
