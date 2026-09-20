@@ -14,6 +14,7 @@ use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
+use crate::reply_markers::reply_marker_impl;
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
@@ -425,6 +426,18 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 for #self_ty #where_clause {}
         }
     });
+    let reply_marker_impls = handlers.iter().map(|h| {
+        reply_marker_impl(
+            h.class,
+            &h.reply,
+            &h.kind_ty,
+            h.multi_kind.as_ref(),
+            &quote! { #impl_generics },
+            &quote! { #self_ty },
+            &quote! { #where_clause },
+            &h.cfgs,
+        )
+    });
 
     // ADR-0090: emit the `type Config = …` line in the trait impl —
     // either the user's declaration (passed through) or the macro's
@@ -552,6 +565,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #(#child_impls)*
 
         #(#handles_kind_impls)*
+        #(#reply_marker_impls)*
 
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
         // For an un-split component `State = Self`, so `init` returns `Self` and

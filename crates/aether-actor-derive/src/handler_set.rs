@@ -87,6 +87,7 @@ use crate::handler_parse::{
     parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
+use crate::reply_markers::reply_marker_impl;
 
 /// Which actor transport a set's handlers are written against, read off the
 /// ctx parameter's type name the same way `expand_handlers` reads the trait
@@ -448,9 +449,25 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         })
         .collect::<syn::Result<Vec<_>>>()?;
 
-    let markers = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
+    let markers = handlers.iter().zip(&gate_idents).flat_map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
-        wrap_in_gate(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} })
+        let handles_marker =
+            wrap_in_gate(gate.as_ref(), quote! { impl ::aether_actor::HandlesKind<#kind_ty> for $ty {} });
+        let reply = reply_marker_impl(
+            h.class,
+            &h.reply,
+            kind_ty,
+            h.multi_kind.as_ref(),
+            &quote! {},
+            &quote! { $ty },
+            &quote! {},
+            &[],
+        );
+        let mut markers = vec![handles_marker];
+        if !reply.is_empty() {
+            markers.push(wrap_in_gate(gate.as_ref(), reply));
+        }
+        markers
     });
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
@@ -646,8 +663,9 @@ mod tests {
         let expanded = native_set(&quote! {
             #[handler::single]
             #[cfg(feature = "extra")]
-            fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) {
+            fn on_gated(&mut self, _ctx: &mut aether_substrate::actor::native::NativeCtx<'_>, m: Gated) -> Reply {
                 let _ = m;
+                Reply
             }
         });
 
@@ -664,6 +682,10 @@ mod tests {
         assert!(
             expanded.contains("__aether_handler_set_gate_Set_0 ! { impl :: aether_actor :: HandlesKind < Gated >"),
             "the marker is wrapped in the gate invocation: {expanded}"
+        );
+        assert!(
+            expanded.contains("__aether_handler_set_gate_Set_0 ! { impl :: aether_actor :: Replies < Gated >"),
+            "the reply marker is wrapped in the same gate: {expanded}"
         );
         assert!(
             expanded.contains("__aether_handler_set_gate_Set_0 ! { # [cfg (not (target_family = \"wasm\"))]"),

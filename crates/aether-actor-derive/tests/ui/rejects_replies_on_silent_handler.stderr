@@ -1,0 +1,17 @@
+error[E0277]: `SilentProbe` does not reply to `Ping` with a single typed kind
+  --> tests/ui/rejects_replies_on_silent_handler.rs:30:22
+   |
+30 |     assert_replies::<SilentProbe>();
+   |                      ^^^^^^^^^^^ this reply bound is not satisfied
+   |
+help: the trait `Replies<Ping>` is not implemented for `SilentProbe`
+  --> tests/ui/rejects_replies_on_silent_handler.rs:13:1
+   |
+13 | struct SilentProbe;
+   | ^^^^^^^^^^^^^^^^^^
+   = note: the handler may be silent, manual, or reply with a different kind
+note: required by a bound in `assert_replies`
+  --> tests/ui/rejects_replies_on_silent_handler.rs:27:22
+   |
+27 | fn assert_replies<T: Replies<Ping>>() {}
+   |                      ^^^^^^^^^^^^^ required by this bound in `assert_replies`

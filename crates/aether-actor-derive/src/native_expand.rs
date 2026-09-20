@@ -16,6 +16,7 @@ use crate::handler_parse::{
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
+use crate::reply_markers::reply_marker_impl;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NativeEmit {
@@ -190,8 +191,16 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             // error when absent). The native dispatch reads `K`
                             // by inference off the signature, so the extracted
                             // kind itself is not retained here.
-                            multi_kind_or_return_error(class, &reply, &f.sig)?;
-                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
+                            let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
+                            handlers.push(NativeActorHandlerFn {
+                                method: f,
+                                kind_ty,
+                                is_slice,
+                                reply,
+                                class,
+                                multi_kind,
+                                cfgs,
+                            });
                         }
                         HandlerVariant::Task => {
                             // A task handler always dispatches with the `Single`
@@ -368,7 +377,9 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 .iter()
                 .map(|h| HandlerMarker {
                     kind: h.kind_ty.clone(),
-                    reply: h.reply.manifest_kind().cloned(),
+                    reply: h.reply.clone(),
+                    class: h.class,
+                    multi_kind: h.multi_kind.clone(),
                     cfgs: h.cfgs.clone(),
                 })
                 .collect();
@@ -902,14 +913,37 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     })
 }
 
-/// One mail handler's marker payload: its inbound kind type, the manifest reply
-/// kind read off the handler's return type (`None` for `-> ()`), and the
-/// `#[cfg]`s the handler method carries, so a configuration that strips the
-/// method strips its marker impl and inventory row with it.
+/// One mail handler's marker payload: its inbound kind type, reply class and
+/// return kind, optional multi emit kind, and the `#[cfg]`s the handler method
+/// carries, so a configuration that strips the method strips every marker impl
+/// and inventory row with it.
 struct HandlerMarker {
     kind: Type,
-    reply: Option<Type>,
+    reply: HandlerReply,
+    class: HandlerClass,
+    multi_kind: Option<Type>,
     cfgs: Vec<syn::Attribute>,
+}
+
+fn emit_native_reply_markers(
+    self_ty: &Type,
+    generics: &syn::Generics,
+    handler_kinds: &[HandlerMarker],
+) -> TokenStream2 {
+    let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
+    let markers = handler_kinds.iter().map(|marker| {
+        reply_marker_impl(
+            marker.class,
+            &marker.reply,
+            &marker.kind,
+            marker.multi_kind.as_ref(),
+            &quote! { #impl_generics },
+            &quote! { #self_ty },
+            &quote! { #where_clause },
+            &marker.cfgs,
+        )
+    });
+    quote! { #(#markers)* }
 }
 
 /// ADR-0169: invoke the adopted set's generated marker bridge, which pastes one
@@ -1078,6 +1112,7 @@ fn emit_native_identity_markers(
             })
             .collect()
     };
+    let reply_marker_impls = emit_native_reply_markers(self_ty, generics, handler_kinds);
 
     // Every native identity carries a name-inventory submission, keyed by
     // cardinality off the `NAMESPACE` expr and gated `not(wasm)` so it rides the
@@ -1124,7 +1159,7 @@ fn emit_native_identity_markers(
         let submissions = handler_kinds.iter().map(|marker| {
             let kind_ty = &marker.kind;
             let cfgs = &marker.cfgs;
-            let reply_expr = if let Some(reply_ty) = &marker.reply {
+            let reply_expr = if let Some(reply_ty) = marker.reply.manifest_kind() {
                 quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
             } else {
                 quote! { ::core::option::Option::None }
@@ -1150,6 +1185,7 @@ fn emit_native_identity_markers(
         #actor_impl
         #lineage_markers
         #(#handles_kind_impls)*
+        #reply_marker_impls
         #name_entry
         #handler_inventory
     }
@@ -1254,15 +1290,15 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
 /// Where the identity markers spell names, so each harvested import can be
 /// gated to match the place that wants it (see [`ImportDemand`]).
 ///
-/// Three shapes: the always-on frame (the `Addressable` body's `NAMESPACE`
+/// Four shapes: the always-on frame (the `Addressable` body's `NAMESPACE`
 /// expression plus the declared parents, named by the `Addressable` / `ChildOf`
-/// impls), each handler's argument kind under that handler's own `#[cfg]`s, and
-/// each handler's reply kind under those plus `not(wasm)` — the reply is spelled
-/// only by the ADR-0109 `HandlerEntry` inventory row, which no wasm build emits.
+/// impls), each handler's argument kind under that handler's own `#[cfg]`s,
+/// single-reply and multi-item kinds used by the always-on ADR-0227 marker
+/// impls, and each inventory reply kind under the handler cfgs plus `not(wasm)`.
 ///
-/// A generic identity emits no handler inventory at all (the non-generic
-/// `NAMESPACE` const wouldn't resolve in the inventory static), so it wants no
-/// reply imports either.
+/// A generic identity emits no handler inventory (the non-generic `NAMESPACE`
+/// const would not resolve in the inventory static), but its always-on reply
+/// markers still demand the reply or item types they name.
 fn identity_import_demands(
     identity: &HarvestedIdentity,
     opts: &ActorOpts,
@@ -1277,12 +1313,21 @@ fn identity_import_demands(
         let kind = &marker.kind;
         demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #kind } });
 
-        let Some(reply) = marker.reply.as_ref().filter(|_| generics.params.is_empty()) else {
-            continue;
-        };
-        let mut reply_cfgs = cfgs;
-        reply_cfgs.push(quote! { #[cfg(not(target_family = "wasm"))] });
-        demands.push(ImportDemand { cfgs: reply_cfgs, tokens: quote! { #reply } });
+        if marker.class == HandlerClass::Single
+            && let Some(reply) = marker.reply.manifest_kind()
+        {
+            demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #reply } });
+        }
+        if let Some(item) = marker.multi_kind.as_ref() {
+            demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #item } });
+        }
+        if let Some(reply) = marker.reply.manifest_kind()
+            && generics.params.is_empty()
+        {
+            let mut inventory_cfgs = cfgs;
+            inventory_cfgs.push(quote! { #[cfg(not(target_family = "wasm"))] });
+            demands.push(ImportDemand { cfgs: inventory_cfgs, tokens: quote! { #reply } });
+        }
     }
     demands
 }
@@ -1456,16 +1501,25 @@ fn harvest_native_actor_impl(
             continue;
         };
         saw_handler = true;
+        let variant = parse_handler_variant(handler_attr).map_err(remap)?;
         // Task completions get no `HandlesKind` / inventory marker.
-        if matches!(parse_handler_variant(handler_attr).map_err(remap)?, HandlerVariant::Task) {
+        if variant == HandlerVariant::Task {
             continue;
         }
+        let class = parse_handler_class(handler_attr, variant).map_err(remap)?;
         let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
-        let reply = classify_handler_reply(&f.sig.output).manifest_kind().cloned();
+        let handler_reply = classify_handler_reply(&f.sig.output);
+        let multi_kind = multi_kind_or_return_error(class, &handler_reply, &f.sig).map_err(remap)?;
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
         // the markers this identity emits so both halves strip together.
-        handler_kinds.push(HandlerMarker { kind, reply, cfgs: handler_cfgs(&f.attrs) });
+        handler_kinds.push(HandlerMarker {
+            kind,
+            reply: handler_reply,
+            class,
+            multi_kind,
+            cfgs: handler_cfgs(&f.attrs),
+        });
     }
 
     // A `NativeActor` impl with no `#[handler]`, no `#[fallback]`, and no
