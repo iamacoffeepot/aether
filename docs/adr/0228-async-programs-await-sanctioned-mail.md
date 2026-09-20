@@ -121,21 +121,20 @@ sandbox is the rule: `run` never sees `WasmCtx` / `MailSender`.
    the citation graph). It never sends mail. Written:
 
    ```rust
-   fn run(input: MuseTurnInput, env: &mut Env<Sync>) -> Result<MuseTurn, Refusal> {
-       let parent = match input.parent {
-           Some(r) => Some(env.injected(r)?), // map lookup, not a fetch
-           None => None,
-       };
-       // …
+   fn run(input: SummarizeInput, env: &mut Env<Sync>) -> Result<SummarizeResult, Refusal> {
+       let text = env.injected_text(input.text)?; // map lookup, not a fetch
+       Ok(SummarizeResult { text: env.stage_text(&format!("summary:{text}")) })
    }
    ```
 
+   That shape is the existing Pure fixture
+   (`crates/aether-test-fixtures-program/src/lib.rs`, `Summarize`).
    `env.injected` is today's `Env<Pure>::read` renamed so it cannot be
    mistaken for journal fetch. `Env<Async>` may later grow
    `read(r).await` as on-demand fetch (ADR-0224's deferred lazy
    closure). Sync `run` never gets that method.
 
-   A typed `Deps` argument (`fn run(input, deps: MuseTurnDeps, env)`)
+   A typed `Deps` argument (`fn run(input, deps: SummarizeDeps, env)`)
    is rejected as the framework: each program would need a custom
    injector. `Cites` + `ReadClosure` is one injector for every
    program.
