@@ -14,7 +14,7 @@ use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
-use crate::reply_markers::reply_marker_impl;
+use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
@@ -427,15 +427,20 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         }
     });
     let reply_marker_impls = handlers.iter().map(|h| {
+        let impl_generics_ts = quote! { #impl_generics };
+        let self_ty_ts = quote! { #self_ty };
+        let where_clause_ts = quote! { #where_clause };
         reply_marker_impl(
             h.class,
             &h.reply,
             &h.kind_ty,
             h.multi_kind.as_ref(),
-            &quote! { #impl_generics },
-            &quote! { #self_ty },
-            &quote! { #where_clause },
-            &h.cfgs,
+            &ReplyMarkerSite {
+                impl_generics: &impl_generics_ts,
+                self_ty: &self_ty_ts,
+                where_clause: &where_clause_ts,
+                cfgs: &h.cfgs,
+            },
         )
     });
 

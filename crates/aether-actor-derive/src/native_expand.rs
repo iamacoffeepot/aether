@@ -16,7 +16,7 @@ use crate::handler_parse::{
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
-use crate::reply_markers::reply_marker_impl;
+use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NativeEmit {
@@ -932,15 +932,20 @@ fn emit_native_reply_markers(
 ) -> TokenStream2 {
     let (impl_generics, _ty_generics, where_clause) = generics.split_for_impl();
     let markers = handler_kinds.iter().map(|marker| {
+        let impl_generics_ts = quote! { #impl_generics };
+        let self_ty_ts = quote! { #self_ty };
+        let where_clause_ts = quote! { #where_clause };
         reply_marker_impl(
             marker.class,
             &marker.reply,
             &marker.kind,
             marker.multi_kind.as_ref(),
-            &quote! { #impl_generics },
-            &quote! { #self_ty },
-            &quote! { #where_clause },
-            &marker.cfgs,
+            &ReplyMarkerSite {
+                impl_generics: &impl_generics_ts,
+                self_ty: &self_ty_ts,
+                where_clause: &where_clause_ts,
+                cfgs: &marker.cfgs,
+            },
         )
     });
     quote! { #(#markers)* }

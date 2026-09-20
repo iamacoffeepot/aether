@@ -4,22 +4,28 @@ use syn::{Attribute, Type};
 
 use crate::handler_parse::{HandlerClass, HandlerReply};
 
+/// The `impl` header a reply marker is pasted onto: generics, self type,
+/// where-clause, and the handler's `#[cfg]`s.
+pub struct ReplyMarkerSite<'a> {
+    pub impl_generics: &'a TokenStream2,
+    pub self_ty: &'a TokenStream2,
+    pub where_clause: &'a TokenStream2,
+    pub cfgs: &'a [Attribute],
+}
+
 /// Emit the reply-contract marker that follows from one handler signature.
 ///
 /// `HandlesKind<K>` is emitted separately at every call site. This helper keeps
 /// the companion marker derived from the same parsed class / return shape on
 /// the wasm, native identity, and handler-set paths.
-#[allow(clippy::too_many_arguments)]
 pub fn reply_marker_impl(
     class: HandlerClass,
     reply: &HandlerReply,
     kind_ty: &Type,
     multi_kind: Option<&Type>,
-    impl_generics: &TokenStream2,
-    self_ty: &TokenStream2,
-    where_clause: &TokenStream2,
-    cfgs: &[Attribute],
+    site: &ReplyMarkerSite<'_>,
 ) -> TokenStream2 {
+    let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
     match (class, reply) {
         (HandlerClass::Single, HandlerReply::Sync(reply_ty) | HandlerReply::Deferred(reply_ty)) => quote! {
             #(#cfgs)*
