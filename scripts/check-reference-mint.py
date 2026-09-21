@@ -22,6 +22,7 @@ ALLOWED_PATHS = (
     "crates/aether-actor/src/reference/mint.rs",
     "crates/aether-actor/src/reference/mod.rs",
     "crates/aether-actor/src/lib.rs",
+    "crates/aether-substrate/src/mail/registry/mailbox/proven.rs",
 )
 
 MINT_RE = re.compile(r"\b__mint_(actor_ref|recipient|any_actor_ref)\b")
