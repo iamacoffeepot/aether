@@ -39,6 +39,7 @@ pub mod local;
 pub mod log;
 pub mod mail;
 pub mod model;
+pub mod reference;
 pub mod request_context;
 pub mod trace;
 pub mod wasm;
@@ -52,6 +53,9 @@ pub use model::{
     HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publishes, Replies,
     Resolve, Root, Singleton, Streams, Subname, root_mailbox, validate_namespace_segment,
 };
+#[doc(hidden)]
+pub use reference::{__mint_actor_ref, __mint_any_actor_ref, __mint_recipient};
+pub use reference::{ActorRef, AnyActorRef, Recipient, Tombstone};
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
 };
