@@ -1,5 +1,5 @@
-//! Segment grammar shared by [`Namespace`](crate::Namespace) and
-//! [`LoadName`](crate::LoadName): the rules of
+//! Segment grammar shared by [`crate::Namespace`] and
+//! [`crate::LoadName`]: the rules of
 //! `aether_actor::model::validate_namespace_segment` as a byte loop usable
 //! in `const` context, so an invalid `Namespace` literal fails to compile
 //! while `LoadName` enforces the same rules at run time.
@@ -27,8 +27,8 @@ pub enum SegmentFault {
 
 impl SegmentFault {
     /// Human-readable description of the violated rule. Used as the
-    /// [`Namespace`](crate::Namespace) `const`-`panic` message and under
-    /// [`LoadNameError`](crate::LoadNameError)'s `Display`.
+    /// [`crate::Namespace`] `const`-`panic` message and under
+    /// [`crate::LoadNameError`]'s `Display`.
     #[must_use]
     pub const fn message(self) -> &'static str {
         match self {

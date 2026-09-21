@@ -1,24 +1,13 @@
-//! ADR-0230 proven actor references: the vocabulary that says "this actor was
-//! registered" — [`Namespace`](crate::Namespace), [`LoadName`](crate::LoadName),
-//! [`Address`](crate::Address), [`ActorRef`](crate::ActorRef),
-//! [`Recipient`](crate::Recipient), [`AnyActorRef`](crate::AnyActorRef), and
-//! [`Tombstone`](crate::Tombstone). One file per type, re-exported from the
-//! crate root; the segment grammar and the shared id codec stay private.
+//! ADR-0230 exportable reference vocabulary: [`Namespace`], [`LoadName`], and
+//! [`Address`]. These are the forms that may cross a boundary, because none
+//! of them claims that an actor exists. The proven reference types are
+//! memory-only and live beside `Addressable` in `aether-actor`.
 
-mod actor_ref;
 mod address;
-mod any_actor_ref;
-pub(crate) mod id_codec;
 mod load_name;
 mod namespace;
-mod recipient;
 pub(crate) mod segment;
-mod tombstone;
 
-pub use actor_ref::ActorRef;
-pub use address::Address;
-pub use any_actor_ref::AnyActorRef;
+pub use address::{Address, AddressForm};
 pub use load_name::{LoadName, LoadNameError};
 pub use namespace::Namespace;
-pub use recipient::Recipient;
-pub use tombstone::Tombstone;

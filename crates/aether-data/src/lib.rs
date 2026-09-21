@@ -63,7 +63,7 @@ pub use name_inventory::{
     ChildEntry, NameEntry, ParamKind, RootEntry, TemplateEntry, build_static_reverse_map, child_entries, fill_template,
     id_for_name, name_entries, root_entries, template_entries,
 };
-pub use reference::{ActorRef, Address, AnyActorRef, LoadName, LoadNameError, Namespace, Recipient, Tombstone};
+pub use reference::{Address, AddressForm, LoadName, LoadNameError, Namespace};
 pub use schema::*;
 pub use storage::{
     Citation, Citations, Cites, Invariant, Storage, StorageData, StorageError, StorageLeaves, UnknownField,

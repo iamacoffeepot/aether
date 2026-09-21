@@ -1,4 +1,4 @@
-//! [`Namespace`](crate::Namespace): a compile-time-validated actor type name.
+//! [`crate::Namespace`]: a compile-time-validated actor type name.
 
 use super::load_name::LoadName;
 use super::segment::check_segment;

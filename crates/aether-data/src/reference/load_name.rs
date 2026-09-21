@@ -1,4 +1,4 @@
-//! [`LoadName`](crate::LoadName): a validated load-time discriminator.
+//! [`crate::LoadName`]: a validated load-time discriminator.
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -15,7 +15,7 @@ use crate::schema::{LabelNode, SchemaType};
 use crate::wire::{Error as WireError, WireDecode, WireEncode};
 
 /// A caller-supplied load name validated against the segment grammar. Unlike
-/// [`Namespace`](crate::Namespace) this is display data the lineage fold has
+/// [`crate::Namespace`] this is display data the lineage fold has
 /// to read, so the text stays reachable through [`as_str`](Self::as_str);
 /// unlike a raw string it is valid by construction on every path in,
 /// including wire decode and `Deserialize`.
@@ -38,7 +38,7 @@ impl LoadName {
     }
 
     /// The validated text. The lineage fold consumes this when an instanced
-    /// node's [`ActorId`](crate::ActorId) folds the discriminator in.
+    /// node's [`crate::ActorId`] folds the discriminator in.
     #[must_use]
     pub const fn as_str(&self) -> &str {
         &self.0
