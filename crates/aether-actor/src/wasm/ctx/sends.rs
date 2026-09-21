@@ -141,6 +141,14 @@ impl Sends<'_> {
         (answer != MailboxId::NONE.0 && answer == candidate.0).then(|| ActorRef::new(candidate))
     }
 
+    /// Send through a proven [`ActorRef`], identical to [`WasmCtx::to`]: a
+    /// helper handed a `Sends` sends through the same reference its caller
+    /// would have sent through.
+    #[must_use]
+    pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
+        WasmActorMailbox::__new(target.id().0, self.mailbox, self.inline)
+    }
+
     /// Send `payload` through a stored [`Mailbox<K>`] addressing token,
     /// inheriting the handler's causal chain. Identical to [`WasmCtx::send`].
     pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {

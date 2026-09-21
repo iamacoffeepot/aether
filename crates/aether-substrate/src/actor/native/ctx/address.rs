@@ -59,11 +59,20 @@ macro_rules! native_sender_methods {
         /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
         /// that tracks its children's ids addresses them through this rather
         /// than re-resolving by name. Captures the in-flight lineage like
-        /// [`Self::actor`].
+        /// [`Self::actor`]. For a proven [`ActorRef`], use [`Self::to`] instead.
         #[must_use]
         pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(id.0, self.binding, parent, root)
+        }
+
+        /// Send through a proven [`ActorRef`]: returns a typed [`NativeActorMailbox`]
+        /// addressing the reference's id. Captures the in-flight lineage like
+        /// [`Self::actor`].
+        #[must_use]
+        pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> NativeActorMailbox<'_, R> {
+            let (parent, root) = self.outbound_lineage();
+            NativeActorMailbox::__new_in_flight(target.id().0, self.binding, parent, root)
         }
 
         /// Resolve `address` to a proven [`ActorRef`]: `Some` only when the

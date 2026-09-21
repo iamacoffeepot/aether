@@ -3,7 +3,8 @@
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{MailSender, Manual};
-use crate::model::{Addressable, Embedded};
+use crate::model::{Addressable, Embedded, HandlesKind};
+use crate::reference::ActorRef;
 use crate::wasm::inline::drain_cluster_queue;
 use aether_data::mailbox_id_from_path;
 use alloc::string::String;
@@ -15,6 +16,8 @@ impl Addressable for SendsPeer {
     const NAMESPACE: &'static str = "test.wasm.sends_peer";
     type Resolver = Embedded;
 }
+
+impl HandlesKind<()> for SendsPeer {}
 
 /// The child's rendered lineage address — a depth-2 path, so the two folds
 /// disagree on it: `mailbox_id_from_path` walks the `/` into two nodes the way
@@ -92,4 +95,37 @@ fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
     let through_view = ctx.sends().actor::<SendsPeer>().mailbox_id();
     assert_ne!(parent, current, "the fixture's parent and current mailboxes differ, so the scope choice is visible");
     assert_eq!(through_view, through_ctx, "the view resolves the parent-scoped peer the ctx resolves");
+}
+
+/// Tripwire: `to` on the ctx and on its `sends()` view both send through a
+/// proven reference — each routes to the reference's id stamped with the
+/// sending actor's own id. The two `u64` arguments of
+/// `WasmActorMailbox::__new` are the recipient and the sender in that order,
+/// so a transposition routes to the sender's own id (no dispatch here) and
+/// stamps the target as the source; either half fails this test. Synthetic
+/// ids keep the fixture off the name fold, so the test needs no suppression.
+#[test]
+fn to_sends_through_a_proven_reference_on_ctx_and_view() {
+    use aether_data::MailboxId;
+
+    let registry = Registry::new();
+    let root = MailboxId(0x7300);
+    registry.set_self_id(root.0);
+
+    let target = MailboxId(0x7301);
+    let probe = recording_target();
+    registry.insert_child(target, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
+
+    let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
+    let reference = ActorRef::<SendsPeer>::new(target);
+
+    ctx.to(&reference).send(&());
+    drain_to_members(&registry, "the ctx to send");
+    assert_eq!(probe.dispatches.get(), 1, "the ctx's to send reaches the reference's id");
+    assert_eq!(probe.source.get(), Some(root), "and stamps the sending actor as the source");
+
+    ctx.sends().to(&reference).send(&());
+    drain_to_members(&registry, "the view to send");
+    assert_eq!(probe.dispatches.get(), 2, "the view's to send reaches the same id");
+    assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
 }
