@@ -12,7 +12,7 @@ use aether_bloomery_kinds::{
 };
 
 use crate::declare::{AsyncProgram, SyncProgram};
-use crate::env::{Async, Env, PendingArtifact, Sync};
+use crate::env::{Async, EnvOwner, PendingArtifact};
 use crate::kinds::Detail;
 
 /// Journal mailbox the invocation child sends `ReadArtifact` to.
@@ -32,7 +32,8 @@ fn run_sync<P: SyncProgram>(
     input: Digest,
     closure: Vec<ClosureArtifact>,
 ) -> Result<(Digest, Vec<EncodedArtifact>), Refusal> {
-    let mut env = Env::<Sync>::from_closure(closure);
+    let owner = EnvOwner::from_closure(closure);
+    let mut env = owner.env();
     let input = env.injected(Ref::<P::Input>::from_digest(input))?;
     let result = P::run(input, &mut env)?;
     let result = env.stage_encoded(&result)?;
@@ -62,7 +63,7 @@ type RunFuture = Pin<Box<dyn Future<Output = Result<(Digest, Vec<EncodedArtifact
 
 /// Live async `run` plus the environment it reads and stages through.
 pub struct AsyncSession {
-    env: Env<Async>,
+    owner: EnvOwner,
     seq: u64,
     future: RunFuture,
 }
@@ -76,7 +77,9 @@ impl AsyncSession {
                 PollResult::Finished(Invoked::Completed { seq: self.seq, result, staged })
             }
             Poll::Ready(Err(refusal)) => PollResult::Finished(Invoked::Refused { seq: self.seq, refusal }),
-            Poll::Pending => self.env.take_pending().map_or(PollResult::Waiting, PollResult::NeedArtifact),
+            Poll::Pending => {
+                self.owner.env::<Async>().take_pending().map_or(PollResult::Waiting, PollResult::NeedArtifact)
+            }
         }
     }
 
@@ -86,18 +89,18 @@ impl AsyncSession {
             ReadArtifactResult::Found { digest, kind, .. }
                 if *digest == expected.digest && *kind != expected.expected =>
             {
-                self.env.fail(expected.digest, Refusal::InputDecode);
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
             ReadArtifactResult::Found { digest, .. } if *digest != expected.digest => {
-                self.env.fail(expected.digest, Refusal::InputDecode);
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
             ReadArtifactResult::Missing { digest } if *digest != expected.digest => {
-                self.env.fail(expected.digest, Refusal::InputDecode);
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
             ReadArtifactResult::Err { digest, .. } if *digest != expected.digest => {
-                self.env.fail(expected.digest, Refusal::InputDecode);
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
             }
-            _ => self.env.fulfill(result),
+            _ => self.owner.env::<Async>().fulfill(result),
         }
     }
 }
@@ -106,18 +109,18 @@ impl AsyncSession {
 #[must_use]
 pub fn start_async<P: AsyncProgram>(invoke: Invoke) -> Started {
     let (seq, _, input, closure) = invoke.into_parts();
-    let env = Env::<Async>::from_closure(closure);
+    let owner = EnvOwner::from_closure(closure);
+    let env = owner.env::<Async>();
     let input = match env.injected(Ref::<P::Input>::from_digest(input)) {
         Ok(input) => input,
         Err(refusal) => return Started::Finished(Invoked::Refused { seq, refusal }),
     };
-    let run_env = env.clone();
     let mut session = AsyncSession {
-        env,
+        owner,
         seq,
         future: Box::pin(async move {
-            let result = P::run(input, run_env.clone()).await?;
-            let mut staged_env = run_env;
+            let result = P::run(input, env).await?;
+            let mut staged_env = env;
             let result = staged_env.stage_encoded(&result)?;
             refuse_orphans(&staged_env.staged(), result.digest())?;
             Ok((result.digest(), staged_env.into_staged()))

@@ -1,13 +1,13 @@
 //! Injected-data sandbox a program runs against.
 
+use alloc::boxed::Box;
 use alloc::collections::BTreeMap;
 use alloc::format;
-use alloc::rc::Rc;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
 use core::future::Future;
-use core::marker::{PhantomData, Sync as MarkerSync};
+use core::marker::PhantomData;
 use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
@@ -20,9 +20,11 @@ use aether_data::{Cites, Kind, KindId, Storage};
 use crate::kinds::Detail;
 
 /// Injected lookup and staging only: a miss is [`Refusal::InputMissing`], never a journal fetch.
+#[derive(Clone, Copy)]
 pub struct Sync;
 
 /// Same injected map and staging as [`Sync`], plus awaitable journal `read` on a miss.
+#[derive(Clone, Copy)]
 pub struct Async;
 
 struct Inner {
@@ -41,50 +43,48 @@ pub struct PendingArtifact {
     pub expected: KindId,
 }
 
-/// Shared injected map. Guest actors are `Send` but dispatch is single-threaded.
-struct Shared(Rc<RefCell<Inner>>);
-
-// SAFETY: `Env` is used from one wasm actor (or a native test thread). The
-// `Addressable: Send` bound requires this wrapper; the Rc is never shared
-// across threads.
-#[allow(clippy::non_send_fields_in_send_ty)]
-unsafe impl Send for Shared {}
-// SAFETY: same as `Send`: guest dispatch is single-threaded.
-unsafe impl MarkerSync for Shared {}
-
-impl Clone for Shared {
-    fn clone(&self) -> Self {
-        Self(Rc::clone(&self.0))
-    }
+/// Owns the injected map for the life of one `run`. [`Env`] handles clone the pointer.
+pub struct EnvOwner {
+    inner: Box<RefCell<Inner>>,
 }
 
-/// Sandbox parameterized by mode. Built from an [`aether_bloomery_kinds::Invoke`] closure.
-pub struct Env<M> {
-    inner: Shared,
-    _mode: PhantomData<M>,
-}
-
-impl<M> Clone for Env<M> {
-    fn clone(&self) -> Self {
-        Self { inner: self.inner.clone(), _mode: PhantomData }
-    }
-}
-
-impl<M> Env<M> {
+impl EnvOwner {
     pub(crate) fn from_closure(closure: Vec<ClosureArtifact>) -> Self {
         let mut artifacts = BTreeMap::new();
         for artifact in closure {
             artifacts.insert(artifact.digest(), artifact);
         }
         Self {
-            inner: Shared(Rc::new(RefCell::new(Inner {
+            inner: Box::new(RefCell::new(Inner {
                 closure: artifacts,
                 staged: Vec::new(),
                 pending: None,
                 terminal: BTreeMap::new(),
-            }))),
-            _mode: PhantomData,
+            })),
         }
+    }
+
+    pub(crate) fn env<M>(&self) -> Env<M> {
+        let ptr: *const RefCell<Inner> = &raw const *self.inner;
+        Env { inner: ptr as usize, _mode: PhantomData }
+    }
+}
+
+/// Sandbox parameterized by mode. Built from an [`aether_bloomery_kinds::Invoke`] closure.
+#[derive(Clone, Copy)]
+pub struct Env<M> {
+    inner: usize,
+    _mode: PhantomData<M>,
+}
+
+impl<M> Env<M> {
+    fn cell(&self) -> &RefCell<Inner> {
+        // SAFETY: `inner` is the `RefCell` inside an [`EnvOwner`] that outlives
+        // every handle cloned from it — the local in a sync `run`, or the
+        // `AsyncSession` that owns both the box and the boxed future.
+        // SAFETY: `inner` is the address of the `RefCell` inside an [`EnvOwner`]
+        // that outlives every handle cloned from it.
+        unsafe { &*(self.inner as *const RefCell<Inner>) }
     }
 
     /// Load `r` from the injected closure.
@@ -104,7 +104,7 @@ impl<M> Env<M> {
     /// [`Refusal::InputMissing`] when the digest is absent (or a journal fetch reported missing).
     /// [`Refusal::InputDecode`] when the kind prefix differs or the payload is not UTF-8.
     pub fn injected_text(&self, r: Ref<Utf8Text>) -> Result<String, Refusal> {
-        let inner = self.inner.0.borrow();
+        let inner = self.cell().borrow();
         if let Some(refusal) = inner.terminal.get(&r.digest()) {
             return Err(refusal.clone());
         }
@@ -138,15 +138,15 @@ impl<M> Env<M> {
     }
 
     pub(crate) fn staged(&self) -> Vec<EncodedArtifact> {
-        self.inner.0.borrow().staged.clone()
+        self.cell().borrow().staged.clone()
     }
 
     pub(crate) fn into_staged(self) -> Vec<EncodedArtifact> {
-        self.inner.0.borrow().staged.clone()
+        self.cell().borrow().staged.clone()
     }
 
     fn decode_injected<K: Storage>(&self, digest: Digest) -> Result<K, Refusal> {
-        let inner = self.inner.0.borrow();
+        let inner = self.cell().borrow();
         if let Some(refusal) = inner.terminal.get(&digest) {
             return Err(refusal.clone());
         }
@@ -159,7 +159,7 @@ impl<M> Env<M> {
 
     fn record(&mut self, artifact: EncodedArtifact) -> Digest {
         let digest = artifact.digest();
-        let mut inner = self.inner.0.borrow_mut();
+        let mut inner = self.cell().borrow_mut();
         if inner.staged.iter().all(|existing| existing.digest() != digest) {
             inner.staged.push(artifact);
         }
@@ -176,7 +176,7 @@ impl Env<Async> {
     /// [`Refusal::InputDecode`] when the kind prefix differs, the payload does not decode, or the
     /// journal reports a backend failure.
     pub async fn read<K: Storage>(&mut self, r: Ref<K>) -> Result<K, Refusal> {
-        Read { env: self.clone(), digest: r.digest(), requested: false, _kind: PhantomData }.await
+        Read { env: *self, digest: r.digest(), requested: false, _kind: PhantomData }.await
     }
 
     /// Load UTF-8 text `r` from the injected map, or fetch it from the journal on a miss.
@@ -187,23 +187,23 @@ impl Env<Async> {
     /// [`Refusal::InputDecode`] when the kind prefix differs, the payload is not UTF-8, or the
     /// journal reports a backend failure.
     pub async fn read_text(&mut self, r: Ref<Utf8Text>) -> Result<String, Refusal> {
-        ReadText { env: self.clone(), digest: r.digest(), requested: false }.await
+        ReadText { env: *self, digest: r.digest(), requested: false }.await
     }
 
-    pub(crate) fn take_pending(&self) -> Option<PendingArtifact> {
-        self.inner.0.borrow_mut().pending.take()
+    pub(crate) fn take_pending(self) -> Option<PendingArtifact> {
+        self.cell().borrow_mut().pending.take()
     }
 
-    pub(crate) fn fail(&self, digest: Digest, refusal: Refusal) {
-        self.inner.0.borrow_mut().terminal.insert(digest, refusal);
+    pub(crate) fn fail(self, digest: Digest, refusal: Refusal) {
+        self.cell().borrow_mut().terminal.insert(digest, refusal);
     }
 
-    fn terminal(&self, digest: Digest) -> bool {
-        self.inner.0.borrow().terminal.contains_key(&digest)
+    fn terminal(self, digest: Digest) -> bool {
+        self.cell().borrow().terminal.contains_key(&digest)
     }
 
-    pub(crate) fn fulfill(&self, result: ReadArtifactResult) {
-        let mut inner = self.inner.0.borrow_mut();
+    pub(crate) fn fulfill(self, result: ReadArtifactResult) {
+        let mut inner = self.cell().borrow_mut();
         match result {
             ReadArtifactResult::Found { digest, kind, bytes } => {
                 inner.terminal.remove(&digest);
@@ -218,8 +218,8 @@ impl Env<Async> {
         }
     }
 
-    fn request(&self, digest: Digest, expected: KindId) {
-        self.inner.0.borrow_mut().pending = Some(PendingArtifact { digest, expected });
+    fn request(self, digest: Digest, expected: KindId) {
+        self.cell().borrow_mut().pending = Some(PendingArtifact { digest, expected });
     }
 }
 
