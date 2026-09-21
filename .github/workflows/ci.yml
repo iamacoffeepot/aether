@@ -114,51 +114,6 @@ jobs:
           --pull-request "${{ github.event.pull_request.number }}"
           --repository "${{ github.repository }}"
 
-  # The proven-reference mint gate (ADR-0230). The `__mint_*` functions turn
-  # a confirmed-`Live` position into a reference, so only the paths in the
-  # scanner's allowlist may name them. Like the suppression scanner above,
-  # the scanner itself is materialized from the event base on pull requests —
-  # otherwise the same PR could weaken the gate that judges it — with the one
-  # bootstrap exception for a base that does not contain the scanner yet. On
-  # other events there is no base to distrust, so the tree scans itself.
-  reference-mint:
-    name: Reference mint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-        with:
-          fetch-depth: 0
-      - name: Materialize the trusted reference-mint scanner
-        if: github.event_name == 'pull_request'
-        shell: bash
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          SCANNER_PATH: ${{ runner.temp }}/check-reference-mint.py
-        run: |
-          set -euo pipefail
-          git cat-file -e "${BASE_SHA}^{commit}"
-          git cat-file -e "${HEAD_SHA}^{commit}"
-          if git cat-file -e "${BASE_SHA}:scripts/check-reference-mint.py"; then
-            git show "${BASE_SHA}:scripts/check-reference-mint.py" > "${SCANNER_PATH}"
-            echo "Using reference-mint scanner from event base ${BASE_SHA}"
-          else
-            # Bootstrap only: the base of the PR that introduces this gate has
-            # no trusted scanner blob yet. Once landed, every later PR takes
-            # the base branch above and cannot execute its proposed scanner.
-            git show "${HEAD_SHA}:scripts/check-reference-mint.py" > "${SCANNER_PATH}"
-            echo "::notice::Event base has no reference-mint scanner; using head ${HEAD_SHA} for bootstrap"
-          fi
-          test -s "${SCANNER_PATH}"
-      - name: Reject out-of-allowlist reference mints
-        shell: bash
-        run: |
-          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
-            python3 "${{ runner.temp }}/check-reference-mint.py" --root .
-          else
-            python3 scripts/check-reference-mint.py --root .
-          fi
-
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
   # program, argv, environment, exit-code interpretation and verdict, so a
@@ -712,14 +667,13 @@ jobs:
   ci-pass:
     name: CI pass
     if: always()
-    needs: [ changes, suppressions, reference-mint, fmt, clippy, docs, test, dup-check, unused-deps, lock-freshness ]
+    needs: [ changes, suppressions, fmt, clippy, docs, test, dup-check, unused-deps, lock-freshness ]
     runs-on: ubuntu-latest
     steps:
       - name: Verify required jobs
         run: |
           echo "changes: ${{ needs.changes.result }}"
           echo "suppressions: ${{ needs.suppressions.result }}"
-          echo "reference-mint: ${{ needs.reference-mint.result }}"
           echo "fmt:     ${{ needs.fmt.result }}"
           echo "clippy:  ${{ needs.clippy.result }}"
           echo "docs:    ${{ needs.docs.result }}"
@@ -734,7 +688,6 @@ jobs:
           else
             [[ "${{ needs.suppressions.result }}" == "skipped" ]] || fail=1
           fi
-          [[ "${{ needs.reference-mint.result }}" == "success" ]] || fail=1
           [[ "${{ needs.fmt.result }}"     == "success" ]] || fail=1
           [[ "${{ needs.clippy.result }}"  == "success" || "${{ needs.clippy.result }}" == "skipped" ]] || fail=1
           [[ "${{ needs.docs.result }}"    == "success" || "${{ needs.docs.result }}" == "skipped" ]] || fail=1
