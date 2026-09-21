@@ -14,12 +14,14 @@ pub fn emit_program_export_desc(
     intent: &LitStr,
     input: &Type,
     result: &Type,
+    async_run: bool,
 ) -> TokenStream2 {
     let Some(ident) = type_last_ident(self_ty) else {
         return quote! {};
     };
     let unique = unique_macro_ident(ident);
     let discard = format_ident!("{unique}_discard");
+    let async_run = syn::LitBool::new(async_run, proc_macro2::Span::call_site());
     quote! {
         #[doc(hidden)]
         #[macro_export]
@@ -36,6 +38,7 @@ pub fn emit_program_export_desc(
                                 mode: Pure,
                                 input: #input,
                                 result: #result,
+                                async_run: #async_run,
                             }
                         ]
                     }

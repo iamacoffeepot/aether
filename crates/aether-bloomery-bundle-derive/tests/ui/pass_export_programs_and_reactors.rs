@@ -2,7 +2,7 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
 use aether_bloomery_kinds::{Head, HeadMoved, Mode, Refusal, SetHead, Tree};
-use aether_bloomery_program::{Env, Program, Pure, program};
+use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_reactor::{Reactor, reactor};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
@@ -43,7 +43,7 @@ impl Program for One {
     type Input = OneIn;
     type Result = OneOut;
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(OneOut { n: input.n })
     }
 }

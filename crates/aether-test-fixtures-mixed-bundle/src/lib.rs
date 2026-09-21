@@ -3,7 +3,7 @@
 
 use aether_actor::export;
 use aether_bloomery_kinds::{CallProgram, HeadMoved, Mode, ProgramName, Ref, Refusal, Utf8Text};
-use aether_bloomery_program::{Env, Program, Pure, program};
+use aether_bloomery_program::{Env, Program, Sync, program};
 use aether_bloomery_reactor::{Guard, NoViews, reactor};
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
@@ -23,8 +23,8 @@ impl Program for Summarize {
     type Input = SummarizeInput;
     type Result = MixedSummary;
 
-    fn run(input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
-        let text = env.read_text(input.text)?;
+    fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+        let text = env.injected_text(input.text)?;
         Ok(MixedSummary { text: env.stage_text(&format!("summary:{text}")) })
     }
 }

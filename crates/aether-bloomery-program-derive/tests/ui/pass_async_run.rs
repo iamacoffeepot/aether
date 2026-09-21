@@ -1,5 +1,5 @@
 use aether_bloomery_kinds::{Mode, Refusal};
-use aether_bloomery_program::{Env, Program, Pure, program};
+use aether_bloomery_program::{Async, Env, Program, program};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.async.input")]
@@ -19,12 +19,12 @@ struct AsyncProg;
 impl Program for AsyncProg {
     const NAME: &'static str = "test.program.async";
     const MODE: Mode = Mode::Pure;
-    const INTENT: &'static str = "Fails because run is async.";
+    const INTENT: &'static str = "Passes because async run takes Env<Async>.";
     type Input = In;
     type Result = Out;
 
-    async fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
-        Ok(input)
+    async fn run(input: Self::Input, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+        Ok(Out { n: input.n })
     }
 }
 

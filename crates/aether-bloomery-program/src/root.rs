@@ -10,22 +10,34 @@ use alloc::collections::BTreeMap;
 use aether_bloomery_kinds::{Invoke, Invoked};
 use aether_data::MailboxId;
 
-use crate::declare::Program;
-use crate::invoke::invoke;
+use crate::declare::{AsyncProgram, SyncProgram};
+use crate::invoke::{Started, invoke, start_async};
 use crate::kinds::Detail;
 
-/// One program of a bundle: its `NAME` and its monomorphized `invoke::<P>`.
+/// One program of a bundle: its `NAME` and a sync invoke or async start.
 #[derive(Clone, Copy)]
 pub struct ProgramEntry {
     name: &'static str,
-    run: fn(Invoke) -> Invoked,
+    run: ProgramRun,
+}
+
+#[derive(Clone, Copy)]
+enum ProgramRun {
+    Sync(fn(Invoke) -> Invoked),
+    Async(fn(Invoke) -> Started),
 }
 
 impl ProgramEntry {
-    /// The entry for `P`: `P::NAME` plus `invoke::<P>`.
+    /// The entry for sync `P`: `P::NAME` plus `invoke::<P>`.
     #[must_use]
-    pub const fn of<P: Program>() -> Self {
-        Self { name: P::NAME, run: invoke::<P> }
+    pub const fn of<P: SyncProgram>() -> Self {
+        Self { name: P::NAME, run: ProgramRun::Sync(invoke::<P>) }
+    }
+
+    /// The entry for async `P`: `P::NAME` plus `start_async::<P>`.
+    #[must_use]
+    pub const fn of_async<P: AsyncProgram>() -> Self {
+        Self { name: P::NAME, run: ProgramRun::Async(start_async::<P>) }
     }
 
     /// The program's `NAME`, unique within its bundle.
@@ -59,12 +71,29 @@ pub const fn program_table(entries: &'static [ProgramEntry]) -> ProgramTable {
 }
 
 /// Run the entry named by `invoke.program()`; `Invoked::Rejected` (`"unknown program"`) when none is.
+///
+/// Async entries that still need a journal fetch are [`Invoked::Refused`]
+/// [`crate::Refusal::InputMissing`]: use [`start_invocation`] for those.
 #[must_use]
 pub fn dispatch(table: &ProgramTable, invoke: Invoke) -> Invoked {
+    let seq = invoke.seq();
+    match start_invocation(table, invoke) {
+        Started::Finished(invoked) => invoked,
+        Started::Live { .. } => Invoked::Refused { seq, refusal: crate::Refusal::InputMissing },
+    }
+}
+
+/// Start the named entry. Sync programs finish immediately; async programs may
+/// return a live session the invocation child polls across journal replies.
+#[must_use]
+pub fn start_invocation(table: &ProgramTable, invoke: Invoke) -> Started {
     let Some(entry) = table.entries().iter().find(|entry| entry.name() == invoke.program().as_str()) else {
-        return Invoked::Rejected { seq: invoke.seq(), reason: Detail::new("unknown program") };
+        return Started::Finished(Invoked::Rejected { seq: invoke.seq(), reason: Detail::new("unknown program") });
     };
-    (entry.run)(invoke)
+    match entry.run {
+        ProgramRun::Sync(run) => Started::Finished(run(invoke)),
+        ProgramRun::Async(start) => start(invoke),
+    }
 }
 
 /// One live invocation: the spawned child's alias plus the shell's handle.

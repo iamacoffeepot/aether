@@ -1,7 +1,9 @@
 //! Native `Root` state machine: admission, attribution, dispatch.
 
 use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Mode, ProgramName, Refusal};
-use aether_bloomery_program::{__macro_internals, Env, Program, ProgramEntry, ProgramTable, Pure, Root, dispatch};
+use aether_bloomery_program::{
+    __macro_internals, Env, Program, ProgramEntry, ProgramTable, Root, Sync, SyncProgram, dispatch,
+};
 use aether_data::MailboxId;
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -18,8 +20,10 @@ impl Program for First {
     const INTENT: &'static str = "Echo the count.";
     type Input = Count;
     type Result = Count;
+}
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+impl SyncProgram for First {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(input)
     }
 }
@@ -32,8 +36,10 @@ impl Program for Second {
     const INTENT: &'static str = "Bump the count.";
     type Input = Count;
     type Result = Count;
+}
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+impl SyncProgram for Second {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(Count { n: input.n.saturating_add(1) })
     }
 }

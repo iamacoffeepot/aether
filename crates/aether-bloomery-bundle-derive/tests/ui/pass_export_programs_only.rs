@@ -1,6 +1,6 @@
 use aether_actor::export;
 use aether_bloomery_kinds::{Mode, Refusal};
-use aether_bloomery_program::{Env, Program, Pure, program};
+use aether_bloomery_program::{Env, Program, Sync, program};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.ui.pass.one.input")]
@@ -36,7 +36,7 @@ impl Program for One {
     type Input = OneIn;
     type Result = OneOut;
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(OneOut { n: input.n })
     }
 }
@@ -51,7 +51,7 @@ impl Program for Two {
     type Input = TwoIn;
     type Result = TwoOut;
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(TwoOut { n: input.n })
     }
 }

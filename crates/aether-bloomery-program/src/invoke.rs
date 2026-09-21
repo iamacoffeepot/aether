@@ -1,31 +1,140 @@
 //! Generic entry that generated bundle code calls for one program.
 
+use alloc::boxed::Box;
 use alloc::format;
 use alloc::vec::Vec;
+use core::future::Future;
+use core::pin::Pin;
+use core::task::{Context, Poll, Waker};
 
-use aether_bloomery_kinds::{ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Ref, Refusal};
+use aether_bloomery_kinds::{
+    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ReadArtifactResult, Ref, Refusal,
+};
 
-use crate::declare::Program;
-use crate::env::{Env, Pure};
+use crate::declare::{AsyncProgram, SyncProgram};
+use crate::env::{Async, EnvOwner, PendingArtifact};
 use crate::kinds::Detail;
 
-/// Run `P` against `invoke`. Never returns [`Invoked::Rejected`].
+/// Journal mailbox the invocation child sends `ReadArtifact` to.
+pub const JOURNAL_NAMESPACE: &str = "aether.bloomery.journal";
+
+/// Run sync `P` against `invoke`. Never returns [`Invoked::Rejected`].
 #[must_use]
-pub fn invoke<P: Program>(invoke: Invoke) -> Invoked {
+pub fn invoke<P: SyncProgram>(invoke: Invoke) -> Invoked {
     let (seq, _, input, closure) = invoke.into_parts();
-    match run::<P>(input, closure) {
+    match run_sync::<P>(input, closure) {
         Ok((result, staged)) => Invoked::Completed { seq, result, staged },
         Err(refusal) => Invoked::Refused { seq, refusal },
     }
 }
 
-fn run<P: Program>(input: Digest, closure: Vec<ClosureArtifact>) -> Result<(Digest, Vec<EncodedArtifact>), Refusal> {
-    let mut env = Env::<Pure>::from_closure(closure);
-    let input = env.read(Ref::<P::Input>::from_digest(input))?;
+fn run_sync<P: SyncProgram>(
+    input: Digest,
+    closure: Vec<ClosureArtifact>,
+) -> Result<(Digest, Vec<EncodedArtifact>), Refusal> {
+    let owner = EnvOwner::from_closure(closure);
+    let mut env = owner.env();
+    let input = env.injected(Ref::<P::Input>::from_digest(input))?;
     let result = P::run(input, &mut env)?;
     let result = env.stage_encoded(&result)?;
-    refuse_orphans(env.staged(), result.digest())?;
+    refuse_orphans(&env.staged(), result.digest())?;
     Ok((result.digest(), env.into_staged()))
+}
+
+/// First poll of an invocation: done, or a live future the child must keep.
+pub enum Started {
+    /// The program completed, refused, or was rejected without awaiting.
+    Finished(Invoked),
+    /// The future yielded; keep [`AsyncSession`] until the next poll is [`PollResult::Finished`].
+    Live { session: AsyncSession, waiting: Option<PendingArtifact> },
+}
+
+/// Result of polling a live session after a journal reply (or the first poll).
+pub enum PollResult {
+    /// The program completed, refused, or was rejected.
+    Finished(Invoked),
+    /// Poll again after the child sends `ReadArtifact` for this digest.
+    NeedArtifact(PendingArtifact),
+    /// A journal read is already in flight; wait for its reply.
+    Waiting,
+}
+
+type RunFuture = Pin<Box<dyn Future<Output = Result<(Digest, Vec<EncodedArtifact>), Refusal>> + Send + 'static>>;
+
+/// Live async `run` plus the environment it reads and stages through.
+pub struct AsyncSession {
+    owner: EnvOwner,
+    seq: u64,
+    future: RunFuture,
+}
+
+impl AsyncSession {
+    /// Drive the future with a noop waker. The invocation child sends on
+    /// [`PollResult::NeedArtifact`] and calls [`Self::fulfill`] on the reply.
+    pub fn poll(&mut self) -> PollResult {
+        match poll_once(self.future.as_mut()) {
+            Poll::Ready(Ok((result, staged))) => {
+                PollResult::Finished(Invoked::Completed { seq: self.seq, result, staged })
+            }
+            Poll::Ready(Err(refusal)) => PollResult::Finished(Invoked::Refused { seq: self.seq, refusal }),
+            Poll::Pending => {
+                self.owner.env::<Async>().take_pending().map_or(PollResult::Waiting, PollResult::NeedArtifact)
+            }
+        }
+    }
+
+    /// Apply a journal reply and make the next [`Self::poll`] see the digest.
+    pub fn fulfill(&mut self, expected: PendingArtifact, result: ReadArtifactResult) {
+        match &result {
+            ReadArtifactResult::Found { digest, kind, .. }
+                if *digest == expected.digest && *kind != expected.expected =>
+            {
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
+            }
+            ReadArtifactResult::Found { digest, .. } if *digest != expected.digest => {
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
+            }
+            ReadArtifactResult::Missing { digest } if *digest != expected.digest => {
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
+            }
+            ReadArtifactResult::Err { digest, .. } if *digest != expected.digest => {
+                self.owner.env::<Async>().fail(expected.digest, Refusal::InputDecode);
+            }
+            _ => self.owner.env::<Async>().fulfill(result),
+        }
+    }
+}
+
+/// Start async `P`. Input lookup is injected-only; cited blobs may fetch.
+#[must_use]
+pub fn start_async<P: AsyncProgram>(invoke: Invoke) -> Started {
+    let (seq, _, input, closure) = invoke.into_parts();
+    let owner = EnvOwner::from_closure(closure);
+    let env = owner.env::<Async>();
+    let input = match env.injected(Ref::<P::Input>::from_digest(input)) {
+        Ok(input) => input,
+        Err(refusal) => return Started::Finished(Invoked::Refused { seq, refusal }),
+    };
+    let mut session = AsyncSession {
+        owner,
+        seq,
+        future: Box::pin(async move {
+            let result = P::run(input, env).await?;
+            let mut staged_env = env;
+            let result = staged_env.stage_encoded(&result)?;
+            refuse_orphans(&staged_env.staged(), result.digest())?;
+            Ok((result.digest(), staged_env.into_staged()))
+        }),
+    };
+    match session.poll() {
+        PollResult::Finished(invoked) => Started::Finished(invoked),
+        PollResult::NeedArtifact(pending) => Started::Live { session, waiting: Some(pending) },
+        PollResult::Waiting => Started::Live { session, waiting: None },
+    }
+}
+
+fn poll_once<F: Future + ?Sized>(future: Pin<&mut F>) -> Poll<F::Output> {
+    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
 fn refuse_orphans(staged: &[EncodedArtifact], root: Digest) -> Result<(), Refusal> {
