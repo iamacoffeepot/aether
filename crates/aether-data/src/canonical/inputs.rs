@@ -9,8 +9,8 @@
 //! `wire::take_from_bytes` symmetrically.
 
 use super::primitives::{
-    U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str, write_u32_le,
-    write_u64_le,
+    U8_WIDTH, U32_WIDTH, U64_WIDTH, option_borrowed_str_len, str_len, write_option_borrowed_str, write_str, write_u8,
+    write_u32_le, write_u64_le,
 };
 
 /// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
@@ -141,6 +141,28 @@ pub const fn inputs_actor_boundary_len(namespace: &str) -> usize {
 pub const fn write_inputs_actor_boundary<const N: usize>(namespace: &str) -> [u8; N] {
     let mut out = [0u8; N];
     let mut pos = write_u32_le(4, &mut out, 0); // variant selector: ActorBoundary
+    pos = write_str(namespace, &mut out, pos);
+    let _ = pos;
+    out
+}
+
+/// Byte length of a `Dependency` record's aether-wire encoding (ADR-0230).
+/// A `u32` LE variant selector (`5`) + the resolver tag (a bare `u8`) +
+/// `wire(namespace)`.
+#[must_use]
+pub const fn inputs_dependency_len(_resolver: u8, namespace: &str) -> usize {
+    U32_WIDTH + U8_WIDTH + str_len(namespace)
+}
+
+/// Serialize an `InputsRecord::Dependency` into a fixed-size array sized
+/// by `inputs_dependency_len`. Exact aether-wire shape for
+/// `InputsRecord::Dependency { resolver, namespace }` — one
+/// `#[actor(depends(R))]` declaration.
+#[must_use]
+pub const fn write_inputs_dependency<const N: usize>(resolver: u8, namespace: &str) -> [u8; N] {
+    let mut out = [0u8; N];
+    let mut pos = write_u32_le(5, &mut out, 0); // variant selector: Dependency
+    pos = write_u8(resolver, &mut out, pos);
     pos = write_str(namespace, &mut out, pos);
     let _ = pos;
     out

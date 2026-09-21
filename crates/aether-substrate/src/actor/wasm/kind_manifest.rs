@@ -42,6 +42,7 @@
 use std::borrow::Cow;
 use std::collections::HashMap;
 
+use aether_actor::{DependencyResolver, Embedded, One};
 use aether_data::{
     EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor,
     KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType,
@@ -303,6 +304,19 @@ pub fn read_producers_from_bytes(wasm: &[u8]) -> String {
 /// loader resolves its mailbox name from the `aether.namespace`
 /// section instead. In a multi-actor module the first group is the
 /// entry type.
+/// One `#[actor(depends(R))]` declaration read off the module: the actors
+/// that must hold a `Live` route before this actor may be created
+/// (ADR-0230). The loader refuses the load while any entry is not live.
+#[derive(Debug, Clone)]
+pub struct Dependency {
+    /// The dependency's `DependencyResolver::TAG` — [`One`] for a root
+    /// singleton, [`Embedded`] for a co-hosted peer under the loader's
+    /// parent. The reader rejects a tag no strategy in this build claims.
+    pub resolver: u8,
+    /// `R::NAMESPACE` of the depended-on actor.
+    pub namespace: String,
+}
+
 #[derive(Debug, Clone)]
 pub struct ActorInputs {
     /// `Addressable::NAMESPACE` of this group's type, from its `ActorBoundary`
@@ -311,23 +325,26 @@ pub struct ActorInputs {
     /// The handler / fallback / component-doc / config records that
     /// belong to this actor type.
     pub capabilities: ComponentCapabilities,
+    /// The `Dependency` records that belong to this actor type, in
+    /// declaration order; empty when the actor declares none.
+    pub dependencies: Vec<Dependency>,
 }
 
 /// Decode the component's `aether.kinds.inputs` section (ADR-0033 /
 /// ADR-0096) into one [`ActorInputs`] per exported actor type. The
 /// record stream is `[0x05][wire(InputsRecord)]` back-to-back; an
 /// `ActorBoundary { namespace }` record opens a new group and the
-/// Handler / Fallback / Component / Config records that follow belong
-/// to it, in declaration order. A single-actor module emits no
-/// boundary, so all its records fall into one implicit `namespace:
+/// Handler / Fallback / Component / Config / Dependency records that
+/// follow belong to it, in declaration order. A single-actor module emits
+/// no boundary, so all its records fall into one implicit `namespace:
 /// None` group (byte-identical to the pre-ADR-0096 layout). The first
 /// group is the entry type. Within each group: every Handler enters
-/// `handlers`, at most one Fallback populates `fallback`, at most one
-/// Component populates `doc`, and at most one Config populates
-/// `config` (ADR-0090 / issue 1257) — a duplicate of any of the
-/// at-most-one records is a substrate-rejected load error, since the
-/// macro emits at most one of each per type. A module that declares no
-/// inputs section at all returns an empty vec.
+/// `handlers`, every Dependency enters `dependencies`, at most one
+/// Fallback populates `fallback`, at most one Component populates `doc`,
+/// and at most one Config populates `config` (ADR-0090 / issue 1257) — a
+/// duplicate of any of the at-most-one records is a substrate-rejected
+/// load error, since the macro emits at most one of each per type. A
+/// module that declares no inputs section at all returns an empty vec.
 pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, String> {
     let mut records: Vec<InputsRecord> = Vec::new();
 
@@ -349,6 +366,7 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                 groups.push(ActorInputs {
                     namespace: Some(namespace.into_owned()),
                     capabilities: ComponentCapabilities::default(),
+                    dependencies: Vec::new(),
                 });
             }
             InputsRecord::Handler { id, name, doc, reply } => {
@@ -386,20 +404,41 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
                 }
                 caps.config = Some(ConfigCapability { id, name: name.into_owned() });
             }
+            InputsRecord::Dependency { resolver, namespace } => {
+                if resolver != One::TAG && resolver != Embedded::TAG {
+                    return Err(format!(
+                        "{INPUTS_SECTION}: dependency resolver tag {resolver:#x} not understood by this substrate build"
+                    ));
+                }
+                current_group(&mut groups)
+                    .dependencies
+                    .push(Dependency { resolver, namespace: namespace.into_owned() });
+            }
         }
     }
     Ok(groups)
+}
+
+/// The open (last) group, creating an implicit `namespace: None` group
+/// when records arrive before any `ActorBoundary` — the single-actor
+/// layout, which emits no boundary.
+fn current_group(groups: &mut Vec<ActorInputs>) -> &mut ActorInputs {
+    if groups.is_empty() {
+        groups.push(ActorInputs {
+            namespace: None,
+            capabilities: ComponentCapabilities::default(),
+            dependencies: Vec::new(),
+        });
+    }
+    let last = groups.len() - 1;
+    &mut groups[last]
 }
 
 /// The capabilities of the open (last) group, creating an implicit
 /// `namespace: None` group when records arrive before any
 /// `ActorBoundary` — the single-actor layout, which emits no boundary.
 fn current_capabilities(groups: &mut Vec<ActorInputs>) -> &mut ComponentCapabilities {
-    if groups.is_empty() {
-        groups.push(ActorInputs { namespace: None, capabilities: ComponentCapabilities::default() });
-    }
-    let last = groups.len() - 1;
-    &mut groups[last].capabilities
+    &mut current_group(groups).capabilities
 }
 
 /// Decode the component's `aether.kinds.inputs` section into the entry
@@ -1282,6 +1321,40 @@ mod tests {
         let wasm = wasm_with_section(INPUTS_SECTION, &section);
         let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
         assert!(err.contains("duplicate Fallback"), "err: {err}");
+    }
+
+    #[test]
+    fn dependencies_land_on_the_current_group() {
+        // ADR-0230: each `Dependency` record joins the open group's
+        // `dependencies` in declaration order, with its resolver tag
+        // preserved; a group that declares none reads back empty.
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
+            InputsRecord::Dependency { resolver: One::TAG, namespace: "aether.kit.camera".into() },
+            InputsRecord::Dependency { resolver: Embedded::TAG, namespace: "ui.peer".into() },
+            InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].dependencies.len(), 2);
+        assert_eq!(actors[0].dependencies[0].resolver, One::TAG);
+        assert_eq!(actors[0].dependencies[0].namespace, "aether.kit.camera");
+        assert_eq!(actors[0].dependencies[1].resolver, Embedded::TAG);
+        assert_eq!(actors[0].dependencies[1].namespace, "ui.peer");
+        assert!(actors[1].dependencies.is_empty());
+    }
+
+    #[test]
+    fn unknown_dependency_tag_is_rejected() {
+        // A resolver tag this build does not claim is a read error, not a
+        // skip — silently dropping it would load an actor while ignoring
+        // one of its declared dependencies.
+        let section = inputs_section(&[InputsRecord::Dependency { resolver: 0xFF, namespace: "ui.peer".into() }]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("dependency resolver tag"), "err: {err}");
+        assert!(err.contains(INPUTS_SECTION), "err: {err}");
     }
 
     #[test]

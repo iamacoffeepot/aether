@@ -1,0 +1,5 @@
+error: duplicate identical `depends` declaration in #[actor]
+ --> tests/ui/rejects_duplicate_actor_depends.rs:5:26
+  |
+5 | #[actor(depends(Target), depends(Target))]
+  |                          ^^^^^^^^^^^^^^^

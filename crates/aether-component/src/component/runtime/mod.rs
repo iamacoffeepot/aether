@@ -20,6 +20,7 @@ use aether_actor::{RegistryChanged, runtime};
 // per-sibling `#[cfg]`). The `load` impl reaches the state fields through their
 // `pub` visibility, unchanged by the move.
 mod config;
+mod dependencies;
 mod load;
 mod module_cache;
 

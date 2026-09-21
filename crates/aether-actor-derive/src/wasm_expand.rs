@@ -341,6 +341,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         fallback.as_ref(),
         component_doc.as_ref(),
         config_kind_ty,
+        &opts.depends,
         opts.handler_set.as_ref().map(|set| (set, &**self_ty)),
     );
 
@@ -406,6 +407,12 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let child_impls = opts.child_of.iter().map(|parent| {
         quote! {
             impl #impl_generics ::aether_actor::ChildOf<#parent>
+                for #self_ty #where_clause {}
+        }
+    });
+    let depends_impls = opts.depends.iter().map(|target| {
+        quote! {
+            impl #impl_generics ::aether_actor::DependsOn<#target>
                 for #self_ty #where_clause {}
         }
     });
@@ -568,6 +575,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #root_impl
         #module_child_impl
         #(#child_impls)*
+        #(#depends_impls)*
 
         #(#handles_kind_impls)*
         #(#reply_marker_impls)*

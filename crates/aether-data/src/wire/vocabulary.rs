@@ -498,6 +498,11 @@ impl WireEncode for InputsRecord {
                 4u32.encode(out)?;
                 namespace.encode(out)
             }
+            Self::Dependency { resolver, namespace } => {
+                5u32.encode(out)?;
+                resolver.encode(out)?;
+                namespace.encode(out)
+            }
         }
     }
 }
@@ -515,6 +520,7 @@ impl<'de> WireDecode<'de> for InputsRecord {
             2 => Ok(Self::Component { doc: Cow::decode(cursor)? }),
             3 => Ok(Self::Config { id: crate::KindId::decode(cursor)?, name: Cow::decode(cursor)? }),
             4 => Ok(Self::ActorBoundary { namespace: Cow::decode(cursor)? }),
+            5 => Ok(Self::Dependency { resolver: u8::decode(cursor)?, namespace: Cow::decode(cursor)? }),
             other => Err(Error::InvalidEnum(other)),
         }
     }

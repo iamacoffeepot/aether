@@ -32,6 +32,13 @@ pub struct ActorOpts {
     /// is intentional so one child identity can be permitted beneath several
     /// logical parents.
     pub child_of: Vec<syn::TypePath>,
+    /// ADR-0230: actor types this actor depends on, from repeated
+    /// `depends(Type)`. Each entry emits `impl DependsOn<R> for Self` plus
+    /// one `Dependency` inputs-manifest record; the host refuses the load
+    /// while any entry has no `Live` route. Only keyless (`One` /
+    /// `Embedded`) actors are declarable — a keyed `R` is a trait-bound
+    /// compile error on the emitted impl, not a macro error here.
+    pub depends: Vec<syn::TypePath>,
     /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
     /// parent exported from the same resident module.
     pub composable: bool,
@@ -111,24 +118,13 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             opts.handler_set = Some(set);
             Ok(())
         } else if meta.path.is_ident("child_of") {
-            let content;
-            syn::parenthesized!(content in meta.input);
-            let parent: syn::TypePath = content.parse().map_err(|_| {
-                content.error("`child_of` expects exactly one actor type path, for example `child_of(Manager)`")
-            })?;
-            if !content.is_empty() {
-                return Err(content.error(
-                    "`child_of` expects exactly one actor type path; repeat `child_of(...)` for another parent",
-                ));
-            }
-            let parent_tokens = parent.to_token_stream().to_string();
-            if opts.child_of.iter().any(|existing| existing.to_token_stream().to_string() == parent_tokens) {
-                return Err(meta.error("duplicate identical `child_of` declaration in #[actor]"));
-            }
+            push_actor_type_entry(&meta, &mut opts.child_of, "child_of", "child_of(Manager)", "parent")?;
             if opts.composable {
                 return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
             }
-            opts.child_of.push(parent);
+            Ok(())
+        } else if meta.path.is_ident("depends") {
+            push_actor_type_entry(&meta, &mut opts.depends, "depends", "depends(RenderCapability)", "dependency")?;
             Ok(())
         } else if !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional module path names the runtime module
@@ -148,13 +144,42 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `root`, `child_of(TypePath)`, `composable`, `handler_set(TraitPath)`, \
+                 `root`, `child_of(TypePath)`, `depends(TypePath)`, `composable`, `handler_set(TraitPath)`, \
                  `runtime_feature = \"name\"`, or a bare runtime module path",
             ))
         }
     });
     Parser::parse2(parser, attr)?;
     Ok(opts)
+}
+
+/// Parse one entry of a repeatable single-actor-type option — `child_of(P)`
+/// or `depends(R)` — into `slot`: exactly one type path, rejecting a
+/// repeated identical type. `name` is the option keyword, `example` its
+/// one-line usage, and `repeat_noun` the word the multi-entry error names.
+fn push_actor_type_entry(
+    meta: &meta::ParseNestedMeta,
+    slot: &mut Vec<syn::TypePath>,
+    name: &str,
+    example: &str,
+    repeat_noun: &str,
+) -> syn::Result<()> {
+    let content;
+    syn::parenthesized!(content in meta.input);
+    let target: syn::TypePath = content
+        .parse()
+        .map_err(|_| content.error(format!("`{name}` expects exactly one actor type path, for example `{example}`")))?;
+    if !content.is_empty() {
+        return Err(content.error(format!(
+            "`{name}` expects exactly one actor type path; repeat `{name}(...)` for another {repeat_noun}"
+        )));
+    }
+    let target_tokens = target.to_token_stream().to_string();
+    if slot.iter().any(|existing| existing.to_token_stream().to_string() == target_tokens) {
+        return Err(meta.error(format!("duplicate identical `{name}` declaration in #[actor]")));
+    }
+    slot.push(target);
+    Ok(())
 }
 
 /// Cardinality declaration from `#[actor(singleton|instanced)]` (ADR-0119),
