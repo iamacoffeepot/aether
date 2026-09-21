@@ -161,11 +161,6 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
         );
     }
 
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; same runtime-name route as `send_to_named`
-    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
-        self.inline.route_or_enqueue(mailbox_id_from_path(name).0, kind.0, bytes, 1, ChainMode::Inherit, self.mailbox);
-    }
-
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()
     }

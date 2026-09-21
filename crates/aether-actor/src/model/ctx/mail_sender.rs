@@ -19,7 +19,7 @@
 //! sends uses the trait's [`MailSender::send`] / [`MailSender::send_many`]
 //! / [`MailSender::send_to_named`] methods.
 
-use aether_data::{Kind, KindId, MailboxId};
+use aether_data::{Kind, MailboxId};
 
 use crate::model::{CallerAddressable, HandlesKind, Singleton};
 
@@ -71,11 +71,6 @@ pub trait MailSender {
     /// `aether.component/aether.embedded:NAME`) addresses its actor here
     /// exactly as a depth-1 root cap name does.
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K);
-
-    /// Encoded-name counterpart of [`Self::send_to_named`] for generated
-    /// invocation children that already hold wire bytes (ADR-0229).
-    #[doc(hidden)]
-    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]);
 
     /// Correlation id the host minted for this actor's most recent
     /// outbound `send_mail` (ADR-0042). `0` before any send.

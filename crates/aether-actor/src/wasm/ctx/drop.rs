@@ -4,7 +4,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
@@ -146,11 +146,6 @@ impl MailSender for WasmDropCtx<'_> {
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, false, self.mailbox);
-    }
-
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; same runtime-name route as `send_to_named`
-    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
-        mail::send_mail(mailbox_id_from_path(name).0, kind.0, bytes, 1, false, self.mailbox);
     }
 
     fn prev_correlation(&self) -> u64 {

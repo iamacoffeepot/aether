@@ -32,7 +32,7 @@
 //! so it belongs with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
-use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use super::WasmCtx;
 use crate::mail::mailbox::Mailbox;
@@ -186,11 +186,6 @@ impl MailSender for Sends<'_> {
     #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; a lineage address routes
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         self.route::<K>(mailbox_id_from_path(name).0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
-    }
-
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; a lineage address routes
-    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
-        self.inline.route_or_enqueue(mailbox_id_from_path(name).0, kind.0, bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 
     fn prev_correlation(&self) -> u64 {

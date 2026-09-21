@@ -57,8 +57,8 @@ without editing the invocation child.
    bytes, expected_reply }` replaces a per-kind pending enum.
    `PollResult::NeedSend` carries it. Journal `read` stays
    `PendingArtifact` / `NeedArtifact`. The child sends `pending.bytes` to
-   `pending.mailbox` with `pending.kind_id` (an encoded-name send next to
-   `MailSender::send_to_named` when the payload is already bytes).
+   `pending.mailbox` with `pending.kind_id` (`WasmCtx::send_to_named_encoded`,
+   because `MailSender::send_to_named` takes a `K: Kind` value).
    `#[fallback]` keeps ADR-0228's three checks (`in_reply_to`, pending
    map, `mail.kind() == expected`) and resumes on the reply kind. It
    does not match `Fetch` by name.

@@ -179,10 +179,6 @@ mod tests {
             unreachable!("stream handles send only via send_detached_to")
         }
 
-        fn send_to_named_encoded(&mut self, _name: &str, _kind: KindId, _bytes: &[u8]) {
-            unreachable!("stream handles send only via send_detached_to")
-        }
-
         fn prev_correlation(&self) -> u64 {
             0
         }
