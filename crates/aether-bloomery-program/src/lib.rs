@@ -29,7 +29,7 @@ pub use aether_bloomery_program_derive::program;
 pub use declare::Program;
 #[doc(hidden)]
 pub use declare::{AsyncProgram, SyncProgram};
-pub use env::{Async, Binding, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Sync};
+pub use env::{Async, Binding, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{DeclarationsError, declarations};

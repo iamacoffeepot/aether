@@ -180,6 +180,28 @@ impl Http {
     }
 }
 
+/// Sampled process sugar over [`Binding<aether_process::ProcessCapability>`].
+pub struct Process(Binding<aether_process::ProcessCapability>);
+
+impl InjectedApi for Process {
+    type Target = aether_process::ProcessCapability;
+    const SAMPLED: bool = true;
+
+    fn from_env(env: &mut Env<Async>) -> Self {
+        Self(Binding::from_env(env))
+    }
+}
+
+impl Process {
+    /// Await [`aether_process::RunResult`] for `mail`.
+    pub fn run(
+        &mut self,
+        mail: aether_process::Run,
+    ) -> impl Future<Output = Result<aether_process::RunResult, Refusal>> + Send + 'static {
+        self.0.call(mail)
+    }
+}
+
 struct Call<A, K> {
     env: Env<Async>,
     mail: Option<K>,
