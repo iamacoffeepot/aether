@@ -2,10 +2,13 @@
 //!
 //! A program is a stateless function over an injected closure, the same
 //! injected-data sandbox reactors use. The native driver sends
-//! [`Invoke`]; [`invoke()`] runs one [`Program`] and replies [`Invoked`].
-//! Only native code writes journal records. A program's identity is its
-//! bundle digest plus name, not a stored declaration digest. [`Root`] is the
-//! bundle root's state: the program table plus the live-seq table.
+//! [`Invoke`]; [`invoke()`] runs one sync [`Program`] and replies [`Invoked`].
+//! [`Env<Sync>`] is injected lookup: a miss is [`Refusal::InputMissing`].
+//! [`Env<Async>::read`] fetches a missing digest from the journal and resumes
+//! when [`kinds::ReadArtifactResult`] arrives. Only native code writes journal
+//! records. A program's identity is its bundle digest plus name, not a stored
+//! declaration digest. [`Root`] is the bundle root's state: the program table
+//! plus the live-seq table.
 //!
 //! `#![no_std]` + `alloc`. Guests cannot link the journal.
 
@@ -24,17 +27,23 @@ pub use aether_bloomery_kinds as kinds;
 pub use aether_bloomery_kinds::{Invoke, Invoked, Refusal};
 pub use aether_bloomery_program_derive::program;
 pub use declare::Program;
-pub use env::{Env, Pure};
-pub use invoke::{invoke, unreachable_staged};
-pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch};
+#[doc(hidden)]
+pub use declare::{AsyncProgram, SyncProgram};
+pub use env::{Async, Env, PendingArtifact, Sync};
+pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
+pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{DeclarationsError, declarations};
 
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::Kind;
+    pub use aether_data::{Kind, MailboxId, RequestId};
+    pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
 
-    pub use crate::root::program_table;
+    pub use crate::declare::{AsyncProgram, SyncProgram};
+    pub use crate::env::PendingArtifact;
+    pub use crate::invoke::{JOURNAL_NAMESPACE, PollResult, Started};
+    pub use crate::root::{program_table, start_invocation};
     pub use crate::section::{MODE_PURE, program_record_len, write_program_record};
 }

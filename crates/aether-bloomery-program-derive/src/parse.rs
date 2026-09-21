@@ -4,7 +4,7 @@ use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
 
-use crate::check::{reject_async_run, reject_run_receiver};
+use crate::check::{pair_run_with_env, reject_run_receiver};
 
 pub struct ProgramDef {
     pub item: ItemImpl,
@@ -13,6 +13,7 @@ pub struct ProgramDef {
     pub intent: LitStr,
     pub input: Type,
     pub result: Type,
+    pub async_run: bool,
 }
 
 pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
@@ -33,6 +34,7 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let mut mode = None;
     let mut input = None;
     let mut result = None;
+    let mut async_run = None;
 
     for impl_item in &item.items {
         match impl_item {
@@ -68,8 +70,11 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                 result = Some(alias.ty.clone());
             }
             ImplItem::Fn(method) if method.sig.ident == "run" => {
-                reject_async_run(&method.sig)?;
+                if async_run.is_some() {
+                    return Err(syn::Error::new_spanned(&method.sig.ident, "`fn run` is given twice"));
+                }
                 reject_run_receiver(&method.sig)?;
+                async_run = Some(pair_run_with_env(&method.sig)?);
             }
             _ => {}
         }
@@ -92,8 +97,9 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     }
     let input = input.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"))?;
     let result = result.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Result`"))?;
+    let async_run = async_run.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `fn run`"))?;
 
-    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, input, result, item })
+    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, input, result, async_run, item })
 }
 
 fn string_literal(konst: &ImplItemConst, ident: &str) -> syn::Result<LitStr> {

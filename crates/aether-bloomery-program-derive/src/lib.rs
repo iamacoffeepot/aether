@@ -1,7 +1,8 @@
 //! Proc macros for `#[program]` authoring.
 //!
 //! `#[program]` sits on `impl Program for Name`, checks the author form, and
-//! emits the impl unchanged plus an export-descriptor companion so
+//! emits the `Program` impl without `run`, a private sync or async run
+//! supertrait, and an export-descriptor companion so
 //! `aether_bloomery_bundle::bundle` can select programs without reflecting on trait impls.
 
 #![forbid(unsafe_code)]
@@ -17,7 +18,8 @@ mod parse;
 /// Outer attribute on `impl Program for Name`.
 ///
 /// Takes no arguments. The impl must declare `NAME`, `INTENT`, `MODE = Mode::Pure`,
-/// `Input`, and `Result`. `run` is an associated function: no receiver, not `async`.
+/// `Input`, and `Result`. `run` is an associated function: no receiver.
+/// `fn run` pairs with `Env<Sync>`; `async fn run` pairs with `Env<Async>`.
 #[proc_macro_attribute]
 pub fn program(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {

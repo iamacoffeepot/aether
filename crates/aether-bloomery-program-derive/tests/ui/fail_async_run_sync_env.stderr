@@ -1,11 +1,11 @@
-error: #[program] run must not take a receiver; Program::run is associated
-  --> tests/ui/fail_run_receiver.rs:26:12
+error: #[program] async fn run requires Env<Async>
+  --> tests/ui/fail_async_run_sync_env.rs:26:5
    |
-26 |     fn run(&self, input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
-   |            ^^^^^
+26 |     async fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+   |     ^^^^^
 
 warning: unused imports: `Mode` and `Refusal`
- --> tests/ui/fail_run_receiver.rs:1:29
+ --> tests/ui/fail_async_run_sync_env.rs:1:29
   |
 1 | use aether_bloomery_kinds::{Mode, Refusal};
   |                             ^^^^  ^^^^^^^
@@ -13,13 +13,13 @@ warning: unused imports: `Mode` and `Refusal`
   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
 
 warning: unused imports: `Env` and `Sync`
- --> tests/ui/fail_run_receiver.rs:2:31
+ --> tests/ui/fail_async_run_sync_env.rs:2:31
   |
 2 | use aether_bloomery_program::{Env, Program, Sync, program};
   |                               ^^^           ^^^^
 
 warning: unused import: `Program`
- --> tests/ui/fail_run_receiver.rs:2:36
+ --> tests/ui/fail_async_run_sync_env.rs:2:36
   |
 2 | use aether_bloomery_program::{Env, Program, Sync, program};
   |                                    ^^^^^^^

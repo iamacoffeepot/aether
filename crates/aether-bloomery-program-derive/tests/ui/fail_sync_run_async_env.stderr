@@ -1,0 +1,25 @@
+error: #[program] fn run requires Env<Sync>
+  --> tests/ui/fail_sync_run_async_env.rs:26:38
+   |
+26 |     fn run(input: Self::Input, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+   |                                      ^^^^^^^^^^^^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/fail_sync_run_async_env.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Async` and `Env`
+ --> tests/ui/fail_sync_run_async_env.rs:2:31
+  |
+2 | use aether_bloomery_program::{Async, Env, Program, program};
+  |                               ^^^^^  ^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_sync_run_async_env.rs:2:43
+  |
+2 | use aether_bloomery_program::{Async, Env, Program, program};
+  |                                           ^^^^^^^

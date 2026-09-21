@@ -8,3 +8,11 @@ error: NAMESPACE `aether.bloomery.bundle` is reserved for the generated bundle r
    | --------------------------------------------------------------------- in this macro invocation
    |
    = note: this error originates in the macro `$crate::__export_collect` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `Refusal`
+ --> tests/ui/fail_export_reserved_namespace.rs:2:35
+  |
+2 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

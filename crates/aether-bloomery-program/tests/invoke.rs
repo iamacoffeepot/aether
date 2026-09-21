@@ -3,10 +3,12 @@
 use std::error::Error;
 
 use aether_bloomery_kinds::{
-    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, Ref, Refusal, Utf8Text,
-    artifact_digest,
+    ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, Mode, OpaqueBytes, ProgramName, ReadArtifactResult, Ref,
+    Refusal, Utf8Text, artifact_digest,
 };
-use aether_bloomery_program::{Env, Program, Pure, invoke};
+use aether_bloomery_program::{
+    Async, AsyncProgram, Env, PollResult, Program, Started, Sync, SyncProgram, invoke, start_async,
+};
 use aether_data::{Cites, Kind, Storage};
 
 fn program_name<P: Program>() -> ProgramName {
@@ -22,7 +24,7 @@ fn closure_of<K: Storage + Clone + Cites>(value: &K) -> Result<ClosureArtifact, 
     Ok(ClosureArtifact::new(encoded.kind(), encoded.bytes().to_vec()))
 }
 
-fn send<P: Program>(input: Digest, closure: Vec<ClosureArtifact>) -> Invoked {
+fn send<P: SyncProgram>(input: Digest, closure: Vec<ClosureArtifact>) -> Invoked {
     invoke::<P>(Invoke::new(7, program_name::<P>(), input, closure))
 }
 
@@ -52,9 +54,11 @@ impl Program for Cite {
     const INTENT: &'static str = "Read a closure child and stage cited text.";
     type Input = CiteInput;
     type Result = CiteResult;
+}
 
-    fn run(input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
-        let _child = env.read(input.child)?;
+impl SyncProgram for Cite {
+    fn run(input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+        let _child = env.injected(input.child)?;
         Ok(CiteResult { text: env.stage_text("hello") })
     }
 }
@@ -67,8 +71,10 @@ impl Program for MissingInput {
     const INTENT: &'static str = "Never runs; the input is absent.";
     type Input = Child;
     type Result = Child;
+}
 
-    fn run(input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+impl SyncProgram for MissingInput {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Ok(input)
     }
 }
@@ -81,9 +87,11 @@ impl Program for MissingRead {
     const INTENT: &'static str = "Read a digest the closure does not carry.";
     type Input = Child;
     type Result = Child;
+}
 
-    fn run(_input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
-        env.read(Ref::<Child>::from_digest(Digest::from_bytes([9; 32])))
+impl SyncProgram for MissingRead {
+    fn run(_input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+        env.injected(Ref::<Child>::from_digest(Digest::from_bytes([9; 32])))
     }
 }
 
@@ -102,8 +110,10 @@ impl Program for Orphan {
     const INTENT: &'static str = "Stage a blob the result does not cite.";
     type Input = Child;
     type Result = Pair;
+}
 
-    fn run(_input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+impl SyncProgram for Orphan {
+    fn run(_input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         let a = env.stage_bytes(b"one");
         let _orphan = env.stage_bytes(b"two");
         Ok(Pair { a, b: a })
@@ -118,8 +128,10 @@ impl Program for Dedupe {
     const INTENT: &'static str = "Stage the same bytes twice.";
     type Input = Child;
     type Result = Pair;
+}
 
-    fn run(_input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+impl SyncProgram for Dedupe {
+    fn run(_input: Self::Input, env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         let a = env.stage_bytes(b"same");
         let b = env.stage_bytes(b"same");
         Ok(Pair { a, b })
@@ -207,4 +219,101 @@ fn staging_the_same_bytes_twice_yields_one_encoded_artifact() -> Result<(), Box<
     let pair = encoded(&Pair { a: Ref::of_bytes(b"same"), b: Ref::of_bytes(b"same") })?;
     assert_eq!(staged, vec![bytes, pair]);
     Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.async_summarize.input")]
+struct SummarizeInput {
+    text: Ref<Utf8Text>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.async_summarize.result")]
+struct SummarizeResult {
+    text: Ref<Utf8Text>,
+}
+
+struct AsyncSummarize;
+
+impl Program for AsyncSummarize {
+    const NAME: &'static str = "async.summarize";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Fetch cited text and stage a derived summary.";
+    type Input = SummarizeInput;
+    type Result = SummarizeResult;
+}
+
+impl AsyncProgram for AsyncSummarize {
+    async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
+        let text = env.read_text(input.text).await?;
+        Ok(SummarizeResult { text: env.stage_text(&format!("summary:{text}")) })
+    }
+}
+
+fn drive_async(input: Digest, closure: Vec<ClosureArtifact>, reply: Option<ReadArtifactResult>) -> Invoked {
+    match start_async::<AsyncSummarize>(Invoke::new(7, program_name::<AsyncSummarize>(), input, closure)) {
+        Started::Finished(invoked) => invoked,
+        Started::Live { mut session, waiting } => {
+            let pending = waiting.expect("a miss records one ReadArtifact");
+            session.fulfill(pending, reply.expect("test supplies a journal reply"));
+            match session.poll() {
+                PollResult::Finished(invoked) => invoked,
+                PollResult::NeedArtifact(_) | PollResult::Waiting => {
+                    panic!("expected Finished after one journal reply")
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn async_hit_path_does_not_fetch() -> Result<(), Box<dyn Error>> {
+    let text = "hello";
+    let text_artifact = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
+    let input = SummarizeInput { text: Ref::of_text(text) };
+    let input_artifact = closure_of(&input)?;
+    match drive_async(input_artifact.digest(), vec![text_artifact, input_artifact], None) {
+        Invoked::Completed { seq: 7, result, staged } => {
+            let expected = SummarizeResult { text: Ref::of_text("summary:hello") };
+            let expected_encoded = encoded(&expected)?;
+            assert_eq!(result, expected_encoded.digest());
+            assert_eq!(staged, vec![EncodedArtifact::text("summary:hello"), expected_encoded]);
+            Ok(())
+        }
+        other => panic!("expected Completed on an injected hit, got {other:?}"),
+    }
+}
+
+#[test]
+fn async_miss_fetches_and_completes() -> Result<(), Box<dyn Error>> {
+    let text = "hello";
+    let input = SummarizeInput { text: Ref::of_text(text) };
+    let input_artifact = closure_of(&input)?;
+    let reply = ReadArtifactResult::Found {
+        digest: Ref::of_text(text).digest(),
+        kind: Utf8Text::ID,
+        bytes: text.as_bytes().to_vec(),
+    };
+    match drive_async(input_artifact.digest(), vec![input_artifact], Some(reply)) {
+        Invoked::Completed { seq: 7, result, staged } => {
+            let expected = SummarizeResult { text: Ref::of_text("summary:hello") };
+            let expected_encoded = encoded(&expected)?;
+            assert_eq!(result, expected_encoded.digest());
+            assert_eq!(staged, vec![EncodedArtifact::text("summary:hello"), expected_encoded]);
+            Ok(())
+        }
+        other => panic!("expected Completed after Found, got {other:?}"),
+    }
+}
+
+#[test]
+fn async_miss_after_journal_missing_is_input_missing() -> Result<(), Box<dyn Error>> {
+    let text = "hello";
+    let input = SummarizeInput { text: Ref::of_text(text) };
+    let input_artifact = closure_of(&input)?;
+    let reply = ReadArtifactResult::Missing { digest: Ref::of_text(text).digest() };
+    match drive_async(input_artifact.digest(), vec![input_artifact], Some(reply)) {
+        Invoked::Refused { seq: 7, refusal: Refusal::InputMissing } => Ok(()),
+        other => panic!("expected InputMissing after Missing, got {other:?}"),
+    }
 }

@@ -94,7 +94,11 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
 fn expand_table(table: &Ident, programs: &[ProgramEntry], program: &TokenStream2) -> TokenStream2 {
     let entries = programs.iter().map(|entry| {
         let ty = &entry.ty;
-        quote! { #program::ProgramEntry::of::<#ty>() }
+        if entry.meta.async_run {
+            quote! { #program::ProgramEntry::of_async::<#ty>() }
+        } else {
+            quote! { #program::ProgramEntry::of::<#ty>() }
+        }
     });
     quote! {
         static #table: #program::ProgramTable =
@@ -105,7 +109,14 @@ fn expand_table(table: &Ident, programs: &[ProgramEntry], program: &TokenStream2
 fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &TokenStream2) -> TokenStream2 {
     let namespace = format!("{BUNDLE_NAMESPACE}.invocation");
     quote! {
-        struct #invocation;
+        struct #invocation {
+            session: ::core::option::Option<#program::AsyncSession>,
+            parent: ::core::option::Option<#program::__macro_internals::MailboxId>,
+            waiting: #program::__macro_internals::BTreeMap<
+                #program::__macro_internals::RequestId,
+                #program::__macro_internals::PendingArtifact,
+            >,
+        }
 
         #[::aether_actor::actor(instanced, child_of(#root))]
         impl ::aether_actor::WasmActor for #invocation {
@@ -114,19 +125,89 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
             fn init(
                 _ctx: &mut ::aether_actor::WasmInitCtx<'_>,
             ) -> Result<Self, ::aether_actor::ActorInitError> {
-                Ok(Self)
+                Ok(Self {
+                    session: ::core::option::Option::None,
+                    parent: ::core::option::Option::None,
+                    waiting: #program::__macro_internals::BTreeMap::new(),
+                })
             }
 
-            #[handler::single]
+            #[handler::manual]
             fn on_invoke(
                 &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
                 invoke: #program::Invoke,
             ) {
-                let _ = self;
-                let invoked = #program::dispatch(&#table, invoke);
-                if let Some(parent) = ctx.source_mailbox() {
-                    ctx.send_to(parent, &invoked);
+                self.parent = ctx.source_mailbox();
+                match #program::__macro_internals::start_invocation(&#table, invoke) {
+                    #program::__macro_internals::Started::Finished(invoked) => {
+                        self.reply_invoked(ctx, &invoked);
+                    }
+                    #program::__macro_internals::Started::Live { session, waiting } => {
+                        self.session = ::core::option::Option::Some(session);
+                        if let Some(pending) = waiting {
+                            self.send_read(ctx, pending);
+                        }
+                    }
+                }
+            }
+
+            #[fallback]
+            fn on_mail(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_>, mail: ::aether_actor::Mail<'_>) {
+                let Some(request) = ctx.in_reply_to() else {
+                    return;
+                };
+                let Some(expected) = self.waiting.remove(&request) else {
+                    return;
+                };
+                if mail.kind() != <#program::kinds::ReadArtifactResult as #program::__macro_internals::Kind>::ID {
+                    self.waiting.insert(request, expected);
+                    return;
+                }
+                let Some(result) = mail.decode_kind::<#program::kinds::ReadArtifactResult>() else {
+                    self.waiting.insert(request, expected);
+                    return;
+                };
+                let Some(session) = self.session.as_mut() else {
+                    return;
+                };
+                session.fulfill(expected, result);
+                match session.poll() {
+                    #program::__macro_internals::PollResult::Finished(invoked) => {
+                        self.session = ::core::option::Option::None;
+                        self.waiting.clear();
+                        self.reply_invoked(ctx, &invoked);
+                    }
+                    #program::__macro_internals::PollResult::NeedArtifact(pending) => {
+                        self.send_read(ctx, pending);
+                    }
+                    #program::__macro_internals::PollResult::Waiting => {}
+                }
+            }
+        }
+
+        impl #invocation {
+            fn send_read<M: ::aether_actor::ReplyMode>(
+                &mut self,
+                ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+                pending: #program::__macro_internals::PendingArtifact,
+            ) {
+                use ::aether_actor::MailSender;
+                ctx.send_to_named(
+                    #program::__macro_internals::JOURNAL_NAMESPACE,
+                    &#program::kinds::ReadArtifact { digest: pending.digest },
+                );
+                let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
+                self.waiting.insert(request, pending);
+            }
+
+            fn reply_invoked<M: ::aether_actor::ReplyMode>(
+                &self,
+                ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+                invoked: &#program::Invoked,
+            ) {
+                if let Some(parent) = self.parent {
+                    ctx.send_to(parent, invoked);
                 }
             }
         }

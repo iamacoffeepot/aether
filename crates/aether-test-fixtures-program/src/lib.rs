@@ -3,7 +3,7 @@
 use aether_actor::export;
 use aether_bloomery_kinds::{Mode, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::kinds::Detail;
-use aether_bloomery_program::{Env, Program, Pure, program};
+use aether_bloomery_program::{Async, Env, Program, Sync, program};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.summarize.input")]
@@ -27,8 +27,8 @@ impl Program for Summarize {
     type Input = SummarizeInput;
     type Result = SummarizeResult;
 
-    fn run(input: Self::Input, env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
-        let text = env.read_text(input.text)?;
+    async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+        let text = env.read_text(input.text).await?;
         Ok(SummarizeResult { text: env.stage_text(&format!("summary:{text}")) })
     }
 }
@@ -55,7 +55,7 @@ impl Program for Refuse {
     type Input = RefuseInput;
     type Result = RefuseResult;
 
-    fn run(_input: Self::Input, _env: &mut Env<Pure>) -> Result<Self::Result, Refusal> {
+    fn run(_input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
         Err(Refusal::Refused { reason: Detail::new("refused") })
     }
 }
