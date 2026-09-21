@@ -362,6 +362,48 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 ///
 /// impl DependsOn<Keyed> for Dependent {}
 /// ```
+///
+/// The sealed bound carries its own weight: a custom keyless strategy
+/// satisfies `Singleton + CallerAddressable` and still fails, on
+/// `DependencyResolver` alone:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{Addressable, CallerScope, CallerScoped, DependsOn, MailboxId, One, Resolve};
+///
+/// struct CustomKeyless;
+///
+/// impl Resolve for CustomKeyless {
+///     type Args<'a> = ();
+///
+///     fn candidate(_carry: u64, _namespace: &str, _key: Option<&str>) -> Option<MailboxId> {
+///         None
+///     }
+///
+///     fn resolve(_carry: u64, _namespace: &str, _key: ()) -> MailboxId {
+///         MailboxId::NONE
+///     }
+/// }
+///
+/// impl CallerScoped for CustomKeyless {
+///     const SCOPE: CallerScope = CallerScope::Root;
+/// }
+///
+/// struct Custom;
+///
+/// impl Addressable for Custom {
+///     const NAMESPACE: &'static str = "example.custom";
+///     type Resolver = CustomKeyless;
+/// }
+///
+/// struct Dependent;
+///
+/// impl Addressable for Dependent {
+///     const NAMESPACE: &'static str = "example.dependent";
+///     type Resolver = One;
+/// }
+///
+/// impl DependsOn<Custom> for Dependent {}
+/// ```
 pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
 where
     R::Resolver: DependencyResolver,

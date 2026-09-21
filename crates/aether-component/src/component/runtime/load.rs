@@ -19,7 +19,7 @@ use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
-use super::dependencies::{missing_dependency, replacement_refusal};
+use super::dependencies::{dependency_refusal, missing_dependency, replacement_refusal};
 use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -337,7 +337,7 @@ impl ComponentHostCapabilityState {
         first: BootSuccessor,
     ) {
         if let Some(namespace) = missing_dependency(&self.registry, ctx.self_id(), &plan.dependencies) {
-            let error = format!("{actor} depends on {namespace}, which is not live", actor = plan.namespace);
+            let error = dependency_refusal(&plan.namespace, namespace);
             match first {
                 BootSuccessor::Load(_) => {
                     owed.reply(ctx, &LoadResult::Err { error });
@@ -383,12 +383,7 @@ impl ComponentHostCapabilityState {
             LoadPlacement::Under { parent, .. } => *parent,
         };
         if let Some(namespace) = missing_dependency(&self.registry, parent, &load.dependencies) {
-            owed.reply(
-                ctx,
-                &LoadResult::Err {
-                    error: format!("{actor} depends on {namespace}, which is not live", actor = load.name),
-                },
-            );
+            owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.name, namespace) });
             return;
         }
         let config = load.requested_config(self);
@@ -585,7 +580,9 @@ impl ComponentHostCapabilityState {
         let source = ctx.reply_target();
         let actor_mailbox = payload.mailbox_id;
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
-            && let Some(error) = replacement_refusal(&self.registry, actor_mailbox, &actors, payload.export.as_deref())
+            && let Ok(boot) = kind_manifest::read_boot_namespace_from_bytes(&payload.wasm)
+            && let Some(error) =
+                replacement_refusal(&self.registry, actor_mailbox, &actors, payload.export.as_deref(), boot.as_deref())
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;

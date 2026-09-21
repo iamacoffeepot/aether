@@ -35,3 +35,26 @@ impl Registry {
         self.is_live(candidate).then(|| __mint_actor_ref(candidate))
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::mail::registry::noop_handler;
+    use crate::testing::boot_authority;
+
+    use super::*;
+
+    #[test]
+    fn is_live_is_true_only_for_live_routes() {
+        let registry = Registry::new();
+        let authority = boot_authority();
+        let live = registry.register_inbox(&authority, "test.proven.live", noop_handler());
+        let dropped = registry.register_inbox(&authority, "test.proven.dropped", noop_handler());
+        assert!(registry.drop_mailbox(&authority, dropped).is_ok());
+
+        assert!(registry.is_live(live));
+        assert!(!registry.is_live(dropped), "a Dropped route is not live");
+        assert!(!registry.is_live(MailboxId(0xdead_beef)), "an unknown id is not live");
+        assert!(registry.proven::<()>(live).is_some());
+        assert!(registry.proven::<()>(dropped).is_none());
+    }
+}

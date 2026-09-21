@@ -1324,6 +1324,40 @@ mod tests {
     }
 
     #[test]
+    fn dependencies_land_on_the_current_group() {
+        // ADR-0230: each `Dependency` record joins the open group's
+        // `dependencies` in declaration order, with its resolver tag
+        // preserved; a group that declares none reads back empty.
+        let section = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "ui.root".into() },
+            InputsRecord::Dependency { resolver: One::TAG, namespace: "aether.kit.camera".into() },
+            InputsRecord::Dependency { resolver: Embedded::TAG, namespace: "ui.peer".into() },
+            InputsRecord::ActorBoundary { namespace: "ui.panel".into() },
+        ]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let actors = read_actor_inputs_from_bytes(&wasm).unwrap();
+        assert_eq!(actors.len(), 2);
+        assert_eq!(actors[0].dependencies.len(), 2);
+        assert_eq!(actors[0].dependencies[0].resolver, One::TAG);
+        assert_eq!(actors[0].dependencies[0].namespace, "aether.kit.camera");
+        assert_eq!(actors[0].dependencies[1].resolver, Embedded::TAG);
+        assert_eq!(actors[0].dependencies[1].namespace, "ui.peer");
+        assert!(actors[1].dependencies.is_empty());
+    }
+
+    #[test]
+    fn unknown_dependency_tag_is_rejected() {
+        // A resolver tag this build does not claim is a read error, not a
+        // skip — silently dropping it would load an actor while ignoring
+        // one of its declared dependencies.
+        let section = inputs_section(&[InputsRecord::Dependency { resolver: 0xFF, namespace: "ui.peer".into() }]);
+        let wasm = wasm_with_section(INPUTS_SECTION, &section);
+        let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
+        assert!(err.contains("dependency resolver tag"), "err: {err}");
+        assert!(err.contains(INPUTS_SECTION), "err: {err}");
+    }
+
+    #[test]
     fn absent_section_returns_default_capabilities() {
         let wasm = wat::parse_str(r#"(module (func (export "noop")))"#).unwrap();
         let caps = read_inputs_from_bytes(&wasm).unwrap();
