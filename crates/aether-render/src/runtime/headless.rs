@@ -10,7 +10,7 @@ use aether_actor::runtime;
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
 
 use aether_substrate::Manual;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::headless::HeadlessRenderCapability;
@@ -62,7 +62,7 @@ impl NativeActor for HeadlessRenderCapability {
     /// senders — it drops a `Component` one and returns `false`
     /// (iamacoffeepot/aether#4341).
     #[handler::manual]
-    fn on_capture_frame(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CaptureFrame) {
+    fn on_capture_frame(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: CaptureFrame) {
         ctx.take_inbound().reply(&CaptureFrameResult::Err { error: UNAVAILABLE_ERROR.to_owned() });
     }
 

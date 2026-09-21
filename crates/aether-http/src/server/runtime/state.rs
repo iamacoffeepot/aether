@@ -6,6 +6,7 @@ use super::*;
 
 use crate::server::shard::HttpDispatchShard;
 use aether_actor::Single;
+use aether_substrate::Erased;
 use aether_substrate::Subname;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -255,7 +256,7 @@ impl HttpSupervisorState {
         }
     }
 
-    fn schedule_shard_wake<A>(&self, ctx: &NativeCtx<'_, Single, A>) {
+    fn schedule_shard_wake<A>(&self, ctx: &NativeCtx<'_, A, Single>) {
         let _ = ctx.send_envelope_tracked(
             self.self_mailbox,
             KindId(<HttpInboundReady as Kind>::ID.0),
@@ -272,7 +273,7 @@ impl HttpSupervisorState {
     /// caller then ends the handler so its birth flushes as an independent
     /// batch. A follow-up wake is always scheduled: it stages the next index,
     /// or resumes ordinary accepted-peer draining after the last index.
-    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, Single, HttpServerCapability>) -> bool {
+    pub fn stage_next_shard(&mut self, ctx: &mut NativeCtx<'_, HttpServerCapability, Single>) -> bool {
         let index = match &mut self.shard_startup {
             ShardStartup::Starting { next_to_stage, .. } => next_to_stage.take(),
             ShardStartup::Idle | ShardStartup::Ready { .. } | ShardStartup::Failed => None,
@@ -426,7 +427,7 @@ impl HttpSupervisorState {
     /// sockets and supervisor-owned pending sockets. The first peer starts
     /// lazy staging; later peers stay FIFO in `Starting`; only `Ready` may
     /// post into a child sink.
-    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, Single, A>, stream: TcpStream, peer: SocketAddr) {
+    pub fn assign_peer<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>, stream: TcpStream, peer: SocketAddr) {
         let live = self.live_connections.load(Ordering::Acquire);
         let pending = self.pending_peer_count();
         if live.saturating_add(pending) >= self.config.max_connections {
@@ -519,7 +520,7 @@ impl HttpSupervisorState {
     /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, mailbox: MailboxId) {
         // A monitor that already failed for this mailbox will fail again — the
         // condition is a property of the target, not of the attempt — so the
         // second route it registers must not re-report it.

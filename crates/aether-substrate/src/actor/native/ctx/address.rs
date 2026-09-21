@@ -95,7 +95,7 @@ macro_rules! native_sender_methods {
 
 pub(super) use native_sender_methods;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// The actor's own [`MailboxId`] — the handler-ctx mirror of
     /// [`NativeInitCtx::self_id`](super::NativeInitCtx::self_id). A cap that subscribes settlement or
     /// keys a per-instance table from inside a handler needs its own

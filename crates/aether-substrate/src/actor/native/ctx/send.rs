@@ -19,7 +19,7 @@ use crate::mail::{Source, SourceAddr};
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Reply to an explicit [`Source`] under an explicit `(root, parent)`
     /// lineage rather than the inbound's own sender / this ctx's in-flight
     /// chain. The ADR-0093 hold-until-resolve path reaches for this:
@@ -167,7 +167,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
 // are inherent methods on `NativeCtx` that reach into the
 // substrate-internal spawner + actor registry.
 
-impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -263,7 +263,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, M, A> {
 // manual-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl<A> OutboundReply for NativeCtx<'_, Manual, A> {
+impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
     type ReplyHandle = Source;
 
     /// Always `Some` on native — the substrate's per-handler dispatcher
@@ -303,7 +303,7 @@ impl<A> OutboundReply for NativeCtx<'_, Manual, A> {
 // not hold the request chain open. A sourceless dispatch (broadcast /
 // substrate-generated mail, no `SourceAddr::Component`) has no routable
 // target, so the emission warn-drops.
-impl<K: Kind, A> Emit<K> for NativeCtx<'_, Multi<K>, A> {
+impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {
         let Some(source) = self.source_mailbox() else {
             tracing::warn!(

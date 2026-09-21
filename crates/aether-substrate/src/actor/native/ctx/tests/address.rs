@@ -166,7 +166,7 @@ fn resolve_tracks_a_keyed_child_across_spawn() {
     impl Dispatch<Self> for ResolveChild {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {

@@ -190,7 +190,7 @@ impl NativeActor for JournalActor {
     /// when the head is already past `after`, otherwise parked until
     /// [`Self::commit`] wakes it.
     #[handler::manual]
-    fn on_watch_head(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: WatchHead) {
+    fn on_watch_head(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, request: WatchHead) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
 
         let head = match self.journal.head() {

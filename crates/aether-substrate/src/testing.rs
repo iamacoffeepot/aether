@@ -283,7 +283,7 @@ pub fn manual_dispatch_ctx<A>(
     binding: &Arc<NativeBinding>,
     sender: Source,
     self_mailbox: MailboxId,
-) -> NativeCtx<'_, Manual, A> {
+) -> NativeCtx<'_, A, Manual> {
     NativeCtx::with_inbound(
         binding,
         sender,

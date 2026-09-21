@@ -14,5 +14,5 @@ impl NativeActor for RuntimeState {
     }
 
     #[handler::multi]
-    fn on_query(state: &mut Self::State, ctx: &mut Ctx<Multi<Row>>, query: Query) {}
+    fn on_query(state: &mut Self::State, ctx: &mut Ctx<Erased, Multi<Row>>, query: Query) {}
 }

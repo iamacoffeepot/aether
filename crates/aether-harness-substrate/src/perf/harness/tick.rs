@@ -78,7 +78,7 @@ impl Dispatch<Self> for TickSource {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

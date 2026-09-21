@@ -10,7 +10,7 @@ use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{DeferredReply, NativeCtx, TaskDone};
+use crate::actor::native::{DeferredReply, Erased, NativeCtx, TaskDone};
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, StubActor};
@@ -173,11 +173,11 @@ type CastOnlyTaskDones =
 /// `TaskDone::resolve*`) alike.
 #[allow(dead_code)]
 fn _assert_cast_kind_repliable(
-    ctx: &mut NativeCtx<'_, Manual>,
+    ctx: &mut NativeCtx<'_, Erased, Manual>,
     sender: Source,
     deferred: DeferredReply,
     task_dones: CastOnlyTaskDones,
-    task_ctx: &mut NativeCtx<'_, Single>,
+    task_ctx: &mut NativeCtx<'_, Erased, Single>,
 ) {
     OutboundReply::reply(ctx, &CastOnly { code: 2 });
     OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });

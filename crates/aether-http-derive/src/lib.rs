@@ -616,7 +616,7 @@ fn parse_ref_ctx_type(method: &ImplItemFn) -> syn::Result<Type> {
     let ctx_arg = method.sig.inputs.iter().nth(1).ok_or_else(|| {
         syn::Error::new(
             method.sig.span(),
-            "a reply method's second parameter must be `ctx: &mut NativeCtx<'_, Manual>`",
+            "a reply method's second parameter must be `ctx: &mut NativeCtx<'_, Erased, Manual>`",
         )
     })?;
     let FnArg::Typed(PatType { ty, .. }) = ctx_arg else {
@@ -1019,7 +1019,7 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
 
 /// Strip a transport ctx type down to its base by dropping any non-lifetime
 /// generic arguments (the reply-class marker a deferred route carries):
-/// `NativeCtx<'a, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` → `WasmCtx<'a>`.
+/// `NativeCtx<'a, Erased, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` → `WasmCtx<'a>`.
 /// The synthesized `wire` needs the base ctx because `wire` is a
 /// `Lifecycle` method with the default reply class, not the handler's.
 fn base_ctx_type(ty: &Type) -> Type {
@@ -1077,7 +1077,7 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     // the first group (all routes on one impl share a transport). `wire`
     // is a `Lifecycle` method with the base (default reply-class) ctx, so
     // strip any reply-class type arg a deferred route carries
-    // (`NativeCtx<'_, Manual>` → `NativeCtx<'_>`).
+    // (`NativeCtx<'_, Erased, Manual>` → `NativeCtx<'_>`).
     let template = &groups[0];
     let first_arg = &template.first_arg;
     let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&template.ctx_c));

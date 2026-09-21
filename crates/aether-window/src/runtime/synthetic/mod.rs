@@ -145,7 +145,7 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler::manual]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: CreateWindow) {
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CreateWindow) {
         let reply = ctx.take_inbound();
         if let Err(error) = state.check_create(&mail.spec) {
             reply.reply(&CreateWindowResult::Err { error });

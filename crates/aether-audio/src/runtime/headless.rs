@@ -22,6 +22,7 @@ use crate::kinds::{
     StopTrack,
 };
 
+use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -98,7 +99,7 @@ impl NativeActor for HeadlessAudioCapability {
     /// what keeps the two `aether.audio.play_track` inventory rows folding to
     /// one.
     #[handler::manual]
-    fn on_play_track(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: PlayTrack) {
+    fn on_play_track(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: PlayTrack) {
         ctx.reply(&PlayTrackResult::Err {
             namespace: mail.namespace,
             path: mail.path,
@@ -116,7 +117,7 @@ impl NativeActor for HeadlessAudioCapability {
     /// echoing the request's `namespace` / `path` — the same manual shape as
     /// `on_play_track`.
     #[handler::manual]
-    fn on_load_instrument(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
+    fn on_load_instrument(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadInstrument) {
         ctx.reply(&LoadInstrumentResult::Err {
             namespace: mail.namespace,
             path: mail.path,

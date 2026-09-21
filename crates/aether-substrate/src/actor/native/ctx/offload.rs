@@ -21,7 +21,7 @@ use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// ADR-0080 §12 spawn primitive: launch a worker thread that
     /// inherits this handler's in-flight `(mail_id, root)` so its
     /// sends fold into the current causal chain. The closure `f`

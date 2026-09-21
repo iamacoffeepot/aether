@@ -15,7 +15,7 @@ use crate::actor::registry::MonitorError;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Issue 607 Phase 4a (ADR-0079): self-shutdown signal. Sets a
     /// flag the actor's dispatcher polls after each handler returns;
     /// when set, the trampoline drains any remaining inbox mail

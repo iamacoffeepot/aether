@@ -1,4 +1,4 @@
-error: #[handler::multi] requires a `Multi<K>` ctx marker naming the emit kind — write `ctx: &mut WasmCtx<'_, Multi<K>>` (or `NativeCtx<'_, Multi<K>>`), where `K` is the kind the handler emits (ADR-0134)
+error: #[handler::multi] requires a `Multi<K>` ctx marker naming the emit kind — write `ctx: &mut WasmCtx<'_, Multi<K>>` (or `NativeCtx<'_, Erased, Multi<K>>`), where `K` is the kind the handler emits (ADR-0134)
   --> tests/ui/rejects_multi_marker_mismatch_wasm.rs:37:33
    |
 37 |     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}

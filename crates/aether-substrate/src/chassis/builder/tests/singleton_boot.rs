@@ -66,7 +66,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     impl Dispatch<Self> for ProbeCap {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -177,7 +177,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
     impl Dispatch<Self> for LocalProbe {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

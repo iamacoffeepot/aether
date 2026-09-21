@@ -11,7 +11,7 @@ use aether_kinds::{
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
-    DeferredReply, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+    DeferredReply, Erased, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
     spawn::Subname,
 };
 use aether_substrate::actor::wasm::asset_manifest;
@@ -166,11 +166,11 @@ pub(super) enum SpawnContext {
 }
 
 impl ComponentHostCapabilityState {
-    pub fn begin_load(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
+    pub fn begin_load(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
         self.begin_load_at(ctx, payload, LoadPlacement::ComponentHost);
     }
 
-    pub fn begin_load_under(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponentUnder) {
+    pub fn begin_load_under(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponentUnder) {
         let parent = match self.registry.resolve_address(&payload.parent) {
             Ok(parent) => parent,
             Err(error) => {
@@ -187,7 +187,12 @@ impl ComponentHostCapabilityState {
         );
     }
 
-    fn begin_load_at(&mut self, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent, placement: LoadPlacement) {
+    fn begin_load_at(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        payload: LoadComponent,
+        placement: LoadPlacement,
+    ) {
         let (descriptors, load) = match self.prepare_load(payload, placement) {
             Ok(prepared) => prepared,
             Err(result) => {
@@ -294,7 +299,7 @@ impl ComponentHostCapabilityState {
 
     pub(super) fn finish_kind_registration(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<RegistryBatchResult, KindRegistration>,
     ) {
         if let Err(error) = done.output() {
@@ -308,7 +313,7 @@ impl ComponentHostCapabilityState {
 
     fn continue_load(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         owed: DeferredReply,
         load: Arc<PreparedLoad>,
     ) {
@@ -328,7 +333,7 @@ impl ComponentHostCapabilityState {
 
     fn stage_module_boot<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, M, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, M>,
         owed: DeferredReply,
         plan: PreparedBoot,
         first: BootSuccessor,
@@ -352,7 +357,7 @@ impl ComponentHostCapabilityState {
 
     fn stage_requested_actor(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         owed: DeferredReply,
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
@@ -387,7 +392,7 @@ impl ComponentHostCapabilityState {
 
     pub(super) fn finish_spawn(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<SpawnOutcome, SpawnContext>,
     ) {
         match done.context().clone() {
@@ -400,7 +405,7 @@ impl ComponentHostCapabilityState {
 
     fn finish_module_boot(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<SpawnOutcome, SpawnContext>,
         plan: PreparedBoot,
         first: BootSuccessor,
@@ -431,7 +436,7 @@ impl ComponentHostCapabilityState {
 
     fn finish_boot_successor(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         owed: DeferredReply,
         successor: BootSuccessor,
         hash: &str,
@@ -448,7 +453,7 @@ impl ComponentHostCapabilityState {
     }
 
     fn reply_boot_failure<M: ReplyMode, A>(
-        ctx: &mut NativeCtx<'_, M, A>,
+        ctx: &mut NativeCtx<'_, A, M>,
         owed: DeferredReply,
         successor: BootSuccessor,
         error: String,
@@ -474,7 +479,7 @@ impl ComponentHostCapabilityState {
 
     fn finish_requested_actor(
         &mut self,
-        ctx: &mut NativeCtx<'_, Single, ComponentHostCapability>,
+        ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
         done: TaskDone<SpawnOutcome, SpawnContext>,
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
@@ -499,7 +504,7 @@ impl ComponentHostCapabilityState {
         done.resolve_with(ctx, move |_, _| LoadResult::Ok { mailbox_id, name, capabilities });
     }
 
-    fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, hash: &str) {
+    fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, hash: &str) {
         let removable =
             self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
         if removable {
@@ -511,7 +516,7 @@ impl ComponentHostCapabilityState {
 
     fn settle_boot_request<M: ReplyMode, A>(
         &mut self,
-        ctx: &mut NativeCtx<'_, M, A>,
+        ctx: &mut NativeCtx<'_, A, M>,
         hash: &str,
         live_actor: Option<MailboxId>,
     ) {
@@ -527,7 +532,7 @@ impl ComponentHostCapabilityState {
         self.drop_orphan_boot(ctx, hash);
     }
 
-    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, actor_mailbox: MailboxId) {
+    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, actor_mailbox: MailboxId) {
         let Some(hash) = self.boot_hash_by_actor.remove(&actor_mailbox) else {
             return;
         };
@@ -559,7 +564,7 @@ impl ComponentHostCapabilityState {
         );
     }
 
-    pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, Manual, ComponentHostCapability>, result: ReplaceResult) {
+    pub fn finish_replace(&mut self, ctx: &mut NativeCtx<'_, ComponentHostCapability, Manual>, result: ReplaceResult) {
         let Some(correlation) = ctx.in_reply_to().map(|request| request.0) else {
             return;
         };
@@ -623,7 +628,7 @@ impl ComponentHostCapabilityState {
 
     fn commit_replacement_boot<M: ReplyMode, A>(
         &mut self,
-        ctx: &mut NativeCtx<'_, M, A>,
+        ctx: &mut NativeCtx<'_, A, M>,
         actor_mailbox: MailboxId,
         boot_operation: u64,
         new_hash: Option<String>,

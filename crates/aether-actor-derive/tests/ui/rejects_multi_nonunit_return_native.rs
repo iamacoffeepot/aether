@@ -51,7 +51,7 @@ impl aether_substrate::actor::native::NativeActor for MultiCap {
     #[handler::multi]
     fn on_ping(
         &mut self,
-        _ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Multi<Frame>>,
+        _ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Erased, aether_substrate::Multi<Frame>>,
         _ping: Ping,
     ) -> u32 {
         0

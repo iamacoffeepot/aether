@@ -9,7 +9,7 @@ use aether_actor::{Manual, ReplyMode, handler_set};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_substrate::InboundMail;
+use aether_substrate::{Erased, InboundMail};
 
 use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, unsupported};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
@@ -37,7 +37,11 @@ impl WindowInstanceState {
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn forward(state: &mut WindowInstanceState, ctx: &mut NativeCtx<'_, Manual>, command: WindowCommand) {
+pub(super) fn forward(
+    state: &mut WindowInstanceState,
+    ctx: &mut NativeCtx<'_, Erased, Manual>,
+    command: WindowCommand,
+) {
     let inbound = ctx.take_inbound();
     let mail_id = inbound.mail_id();
     if state.pending.insert(mail_id, inbound).is_some() {
@@ -52,7 +56,7 @@ pub(super) fn forward(state: &mut WindowInstanceState, ctx: &mut NativeCtx<'_, M
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub(super) fn complete<M: ReplyMode>(
     state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, M>,
+    ctx: &mut NativeCtx<'_, Erased, M>,
     result: ApplyWindowCommandResult,
 ) {
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
@@ -103,7 +107,11 @@ pub(super) fn complete<M: ReplyMode>(
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn retire<M: ReplyMode>(_state: &mut WindowInstanceState, ctx: &mut NativeCtx<'_, M>, _mail: RetireWindow) {
+pub(super) fn retire<M: ReplyMode>(
+    _state: &mut WindowInstanceState,
+    ctx: &mut NativeCtx<'_, Erased, M>,
+    _mail: RetireWindow,
+) {
     ctx.shutdown();
 }
 
@@ -153,13 +161,13 @@ pub trait WindowEndpoint {
 
     /// Ask the manager to close this window.
     #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: CloseWindow) {
+    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: CloseWindow) {
         forward(Self::endpoint(state), ctx, WindowCommand::Close);
     }
 
     /// Ask the manager to change this window's presentation mode.
     #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMode) {
+    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMode) {
         forward(
             Self::endpoint(state),
             ctx,
@@ -169,31 +177,31 @@ pub trait WindowEndpoint {
 
     /// Ask the manager to retitle this window.
     #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowTitle) {
+    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowTitle) {
         forward(Self::endpoint(state), ctx, WindowCommand::SetTitle { title: mail.title });
     }
 
     /// Ask the manager to install this window's native menu bar.
     #[handler::manual]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMenu) {
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMenu) {
         forward(Self::endpoint(state), ctx, WindowCommand::SetMenu { menus: mail.menus });
     }
 
     /// Ask the manager to set this window's pointer shape.
     #[handler::manual]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowCursor) {
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowCursor) {
         forward(Self::endpoint(state), ctx, WindowCommand::SetCursor { icon: mail.icon });
     }
 
     /// Ask the manager to bring this window to the foreground.
     #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: FocusWindow) {
+    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: FocusWindow) {
         forward(Self::endpoint(state), ctx, WindowCommand::Focus);
     }
 
     /// Ask the manager to schedule this window for redraw.
     #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, _mail: RequestWindowRedraw) {
+    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: RequestWindowRedraw) {
         forward(Self::endpoint(state), ctx, WindowCommand::RequestRedraw);
     }
 

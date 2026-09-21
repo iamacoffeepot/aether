@@ -70,7 +70,7 @@ pub use init::NativeInitCtx;
 /// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
-pub struct NativeCtx<'a, M: ReplyMode = Single, A = Erased> {
+pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     binding: &'a Arc<NativeBinding>,
     source: Source,
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
@@ -136,7 +136,7 @@ pub struct NativeCtx<'a, M: ReplyMode = Single, A = Erased> {
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub struct Erased;
-impl<'a> NativeCtx<'a, Single> {
+impl<'a> NativeCtx<'a, Erased, Single> {
     /// Internal constructor — the chassis dispatcher trampoline (in
     /// `chassis::builder`) builds these for `wire` / `unwire` / close
     /// hooks. Cap-side test fixtures in the per-cap crates also reach
@@ -199,7 +199,7 @@ impl<'a> NativeCtx<'a, Single> {
     }
 }
 
-impl<'a, M: ReplyMode, A> NativeCtx<'a, M, A> {
+impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     /// The actor-naming counterpart of [`Self::new`] / [`Self::new_dispatching`]
     /// (issue 4158): the same inbound-less ctx, typed by the actor it
     /// dispatches for, so the handler it drives reaches [`Self::spawn_child`].
@@ -239,16 +239,16 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, M, A> {
     /// re-naming an actor is exactly the misstatement this replaced.
     #[doc(hidden)]
     #[must_use]
-    pub fn erase(&mut self) -> &mut NativeCtx<'a, M, Erased> {
-        // SAFETY: `A` appears only in `PhantomData`, so `NativeCtx<'a, M, A>`
-        // and `NativeCtx<'a, M, Erased>` are layout-identical for every `A`
+    pub fn erase(&mut self) -> &mut NativeCtx<'a, Erased, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `NativeCtx<'a, A, M>`
+        // and `NativeCtx<'a, Erased, M>` are layout-identical for every `A`
         // (see `native_ctx_layout_identical_across_modes`). The reborrow swaps
         // the marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, M, Erased>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Erased, M>>() }
     }
 }
 
-impl<'a> NativeCtx<'a, Manual> {
+impl<'a> NativeCtx<'a, Erased, Manual> {
     /// ADR-0112: an inbound-less `<Manual>` ctx for driving the
     /// macro-emitted `NativeDispatch::__aether_dispatch_envelope` (which
     /// carries the most-permissive view) from a cross-crate trampoline
@@ -274,7 +274,7 @@ impl<'a> NativeCtx<'a, Manual> {
     }
 }
 
-impl<'a, A> NativeCtx<'a, Manual, A> {
+impl<'a, A> NativeCtx<'a, A, Manual> {
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
@@ -283,13 +283,13 @@ impl<'a, A> NativeCtx<'a, Manual, A> {
     /// downgrades.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut NativeCtx<'a, Single, A> {
-        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, Manual, A>` and
-        // `NativeCtx<'a, Single, A>` are layout-identical (the marker field is
+    pub fn as_single(&mut self) -> &mut NativeCtx<'a, A, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `NativeCtx<'a, A, Manual>` and
+        // `NativeCtx<'a, A, Single>` are layout-identical (the marker field is
         // a ZST for every `M` — see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Single, A>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Single>>() }
     }
 
     /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -299,12 +299,12 @@ impl<'a, A> NativeCtx<'a, Manual, A> {
     /// handler whose marker disagrees with its class fails to unify.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, Multi<K>, A> {
+    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, A, Multi<K>> {
         // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
-        // `K`, so `NativeCtx<'a, Manual, A>` and `NativeCtx<'a, Multi<K>, A>`
+        // `K`, so `NativeCtx<'a, A, Manual>` and `NativeCtx<'a, A, Multi<K>>`
         // are layout-identical (see `native_ctx_layout_identical_across_modes`).
         // The reborrow swaps the marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, Multi<K>, A>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Multi<K>>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched
@@ -334,7 +334,7 @@ impl<'a, A> NativeCtx<'a, Manual, A> {
     }
 }
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Borrow the wired `Mailer`. Issue 953: surfaced so cap handlers
     /// (`TraceDispatchCapability` is the motivating consumer) can
     /// reach the per-chassis trace handle for `now_nanos` without
@@ -356,7 +356,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
     }
 }
 
-impl<M: ReplyMode, A> Drop for NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> Drop for NativeCtx<'_, A, M> {
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): handler-end flush. One
     /// `NativeCtx` is built per dispatched envelope (and one for
     /// `unwire`), so its scope *is* the handler's lifetime — dropping it

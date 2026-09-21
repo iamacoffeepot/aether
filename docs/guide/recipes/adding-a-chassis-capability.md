@@ -86,7 +86,7 @@ use crate::kinds::{DrawText, LoadFont, LoadFontResult};
 use crate::fs::{FsCapability, Read, ReadResult};
 use aether_actor::runtime;
 use aether_substrate::Manual;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 /// The cap's mutable state — the font registry and glyph atlas.
@@ -114,7 +114,7 @@ impl NativeActor for TextCapability {
     // `aether.fs.read`, then reply later from `on_read_result`.
     // See "the reply is deferred here" below.
     #[handler::manual]
-    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFont) {
         TextCapabilityState::forward_font_read(
             ctx,
             mail.namespace,

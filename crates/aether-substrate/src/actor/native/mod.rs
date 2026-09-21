@@ -123,7 +123,7 @@ pub trait Dispatch<S> {
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
     fn dispatch(
         state: &mut S,
-        ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+        ctx: &mut NativeCtx<'_, Self, crate::Manual>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()>
@@ -133,7 +133,7 @@ pub trait Dispatch<S> {
     /// Catch-all for envelopes no `#[handler]` matched (issue 576). Default
     /// returns `false` so the trampoline warn-logs the miss; the macro
     /// overrides it when a `#[fallback]` is present.
-    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, crate::Manual, Self>, _envelope: &Envelope) -> bool
+    fn dispatch_fallback(_state: &mut S, _ctx: &mut NativeCtx<'_, Self, crate::Manual>, _envelope: &Envelope) -> bool
     where
         Self: Sized,
     {

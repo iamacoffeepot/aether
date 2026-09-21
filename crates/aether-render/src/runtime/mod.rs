@@ -48,7 +48,7 @@ pub use aether_data::{Kind, KindId};
 use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
 
 use aether_substrate::Manual;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
@@ -314,7 +314,7 @@ impl RenderCapabilityState {
     /// against the mail it describes (issue 5965). The payload is empty
     /// because the harness's inline observer records only the kind id;
     /// nothing downstream decodes a witness.
-    fn observe<M: ReplyMode, A>(&self, ctx: &NativeCtx<'_, M, A>, kind: KindId) {
+    fn observe<M: ReplyMode, A>(&self, ctx: &NativeCtx<'_, A, M>, kind: KindId) {
         if let Some(observer) = self.observer {
             let _ = ctx.send_envelope_tracked(observer, kind, &[]);
         }
@@ -1200,7 +1200,7 @@ impl NativeActor for RenderCapability {
     /// every rejected capture over the wire returned no image, no error and
     /// no timeout (iamacoffeepot/aether#4341).
     #[handler::manual]
-    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CaptureFrame) {
+    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CaptureFrame) {
         state.observe(ctx, <CaptureFrame as Kind>::ID);
         let reply = ctx.take_inbound();
 

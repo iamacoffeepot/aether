@@ -42,6 +42,7 @@ pub use aether_actor::OutboundReply;
 pub use aether_actor::root_mailbox;
 pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId};
 pub use aether_kinds::LifecycleAdvanceComplete;
+use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
@@ -125,7 +126,7 @@ impl LifecycleCapabilityState {
     /// binding) means "not monitorable": the rows then live until
     /// substrate teardown, exactly as they would for a mailbox that
     /// never goes away.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: DataMailboxId) {
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, mailbox: DataMailboxId) {
         if !self.monitors.contains_key(&mailbox)
             && let Ok(handle) = ctx.monitor(mailbox)
         {
@@ -478,7 +479,7 @@ impl NativeActor for LifecycleCapability {
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::manual]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LifecycleAdvance) {
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LifecycleAdvance) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -592,7 +593,7 @@ impl NativeActor for LifecycleCapability {
     /// when the in-flight count for `root` reaches zero; not a public
     /// API for user code.
     #[handler::manual]
-    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: Settled) {
+    fn on_settled(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: Settled) {
         let Some(pending) = state.pending.as_ref() else {
             return;
         };

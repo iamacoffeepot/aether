@@ -26,7 +26,7 @@ impl WasmTrampolineState {
     /// Publish the logical inline-child routes a guest call staged. The
     /// owner batch is reserved admission; completion is a later no-reply
     /// actor turn so rejection cannot silently lose the originating chain.
-    pub fn stage_inline_aliases<A>(&self, ctx: &mut NativeCtx<'_, Single, A>, aliases: Vec<PreparedAliasRoute>) {
+    pub fn stage_inline_aliases<A>(&self, ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<PreparedAliasRoute>) {
         for alias in aliases {
             let alias_id = alias.alias;
             let _ = ctx.stage_registry_batch(
@@ -41,7 +41,7 @@ impl WasmTrampolineState {
     /// its departure notices here, from this actor's own turn, so a cap keying
     /// rows on the child's stamped identity (ADR-0114 §4) reclaims them; the
     /// route retirement itself is staged through the owner alongside.
-    pub fn stage_inline_alias_retirements<A>(&self, ctx: &mut NativeCtx<'_, Single, A>, aliases: Vec<MailboxId>) {
+    pub fn stage_inline_alias_retirements<A>(&self, ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<MailboxId>) {
         for alias in aliases {
             ctx.vacate_alias(alias);
             let _ = ctx.stage_registry_batch(
@@ -72,7 +72,7 @@ impl WasmTrampolineState {
     /// own capability group (looked up by actor-type tag). A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
-    pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, Single, WasmTrampoline>, pending: PendingSpawn) {
+    pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, WasmTrampoline, Single>, pending: PendingSpawn) {
         let capabilities = self
             .actor_caps
             .iter()

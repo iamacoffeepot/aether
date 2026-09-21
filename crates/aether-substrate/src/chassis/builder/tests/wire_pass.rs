@@ -74,7 +74,7 @@ fn spawn_actor_runs_wire_once_after_init() {
     impl Dispatch<Self> for WireSpawnProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -133,7 +133,7 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
     impl Dispatch<Self> for WireProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -192,7 +192,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     impl Dispatch<Self> for Pinger {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -225,7 +225,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     impl Dispatch<Self> for Ponger {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

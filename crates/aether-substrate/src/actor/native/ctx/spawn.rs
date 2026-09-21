@@ -21,7 +21,7 @@ use super::NativeCtx;
 /// The one surface that needs the ctx to name its actor: a birth's parent is
 /// the actor being dispatched, so the call exists only where that actor is in
 /// scope. An [`Erased`](super::Erased) ctx reaches none of this (issue 4158).
-impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// Spawn an instanced `C` as a child of `A`, the actor this ctx
     /// dispatches for. The `C: ChildOf<A>` bound enforces the ADR-0166
     /// permission, and
@@ -34,8 +34,8 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, M, A> {
     ///
     /// The parent is the ctx's own actor, never a caller-supplied one
     /// (issue 4158): a handler opts into this call by naming the actor in
-    /// its ctx signature — `ctx: &mut NativeCtx<'_, Single, Self>` or
-    /// `NativeCtx<'_, Manual, Self>` — and the `#[actor]` macro hands it a
+    /// its ctx signature — `ctx: &mut NativeCtx<'_, Self, Single>` or
+    /// `NativeCtx<'_, Self, Manual>` — and the `#[actor]` macro hands it a
     /// ctx typed by the actor it is dispatching for. A parent that
     /// disagrees with the executing binding is therefore not a runtime
     /// error to check but a state with no spelling.

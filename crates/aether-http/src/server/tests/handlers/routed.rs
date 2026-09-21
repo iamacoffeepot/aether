@@ -5,7 +5,7 @@
 
 use aether_actor::{Manual, actor};
 use aether_data::Kind;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate as http;
@@ -270,7 +270,7 @@ impl NativeActor for SilentPeer {
     // Deliberately manual + no reply: the deferred route's downstream
     // chain settles without an answer, arming the `504`.
     #[handler::manual]
-    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Manual>, _ask: EchoAsk) {}
+    fn on_ask(_state: &mut SilentPeerState, _ctx: &mut NativeCtx<'_, Erased, Manual>, _ask: EchoAsk) {}
 }
 
 /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
@@ -294,14 +294,17 @@ impl NativeActor for DeferRouteHandler {
     /// `GET /echo` — forward to the echo peer by type, answer on its
     /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
     #[http::route(Get, "/echo")]
-    fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+    fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Erased, Manual>>) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
     /// `GET /blackhole` — forward to the silent peer; it settles without a
     /// reply, so the server's own `502` net answers.
     #[http::route(Get, "/blackhole")]
-    fn blackhole(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Manual>>) -> http::Outcome {
+    fn blackhole(
+        _state: &mut DeferRouteHandlerState,
+        ctx: http::Ctx<'_, NativeCtx<'_, Erased, Manual>>,
+    ) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
     }
 
@@ -317,7 +320,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::reply]
     fn on_say(
         _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Manual>,
+        _ctx: &mut NativeCtx<'_, Erased, Manual>,
         say: EchoSay,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
@@ -335,7 +338,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::reply]
     fn on_gated_out(
         _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Manual>,
+        _ctx: &mut NativeCtx<'_, Erased, Manual>,
         _reply: GatedOutReply,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }

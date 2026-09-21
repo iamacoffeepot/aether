@@ -81,7 +81,7 @@ impl NativeActor for BundleDriver {
     }
 
     #[handler::manual]
-    fn on_call(&mut self, ctx: &mut NativeCtx<'_, Manual>, call: Call) {
+    fn on_call(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, call: Call) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.call(call);
         self.callers.push((caller, owed));
@@ -89,7 +89,11 @@ impl NativeActor for BundleDriver {
     }
 
     #[handler::manual]
-    fn on_await_processed(&mut self, ctx: &mut NativeCtx<'_, Manual>, request: AwaitProcessed) {
+    fn on_await_processed(
+        &mut self,
+        ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>,
+        request: AwaitProcessed,
+    ) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.await_processed(request);
         self.callers.push((caller, owed));

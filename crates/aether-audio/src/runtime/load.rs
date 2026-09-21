@@ -13,6 +13,7 @@ use super::track::{DecodeOutput, TrackDecodeContext};
 use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
 use aether_fs::FsMailboxExt;
+use aether_substrate::Erased;
 
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's
@@ -35,7 +36,7 @@ impl AudioCapabilityState {
     /// handler can route three fetch paths.
     pub fn start_track_decode(
         &mut self,
-        ctx: &mut NativeCtx<'_, Manual>,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
         context: AudioLoadContext,
         namespace: String,
         path: String,
@@ -76,7 +77,7 @@ impl AudioCapabilityState {
     /// [`BankAssembly`] is parked until the sample reads complete.
     pub fn on_sfz_loaded(
         &mut self,
-        ctx: &mut NativeCtx<'_, Manual>,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
         source: Source,
         namespace: String,
         path: String,
@@ -154,7 +155,13 @@ impl AudioCapabilityState {
     /// the last sample is in, dispatch the decode + assembly off the
     /// realtime path (ADR-0093 / ADR-0103 §6). A late / orphan reply
     /// (its assembly already failed) is dropped.
-    pub fn on_sample_loaded(&mut self, ctx: &mut NativeCtx<'_, Manual>, assembly_id: u64, slot: u64, bytes: Vec<u8>) {
+    pub fn on_sample_loaded(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        assembly_id: u64,
+        slot: u64,
+        bytes: Vec<u8>,
+    ) {
         let Ok(slot) = usize::try_from(slot) else {
             return;
         };
@@ -205,7 +212,7 @@ impl AudioCapabilityState {
     /// original requester and discard the partial assembly (ADR-0103
     /// §2). Sibling sample reads still in flight will find no assembly
     /// when their context arrives and drop.
-    pub fn fail_assembly(&mut self, ctx: &mut NativeCtx<'_, Manual>, assembly_id: u64, error: String) {
+    pub fn fail_assembly(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, assembly_id: u64, error: String) {
         let Some(assembly) = self.assemblies.remove(&assembly_id) else {
             return;
         };

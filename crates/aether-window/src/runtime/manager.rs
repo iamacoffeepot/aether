@@ -2,7 +2,7 @@
 
 use aether_actor::{Manual, OutboundReply, handler_set};
 use aether_data::{Kind, MailboxId};
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{Erased, NativeCtx};
 
 use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
 use crate::{
@@ -27,7 +27,7 @@ use crate::{
 /// caller receives as the command's own `Err` variant rather than as silence.
 fn route_to_sole_window<K: Kind>(
     windows: &[WindowId],
-    ctx: &mut NativeCtx<'_, Manual>,
+    ctx: &mut NativeCtx<'_, Erased, Manual>,
     mail: &K,
 ) -> Result<(), String> {
     let window = match windows {
@@ -138,7 +138,7 @@ pub trait WindowManagerSurface {
 
     /// Close the sole window.
     #[handler::manual]
-    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CloseWindow) {
+    fn on_close(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CloseWindow) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&CloseWindowResult::Err { error });
         }
@@ -146,7 +146,7 @@ pub trait WindowManagerSurface {
 
     /// Change the sole window's presentation mode.
     #[handler::manual]
-    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMode) {
+    fn on_set_mode(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMode) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&SetWindowModeResult::Err { error });
         }
@@ -154,7 +154,7 @@ pub trait WindowManagerSurface {
 
     /// Change the sole window's title.
     #[handler::manual]
-    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowTitle) {
+    fn on_set_title(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowTitle) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&SetWindowTitleResult::Err { error });
         }
@@ -162,7 +162,7 @@ pub trait WindowManagerSurface {
 
     /// Install the sole window's native menu bar.
     #[handler::manual]
-    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowMenu) {
+    fn on_set_menu(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowMenu) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&SetWindowMenuResult::Err { error });
         }
@@ -170,7 +170,7 @@ pub trait WindowManagerSurface {
 
     /// Set the sole window's pointer shape.
     #[handler::manual]
-    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: SetWindowCursor) {
+    fn on_set_cursor(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: SetWindowCursor) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&SetWindowCursorResult::Err { error });
         }
@@ -178,7 +178,7 @@ pub trait WindowManagerSurface {
 
     /// Bring the sole window to the foreground.
     #[handler::manual]
-    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: FocusWindow) {
+    fn on_focus(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FocusWindow) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&FocusWindowResult::Err { error });
         }
@@ -186,7 +186,7 @@ pub trait WindowManagerSurface {
 
     /// Schedule the sole window for redraw.
     #[handler::manual]
-    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: RequestWindowRedraw) {
+    fn on_request_redraw(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: RequestWindowRedraw) {
         if let Err(error) = route_to_sole_window(&Self::routable_windows(state), ctx, &mail) {
             ctx.reply(&RequestWindowRedrawResult::Err { error });
         }

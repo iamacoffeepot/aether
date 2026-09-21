@@ -82,9 +82,9 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
-    HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs, multi_kind_or_return_error,
-    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
+    CtxTransport, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
+    classify_handler_reply, extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs,
+    multi_kind_or_return_error, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
@@ -101,13 +101,24 @@ pub enum SetTransport {
 }
 
 impl SetTransport {
+    /// The ctx-argument order this transport's handlers are written against
+    /// (issue 6282): native names the actor first, wasm still the mode.
+    fn ctx_transport(self) -> CtxTransport {
+        match self {
+            Self::Wasm => CtxTransport::Wasm,
+            Self::Native => CtxTransport::Native,
+        }
+    }
+
     /// The ctx type the set's dispatch method takes, in its `Manual` view —
     /// the same view `#[actor]` dispatches with, so the adopter can hand its
     /// own ctx straight through.
     fn dispatch_ctx(self) -> TokenStream2 {
         match self {
             Self::Wasm => quote! { ::aether_actor::WasmCtx<'_, ::aether_actor::Manual> },
-            Self::Native => quote! { ::aether_substrate::actor::native::NativeCtx<'_, ::aether_actor::Manual> },
+            Self::Native => quote! {
+                ::aether_substrate::actor::native::NativeCtx<'_, ::aether_substrate::Erased, ::aether_actor::Manual>
+            },
         }
     }
 
@@ -263,7 +274,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
         let class = parse_handler_class(&f.attrs[idx], variant)?;
-        let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
+        let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig, this_transport.ctx_transport())?;
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
 

@@ -121,12 +121,12 @@ where
     /// consumed the actor.
     // Issue 4158: the ctx is typed by `A`, so a host turn can stage a child
     // under the pumped actor — the desktop window cap's create path does.
-    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, Single, A>) -> R) -> Option<R> {
+    pub fn host_turn<R>(&mut self, turn: impl FnOnce(&mut A::State, &mut NativeCtx<'_, A, Single>) -> R) -> Option<R> {
         let actor = self.actor.as_deref_mut()?;
         let binding = &self.binding;
         let slots = &self.slots;
         Some(local::with_stamped(slots, || {
-            let mut ctx = NativeCtx::<'_, Single, A>::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::<'_, A, Single>::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
             turn(actor, &mut ctx)
         }))
     }
@@ -203,6 +203,7 @@ mod tests {
     use aether_kinds::trace::TraceEvent;
     use aether_kinds::{CostTail, CostTailResult, LogTail, LogTailResult, descriptors};
 
+    use crate::Erased;
     use crate::actor::native::Dispatch;
     use crate::actor::native::envelope::Envelope;
     use crate::actor::native::local::with_stamped;
@@ -289,7 +290,7 @@ mod tests {
         }
 
         #[handler::manual]
-        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Manual>, _d: Defer) {
+        fn on_defer(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, _d: Defer) {
             if let Some(tx) = &self.deferred_tx {
                 // Retain the inbound past this handler's return; the reply is
                 // sent from a worker thread and the guard settles the chain

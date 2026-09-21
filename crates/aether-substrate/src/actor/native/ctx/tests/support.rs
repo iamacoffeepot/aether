@@ -39,7 +39,7 @@ impl aether_actor::Lifecycle<Self> for StubActor {
 impl Dispatch<Self> for StubActor {
     fn dispatch(
         _state: &mut Self,
-        _ctx: &mut NativeCtx<'_, Manual, Self>,
+        _ctx: &mut NativeCtx<'_, Self, Manual>,
         _kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

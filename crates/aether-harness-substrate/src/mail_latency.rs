@@ -91,7 +91,7 @@ impl Dispatch<Self> for RingRelay {
 
     fn dispatch(
         state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
@@ -167,7 +167,7 @@ impl Dispatch<Self> for HoldRelay {
 
     fn dispatch(
         _state: &mut Self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Manual, Self>,
+        ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>,
         kind: KindId,
         _payload: &[u8],
     ) -> Option<()> {

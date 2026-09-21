@@ -18,6 +18,7 @@ use crate::kinds::{
     StopTrack,
 };
 use aether_fs::{FsMailboxExt, NamespaceAddr};
+use aether_substrate::Erased;
 
 impl AudioCapabilityState {
     pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
@@ -144,7 +145,7 @@ impl AudioCapabilityState {
         ScheduleResult::Ok { accepted }
     }
 
-    pub fn handle_play_track(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: PlayTrack) {
+    pub fn handle_play_track(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: PlayTrack) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
@@ -170,7 +171,7 @@ impl AudioCapabilityState {
         ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
     }
 
-    pub fn handle_read_result(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+    pub fn handle_read_result(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ReadResult) {
         let Some(context) = ctx.take_context::<AudioLoadContext>() else {
             return;
         };
@@ -265,7 +266,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_load_instrument(&mut self, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
+    pub fn handle_load_instrument(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadInstrument) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
