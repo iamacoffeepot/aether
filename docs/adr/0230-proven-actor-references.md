@@ -4,8 +4,8 @@
 - **Date:** 2026-09-21
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
-stays how a `MailboxId` is *assigned*; it stops being how an actor is
-*looked up*), [ADR-0166](0166-typed-actor-lineage-and-abbreviated-external-addresses.md)
+stays how a position is *derived*; a derived position stops being something
+a caller can *send to*), [ADR-0166](0166-typed-actor-lineage-and-abbreviated-external-addresses.md)
 (its string grammar becomes the text form of one typed value), and
 [ADR-0075](0075-actor-typed-sender-api-and-chassis-cap-marker-split.md)
 (`HandlesKind<K>` gains a stored, kind-typed reference).
@@ -44,10 +44,15 @@ Four further facts shape the decision:
    kind therefore degrades to a raw `MailboxId` — 229 field declarations,
    among them `SubscribeWindow.mailbox`, `RegisterRoute.mailbox`, and
    `BindListener.consumer`.
-2. **The guest cannot answer scoped questions.** It holds a rolling `u64`
-   carry, which is a fold and is not invertible. `ctx.actor::<Peer>()`
-   between two co-hosted components folds the peer under the *caller*, a
-   position nothing registers. The host holds the real tree.
+2. **The guest can derive a position and cannot know whether it is
+   occupied.** `Resolve` (`crates/aether-actor/src/model/mod.rs`) is the one
+   derivation: each strategy (`One`, `Many`, `Embedded`, `EmbeddedMany`)
+   declares a `CallerScope`, and the runtime retains the caller's logical
+   parent so a co-hosted peer folds under the shared host rather than under
+   the caller (`scope_mailbox` on the guest's inline registry and on the native
+   binding). The fold is correct and total, so
+   it answers for a peer that was never loaded exactly as it answers for one
+   that was. Only the host's registry knows which.
 3. **The authoritative resolver already exists.** `Registry::resolve_address`
    and `lookup_canonical`
    (`crates/aether-substrate/src/mail/registry/mailbox/resolve.rs`) expand an
@@ -92,11 +97,11 @@ added to the id.
 
 ```rust
 pub struct Namespace(&'static str);
-pub struct Address<R: Addressable> { /* anchor + typed keys */ }
-pub struct ActorRef<R: Addressable> { id: MailboxId, _actor: PhantomData<fn() -> R> }
+pub struct Address<R> { /* anchor + typed keys */ }
+pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 pub struct Recipient<K: Kind> { id: MailboxId, _kind: PhantomData<fn(K)> }
 pub struct AnyActorRef { id: MailboxId }
-pub struct Tombstone<R: Addressable> { id: MailboxId, _actor: PhantomData<fn() -> R> }
+pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 ```
 
 | Type | Claims | Made by | Can |
@@ -135,12 +140,14 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Self, parent, inline cluster members | structural | none; handed over at `init` |
 | A child this actor spawned or loaded | the spawn or load result carries the reference | none beyond the spawn |
 | The envelope sender; a reference field in mail | the type carries the proof between in-engine actors | none |
-| `ctx.resolve(&address) -> Option<ActorRef<R>>` | one registry lookup on the host, synchronous, no mail | one lookup per reference, ever |
+| `ctx.resolve(&address) -> Option<ActorRef<R>>` | `R`'s `Resolve` strategy folds the candidate position; the host confirms a `Live` route there. One synchronous host call carrying eight bytes, no mail. | one lookup per reference, ever |
 | Bytes from another process (RPC ingress) | resolved against the registry at decode; a miss is an error reply | one lookup per reference field, at ingress only |
 
-Resolution runs on the host for every case that is not a compile-time
-constant, because only the host holds the tree. References do not go to
-disk; persisted state stores the `Address` and resolves it on load.
+The position and the proof have different owners. `Resolve` stays the single
+derivation of a position, fed by an `Address<R>` and never by text. The host
+is the single authority on whether that position is occupied, and it is the
+only thing that can turn one into a reference. References do not go to disk;
+persisted state stores the `Address` and resolves it on load.
 
 Strings exist in exactly one place: the host's `resolve_address` parser
 behind the MCP, RPC, and harness boundary, which yields an `Address` and then
@@ -157,12 +164,22 @@ fine in a log and useless as an address. The registry renders canonical
 names from the macro-emitted inventory records, which never pass through the
 type.
 
-`ActorRef` and its siblings live beside `Addressable` in `aether-actor` with
-crate-private constructors. Rust visibility is crate-granular and the native
-registry in `aether-substrate` also has to mint, so there is one
-`#[doc(hidden)]` mint function. It is guarded by an xtask gate with a path
-allowlist naming the registry module and with no in-source `#[allow]`
-escape: widening it means editing the gate in a reviewed diff.
+The reference types live in `aether-data` with crate-private constructors.
+They cannot live beside `Addressable`: `aether-actor` depends on
+`aether-kinds`, and kinds there (`LoadResult`, `MonitorNotice`,
+`DropComponent`) carry references, so the types sit below both. The struct
+carries `R` as a phantom with no `Addressable` bound; the bound lives on the
+operations in `aether-actor`.
+
+A guest receives every reference as bytes the host produced — the injected
+dependencies at `init`, a spawn result, the envelope sender, the answer to
+`resolve` — so wire decode in `aether-data` is its only door. The native
+registry in `aether-substrate` holds the proof itself and has no bytes to
+decode, so there is one `#[doc(hidden)]` mint function. It is guarded by a
+gate with a path allowlist naming the registry module and with no in-source
+`#[allow]` escape: widening it means editing the gate in a reviewed diff.
+Assembling bytes by hand and decoding them into a reference is deliberate
+forgery rather than a mistake, and is a review finding.
 
 ### 5. What is deleted
 
@@ -170,15 +187,18 @@ escape: widening it means editing the gate in a reviewed diff.
 and `Mailbox<K>`; public access to `mailbox_id_from_name`,
 `mailbox_id_from_name_pair`, `mailbox_id_from_path`, and
 `MailboxId::from_name`; the public field, `Pod`, and `Default` on
-`MailboxId` (`MailboxId::NONE` becomes `Option`); the guest-side fold behind
-`ctx.actor::<R>()` and `resolve_actor::<R>(&str)`; `LoadResult`'s rendered
+`MailboxId` (`MailboxId::NONE` becomes `Option`); the unproven handle:
+`ctx.actor::<R>()` and `actor_at::<R>(id)` returning something sendable
+straight from a fold or a raw id, and `resolve_actor::<R>(&str)` keyed by
+text; `LoadResult`'s rendered
 `name: String` as an address to re-hash.
 
 ## Consequences
 
-- The dominant defect class is unrepresentable: no code outside the registry
-  derives an id, so two derivations cannot disagree. A wrong-anchor
-  resolution (issue 4471) cannot occur because the guest no longer resolves.
+- The dominant defect class is unrepresentable: `Resolve` is the only
+  derivation left and text never reaches it, so two derivations cannot
+  disagree. A position nothing registered resolves to `None` at the one
+  place the dependent asked, instead of absorbing mail.
 - A missing chassis dependency is a refused load naming the dependency,
   rather than a warn-drop on every tick.
 - Steady-state sends get cheaper. A stored reference or a constant replaces a
