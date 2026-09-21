@@ -77,7 +77,7 @@ pub trait InjectedApi: Sized {
     fn from_env(env: &mut Env<Async>) -> Self;
 }
 
-/// Generic actor handle sharing the [`EnvOwner`] pointer with [`Env<Async>`].
+/// Generic actor handle sharing the invocation environment pointer with [`Env<Async>`].
 pub struct Binding<A: Addressable> {
     env: Env<Async>,
     _target: PhantomData<A>,

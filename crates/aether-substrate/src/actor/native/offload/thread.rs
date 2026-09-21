@@ -169,8 +169,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; same runtime-name route as `send_to_named`
     fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
         self.binding.send_mail_with_lineage(
             mailbox_id_from_path(name).0,
@@ -286,8 +285,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; same runtime-name route as `send_to_named`
     fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
         self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, kind.0, bytes, 1, None, None);
     }
