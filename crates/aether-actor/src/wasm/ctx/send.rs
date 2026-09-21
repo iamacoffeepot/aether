@@ -2,7 +2,7 @@
 //! and the [`MailSender`] / [`OutboundReply`] / [`Emit`] impls on
 //! [`WasmCtx`].
 
-use aether_data::{Kind, KindId, MailboxId, RequestId, Source, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_path};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
@@ -67,13 +67,6 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
-    }
-
-    /// Encoded-name send for generated invocation children (ADR-0229).
-    #[doc(hidden)]
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; same runtime-name route as `send_to_named`
-    pub fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
-        self.inline.route_or_enqueue(mailbox_id_from_path(name).0, kind.0, bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 
     /// Send to a raw mailbox id and store a typed context for the reply

@@ -57,7 +57,7 @@ pub enum PollResult {
     Finished(Invoked),
     /// Poll again after the child sends `ReadArtifact` for this digest.
     NeedArtifact(PendingArtifact),
-    /// Poll again after the child sends `pending.bytes` to `pending.mailbox`.
+    /// Poll again after the child [`PendingCall::dispatch`]es this call.
     NeedSend(PendingCall),
     /// A journal read is already in flight; wait for its reply.
     Waiting,

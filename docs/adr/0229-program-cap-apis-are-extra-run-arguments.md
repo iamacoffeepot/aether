@@ -48,20 +48,21 @@ without editing the invocation child.
 
 3. **Generic `call`, Http is sugar.** `Binding<A: Addressable>` shares
    the `EnvOwner` pointer with `Env<Async>`. `Binding<A>::call<K>(mail)`
-   encodes `K` before yield and awaits `<A as Replies<K>>::Reply`.
+   holds `K` until the child dispatches and awaits `<A as Replies<K>>::Reply`.
    `Http` is `struct Http(Binding<HttpCapability>)` with `fetch` calling
    `call(Fetch)`. A program-defined actor uses the same `Binding<MyActor>`
    — chassis vs bundle-local is which `A` you name, not a second pump.
 
-4. **Type-erased pending send.** One `PendingCall { mailbox, kind_id,
-   bytes, expected_reply }` replaces a per-kind pending enum.
-   `PollResult::NeedSend` carries it. Journal `read` stays
-   `PendingArtifact` / `NeedArtifact`. The child sends `pending.bytes` to
-   `pending.mailbox` with `pending.kind_id` (`WasmCtx::send_to_named_encoded`,
-   because `MailSender::send_to_named` takes a `K: Kind` value).
-   `#[fallback]` keeps ADR-0228's three checks (`in_reply_to`, pending
-   map, `mail.kind() == expected`) and resumes on the reply kind. It
-   does not match `Fetch` by name.
+4. **Captured pending send.** `PollResult::NeedSend` carries
+   `PendingCall { mailbox, kind_id, expected_reply }` plus the request
+   `K`. Journal `read` stays `PendingArtifact` / `NeedArtifact`. The
+   child allowlists `pending.mailbox` then `pending.dispatch(&mut
+   ctx.sends())`, which calls `MailSender::send_to_named` with the
+   captured `K`. The pump is still one child and one `PollResult` (the
+   capture is the erasure, not encoded bytes). `#[fallback]` keeps
+   ADR-0228's three checks (`in_reply_to`, pending map, `mail.kind() ==
+   expected`) and resumes on the reply kind. It does not match `Fetch`
+   by name.
 
 5. **Sampled pairing.** `Mode::Sampled` is required when any trailing
    target is Sampled (`Http` is). Pure + `Http` / `Binding<HttpCapability>`
@@ -88,6 +89,9 @@ without editing the invocation child.
 - **`PendingSend::{Http(Fetch), Process(Run)}` plus per-kind child arms.**
   Rejected: hardcodes chassis verbs; a bundle actor cannot join without
   editing the pump.
+- **Encode `K` into `PendingCall.bytes` and `WasmCtx::send_to_named_encoded`.**
+  Rejected: `Binding::call` already has `K`; encoding before yield
+  duplicates the typed `send_to_named` path the child can invoke.
 - **`env.fetch` / methods on `Env<Async>`.** Rejected: every async program
   would name HTTP.
 - **`type Caps` / `Env<Async, Caps>`.** Rejected: the trailing `Binding<A>`

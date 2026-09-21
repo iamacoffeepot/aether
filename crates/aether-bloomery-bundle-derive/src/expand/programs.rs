@@ -264,7 +264,7 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
                         }
                         return;
                     }
-                    ctx.send_to_named_encoded(pending.mailbox, pending.kind_id, &pending.bytes);
+                    pending.dispatch(&mut ctx.sends());
                     let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
                     self.waiting.insert(request, #program::__macro_internals::Pending::Send(pending));
                 }

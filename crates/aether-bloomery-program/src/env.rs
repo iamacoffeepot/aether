@@ -6,13 +6,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
 
-use aether_actor::{Addressable, Replies};
+use aether_actor::{Addressable, MailSender, Replies, Sends};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
@@ -46,24 +47,75 @@ pub struct PendingArtifact {
 }
 
 /// One cap send the invocation child must emit before polling again.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// `mailbox` / `kind_id` / `expected_reply` are the pump's type-erased
+/// view. The request value stays `K` inside [`Self::dispatch`], which
+/// calls [`MailSender::send_to_named`].
 pub struct PendingCall {
     /// `Addressable::NAMESPACE` of the binding's target actor.
     pub mailbox: &'static str,
-    /// Kind id of the encoded request.
+    /// Kind id of the captured request.
     pub kind_id: KindId,
-    /// Already-encoded request bytes.
-    pub bytes: Vec<u8>,
     /// Kind id the `#[fallback]` must match before resume.
     pub expected_reply: KindId,
+    body: Box<dyn DispatchBody>,
+}
+
+trait DispatchBody: Send {
+    fn send(&self, sends: &mut Sends<'_>);
+}
+
+struct CapturedSend<A, K> {
+    mail: K,
+    _target: PhantomData<fn() -> A>,
+}
+
+impl<A, K> DispatchBody for CapturedSend<A, K>
+where
+    A: Addressable + Replies<K>,
+    K: Kind + Send,
+{
+    fn send(&self, sends: &mut Sends<'_>) {
+        sends.send_to_named(A::NAMESPACE, &self.mail);
+    }
+}
+
+impl PendingCall {
+    fn new<A, K>(mail: K) -> Self
+    where
+        A: Addressable + Replies<K> + 'static,
+        K: Kind + Send + 'static,
+    {
+        Self {
+            mailbox: A::NAMESPACE,
+            kind_id: K::ID,
+            expected_reply: A::Reply::ID,
+            body: Box::new(CapturedSend::<A, K> { mail, _target: PhantomData }),
+        }
+    }
+
+    /// Send the captured request through typed [`MailSender::send_to_named`].
+    pub fn dispatch(&self, sends: &mut Sends<'_>) {
+        self.body.send(sends);
+    }
+}
+
+impl fmt::Debug for PendingCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingCall")
+            .field("mailbox", &self.mailbox)
+            .field("kind_id", &self.kind_id)
+            .field("expected_reply", &self.expected_reply)
+            .finish_non_exhaustive()
+    }
 }
 
 /// First-poll wait the invocation child must discharge.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub enum Pending {
     /// Journal `ReadArtifact` for [`PendingArtifact::digest`].
     Artifact(PendingArtifact),
-    /// Type-erased cap send.
+    /// Cap send; `K` stays captured until [`PendingCall::dispatch`].
     Send(PendingCall),
 }
 
@@ -99,7 +151,7 @@ impl<A: Addressable> Binding<A> {
         mail: K,
     ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
     where
-        A: Replies<K> + Unpin,
+        A: Replies<K> + Unpin + 'static,
         K: Kind + Send + Unpin + 'static,
     {
         Call::<A, K> { env: self.env, mail: Some(mail), _target: PhantomData }
@@ -136,8 +188,8 @@ struct Call<A, K> {
 
 impl<A, K> Future for Call<A, K>
 where
-    A: Replies<K> + Unpin,
-    K: Kind + Unpin,
+    A: Addressable + Replies<K> + Unpin + 'static,
+    K: Kind + Send + Unpin + 'static,
 {
     type Output = Result<A::Reply, Refusal>;
 
@@ -147,12 +199,7 @@ where
             return Poll::Ready(decode_call_reply::<A::Reply>(result));
         }
         if let Some(mail) = this.mail.take() {
-            this.env.request_send(PendingCall {
-                mailbox: A::NAMESPACE,
-                kind_id: K::ID,
-                bytes: mail.encode_into_bytes(),
-                expected_reply: A::Reply::ID,
-            });
+            this.env.request_send(PendingCall::new::<A, K>(mail));
             return Poll::Pending;
         }
         Poll::Pending
