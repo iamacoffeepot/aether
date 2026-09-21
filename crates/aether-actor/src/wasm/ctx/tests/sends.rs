@@ -97,7 +97,7 @@ fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
     assert_eq!(through_view, through_ctx, "the view resolves the parent-scoped peer the ctx resolves");
 }
 
-/// Tripwire: `to` on the ctx and on its `sends()` view both send through a
+/// `to` on the ctx and on its `sends()` view both send through a
 /// proven reference — each routes to the reference's id stamped with the
 /// sending actor's own id. The two `u64` arguments of
 /// `WasmActorMailbox::__new` are the recipient and the sender in that order,
