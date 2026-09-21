@@ -32,15 +32,17 @@
 //! so it belongs with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Address, Kind, MailboxId, mailbox_id_from_path};
 
 use super::WasmCtx;
 use crate::mail::mailbox::Mailbox;
+use crate::model::address::address_candidate;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, HandlesKind, Instanced, Resolve, Singleton,
 };
+use crate::reference::ActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -126,6 +128,17 @@ impl Sends<'_> {
     #[must_use]
     pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.actor_with_namespace::<R>(name)
+    }
+
+    /// Resolve `address` to a proven [`ActorRef`], identical to
+    /// [`WasmCtx::resolve`]: a helper handed a `Sends` proves the same
+    /// address its caller would have proven.
+    #[must_use]
+    pub fn resolve<R: CallerAddressable>(&self, address: &Address<R>) -> Option<ActorRef<R>> {
+        let candidate =
+            address_candidate(address, MailboxId(self.mailbox), MailboxId(self.scope_mailbox(CallerScope::Parent)))?;
+        let answer = mail::resolve_live(candidate.0);
+        (answer != MailboxId::NONE.0 && answer == candidate.0).then(|| ActorRef::new(candidate))
     }
 
     /// Send `payload` through a stored [`Mailbox<K>`] addressing token,

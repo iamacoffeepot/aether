@@ -104,6 +104,10 @@ impl Resolve for ParentKeyed {
     fn resolve(caller_carry: u64, namespace: &str, name: &str) -> MailboxId {
         <aether_actor::Many as Resolve>::resolve(caller_carry, namespace, name)
     }
+
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+        key.map(|key| Self::resolve(caller_carry, namespace, key))
+    }
 }
 
 impl CallerScoped for ParentKeyed {

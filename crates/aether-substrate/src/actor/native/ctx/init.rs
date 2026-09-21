@@ -8,8 +8,10 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use aether_actor::{Addressable, CallerAddressable, CallerScoped, Instanced, Singleton};
-use aether_data::{MailId, MailboxId};
+use aether_actor::{
+    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, Singleton, address_candidate,
+};
+use aether_data::{Address, MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::mailbox::NativeActorMailbox;
