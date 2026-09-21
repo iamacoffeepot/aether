@@ -210,10 +210,12 @@ dependencies = [
 name = "aether-bloomery-program"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-program-derive",
  "aether-data",
  "aether-harness-substrate",
+ "aether-http",
  "aether-kinds",
  "wasmparser 0.246.2",
 ]
@@ -225,6 +227,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
+ "aether-http",
  "proc-macro2",
  "quote",
  "syn",
@@ -1020,6 +1023,7 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-data",
+ "aether-http",
 ]
 
 [[package]]

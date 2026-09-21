@@ -47,6 +47,31 @@ fn program_name(name: &str) -> ProgramName {
     ProgramName::new(name).expect("valid program name")
 }
 
+fn assert_fixture_section(wasm: &[u8]) {
+    let decoded = declarations(&section_bytes(wasm)).expect("aether.bloomery.programs decodes");
+    assert_eq!(decoded.len(), 3, "the custom section lists every exported program");
+    let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
+    assert!(names.contains(&"test.program.summarize"), "{names:?}");
+    assert!(names.contains(&"test.program.refuse"), "{names:?}");
+    assert!(names.contains(&"test.program.fetch_body"), "{names:?}");
+    let summarize = decoded
+        .iter()
+        .find(|program| program.name.as_str() == "test.program.summarize")
+        .expect("summarize declaration");
+    assert_eq!(summarize.input, SummarizeInput::ID);
+    assert_eq!(summarize.result, SummarizeResult::ID);
+    assert_eq!(summarize.mode, Mode::Pure);
+    let refuse =
+        decoded.iter().find(|program| program.name.as_str() == "test.program.refuse").expect("refuse declaration");
+    assert_eq!(refuse.input, RefuseInput::ID);
+    assert_eq!(refuse.mode, Mode::Pure);
+    let fetch_body = decoded
+        .iter()
+        .find(|program| program.name.as_str() == "test.program.fetch_body")
+        .expect("fetch_body declaration");
+    assert_eq!(fetch_body.mode, Mode::Sampled);
+}
+
 fn section_bytes(wasm: &[u8]) -> Vec<u8> {
     let mut section = Vec::new();
     for payload in Parser::new(0).parse_all(wasm) {
@@ -68,22 +93,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     let digest = artifact_digest(OpaqueBytes::ID, &wasm);
     let expected_name = format!("aether.component/aether.embedded:{digest}");
 
-    let decoded = declarations(&section_bytes(&wasm)).expect("aether.bloomery.programs decodes");
-    assert_eq!(decoded.len(), 2, "the custom section lists both programs");
-    let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
-    assert!(names.contains(&"test.program.summarize"), "{names:?}");
-    assert!(names.contains(&"test.program.refuse"), "{names:?}");
-    let summarize = decoded
-        .iter()
-        .find(|program| program.name.as_str() == "test.program.summarize")
-        .expect("summarize declaration");
-    assert_eq!(summarize.input, SummarizeInput::ID);
-    assert_eq!(summarize.result, SummarizeResult::ID);
-    assert_eq!(summarize.mode, Mode::Pure);
-    let refuse =
-        decoded.iter().find(|program| program.name.as_str() == "test.program.refuse").expect("refuse declaration");
-    assert_eq!(refuse.input, RefuseInput::ID);
-    assert_eq!(refuse.mode, Mode::Pure);
+    assert_fixture_section(&wasm);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let loaded = harness

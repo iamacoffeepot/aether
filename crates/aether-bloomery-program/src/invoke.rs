@@ -10,9 +10,10 @@ use core::task::{Context, Poll, Waker};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, Invoke, Invoked, ReadArtifactResult, Ref, Refusal,
 };
+use aether_data::KindId;
 
 use crate::declare::{AsyncProgram, SyncProgram};
-use crate::env::{Async, EnvOwner, PendingArtifact};
+use crate::env::{Async, EnvOwner, Pending, PendingArtifact, PendingCall};
 use crate::kinds::Detail;
 
 /// Journal mailbox the invocation child sends `ReadArtifact` to.
@@ -46,15 +47,18 @@ pub enum Started {
     /// The program completed, refused, or was rejected without awaiting.
     Finished(Invoked),
     /// The future yielded; keep [`AsyncSession`] until the next poll is [`PollResult::Finished`].
-    Live { session: AsyncSession, waiting: Option<PendingArtifact> },
+    Live { session: AsyncSession, waiting: Option<Pending> },
 }
 
 /// Result of polling a live session after a journal reply (or the first poll).
+#[derive(Debug)]
 pub enum PollResult {
     /// The program completed, refused, or was rejected.
     Finished(Invoked),
     /// Poll again after the child sends `ReadArtifact` for this digest.
     NeedArtifact(PendingArtifact),
+    /// Poll again after the child sends `pending.bytes` to `pending.mailbox`.
+    NeedSend(PendingCall),
     /// A journal read is already in flight; wait for its reply.
     Waiting,
 }
@@ -77,9 +81,11 @@ impl AsyncSession {
                 PollResult::Finished(Invoked::Completed { seq: self.seq, result, staged })
             }
             Poll::Ready(Err(refusal)) => PollResult::Finished(Invoked::Refused { seq: self.seq, refusal }),
-            Poll::Pending => {
-                self.owner.env::<Async>().take_pending().map_or(PollResult::Waiting, PollResult::NeedArtifact)
-            }
+            Poll::Pending => match self.owner.env::<Async>().take_pending() {
+                Some(Pending::Artifact(pending)) => PollResult::NeedArtifact(pending),
+                Some(Pending::Send(pending)) => PollResult::NeedSend(pending),
+                None => PollResult::Waiting,
+            },
         }
     }
 
@@ -102,6 +108,20 @@ impl AsyncSession {
             }
             _ => self.owner.env::<Async>().fulfill(result),
         }
+    }
+
+    /// Apply a cap reply and make the next [`Self::poll`] see the decoded kind.
+    pub fn fulfill_send(&mut self, expected: &PendingCall, kind: KindId, bytes: Vec<u8>) {
+        if kind != expected.expected_reply {
+            self.owner.env::<Async>().reject_call(Refusal::InputDecode);
+            return;
+        }
+        self.owner.env::<Async>().fulfill_call(kind, bytes);
+    }
+
+    /// Fail the in-flight cap await (allowlist miss, or a dropped send).
+    pub fn reject_send(&mut self, refusal: Refusal) {
+        self.owner.env::<Async>().reject_call(refusal);
     }
 }
 
@@ -128,7 +148,8 @@ pub fn start_async<P: AsyncProgram>(invoke: Invoke) -> Started {
     };
     match session.poll() {
         PollResult::Finished(invoked) => Started::Finished(invoked),
-        PollResult::NeedArtifact(pending) => Started::Live { session, waiting: Some(pending) },
+        PollResult::NeedArtifact(pending) => Started::Live { session, waiting: Some(Pending::Artifact(pending)) },
+        PollResult::NeedSend(pending) => Started::Live { session, waiting: Some(Pending::Send(pending)) },
         PollResult::Waiting => Started::Live { session, waiting: None },
     }
 }

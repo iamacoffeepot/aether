@@ -7,9 +7,11 @@ use aether_bloomery_kinds::{
     Refusal, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::{
-    Async, AsyncProgram, Env, PollResult, Program, Started, Sync, SyncProgram, invoke, start_async,
+    Async, AsyncProgram, Env, Http, InjectedApi, Pending, PollResult, Program, Started, Sync, SyncProgram, invoke,
+    start_async,
 };
 use aether_data::{Cites, Kind, Storage};
+use aether_http::{Fetch, FetchResult, HttpMethod};
 
 fn program_name<P: Program>() -> ProgramName {
     ProgramName::new(P::NAME).expect("valid program name")
@@ -254,11 +256,13 @@ fn drive_async(input: Digest, closure: Vec<ClosureArtifact>, reply: Option<ReadA
     match start_async::<AsyncSummarize>(Invoke::new(7, program_name::<AsyncSummarize>(), input, closure)) {
         Started::Finished(invoked) => invoked,
         Started::Live { mut session, waiting } => {
-            let pending = waiting.expect("a miss records one ReadArtifact");
+            let Pending::Artifact(pending) = waiting.expect("a miss records one ReadArtifact") else {
+                panic!("expected a journal ReadArtifact");
+            };
             session.fulfill(pending, reply.expect("test supplies a journal reply"));
             match session.poll() {
                 PollResult::Finished(invoked) => invoked,
-                PollResult::NeedArtifact(_) | PollResult::Waiting => {
+                PollResult::NeedArtifact(_) | PollResult::NeedSend(_) | PollResult::Waiting => {
                     panic!("expected Finished after one journal reply")
                 }
             }
@@ -315,5 +319,88 @@ fn async_miss_after_journal_missing_is_input_missing() -> Result<(), Box<dyn Err
     match drive_async(input_artifact.digest(), vec![input_artifact], Some(reply)) {
         Invoked::Refused { seq: 7, refusal: Refusal::InputMissing } => Ok(()),
         other => panic!("expected InputMissing after Missing, got {other:?}"),
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_http.input")]
+struct HttpInput {
+    marker: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_http.result")]
+struct HttpResult {
+    body: Ref<OpaqueBytes>,
+}
+
+struct SampledHttp;
+
+impl Program for SampledHttp {
+    const NAME: &'static str = "sampled.http";
+    const MODE: Mode = Mode::Sampled;
+    const INTENT: &'static str = "Fetch and stage the response body.";
+    type Input = HttpInput;
+    type Result = HttpResult;
+}
+
+impl AsyncProgram for SampledHttp {
+    async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
+        let _ = input;
+        let mut http = Http::from_env(&mut env);
+        match http
+            .fetch(Fetch {
+                request_id: 1,
+                url: "https://example.test/body".into(),
+                method: HttpMethod::Get,
+                headers: Vec::new(),
+                body: Vec::new(),
+                timeout_ms: None,
+            })
+            .await?
+        {
+            FetchResult::Ok { body, .. } => Ok(HttpResult { body: env.stage_bytes(&body) }),
+            FetchResult::Err { .. } => Err(Refusal::InputDecode),
+        }
+    }
+}
+
+#[test]
+fn sampled_http_fetch_yields_need_send_then_completes() -> Result<(), Box<dyn Error>> {
+    let input = HttpInput { marker: 1 };
+    let input_artifact = closure_of(&input)?;
+    match start_async::<SampledHttp>(Invoke::new(
+        7,
+        program_name::<SampledHttp>(),
+        input_artifact.digest(),
+        vec![input_artifact],
+    )) {
+        Started::Finished(other) => panic!("expected Live NeedSend, got Finished {other:?}"),
+        Started::Live { mut session, waiting } => {
+            let Pending::Send(pending) = waiting.expect("first poll records one cap send") else {
+                panic!("expected NeedSend to aether.http");
+            };
+            assert_eq!(pending.mailbox, "aether.http");
+            assert_eq!(pending.kind_id, Fetch::ID);
+            assert_eq!(pending.expected_reply, FetchResult::ID);
+            let reply = FetchResult::Ok {
+                request_id: 1,
+                url: "https://example.test/body".into(),
+                status: 200,
+                headers: Vec::new(),
+                body: b"hello".to_vec(),
+            };
+            session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+            match session.poll() {
+                PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) => {
+                    let expected = HttpResult { body: Ref::of_bytes(b"hello") };
+                    let expected_encoded = encoded(&expected)?;
+                    assert_eq!(result, expected_encoded.digest());
+                    assert_eq!(staged, vec![EncodedArtifact::opaque_bytes(b"hello"), expected_encoded]);
+                    Ok(())
+                }
+                other => panic!("expected Completed after FetchResult, got {other:?}"),
+            }
+        }
     }
 }

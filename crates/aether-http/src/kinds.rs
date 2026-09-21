@@ -6,8 +6,8 @@
 //! `aether_data::{Kind, Schema}` and serde, so the
 //! `default-features = false` wasm consumers keep compiling.
 
+use core::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 // ADR-0043 substrate HTTP egress. One request kind + one reply
 // kind on the `"aether.http"` sink, plus supporting `HttpMethod`,

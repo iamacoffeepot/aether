@@ -25,7 +25,7 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     };
     let handlers = expand_handlers(root, &invocation, &program);
     let table_static = expand_table(&table, programs, &program);
-    let invocation_actor = expand_invocation(root, &invocation, &table, &program);
+    let invocation_actor = expand_invocation(root, &invocation, &table, &program, programs);
     let sections = programs.iter().map(|entry| expand_section(entry, &program));
     let items = quote! {
         #table_static
@@ -106,15 +106,24 @@ fn expand_table(table: &Ident, programs: &[ProgramEntry], program: &TokenStream2
     }
 }
 
-fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &TokenStream2) -> TokenStream2 {
+fn expand_invocation(
+    root: &Ident,
+    invocation: &Ident,
+    table: &Ident,
+    program: &TokenStream2,
+    programs: &[ProgramEntry],
+) -> TokenStream2 {
     let namespace = format!("{BUNDLE_NAMESPACE}.invocation");
+    let api_tys: Vec<_> = programs.iter().flat_map(|entry| entry.meta.apis.iter()).collect();
+    let resume = resume_after_poll(program);
+    let send_pending = expand_send_pending(program, api_tys.as_slice());
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
             parent: ::core::option::Option<#program::__macro_internals::MailboxId>,
             waiting: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
-                #program::__macro_internals::PendingArtifact,
+                #program::__macro_internals::Pending,
             >,
         }
 
@@ -146,7 +155,7 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
                     #program::__macro_internals::Started::Live { session, waiting } => {
                         self.session = ::core::option::Option::Some(session);
                         if let Some(pending) = waiting {
-                            self.send_read(ctx, pending);
+                            self.send_pending(ctx, pending);
                         }
                     }
                 }
@@ -160,46 +169,37 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
                 let Some(expected) = self.waiting.remove(&request) else {
                     return;
                 };
-                if mail.kind() != <#program::kinds::ReadArtifactResult as #program::__macro_internals::Kind>::ID {
+                let expected_kind = match &expected {
+                    #program::__macro_internals::Pending::Artifact(_) => {
+                        <#program::kinds::ReadArtifactResult as #program::__macro_internals::Kind>::ID
+                    }
+                    #program::__macro_internals::Pending::Send(pending) => pending.expected_reply,
+                };
+                if mail.kind() != expected_kind {
                     self.waiting.insert(request, expected);
                     return;
                 }
-                let Some(result) = mail.decode_kind::<#program::kinds::ReadArtifactResult>() else {
-                    self.waiting.insert(request, expected);
-                    return;
-                };
                 let Some(session) = self.session.as_mut() else {
                     return;
                 };
-                session.fulfill(expected, result);
-                match session.poll() {
-                    #program::__macro_internals::PollResult::Finished(invoked) => {
-                        self.session = ::core::option::Option::None;
-                        self.waiting.clear();
-                        self.reply_invoked(ctx, &invoked);
+                match expected {
+                    #program::__macro_internals::Pending::Artifact(pending) => {
+                        let Some(result) = mail.decode_kind::<#program::kinds::ReadArtifactResult>() else {
+                            self.waiting.insert(request, #program::__macro_internals::Pending::Artifact(pending));
+                            return;
+                        };
+                        session.fulfill(pending, result);
                     }
-                    #program::__macro_internals::PollResult::NeedArtifact(pending) => {
-                        self.send_read(ctx, pending);
+                    #program::__macro_internals::Pending::Send(pending) => {
+                        session.fulfill_send(&pending, mail.kind(), mail.bytes().to_vec());
                     }
-                    #program::__macro_internals::PollResult::Waiting => {}
                 }
+                #resume
             }
         }
 
         impl #invocation {
-            fn send_read<M: ::aether_actor::ReplyMode>(
-                &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, M>,
-                pending: #program::__macro_internals::PendingArtifact,
-            ) {
-                use ::aether_actor::MailSender;
-                ctx.send_to_named(
-                    #program::__macro_internals::JOURNAL_NAMESPACE,
-                    &#program::kinds::ReadArtifact { digest: pending.digest },
-                );
-                let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
-                self.waiting.insert(request, pending);
-            }
+            #send_pending
 
             fn reply_invoked<M: ::aether_actor::ReplyMode>(
                 &self,
@@ -208,6 +208,65 @@ fn expand_invocation(root: &Ident, invocation: &Ident, table: &Ident, program: &
             ) {
                 if let Some(parent) = self.parent {
                     ctx.send_to(parent, invoked);
+                }
+            }
+        }
+    }
+}
+
+fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
+    quote! {
+        match session.poll() {
+            #program::__macro_internals::PollResult::Finished(invoked) => {
+                self.session = ::core::option::Option::None;
+                self.waiting.clear();
+                self.reply_invoked(ctx, &invoked);
+            }
+            #program::__macro_internals::PollResult::NeedArtifact(pending) => {
+                self.send_pending(ctx, #program::__macro_internals::Pending::Artifact(pending));
+            }
+            #program::__macro_internals::PollResult::NeedSend(pending) => {
+                self.send_pending(ctx, #program::__macro_internals::Pending::Send(pending));
+            }
+            #program::__macro_internals::PollResult::Waiting => {}
+        }
+    }
+}
+
+fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenStream2 {
+    let resume = resume_after_poll(program);
+    quote! {
+        fn send_pending<M: ::aether_actor::ReplyMode>(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+            pending: #program::__macro_internals::Pending,
+        ) {
+            use ::aether_actor::MailSender;
+            match pending {
+                #program::__macro_internals::Pending::Artifact(pending) => {
+                    ctx.send_to_named(
+                        #program::__macro_internals::JOURNAL_NAMESPACE,
+                        &#program::kinds::ReadArtifact { digest: pending.digest },
+                    );
+                    let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
+                    self.waiting.insert(request, #program::__macro_internals::Pending::Artifact(pending));
+                }
+                #program::__macro_internals::Pending::Send(pending) => {
+                    const ALLOWED: &[&str] = &[
+                        #(<<#api_tys as #program::InjectedApi>::Target as ::aether_actor::Addressable>::NAMESPACE),*
+                    ];
+                    if !ALLOWED.iter().copied().any(|name| name == pending.mailbox) {
+                        if let Some(session) = self.session.as_mut() {
+                            session.reject_send(#program::Refusal::Refused {
+                                reason: #program::kinds::Detail::new("mailbox is not in the program allowlist"),
+                            });
+                            #resume
+                        }
+                        return;
+                    }
+                    ctx.send_to_named_encoded(pending.mailbox, pending.kind_id, &pending.bytes);
+                    let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
+                    self.waiting.insert(request, #program::__macro_internals::Pending::Send(pending));
                 }
             }
         }
@@ -223,6 +282,11 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
     let len_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_LEN_{hash:016X}");
     let bytes_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_BYTES_{hash:016X}");
     let section_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_SECTION_{hash:016X}");
+    let mode = if entry.meta.sampled {
+        quote! { #program::__macro_internals::MODE_SAMPLED }
+    } else {
+        quote! { #program::__macro_internals::MODE_PURE }
+    };
     quote! {
         const #len_ident: usize = #program::__macro_internals::program_record_len(
             #name.as_bytes(),
@@ -232,7 +296,7 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
             #name.as_bytes(),
             <#input as #program::__macro_internals::Kind>::ID.0,
             <#result as #program::__macro_internals::Kind>::ID.0,
-            #program::__macro_internals::MODE_PURE,
+            #mode,
             #intent.as_bytes(),
         );
         const _: &[u8] = &#bytes_ident;

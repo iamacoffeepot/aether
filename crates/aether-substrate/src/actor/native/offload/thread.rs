@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, HandlesKind};
 use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
-use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_path};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::runtime::trace::SettlementHold;
@@ -169,6 +169,19 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
+    #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
+    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
+        self.binding.send_mail_with_lineage(
+            mailbox_id_from_path(name).0,
+            kind.0,
+            bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
+    }
+
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
@@ -271,6 +284,12 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
+    }
+
+    #[allow(clippy::disallowed_methods)]
+    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
+    fn send_to_named_encoded(&mut self, name: &str, kind: KindId, bytes: &[u8]) {
+        self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, kind.0, bytes, 1, None, None);
     }
 
     fn prev_correlation(&self) -> u64 {

@@ -4,7 +4,9 @@ use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
 
-use crate::check::{pair_run_with_env, reject_run_receiver};
+use syn::Ident;
+
+use crate::check::{pair_run_with_env, reject_run_receiver, trailing_apis};
 
 pub struct ProgramDef {
     pub item: ItemImpl,
@@ -14,6 +16,8 @@ pub struct ProgramDef {
     pub input: Type,
     pub result: Type,
     pub async_run: bool,
+    pub sampled: bool,
+    pub apis: Vec<(Ident, Type)>,
 }
 
 pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
@@ -31,10 +35,11 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
 
     let mut name = None;
     let mut intent = None;
-    let mut mode = None;
+    let mut sampled = None;
     let mut input = None;
     let mut result = None;
     let mut async_run = None;
+    let mut apis = Vec::new();
 
     for impl_item in &item.items {
         match impl_item {
@@ -51,11 +56,10 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                 intent = Some(string_literal(konst, "INTENT")?);
             }
             ImplItem::Const(konst) if konst.ident == "MODE" => {
-                if mode.is_some() {
+                if sampled.is_some() {
                     return Err(syn::Error::new_spanned(&konst.ident, "`const MODE` is given twice"));
                 }
-                require_pure_mode(konst)?;
-                mode = Some(());
+                sampled = Some(parse_mode(konst)?);
             }
             ImplItem::Type(alias) if alias.ident == "Input" => {
                 if input.is_some() {
@@ -74,7 +78,9 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                     return Err(syn::Error::new_spanned(&method.sig.ident, "`fn run` is given twice"));
                 }
                 reject_run_receiver(&method.sig)?;
-                async_run = Some(pair_run_with_env(&method.sig)?);
+                let is_async = pair_run_with_env(&method.sig)?;
+                apis = trailing_apis(&method.sig, is_async)?;
+                async_run = Some(is_async);
             }
             _ => {}
         }
@@ -92,14 +98,18 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let intent = intent.ok_or_else(|| {
         syn::Error::new(item.self_ty.span(), "#[program] requires `const INTENT: &'static str = \"…\"`")
     })?;
-    if mode.is_none() {
-        return Err(syn::Error::new(item.self_ty.span(), "#[program] requires `const MODE: Mode = Mode::Pure`"));
-    }
+    let sampled = sampled.ok_or_else(|| {
+        syn::Error::new(item.self_ty.span(), "#[program] requires `const MODE: Mode = Mode::Pure` or `Mode::Sampled`")
+    })?;
     let input = input.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"))?;
     let result = result.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Result`"))?;
     let async_run = async_run.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `fn run`"))?;
 
-    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, input, result, async_run, item })
+    if sampled && !async_run {
+        return Err(syn::Error::new(item.self_ty.span(), "#[program] Mode::Sampled requires async fn run"));
+    }
+
+    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, input, result, async_run, sampled, apis, item })
 }
 
 fn string_literal(konst: &ImplItemConst, ident: &str) -> syn::Result<LitStr> {
@@ -111,16 +121,18 @@ fn string_literal(konst: &ImplItemConst, ident: &str) -> syn::Result<LitStr> {
     }
 }
 
-fn require_pure_mode(konst: &ImplItemConst) -> syn::Result<()> {
+fn parse_mode(konst: &ImplItemConst) -> syn::Result<bool> {
     let expr = peel_group(&konst.expr);
     let last = match expr {
         Expr::Path(path) => path.path.segments.last().map(|segment| segment.ident.to_string()),
         _ => None,
     };
-    if last.as_deref() == Some("Pure") {
-        Ok(())
-    } else {
-        Err(syn::Error::new_spanned(expr, "#[program] requires `const MODE: Mode = Mode::Pure`"))
+    match last.as_deref() {
+        Some("Pure") => Ok(false),
+        Some("Sampled") => Ok(true),
+        _ => {
+            Err(syn::Error::new_spanned(expr, "#[program] requires `const MODE: Mode = Mode::Pure` or `Mode::Sampled`"))
+        }
     }
 }
 

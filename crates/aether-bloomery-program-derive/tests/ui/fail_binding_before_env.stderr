@@ -1,0 +1,25 @@
+error: #[program] env is the second argument; cap bindings follow env
+  --> tests/ui/fail_binding_before_env.rs:26:45
+   |
+26 |     async fn run(input: Self::Input, _http: Http, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+   |                                             ^^^^
+
+warning: unused imports: `Mode` and `Refusal`
+ --> tests/ui/fail_binding_before_env.rs:1:29
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                             ^^^^  ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Async`, `Env`, and `Http`
+ --> tests/ui/fail_binding_before_env.rs:2:31
+  |
+2 | use aether_bloomery_program::{Async, Env, Http, Program, program};
+  |                               ^^^^^  ^^^  ^^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_binding_before_env.rs:2:49
+  |
+2 | use aether_bloomery_program::{Async, Env, Http, Program, program};
+  |                                                 ^^^^^^^

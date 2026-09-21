@@ -17,6 +17,7 @@ aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-http = { path = "../aether-http", default-features = false }
 
 [lints]
 workspace = true
