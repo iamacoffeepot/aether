@@ -1,0 +1,61 @@
+[package]
+name = "aether-chassis-bloomery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The bloomery chassis (issue #6244): the journal-driven engine. Boots the
+# shared base stratum plus the component host and the RPC server, then spawns
+# the journal owner and the bundle driver over one journal file. Produces the
+# `aether-bloomery` binary over the shared `aether-chassis` composition layer.
+
+[[bin]]
+name = "aether-bloomery"
+path = "src/bin/bloomery.rs"
+
+# Same `runtime` convention as the other chassis crates (ADR-0122).
+[features]
+default = ["runtime"]
+runtime = []
+
+[dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-substrate = { path = "../aether-substrate" }
+# The bloomery cap set: the component host the driver's `Command::Load`
+# targets, the RPC server every substrate chassis composes (ADR-0155 §3),
+# and the journal owner plus bundle driver the mount seam spawns.
+aether-component = { path = "../aether-component" }
+aether-rpc = { path = "../aether-rpc" }
+aether-bloomery-journal = { path = "../aether-bloomery-journal" }
+aether-bloomery-driver = { path = "../aether-bloomery-driver" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+clap = { workspace = true }
+# `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a
+# `#[derive(confique::Config)]` layer struct reached only through
+# macro-emitted paths the source-only unused-deps scan can't see (ignored
+# below).
+confique = { workspace = true }
+tracing = { workspace = true, features = ["std", "attributes"] }
+
+# The signal-blocking driver: signal-hook on Unix, the `ctrlc` Ctrl-C
+# fallback on Windows.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
+[dev-dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data" }
+tempfile = "3"
+
+# `confique` is reached only through the
+# `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,
+# invisible to the source-only unused-deps scan.
+[package.metadata.cargo-machete]
+ignored = ["confique"] # aether-suppression-request: reached only through the `#[derive(aether_substrate::Config)]`-emitted layer struct on `BloomeryConfig`, invisible to the source-only unused-deps scan
+
+[lints]
+workspace = true

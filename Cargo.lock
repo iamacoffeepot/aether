@@ -306,6 +306,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-chassis-bloomery"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-driver",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-chassis",
+ "aether-component",
+ "aether-data",
+ "aether-rpc",
+ "aether-substrate",
+ "clap",
+ "confique",
+ "ctrlc",
+ "signal-hook",
+ "tempfile",
+ "tracing",
+]
+
+[[package]]
 name = "aether-chassis-desktop"
 version = "0.3.0-alpha"
 dependencies = [
