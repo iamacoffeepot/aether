@@ -21,7 +21,7 @@ pub struct Tombstone<R> {
 
 impl<R> Tombstone<R> {
     /// Record a proven id as dead. Called only by `ActorRef::entomb`.
-    pub(crate) const fn new(id: MailboxId) -> Self {
+    pub(super) const fn new(id: MailboxId) -> Self {
         Self { id, _actor: PhantomData }
     }
 
