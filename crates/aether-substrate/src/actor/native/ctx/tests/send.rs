@@ -69,6 +69,45 @@ fn handle_send_inherits_chain_detached_mints_fresh() {
     assert_eq!(detached.root, detached.mail_id, "detached send is its own root");
 }
 
+/// `ctx.to` sends through a proven reference: the routed envelope lands at
+/// the reference's id and inherits the in-flight root and parent like an
+/// `actor_at` send. The reference comes from `registry.proven`, so the test
+/// proves the whole resolve-then-send path without minting anything itself.
+#[test]
+fn to_send_through_a_proven_reference_inherits_chain() {
+    use crate::mail::registry::OwnedDispatch;
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        "test.issue_6278.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let reference = registry.proven::<StubActor>(recipient).expect("a registered inbox proves a reference");
+
+    let actor_mailbox = MailboxId(0x00BE_EF04);
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
+
+    let in_flight_root = MailId::new(MailboxId(0xC0), 7);
+    let in_flight_mail = MailId::new(MailboxId(0x99), 42);
+    let source = Source::with_correlation(SourceAddr::None, 0);
+
+    {
+        let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        ctx.to(&reference).send(&CastOnly { code: 3 });
+    }
+    let routed = rx.try_recv().expect("to send routed at flush");
+    assert_eq!(routed.recipient, recipient, "to addresses the reference's id");
+    assert_eq!(routed.root, in_flight_root, "to inherits the caller's root");
+    assert_eq!(routed.parent_mail, Some(in_flight_mail), "to's parent is the in-flight mail");
+}
+
 /// ADR-0134: a multi handler's `ctx.emit` addresses the dispatch source
 /// and starts a fresh detached chain (no parent edge, its own root);
 /// a dispatch with no routable source (`SourceAddr::None`) drops the
