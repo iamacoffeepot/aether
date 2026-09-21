@@ -147,6 +147,12 @@ mod tests {
     }
 
     #[test]
+    fn rejects_multi_byte_whitespace_and_control() {
+        assert_eq!(check_segment("a\u{3000}b".as_bytes()), Err(SegmentFault::ContainsControlOrWhitespace));
+        assert_eq!(check_segment("a\u{0085}b".as_bytes()), Err(SegmentFault::ContainsControlOrWhitespace));
+    }
+
+    #[test]
     fn accepts_multi_byte() {
         assert_eq!(check_segment("aether.日本語".as_bytes()), Ok(()));
     }

@@ -21,7 +21,7 @@ impl Namespace {
     /// grammar. In a `const` context the panic is a compile error, so a
     /// bad `NAMESPACE` literal never reaches registration:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0080
     /// use aether_data::Namespace;
     ///
     /// const BAD: Namespace = Namespace::new("a/b");

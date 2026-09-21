@@ -2,7 +2,11 @@
 
 use alloc::borrow::Cow;
 use alloc::vec::Vec;
+use core::fmt;
+use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
+
+use serde::{Deserialize, Serialize};
 
 use super::actor_ref::ActorRef;
 use super::load_name::LoadName;
@@ -14,6 +18,11 @@ use crate::{CastEligible, MailboxId, Schema};
 /// optional anchor plus an optional key. An address claims nothing about
 /// existence — only resolution against the registry turns one into a
 /// reference — so unlike the proven types its constructors are public.
+///
+/// The value traits are hand-written and the serde bound is emptied so that
+/// none of them lands a bound on the phantom `R`.
+#[derive(Serialize, Deserialize)]
+#[serde(bound = "")]
 pub struct Address<R> {
     anchor: Option<MailboxId>,
     key: Option<LoadName>,
@@ -45,6 +54,33 @@ impl<R> Address<R> {
     #[must_use]
     pub fn key(&self) -> Option<&LoadName> {
         self.key.as_ref()
+    }
+}
+
+impl<R> Clone for Address<R> {
+    fn clone(&self) -> Self {
+        Self { anchor: self.anchor, key: self.key.clone(), _actor: PhantomData }
+    }
+}
+
+impl<R> PartialEq for Address<R> {
+    fn eq(&self, other: &Self) -> bool {
+        self.anchor == other.anchor && self.key == other.key
+    }
+}
+
+impl<R> Eq for Address<R> {}
+
+impl<R> Hash for Address<R> {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.anchor.hash(state);
+        self.key.hash(state);
+    }
+}
+
+impl<R> fmt::Debug for Address<R> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Address").field("anchor", &self.anchor).field("key", &self.key).finish()
     }
 }
 

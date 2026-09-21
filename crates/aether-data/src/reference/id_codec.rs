@@ -29,21 +29,20 @@ pub fn serialize_reference_id<S: Serializer>(id: MailboxId, serializer: S) -> Re
     serialize_id(id.0, serializer)
 }
 
-/// Deserialize a proven id like [`MailboxId`], with the tag check on the
-/// binary path: a raw `u64` is accepted only with `Tag::Mailbox` bits. The
-/// human-readable path takes `deserialize_id` as is — a tagged string
-/// enforces the `mbx-` tag there, and a bare number stays the back-compat
-/// spelling.
+/// Deserialize a proven id, accepting only a value with `Tag::Mailbox` bits
+/// on every path. [`MailboxId`] tolerates a bare number in human-readable
+/// formats as a back-compat spelling; a reference cannot, because that
+/// number reaches here unchecked and zero would become a reference.
 pub fn deserialize_reference_id<'de, D: Deserializer<'de>>(deserializer: D) -> Result<MailboxId, D::Error> {
-    if deserializer.is_human_readable() {
-        deserialize_id(deserializer, Tag::Mailbox).map(MailboxId)
+    let raw = if deserializer.is_human_readable() {
+        deserialize_id(deserializer, Tag::Mailbox)?
     } else {
-        let raw = u64::deserialize(deserializer)?;
-        if tagged_id::tag_of(raw) == Some(Tag::Mailbox) {
-            Ok(MailboxId(raw))
-        } else {
-            Err(DeError::custom("invalid actor reference id"))
-        }
+        u64::deserialize(deserializer)?
+    };
+    if tagged_id::tag_of(raw) == Some(Tag::Mailbox) {
+        Ok(MailboxId(raw))
+    } else {
+        Err(DeError::custom("invalid actor reference id"))
     }
 }
 
@@ -64,5 +63,17 @@ mod tests {
         let bytes = raw.to_le_bytes();
         let mut cursor: &[u8] = &bytes;
         assert_eq!(decode_reference_id(&mut cursor), Err(WireError::InvalidReference(raw)));
+    }
+
+    #[test]
+    fn human_readable_number_without_the_mailbox_tag_is_rejected() {
+        use serde::de::IntoDeserializer;
+        use serde::de::value::{Error as ValueError, U64Deserializer};
+
+        let zero: U64Deserializer<ValueError> = 0u64.into_deserializer();
+        assert!(deserialize_reference_id(zero).is_err());
+
+        let tagged: U64Deserializer<ValueError> = tagged_id::with_tag(Tag::Mailbox, 1).into_deserializer();
+        assert_eq!(deserialize_reference_id(tagged).ok(), Some(MailboxId(tagged_id::with_tag(Tag::Mailbox, 1))));
     }
 }

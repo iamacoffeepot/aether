@@ -18,7 +18,7 @@ use crate::{CastEligible, MailboxId, Schema};
 /// constructor is `pub(crate)`: in this change a value comes into being only
 /// through wire decode or `Deserialize`, and there is no `From<MailboxId>`.
 ///
-/// ```compile_fail
+/// ```compile_fail,E0624
 /// use aether_data::{ActorRef, MailboxId};
 ///
 /// let _reference = ActorRef::<()>::new(MailboxId::NONE);
