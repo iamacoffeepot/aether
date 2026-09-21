@@ -63,13 +63,13 @@ Nothing on main can carry any of this yet:
    roots are shared by digest, and `Invoke.seq` is unique only within one
    journal, so two drivers would collide. The driver has two roles that
    share one table of loaded bundles:
+   - it loads and invokes programs on demand;
+   - it follows the reactor set.
 
-   Chassis mounting landed in `aether-chassis-bloomery` (issue #6244):
+   Chassis mounting has since landed in `aether-chassis-bloomery` (issue #6244):
    the chassis composes the shared base stratum plus `ComponentHostCapability`
    and the RPC server, then spawns the journal owner and the driver post-build
    over one journal file. No full-stack cap rides the engine.
-   - it loads and invokes programs on demand;
-   - it follows the reactor set.
 
 2. **Roots are named by digest and never dropped.** A root's `name` is the
    lowercase-hex `artifact_digest(OpaqueBytes::ID, wasm)`, as in ADR-0224

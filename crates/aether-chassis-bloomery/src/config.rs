@@ -3,9 +3,9 @@
 //! [`BloomeryConfig`] is the chassis's own derive-`Config` member, resolved off
 //! the source stack into [`BloomeryEnv`](crate::chassis::BloomeryEnv) and declared
 //! on the builder by [`compose`](aether_substrate::chassis::BootableChassis::compose),
-//! so the known-key sweep and `--print-config` list both knobs. Its value applies
-//! off the builder at the mount seam, which lowers it to the typed pair the
-//! journal owner and the bundle driver spawn over.
+//! so the known-key sweep and `--print-config` list both knobs. `build` lowers
+//! its value to the typed pair the journal owner and the bundle driver spawn
+//! over before it stands up the substrate, so a refused knob costs no boot.
 
 use std::io;
 use std::path::PathBuf;
@@ -27,8 +27,9 @@ pub struct BloomeryConfig {
     ///
     /// Created when absent, but its parent directory must already exist — the
     /// chassis creates no directories. Required: an unset journal refuses boot
-    /// at the mount seam with a named error, so `--describe` / `--print-config`
-    /// keep working with no journal configured (ADR-0155 §4).
+    /// with a named error. It stays an `Option` rather than a mandatory flag so
+    /// `--describe` / `--print-config` answer with no journal configured
+    /// (ADR-0155 §4) — they exit in the shared prelude, before `build`.
     pub journal: Option<String>,
     /// Byte budget for one closure read handed to the bundle driver.
     ///
@@ -51,7 +52,9 @@ impl Default for BloomeryConfig {
 
 impl BloomeryConfig {
     /// Lower the resolved knobs to the typed pair the mount seam spawns over:
-    /// the journal path and the driver's closure limit.
+    /// the journal path and the driver's closure limit. Called at the top of
+    /// [`BloomeryChassis::build`](crate::BloomeryChassis), ahead of every boot
+    /// side effect.
     ///
     /// # Errors
     ///

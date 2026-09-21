@@ -8,29 +8,32 @@
 
 use std::fmt::Debug;
 use std::io;
+use std::path::Path;
 
 use aether_bloomery_driver::{BundleDriver, DriverParams};
 use aether_bloomery_journal::JournalActor;
+use aether_bloomery_kinds::ClosureLimit;
 use aether_substrate::Subname;
 use aether_substrate::chassis::builder::BuiltChassis;
 use aether_substrate::chassis::error::BootError;
 
 use crate::chassis::BloomeryChassis;
-use crate::config::BloomeryConfig;
 
 /// Spawn the journal owner under `Subname::Named("journal")` and the bundle
 /// driver under `Subname::Named("driver")` over the journal's born id, so the
 /// engine answers as `aether.bloomery.journal:journal` and
 /// `aether.bloomery.driver:driver`.
 ///
+/// Takes the already-lowered pair rather than the config: `BloomeryChassis::build`
+/// lowers the knobs before it stands up the substrate, so a bad journal path
+/// never reaches this seam.
+///
 /// # Errors
 ///
-/// Returns [`BootError`] when the config refuses to lower (no journal path, or
-/// a closure limit outside the accepted range) or when either spawn fails.
-pub fn mount(built: &BuiltChassis<BloomeryChassis>, config: &BloomeryConfig) -> Result<(), BootError> {
-    let (path, limit) = config.to_journal_and_limit()?;
+/// Returns [`BootError`] when either spawn fails.
+pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureLimit) -> Result<(), BootError> {
     let journal = built
-        .spawn_actor::<JournalActor>(Subname::Named("journal"), path.clone(), ())
+        .spawn_actor::<JournalActor>(Subname::Named("journal"), path.to_path_buf(), ())
         .finish()
         .map_err(|error| spawn_failed("aether.bloomery.journal:journal", &error))?;
     let driver = built

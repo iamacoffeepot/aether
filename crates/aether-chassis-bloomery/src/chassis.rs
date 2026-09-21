@@ -42,20 +42,27 @@ impl Chassis for BloomeryChassis {
     type Env = BloomeryEnv;
 
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
-    /// stand up the substrate, re-apply the resolved log filter, lift the
-    /// bloomery knobs and the base out of the env, compose the shared stratum
+    /// lower the bloomery knobs, stand up the substrate, re-apply the resolved
+    /// log filter, lift the base out of the env, compose the shared stratum
     /// plus the component host and the RPC server, sweep for unknown env keys,
     /// install the signal-blocking driver, and mount the journal owner and the
     /// bundle driver before returning.
     fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        // Lower the bloomery knobs first, before anything with a side effect:
+        // an unset journal or an out-of-range closure limit is a typo in the
+        // operator's own argv, and refusing it here costs nothing, where
+        // refusing it at the mount seam would first stand up wasmtime and let
+        // the RPC server bind and drop a port. `--describe` / `--print-config`
+        // exit in `run_chassis_main`'s prelude before `build` is called, so
+        // they never reach this and still answer with no journal configured.
+        let (journal, limit) = mem::take(&mut env.bloomery).to_journal_and_limit()?;
         let mut boot = SubstrateBoot::build()?;
         apply_filter(&env.runtime.log_filter);
-        let bloomery = mem::take(&mut env.bloomery);
         let base = mem::take(&mut env.base);
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(BloomeryDriverCapability { boot }).build()?;
-        mount::mount(&built, &bloomery)?;
+        mount::mount(&built, &journal, limit)?;
         Ok(built)
     }
 }
@@ -74,8 +81,9 @@ pub struct BloomeryEnv {
     /// [`BloomeryChassis::build`]); the field carries the whole resolved
     /// member so its values resolve once.
     pub runtime: RuntimeConfig,
-    /// The bloomery knobs. Applied off the builder at the mount seam, which
-    /// lowers them to the journal path and the driver's closure limit.
+    /// The bloomery knobs. Lowered to the journal path and the driver's
+    /// closure limit at the top of [`BloomeryChassis::build`], then applied off
+    /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
 }
 
