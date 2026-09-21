@@ -15,7 +15,6 @@
 //! `send_mail_traced` observes it as one in-flight unit.
 
 use std::collections::{HashMap, HashSet};
-use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -26,13 +25,8 @@ use super::{ProcessCapability, ProcessConfig};
 
 use aether_actor::runtime;
 
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone, TaskQueue};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
-
-/// Syntactic `-> Pending<R>` marker for `classify_handler_reply`. The real hold
-/// is the ledger entry [`TaskQueue::submit`] already arms; expand discards this
-/// return.
-struct Pending<R>(PhantomData<fn() -> R>);
 
 /// Composer-supplied construction params for the `aether.process` cap
 /// (ADR-0156 §3): the working-directory confinement root. Resolved at
@@ -124,8 +118,7 @@ impl NativeActor for ProcessCapability {
     fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
         // Deny-by-default: an unlisted binary is refused before any spawn.
         let Some(path) = state.allowlist.get(&mail.binary).cloned() else {
-            state.tasks.submit(ctx, || RunResult::Err { error: ProcessError::NotPermitted });
-            return Pending(PhantomData);
+            return state.tasks.submit(ctx, || RunResult::Err { error: ProcessError::NotPermitted });
         };
 
         let timeout = if mail.timeout_millis == 0 {
@@ -139,8 +132,7 @@ impl NativeActor for ProcessCapability {
         state.tasks.submit(ctx, move || {
             let command = build_command(&path, &args, &env, &work_root);
             outcome_to_result(run_to_completion(command, stdin, timeout))
-        });
-        Pending(PhantomData)
+        })
     }
 
     /// ADR-0093 completion for a finished run: re-reply the worker's

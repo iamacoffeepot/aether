@@ -63,19 +63,26 @@ use crate::actor::native::ctx::NativeCtx;
 #[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct DispatchId(pub u64);
 
+impl DispatchId {
+    /// Sentinel for a hold captured without a worker yet.
+    /// The in-flight table mints from 1, so `0` is never a live dispatch.
+    pub const NONE: Self = Self(0);
+}
+
 /// A type-level "receipt" for a deferred reply (ADR-0109). Returned by
-/// [`dispatch_blocking`](NativeCtx::dispatch_blocking) in place of a bare
-/// [`DispatchId`] so a request handler can declare `-> Pending<R>`: the
-/// reply is an `R`, sent later from the matching `#[handler(task)]`
-/// completion rather than synchronously on this handler's return.
+/// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and by bounded submit
+/// helpers that arm the same hold, so a request handler can declare
+/// `-> Pending<R>`: the reply is an `R`, sent later from the matching
+/// `#[handler(task)]` completion rather than synchronously on this handler's
+/// return.
 ///
 /// Phantom over `R` only — the actual hold and reply target live in the
-/// in-flight ledger, not here, so a `Pending<R>` carries just the
-/// [`DispatchId`] (reachable via [`Pending::dispatch_id`] for *optional*
-/// cancellation) plus the reply-kind marker. Framework-constructed: only
-/// `dispatch_blocking` mints one, so a signature that declares
-/// `Pending<R>` implies an obligation for `R` was actually armed
-/// (ADR-0109 §3) — it is not user-fabricable.
+/// in-flight ledger (or in a queued thunk's captured hold), not here, so a
+/// `Pending<R>` carries just the [`DispatchId`] (reachable via
+/// [`Pending::dispatch_id`] for *optional* cancellation) plus the reply-kind
+/// marker. Framework-constructed: `Pending::new` is crate-internal;
+/// out-of-crate minting goes through [`NativeCtx::pending`] or
+/// `TaskQueue` / `PerSenderEgress` `submit` (ADR-0109 §3).
 pub struct Pending<R: Kind> {
     dispatch_id: DispatchId,
     /// `fn() -> R` so `Pending<R>` is covariant in `R` and stays
@@ -85,10 +92,9 @@ pub struct Pending<R: Kind> {
 }
 
 impl<R: Kind> Pending<R> {
-    /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — only
-    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) constructs a
-    /// `Pending`, which is what makes the `-> Pending<R>` contract
-    /// non-forgeable (ADR-0109 §3).
+    /// Wrap the armed dispatch's [`DispatchId`]. Crate-internal — called from
+    /// [`dispatch_blocking`](NativeCtx::dispatch_blocking) and
+    /// [`NativeCtx::pending`] (ADR-0109 §3).
     pub(crate) fn new(dispatch_id: DispatchId) -> Self {
         Self { dispatch_id, _reply: PhantomData }
     }

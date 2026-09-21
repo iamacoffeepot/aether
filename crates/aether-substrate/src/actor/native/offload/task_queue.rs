@@ -32,6 +32,7 @@ use std::collections::VecDeque;
 use aether_actor::Single;
 
 use crate::actor::native::NativeCtx;
+use crate::actor::native::offload::blocking::{DispatchId, Pending};
 use aether_data::Kind;
 
 /// Default per-cap concurrency bound when a cap doesn't override it.
@@ -89,20 +90,16 @@ impl TaskQueue {
     /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
     /// so the deferred dispatch keeps *this* chain held and replies to
     /// *this* caller (iamacoffeepot/aether#1031).
-    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, work: F)
+    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, work: F) -> Pending<O>
     where
         O: Kind + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
         M: aether_actor::ReplyMode,
     {
         if self.in_flight < self.max {
-            // `dispatch_blocking_with` (not the bare `dispatch_blocking`,
-            // which now returns a `Pending<R>` and so needs the reply kind
-            // `R` declared, ADR-0109): `TaskQueue` is reply-kind-agnostic
-            // plumbing — its completion handler re-replies the carried
-            // output via `done.resolve`, so there is no `R` to thread here.
-            ctx.dispatch_blocking_with((), work);
+            let id = ctx.dispatch_blocking_with((), work);
             self.in_flight += 1;
+            ctx.pending(id)
         } else {
             // Capture the hold + reply target at accept time so the
             // buffered request stays held from accept -> its eventual
@@ -113,6 +110,7 @@ impl TaskQueue {
             self.pending.push_back(Box::new(move |ctx: &mut NativeCtx<'_>| {
                 ctx.dispatch_blocking_resumed(hold, reply_to, work);
             }));
+            ctx.pending(DispatchId::NONE)
         }
     }
 

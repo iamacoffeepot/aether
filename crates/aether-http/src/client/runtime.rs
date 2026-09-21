@@ -18,7 +18,6 @@ use super::{HttpCapability, HttpConfig};
 use aether_actor::runtime;
 
 use std::collections::HashSet;
-use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -26,15 +25,10 @@ use ureq::http::Method;
 use ureq::http::Request;
 
 pub use aether_data::MailboxId;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
-
-/// Syntactic `-> Pending<R>` marker for `classify_handler_reply`. The real hold
-/// is the ledger entry [`PerSenderEgress::submit`] already arms; expand discards
-/// this return.
-struct Pending<R>(PhantomData<fn() -> R>);
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
 /// kind by the cap before handing to the adapter.
@@ -162,8 +156,7 @@ impl NativeActor for HttpCapability {
         state.egress.submit(ctx, sender, move || match adapter.fetch(adapter_req) {
             Ok(r) => FetchResult::Ok { request_id, url, status: r.status, headers: r.headers, body: r.body },
             Err(error) => FetchResult::Err { request_id, url, error },
-        });
-        Pending(PhantomData)
+        })
     }
 
     /// ADR-0093 completion for a finished fetch: re-reply the worker's
