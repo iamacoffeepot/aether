@@ -74,6 +74,14 @@ jobs:
   # scanner yet. Findings stay visible even when an owner-edited, commit-bound
   # hidden marker in the current PR body signs them off; pushes and manual runs
   # have no PR authorization context and skip.
+  #
+  # The reference-mint scan (ADR-0230) rides in this job for the same reason:
+  # its allowlist is the gate, so the scanner comes from the event base and a
+  # PR cannot add itself to the list it is judged by. It shares the job rather
+  # than taking its own because every job `ci-pass` requires must map to a
+  # verify umbrella member, and this scan has none. Two limits follow: the
+  # local verify lane does not predict a mint finding, and pushes and manual
+  # runs are not scanned.
   suppressions:
     name: New suppressions
     if: github.event_name == 'pull_request'
@@ -113,6 +121,19 @@ jobs:
           --head "${{ github.event.pull_request.head.sha }}"
           --pull-request "${{ github.event.pull_request.number }}"
           --repository "${{ github.repository }}"
+      - name: Materialize the trusted reference-mint scanner
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          MINT_SCANNER_PATH: ${{ runner.temp }}/check-reference-mint.py
+        run: |
+          set -euo pipefail
+          git show "${BASE_SHA}:scripts/check-reference-mint.py" > "${MINT_SCANNER_PATH}"
+          test -s "${MINT_SCANNER_PATH}"
+      - name: Reject out-of-allowlist reference mints
+        env:
+          MINT_SCANNER_PATH: ${{ runner.temp }}/check-reference-mint.py
+        run: python3 "${MINT_SCANNER_PATH}" --root .
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
