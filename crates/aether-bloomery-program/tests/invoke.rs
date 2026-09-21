@@ -7,11 +7,12 @@ use aether_bloomery_kinds::{
     Refusal, Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::{
-    Async, AsyncProgram, Env, Http, InjectedApi, Pending, PollResult, Program, Started, Sync, SyncProgram, invoke,
-    start_async,
+    Async, AsyncProgram, Env, Http, InjectedApi, Pending, PollResult, Process, Program, Started, Sync, SyncProgram,
+    invoke, start_async,
 };
 use aether_data::{Cites, Kind, Storage};
 use aether_http::{Fetch, FetchResult, HttpMethod};
+use aether_process::{Run, RunResult};
 
 fn program_name<P: Program>() -> ProgramName {
     ProgramName::new(P::NAME).expect("valid program name")
@@ -403,4 +404,83 @@ fn sampled_http_fetch_yields_need_send_then_completes() -> Result<(), Box<dyn Er
             }
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_process.input")]
+struct ProcessInput {
+    marker: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.bloomery.sampled_process.result")]
+struct ProcessOut {
+    stdout: Ref<OpaqueBytes>,
+}
+
+struct SampledProcess;
+
+impl Program for SampledProcess {
+    const NAME: &'static str = "sampled.process";
+    const MODE: Mode = Mode::Sampled;
+    const INTENT: &'static str = "Run a binary and stage stdout.";
+    type Input = ProcessInput;
+    type Result = ProcessOut;
+}
+
+impl AsyncProgram for SampledProcess {
+    async fn run(input: Self::Input, mut env: Env<Async>) -> Result<Self::Result, Refusal> {
+        let _ = input;
+        let mut process = Process::from_env(&mut env);
+        match process
+            .run(Run { binary: "echo".into(), args: Vec::new(), env: Vec::new(), stdin: Vec::new(), timeout_millis: 0 })
+            .await?
+        {
+            RunResult::Ok { stdout, .. } => Ok(ProcessOut { stdout: env.stage_bytes(&stdout) }),
+            RunResult::TimedOut { .. } | RunResult::Err { .. } => Err(Refusal::InputDecode),
+        }
+    }
+}
+
+#[test]
+fn sampled_process_run_yields_need_send_then_completes() -> Result<(), Box<dyn Error>> {
+    let input = ProcessInput { marker: 1 };
+    let input_artifact = closure_of(&input)?;
+    match start_async::<SampledProcess>(Invoke::new(
+        7,
+        program_name::<SampledProcess>(),
+        input_artifact.digest(),
+        vec![input_artifact],
+    )) {
+        Started::Finished(other) => panic!("expected Live NeedSend, got Finished {other:?}"),
+        Started::Live { mut session, waiting } => {
+            let Pending::Send(pending) = waiting.expect("first poll records one cap send") else {
+                panic!("expected NeedSend to aether.process");
+            };
+            assert_eq!(pending.mailbox, "aether.process");
+            assert_eq!(pending.kind_id, Run::ID);
+            assert_eq!(pending.expected_reply, RunResult::ID);
+            let reply = RunResult::Ok { exit_code: Some(0), stdout: b"hello".to_vec(), stderr: Vec::new() };
+            session.fulfill_send(&pending, RunResult::ID, reply.encode_into_bytes());
+            match session.poll() {
+                PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) => {
+                    let expected = ProcessOut { stdout: Ref::of_bytes(b"hello") };
+                    let expected_encoded = encoded(&expected)?;
+                    assert_eq!(result, expected_encoded.digest());
+                    assert_eq!(staged, vec![EncodedArtifact::opaque_bytes(b"hello"), expected_encoded]);
+                    Ok(())
+                }
+                other => panic!("expected Completed after RunResult, got {other:?}"),
+            }
+        }
+    }
+}
+
+#[test]
+fn invocation_child_has_no_run_kind_arm() {
+    // Tripwire: Process shares Http's generic NeedSend pump. A per-kind `Run`
+    // arm in the generated invocation child reopens the closed PendingSend enum.
+    let child = include_str!("../../aether-bloomery-bundle-derive/src/expand/programs.rs");
+    assert!(!child.contains("PendingSend::Process"), "invocation child must not grow a Process arm");
+    assert!(!child.contains("Run =>"), "invocation child must not match on Run");
 }

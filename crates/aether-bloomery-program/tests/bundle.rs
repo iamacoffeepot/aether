@@ -49,11 +49,12 @@ fn program_name(name: &str) -> ProgramName {
 
 fn assert_fixture_section(wasm: &[u8]) {
     let decoded = declarations(&section_bytes(wasm)).expect("aether.bloomery.programs decodes");
-    assert_eq!(decoded.len(), 3, "the custom section lists every exported program");
+    assert_eq!(decoded.len(), 4, "the custom section lists every exported program");
     let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
     assert!(names.contains(&"test.program.summarize"), "{names:?}");
     assert!(names.contains(&"test.program.refuse"), "{names:?}");
     assert!(names.contains(&"test.program.fetch_body"), "{names:?}");
+    assert!(names.contains(&"test.program.exec"), "{names:?}");
     let summarize = decoded
         .iter()
         .find(|program| program.name.as_str() == "test.program.summarize")
@@ -70,6 +71,8 @@ fn assert_fixture_section(wasm: &[u8]) {
         .find(|program| program.name.as_str() == "test.program.fetch_body")
         .expect("fetch_body declaration");
     assert_eq!(fetch_body.mode, Mode::Sampled);
+    let exec = decoded.iter().find(|program| program.name.as_str() == "test.program.exec").expect("exec declaration");
+    assert_eq!(exec.mode, Mode::Sampled);
 }
 
 fn section_bytes(wasm: &[u8]) -> Vec<u8> {

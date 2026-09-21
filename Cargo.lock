@@ -217,6 +217,7 @@ dependencies = [
  "aether-harness-substrate",
  "aether-http",
  "aether-kinds",
+ "aether-process",
  "wasmparser 0.246.2",
 ]
 
@@ -1024,6 +1025,7 @@ dependencies = [
  "aether-bloomery-program",
  "aether-data",
  "aether-http",
+ "aether-process",
 ]
 
 [[package]]
