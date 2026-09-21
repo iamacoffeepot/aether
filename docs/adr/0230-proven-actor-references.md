@@ -93,11 +93,23 @@ Because the claim is monotone it is discharged once. Nothing revalidates a
 reference, no mail is spent keeping one valid, and no generation counter is
 added to the id.
 
+The claim is relative to one engine in one session, and that decides what may
+be exported. A type that cannot uphold its invariant on the far side of a
+boundary is not exportable. A structural check at decode (tag bits, non-zero)
+is not the invariant: the same bytes arrive from saved state, a config file,
+a save written last session, an MCP parameter, or another engine, where the
+same id is a well-formed position that may hold a different actor or nothing.
+So the proven types implement no `Serialize`, `Deserialize`, `WireEncode`,
+`WireDecode`, or `Schema`. They cannot be a kind field, a config field, or
+saved state; they exist only in the memory of the context that proved them.
+`Address<R>` is the one form that crosses a boundary, because it claims
+nothing, and the receiver proves it again on its own side.
+
 ### 2. The types
 
 ```rust
 pub struct Namespace(&'static str);
-pub struct Address<R> { /* anchor + typed keys */ }
+pub enum Address<R> { Scoped { key }, Beneath { parent, key }, Exact { id } }
 pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 pub struct Recipient<K: Kind> { id: MailboxId, _kind: PhantomData<fn(K)> }
 pub struct AnyActorRef { id: MailboxId }
@@ -108,9 +120,9 @@ pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 |---|---|---|---|
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
-| `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, the boundary parser | be stored, mailed, configured, persisted; be resolved |
-| `ActorRef<R>` | an `R` reached `Live` at this id | section 3 only | send, monitor, store, ride in mail |
-| `Recipient<K>` | an actor that handles `K` reached `Live` at this id | `ctx.me().recipient::<K>()`, bounded on `HandlesKind<K>`; host-checked narrowing of an `AnyActorRef` | send `K`, monitor, store, ride in mail |
+| `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
+| `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
+| `Recipient<K>` | an actor that handles `K` reached `Live` at this id | `ctx.me().recipient::<K>()`, bounded on `HandlesKind<K>`; host-checked narrowing of an `AnyActorRef` | send `K`, monitor, be held in actor memory, yield its `Address` |
 | `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor, narrow |
 | `Tombstone<R>` | that actor is dead | exchanging a reference on its `MonitorNotice` | key cleanup of held state |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
@@ -125,8 +137,11 @@ component's key is its load name, a validated `LoadName`; a window's is its
 window id. There is one addressing system and this is its value type.
 
 `Recipient<K>` replaces `Mailbox<K>` and the string-taking `resolve_mailbox`.
-Subscriber and consumer fields are this type: the window capability knows its
-subscriber handles `Key` and nothing else about it.
+It is what a capability holds for a subscriber or consumer: the window
+capability knows its subscriber handles `Key` and nothing else about it. The
+subscribe mail itself carries an `Address`, or nothing when the envelope
+sender is the subscriber; the capability resolves it once and keeps the
+`Recipient`.
 
 The per-handler handle keeps its job of carrying origin, now fed by a
 reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
@@ -137,17 +152,20 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Source | Proof | Runtime cost |
 |---|---|---|
 | A declared root singleton of the chassis | the `#[actor]` dependency list is emitted to the wasm custom section and checked against the chassis's linked inventory before `init` (native: at chassis build). A missing dependency refuses the load and names it. | none; at depth 1 the fold is a `const` |
-| Self, parent, inline cluster members | structural | none; handed over at `init` |
-| A child this actor spawned or loaded | the spawn or load result carries the reference | none beyond the spawn |
-| The envelope sender; a reference field in mail | the type carries the proof between in-engine actors | none |
+| Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
+| A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
+| The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |
 | `ctx.resolve(&address) -> Option<ActorRef<R>>` | `R`'s `Resolve` strategy folds the candidate position; the host confirms a `Live` route there. One synchronous host call carrying eight bytes, no mail. | one lookup per reference, ever |
-| Bytes from another process (RPC ingress) | resolved against the registry at decode; a miss is an error reply | one lookup per reference field, at ingress only |
+| An `Address<R>` that arrived in mail, config, saved state, or from another process | the same `ctx.resolve`; there is no second path for foreign bytes | one lookup per received address, by the receiver that wants to use it |
 
 The position and the proof have different owners. `Resolve` stays the single
 derivation of a position, fed by an `Address<R>` and never by text. The host
 is the single authority on whether that position is occupied, and it is the
-only thing that can turn one into a reference. References do not go to disk;
-persisted state stores the `Address` and resolves it on load.
+only thing that can turn one into a reference. Handing a reference to a peer
+means sending `reference.address()`; the peer's `resolve` is one synchronous
+host call and no mail. Persisted state stores an `Address` for the same
+reason, and this is enforced by the types having no codec rather than by
+convention.
 
 Strings exist in exactly one place: the host's `resolve_address` parser
 behind the MCP, RPC, and harness boundary, which yields an `Address` and then
@@ -164,22 +182,18 @@ fine in a log and useless as an address. The registry renders canonical
 names from the macro-emitted inventory records, which never pass through the
 type.
 
-The reference types live in `aether-data` with crate-private constructors.
-They cannot live beside `Addressable`: `aether-actor` depends on
-`aether-kinds`, and kinds there (`LoadResult`, `MonitorNotice`,
-`DropComponent`) carry references, so the types sit below both. The struct
-carries `R` as a phantom with no `Addressable` bound; the bound lives on the
-operations in `aether-actor`.
+`Namespace`, `LoadName`, and `Address<R>` live in `aether-data`, because kinds
+in `aether-kinds` carry addresses and `aether-actor` depends on that crate.
+The proven types live beside `Addressable` in `aether-actor` with
+crate-private constructors: nothing serializable names them, so no kind crate
+needs them, and the guest SDK mints its own from the host's answers without
+any public door.
 
-A guest receives every reference as bytes the host produced — the injected
-dependencies at `init`, a spawn result, the envelope sender, the answer to
-`resolve` — so wire decode in `aether-data` is its only door. The native
-registry in `aether-substrate` holds the proof itself and has no bytes to
-decode, so there is one `#[doc(hidden)]` mint function. It is guarded by a
-gate with a path allowlist naming the registry module and with no in-source
-`#[allow]` escape: widening it means editing the gate in a reviewed diff.
-Assembling bytes by hand and decoding them into a reference is deliberate
-forgery rather than a mistake, and is a review finding.
+Rust visibility is crate-granular and the native registry in
+`aether-substrate` also has to mint, so there is one `#[doc(hidden)]` mint
+function. It is guarded by a gate with a path allowlist naming the registry
+module and with no in-source `#[allow]` escape: widening it means editing the
+gate in a reviewed diff.
 
 ### 5. What is deleted
 
@@ -204,10 +218,11 @@ text; `LoadResult`'s rendered
 - Steady-state sends get cheaper. A stored reference or a constant replaces a
   fold recomputed per `ctx.actor::<R>()` call. No mail is added anywhere on
   the send path.
-- Kinds that carry a reference leave the cast-shape (`Pod`) class, since a
-  cast from `u64` would forge one. Most of the affected families are
-  subscribe and register shapes, and many can drop the field in favor of the
-  envelope sender, as `SubscribeWindowSelf` already does.
+- A kind never carries a reference. A kind that names an actor to send to
+  carries an `Address<R>`, which is not cast-shape (`Pod`), and its receiver
+  pays one synchronous host call to resolve it, once. Most of the affected
+  families are subscribe and register shapes, and many can drop the field in
+  favor of the envelope sender, as `SubscribeWindowSelf` already does.
 - Mail addressed to a position nobody has registered is no longer expressible
   from an actor, so parking stops being the mechanism for boot-order
   independence between separately loaded peers. A dependent resolves its peer
@@ -232,10 +247,10 @@ text; `LoadResult`'s rendered
 - **Keep narrowing the computing functions by lint.** Four passes did not
   close it: tuple construction stays open and `#[allow]` is an in-source
   escape.
-- **Validate reference fields on every send.** A registry lookup per field
-  per mail to defend against forgery, when the defects are safe-Rust mistakes
-  that a missing constructor already prevents. Validation belongs only where
-  bytes arrive from another process.
+- **Keep references in kinds and have the host validate them at delivery.**
+  A schema walk and a registry lookup per reference field per mail, paid by
+  every delivery whether or not the receiver uses the reference, and the
+  guest-side decode stays open to any bytes.
 - **Liveness in the type.** Not monotone; holding it true would cost mail.
 - **Generational ids.** Already rejected by ADR-0079 as a wire change, and
   unnecessary while names are never reused.
@@ -244,7 +259,8 @@ text; `LoadResult`'s rendered
   corrected retry under the same name is refused.
 - **One type with a state parameter (`ActorRef<R, S>`).** The states carry
   different data (a description, an id, an unsendable id), so it is three
-  structs under one name and a longer spelling in every kind field.
-- **Decode as the only door, with the native registry encoding bytes to mint
-  from them.** No hidden function, at the price of a ceremony that proves
-  nothing; one gated function is the honest form.
+  structs under one name and a longer spelling at every use.
+- **Serializable references with a structural check at decode.** The first
+  form of this decision. Decode cannot re-establish "reached `Live` here",
+  and the type cannot know where its bytes came from, so every codec impl is
+  a door that skips the registry.
