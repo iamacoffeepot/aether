@@ -91,8 +91,18 @@ pub(super) const U32_WIDTH: usize = 4;
 /// typed id (`KindId`) and a `SchemaType::TypeId`.
 pub(super) const U64_WIDTH: usize = 8;
 
+/// Byte width of a bare `u8` on the wire — the size of a resolver tag.
+pub(super) const U8_WIDTH: usize = 1;
+
 /// Byte width of a one-byte flag — `bool` and option-presence.
 pub(super) const FLAG_WIDTH: usize = 1;
+
+/// Write `val` as its single wire byte (the encoding of a bare `u8`
+/// such as a resolver tag), returning the advanced cursor.
+pub(super) const fn write_u8(val: u8, out: &mut [u8], cursor: usize) -> usize {
+    out[cursor] = val;
+    cursor + U8_WIDTH
+}
 
 /// Write `val` as four fixed little-endian bytes (the wire encoding of a
 /// `u32` count / selector / discriminant), returning the advanced cursor.

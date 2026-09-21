@@ -15,6 +15,7 @@
 //! so each lives in its own satellite crate.
 
 mod cube;
+mod dependent_probe;
 mod editor_region_probe;
 mod fs_demux;
 mod http_handler;
@@ -31,6 +32,7 @@ mod tcp_load_probe;
 mod ui_widget;
 
 pub use cube::Cube;
+pub use dependent_probe::DependentProbe;
 pub use editor_region_probe::EditorRegionProbe;
 pub use fs_demux::FsDemux;
 pub use http_handler::{
@@ -91,6 +93,7 @@ aether_actor::export!(
     Counter,
     Sidecar,
     TcpLoadProbe,
+    DependentProbe,
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

@@ -204,6 +204,37 @@ impl CallerScoped for EmbeddedMany {
     const SCOPE: CallerScope = CallerScope::Current;
 }
 
+mod sealed {
+    /// Private supertrait sealing [`super::DependencyResolver`] — only the
+    /// keyless strategies in this module can implement it, so the set of
+    /// declarable strategies is closed.
+    pub trait Sealed {}
+}
+
+/// A [`Resolve`] strategy that may back a declared `#[actor(depends(R))]`
+/// dependency (ADR-0230): the keyless strategies, whose candidate position
+/// the host folds without run-time data. Sealed: the only implementors are
+/// [`One`] and [`Embedded`]. A keyed strategy stays with `ctx.resolve`,
+/// where the caller supplies the key at run time.
+pub trait DependencyResolver: Resolve + sealed::Sealed {
+    /// The wire tag the `#[actor]` macro writes into the
+    /// `InputsRecord::Dependency` record and the host reader matches on.
+    /// Tags are stable: a new declarable strategy takes the next tag,
+    /// never a reused one.
+    const TAG: u8;
+}
+
+impl sealed::Sealed for One {}
+impl sealed::Sealed for Embedded {}
+
+impl DependencyResolver for One {
+    const TAG: u8 = 0;
+}
+
+impl DependencyResolver for Embedded {
+    const TAG: u8 = 1;
+}
+
 /// An actor that can be addressed by bare type from a peer's ctx, because its
 /// [`Resolver`](Addressable::Resolver) is [`CallerScoped`] (ADR-0119
 /// amendment). Bounds every carry-passing send surface —
@@ -300,6 +331,42 @@ pub fn root_mailbox<C: Root + Addressable<Resolver = One>>() -> MailboxId {
 /// child may implement `ChildOf` for several distinct parents and may also
 /// implement [`Root`] when both placements are meaningful.
 pub trait ChildOf<P: Addressable>: Addressable {}
+
+/// A declared load-time dependency (ADR-0230): `Self: DependsOn<R>` means
+/// the actor could not have been created before `R` was `Live` — the host
+/// refuses the load, the module boot actor, or the replacement while `R`
+/// has no `Live` route, before `init`. Emitted by `#[actor(depends(R))]`;
+/// authors never write these by hand.
+///
+/// Only keyless actors are declarable: `R: Singleton + CallerAddressable`
+/// with a [`DependencyResolver`] strategy. A keyed actor cannot be a
+/// declared dependency — which instance is meant is run-time data, and
+/// that case stays with `ctx.resolve`:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{Addressable, DependsOn, Many, One};
+///
+/// struct Keyed;
+///
+/// impl Addressable for Keyed {
+///     const NAMESPACE: &'static str = "example.keyed";
+///     type Resolver = Many;
+/// }
+///
+/// struct Dependent;
+///
+/// impl Addressable for Dependent {
+///     const NAMESPACE: &'static str = "example.dependent";
+///     type Resolver = One;
+/// }
+///
+/// impl DependsOn<Keyed> for Dependent {}
+/// ```
+pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
+where
+    R::Resolver: DependencyResolver,
+{
+}
 
 /// The boot/teardown capability an actor composes onto its identity
 /// (iamacoffeepot/aether#2048). The lifecycle was declared twice —

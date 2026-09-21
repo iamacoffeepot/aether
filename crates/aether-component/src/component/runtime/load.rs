@@ -15,10 +15,11 @@ use aether_substrate::actor::native::{
     spawn::Subname,
 };
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs};
+use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency};
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
+use super::dependencies::{missing_dependency, replacement_refusal};
 use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
@@ -36,6 +37,7 @@ fn content_hash_hex(wasm: &[u8]) -> String {
 
 pub(super) struct PreparedLoad {
     capabilities: ComponentCapabilities,
+    dependencies: Vec<Dependency>,
     type_tag: Option<u64>,
     actors: Vec<ActorInputs>,
     boot_namespace: Option<String>,
@@ -87,6 +89,7 @@ pub(super) struct PreparedBoot {
     hash: String,
     namespace: String,
     capabilities: ComponentCapabilities,
+    dependencies: Vec<Dependency>,
     module: Module,
     actors: Vec<ActorInputs>,
     wasm_bytes: Arc<[u8]>,
@@ -94,12 +97,10 @@ pub(super) struct PreparedBoot {
 
 impl PreparedBoot {
     fn new(namespace: String, hash: String, module: Module, actors: Vec<ActorInputs>, wasm_bytes: Arc<[u8]>) -> Self {
-        let capabilities = actors
-            .iter()
-            .find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()))
-            .map(|actor| actor.capabilities.clone())
-            .unwrap_or_default();
-        Self { hash, namespace, capabilities, module, actors, wasm_bytes }
+        let group = actors.iter().find(|actor| actor.namespace.as_deref() == Some(namespace.as_str()));
+        let capabilities = group.map(|actor| actor.capabilities.clone()).unwrap_or_default();
+        let dependencies = group.map(|actor| actor.dependencies.clone()).unwrap_or_default();
+        Self { hash, namespace, capabilities, dependencies, module, actors, wasm_bytes }
     }
 
     #[allow(clippy::disallowed_methods)]
@@ -222,7 +223,7 @@ impl ComponentHostCapabilityState {
             });
         }
 
-        let (mut capabilities, type_tag, selected_namespace) = if let Some(requested) = &payload.export {
+        let (mut capabilities, dependencies, type_tag, selected_namespace) = if let Some(requested) = &payload.export {
             let Some(group) = actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested.as_str())) else {
                 let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
                 return Err(LoadResult::Err {
@@ -231,7 +232,7 @@ impl ComponentHostCapabilityState {
             };
             #[allow(clippy::disallowed_methods)]
             let tag = aether_data::mailbox_id_from_name(requested).0;
-            (group.capabilities.clone(), Some(tag), Some(requested.clone()))
+            (group.capabilities.clone(), group.dependencies.clone(), Some(tag), Some(requested.clone()))
         } else if kind_manifest::read_no_default_marker(&payload.wasm) {
             let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
             return Err(LoadResult::Err {
@@ -246,6 +247,7 @@ impl ComponentHostCapabilityState {
             );
             (
                 default_actor.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
+                default_actor.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
                 None,
                 default_actor.and_then(|actor| actor.namespace.clone()),
             )
@@ -279,6 +281,7 @@ impl ComponentHostCapabilityState {
             descriptors,
             Arc::new(PreparedLoad {
                 capabilities,
+                dependencies,
                 type_tag,
                 actors,
                 boot_namespace,
@@ -333,6 +336,24 @@ impl ComponentHostCapabilityState {
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
+        if let Some(namespace) = missing_dependency(&self.registry, ctx.self_id(), &plan.dependencies) {
+            let error = format!("{actor} depends on {namespace}, which is not live", actor = plan.namespace);
+            match first {
+                BootSuccessor::Load(_) => {
+                    owed.reply(ctx, &LoadResult::Err { error });
+                }
+                BootSuccessor::Replacement { pending, result } => {
+                    tracing::warn!(
+                        target: "aether_component",
+                        actor = %pending.actor_mailbox,
+                        %error,
+                        "replace succeeded but the replacement module boot failed",
+                    );
+                    owed.reply(ctx, &result);
+                }
+            }
+            return;
+        }
         let hash = plan.hash.clone();
         let namespace = plan.namespace.clone();
         let config = plan.config(self);
@@ -357,6 +378,19 @@ impl ComponentHostCapabilityState {
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
     ) {
+        let parent = match &load.placement {
+            LoadPlacement::ComponentHost => ctx.self_id(),
+            LoadPlacement::Under { parent, .. } => *parent,
+        };
+        if let Some(namespace) = missing_dependency(&self.registry, parent, &load.dependencies) {
+            owed.reply(
+                ctx,
+                &LoadResult::Err {
+                    error: format!("{actor} depends on {namespace}, which is not live", actor = load.name),
+                },
+            );
+            return;
+        }
         let config = load.requested_config(self);
         let context = SpawnContext::RequestedActor { load: Arc::clone(&load), boot_hash: boot_hash.clone() };
         let placement = load.placement.clone();
@@ -550,6 +584,12 @@ impl ComponentHostCapabilityState {
     pub fn begin_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
         let actor_mailbox = payload.mailbox_id;
+        if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
+            && let Some(error) = replacement_refusal(&self.registry, actor_mailbox, &actors, payload.export.as_deref())
+        {
+            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+            return;
+        }
         let boot_operation = self.next_boot_operation(actor_mailbox);
         let bytes = payload.encode_into_bytes();
         let mail_id = ctx.send_envelope_tracked(actor_mailbox, ReplaceComponent::ID, &bytes);

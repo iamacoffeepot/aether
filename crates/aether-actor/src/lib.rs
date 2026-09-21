@@ -50,9 +50,10 @@ pub use model::address::{address, address_at, address_candidate, address_named, 
 pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, EMBEDDED_SCOPE, Embedded, EmbeddedMany,
-    HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publishes, Replies,
-    Resolve, Root, Singleton, Streams, Subname, root_mailbox, validate_namespace_segment,
+    Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, DependencyResolver, DependsOn,
+    EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN,
+    NamespaceError, One, Publishes, Replies, Resolve, Root, Singleton, Streams, Subname, root_mailbox,
+    validate_namespace_segment,
 };
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_any_actor_ref, __mint_recipient};

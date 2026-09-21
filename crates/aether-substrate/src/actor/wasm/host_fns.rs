@@ -852,9 +852,8 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // `Live` route there, echoing the candidate on `Live` and zero
     // otherwise. It sends no mail and touches no trace state.
     linker.func_wrap("aether", "resolve_live_p32", |caller: Caller<'_, ComponentCtx>, candidate: u64| -> u64 {
-        // The unit-typed mint is discarded — only its existence crosses the
-        // boundary, as the echoed candidate or zero.
-        if caller.data().registry.proven::<()>(MailboxId(candidate)).is_some() {
+        // A bare liveness read — no reference is minted only to be discarded.
+        if caller.data().registry.is_live(MailboxId(candidate)) {
             candidate
         } else {
             0
