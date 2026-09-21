@@ -176,7 +176,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         &mut self,
         host_turn: impl FnOnce(
             &mut DesktopWindowCapabilityState,
-            &mut aether_substrate::NativeCtx<'_, aether_actor::Single, DesktopWindowCapability>,
+            &mut aether_substrate::NativeCtx<'_, DesktopWindowCapability, aether_actor::Single>,
         ),
     ) -> (Vec<WindowHostAction>, Vec<WindowHostEffect>) {
         self.window_slot.drain_available();
@@ -195,7 +195,7 @@ impl<I: DesktopWindowIntegration> DesktopWindowApplication<I> {
         flush_frame: bool,
         host_turn: impl FnOnce(
             &mut DesktopWindowCapabilityState,
-            &mut aether_substrate::NativeCtx<'_, aether_actor::Single, DesktopWindowCapability>,
+            &mut aether_substrate::NativeCtx<'_, DesktopWindowCapability, aether_actor::Single>,
         ),
     ) {
         self.integration.drain_available();

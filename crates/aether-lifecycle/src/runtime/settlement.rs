@@ -12,7 +12,7 @@ use aether_actor::Manual;
 use aether_actor::OutboundReply;
 use aether_data::KindId;
 use aether_kinds::LifecycleAdvanceComplete;
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{Erased, NativeCtx};
 use aether_substrate::mail::{MailId, Source};
 
 // `LifecycleStateData` is the cap-root re-export over `graph`
@@ -136,7 +136,7 @@ impl LifecycleCapabilityState {
     /// state mutation + reply but logs at `error`: reaching here means
     /// the settlement pipeline stalled past `advance_timeout`. No-op when
     /// nothing is pending.
-    pub fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_, Manual>) {
+    pub fn force_complete_pending(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>) {
         let Some(pending) = self.pending.take() else {
             return;
         };

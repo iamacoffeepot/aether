@@ -3,7 +3,7 @@
 
 use aether_actor::{Emit, Manual, Multi, OutboundReply, Single};
 
-use crate::actor::native::NativeCtx;
+use crate::actor::native::{Erased, NativeCtx};
 
 use super::support::CastOnly;
 
@@ -13,8 +13,8 @@ use super::support::CastOnly;
 #[test]
 fn native_ctx_layout_identical_across_modes() {
     use std::mem::{align_of, size_of};
-    assert_eq!(size_of::<NativeCtx<'static, Single>>(), size_of::<NativeCtx<'static, Manual>>(),);
-    assert_eq!(align_of::<NativeCtx<'static, Single>>(), align_of::<NativeCtx<'static, Manual>>(),);
+    assert_eq!(size_of::<NativeCtx<'static, Erased, Single>>(), size_of::<NativeCtx<'static, Erased, Manual>>(),);
+    assert_eq!(align_of::<NativeCtx<'static, Erased, Single>>(), align_of::<NativeCtx<'static, Erased, Manual>>(),);
 }
 
 /// ADR-0112: `OutboundReply` is reachable from the `Manual` ctx
@@ -24,7 +24,7 @@ fn native_ctx_layout_identical_across_modes() {
 #[test]
 fn outbound_reply_present_on_manual() {
     fn assert_impls<C: OutboundReply>() {}
-    assert_impls::<NativeCtx<'static, Manual>>();
+    assert_impls::<NativeCtx<'static, Erased, Manual>>();
 }
 
 /// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
@@ -33,8 +33,8 @@ fn outbound_reply_present_on_manual() {
 #[test]
 fn native_ctx_layout_identical_for_multi_mode() {
     use std::mem::{align_of, size_of};
-    assert_eq!(size_of::<NativeCtx<'static, Single>>(), size_of::<NativeCtx<'static, Multi<u32>>>(),);
-    assert_eq!(align_of::<NativeCtx<'static, Single>>(), align_of::<NativeCtx<'static, Multi<u32>>>(),);
+    assert_eq!(size_of::<NativeCtx<'static, Erased, Single>>(), size_of::<NativeCtx<'static, Erased, Multi<u32>>>(),);
+    assert_eq!(align_of::<NativeCtx<'static, Erased, Single>>(), align_of::<NativeCtx<'static, Erased, Multi<u32>>>(),);
 }
 
 /// ADR-0134: `Emit` is reachable from the `Multi<K>` ctx only. The
@@ -44,5 +44,5 @@ fn native_ctx_layout_identical_for_multi_mode() {
 #[test]
 fn emit_present_on_multi() {
     fn assert_impls<C: Emit<CastOnly>>() {}
-    assert_impls::<NativeCtx<'static, Multi<CastOnly>>>();
+    assert_impls::<NativeCtx<'static, Erased, Multi<CastOnly>>>();
 }

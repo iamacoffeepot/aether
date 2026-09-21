@@ -22,7 +22,7 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
     TextInput, WindowMode, WindowSize,
 };
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::runtime::effect_chain::OrderingDevice;
 use aether_substrate::{InboundMail, MonitorHandle as ActorMonitorHandle, Subname};
@@ -277,7 +277,7 @@ impl DesktopWindowCapabilityState {
         &mut self,
         id: WindowId,
         attachment: Result<(), String>,
-        ctx: &mut NativeCtx<'_, Single, DesktopWindowCapability>,
+        ctx: &mut NativeCtx<'_, DesktopWindowCapability, Single>,
     ) -> Vec<WindowHostEffect> {
         let Some(mut pending) = self.pending_creates.remove(&id) else {
             return Vec::new();
@@ -426,7 +426,7 @@ impl DesktopWindowCapabilityState {
     pub fn finish_window_close<A>(
         &mut self,
         id: WindowId,
-        ctx: &mut NativeCtx<'_, Single, A>,
+        ctx: &mut NativeCtx<'_, A, Single>,
     ) -> Vec<WindowHostEffect> {
         let close_reply = self.windows.get_mut(&id).and_then(|state| state.close_reply.take());
         let existed = self.remove_window(id);
@@ -540,7 +540,7 @@ impl DesktopWindowCapabilityState {
     /// a predefined Quit, another library's menu — resolves to no window and
     /// is dropped rather than attributed to whichever window happens to parse
     /// out of it.
-    pub fn menu_activated<A>(&mut self, raw: &str, ctx: &mut NativeCtx<'_, Single, A>) {
+    pub fn menu_activated<A>(&mut self, raw: &str, ctx: &mut NativeCtx<'_, A, Single>) {
         let Some((window, item)) = parse_menu_item_id(raw) else {
             return;
         };
@@ -553,7 +553,7 @@ impl DesktopWindowCapabilityState {
     /// Translate one native window event and publish typed input directly to
     /// selector-aware subscribers.
     #[allow(clippy::too_many_lines)]
-    pub fn window_event<A>(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_, Single, A>) {
+    pub fn window_event<A>(&mut self, winit_id: WinitWindowId, event: WindowEvent, ctx: &mut NativeCtx<'_, A, Single>) {
         let Some(id) = self.winit_windows.get(&winit_id).copied() else {
             return;
         };
@@ -802,7 +802,7 @@ impl DesktopWindowCapabilityState {
         WindowSize { window: id, width, height, scale_factor }
     }
 
-    fn publish<K: Kind, A>(&self, ctx: &mut NativeCtx<'_, Single, A>, window: WindowId, event: &K) {
+    fn publish<K: Kind, A>(&self, ctx: &mut NativeCtx<'_, A, Single>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
 }
@@ -889,7 +889,7 @@ impl NativeActor for DesktopWindowCapability {
     }
 
     #[handler::manual]
-    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: CreateWindow) {
+    fn on_create(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CreateWindow) {
         let reply = ctx.take_inbound();
         if let Err((error, reply)) = state.queue_create(mail.spec, Some(Box::new(reply)), false)
             && let Some(reply) = reply
@@ -908,7 +908,7 @@ impl NativeActor for DesktopWindowCapability {
     /// resolves against the live `Arc<Window>` on this same turn — this is a
     /// pumped actor, so this *is* the winit thread — and replies immediately.
     #[handler::manual]
-    fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ApplyWindowCommand) {
+    fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ApplyWindowCommand) {
         let reply = ctx.take_inbound();
         if matches!(mail.command, WindowCommand::Close) {
             if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
@@ -1282,7 +1282,7 @@ mod tests {
         let (binding, _mailer) = test_ctx();
         // Attachment stages the window's child birth, so the ctx names the cap
         // it would parent under — the same one the pumped host turn supplies.
-        let mut ctx = NativeCtx::<'_, Single, DesktopWindowCapability>::new_for_actor(
+        let mut ctx = NativeCtx::<'_, DesktopWindowCapability, Single>::new_for_actor(
             &binding,
             Source::NONE,
             MailId::NONE,

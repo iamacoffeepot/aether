@@ -1,5 +1,5 @@
 //! ADR-0134: a split `#[actor] impl NativeActor` may carry a
-//! `#[handler::multi]` whose ctx is `NativeCtx<'_, Multi<K>>`. The
+//! `#[handler::multi]` whose ctx is `NativeCtx<'_, Erased, Multi<K>>`. The
 //! substrate-typed runtime impls cfg out in this fixture bin (no `runtime`
 //! feature) — mirroring `accepts_actor_split_task_handler` — so the
 //! assertion is that the macro accepts the multi signature (parses
@@ -59,7 +59,7 @@ impl aether_substrate::actor::native::NativeActor for MultiCap {
     #[handler::multi]
     fn on_ping(
         state: &mut Self::State,
-        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Multi<Frame>>,
+        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Erased, aether_substrate::Multi<Frame>>,
         ping: Ping,
     ) {
         state.seen += 1;
@@ -77,8 +77,8 @@ struct MultiSpawnCapState {
 }
 
 // Issue 4158: a multi handler may also name the actor it dispatches for, to
-// reach `spawn_child`. The reply mode is then the *first* ctx type argument
-// and the actor the second, so a macro that reads the marker off the last
+// reach `spawn_child`. The reply mode is then the *second* ctx type argument
+// and the actor the first, so a macro that reads the marker off the first
 // argument sees `Self` here and rejects the signature.
 #[actor(singleton)]
 impl aether_substrate::actor::native::NativeActor for MultiSpawnCap {
@@ -97,7 +97,7 @@ impl aether_substrate::actor::native::NativeActor for MultiSpawnCap {
     #[handler::multi]
     fn on_ping(
         state: &mut Self::State,
-        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, aether_substrate::Multi<Frame>, Self>,
+        ctx: &mut aether_substrate::actor::native::NativeCtx<'_, Self, aether_substrate::Multi<Frame>>,
         ping: Ping,
     ) {
         state.seen += 1;

@@ -222,7 +222,7 @@ impl NativeActor for TcpListenerActor {
     /// we'll see the queue already drained on the second handler
     /// call and exit fast.
     #[handler::single]
-    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, _mail: ConnectionReady) {
+    fn on_connection_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: ConnectionReady) {
         while let Ok((stream, peer)) = state.connection_rx.try_recv() {
             let subname = format!("conn-{}", state.next_subname);
             state.next_subname += 1;

@@ -51,7 +51,7 @@ use std::sync::Arc;
 use wasmtime::{Engine, Linker};
 
 use aether_substrate::actor::native::{
-    NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
+    Erased, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::component::ComponentCtx;
 use aether_substrate::chassis::error::BootError;
@@ -179,8 +179,12 @@ pub struct BootEntry {
 /// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
 /// holds no field this helper reads, so it stays stateless and the handlers
 /// reach it through the parent's `use runtime::*` glob.
-fn forward_to_trampoline<M: ReplyMode, P>(ctx: &mut NativeCtx<'_, M>, recipient: MailboxId, kind: KindId, payload: &P)
-where
+fn forward_to_trampoline<M: ReplyMode, P>(
+    ctx: &mut NativeCtx<'_, Erased, M>,
+    recipient: MailboxId,
+    kind: KindId,
+    payload: &P,
+) where
     P: Kind,
 {
     let bytes = payload.encode_into_bytes();
@@ -245,7 +249,7 @@ impl NativeActor for ComponentHostCapability {
     /// invalid wasm, instantiation trap) come back as
     /// `LoadResult::Err`.
     #[handler::manual]
-    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponent) {
+    fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
         state.begin_load(ctx, payload);
     }
 
@@ -254,14 +258,18 @@ impl NativeActor for ComponentHostCapability {
     /// continues to place the requested trampoline beneath this component
     /// host; this handler is the explicit test-harness seam for nested peers.
     #[handler::manual]
-    fn on_load_component_under(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: LoadComponentUnder) {
+    fn on_load_component_under(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        payload: LoadComponentUnder,
+    ) {
         state.begin_load_under(ctx, payload);
     }
 
     #[handler(task)]
     fn on_kind_registration_done(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Single, Self>,
+        ctx: &mut NativeCtx<'_, Self, Single>,
         done: TaskDone<RegistryBatchResult, load::KindRegistration>,
     ) {
         state.finish_kind_registration(ctx, done);
@@ -270,7 +278,7 @@ impl NativeActor for ComponentHostCapability {
     #[handler(task)]
     fn on_component_spawn_done(
         state: &mut Self::State,
-        ctx: &mut NativeCtx<'_, Single, Self>,
+        ctx: &mut NativeCtx<'_, Self, Single>,
         done: TaskDone<SpawnOutcome, load::SpawnContext>,
     ) {
         state.finish_spawn(ctx, done);
@@ -281,7 +289,11 @@ impl NativeActor for ComponentHostCapability {
     /// one coherent snapshot, egresses it at most once per generation pair,
     /// and always acknowledges so a publication racing the clear is re-armed.
     #[handler::manual]
-    fn on_registry_changed(state: &mut Self::State, _ctx: &mut NativeCtx<'_, Manual>, _payload: RegistryChanged) {
+    fn on_registry_changed(
+        state: &mut Self::State,
+        _ctx: &mut NativeCtx<'_, Erased, Manual>,
+        _payload: RegistryChanged,
+    ) {
         state.refresh_registry_inventory();
     }
 
@@ -298,7 +310,7 @@ impl NativeActor for ComponentHostCapability {
     /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
     /// trampoline's id from the `LoadResult.mailbox_id` field.
     #[handler::manual]
-    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, payload: DropComponent) {
+    fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
         // ADR-0147 non-droppability guard: the boot actor is unconditional and
         // refcounted against its module's non-boot actors, so an external drop
         // addressed straight at a boot mailbox must be rejected — letting it
@@ -359,7 +371,7 @@ impl NativeActor for ComponentHostCapability {
     /// `finish_replace` commits it on `Ok`, then re-replies the verdict to the
     /// original caller.
     #[handler::manual]
-    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, payload: ReplaceResult) {
+    fn on_replace_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: ReplaceResult) {
         state.finish_replace(ctx, payload);
     }
 

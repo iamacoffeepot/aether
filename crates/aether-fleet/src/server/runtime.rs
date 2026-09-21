@@ -630,7 +630,7 @@ impl FleetServerState {
     /// the way it always has. What *is* continuous is `supervision` — the
     /// recipe and the spent restart budget ride across, so the burst
     /// limit binds over the lineage rather than resetting on every new id.
-    fn restart_engine(&mut self, ctx: &mut NativeCtx<'_, Single, FleetServer>, supervision: Supervision) {
+    fn restart_engine(&mut self, ctx: &mut NativeCtx<'_, FleetServer, Single>, supervision: Supervision) {
         let hash = supervision.recipe.hash.clone();
 
         // Re-resolve rather than trusting a path captured at spawn time:
@@ -909,7 +909,7 @@ impl NativeActor for FleetServer {
     /// replied only after the registry owner authoritatively activates the
     /// staged proxy.
     #[handler::manual]
-    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: SpawnEngine) {
+    fn on_spawn(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: SpawnEngine) {
         let mut owed: DeferredReply = ctx.defer_reply_to(ctx.reply_target());
 
         // Resolve the registry selector to stored content bytes before
@@ -1243,7 +1243,7 @@ impl NativeActor for FleetServer {
     /// looks the token up and re-forks the filed recipe under a fresh
     /// engine id. A token with no pending entry is a silent no-op.
     #[handler::single]
-    fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, mail: EngineRestartDue) {
+    fn on_restart_due(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, mail: EngineRestartDue) {
         if let Some(supervision) = state.pending_restarts.remove(&mail.token) {
             state.restart_engine(ctx, supervision);
             // The filed restart is no longer pending: it either became a

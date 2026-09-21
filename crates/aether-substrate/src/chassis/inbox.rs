@@ -672,7 +672,7 @@ mod tests {
         let id = MailboxId(0x1757_0001);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let env = armed_env(id, MailId::NONE, MailId::NONE, Source::NONE);
-        let mut ctx = NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(
+        let mut ctx = NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(
             &binding,
             Source::NONE,
             MailId::NONE,
@@ -706,7 +706,7 @@ mod tests {
         let mail_id = MailId::new(id, 7);
         let env = armed_env(id, mail_id, mail_id, Source::NONE);
         let ctx =
-            NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
+            NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
         // Drop the ctx without taking the inbound — the single armed
         // envelope is dropped *inside* the ctx, so its ADR-0094 guard
         // panics rather than leaking.
@@ -746,7 +746,7 @@ mod tests {
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
         let env = armed_env(id, MailId::new(id, 21), root, sender);
-        let mut ctx = NativeCtx::<'_, crate::Manual, crate::Erased>::with_inbound(
+        let mut ctx = NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(
             &binding,
             sender,
             MailId::new(id, 21),

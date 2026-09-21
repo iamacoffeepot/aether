@@ -74,7 +74,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Grandchild {
         fn dispatch(
             state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -119,7 +119,7 @@ fn instanced_can_spawn_grandchild() {
     impl Dispatch<Self> for Parent {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -274,7 +274,7 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
     impl Dispatch<Self> for NamedReturn {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {

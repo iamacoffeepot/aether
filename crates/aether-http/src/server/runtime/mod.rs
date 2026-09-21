@@ -247,7 +247,7 @@ impl NativeActor for HttpServerCapability {
     /// accept sidecar fires this; the handler drains the mpsc and assigns
     /// per item.
     #[handler::single]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Single, Self>, _mail: HttpInboundReady) {
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         // One deterministic child per handler turn keeps each birth in its
         // own transactional owner batch. A canonical-name conflict can then

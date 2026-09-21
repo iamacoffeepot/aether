@@ -331,7 +331,7 @@ impl DeferredReply {
 
     /// Send the terminal reply through the original target and then release
     /// the continuously-held settlement root.
-    pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, M, A>, reply: &R)
+    pub fn reply<M, R, A>(mut self, ctx: &mut NativeCtx<'_, A, M>, reply: &R)
     where
         M: ReplyMode,
         R: Kind,
@@ -430,7 +430,7 @@ impl<O, C> TaskDone<O, C> {
     /// Re-reply the carried `output` through the carried `reply_to`,
     /// then release the hold (ADR-0093 §4). The worker already shaped
     /// `output` into the reply value, so this is the common one-liner.
-    pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, Single, A>)
+    pub fn resolve<A>(mut self, ctx: &mut NativeCtx<'_, A, Single>)
     where
         O: Kind,
     {
@@ -442,7 +442,7 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. For
     /// completion handlers that shape a different reply from the carried
     /// output (and context, when present) than the raw `output`.
-    pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, f: F)
+    pub fn resolve_with<R, F, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, f: F)
     where
         R: Kind,
         F: FnOnce(&O, &C) -> R,
@@ -460,7 +460,7 @@ impl<O, C> TaskDone<O, C> {
     /// computed by the handler rather than built in a ctx-less closure.
     /// Re-replies **first**, then releases the hold (`Sent` before
     /// `Release`, ADR-0080 §12), like the rest of the `resolve*` family.
-    pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, reply: &R)
+    pub fn resolve_value<R, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, reply: &R)
     where
         R: Kind,
     {
@@ -482,7 +482,7 @@ impl<O, C> TaskDone<O, C> {
     /// through the carried `reply_to`, then release the hold. The
     /// carried `output` is discarded — used when the completion is a
     /// failure rather than a result.
-    pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, Single, A>, err: &E)
+    pub fn resolve_err<E, A>(mut self, ctx: &mut NativeCtx<'_, A, Single>, err: &E)
     where
         E: Kind,
     {

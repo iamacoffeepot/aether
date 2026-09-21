@@ -628,8 +628,8 @@ type, and can spawn an `Instanced` native actor when that child declares
 `ChildOf<Parent>` for the actor doing the spawning:
 `ctx.spawn_child::<TcpSessionActor>(subname, config, params)`. The parent comes
 from the ctx. A handler opts into the call by naming its own actor in its ctx
-signature — `ctx: &mut NativeCtx<'_, Single, Self>`, or
-`NativeCtx<'_, Manual, Self>` for a manual-reply handler — and the `#[actor]`
+signature — `ctx: &mut NativeCtx<'_, Self, Single>`, or
+`NativeCtx<'_, Self, Manual>` for a manual-reply handler — and the `#[actor]`
 macro hands such a handler a ctx typed by the actor being dispatched. Every
 other handler keeps the plain `NativeCtx<'_>` and reaches no spawn surface, so
 a birth cannot be placed under a parent other than the one running.

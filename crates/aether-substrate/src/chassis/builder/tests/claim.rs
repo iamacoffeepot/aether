@@ -112,7 +112,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
     impl Dispatch<Self> for FailingCap {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {

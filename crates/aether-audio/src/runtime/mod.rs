@@ -70,6 +70,7 @@ use super::kinds::{
 pub use std::collections::HashMap;
 
 pub use aether_actor::Manual;
+use aether_substrate::Erased;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -267,13 +268,13 @@ impl NativeActor for AudioCapability {
 
     /// Fetch, decode, and play an audio asset in the track lane.
     #[handler::manual]
-    fn on_play_track(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: PlayTrack) {
+    fn on_play_track(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: PlayTrack) {
         state.handle_play_track(ctx, mail);
     }
 
     /// Correlate a forwarded `aether.fs.read` reply (ADR-0103 §2).
     #[handler::manual]
-    fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+    fn on_read_result(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ReadResult) {
         state.handle_read_result(ctx, mail);
     }
 
@@ -295,7 +296,7 @@ impl NativeActor for AudioCapability {
 
     /// Load a sampled instrument bank from an `.sfz` file (ADR-0103 §4/§5).
     #[handler::manual]
-    fn on_load_instrument(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadInstrument) {
+    fn on_load_instrument(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadInstrument) {
         state.handle_load_instrument(ctx, mail);
     }
 
