@@ -650,7 +650,7 @@ right item only while every item is realized. The list says it instead:
 
 ```rust
 #[handler::manual]
-fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: VirtualListHover) {
+fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: VirtualListHover) {
     // `hover.index` is into the config's `items`, or `None` once the pointer
     // has left the rows; `hover.frame` is that row's plate.
 }
@@ -659,7 +659,10 @@ fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: Virtua
 `VirtualListHover { index: Option<u32>, frame }` is sent whenever
 that answer **changes** — from a pointer move, a wheel, a thumb drag, or a
 fresh item vector arriving under a still pointer — and is attributed by
-`ctx.source_mailbox()` like every other value-up event. The rectangle is the
+`ctx.source_mailbox()` like every other value-up event. (A handler may spell
+its actor — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
+actor; the default `Erased` names no actor. The actor is the first parameter,
+the reply mode the second.) The rectangle is the
 row's plate in the same window pixels the panel assigned the list its frame in,
 so a host stands a tooltip on the row without measuring anything, and it is all
 zeroes when `index` is `None` — the event that says to take the tooltip down.
@@ -963,7 +966,7 @@ scrolls the realized window. The dropdown says it instead:
 
 ```rust
 #[handler::manual]
-fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Manual>, hover: DropdownHover) {
+fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: DropdownHover) {
     // `hover.index` indexes the config's `options`; `hover.frame` is that
     // row's rectangle in window pixels.
 }

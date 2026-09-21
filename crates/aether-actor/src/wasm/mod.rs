@@ -149,7 +149,7 @@ pub trait WasmDispatch<S> {
     /// Returns the dispatch result code the `receive` FFI shim relays.
     /// ADR-0112: the seam carries the most-permissive [`Manual`](crate::Manual)
     /// view; the synthesized dispatcher downgrades per handler class.
-    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Manual>, mail: crate::Mail<'_>) -> u32;
+    fn dispatch(state: &mut S, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, mail: crate::Mail<'_>) -> u32;
 }
 
 // Bare `Actor` collides with `model::Actor`; the `Wasm` prefix is the deliberate native-vs-wasm disambiguator.
@@ -288,20 +288,24 @@ pub trait ErasedWasmActor {
     /// ADR-0112: the object-safe seam carries the most-permissive
     /// [`Manual`](crate::Manual) view; the synthesized dispatcher
     /// downgrades per handler class.
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, mail: crate::Mail<'_>) -> u32;
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, mail: crate::Mail<'_>) -> u32;
 
     /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire) (the synthesized impl downgrades
     /// the carried [`Manual`](crate::Manual) ctx to `Single`).
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>);
+    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
 
     /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire).
-    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>);
+    fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
     fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>);
 
     /// Forwards to [`WasmActor::on_rehydrate`].
-    fn erased_on_rehydrate(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, prior: crate::PriorState<'_>);
+    fn erased_on_rehydrate(
+        &mut self,
+        ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
+        prior: crate::PriorState<'_>,
+    );
 }
 
 /// Stage a guest init-failure message into the substrate via

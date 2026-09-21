@@ -1,0 +1,17 @@
+error[E0308]: mismatched types
+  --> tests/ui/rejects_foreign_actor_ctx_wasm.rs:18:1
+   |
+18 | #[actor]
+   | ^^^^^^^^ expected `&mut WasmCtx<'_, OtherActor>`, found `&mut WasmCtx<'_, ForeignProbe>`
+...
+27 |     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, OtherActor>, _ping: Ping) {}
+   |        ------- arguments to this method are incorrect
+   |
+   = note: expected mutable reference `&mut WasmCtx<'_, OtherActor>`
+              found mutable reference `&mut WasmCtx<'_, ForeignProbe>`
+note: method defined here
+  --> tests/ui/rejects_foreign_actor_ctx_wasm.rs:27:8
+   |
+27 |     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, OtherActor>, _ping: Ping) {}
+   |        ^^^^^^^            ----------------------------------
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

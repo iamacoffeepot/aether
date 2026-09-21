@@ -49,7 +49,7 @@ impl aether_actor::WasmActor for SilentProbe {
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {
         // A single-class handler has no reply surface: `OutboundReply` is
-        // not implemented for `WasmCtx<'_, Single>`, so this fails to compile.
+        // not implemented for `WasmCtx<'_, Erased, Single>`, so this fails to compile.
         ctx.reply(&Ack { seq: ping.seq });
     }
 }

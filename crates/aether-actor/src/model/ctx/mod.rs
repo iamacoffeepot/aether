@@ -28,3 +28,19 @@ pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
 pub use reply_mode::{Manual, Multi, ReplyMode, Single};
+
+/// The actor marker of a ctx that names no actor.
+///
+/// A ctx that names its actor reaches the calls that are sound only for the
+/// actor being dispatched — natively, `spawn_child` lives only on the typed
+/// form, so the parent of a staged birth is read off the ctx rather than
+/// declared beside it, and a caller has no way to name a parent the runtime
+/// will then contradict (issue 4158). Every ctx built where no actor is in
+/// scope — a guest entry point, `wire` / `unwire`, the chassis root, a test
+/// fixture — is this form, and loses only a call it could not have made
+/// correctly.
+///
+/// A type-position marker like [`Single`] / [`Manual`], never a value: it is
+/// only ever the `A` of a [`WasmCtx`](crate::WasmCtx) / `NativeCtx`, so it
+/// carries no impls of its own.
+pub struct Erased;

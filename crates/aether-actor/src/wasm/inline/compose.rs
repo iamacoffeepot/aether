@@ -368,7 +368,7 @@ mod tests {
     use crate::wasm::ctx::{NO_INBOUND_SOURCE, WasmDropCtx, WasmInitCtx};
     use crate::wasm::inline::bundle;
     use crate::wasm::{ActorInitError, ErasedWasmActor, WasmActor, WasmCtx};
-    use crate::{Addressable, Lifecycle, Manual};
+    use crate::{Addressable, Erased, Lifecycle, Manual};
     use aether_data::{Kind, KindId, MailboxId};
     use alloc::boxed::Box;
     use alloc::string::String;
@@ -386,15 +386,15 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.saving_child"
         }
-        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
             0
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
         fn erased_on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
             ctx.save_state(9, &self.tag.to_le_bytes());
         }
-        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
     }
 
     fn child_entry(alias_id: u64, type_tag: u64, parent_id: Option<u64>) -> bundle::ChildEntry {
@@ -743,7 +743,7 @@ mod tests {
     }
 
     impl crate::WasmDispatch<Self> for TypedConfigChild {
-        fn dispatch(state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        fn dispatch(state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
             state.observed
         }
     }
@@ -752,13 +752,13 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             Self::NAMESPACE
         }
-        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
             self.observed
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
     }
 
     /// Step 5 coverage (the branch this issue fixes): `reconstruct_one_child`

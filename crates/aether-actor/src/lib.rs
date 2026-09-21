@@ -47,7 +47,7 @@ pub mod wasm;
 pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 pub use local::Local;
 pub use model::address::{address, address_at, address_candidate, address_named, child_address};
-pub use model::ctx::{Emit, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
+pub use model::ctx::{Emit, Erased, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, DependencyResolver, DependsOn,

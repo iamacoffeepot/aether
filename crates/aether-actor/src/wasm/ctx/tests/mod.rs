@@ -12,7 +12,7 @@ mod spawn;
 use super::{ActorTypeTag, NO_INBOUND_SOURCE, SpawnError, WasmCtx, install_inline_child};
 use crate::mail::{Mail, PriorState};
 use crate::model::Subname;
-use crate::model::ctx::Manual;
+use crate::model::ctx::{Erased, Manual};
 use crate::wasm::inline::Registry;
 use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::{
@@ -55,7 +55,7 @@ impl WasmActor for FailingChild {
 }
 
 impl crate::WasmDispatch<Self> for FailingChild {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("a failed-init child is never dispatched")
     }
 }
@@ -64,19 +64,19 @@ impl ErasedWasmActor for FailingChild {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
     }
-    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("a failed-init child is never dispatched")
     }
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {
         unreachable!()
     }
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {
         unreachable!()
     }
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {
         unreachable!()
     }
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {
         unreachable!()
     }
 }
@@ -117,7 +117,7 @@ impl SucceedingChild {
 }
 
 impl crate::WasmDispatch<Self> for SucceedingChild {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the despawn test never dispatches this child")
     }
 }
@@ -128,13 +128,13 @@ impl ErasedWasmActor for SucceedingChild {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
     }
-    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the despawn test never dispatches this child")
     }
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
 }
 
 // Issue 2692: the by-tag spawn host-unit fixtures. `thread_local` (not
@@ -195,7 +195,7 @@ impl StubChild {
 }
 
 impl crate::WasmDispatch<Self> for StubChild {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the by-tag spawn tests never dispatch the stub child")
     }
 }
@@ -204,13 +204,13 @@ impl ErasedWasmActor for StubChild {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
     }
-    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the by-tag spawn tests never dispatch the stub child")
     }
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
 }
 
 /// Synthetic stand-in for the `export!`-generated resolver: matches the
@@ -297,7 +297,7 @@ impl WasmActor for LifecycleProbe {
 }
 
 impl crate::WasmDispatch<Self> for LifecycleProbe {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the lifecycle-probe tests never dispatch this child")
     }
 }
@@ -306,17 +306,17 @@ impl ErasedWasmActor for LifecycleProbe {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
     }
-    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the lifecycle-probe tests never dispatch this child")
     }
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {
         PROBE_WIRE_COUNT.set(PROBE_WIRE_COUNT.get() + 1);
     }
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {
         PROBE_UNWIRE_COUNT.set(PROBE_UNWIRE_COUNT.get() + 1);
     }
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
 }
 
 /// Inline child whose `wire` spawns a nested inline child by tag — the
@@ -353,7 +353,7 @@ impl ChildOf<NestingParent> for FailingChild {}
 impl ChildOf<NestingParent> for StubChild {}
 
 impl crate::WasmDispatch<Self> for NestingParent {
-    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the nesting-parent test never dispatches this child")
     }
 }
@@ -362,17 +362,17 @@ impl ErasedWasmActor for NestingParent {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
     }
-    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         unreachable!("the nesting-parent test never dispatches this child")
     }
-    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         let config_bytes = StubConfig { value: 0x0BAD_CAFE }.encode_into_bytes();
         ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("nested"), &config_bytes)
             .expect("the nested by-tag spawn during wire succeeds");
     }
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
 }
 
 /// A target actor that records every dispatch it receives and the source the
@@ -397,19 +397,19 @@ impl ErasedWasmActor for RecordingTarget {
         "test.wasm.recording_target"
     }
 
-    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Manual>, _mail: Mail<'_>) -> u32 {
+    fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         self.dispatches.set(self.dispatches.get() + 1);
         self.source.set(ctx.source_mailbox());
         0
     }
 
-    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+    fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
 
-    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Manual>) {}
+    fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>) {}
 
     fn erased_on_dehydrate(&mut self, _ctx: &mut WasmDropCtx<'_>) {}
 
-    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _prior: PriorState<'_>) {}
+    fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _prior: PriorState<'_>) {}
 }
 
 fn recording_target() -> RecordingTargetProbe {

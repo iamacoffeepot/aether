@@ -105,7 +105,9 @@ pub use kinds::*;
 pub use labels::MaterialField;
 pub use turntable::*;
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
@@ -872,7 +874,7 @@ impl WasmActor for Puppet {
     /// Point her at a subject. Asynchronous — the reply target is carried
     /// in the fs context so the eventual `LoadResult` reaches whoever asked.
     #[handler::manual]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: Load) {
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: Load) {
         self.owed = ctx.reply_target();
 
         for path in self.stage(&mail) {
@@ -886,7 +888,7 @@ impl WasmActor for Puppet {
     /// A loader that cannot report failure is a bad surface and this one
     /// proved it: a mesh that overran the mail bound reported `delivered`
     /// to the caller and left the reason only in the actor log.
-    fn settle(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: &LoadResult) {
+    fn settle(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: &LoadResult) {
         if let Some(sender) = self.owed.take() {
             ctx.reply_to(sender, result);
         }
@@ -946,7 +948,7 @@ impl WasmActor for Puppet {
     /// The bytes arrived. Parse, run the view-independent passes, and swap
     /// the cache in one go.
     #[handler::manual]
-    fn on_read(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: ReadResult) {
+    fn on_read(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: ReadResult) {
         let path = match mail {
             ReadResult::Ok { ref addr, .. } => addr.path.clone(),
             ReadResult::Err { ref addr, ref error, .. } => {

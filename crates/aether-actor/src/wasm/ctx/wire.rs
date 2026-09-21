@@ -6,6 +6,7 @@ use core::ops::{Deref, DerefMut};
 
 use super::WasmCtx;
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
+use crate::model::ctx::Erased;
 use crate::wasm::bridge::asset;
 use alloc::vec::Vec;
 
@@ -34,8 +35,8 @@ use alloc::vec::Vec;
 /// for `wire`, so authors only ever name it as `&mut WireCtx<'_, '_>`.
 // The `Wire` prefix carries the load-window signal; a bare `Ctx` would lose it.
 #[allow(clippy::module_name_repetitions)]
-pub struct WireCtx<'ctx, 'a> {
-    inner: &'ctx mut WasmCtx<'a>,
+pub struct WireCtx<'ctx, 'a, A = Erased> {
+    inner: &'ctx mut WasmCtx<'a, A>,
     /// ADR-0163 §3 asset catalog, fetched lazily on the first
     /// [`AssetCatalog::assets`] call and cached for the ctx's life. A
     /// `wire` body that never enumerates assets pays no hostcall; one that
@@ -43,37 +44,37 @@ pub struct WireCtx<'ctx, 'a> {
     catalog: OnceCell<Vec<AssetInfo>>,
 }
 
-impl<'ctx, 'a> WireCtx<'ctx, 'a> {
+impl<'ctx, 'a, A> WireCtx<'ctx, 'a, A> {
     /// Not part of the public API; called only by the `#[actor]` macro's
     /// `wire` forwarder, which wraps the [`WasmCtx`] it builds for the
     /// lifecycle call.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(inner: &'ctx mut WasmCtx<'a>) -> Self {
+    pub fn __new(inner: &'ctx mut WasmCtx<'a, A>) -> Self {
         Self { inner, catalog: OnceCell::new() }
     }
 }
 
-impl<'a> Deref for WireCtx<'_, 'a> {
-    type Target = WasmCtx<'a>;
-    fn deref(&self) -> &WasmCtx<'a> {
+impl<'a, A> Deref for WireCtx<'_, 'a, A> {
+    type Target = WasmCtx<'a, A>;
+    fn deref(&self) -> &WasmCtx<'a, A> {
         self.inner
     }
 }
 
-impl<'a> DerefMut for WireCtx<'_, 'a> {
-    fn deref_mut(&mut self) -> &mut WasmCtx<'a> {
+impl<'a, A> DerefMut for WireCtx<'_, 'a, A> {
+    fn deref_mut(&mut self) -> &mut WasmCtx<'a, A> {
         self.inner
     }
 }
 
-impl AssetCatalog for WireCtx<'_, '_> {
+impl<A> AssetCatalog for WireCtx<'_, '_, A> {
     fn assets(&self) -> &[AssetInfo] {
         self.catalog.get_or_init(asset::fetch_catalog).as_slice()
     }
 }
 
-impl AssetWindow for WireCtx<'_, '_> {
+impl<A> AssetWindow for WireCtx<'_, '_, A> {
     fn asset(&mut self, name: &str) -> Option<Vec<u8>> {
         asset::fetch_asset(name)
     }

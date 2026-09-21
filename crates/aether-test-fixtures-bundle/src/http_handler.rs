@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, MailboxId};
 use aether_http as http;
@@ -134,7 +134,7 @@ impl StreamProgress {
     /// spending it would overrun the window and the cap would tear the
     /// connection down as a flood. Grants for *other* streams are no longer a
     /// case to defend against — each has its own entry.
-    fn spend_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: &HttpStreamCredit) {
+    fn spend_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: &HttpStreamCredit) {
         let state = match self.streams.entry(credit.stream_id) {
             Entry::Occupied(occupied) => occupied.into_mut(),
             Entry::Vacant(vacant) => {
@@ -207,7 +207,7 @@ impl WasmActor for StreamingHttpHandler {
     /// window slot; the handler emits at most that many `HttpResponseChunk`s
     /// in response.
     #[handler::manual]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         self.progress.spend_credit(ctx, &credit);
     }
 }
@@ -295,7 +295,7 @@ impl WasmActor for WebSocketHandler {
     /// # Agent
     /// Not sent manually — the cap grants credit as writer slots free.
     #[handler::manual]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         // ADR-0133: capture the connection handle from the accept-time
         // credit grant — its counterparty is whoever owns the socket. A
         // repeat grant for a known stream_id is a no-op: this connection
@@ -438,7 +438,7 @@ impl WasmActor for RoutedStreamingHttpHandler {
     /// Not sent manually — the cap sends one `HttpStreamCredit` per freed
     /// window slot.
     #[handler::manual]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         self.progress.spend_credit(ctx, &credit);
     }
 }

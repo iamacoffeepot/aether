@@ -10,7 +10,7 @@ pub use state::*;
 
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Manual, Sends, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, Sends, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
 use aether_kinds::keycode::{KEY_BACKSPACE, KEY_DOWN, KEY_ENTER, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::{CachedFontMetrics, Key, KeyRelease, MouseWheel, QuadSpace, Quit, TextInput, Tick, WindowSize};
@@ -78,7 +78,7 @@ impl ConsoleOverlay {
         (panel_height - BOTTOM_PADDING - self.config.font_size).max(TOP_PADDING)
     }
 
-    fn render(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn render(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         if !self.state.open {
             return;
         }
@@ -193,7 +193,7 @@ impl ConsoleOverlay {
         }
     }
 
-    fn draw_markdown_line(&self, ctx: &mut WasmCtx<'_, Manual>, font_id: u32, line: &MarkdownLine, y: f32) {
+    fn draw_markdown_line(&self, ctx: &mut WasmCtx<'_, Erased, Manual>, font_id: u32, line: &MarkdownLine, y: f32) {
         let mut x = HORIZONTAL_PADDING;
         for run in &line.runs {
             if run.text.is_empty() || run.tone == MarkdownTone::ThematicBreak {
@@ -293,7 +293,7 @@ impl ConsoleOverlay {
         chars.next().is_none() && u32::from(ch) == activation_key_code
     }
 
-    fn dispatch_actions(ctx: &mut WasmCtx<'_, Manual>, actions: Vec<ConsoleAction>) {
+    fn dispatch_actions(ctx: &mut WasmCtx<'_, Erased, Manual>, actions: Vec<ConsoleAction>) {
         for action in actions {
             match action {
                 ConsoleAction::InvokeExternal { mailbox, payload } => {
@@ -336,7 +336,7 @@ impl ConsoleOverlay {
         let _ = sends.actor::<TextCapability>().send_with_context(&load, &ConsoleFontLoadContext { embedded });
     }
 
-    fn request_font_metrics(ctx: &mut WasmCtx<'_, Manual>, font_id: u32) {
+    fn request_font_metrics(ctx: &mut WasmCtx<'_, Erased, Manual>, font_id: u32) {
         let request = FontMetricsRequest { font: FontRef::Id(font_id) };
         let _ = ctx.actor::<TextCapability>().send_with_context(&request, &ConsoleFontMetricsContext { font_id });
     }
@@ -345,7 +345,7 @@ impl ConsoleOverlay {
         namespace == MEMORY_FONT_NAMESPACE && path == EMBEDDED_FONT_NAME
     }
 
-    fn handle_override_font_failure(&mut self, ctx: &mut WasmCtx<'_, Manual>, error: String) {
+    fn handle_override_font_failure(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, error: String) {
         if !self.override_font_failed {
             self.override_font_failed = true;
             self.state.push_error(format!("font override failed: {error}"));
@@ -353,7 +353,7 @@ impl ConsoleOverlay {
         self.request_embedded_font(&mut ctx.sends());
     }
 
-    fn register_command(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: RegisterConsoleCommand) {
+    fn register_command(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: RegisterConsoleCommand) {
         let mailbox = if mail.mailbox == MailboxId::NONE {
             ctx.source_mailbox().unwrap_or(MailboxId::NONE)
         } else {
@@ -426,14 +426,14 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Manual>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _tick: Tick) {
         self.state.tick_cursor();
         self.tick_backspace_repeat();
         self.render(ctx);
     }
 
     #[handler::manual]
-    fn on_key(&mut self, ctx: &mut WasmCtx<'_, Manual>, key: Key) {
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, key: Key) {
         if key.code == self.config.activation_key_code {
             self.state.open = !self.state.open;
             self.state.cursor_visible = true;
@@ -461,14 +461,14 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_, Manual>, key: KeyRelease) {
+    fn on_key_release(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, key: KeyRelease) {
         if key.code == KEY_BACKSPACE {
             self.release_backspace();
         }
     }
 
     #[handler::manual]
-    fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_, Manual>, input: TextInput) {
+    fn on_text_input(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, input: TextInput) {
         if self.state.open {
             if Self::is_activation_text(&input.text, self.config.activation_key_code) {
                 return;
@@ -478,7 +478,7 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_, Manual>, wheel: MouseWheel) {
+    fn on_mouse_wheel(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, wheel: MouseWheel) {
         if !self.state.open {
             return;
         }
@@ -493,12 +493,12 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_, Manual>, size: WindowSize) {
+    fn on_window_size(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, size: WindowSize) {
         self.window_size = [size.width, size.height];
     }
 
     #[handler::manual]
-    fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: LoadFontResult) {
+    fn on_load_font_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: LoadFontResult) {
         let Some(context) = ctx.take_context::<ConsoleFontLoadContext>() else {
             return;
         };
@@ -518,7 +518,7 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, result: FontMetricsResult) {
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: FontMetricsResult) {
         let Some(_context) = ctx.take_context::<ConsoleFontMetricsContext>() else {
             return;
         };
@@ -533,17 +533,17 @@ impl WasmActor for ConsoleOverlay {
     }
 
     #[handler::manual]
-    fn on_register_command(&mut self, ctx: &mut WasmCtx<'_, Manual>, mail: RegisterConsoleCommand) {
+    fn on_register_command(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: RegisterConsoleCommand) {
         self.register_command(ctx, mail);
     }
 
     #[handler::manual]
-    fn on_unregister_command(&mut self, _ctx: &mut WasmCtx<'_, Manual>, mail: UnregisterConsoleCommand) {
+    fn on_unregister_command(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, mail: UnregisterConsoleCommand) {
         self.state.unregister_external(&mail.name);
     }
 
     #[handler::manual]
-    fn on_command_output(&mut self, _ctx: &mut WasmCtx<'_, Manual>, output: ConsoleCommandOutput) {
+    fn on_command_output(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, output: ConsoleCommandOutput) {
         self.state.append_command_output(output.lines, output.error);
     }
 }

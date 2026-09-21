@@ -137,7 +137,7 @@ aether_actor::export!(
     aether_behavior::BehaviorHost
 );
 
-use aether_actor::{ActorInitError, Addressable, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Addressable, Erased, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -227,7 +227,7 @@ impl Widget {
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
-    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         if self.spawned {
             return;
         }
@@ -258,7 +258,7 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -276,7 +276,7 @@ impl Widget {
 
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
-    fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn finish(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -299,7 +299,7 @@ impl Widget {
 /// has no up-lane consumer, so the drain is a harmless no-send there (kept
 /// mechanical for uniformity and future re-parenting). Shared by the
 /// compositing node and the reference panel, which both own a `Composite`.
-pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, Manual>) {
+pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, Erased, Manual>) {
     if let Some(changed) = composite.take_membership_changes()
         && let Some(parent) = ctx.parent()
     {
@@ -313,7 +313,7 @@ pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, 
 /// emits; the panel emits), so only the fill + completeness check is shared.
 pub(crate) fn accept_child_list(
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, Manual>,
+    ctx: &mut WasmCtx<'_, Erased, Manual>,
     list: WidgetDrawList,
 ) -> bool {
     if let Some(source) = ctx.source_mailbox() {
@@ -325,7 +325,7 @@ pub(crate) fn accept_child_list(
 fn accept_open_child_list(
     discharge: &FrameDischarge,
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, Manual>,
+    ctx: &mut WasmCtx<'_, Erased, Manual>,
     list: WidgetDrawList,
 ) -> bool {
     !discharge.is_closed() && accept_child_list(composite, ctx, list)
@@ -636,7 +636,7 @@ fn text_items(items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) -> Vec
 /// text cap. Text's extra hop keeps the established later lane. Public so a
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
-pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
+pub fn emit(ctx: &mut WasmCtx<'_, Erased, Manual>, list: &WidgetDrawList) {
     emit_layer(ctx, &list.items, &list.overlay);
     if !list.overlay.is_empty() {
         emit_layer(ctx, &list.overlay, &[]);
@@ -648,7 +648,7 @@ pub fn emit(ctx: &mut WasmCtx<'_, Manual>, list: &WidgetDrawList) {
 /// cluster overlay for the ordinary lane, empty for the overlay lane. Called
 /// for the ordinary items and again for the overlay, so an overlay's quads
 /// and glyphs are submitted after every ordinary quad and glyph respectively.
-fn emit_layer(ctx: &mut WasmCtx<'_, Manual>, items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) {
+fn emit_layer(ctx: &mut WasmCtx<'_, Erased, Manual>, items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) {
     for run in direct_runs(items) {
         match run {
             DirectRun::Textured { texture_id, clip, quads } => {
@@ -1446,7 +1446,7 @@ impl WasmActor for Widget {
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Manual>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _tick: Tick) {
         self.drive_frame(ctx);
     }
 
@@ -1458,7 +1458,7 @@ impl WasmActor for Widget {
     /// Sent by a compositing parent each frame; not useful to send
     /// manually.
     #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Manual>, _collect: Collect) {
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 
@@ -1470,7 +1470,7 @@ impl WasmActor for Widget {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }

@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError, Subname,
-    WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Erased, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle, SpawnError,
+    Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_data::KindId;
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
@@ -184,7 +184,7 @@ impl WasmActor for BehaviorHost {
     /// reply target through the async read as a request context.
     #[allow(clippy::unused_self)] // aether-suppression-request: required wasm handler receiver
     #[handler::manual]
-    fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Manual>, msg: LoadScript) {
+    fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, msg: LoadScript) {
         let context = ScriptLoadContext {
             reply: ctx.reply_target(),
             origin: ScriptLoadOrigin::Runtime,
@@ -197,7 +197,7 @@ impl WasmActor for BehaviorHost {
     /// the script on `Ok`, keeps the prior on `Err`, and recovers the parked
     /// `load_script_result` reply from the request context when one is pending.
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, reply: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, reply: ReadResult) {
         let Some(context) = ctx.take_context::<ScriptLoadContext>() else {
             return;
         };

@@ -88,7 +88,7 @@ impl RelativeMailbox<'_> {
     }
 }
 
-impl<'a, M: ReplyMode> WasmCtx<'a, M> {
+impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
     /// ADR-0114 addressing amendment: a sendable handle to this actor's
     /// **parent** in the cluster, or `None` if this actor is the cluster
     /// root (the instance itself — its parent is cross-cluster, addressed

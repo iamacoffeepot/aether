@@ -35,7 +35,9 @@
 
 use core::cell::UnsafeCell;
 
-use aether_actor::{ActorInitError, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Erased, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
     MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix, SourceQuery,
@@ -161,14 +163,14 @@ impl WasmActor for MatrixParent {
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
     /// cell with the source the parent read (the membrane's own-id path).
     #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: MatrixPing) {
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
         record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
     }
 
     /// Read the cluster's shared observation log and reply the structured
     /// matrix report. Sent after `RunMatrix` has fully settled.
     #[handler::manual]
-    fn on_collect_matrix(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectMatrix) {
+    fn on_collect_matrix(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CollectMatrix) {
         if ctx.reply_target().is_some() {
             ctx.reply(&snapshot_report());
         }
@@ -192,7 +194,7 @@ impl WasmActor for MatrixChild {
     /// ping is the fan-out ping (parent → child\[a\]) — drive the child-origin
     /// cells and the cross-cluster send, all in place.
     #[handler::manual]
-    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: MatrixPing) {
+    fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
         record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
 
         if ping.fan_out == 0 {

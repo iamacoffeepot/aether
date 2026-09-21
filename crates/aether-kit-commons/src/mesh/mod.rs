@@ -37,7 +37,9 @@
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MeshLoadResult, Render};
 use aether_lifecycle::LifecycleCapability;
@@ -203,7 +205,7 @@ impl WasmActor for MeshViewer {
     /// # Agent
     /// Substrate-driven; do not send manually.
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, r: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, r: ReadResult) {
         let Some(context) = ctx.take_context::<MeshLoadContext>() else {
             return;
         };
@@ -282,7 +284,7 @@ impl MeshViewer {
     #[allow(clippy::unused_self)]
     fn reply_load_result(
         &self,
-        ctx: &mut WasmCtx<'_, Manual>,
+        ctx: &mut WasmCtx<'_, Erased, Manual>,
         sender: Option<ReplyHandle>,
         namespace: String,
         path: String,

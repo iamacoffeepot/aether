@@ -9,7 +9,9 @@
 //! actor: two in-flight reads carry distinct typed contexts, and the same
 //! `ReadResult` handler recovers them by probe-then-take.
 
-use aether_actor::{ActorInitError, Kind, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Erased, Kind, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
     FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
@@ -67,7 +69,7 @@ impl WasmActor for FsDemux {
     }
 
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Manual>, _reply: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _reply: ReadResult) {
         if self.handle_typed_context(ctx) {
             return;
         }
@@ -105,7 +107,7 @@ impl WasmActor for FsDemux {
 impl FsDemux {
     /// Probe-then-take for [`RunFsContextDemux`]. Returns whether this reply
     /// carried a typed context (consumed here even if recovery failed).
-    fn handle_typed_context(&mut self, ctx: &mut WasmCtx<'_, Manual>) -> bool {
+    fn handle_typed_context(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) -> bool {
         let Some(kind) = ctx.context_kind() else {
             return false;
         };

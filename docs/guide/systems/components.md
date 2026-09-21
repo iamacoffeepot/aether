@@ -185,6 +185,10 @@ fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 The `ChildOf<RootManager>` bound rejects a missing placement at compile time.
 At runtime the ctx also verifies that its actual registry actor tag is
 `RootManager` before config encoding or the sibling-spawn host call.

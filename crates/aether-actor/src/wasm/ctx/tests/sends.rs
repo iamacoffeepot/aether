@@ -2,7 +2,7 @@
 //! stamps outbound mail exactly as the [`WasmCtx`] it was taken from.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
-use crate::model::ctx::{MailSender, Manual};
+use crate::model::ctx::{Erased, MailSender, Manual};
 use crate::model::{Addressable, Embedded, HandlesKind};
 use crate::reference::ActorRef;
 use crate::wasm::inline::drain_cluster_queue;
@@ -50,7 +50,7 @@ fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
     let probe = recording_target();
     registry.insert_child(target, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
 
-    let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
 
     ctx.send_to(target, &());
     drain_to_members(&registry, "the ctx send");
@@ -89,7 +89,7 @@ fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
     registry.set_self_id(current.0);
     registry.set_parent_id(parent.0);
 
-    let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
 
     let through_ctx = ctx.actor::<SendsPeer>().mailbox_id();
     let through_view = ctx.sends().actor::<SendsPeer>().mailbox_id();
@@ -116,7 +116,7 @@ fn to_sends_through_a_proven_reference_on_ctx_and_view() {
     let probe = recording_target();
     registry.insert_child(target, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
 
-    let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
     let reference = ActorRef::<SendsPeer>::new(target);
 
     ctx.to(&reference).send(&());

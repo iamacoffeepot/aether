@@ -59,7 +59,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, AssetWindow, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, AssetWindow, Erased, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -193,7 +193,7 @@ impl WasmActor for Probe {
     /// `aether.test_fixtures.asset_probe_result` carries `{ pulled, len,
     /// checksum }`.
     #[handler::manual]
-    fn on_asset_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: AssetProbe) {
+    fn on_asset_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: AssetProbe) {
         if ctx.reply_target().is_some() {
             ctx.reply(&self.asset);
         }
@@ -223,7 +223,7 @@ impl WasmActor for ProbeWithConfig {
     /// the integration test observe what the typed `init` actually
     /// received without scraping logs or readback.
     #[handler::manual]
-    fn on_config_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: ConfigQuery) {
+    fn on_config_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: ConfigQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&ConfigEcho { seed: self.seed, label: self.label.clone() });
         }

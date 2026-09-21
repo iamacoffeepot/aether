@@ -3,7 +3,7 @@
 //! class's emit, and the relative verbs' in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child, recording_target};
-use crate::model::ctx::{Emit, Manual, Multi, Single};
+use crate::model::ctx::{Emit, Erased, Manual, Multi, Single};
 use crate::model::{Addressable, CallerScope, CallerScoped, Embedded, HandlesKind, Many, Resolve};
 use crate::wasm::WasmActorMailbox;
 use crate::wasm::inline::{RouteDecision, drain_cluster_queue};
@@ -68,17 +68,17 @@ fn source_mailbox_reads_the_threaded_source_field() {
     let registry = Registry::new();
 
     let source = MailboxId(0x9999_0000_1234_5678);
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, source.0);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, source.0);
     assert_eq!(ctx.source_mailbox(), Some(source), "a non-NONE threaded source must surface verbatim");
 
-    let none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
+    let none_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(none_ctx.source_mailbox(), None, "MailboxId::NONE means no peer-component origin");
 }
 
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
     assert_eq!(ctx.context_kind(), None, "cluster-drained dispatches expose no request-context kind");
 }
@@ -98,13 +98,13 @@ fn emit_routes_at_the_threaded_source_and_drops_when_sourceless() {
 
     // A dispatch whose source is a cluster member: emit routes a
     // detached mail there and enqueues locally.
-    let mut ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, source);
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(source, &registry, source);
     Emit::<()>::emit(ctx.as_multi::<()>(), &());
     assert_eq!(registry.queued_len(), 1, "emit routes a detached mail at the threaded source");
 
     // A sourceless dispatch (NONE) has no routable target — the emit
     // drops rather than enqueuing.
-    let mut none_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
+    let mut none_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
     Emit::<()>::emit(none_ctx.as_multi::<()>(), &());
     assert_eq!(registry.queued_len(), 1, "a sourceless emit drops — no additional mail enqueued");
 }
@@ -114,17 +114,21 @@ fn emit_routes_at_the_threaded_source_and_drops_when_sourceless() {
 /// This is the invariant the `as_multi` pointer reborrow rests on.
 #[test]
 fn ffi_ctx_layout_identical_for_multi_mode() {
-    assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Multi<u32>>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Multi<u32>>>(),);
+    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Multi<u32>>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Multi<u32>>>(),);
 }
 
 /// ADR-0112: the mode marker is layout-neutral — the `Single` and
 /// `Manual` views have identical size + alignment. This is the
-/// invariant the `as_single` pointer reborrow rests on.
+/// invariant the `as_single` pointer reborrow rests on. The actor marker
+/// is layout-neutral too — the invariant the `__for_actor` / `erase`
+/// reborrows rest on (issue 6279).
 #[test]
 fn ffi_ctx_layout_identical_across_modes() {
-    assert_eq!(size_of::<WasmCtx<'static, Single>>(), size_of::<WasmCtx<'static, Manual>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, Single>>(), align_of::<WasmCtx<'static, Manual>>(),);
+    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
+    assert_eq!(size_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), size_of::<WasmCtx<'static, Erased, Manual>>(),);
+    assert_eq!(align_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
 }
 
 /// Keyed typed construction selects the recipient resolver's declared scope:
@@ -156,7 +160,7 @@ fn keyed_actor_resolution_selects_scope_and_retains_wasm_context() {
     );
     registry.insert_child(parent_target, 0, String::from("parent"), false, parent.0, Vec::new(), parent_probe.actor);
 
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
     let current_peer = ctx.resolve_actor::<CurrentKeyedPeer>("current");
     let parent_peer = ctx.resolve_actor::<ParentKeyedPeer>("parent");
 
@@ -223,8 +227,8 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     )
     .expect("install nested embedded peer");
 
-    let entry_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
-    let child_ctx: WasmCtx<'_, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
+    let entry_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
+    let child_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
 
     let default = entry_ctx.actor::<EmbeddedPeer>();
     let named = entry_ctx.actor_with_namespace::<EmbeddedPeer>("named-peer");
@@ -268,7 +272,7 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     )
     .expect("a succeeding init installs the inline grandchild");
 
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
 
     // The root has no registry parent entry — its parent is cross-cluster.
     assert!(ctx.parent().is_none(), "the cluster root resolves no in-cluster parent");

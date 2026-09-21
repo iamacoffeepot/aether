@@ -291,6 +291,10 @@ fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 Address the cap by type — `ctx.actor::<RenderCapability>()` — and send
 `DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). On a chassis whose
 lifecycle graph omits `Render` (headless), subscribing to it rejects fail-fast at

@@ -13,7 +13,7 @@
 //! painting and hit testing from drifting under non-zero panel origins or
 //! ancestor offsets.
 
-use aether_actor::{ActorInitError, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
@@ -194,7 +194,7 @@ fn clipped_focus_rect(viewport: &WidgetFrame, child: &WidgetFrame) -> Option<Foc
 }
 
 impl ScrollWidget {
-    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         if self.spawned {
             return;
         }
@@ -235,7 +235,7 @@ impl ScrollWidget {
         }
     }
 
-    fn sync_layout(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn sync_layout(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         let Some(content) = &self.content else {
             return;
         };
@@ -269,7 +269,7 @@ impl ScrollWidget {
         }
     }
 
-    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -282,7 +282,7 @@ impl ScrollWidget {
         }
     }
 
-    fn finish(&mut self, ctx: &mut WasmCtx<'_, Manual>) {
+    fn finish(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -297,7 +297,7 @@ impl ScrollWidget {
         debug_assert!(closed, "an open scroll frame closes exactly once");
     }
 
-    fn apply_delta(&mut self, ctx: &mut WasmCtx<'_, Manual>, delta: ScrollDelta) {
+    fn apply_delta(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, delta: ScrollDelta) {
         let outcome = apply_scroll(ctx.mailbox_id(), self.viewport_extent, self.content_extent, self.offset, delta);
         self.offset = outcome.offset;
         self.sync_layout(ctx);
@@ -356,18 +356,18 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::manual]
-    fn on_frame(&mut self, ctx: &mut WasmCtx<'_, Manual>, frame: WidgetFrame) {
+    fn on_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, frame: WidgetFrame) {
         self.frame = frame;
         self.sync_layout(ctx);
     }
 
     #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Manual>, _collect: Collect) {
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 
     #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Manual>, list: WidgetDrawList) {
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }
@@ -387,7 +387,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::manual]
-    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_, Manual>, wheel: MouseWheel) {
+    fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, wheel: MouseWheel) {
         if let Some(child) = self.scroll_focus.hit_test(wheel.x, wheel.y) {
             ctx.send_to(child, &wheel);
         } else {
@@ -396,7 +396,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::manual]
-    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Manual>, outcome: ScrollOutcome) {
+    fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
         if !self.nested_source(ctx.source_mailbox()) {
             tracing::warn!(target: "aether_kit_widget", "ignored scroll outcome from non-child source");
             return;
@@ -407,7 +407,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::manual]
-    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Manual>, residual: ScrollResidual) {
+    fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, residual: ScrollResidual) {
         if !self.nested_source(ctx.source_mailbox()) {
             tracing::warn!(target: "aether_kit_widget", "ignored scroll residual from non-child source");
             return;

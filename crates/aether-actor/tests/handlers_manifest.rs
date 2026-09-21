@@ -23,7 +23,7 @@
 
 use aether_actor::__macro_internals::WasmPlacementFacts;
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Addressable, DependencyResolver, DependsOn, Embedded, Manual, One, WasmActor,
+    ActorInitError, ActorTypeTag, Addressable, DependencyResolver, DependsOn, Embedded, Erased, Manual, One, WasmActor,
     WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
@@ -110,7 +110,7 @@ impl WasmActor for ManifestProbe {
     // issues its own replies, so the manifest reports `ReplyContract::Manual`
     // (no single static reply kind).
     #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _poke: Poke) {}
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _poke: Poke) {}
 
     /// # Agent
     /// Catch-all for anything else.

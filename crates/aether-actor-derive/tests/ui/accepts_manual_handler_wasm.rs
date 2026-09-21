@@ -9,7 +9,7 @@
 //! substrate types — the existing native fixtures here are all
 //! macro-level diagnostics that fire before path resolution).
 
-use aether_actor::{Manual, OutboundReply, WasmCtx, actor};
+use aether_actor::{Erased, Manual, OutboundReply, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -36,7 +36,7 @@ impl aether_actor::WasmActor for ManualProbe {
     }
 
     #[handler::manual]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Manual>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: Ping) {
         ctx.reply(&Ack { seq: ping.seq });
     }
 }

@@ -1,7 +1,7 @@
 //! Typed sink used to assert editor-shell routing without giving peer regions
 //! their own input subscriptions.
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
@@ -92,7 +92,7 @@ impl WasmActor for EditorRegionProbe {
     }
 
     #[handler::manual]
-    fn on_drain_editor_inputs(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: DrainEditorInputs) {
+    fn on_drain_editor_inputs(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: DrainEditorInputs) {
         if ctx.reply_target().is_some() {
             ctx.reply(&DrainEditorInputsResult {
                 region_name: self.region_name.clone(),

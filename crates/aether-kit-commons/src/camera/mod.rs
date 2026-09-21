@@ -53,7 +53,7 @@ pub use kinds::*;
 
 use std::collections::HashMap;
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
@@ -343,7 +343,7 @@ impl WasmActor for CameraComponent {
     /// source-bound reply carries `None` when the active binding is absent or
     /// names a camera that is no longer live.
     #[handler::manual]
-    fn on_eye(&mut self, ctx: &mut WasmCtx<'_, Manual>, _request: CameraEyeRequest) {
+    fn on_eye(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _request: CameraEyeRequest) {
         if ctx.reply_target().is_some() {
             ctx.reply(&self.eye_result());
         }

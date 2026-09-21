@@ -801,15 +801,20 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.recording_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, _mail: Mail<'_>) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
             self.observed_source.set(ctx.source_mailbox());
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
-        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
+        fn erased_on_rehydrate(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
+            _prior: PriorState<'_>,
+        ) {
+        }
     }
 
     /// A child that despawns *itself* during its own dispatch — through the
@@ -833,7 +838,7 @@ mod tests {
         fn erased_namespace(&self) -> &'static str {
             "test.inline.self_despawning_child"
         }
-        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Manual>, _mail: Mail<'_>) -> u32 {
+        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, _mail: Mail<'_>) -> u32 {
             // Self-despawn mid-dispatch through the threaded registry: this
             // box is currently taken out (held on the membrane's stack), so
             // the ctx's despawn clears the empty slot and the membrane's
@@ -841,10 +846,15 @@ mod tests {
             ctx.despawn_inline_child(self.id);
             CHILD_CODE
         }
-        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
-        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>) {}
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
         fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
-        fn erased_on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_, crate::Manual>, _prior: PriorState<'_>) {}
+        fn erased_on_rehydrate(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
+            _prior: PriorState<'_>,
+        ) {
+        }
     }
 
     /// Build a host-side `Mail` with the given routed recipient; the

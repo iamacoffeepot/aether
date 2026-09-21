@@ -3,9 +3,9 @@
 //! to a `#[handler]`, so a signature whose ctx marker disagrees fails to
 //! unify. Two mismatches on the wasm path:
 //!   - manual class + `WasmCtx<'_>` (= Single) ctx,
-//!   - single class + `WasmCtx<'_, Manual>` ctx.
+//!   - single class + `WasmCtx<'_, Erased, Manual>` ctx.
 
-use aether_actor::{WasmCtx, Manual, actor};
+use aether_actor::{Erased, Manual, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(
@@ -52,9 +52,9 @@ impl aether_actor::WasmActor for MismatchProbe {
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 
     // single class but a manual-mode ctx — the macro passes `as_single()`,
-    // which doesn't unify with `WasmCtx<'_, Manual>`.
+    // which doesn't unify with `WasmCtx<'_, Erased, Manual>`.
     #[handler::single]
-    fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _pong: Pong) {}
+    fn on_pong(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _pong: Pong) {}
 }
 
 fn main() {}

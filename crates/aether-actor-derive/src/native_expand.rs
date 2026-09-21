@@ -7,12 +7,12 @@ use syn::{Expr, ImplItem, ItemImpl, ItemStruct, Type};
 
 use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
-    CtxTransport, HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn,
-    NativeFallbackFn, TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    classify_task_reply_mode, ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types,
-    handler_cfgs, multi_kind_or_return_error, parse_handler_class, parse_handler_variant,
-    reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq,
-    validate_addressable_consts, validate_native_fallback_sig,
+    HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
+    TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
+    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, handler_cfgs,
+    multi_kind_or_return_error, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
+    rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq, validate_addressable_consts,
+    validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -40,7 +40,7 @@ pub enum NativeEmit {
 /// only ever removed, so a handler cannot name a parent at all, let alone the
 /// wrong one.
 fn erase_unless_ctx_names_actor(sig: &syn::Signature) -> TokenStream2 {
-    if ctx_names_actor(sig, CtxTransport::Native) {
+    if ctx_names_actor(sig) {
         quote!()
     } else {
         quote!(.erase())
@@ -191,7 +191,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             // error when absent). The native dispatch reads `K`
                             // by inference off the signature, so the extracted
                             // kind itself is not retained here.
-                            let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig, CtxTransport::Native)?;
+                            let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
                             handlers.push(NativeActorHandlerFn {
                                 method: f,
                                 kind_ty,
@@ -1525,8 +1525,7 @@ fn harvest_native_actor_impl(
         let class = parse_handler_class(handler_attr, variant).map_err(remap)?;
         let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
         let handler_reply = classify_handler_reply(&f.sig.output);
-        let multi_kind =
-            multi_kind_or_return_error(class, &handler_reply, &f.sig, CtxTransport::Native).map_err(remap)?;
+        let multi_kind = multi_kind_or_return_error(class, &handler_reply, &f.sig).map_err(remap)?;
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
         // the markers this identity emits so both halves strip together.
