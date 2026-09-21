@@ -31,6 +31,11 @@ aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 clap = { workspace = true }
+# `BloomeryConfig` derives `aether_substrate::Config`; the macro emits a
+# `#[derive(confique::Config)]` layer struct reached only through
+# macro-emitted paths the source-only unused-deps scan can't see (ignored
+# below).
+confique = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
 # The signal-blocking driver: signal-hook on Unix, the `ctrlc` Ctrl-C
@@ -45,6 +50,12 @@ ctrlc = "3"
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 tempfile = "3"
+
+# `confique` is reached only through the
+# `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,
+# invisible to the source-only unused-deps scan.
+[package.metadata.cargo-machete]
+ignored = ["confique"]
 
 [lints]
 workspace = true
