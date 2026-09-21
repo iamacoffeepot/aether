@@ -845,6 +845,22 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
         },
     )?;
 
+    // HOST_FN_OK: ADR-0230 §3 — occupancy is a synchronous host-side fact,
+    // so confirming it is a host fn, not mail. The guest derived the
+    // candidate position through its own `Resolve` strategy and carries it
+    // here; the host answers only whether the published route view holds a
+    // `Live` route there, echoing the candidate on `Live` and zero
+    // otherwise. It sends no mail and touches no trace state.
+    linker.func_wrap("aether", "resolve_live_p32", |caller: Caller<'_, ComponentCtx>, candidate: u64| -> u64 {
+        // The unit-typed mint is discarded — only its existence crosses the
+        // boundary, as the echoed candidate or zero.
+        if caller.data().registry.proven::<()>(MailboxId(candidate)).is_some() {
+            candidate
+        } else {
+            0
+        }
+    })?;
+
     Ok(())
 }
 

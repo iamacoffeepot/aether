@@ -238,6 +238,9 @@ mod tests {
             fn resolve(caller_carry: u64, namespace: &str, (): ()) -> MailboxId {
                 MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::singleton(namespace))))
             }
+            fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+                key.is_none().then(|| Self::resolve(caller_carry, namespace, ()))
+            }
         }
         impl CallerScoped for FoldedChild {
             const SCOPE: CallerScope = CallerScope::Current;

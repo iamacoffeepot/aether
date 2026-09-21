@@ -124,3 +124,82 @@ fn keyed_actor_resolution_selects_scope_and_retains_native_context() {
         assert_eq!(delivered.parent_mail, Some(in_flight_mail), "resolved handle retains the handled mail parent");
     }
 }
+
+/// `ctx.resolve` tracks a keyed child across a genuine spawn: `None` before
+/// the spawn machinery publishes it, `Some` after — and the reference proves
+/// the spawned child's position. The eager terminal commits synchronously,
+/// so the test reads both sides of the transition without a running pool.
+#[test]
+fn resolve_tracks_a_keyed_child_across_spawn() {
+    use aether_actor::{Lifecycle, Manual, address_at};
+    use aether_data::LoadName;
+
+    use crate::actor::native::identity::ActorRuntimeIdentity;
+    use crate::actor::native::spawn::{SpawnBuilder, Spawner, Subname};
+    use crate::actor::native::{Dispatch, NativeActor, NativeInitCtx};
+    use crate::actor::registry::ActorRegistry;
+    use crate::chassis::error::BootError;
+    use crate::config::RingCapacities;
+    use crate::mail::KindId;
+    use crate::runtime::lifecycle::PanicAborter;
+    use crate::scheduler::WakeSink;
+    use crate::testing::bare_substrate;
+
+    struct ResolveChild;
+
+    impl Addressable for ResolveChild {
+        const NAMESPACE: &'static str = "test.native.resolve_child";
+        type Resolver = aether_actor::Many;
+    }
+
+    impl Lifecycle<Self> for ResolveChild {
+        type Config = ();
+        type Params = ();
+        type InitError = BootError;
+        type InitCtx<'a> = NativeInitCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a>;
+        fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+            Ok(Self)
+        }
+    }
+
+    impl Dispatch<Self> for ResolveChild {
+        fn dispatch(
+            _state: &mut Self,
+            _ctx: &mut NativeCtx<'_, Manual, Self>,
+            _kind: KindId,
+            _payload: &[u8],
+        ) -> Option<()> {
+            None
+        }
+    }
+
+    impl NativeActor for ResolveChild {
+        type State = Self;
+    }
+
+    let (registry, mailer) = bare_substrate();
+    let current = MailboxId(0x4010);
+    let grandparent = MailboxId(0x4020);
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, grandparent));
+    let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+    let address = address_at::<ResolveChild>(LoadName::new("child-a").expect("a valid test subname"));
+    assert!(ctx.resolve(&address).is_none(), "an unspawned child resolves to no reference");
+
+    let spawner = Arc::new(Spawner::new(
+        Arc::clone(&registry),
+        Arc::new(ActorRegistry::new()),
+        Arc::clone(&mailer),
+        Arc::new(PanicAborter),
+        WakeSink::detached(),
+        RingCapacities::default(),
+    ));
+    let parent = ActorRuntimeIdentity::new(current, grandparent, current.0, Arc::from("test.native.resolve_parent"));
+    let child_id =
+        SpawnBuilder::<'_, ResolveChild>::new_child(spawner, Subname::Named("child-a"), (), (), Source::NONE, parent)
+            .finish()
+            .expect("spawn the keyed child");
+
+    let resolved = ctx.resolve(&address).expect("a spawned child resolves to a reference");
+    assert_eq!(resolved.id(), child_id, "the reference proves the spawned child's position");
+}

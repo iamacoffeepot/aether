@@ -7,8 +7,11 @@
 //! inherits the handler's causal chain (ADR-0080 §7), so the pair that
 //! derives it belongs with the pair that reads it.
 
-use aether_actor::{Addressable, CallerAddressable, CallerScoped, Instanced, ReplyMode, Singleton};
-use aether_data::{MailId, MailboxId};
+use aether_actor::{
+    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, ReplyMode, Singleton,
+    address_candidate,
+};
+use aether_data::{Address, MailId, MailboxId};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
 
@@ -61,6 +64,22 @@ macro_rules! native_sender_methods {
         pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(id.0, self.binding, parent, root)
+        }
+
+        /// Resolve `address` to a proven [`ActorRef`]: `Some` only when the
+        /// registry holds a `Live` route at the position the address names,
+        /// `None` for `Starting`, `Dropped`, and `Unknown` alike (ADR-0230).
+        /// The one fallible conversion from a description to a proof, and
+        /// the only way a reference received from anywhere becomes usable.
+        /// Sends no mail: a registry read of the published route view.
+        #[must_use]
+        pub fn resolve<R: CallerAddressable>(&self, address: &Address<R>) -> Option<ActorRef<R>> {
+            let candidate = address_candidate(
+                address,
+                self.binding.self_mailbox(),
+                self.binding.scope_mailbox(CallerScope::Parent),
+            )?;
+            self.binding.mailer().registry().proven(candidate)
         }
     };
 }
