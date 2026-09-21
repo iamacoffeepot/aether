@@ -107,6 +107,15 @@ impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
         Pending::new(id)
     }
 
+    /// Framework receipt for a deferred reply `R` (ADR-0109). `dispatch_id` is
+    /// the worker's id from [`Self::dispatch_blocking_with`], or
+    /// [`DispatchId::NONE`] when only a hold was captured for a later resumed
+    /// dispatch. Bounded submit helpers are the other public mint site;
+    /// `Pending::new` stays crate-internal.
+    pub fn pending<R: Kind>(&self, dispatch_id: DispatchId) -> Pending<R> {
+        Pending::new(dispatch_id)
+    }
+
     /// Context-carrying variant of [`Self::dispatch_blocking`]
     /// (ADR-0093 §5): parks `cx` in the in-flight ledger alongside the
     /// hold + reply target so the completion handler receives a

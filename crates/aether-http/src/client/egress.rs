@@ -30,7 +30,7 @@ use std::collections::{HashMap, VecDeque};
 
 use aether_actor::ReplyMode;
 use aether_data::{Kind, MailboxId, Source, SourceAddr};
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending};
 
 /// A buffered fetch: replays an over-bound request via
 /// `dispatch_blocking_resumed_with` when a slot frees. Built and run on the
@@ -104,7 +104,7 @@ impl PerSenderEgress {
     /// [`NativeCtx::dispatch_blocking_resumed_with`] when a slot frees, so the
     /// queued fetch keeps *its own* chain held from accept through its
     /// eventual re-reply and replies to *its own* caller (ADR-0158 §2).
-    pub fn submit<O, F, M>(&mut self, ctx: &mut NativeCtx<'_, M>, sender: MailboxId, work: F)
+    pub fn submit<O, F, M>(&mut self, ctx: &mut NativeCtx<'_, M>, sender: MailboxId, work: F) -> Pending<O>
     where
         O: Kind + serde::Serialize + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -117,8 +117,8 @@ impl PerSenderEgress {
         if entry.in_flight < per_sender_max && global_room {
             entry.in_flight += 1;
             self.global_in_flight += 1;
-            ctx.dispatch_blocking_with(sender, work);
-            return;
+            let id = ctx.dispatch_blocking_with(sender, work);
+            return ctx.pending(id);
         }
 
         let hold = ctx.acquire_settlement_hold();
@@ -130,6 +130,7 @@ impl PerSenderEgress {
         if was_empty {
             self.waiting.push_back(sender);
         }
+        ctx.pending(DispatchId::NONE)
     }
 
     /// Call from the cap's `#[handler(task)]` after `resolve`, passing the
