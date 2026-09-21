@@ -375,6 +375,14 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         (answer != MailboxId::NONE.0 && answer == candidate.0).then(|| ActorRef::new(candidate))
     }
 
+    /// Send through a proven [`ActorRef`]: returns a ctx-bound [`WasmActorMailbox`]
+    /// addressing the reference's id, carrying this actor's own id as the send's
+    /// `from` and a borrow of the inline registry the send routes through.
+    #[must_use]
+    pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
+        WasmActorMailbox::__new(target.id().0, self.mailbox, self.inline)
+    }
+
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
     /// Diverging — does not return. The body `panic!`s; the substrate's
     /// wasm runtime catches the trap and ADR-0063 escalates the

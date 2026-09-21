@@ -693,6 +693,20 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     })
 }
 
+/// Issue 6279: the ctx expression a dispatch arm calls through —
+/// `__aether_ctx.__for_actor::<Self>()` when the callee's signature names its
+/// actor, bare `__aether_ctx` otherwise, so every other arm receives the
+/// erased ctx exactly as today. The guest mirror of native's
+/// `erase_unless_ctx_names_actor`: the guest ctx starts erased and upgrades
+/// per signature where the native ctx starts typed and downgrades.
+fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
+    if ctx_names_actor(sig) {
+        quote!(__aether_ctx.__for_actor::<Self>())
+    } else {
+        quote!(__aether_ctx)
+    }
+}
+
 /// Issue 552 stage 1: expansion for `#[actor] impl NativeActor for X`
 /// — the new native chassis-cap shape. Per-handler ctx + `&self`
 /// (Arc-shared) + typed `init`. Mirrors `expand_wasm_actor`'s shape
@@ -715,20 +729,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 ///
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
-/// Issue 6279: the ctx expression a dispatch arm calls through —
-/// `__aether_ctx.__for_actor::<Self>()` when the callee's signature names its
-/// actor, bare `__aether_ctx` otherwise, so every other arm receives the
-/// erased ctx exactly as today. The guest mirror of native's
-/// `erase_unless_ctx_names_actor`: the guest ctx starts erased and upgrades
-/// per signature where the native ctx starts typed and downgrades.
-fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
-    if ctx_names_actor(sig) {
-        quote!(__aether_ctx.__for_actor::<Self>())
-    } else {
-        quote!(__aether_ctx)
-    }
-}
-
 /// What an `impl NativeActor for X` expansion emits, selecting between the two
 fn build_dispatch_body(
     handlers: &[HandlerFn],
