@@ -40,6 +40,7 @@ pub mod ids;
 pub mod mail;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod name_inventory;
+pub mod reference;
 pub mod schema;
 pub mod storage;
 pub mod tag_bits;
@@ -62,6 +63,7 @@ pub use name_inventory::{
     ChildEntry, NameEntry, ParamKind, RootEntry, TemplateEntry, build_static_reverse_map, child_entries, fill_template,
     id_for_name, name_entries, root_entries, template_entries,
 };
+pub use reference::{ActorRef, Address, AnyActorRef, LoadName, LoadNameError, Namespace, Recipient, Tombstone};
 pub use schema::*;
 pub use storage::{
     Citation, Citations, Cites, Invariant, Storage, StorageData, StorageError, StorageLeaves, UnknownField,

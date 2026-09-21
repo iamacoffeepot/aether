@@ -21,6 +21,7 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use crate::hash::{
     TYPE_DOMAIN, fnv1a_64_prefixed, mailbox_id_from_name, mailbox_id_from_name_pair, thread_id_from_name,
 };
+use crate::reference::{ActorRef, AnyActorRef, Recipient, Tombstone};
 use crate::tagged_id::{self, Tag};
 
 /// Shared `Display` body — render tagged-string form when the tag
@@ -39,7 +40,7 @@ fn fmt_tagged(id: u64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 /// tagged-string form. Falls back to a raw `u64` for reserved-tag
 /// sentinels (e.g. `MailboxId::NONE = 0`) so the encoder doesn't
 /// error on a sentinel payload.
-fn serialize_id<S: Serializer>(id: u64, s: S) -> Result<S::Ok, S::Error> {
+pub(crate) fn serialize_id<S: Serializer>(id: u64, s: S) -> Result<S::Ok, S::Error> {
     if s.is_human_readable() {
         match tagged_id::encode(id) {
             Some(encoded) => s.serialize_str(&encoded),
@@ -55,7 +56,7 @@ fn serialize_id<S: Serializer>(id: u64, s: S) -> Result<S::Ok, S::Error> {
 /// number (back-compat for callers that haven't migrated). For
 /// binary formats (the structured wire), reads a raw u64 varint — the
 /// substrate wire is byte-identical to a `u64` field.
-fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64, D::Error> {
+pub(crate) fn deserialize_id<'de, D: Deserializer<'de>>(d: D, expected: Tag) -> Result<u64, D::Error> {
     use serde::de::{self, Visitor};
 
     struct IdVisitor {
@@ -109,6 +110,12 @@ pub const fn tag_for_type_id(type_id: u64) -> Option<Tag> {
         Some(Tag::Transform)
     } else if type_id == ThreadId::TYPE_ID {
         Some(Tag::Thread)
+    } else if type_id == ActorRef::<()>::TYPE_ID
+        || type_id == Recipient::<()>::TYPE_ID
+        || type_id == AnyActorRef::TYPE_ID
+        || type_id == Tombstone::<()>::TYPE_ID
+    {
+        Some(Tag::Mailbox)
     } else {
         None
     }
@@ -129,6 +136,14 @@ pub const fn type_name_for_type_id(type_id: u64) -> Option<&'static str> {
         Some(TransformId::TYPE_NAME)
     } else if type_id == ThreadId::TYPE_ID {
         Some(ThreadId::TYPE_NAME)
+    } else if type_id == ActorRef::<()>::TYPE_ID {
+        Some(ActorRef::<()>::TYPE_NAME)
+    } else if type_id == Recipient::<()>::TYPE_ID {
+        Some(Recipient::<()>::TYPE_NAME)
+    } else if type_id == AnyActorRef::TYPE_ID {
+        Some(AnyActorRef::TYPE_NAME)
+    } else if type_id == Tombstone::<()>::TYPE_ID {
+        Some(Tombstone::<()>::TYPE_NAME)
     } else {
         None
     }
@@ -512,5 +527,31 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(tagged_id::tag_of(a.0), Some(Tag::Thread));
+    }
+
+    // Tripwire: the four reference `TYPE_ID`s are pairwise distinct and
+    // distinct from `MailboxId::TYPE_ID`, and each resolves its table arm.
+    // A collision would silently alias two schema types in the codec.
+    #[test]
+    fn reference_type_ids_are_distinct_and_resolve() {
+        let ids = [
+            ActorRef::<()>::TYPE_ID,
+            Recipient::<()>::TYPE_ID,
+            AnyActorRef::TYPE_ID,
+            Tombstone::<()>::TYPE_ID,
+            MailboxId::TYPE_ID,
+        ];
+        let mut sorted = ids;
+        sorted.sort_unstable();
+        for pair in sorted.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+        for id in ids {
+            assert_eq!(tag_for_type_id(id), Some(Tag::Mailbox));
+        }
+        assert_eq!(type_name_for_type_id(ActorRef::<()>::TYPE_ID), Some(ActorRef::<()>::TYPE_NAME));
+        assert_eq!(type_name_for_type_id(Recipient::<()>::TYPE_ID), Some(Recipient::<()>::TYPE_NAME));
+        assert_eq!(type_name_for_type_id(AnyActorRef::TYPE_ID), Some(AnyActorRef::TYPE_NAME));
+        assert_eq!(type_name_for_type_id(Tombstone::<()>::TYPE_ID), Some(Tombstone::<()>::TYPE_NAME));
     }
 }

@@ -73,6 +73,11 @@ pub enum Error {
     Message(String),
     /// An enum selector that does not name a declared variant.
     InvalidEnum(u32),
+    /// A proven actor reference id whose tag bits are not `Tag::Mailbox`.
+    /// Carries the rejected raw `u64`, which is also how a zero id fails.
+    InvalidReference(u64),
+    /// A decoded load name that breaks the segment grammar.
+    InvalidLoadName,
 }
 
 impl fmt::Display for Error {
@@ -87,6 +92,8 @@ impl fmt::Display for Error {
             Self::NotSelfDescribing => f.write_str("aether wire: format is not self-describing (deserialize_any)"),
             Self::Message(m) => f.write_str(m),
             Self::InvalidEnum(selector) => write!(f, "aether wire: invalid enum selector {selector}"),
+            Self::InvalidReference(raw) => write!(f, "aether wire: invalid actor reference id {raw}"),
+            Self::InvalidLoadName => f.write_str("aether wire: invalid load name"),
         }
     }
 }
