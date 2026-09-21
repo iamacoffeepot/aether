@@ -12,6 +12,8 @@
 //! `signal-hook`'s iterator API blocks the driver thread until SIGINT
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
+use std::thread;
+
 use aether_substrate::SubstrateBoot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
@@ -71,7 +73,7 @@ fn shutdown_signal() -> &'static str {
                 "aether-bloomery: signal handler install failed: {error}; \
                  parking thread — SIGKILL is the only exit"
             );
-            std::thread::park();
+            thread::park();
             return "park";
         }
     };
@@ -98,7 +100,7 @@ fn shutdown_signal() -> &'static str {
             "aether-bloomery: ctrl-c handler install failed: {error}; \
              parking thread — SIGKILL is the only exit"
         );
-        std::thread::park();
+        thread::park();
         return "park";
     }
     let _ = rx.recv();

@@ -7,6 +7,7 @@
 //! off the builder at the mount seam, which lowers it to the typed pair the
 //! journal owner and the bundle driver spawn over.
 
+use std::io;
 use std::path::PathBuf;
 
 use aether_bloomery_kinds::ClosureLimit;
@@ -22,7 +23,7 @@ use aether_substrate::chassis::error::BootError;
 #[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER_BLOOMERY", cli_prefix = "bloomery")]
 pub struct BloomeryConfig {
-    /// SQLite journal file the engine opens and drives.
+    /// `SQLite` journal file the engine opens and drives.
     ///
     /// Created when absent, but its parent directory must already exist — the
     /// chassis creates no directories. Required: an unset journal refuses boot
@@ -60,12 +61,12 @@ impl BloomeryConfig {
     /// `ClosureLimit`'s accepted range.
     pub(crate) fn to_journal_and_limit(&self) -> Result<(PathBuf, ClosureLimit), BootError> {
         let Some(journal) = self.journal.as_deref().filter(|path| !path.is_empty()) else {
-            return Err(BootError::Other(Box::new(std::io::Error::other(
+            return Err(BootError::Other(Box::new(io::Error::other(
                 "the bloomery chassis needs a journal path: set AETHER_BLOOMERY_JOURNAL or pass --bloomery-journal <PATH>",
             ))));
         };
         let limit = ClosureLimit::new(self.closure_limit_bytes).map_err(|error| {
-            BootError::Other(Box::new(std::io::Error::other(format!(
+            BootError::Other(Box::new(io::Error::other(format!(
                 "AETHER_BLOOMERY_CLOSURE_LIMIT_BYTES={} is not a usable closure limit: {error}",
                 self.closure_limit_bytes,
             ))))

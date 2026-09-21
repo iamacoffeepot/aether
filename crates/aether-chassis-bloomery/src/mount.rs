@@ -6,6 +6,9 @@
 //! `DriverCtx` spawn exists, so this is the only seam that can birth actors
 //! whose wiring needs the journal's born id.
 
+use std::fmt::Debug;
+use std::io;
+
 use aether_bloomery_driver::{BundleDriver, DriverParams};
 use aether_bloomery_journal::JournalActor;
 use aether_substrate::Subname;
@@ -24,7 +27,7 @@ use crate::config::BloomeryConfig;
 ///
 /// Returns [`BootError`] when the config refuses to lower (no journal path, or
 /// a closure limit outside the accepted range) or when either spawn fails.
-pub(crate) fn mount(built: &BuiltChassis<BloomeryChassis>, config: &BloomeryConfig) -> Result<(), BootError> {
+pub fn mount(built: &BuiltChassis<BloomeryChassis>, config: &BloomeryConfig) -> Result<(), BootError> {
     let (path, limit) = config.to_journal_and_limit()?;
     let journal = built
         .spawn_actor::<JournalActor>(Subname::Named("journal"), path.clone(), ())
@@ -47,6 +50,6 @@ pub(crate) fn mount(built: &BuiltChassis<BloomeryChassis>, config: &BloomeryConf
 /// does: [`SpawnError`](aether_substrate::actor::native::spawn::SpawnError) is
 /// `#[derive(Debug)]` only — no `Display`, no `std::error::Error` — so it
 /// cannot be boxed into [`BootError::Other`] as-is.
-fn spawn_failed(actor: &str, error: &dyn std::fmt::Debug) -> BootError {
-    BootError::Other(Box::new(std::io::Error::other(format!("spawning {actor}: {error:?}"))))
+fn spawn_failed(actor: &str, error: &dyn Debug) -> BootError {
+    BootError::Other(Box::new(io::Error::other(format!("spawning {actor}: {error:?}"))))
 }

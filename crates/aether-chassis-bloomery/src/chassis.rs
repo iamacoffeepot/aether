@@ -1,7 +1,7 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
 //! engine. Boots the shared base stratum plus the component host and the RPC
-//! server, then mounts the journal owner and the bundle driver over one
-//! journal file through [`mount`](crate::mount::mount).
+//! server, then the mount seam spawns the journal owner and the bundle driver
+//! over one journal file.
 //!
 //! The composition is deliberately narrow: no egress, exec, TCP, or
 //! HTTP-serving capability rides this engine (the zero-external-integration
