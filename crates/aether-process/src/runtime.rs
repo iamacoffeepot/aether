@@ -15,6 +15,7 @@
 //! `send_mail_traced` observes it as one in-flight unit.
 
 use std::collections::{HashMap, HashSet};
+use std::marker::PhantomData;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
@@ -24,10 +25,14 @@ use super::runner::{RunOutcome, run_to_completion};
 use super::{ProcessCapability, ProcessConfig};
 
 use aether_actor::runtime;
-use aether_actor::{Manual, OutboundReply};
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone, TaskQueue};
 pub use aether_substrate::chassis::error::BootError;
+
+/// Syntactic `-> Pending<R>` marker for `classify_handler_reply`. The real hold
+/// is the ledger entry [`TaskQueue::submit`] already arms; expand discards this
+/// return.
+struct Pending<R>(PhantomData<fn() -> R>);
 
 /// Composer-supplied construction params for the `aether.process` cap
 /// (ADR-0156 §3): the working-directory confinement root. Resolved at
@@ -111,16 +116,16 @@ impl NativeActor for ProcessCapability {
     ///
     /// # Agent
     /// Reply: `run_result`. Resolves `binary` against the allowlist
-    /// synchronously (`Err { NotPermitted }` on a miss, before any
-    /// spawn), then dispatches the blocking spawn-and-capture on a worker
+    /// (`Err { NotPermitted }` on a miss, submitted without spawning a
+    /// child), then dispatches the blocking spawn-and-capture on a worker
     /// thread; the reply lands when the run completes, times out, or
     /// fails to spawn/reap.
-    #[handler::manual]
-    fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: Run) {
+    #[handler::single]
+    fn on_run(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Run) -> Pending<RunResult> {
         // Deny-by-default: an unlisted binary is refused before any spawn.
         let Some(path) = state.allowlist.get(&mail.binary).cloned() else {
-            OutboundReply::reply(ctx, &RunResult::Err { error: ProcessError::NotPermitted });
-            return;
+            state.tasks.submit(ctx, || RunResult::Err { error: ProcessError::NotPermitted });
+            return Pending(PhantomData);
         };
 
         let timeout = if mail.timeout_millis == 0 {
@@ -135,6 +140,7 @@ impl NativeActor for ProcessCapability {
             let command = build_command(&path, &args, &env, &work_root);
             outcome_to_result(run_to_completion(command, stdin, timeout))
         });
+        Pending(PhantomData)
     }
 
     /// ADR-0093 completion for a finished run: re-reply the worker's
@@ -249,23 +255,24 @@ mod tests {
         ));
     }
 
-    /// An unlisted binary is refused synchronously with `NotPermitted`
-    /// and spawns no work — the deny-by-default boundary never reaches the
-    /// dispatch helper.
+    /// An unlisted binary replies `NotPermitted` without spawning a child —
+    /// the deny-by-default boundary submits an error worker instead of
+    /// `build_command` / `run_to_completion`.
     #[test]
     fn unlisted_binary_replies_not_permitted_without_dispatch() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = ProcessCapabilityState::from_parts(HashMap::new(), env::temp_dir(), 4);
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b""));
+        drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
 
         match decode_session_reply::<RunResult>(&rx) {
             RunResult::Err { error: ProcessError::NotPermitted } => {}
             other => panic!("expected NotPermitted, got {other:?}"),
         }
-        assert_eq!(state.test_in_flight(), 0, "a refused request spawns no in-flight work");
+        assert_eq!(state.test_in_flight(), 0, "in-flight is 0 after the error worker completes");
     }
 
     /// An allowlisted benign binary runs end-to-end through the ADR-0093
@@ -280,7 +287,7 @@ mod tests {
         let allowlist = HashMap::from([("cat".to_owned(), PathBuf::from("/bin/cat"))]);
         let mut state = ProcessCapabilityState::from_parts(allowlist, env::temp_dir(), 4);
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether"));
         // The worker runs cat against the piped stdin and pushes the
@@ -295,5 +302,12 @@ mod tests {
             }
             other => panic!("expected Ok, got {other:?}"),
         }
+    }
+
+    fn assert_process_replies<T: aether_actor::Replies<Run, Reply = RunResult>>() {}
+
+    #[test]
+    fn process_capability_replies_run() {
+        assert_process_replies::<ProcessCapability>();
     }
 }

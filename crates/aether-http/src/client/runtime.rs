@@ -18,18 +18,23 @@ use super::{HttpCapability, HttpConfig};
 use aether_actor::runtime;
 
 use std::collections::HashSet;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ureq::http::Method;
 use ureq::http::Request;
 
-pub use aether_actor::Manual;
 pub use aether_data::MailboxId;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
+
+/// Syntactic `-> Pending<R>` marker for `classify_handler_reply`. The real hold
+/// is the ledger entry [`PerSenderEgress::submit`] already arms; expand discards
+/// this return.
+struct Pending<R>(PhantomData<fn() -> R>);
 
 /// Adapter-facing request shape. Converted from the wire `Fetch`
 /// kind by the cap before handing to the adapter.
@@ -143,8 +148,8 @@ impl NativeActor for HttpCapability {
     /// ceiling — a slow remote occupies one worker slot for its own sender
     /// instead of stalling the cap's dispatch thread. Over budget, the fetch
     /// queues (holding its chain) and dispatches when a slot frees.
-    #[handler::manual]
-    fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: Fetch) {
+    #[handler::single]
+    fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Fetch) -> Pending<FetchResult> {
         let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| Duration::from_millis(u64::from(ms)));
         let request_id = mail.request_id;
         let sender = sender_mailbox_id(ctx.reply_target());
@@ -158,6 +163,7 @@ impl NativeActor for HttpCapability {
             Ok(r) => FetchResult::Ok { request_id, url, status: r.status, headers: r.headers, body: r.body },
             Err(error) => FetchResult::Err { request_id, url, error },
         });
+        Pending(PhantomData)
     }
 
     /// ADR-0093 completion for a finished fetch: re-reply the worker's
@@ -614,12 +620,8 @@ mod tests {
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -655,12 +657,8 @@ mod tests {
             HttpConfig::default().default_timeout,
         );
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -692,12 +690,8 @@ mod tests {
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-        let mut ctx = NativeCtx::new_dispatching(
-            &transport,
-            session_sender(),
-            aether_data::MailId::NONE,
-            aether_data::MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -720,6 +714,13 @@ mod tests {
             .take()
             .expect("adapter was not called");
         assert!(observed.timeout > Duration::ZERO);
+    }
+
+    fn assert_http_replies<T: aether_actor::Replies<Fetch, Reply = FetchResult>>() {}
+
+    #[test]
+    fn http_capability_replies_fetch() {
+        assert_http_replies::<HttpCapability>();
     }
 
     #[test]
