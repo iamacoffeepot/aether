@@ -4,6 +4,7 @@
 - **Date:** 2026-09-18
 - **Amended:** 2026-09-19 — decision 9's reactor restart point is the higher of the reaction and activation watermarks; decision 11's `Processed` also waits for requests at or below `through` (issue #6208).
 - **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
+- **Amended:** 2026-09-21 — chassis mounting lands in `aether-chassis-bloomery`: base stratum + component host + RPC server, with the journal owner and the driver spawned post-build as `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`, which widens the unauthenticated-writes consequence to any local process reaching a bound RPC port (issue #6244).
 
 ## Context
 
@@ -62,6 +63,11 @@ Nothing on main can carry any of this yet:
    roots are shared by digest, and `Invoke.seq` is unique only within one
    journal, so two drivers would collide. The driver has two roles that
    share one table of loaded bundles:
+
+   Chassis mounting landed in `aether-chassis-bloomery` (issue #6244):
+   the chassis composes the shared base stratum plus `ComponentHostCapability`
+   and the RPC server, then spawns the journal owner and the driver post-build
+   over one journal file. No full-stack cap rides the engine.
    - it loads and invokes programs on demand;
    - it follows the reactor set.
 
@@ -272,8 +278,10 @@ Nothing on main can carry any of this yet:
   engine on restart until the pre-delivery watermark record exists.
   Programs don't crash-loop, because they are faulted `Interrupted`.
 - **Journal writes are not authenticated.** Any engine-local mailer can
-  send `AppendRecords` or write kinds meant only for the driver.
-  Authentication is deferred.
+  send `AppendRecords` or write kinds meant only for the driver. Since
+  chassis mounting (issue #6244), the journal owner and the driver are
+  RPC-addressable on the bloomery engine, so any local process that can
+  reach a bound RPC port can do the same. Authentication is deferred.
 - **History growth.** The dedup index and the request, activation, and
   head folds grow with history. Restart refolds from seq 1 and warms
   every selected instance serially. Checkpoints and parallel warmup are
@@ -287,7 +295,10 @@ Nothing on main can carry any of this yet:
   table existed have no edges. No deployed journal holds any.
 - **New crate.** The driver lives in a new native crate. Its kinds live
   in `aether-bloomery-kinds` and its folds in `aether-bloomery-view`.
-  Chassis mounting is a later decision.
+  Chassis mounting landed as the `aether-chassis-bloomery` crate (issue
+  #6244): base stratum + component host + RPC server, with the journal
+  owner and the driver spawned post-build as
+  `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`.
 - **Amendments.** Following ADR-0224's precedent, the older ADRs stay
   unedited. This ADR amends:
   - ADR-0223: the feeder becomes this driver; `DropComponent` is never

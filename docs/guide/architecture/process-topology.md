@@ -20,7 +20,7 @@ it mints each process-local `engine_id` and assigns it to the child proxy. Each
 child substrate owns an independent registry, scheduler, actor set, and live
 runtime state.
 
-## The four chassis profiles
+## The five chassis profiles
 
 The `aether-chassis-*` crates assemble the shared runtime into purpose-specific
 profiles. The exact capability set is code and feature dependent, so treat this
@@ -32,9 +32,10 @@ table as intent rather than a hardcoded manifest.
 | Headless | `aether-headless` | timer-driven engine without a desktop event loop |
 | Hub | `aether-hub` | supervise child engines, store artifacts, and route RPC |
 | Substrate harness | `aether-substrate-harness` | deterministic in-process operations and test evidence |
+| Bloomery | `aether-bloomery` | journal-driven engine: the bundle driver over one journal file |
 
 Their builders live under
-`crates/aether-chassis-{desktop,headless,hub,harness}`. Shared runtime mechanism
+`crates/aether-chassis-{desktop,headless,hub,harness,bloomery}`. Shared runtime mechanism
 remains in `aether-substrate`; each shared native actor remains in its own
 `aether-<capability>` crate.
 
