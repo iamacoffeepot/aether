@@ -125,10 +125,13 @@ aether_actor::export!(Web);
 ```
 
 `#[handler::single]` replies by *returning* its kind, as above.
-`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Manual>`)
+`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Erased, Manual>`)
 whose `ctx.reply(&…)` sends the reply explicitly — reach for it when one handler
 needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
-below), since a single return type can't express that choice.
+below), since a single return type can't express that choice. A handler may
+spell its actor instead of the default — `WasmCtx<'_, Self>` — and the macro
+hands it a ctx typed by that actor; `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
@@ -458,7 +461,7 @@ impl WasmActor for Feed {
     // The first credit mail arms the stream handle — its counterparty is
     // whoever paced the stream, and every chunk flows back through it.
     #[handler::manual]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         let stream = match self.stream {
             Some(stream) => stream,
             None => match ResponseStream::from_credit(ctx, &credit) {
@@ -493,11 +496,11 @@ kind, so this is exactly the case that needs `#[handler::manual]` and its
 returning it:
 
 ```rust
-use aether_actor::{Manual, OutboundReply, WasmCtx};
+use aether_actor::{Erased, Manual, OutboundReply, WasmCtx};
 use aether_http::kinds::{HttpResponseStreamOpen, HttpServerRequest, HttpServerResponse};
 
 #[handler::manual]
-fn on_request(&mut self, ctx: &mut WasmCtx<'_, Manual>, req: HttpServerRequest) {
+fn on_request(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, req: HttpServerRequest) {
     match req.path.as_str() {
         "/download" => ctx.reply(&HttpResponseStreamOpen {
             status: 200,

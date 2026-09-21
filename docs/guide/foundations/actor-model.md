@@ -292,7 +292,7 @@ through `ctx.emit`, returning `()` — the emissions are the reply:
 
 ```rust
 #[handler::multi]
-fn on_query(&mut self, ctx: &mut WasmCtx<'_, Multi<Row>>, q: Query) {
+fn on_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Multi<Row>>, q: Query) {
     for row in self.rows_matching(&q) {
         ctx.emit(&row);            // one Row mail per match
     }
@@ -311,10 +311,14 @@ The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
 ### Helpers that only send
 
 The class marker rides on the context type — `WasmCtx<'_>` is
-`WasmCtx<'_, Single>`, a manual handler holds `WasmCtx<'_, Manual>`, a multi
-handler `WasmCtx<'_, Multi<K>>` — which is what makes a stray `ctx.reply` in a
-single handler a compile error. One call deeper it buys nothing: a helper you
-factor out of a handler to *send* something never touches the reply channel,
+`WasmCtx<'_, Erased, Single>`, a manual handler holds `WasmCtx<'_, Erased, Manual>`, a multi
+handler `WasmCtx<'_, Erased, Multi<K>>` — which is what makes a stray `ctx.reply` in a
+single handler a compile error. A handler may spell its actor instead of the
+default — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
+actor; `Erased` names no actor. The actor is the first parameter, the reply
+mode the second (`WasmCtx<'_, Self, Manual>`). One call deeper the class buys
+nothing: a helper you factor out of a handler to *send* something never
+touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
 out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
@@ -333,14 +337,14 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 }
 
 #[handler::manual]
-fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Manual>, _r: Redraw) {
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _r: Redraw) {
     announce(&mut ctx.sends(), &self.frame);        // Manual — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
 ```
 
 `reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
-is recovered on the reply — stay on `WasmCtx<'_, M>`, so a helper that needs
+is recovered on the reply — stay on `WasmCtx<'_, Erased, M>`, so a helper that needs
 those still states which class it belongs to. That's the line: the reply class
 is load-bearing exactly where the reply is.
 

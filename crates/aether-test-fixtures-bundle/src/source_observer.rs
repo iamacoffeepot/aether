@@ -27,7 +27,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Erased, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SendSourceQuery, SourceQuery, SourceReport};
 
@@ -57,7 +57,7 @@ impl WasmActor for SourceObserver {
     /// broadcast `SourceReport { mailbox_id }` to the observer, and reply to
     /// the direct sender with the same report.
     #[handler::manual]
-    fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: SourceQuery) {
+    fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: SourceQuery) {
         let mailbox_id = ctx.source_mailbox().map_or(0, |m| m.0);
         // Log the raw value so the SubstrateHarness integration test can verify it
         // with `log_tail` without relying on broadcast payload access.

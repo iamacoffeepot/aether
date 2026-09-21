@@ -105,7 +105,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry as InlineRegistry;
-    use aether_actor::{Addressable, Embedded, Manual, Resolve, WasmActorMailbox, WasmCtx};
+    use aether_actor::{Addressable, Embedded, Erased, Manual, Resolve, WasmActorMailbox, WasmCtx};
     use aether_data::mailbox_id_from_name;
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
@@ -140,7 +140,7 @@ mod tests {
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(parent.0, 0, &registry);
         let name = Guest::NAMESPACE;
         let trampoline = host.resolve::<WasmTrampoline>(name);
-        let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
+        let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
 
         assert_eq!(ctx.actor::<Guest>().mailbox_id(), trampoline.mailbox_id());
         assert_eq!(ctx.actor::<Guest>().mailbox_id(), resolve_embedded(name));
@@ -164,8 +164,8 @@ mod tests {
         let registry_b = InlineRegistry::new();
         registry_b.set_self_id(caller_b.0);
         registry_b.set_parent_id(parent_b.0);
-        let ctx_a: WasmCtx<'_, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
-        let ctx_b: WasmCtx<'_, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
+        let ctx_a: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
+        let ctx_b: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
 
         assert_eq!(ctx_a.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_a.0, Guest::NAMESPACE, ()));
         assert_eq!(ctx_b.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_b.0, Guest::NAMESPACE, ()));

@@ -5,7 +5,7 @@ use super::{
     ActorTypeTag, LifecycleProbe, NO_INBOUND_SOURCE, NestingParent, Registry, SucceedingChild, WasmCtx,
     install_inline_child,
 };
-use crate::model::ctx::Manual;
+use crate::model::ctx::{Erased, Manual};
 use aether_data::MailboxId;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -33,7 +33,7 @@ fn child_as_admits_only_the_recorded_child_type() {
     )
     .expect("the child installs");
 
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(parent.0, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(parent.0, &registry, NO_INBOUND_SOURCE);
 
     let matched = ctx.child_as::<SucceedingChild>("slot").expect("the recorded type resolves");
     assert_eq!(matched.id(), child, "the typed handle carries the resolved alias");
@@ -65,7 +65,7 @@ fn sibling_as_resolves_through_the_recorded_parent() {
         .expect("the child installs");
     }
 
-    let ctx: WasmCtx<'_, Manual> = WasmCtx::__new(0xB001, &registry, NO_INBOUND_SOURCE);
+    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0xB001, &registry, NO_INBOUND_SOURCE);
 
     assert_eq!(
         ctx.sibling_as::<SucceedingChild>("b").map(|sibling| sibling.id()),

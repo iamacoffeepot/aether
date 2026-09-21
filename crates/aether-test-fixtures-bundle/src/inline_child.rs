@@ -83,8 +83,8 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
+    ActorInitError, ActorTypeTag, Erased, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor, WasmCtx,
+    WasmInitCtx, actor,
 };
 use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
@@ -103,7 +103,7 @@ pub struct InlineCounterState {
 
 /// Reply to an `InlineProbe` with the `who` marker of whichever actor
 /// handled it — shared by the basic and despawn parent/child actors.
-fn reply_who(ctx: &mut WasmCtx<'_, Manual>, who: u32) {
+fn reply_who(ctx: &mut WasmCtx<'_, Erased, Manual>, who: u32) {
     if ctx.reply_target().is_some() {
         ctx.reply(&InlineEcho { who });
     }
@@ -131,7 +131,7 @@ impl WasmActor for InlineParent {
     /// Answer an `InlineProbe` addressed to the parent's own mailbox with
     /// the parent marker — the membrane's own-id (control) path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_PARENT);
     }
 }
@@ -152,7 +152,7 @@ impl WasmActor for InlineChild {
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_CHILD);
     }
 }
@@ -228,7 +228,7 @@ impl WasmActor for InlineStatefulChild {
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
@@ -271,7 +271,7 @@ impl WasmActor for InlineDespawnParent {
     /// alias settles as mail to a retired address rather than falling through
     /// to this parent — and either way never leaks.
     #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _trigger: DespawnChild) {
         if let Some(child) = self.child {
             let _ = ctx.despawn_inline_child(child);
         }
@@ -282,7 +282,7 @@ impl WasmActor for InlineDespawnParent {
     /// shows the parent still live and answering after a teardown, so the
     /// dead alias's silence reads as the retirement rather than a dead host.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_PARENT);
     }
 }
@@ -303,14 +303,14 @@ impl WasmActor for InlineDespawnChild {
     /// Answer an `InlineProbe` addressed to the child's alias with the
     /// child marker — the membrane's child-demux path.
     #[handler::manual]
-    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Manual>, _probe: InlineProbe) {
+    fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_CHILD);
     }
 
     /// Self-despawn: tear *itself* down mid-dispatch (ADR-0114 reentrant
     /// teardown). The child's own alias is the ctx's mailbox id.
     #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Manual>, _trigger: DespawnChild) {
+    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _trigger: DespawnChild) {
         let _ = ctx.despawn_inline_child(ctx.mailbox_id());
     }
 }
@@ -394,7 +394,7 @@ impl WasmActor for InlineConfiguredChild {
     /// Reply with the live counter so a test can read the child's state
     /// across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
@@ -481,7 +481,7 @@ impl WasmActor for NestedLineageLeaf {
     }
 
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }
@@ -502,7 +502,7 @@ impl WasmActor for NestedDetachedLeaf {
     }
 
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: 77 });
         }
@@ -572,7 +572,7 @@ impl WasmActor for InlineTagParent {
     /// Report the accepted composable spawn and all three rejected selections
     /// over the wire.
     #[handler::manual]
-    fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: TagSpawnQuery) {
+    fn on_tag_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: TagSpawnQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&TagSpawnReport {
                 composable_spawned: self.child.is_some(),

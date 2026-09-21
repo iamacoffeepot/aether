@@ -42,7 +42,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
         #[handler::manual]
         fn on_warm(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             warm: #reactor::kinds::Warm,
         ) {
             use ::aether_actor::OutboundReply;
@@ -58,7 +58,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
         #[handler::manual]
         fn on_event(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             event: #reactor::kinds::Event,
         ) {
             use ::aether_actor::OutboundReply;
@@ -74,7 +74,7 @@ fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {
         #[handler::manual]
         fn on_status(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             _query: #reactor::kinds::StatusQuery,
         ) {
             use ::aether_actor::OutboundReply;

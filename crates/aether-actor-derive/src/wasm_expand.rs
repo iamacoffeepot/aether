@@ -5,10 +5,10 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    CtxTransport, FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
-    classify_handler_reply, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
-    validate_fallback_sig,
+    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
+    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error,
+    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    validate_addressable_consts, validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -136,7 +136,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // ADR-0134: a multi handler emits through `ctx.emit` and
                     // must return `()` (the emissions are the reply, not a
                     // return value); `K` rides its `Multi<K>` ctx marker.
-                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig, CtxTransport::Wasm)?;
+                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
@@ -535,13 +535,20 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // handler (which is handed a `WasmCtx`). The forwarder wraps the
     // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
     // user's `wire` body reaches every send / subscribe verb unchanged.
+    // Issue 6279: the renamed hooks keep the author's signatures, so read the
+    // actor off them — a `wire` / `unwire` that spells its actor receives the
+    // `__for_actor::<Self>()` upgrade, every other the erased ctx as today.
+    let wire_ctx = boot_hooks.iter().find(|m| m.sig.ident == "__aether_wire").map(|m| upgrade_ctx_when_named(&m.sig));
+    let unwire_ctx =
+        boot_hooks.iter().find(|m| m.sig.ident == "__aether_unwire").map(|m| upgrade_ctx_when_named(&m.sig));
     let wire_forward = if has_wire {
+        let wire_ctx = wire_ctx.expect("has_wire implies a renamed __aether_wire method");
         quote! {
             fn wire(
                 __aether_state: &mut Self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
             ) {
-                let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(__aether_ctx);
+                let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(#wire_ctx);
                 #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx);
             }
         }
@@ -549,12 +556,13 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! {}
     };
     let unwire_forward = if has_unwire {
+        let unwire_ctx = unwire_ctx.expect("has_unwire implies a renamed __aether_unwire method");
         quote! {
             fn unwire(
                 __aether_state: &mut Self,
                 __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
             ) {
-                #self_ty::__aether_unwire(__aether_state, __aether_ctx);
+                #self_ty::__aether_unwire(__aether_state, #unwire_ctx);
             }
         }
     } else {
@@ -596,7 +604,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         impl #impl_generics ::aether_actor::WasmDispatch<Self> for #self_ty #where_clause {
             fn dispatch(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #self_ty::__aether_dispatch(__aether_state, __aether_ctx, __aether_mail)
@@ -622,7 +630,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             #[doc(hidden)]
             pub fn __aether_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 #dispatch_body
@@ -651,17 +659,17 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_dispatch(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 __aether_mail: ::aether_actor::Mail<'_>,
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
             }
             // ADR-0112: the lifecycle hooks keep their `WasmCtx<'_>` (= Single)
             // default signatures; downgrade the carried `Manual` ctx here.
-            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>) {
+            fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.as_single());
             }
-            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>) {
+            fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
                 <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.as_single());
             }
             fn erased_on_dehydrate(
@@ -672,7 +680,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             }
             fn erased_on_rehydrate(
                 &mut self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 __aether_prior: ::aether_actor::PriorState<'_>,
             ) {
                 <#self_ty as ::aether_actor::WasmActor>::on_rehydrate(self, __aether_ctx.as_single(), __aether_prior);
@@ -707,6 +715,20 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 ///
 /// `#[fallback]` is rejected — native actors are typed receivers;
 /// unknown kinds are programming errors, not fallback paths.
+/// Issue 6279: the ctx expression a dispatch arm calls through —
+/// `__aether_ctx.__for_actor::<Self>()` when the callee's signature names its
+/// actor, bare `__aether_ctx` otherwise, so every other arm receives the
+/// erased ctx exactly as today. The guest mirror of native's
+/// `erase_unless_ctx_names_actor`: the guest ctx starts erased and upgrades
+/// per signature where the native ctx starts typed and downgrades.
+fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
+    if ctx_names_actor(sig) {
+        quote!(__aether_ctx.__for_actor::<Self>())
+    } else {
+        quote!(__aether_ctx)
+    }
+}
+
 /// What an `impl NativeActor for X` expansion emits, selecting between the two
 fn build_dispatch_body(
     handlers: &[HandlerFn],
@@ -716,6 +738,11 @@ fn build_dispatch_body(
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
+        // Issue 6279: a handler whose signature names its actor is called
+        // through the `__for_actor::<Self>()` upgrade, ahead of the per-class
+        // downgrade below; every other handler receives the erased ctx as
+        // today.
+        let ctx = upgrade_ctx_when_named(&h.method.sig);
         // ADR-0112: the dispatch ctx is the full `Manual` view. A single
         // handler is called with the downgraded `as_single()` view and the
         // macro auto-replies a `-> R` return through `OutboundReply::reply`
@@ -725,20 +752,20 @@ fn build_dispatch_body(
         // auto-reply, regardless of return type.
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
-                let __aether_reply = self.#method(__aether_ctx.as_single(), __aether_decoded);
+                let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
                 ::aether_actor::OutboundReply::reply(__aether_ctx, &__aether_reply);
             },
             (HandlerClass::Single, HandlerReply::None | HandlerReply::Deferred(_)) => quote! {
-                self.#method(__aether_ctx.as_single(), __aether_decoded);
+                self.#method(#ctx.as_single(), __aether_decoded);
             },
             (HandlerClass::Manual, _) => quote! {
-                self.#method(__aether_ctx, __aether_decoded);
+                self.#method(#ctx, __aether_decoded);
             },
             // ADR-0134: a multi handler is called with the `Multi<K>` view
             // (`K` inferred from its ctx signature); it emits 0..n mails and
             // returns `()`, so there is no auto-reply.
             (HandlerClass::Multi, _) => quote! {
-                self.#method(__aether_ctx.as_multi(), __aether_decoded);
+                self.#method(#ctx.as_multi(), __aether_decoded);
             },
         };
         // `Mail::kind()` and `Kind::ID` are both the typed `KindId`
@@ -785,10 +812,13 @@ fn build_dispatch_body(
 
     let tail = if let Some(f) = fallback {
         let method = &f.method.sig.ident;
+        // Issue 6279: a `#[fallback]` whose signature names its actor is
+        // called through the `__for_actor::<Self>()` upgrade, like a handler.
+        let ctx = upgrade_ctx_when_named(&f.method.sig);
         // ADR-0112: a `#[fallback]` keeps its `WasmCtx<'_>` (= Single)
         // signature; the dispatch ctx is `Manual`, so downgrade.
         quote! {
-            self.#method(__aether_ctx.as_single(), __aether_mail);
+            self.#method(#ctx.as_single(), __aether_mail);
             ::aether_actor::DISPATCH_HANDLED
         }
     } else {

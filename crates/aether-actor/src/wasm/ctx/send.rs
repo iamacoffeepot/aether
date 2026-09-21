@@ -15,7 +15,7 @@ use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Si
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
-impl<M: ReplyMode> WasmCtx<'_, M> {
+impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Issue 1987: send `payload` through a stored [`Mailbox<K>`] addressing
     /// token, threading this actor's own id as the send's `from` so the
     /// recipient's `ctx.source_mailbox()` resolves the sender and the host
@@ -104,7 +104,7 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
 // recipient hits the host. For a childless component with no captured
 // `self_id` match the recipient is always `Remote`, so the path is identical
 // to a bare `mail::send_mail`.
-impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
+impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
@@ -200,7 +200,7 @@ impl<M: ReplyMode> MailSender for WasmCtx<'_, M> {
 // manual-class handler issues its own replies); `Single` deliberately
 // does not, so a `-> ()` single handler is provably silent and a stray
 // single-ctx `ctx.reply` is a compile error rather than a manifest lie.
-impl OutboundReply for WasmCtx<'_, Manual> {
+impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
     type ReplyHandle = ReplyHandle;
 
     fn reply_target(&self) -> Option<ReplyHandle> {
@@ -235,7 +235,7 @@ impl OutboundReply for WasmCtx<'_, Manual> {
 // holding the request chain open. A sourceless dispatch (session /
 // broadcast / substrate-origin mail, `MailboxId::NONE`) has no routable
 // target, so the emission warn-drops.
-impl<K: Kind> Emit<K> for WasmCtx<'_, Multi<K>> {
+impl<A, K: Kind> Emit<K> for WasmCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {
         if self.source == MailboxId::NONE.0 {
             tracing::warn!(

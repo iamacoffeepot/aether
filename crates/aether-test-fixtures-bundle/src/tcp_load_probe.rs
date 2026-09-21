@@ -4,7 +4,7 @@
 // borrows their fields.
 #![allow(clippy::needless_pass_by_value)]
 
-use aether_actor::{ActorInitError, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
@@ -114,7 +114,7 @@ impl WasmActor for TcpLoadProbe {
     }
 
     #[handler::manual]
-    fn on_collect_snapshot(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CollectTcpLoadSnapshot) {
+    fn on_collect_snapshot(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CollectTcpLoadSnapshot) {
         if ctx.reply_target().is_some() {
             ctx.reply(&TcpLoadSnapshot {
                 sessions: self.sessions.clone(),

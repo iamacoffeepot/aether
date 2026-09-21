@@ -22,7 +22,9 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::__macro_internals::WasmPlacementFacts;
-use aether_actor::{ActorInitError, ActorTypeTag, Addressable, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, ActorTypeTag, Addressable, Erased, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_data::Kind;
 use aether_data::{
     ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, ReplyContract,
@@ -100,7 +102,7 @@ impl WasmActor for ManifestProbe {
     // issues its own replies, so the manifest reports `ReplyContract::Manual`
     // (no single static reply kind).
     #[handler::manual]
-    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _poke: Poke) {}
+    fn on_poke(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _poke: Poke) {}
 
     /// # Agent
     /// Catch-all for anything else.

@@ -2,7 +2,7 @@
 //! `HandlesKind`: single replies use `Replies`, while multi replies use
 //! `Streams` with the item kind read from `Multi<K>`.
 
-use aether_actor::{Emit, Multi, Replies, Streams, WasmCtx, actor};
+use aether_actor::{Emit, Erased, Multi, Replies, Streams, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -48,7 +48,7 @@ impl aether_actor::WasmActor for ReplyProbe {
     }
 
     #[handler::multi]
-    fn on_query(&mut self, ctx: &mut WasmCtx<'_, Multi<Row>>, query: Query) {
+    fn on_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Multi<Row>>, query: Query) {
         for index in 0..query.count {
             ctx.emit(&Row { index });
         }

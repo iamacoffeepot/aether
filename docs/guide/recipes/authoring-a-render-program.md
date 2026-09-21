@@ -419,6 +419,10 @@ fn on_registered(&mut self, _ctx: &mut WasmCtx<'_>, result: ProgramRegisterResul
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 The dispatch then rides wherever the repaint cadence lives — a `Tick` or
 `Render` handler, a settle gate — as
 `ctx.actor::<RenderCapability>().send(&ProgramDispatch { program_id, bindings, geometries, uniforms })`.

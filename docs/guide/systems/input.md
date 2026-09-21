@@ -137,6 +137,10 @@ fn on_key(&mut self, _ctx: &mut WasmCtx<'_>, key: Key) {
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 The reflexive `subscribe`/`unsubscribe` facade methods use the sending actor's
 host-stamped mailbox and are the normal component API. The rare
 `subscribe_for`/`unsubscribe_for` methods name another local mailbox. The

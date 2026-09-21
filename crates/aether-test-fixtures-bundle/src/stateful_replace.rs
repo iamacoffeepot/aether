@@ -21,7 +21,8 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, Erased, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx,
+    actor,
 };
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
@@ -47,7 +48,7 @@ impl WasmActor for Counter {
 
     /// Reply with the live counter so a test can read it across a swap.
     #[handler::manual]
-    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Manual>, _query: CountQuery) {
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
         if ctx.reply_target().is_some() {
             ctx.reply(&CountReport { count: self.count });
         }

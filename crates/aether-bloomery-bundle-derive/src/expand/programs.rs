@@ -40,7 +40,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
         #[handler::manual]
         fn on_invoke(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             invoke: #program::Invoke,
         ) {
             use ::aether_actor::OutboundReply;
@@ -76,7 +76,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
         #[handler::manual]
         fn on_invoked(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
             invoked: #program::Invoked,
         ) {
             use ::aether_actor::OutboundReply;
@@ -144,7 +144,7 @@ fn expand_invocation(
             #[handler::manual]
             fn on_invoke(
                 &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Manual>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 invoke: #program::Invoke,
             ) {
                 self.parent = ctx.source_mailbox();
@@ -203,7 +203,7 @@ fn expand_invocation(
 
             fn reply_invoked<M: ::aether_actor::ReplyMode>(
                 &self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, M>,
                 invoked: &#program::Invoked,
             ) {
                 if let Some(parent) = self.parent {
@@ -238,7 +238,7 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
     quote! {
         fn send_pending<M: ::aether_actor::ReplyMode>(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, M>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, M>,
             pending: #program::__macro_internals::Pending,
         ) {
             use ::aether_actor::MailSender;

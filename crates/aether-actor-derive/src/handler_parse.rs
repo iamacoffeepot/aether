@@ -176,8 +176,10 @@ pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Re
 }
 
 /// The ctx parameter's angle-bracketed **type** arguments in declaration
-/// order, lifetimes skipped: `[]` for `NativeCtx<'_>`, `[Erased, Manual]` for
-/// `NativeCtx<'_, Erased, Manual>`, `[Self, Manual]` for `NativeCtx<'_, Self, Manual>`.
+/// order, lifetimes skipped: `[]` for `WasmCtx<'_>`, `[Erased, Manual]` for
+/// `WasmCtx<'_, Erased, Manual>`, `[Self]` for `WasmCtx<'_, Self>`. Both
+/// transports spell the actor first (issues 4158 + 6279), so one positional
+/// reader serves `WasmCtx` / `NativeCtx` / `WireCtx` alike.
 /// `None` when the second parameter is not a reference to a path type at all —
 /// each caller phrases that failure in its own vocabulary.
 fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
@@ -206,30 +208,14 @@ fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
     )
 }
 
-/// Which actor transport a handler's ctx belongs to (issue 6282). The native
-/// and guest ctx spell one concept one way after the reorder — the actor
-/// first — but the guest `WasmCtx<'a, M>` keeps its single mode parameter
-/// until issue 6279, so positional ctx-argument readers take the transport.
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum CtxTransport {
-    Wasm,
-    Native,
-}
-
-/// Issue 4158: whether a handler's ctx signature names the actor it
-/// dispatches for. On native that is the *first* type argument, as in
-/// `NativeCtx<'_, Self, Manual>` — unless it spells the `Erased` marker, which
-/// names no actor. On wasm the ctx carries only the mode (issue 6279 adds the
-/// actor), so it never names one. Only a handler that asks receives the typed
-/// ctx `spawn_child` lives on; every other arm is handed an `erase()`d view,
-/// so a spawn cannot name a parent other than the actor being dispatched.
-pub fn ctx_names_actor(sig: &Signature, transport: CtxTransport) -> bool {
-    match transport {
-        CtxTransport::Wasm => false,
-        CtxTransport::Native => {
-            ctx_type_args(sig).is_some_and(|args| args.first().is_some_and(|ty| !type_is_erased(ty)))
-        }
-    }
+/// Whether a handler's (or lifecycle hook's) ctx signature names the actor it
+/// dispatches for (issues 4158 + 6279). That is the *first* type argument on
+/// both transports, as in `WasmCtx<'_, Self>` — unless it spells the `Erased`
+/// marker, which names no actor. Only a signature that asks receives the typed
+/// ctx; every other arm is handed the erased view, so a handler cannot receive
+/// a ctx typed by an actor other than the one being dispatched.
+pub fn ctx_names_actor(sig: &Signature) -> bool {
+    ctx_type_args(sig).is_some_and(|args| args.first().is_some_and(|ty| !type_is_erased(ty)))
 }
 
 /// Whether a ctx type argument spells the `Erased` actor marker — any path
@@ -242,20 +228,20 @@ fn type_is_erased(ty: &Type) -> bool {
 
 /// Extract the element kind `K` from a `#[handler::multi]` method's ctx
 /// parameter (ADR-0134). The ctx is the second parameter and must be
-/// `ctx: &mut WasmCtx<'_, Multi<K>>` (wasm) or
+/// `ctx: &mut WasmCtx<'_, Erased, Multi<K>>` (wasm) or
 /// `ctx: &mut NativeCtx<'_, Erased, Multi<K>>` (native): the macro reads `K` off
 /// the `Multi<K>` marker so the manifest's `ReplyContract::Multi(K::ID)`
 /// and the `emit` element kind cannot drift. A ctx that lacks the
 /// `Multi<K>` marker earns a pointed error naming the required shape
 /// rather than an opaque unification failure at the generated call site.
-fn extract_multi_emit_kind(sig: &Signature, transport: CtxTransport) -> syn::Result<Type> {
+fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
     // Nested (non-capturing) so every `Multi<K>`-shape failure earns one
     // message, spanned at whichever token the parse got stuck on.
     fn shape_err<T: quote::ToTokens>(span: T) -> syn::Error {
         syn::Error::new_spanned(
             span,
             "#[handler::multi] requires a `Multi<K>` ctx marker naming the emit kind — \
-             write `ctx: &mut WasmCtx<'_, Multi<K>>` (or `NativeCtx<'_, Erased, Multi<K>>`), \
+             write `ctx: &mut WasmCtx<'_, Erased, Multi<K>>` (or `NativeCtx<'_, Erased, Multi<K>>`), \
              where `K` is the kind the handler emits (ADR-0134)",
         )
     }
@@ -266,15 +252,11 @@ fn extract_multi_emit_kind(sig: &Signature, transport: CtxTransport) -> syn::Res
         return Err(shape_err(ctx_param));
     };
     let ctx_ty = &*ctx_pat.ty;
-    // The reply mode is the ctx's mode-argument slot: the *first* type
-    // argument on wasm (`WasmCtx<'_, Multi<K>>`), the *second* on native, where
-    // the first names the actor (`NativeCtx<'_, Self, Multi<K>>`, issue 4158) —
-    // reading positionally per transport is what keeps the two apart.
+    // The reply mode is the ctx's *second* type argument on both transports —
+    // the first names the actor (`WasmCtx<'_, Self, Multi<K>>`, issues 4158 +
+    // 6279) — so the reader is positional with no transport split.
     let args = ctx_type_args(sig).ok_or_else(|| shape_err(ctx_ty))?;
-    let mode_arg = match transport {
-        CtxTransport::Wasm => args.first(),
-        CtxTransport::Native => args.get(1),
-    };
+    let mode_arg = args.get(1);
     let marker_ty = *mode_arg.ok_or_else(|| shape_err(ctx_ty))?;
     let Type::Path(marker_path) = marker_ty else {
         return Err(shape_err(marker_ty));
@@ -306,7 +288,6 @@ pub fn multi_kind_or_return_error(
     class: HandlerClass,
     reply: &HandlerReply,
     sig: &Signature,
-    transport: CtxTransport,
 ) -> syn::Result<Option<Type>> {
     if class != HandlerClass::Multi {
         return Ok(None);
@@ -318,7 +299,7 @@ pub fn multi_kind_or_return_error(
              `ctx.emit` calls, so a return value has no reply path (ADR-0134)",
         ));
     }
-    Ok(Some(extract_multi_emit_kind(sig, transport)?))
+    Ok(Some(extract_multi_emit_kind(sig)?))
 }
 
 /// Extract `(O, C, is_borrow)` from a `#[handler(task)]` method's third

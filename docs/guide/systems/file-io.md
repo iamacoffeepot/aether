@@ -167,6 +167,10 @@ fn on_read_result(&mut self, ctx: &mut WasmCtx<'_>, result: ReadResult) {
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 The echoed `addr` makes logs and MCP replies readable, but it does not uniquely
 identify duplicate concurrent reads. For duplicate-safe
 one-shot matching, derive `Kind` for a small context, bind it once, and take it

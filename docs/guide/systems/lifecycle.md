@@ -169,6 +169,10 @@ Then handle each stage as its kind, like any other mail:
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) { /* advance one frame */ }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 `aether-kit-commons`'s `camera` export subscribes `Tick` and `Render` this way — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on
 `Render`; its `MeshViewer` export (`aether.kit.mesh`) subscribes `Render` to

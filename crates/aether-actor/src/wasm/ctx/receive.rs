@@ -12,6 +12,7 @@ use aether_data::{Address, Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::address::address_candidate;
+use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, Instanced, Resolve, Singleton,
@@ -28,7 +29,7 @@ use alloc::string::String;
 /// address this component explicitly.
 // The `Wasm` prefix carries the native/wasm split signal; bare `Ctx` loses that.
 #[allow(clippy::module_name_repetitions)]
-pub struct WasmCtx<'a, M: ReplyMode = Single> {
+pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     pub(super) mailbox: u64,
     pub(super) sender: Option<ReplyHandle>,
     /// The inbound source — the folded [`MailboxId`] raw value of whoever
@@ -59,6 +60,11 @@ pub struct WasmCtx<'a, M: ReplyMode = Single> {
     /// selects which reply surface this ctx exposes. Defaults to
     /// [`Single`], so the common `WasmCtx<'_>` signature is unchanged.
     _mode: PhantomData<M>,
+    /// Phantom marker naming the actor this ctx dispatches *for*. The
+    /// `#[actor]` macro supplies it — a handler that spells its actor
+    /// receives the typed form, every other arm the [`Erased`] view — so
+    /// the default keeps the common `WasmCtx<'_>` signature unchanged.
+    _actor: PhantomData<fn() -> A>,
 }
 
 /// The `source` argument to [`WasmCtx::__new`] for a dispatch that carries no
@@ -70,11 +76,13 @@ pub struct WasmCtx<'a, M: ReplyMode = Single> {
 #[doc(hidden)]
 pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
 
-impl<'a> WasmCtx<'a, Manual> {
+impl<'a> WasmCtx<'a, Erased, Manual> {
     /// Not part of the public API; called only by [`crate::export!`] and
     /// the inline membrane / drain. The runtime builds the most-permissive
-    /// [`Manual`] view; the `#[actor]` dispatcher / lifecycle shims
-    /// downgrade it per handler class with [`Self::as_single`].
+    /// [`Manual`] view, with the actor [`Erased`] — the entry points run
+    /// where no actor type is in scope, so the `#[actor]` macro upgrades to
+    /// the typed form per handler with [`Self::__for_actor`] and downgrades
+    /// per handler class with [`Self::as_single`].
     ///
     /// `source` is the inbound source (issues 1987 + 2001): the enqueuing
     /// member's id for an in-place drained dispatch, the host-resolved source
@@ -83,7 +91,16 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self { mailbox, sender: None, source, host_dispatch: true, inline, _borrow: PhantomData, _mode: PhantomData }
+        Self {
+            mailbox,
+            sender: None,
+            source,
+            host_dispatch: true,
+            inline,
+            _borrow: PhantomData,
+            _mode: PhantomData,
+            _actor: PhantomData,
+        }
     }
 
     /// Not part of the public API; inline-cluster drains build ctxs through
@@ -92,25 +109,36 @@ impl<'a> WasmCtx<'a, Manual> {
     #[doc(hidden)]
     #[must_use]
     pub fn __new_local_dispatch(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
-        Self { mailbox, sender: None, source, host_dispatch: false, inline, _borrow: PhantomData, _mode: PhantomData }
+        Self {
+            mailbox,
+            sender: None,
+            source,
+            host_dispatch: false,
+            inline,
+            _borrow: PhantomData,
+            _mode: PhantomData,
+            _actor: PhantomData,
+        }
     }
+}
 
+impl<'a, A> WasmCtx<'a, A, Manual> {
     /// ADR-0112 downgrade-only coercion: view this [`Manual`] ctx as a
     /// [`Single`] ctx, dropping the `OutboundReply` surface. The
     /// `#[actor]` macro hands a single-class handler this view, so a
     /// handler whose marker disagrees with its class fails to unify.
     /// There is deliberately no `as_manual` — the runtime only ever
-    /// downgrades.
+    /// downgrades. Preserves the actor marker `A`.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_single(&mut self) -> &mut WasmCtx<'a, Single> {
-        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, Manual>` and
-        // `WasmCtx<'a, Single>` are layout-identical (the marker field is a
+    pub fn as_single(&mut self) -> &mut WasmCtx<'a, A, Single> {
+        // SAFETY: `M` is `PhantomData`-only, so `WasmCtx<'a, A, Manual>` and
+        // `WasmCtx<'a, A, Single>` are layout-identical (the marker field is a
         // ZST for every `M` — see `reply_mode_types_are_zsts` and
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field and only removes
         // capability, never adds it.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Single>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Single>>() }
     }
 
     /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
@@ -118,19 +146,55 @@ impl<'a> WasmCtx<'a, Manual> {
     /// [`Emit<K>`](crate::Emit) surface. The `#[actor]` macro hands a `#[handler::multi]`
     /// handler this view (with `K` read off its `Multi<K>` signature), so a
     /// handler whose marker disagrees with its class fails to unify.
+    /// Preserves the actor marker `A`.
     #[doc(hidden)]
     #[must_use]
-    pub fn as_multi<K: Kind>(&mut self) -> &mut WasmCtx<'a, Multi<K>> {
+    pub fn as_multi<K: Kind>(&mut self) -> &mut WasmCtx<'a, A, Multi<K>> {
         // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
-        // `K`, so `WasmCtx<'a, Manual>` and `WasmCtx<'a, Multi<K>>` are
+        // `K`, so `WasmCtx<'a, A, Manual>` and `WasmCtx<'a, A, Multi<K>>` are
         // layout-identical (see `reply_mode_types_are_zsts` and
         // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
         // marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Multi<K>>>() }
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Multi<K>>>() }
     }
 }
 
-impl<M: ReplyMode> WasmCtx<'_, M> {
+impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
+    /// Upgrade this erased ctx to the actor being dispatched (issue 6279).
+    /// The `#[actor]` macro calls it with `Self` for a handler, `#[fallback]`,
+    /// `wire`, or `unwire` hook whose signature names its actor, ahead of the
+    /// per-class [`Self::as_single`] / [`Self::as_multi`] downgrade; every
+    /// other arm receives the erased ctx as today. Defined on the erased form
+    /// only, so the upgrade always starts from the dispatcher's erased ctx.
+    ///
+    /// Not part of the public API; the macro is the only intended caller.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn __for_actor<A>(&mut self) -> &mut WasmCtx<'a, A, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, Erased, M>`
+        // and `WasmCtx<'a, A, M>` are layout-identical for every `A` (see
+        // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
+        // marker without touching any real field.
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, M>>() }
+    }
+}
+
+impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
+    /// Downgrade-only coercion: view this ctx as one that names no actor. A
+    /// handler that spells its actor reaches an erased-only helper through
+    /// this. Like [`Self::as_single`] the coercion only removes capability —
+    /// the way back up is the macro's [`Self::__for_actor`].
+    #[must_use]
+    pub fn erase(&mut self) -> &mut WasmCtx<'a, Erased, M> {
+        // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, A, M>` and
+        // `WasmCtx<'a, Erased, M>` are layout-identical for every `A` (see
+        // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
+        // marker without touching any real field.
+        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, Erased, M>>() }
+    }
+}
+
+impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     pub(super) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
         self.inline.scope_mailbox(MailboxId(self.mailbox), scope).0
     }

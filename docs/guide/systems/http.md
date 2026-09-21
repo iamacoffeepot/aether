@@ -163,6 +163,10 @@ fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_>, result: FetchResult) {
 }
 ```
 
+A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
+ctx typed by that actor; the default `Erased` names no actor. The actor is the
+first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+
 Both arms echo the caller-minted `request_id` you stamped on the `Fetch`, so a
 component with several fetches outstanding tells them apart by it — match it
 against whatever state you were waiting to fill. The cap dispatches fetches

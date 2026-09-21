@@ -1,7 +1,7 @@
 //! ADR-0227: a manual handler can issue arbitrary replies and therefore emits
 //! `HandlesKind<K>` but no `Replies<K>` marker.
 
-use aether_actor::{Manual, Replies, WasmCtx, actor};
+use aether_actor::{Erased, Manual, Replies, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
@@ -21,7 +21,7 @@ impl aether_actor::WasmActor for ManualProbe {
     }
 
     #[handler::manual]
-    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Manual>, _ping: Ping) {}
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _ping: Ping) {}
 }
 
 fn assert_replies<T: Replies<Ping>>() {}

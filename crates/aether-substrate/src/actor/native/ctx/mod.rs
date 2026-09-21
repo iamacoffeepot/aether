@@ -135,7 +135,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 ///
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
-pub struct Erased;
+pub use aether_actor::Erased;
 impl<'a> NativeCtx<'a, Erased, Single> {
     /// Internal constructor — the chassis dispatcher trampoline (in
     /// `chassis::builder`) builds these for `wire` / `unwire` / close

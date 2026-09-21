@@ -3,7 +3,7 @@
 //! via `Emit::emit` — the multi-class path compiles cleanly on the wasm
 //! expansion, and the macro reads `K` off the `Multi<K>` signature.
 
-use aether_actor::{Emit, Multi, WasmCtx, actor};
+use aether_actor::{Emit, Erased, Multi, WasmCtx, actor};
 
 #[repr(C)]
 #[derive(
@@ -45,7 +45,7 @@ impl aether_actor::WasmActor for MultiProbe {
     }
 
     #[handler::multi]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Multi<Frame>>, ping: Ping) {
+    fn on_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Multi<Frame>>, ping: Ping) {
         for n in 0..ping.seq {
             ctx.emit(&Frame { n });
         }
