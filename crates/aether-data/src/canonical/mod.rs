@@ -43,9 +43,9 @@ mod primitives;
 mod schema;
 
 pub use inputs::{
-    inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_fallback_len, inputs_handler_len,
-    reply_contract_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
-    write_inputs_fallback, write_inputs_handler, write_reply_contract,
+    inputs_actor_boundary_len, inputs_component_len, inputs_config_len, inputs_dependency_len, inputs_fallback_len,
+    inputs_handler_len, reply_contract_len, write_inputs_actor_boundary, write_inputs_component, write_inputs_config,
+    write_inputs_dependency, write_inputs_fallback, write_inputs_handler, write_reply_contract,
 };
 pub use labels::{canonical_len_labels, canonical_serialize_labels};
 pub use schema::{
@@ -437,6 +437,25 @@ mod tests {
         const BYTES: [u8; N] = write_inputs_actor_boundary::<N>(NS);
         let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
         assert_eq!(decoded, InputsRecord::ActorBoundary { namespace: NS.into() });
+    }
+
+    #[test]
+    fn inputs_dependency_const_round_trips() {
+        // Tripwire: the `Dependency` record keeps wire selector 5 with the
+        // resolver tag as its first body byte, and the const-fn writer emits
+        // byte-identical output to the runtime encoder. A drift here means the
+        // `#[actor(depends(R))]` manifest bytes no longer decode to the
+        // declared dependency, or an earlier variant's bytes moved.
+        const RESOLVER: u8 = 1;
+        const NS: &str = "test.dependency.target";
+        const N: usize = inputs_dependency_len(RESOLVER, NS);
+        const BYTES: [u8; N] = write_inputs_dependency::<N>(RESOLVER, NS);
+        assert_eq!(&BYTES[0..4], &5u32.to_le_bytes(), "Dependency keeps wire selector 5");
+        assert_eq!(BYTES[4], RESOLVER, "the resolver tag is the first body byte");
+        let decoded: InputsRecord = wire::from_bytes(&BYTES).expect("decode");
+        assert_eq!(decoded, InputsRecord::Dependency { resolver: RESOLVER, namespace: NS.into() });
+        let record = InputsRecord::Dependency { resolver: RESOLVER, namespace: Cow::Borrowed(NS) };
+        assert_eq!(&BYTES[..], wire::to_vec(&record).expect("encode").as_slice());
     }
 
     #[test]

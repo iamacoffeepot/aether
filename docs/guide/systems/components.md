@@ -306,6 +306,32 @@ mailing the component never learn it changed. Prefer `save_state_kind` (which
 carries schema identity through the kind system) over the raw `save_state` byte
 bundle unless you're persisting a non-kind blob or driving an explicit migration.
 
+## Declared dependencies
+
+An actor that cannot run without another actor says so on `#[actor]`, once per
+dependency ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)):
+
+```rust
+#[actor(depends(RenderCapability), depends(ParentPeerTarget))]
+impl WasmActor for MeshViewer {
+    // …
+}
+```
+
+Each entry names a keyless actor — a root singleton (`One`, like a chassis
+capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
+(`Instanced`) entry is a compile error: which instance is meant is run-time
+data, and that case stays with `ctx.resolve`. The declaration travels in the
+wasm inputs section, so the host reads it without running the guest, and the
+macro also emits `impl DependsOn<R>` for each entry.
+
+A load, a module boot actor, or a replacement whose declared dependency has no
+`Live` route is refused before `init` — the operation replies its `Err` naming
+the actor and the missing namespace (`"<actor> depends on <namespace>, which is
+not live"`), and a refused replacement keeps the running module. There is no
+ordering, retry, or wait: two actors that declare each other both refuse, and
+one of them takes the fallible path instead.
+
 ## Where to read more
 
 - The actor this specializes — its lifecycle, `#[actor]`, handlers, addressing —

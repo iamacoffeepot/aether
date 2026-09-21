@@ -156,6 +156,7 @@ pub fn build_inputs_manifest_consts(
     fallback: Option<&FallbackFn>,
     component_doc: Option<&String>,
     config_kind_ty: Option<&Type>,
+    depends: &[syn::TypePath],
     handler_set: Option<(&syn::Path, &Type)>,
 ) -> TokenStream2 {
     let mut len_stmts: Vec<TokenStream2> = Vec::new();
@@ -233,6 +234,37 @@ pub fn build_inputs_manifest_consts(
                     ::aether_actor::__macro_internals::canonical::write_inputs_config::<RECORD_LEN>(
                         <#cfg as ::aether_actor::__macro_internals::Kind>::ID.0,
                         <#cfg as ::aether_actor::__macro_internals::Kind>::NAME,
+                    )
+                },
+            ),
+        );
+    }
+
+    // ADR-0230 (issue 6277): one `Dependency` record per `depends(...)`
+    // entry, after the `Config` record. The resolver tag and namespace both
+    // come off the named actor type, so the record cannot name a strategy
+    // the type does not implement. Variant tag `0x05` matches
+    // `InputsRecord::Dependency`.
+    for target in depends {
+        let resolver_tag = quote! {
+            <<#target as ::aether_actor::Addressable>::Resolver as ::aether_actor::DependencyResolver>::TAG
+        };
+        let target_namespace = quote! { <#target as ::aether_actor::Addressable>::NAMESPACE };
+        let record_len = quote! {
+            ::aether_actor::__macro_internals::canonical::inputs_dependency_len(
+                #resolver_tag,
+                #target_namespace,
+            )
+        };
+        push_ungated(
+            &quote! { (1 + #record_len) },
+            &emit_record_copy_block(
+                &section_version,
+                &record_len,
+                &quote! {
+                    ::aether_actor::__macro_internals::canonical::write_inputs_dependency::<RECORD_LEN>(
+                        #resolver_tag,
+                        #target_namespace,
                     )
                 },
             ),

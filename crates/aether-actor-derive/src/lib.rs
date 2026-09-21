@@ -169,6 +169,7 @@ fn parse_runtime_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         || opts.runtime_module.is_some()
         || opts.root
         || !opts.child_of.is_empty()
+        || !opts.depends.is_empty()
         || opts.composable;
     if identity_declared {
         return Err(syn::Error::new(

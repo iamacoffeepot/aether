@@ -23,7 +23,8 @@
 
 use aether_actor::__macro_internals::WasmPlacementFacts;
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Addressable, Erased, Manual, One, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Addressable, DependencyResolver, DependsOn, Embedded, Erased, Manual, One, WasmActor,
+    WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_data::{
@@ -77,6 +78,13 @@ impl Addressable for SecondParent {
     type Resolver = One;
 }
 
+struct EmbeddedPeer;
+
+impl Addressable for EmbeddedPeer {
+    const NAMESPACE: &'static str = "manifest.peer.embedded";
+    type Resolver = Embedded;
+}
+
 #[actor(instanced, child_of(FirstParent), child_of(SecondParent))]
 impl WasmActor for ManifestProbe {
     const NAMESPACE: &'static str = "manifest_probe";
@@ -124,6 +132,20 @@ impl WasmActor for ComposableProbe {
 
     #[fallback]
     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
+}
+
+struct DependentProbe;
+
+#[actor(depends(FirstParent), depends(EmbeddedPeer))]
+impl WasmActor for DependentProbe {
+    const NAMESPACE: &'static str = "manifest.dependent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    fn on_tick(&mut self, _ctx: &mut WasmCtx<'_>, _tick: Tick) {}
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -227,6 +249,11 @@ fn manifest_const_round_trips_to_expected_records() {
             InputsRecord::ActorBoundary { .. } => {
                 panic!("unexpected ActorBoundary record for a single-actor module")
             }
+            // ADR-0230: this fixture declares no `depends(...)`, so the
+            // macro emits no Dependency record.
+            InputsRecord::Dependency { .. } => {
+                panic!("unexpected Dependency record for a dependency-free component")
+            }
         }
     }
 
@@ -236,6 +263,24 @@ fn manifest_const_round_trips_to_expected_records() {
         tick_doc.as_deref(),
         Some("Increments the tick counter."),
         "rustdoc # Agent body should land on the Tick handler"
+    );
+}
+
+#[test]
+fn depends_entries_emit_dependency_records() {
+    fn assert_depends_on<T: DependsOn<FirstParent> + DependsOn<EmbeddedPeer>>() {}
+    assert_depends_on::<DependentProbe>();
+
+    let records = parse_section(&DependentProbe::__AETHER_INPUTS_MANIFEST);
+    let dependencies: Vec<InputsRecord> =
+        records.into_iter().filter(|record| matches!(record, InputsRecord::Dependency { .. })).collect();
+    assert_eq!(
+        dependencies,
+        vec![
+            InputsRecord::Dependency { resolver: One::TAG, namespace: FirstParent::NAMESPACE.into() },
+            InputsRecord::Dependency { resolver: Embedded::TAG, namespace: EmbeddedPeer::NAMESPACE.into() },
+        ],
+        "one Dependency record per depends(...) entry, in declaration order",
     );
 }
 
