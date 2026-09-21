@@ -411,6 +411,10 @@ mod tests {
         fn resolve(caller_carry: u64, _namespace: &str, (): ()) -> MailboxId {
             MailboxId(caller_carry)
         }
+
+        fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+            key.is_none().then(|| Self::resolve(caller_carry, namespace, ()))
+        }
     }
 
     impl CallerScoped for ParentScopeResolver {

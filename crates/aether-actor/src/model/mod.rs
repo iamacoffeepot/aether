@@ -20,6 +20,7 @@
 //! restores the markers to their natural home alongside the rest of
 //! the actor SDK.
 
+pub mod address;
 pub mod ctx;
 pub mod slot;
 
@@ -43,6 +44,14 @@ pub trait Resolve {
     /// the selected caller scope and the strategy-specific `args`.
     #[must_use]
     fn resolve(caller_carry: u64, namespace: &str, args: Self::Args<'_>) -> MailboxId;
+
+    /// Fold an address key to a resolution candidate (ADR-0230): the same
+    /// derivation as `resolve`, entered through the `Option<&str>` key
+    /// shape an `Address` carries. Each strategy delegates to its own
+    /// `resolve` and returns `None` for the key shape it cannot fold —
+    /// never a fallback id.
+    #[must_use]
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId>;
 }
 
 /// Root-pinned keyless resolution (ADR-0119): the depth-1 fixed point
@@ -58,6 +67,9 @@ impl Resolve for One {
     fn resolve(_caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
         MailboxId(with_tag(Tag::Mailbox, ActorId::singleton(namespace).0))
     }
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+        key.is_none().then(|| Self::resolve(caller_carry, namespace, ()))
+    }
 }
 
 /// Keyed resolution (ADR-0119): folds `ActorId::instanced(NAMESPACE, subname)`
@@ -69,6 +81,9 @@ impl Resolve for Many {
     type Args<'a> = &'a str;
     fn resolve(caller_carry: u64, namespace: &str, subname: &str) -> MailboxId {
         MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(namespace, subname))))
+    }
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+        key.map(|key| Self::resolve(caller_carry, namespace, key))
     }
 }
 
@@ -96,6 +111,9 @@ impl Resolve for Embedded {
     fn resolve(caller_carry: u64, namespace: &str, _args: ()) -> MailboxId {
         MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, namespace))))
     }
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+        Some(Self::resolve(caller_carry, key.unwrap_or(namespace), ()))
+    }
 }
 
 /// Keyed embedded resolution (ADR-0119, ADR-0097): a spawned sibling under
@@ -108,6 +126,9 @@ impl Resolve for EmbeddedMany {
     type Args<'a> = &'a str;
     fn resolve(caller_carry: u64, _namespace: &str, subname: &str) -> MailboxId {
         MailboxId(with_tag(Tag::Mailbox, fold_lineage(caller_carry, ActorId::instanced(EMBEDDED_SCOPE, subname))))
+    }
+    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+        key.map(|key| Self::resolve(caller_carry, namespace, key))
     }
 }
 
@@ -464,6 +485,10 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 ///
 ///     fn resolve(carry: u64, _namespace: &str, _key: &str) -> MailboxId {
 ///         MailboxId(carry)
+///     }
+///
+///     fn candidate(carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
+///         key.map(|key| Self::resolve(carry, namespace, key))
 ///     }
 /// }
 ///
@@ -823,5 +848,50 @@ mod tests {
             <PerThing as Addressable>::resolve(carry, "43"),
             "different subnames resolve to different mailboxes"
         );
+    }
+
+    /// ADR-0230: `candidate` is the same derivation as `resolve`, entered
+    /// through the address key shape. Each strategy agrees with its own
+    /// `resolve` for the matching shape.
+    #[test]
+    fn candidate_matches_resolve_for_matching_key_shape() {
+        let carry = 0x0BAD_F00D_u64;
+
+        assert_eq!(
+            One::candidate(carry, "test.candidate.root", None),
+            Some(One::resolve(carry, "test.candidate.root", ())),
+            "a keyless strategy folds a keyless address",
+        );
+        assert_eq!(
+            Many::candidate(carry, "test.candidate.child", Some("one")),
+            Some(Many::resolve(carry, "test.candidate.child", "one")),
+            "a keyed strategy folds the carried key",
+        );
+        assert_eq!(
+            EmbeddedMany::candidate(carry, "test.candidate.sibling", Some("two")),
+            Some(EmbeddedMany::resolve(carry, "test.candidate.sibling", "two")),
+            "a keyed embedded strategy folds the carried key",
+        );
+        assert_eq!(
+            Embedded::candidate(carry, "test.candidate.peer", None),
+            Some(Embedded::resolve(carry, "test.candidate.peer", ())),
+            "an embedded strategy folds the type namespace for a keyless address",
+        );
+        assert_eq!(
+            Embedded::candidate(carry, "test.candidate.peer", Some("test.candidate.peer-1")),
+            Some(Embedded::resolve(carry, "test.candidate.peer-1", ())),
+            "an embedded strategy folds a carried name in the namespace slot, like resolve_embedded",
+        );
+    }
+
+    /// ADR-0230: a key of the wrong shape for the strategy is `None`,
+    /// never a fallback id.
+    #[test]
+    fn candidate_rejects_mismatched_key_shape() {
+        let carry = 0x0BAD_F00D_u64;
+
+        assert_eq!(One::candidate(carry, "test.candidate.root", Some("one")), None, "One takes no key");
+        assert_eq!(Many::candidate(carry, "test.candidate.child", None), None, "Many requires a key");
+        assert_eq!(EmbeddedMany::candidate(carry, "test.candidate.sibling", None), None, "EmbeddedMany requires a key");
     }
 }

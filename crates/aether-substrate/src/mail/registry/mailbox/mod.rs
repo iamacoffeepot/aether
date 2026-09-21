@@ -32,6 +32,7 @@ mod birth;
 mod commands;
 mod inventory;
 mod kinds;
+mod proven;
 mod publish;
 mod register;
 mod resolve;

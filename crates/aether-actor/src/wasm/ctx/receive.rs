@@ -8,13 +8,15 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use aether_data::{Kind, KindId, MailboxId, RequestId, Source};
+use aether_data::{Address, Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
+use crate::model::address::address_candidate;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, Instanced, Resolve, Singleton,
 };
+use crate::reference::ActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -293,6 +295,20 @@ impl<M: ReplyMode> WasmCtx<'_, M> {
     #[must_use]
     pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.actor_with_namespace::<R>(name)
+    }
+
+    /// Resolve `address` to a proven [`ActorRef`]: `Some` only when the
+    /// host confirms a `Live` route at the position the address names,
+    /// `None` for `Starting`, `Dropped`, and `Unknown` alike (ADR-0230).
+    /// The one fallible conversion from a description to a proof, and the
+    /// only way a reference received from anywhere becomes usable. Costs
+    /// one synchronous host call carrying eight bytes, no mail.
+    #[must_use]
+    pub fn resolve<R: CallerAddressable>(&self, address: &Address<R>) -> Option<ActorRef<R>> {
+        let candidate =
+            address_candidate(address, MailboxId(self.mailbox), MailboxId(self.scope_mailbox(CallerScope::Parent)))?;
+        let answer = mail::resolve_live(candidate.0);
+        (answer != MailboxId::NONE.0 && answer == candidate.0).then(|| ActorRef::new(candidate))
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.
