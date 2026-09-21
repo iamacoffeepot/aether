@@ -23,14 +23,14 @@ use aether_substrate::testing::{
     assert_next_send_kind, boot_authority, decode_session_reply, decode_session_reply_with_session,
     drive_task_completion, fs_reply_source, session_sender, test_mailer_and_rx,
 };
-use aether_substrate::{EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
+use aether_substrate::{EgressEvent, Erased, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
 use crossbeam_queue::ArrayQueue;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 const TEST_RATE: f32 = 48_000.0;
 
-fn read_result_ctx(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, Manual> {
+fn read_result_ctx(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, Erased, Manual> {
     NativeCtx::new_dispatching(transport, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE)
 }
 
@@ -63,7 +63,7 @@ fn load_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
 /// methods (`on_load_instrument`, `on_read_result`). Mirrors `load_ctx`
 /// but uses `new_dispatching` so the method's `OutboundReply` surface
 /// is available.
-fn manual_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_, Manual> {
+fn manual_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_, Erased, Manual> {
     NativeCtx::new_dispatching(transport, session_sender(), MailId::NONE, MailId::NONE)
 }
 

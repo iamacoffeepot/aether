@@ -19,7 +19,7 @@ use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// #1757 / ADR-0106: retain this handler's inbound mail as an
     /// [`InboundMail`] guard to defer its reply past the handler's return
     /// — the by-construction replacement for a hand-rolled

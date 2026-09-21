@@ -18,7 +18,7 @@ use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_data::KindId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{Erased, NativeCtx};
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::mail::MailboxId as SubstrateMailboxId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -122,7 +122,7 @@ impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 /// counts each child against the root (ADR-0080 §6).
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub fn broadcast_to_subscribers<M: ReplyMode>(
-    ctx: &mut NativeCtx<'_, M>,
+    ctx: &mut NativeCtx<'_, Erased, M>,
     subscribers: &BTreeMap<KindId, BTreeSet<MailboxId>>,
     stage: KindId,
     payload: &[u8],

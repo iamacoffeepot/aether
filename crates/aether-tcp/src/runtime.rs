@@ -31,6 +31,7 @@ pub use aether_substrate::{KindId, Mail, Mailer};
 pub use aether_data::Kind;
 
 use aether_actor::runtime;
+use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
 use aether_kinds::MonitorNotice;
@@ -120,7 +121,7 @@ pub enum TcpSpawnContext {
     Listener { addr: String, listener_name: String, local_port: u16 },
 }
 
-fn reply_to_pending_connect<A>(ctx: &mut NativeCtx<'_, Manual, A>, owed: DeferredReply, result: &ConnectResult) {
+fn reply_to_pending_connect<A>(ctx: &mut NativeCtx<'_, A, Manual>, owed: DeferredReply, result: &ConnectResult) {
     owed.reply(ctx, result);
 }
 
@@ -160,7 +161,7 @@ impl NativeActor for TcpCapability {
     /// Reply: `ConnectResult`. Asynchronous — the shared cap dispatcher
     /// remains available while the OS resolves and connects `mail.addr`.
     #[handler::manual]
-    fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: Connect) {
+    fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: Connect) {
         let id = state.next_connect_id;
         state.next_connect_id += 1;
         state.pending_connects.insert(
@@ -206,7 +207,7 @@ impl NativeActor for TcpCapability {
     /// connected stream. The task completion sends each parked
     /// `ConnectResult` only after authoritative activation.
     #[handler::manual]
-    fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, _mail: ConnectReady) {
+    fn on_connect_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, _mail: ConnectReady) {
         while let Ok((id, result)) = state.connect_rx.try_recv() {
             let Some(PendingConnect { owed, addr, name, consumer }) = state.pending_connects.remove(&id) else {
                 continue;
@@ -274,7 +275,7 @@ impl NativeActor for TcpCapability {
     /// Reply: `BindListenerResult`. `Ok` on successful bind +
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::manual]
-    fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual, Self>, mail: BindListener) {
+    fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListener) {
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
@@ -366,7 +367,7 @@ impl NativeActor for TcpCapability {
     /// fires after the listener's accept thread joins and its
     /// `MonitorNotice` arrives at this cap.
     #[handler::manual]
-    fn on_unbind(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: UnbindListener) {
+    fn on_unbind(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: UnbindListener) {
         // Resolve listener_id from the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
@@ -428,7 +429,7 @@ impl NativeActor for TcpCapability {
     /// unbind request, `pending_unbinds` has an entry with the
     /// originator to reply to.
     #[handler::manual]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, notice: MonitorNotice) {
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, notice: MonitorNotice) {
         // Drop the supervisor entry. The held MonitorHandle drops
         // here; deregister is idempotent with the close path's
         // forward-index drain.

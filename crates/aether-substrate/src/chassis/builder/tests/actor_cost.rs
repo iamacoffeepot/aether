@@ -72,7 +72,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
     impl Dispatch<Self> for PreSeedProbe {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {
@@ -177,7 +177,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     impl Dispatch<Self> for SpawnCostProbe {
         fn dispatch(
             state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

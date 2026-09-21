@@ -3,7 +3,7 @@
 //! the request-side streaming upload handler.
 
 use aether_actor::{Manual, actor};
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{
@@ -74,7 +74,7 @@ impl NativeActor for StreamHttpHandler {
     /// data phase goes to whichever dispatch shard granted the credit,
     /// never to the supervisor by type (ADR-0135).
     #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
             return;
         };
@@ -131,7 +131,7 @@ impl NativeActor for StreamIdEchoHandler {
     }
 
     #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
             return;
         };
@@ -184,7 +184,7 @@ impl NativeActor for FloodHttpHandler {
     }
 
     #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, credit: HttpStreamCredit) {
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
         if state.flooded {
             return;
         }
@@ -234,7 +234,7 @@ impl NativeActor for StreamingUploadHandler {
     }
 
     #[handler::manual]
-    fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, open: HttpRequestStreamOpen) {
+    fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, open: HttpRequestStreamOpen) {
         state.received = 0;
         state.stream = RequestStream::from_open(ctx, &open);
     }

@@ -5,7 +5,7 @@ use syn::{FnArg, ImplItem, ItemImpl, Type};
 use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
-    FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
+    CtxTransport, FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
     classify_handler_reply, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error, parse_handler_class,
     parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
     validate_fallback_sig,
@@ -136,7 +136,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // ADR-0134: a multi handler emits through `ctx.emit` and
                     // must return `()` (the emissions are the reply, not a
                     // return value); `K` rides its `Multi<K>` ctx marker.
-                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
+                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig, CtxTransport::Wasm)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.

@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap};
 use aether_actor::ReplyMode;
 use aether_data::{KindId, MailboxId};
 use aether_substrate::actor::monitor::MonitorHandle;
-use aether_substrate::actor::native::NativeCtx;
+use aether_substrate::actor::native::{Erased, NativeCtx};
 use aether_substrate::mail::MailboxEntry;
 
 use crate::{WindowId, WindowSelector};
@@ -31,7 +31,7 @@ impl WindowSubscribers {
 
     pub fn subscribe<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, M>,
+        ctx: &mut NativeCtx<'_, Erased, M>,
         selector: WindowSelector,
         kind: KindId,
         mailbox: MailboxId,
@@ -42,7 +42,7 @@ impl WindowSubscribers {
 
     pub fn subscribe_self<M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, M>,
+        ctx: &mut NativeCtx<'_, Erased, M>,
         selector: WindowSelector,
         kind: KindId,
     ) -> Result<(), String> {
@@ -62,7 +62,7 @@ impl WindowSubscribers {
 
     pub fn unsubscribe_self<M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, M>,
+        ctx: &NativeCtx<'_, Erased, M>,
         selector: WindowSelector,
         kind: KindId,
     ) -> Result<(), String> {
@@ -133,7 +133,7 @@ impl WindowSubscribers {
         }
     }
 
-    fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, M>, mailbox: MailboxId) {
+    fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, mailbox: MailboxId) {
         if !self.monitors.contains_key(&mailbox)
             && let Ok(handle) = ctx.monitor(mailbox)
         {

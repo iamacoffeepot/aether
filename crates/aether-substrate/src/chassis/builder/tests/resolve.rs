@@ -45,7 +45,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
     impl Dispatch<Self> for Foo {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -74,7 +74,7 @@ fn resolve_actor_returns_none_on_type_mismatch() {
     impl Dispatch<Self> for Bar {
         fn dispatch(
             _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             _kind: KindId,
             _payload: &[u8],
         ) -> Option<()> {
@@ -152,7 +152,7 @@ fn resolve_actor_finds_named_instance_resolve_actors_enumerates() {
     impl Dispatch<Self> for Member {
         fn dispatch(
             _state: &mut Self,
-            ctx: &mut NativeCtx<'_, crate::Manual, Self>,
+            ctx: &mut NativeCtx<'_, Self, crate::Manual>,
             kind: KindId,
             payload: &[u8],
         ) -> Option<()> {

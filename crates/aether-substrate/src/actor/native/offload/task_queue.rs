@@ -90,7 +90,7 @@ impl TaskQueue {
     /// [`NativeCtx::dispatch_blocking_resumed`] when a slot later frees,
     /// so the deferred dispatch keeps *this* chain held and replies to
     /// *this* caller (iamacoffeepot/aether#1031).
-    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, work: F) -> Pending<O>
+    pub fn submit<O, F, M, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, work: F) -> Pending<O>
     where
         O: Kind + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -120,7 +120,7 @@ impl TaskQueue {
     /// decrementing the count when the queue is empty.
     // The buffered thunks are stored erased (they only re-dispatch, never
     // spawn), so a typed caller's ctx erases on the way in — issue 4158.
-    pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, Single, A>) {
+    pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, A, Single>) {
         match self.pending.pop_front() {
             Some(next) => next(ctx.erase()),
             None => self.in_flight = self.in_flight.saturating_sub(1),

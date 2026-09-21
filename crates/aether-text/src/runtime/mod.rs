@@ -14,6 +14,7 @@ pub use std::sync::Arc;
 pub use aether_actor::OutboundReply;
 pub use aether_data::Source;
 pub use aether_kinds::QuadSpace;
+use aether_substrate::Erased;
 pub use aether_substrate::Manual;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
@@ -146,7 +147,12 @@ impl TextCapabilityState {
     /// request context. The `ReadResult` routes back to `on_read_result`,
     /// which recovers the context, parses the bytes, and replies in the shape
     /// `reply` selects.
-    pub fn forward_font_read(ctx: &mut NativeCtx<'_, Manual>, namespace: String, path: String, reply: PendingReply) {
+    pub fn forward_font_read(
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        namespace: String,
+        path: String,
+        reply: PendingReply,
+    ) {
         let source = ctx.reply_target();
         let context = FontLoadContext { source, reply };
 
@@ -160,7 +166,7 @@ impl TextCapabilityState {
     /// `on_font_parsed` with the same registration and reply shaping used by
     /// the `aether.fs.read` path.
     pub fn dispatch_font_parse(
-        ctx: &mut NativeCtx<'_, Manual>,
+        ctx: &mut NativeCtx<'_, Erased, Manual>,
         source: Source,
         namespace: String,
         path: String,
@@ -390,7 +396,7 @@ impl NativeActor for TextCapability {
     /// or `Err` with the failure reason (bad path, or an unparseable
     /// file). The `font_id` is session-scoped — thread it into `draw`.
     #[handler::manual]
-    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFont) {
+    fn on_load_font(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFont) {
         TextCapabilityState::forward_font_read(ctx, mail.namespace, mail.path, PendingReply::LoadFont);
     }
 
@@ -402,7 +408,7 @@ impl NativeActor for TextCapability {
     /// This avoids requiring a component with an embedded fallback font to
     /// write that font through `aether.fs` before loading it.
     #[handler::manual]
-    fn on_load_font_bytes(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: LoadFontBytes) {
+    fn on_load_font_bytes(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadFontBytes) {
         let source = ctx.reply_target();
         let name = mail.name;
         TextCapabilityState::dispatch_font_parse(
@@ -428,7 +434,7 @@ impl NativeActor for TextCapability {
     /// addressable by the assigned id too) or `Err` on a bad path /
     /// unparseable file. An unknown `font_id` replies `Err`.
     #[handler::manual]
-    fn on_font_metrics(state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: FontMetricsRequest) {
+    fn on_font_metrics(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: FontMetricsRequest) {
         match mail.font {
             FontRef::Id(font_id) => {
                 let reply = state.fonts.get(&font_id).map_or_else(
@@ -457,7 +463,7 @@ impl NativeActor for TextCapability {
     /// original `load_font` caller; `Err` relays the fs error to that
     /// caller as `LoadFontResult::Err`.
     #[handler::manual]
-    fn on_read_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Manual>, mail: ReadResult) {
+    fn on_read_result(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ReadResult) {
         let Some(context) = ctx.take_context::<FontLoadContext>() else {
             return;
         };

@@ -11,7 +11,7 @@ use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 
 use super::NativeCtx;
 
-impl<M: ReplyMode, A> NativeCtx<'_, M, A> {
+impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Stage a typed registry-owner batch from the current handler. The batch
     /// uses reserved owner admission and completes on a later actor turn.
     pub fn stage_registry_batch<C>(&mut self, batch: RegistryBatch, context: C) -> DispatchId

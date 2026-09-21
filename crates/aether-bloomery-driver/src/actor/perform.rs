@@ -18,7 +18,7 @@ impl BundleDriver {
     /// the loaded root's handed-over id, and answers release the parked
     /// reply. Every send carries its ticket as the request context, so the
     /// reply routes back to the core continuation that issued it.
-    pub(crate) fn perform<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, M, A>, commands: Vec<Command>) {
+    pub(crate) fn perform<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, commands: Vec<Command>) {
         for command in commands {
             match command {
                 Command::ReadEvents { ticket, request } => {
