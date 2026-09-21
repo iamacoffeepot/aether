@@ -1,5 +1,5 @@
 use aether_actor::export;
-use aether_bloomery_kinds::{Mode, Refusal};
+use aether_bloomery_kinds::Mode;
 use aether_bloomery_program::{Env, Program, Sync, program};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
@@ -24,7 +24,7 @@ impl Program for First {
     type Input = In;
     type Result = Out;
 
-    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, aether_bloomery_program::Refusal> {
         Ok(Out { n: input.n })
     }
 }
@@ -39,7 +39,7 @@ impl Program for Second {
     type Input = In;
     type Result = Out;
 
-    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, Refusal> {
+    fn run(input: Self::Input, _env: &mut Env<Sync>) -> Result<Self::Result, aether_bloomery_program::Refusal> {
         Ok(Out { n: input.n })
     }
 }
