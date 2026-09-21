@@ -29,21 +29,27 @@ pub use aether_bloomery_program_derive::program;
 pub use declare::Program;
 #[doc(hidden)]
 pub use declare::{AsyncProgram, SyncProgram};
-pub use env::{Async, Env, PendingArtifact, Sync};
+pub use env::{Async, Binding, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Sync};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{DeclarationsError, declarations};
 
 #[doc(hidden)]
 pub mod __macro_internals {
-    pub use aether_data::{Kind, MailboxId, RequestId};
+    pub use aether_data::{Kind, KindId, MailboxId, RequestId};
     pub use alloc::collections::BTreeMap;
     pub use alloc::string::ToString;
     pub use alloc::vec::Vec;
 
     pub use crate::declare::{AsyncProgram, SyncProgram};
-    pub use crate::env::PendingArtifact;
+    pub use crate::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
     pub use crate::invoke::{JOURNAL_NAMESPACE, PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
-    pub use crate::section::{MODE_PURE, program_record_len, write_program_record};
+    pub use crate::section::{MODE_PURE, MODE_SAMPLED, program_record_len, write_program_record};
+
+    pub struct RejectSampledOnPure<const SAMPLED: bool>;
+
+    impl RejectSampledOnPure<false> {
+        pub const OK: () = ();
+    }
 }

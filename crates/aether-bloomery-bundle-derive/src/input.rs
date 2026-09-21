@@ -45,6 +45,8 @@ pub struct ProgramMeta {
     pub input: Type,
     pub result: Type,
     pub async_run: bool,
+    pub sampled: bool,
+    pub apis: Vec<Type>,
 }
 
 pub enum NamespaceTok {
@@ -85,6 +87,8 @@ impl Parse for ProgramMeta {
         let mut input_ty = None;
         let mut result = None;
         let mut async_run = false;
+        let mut sampled = false;
+        let mut apis = Vec::new();
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![:]>()?;
@@ -99,9 +103,19 @@ impl Parse for ProgramMeta {
                 }
                 "mode" => {
                     let mode: Ident = input.parse()?;
-                    if mode != "Pure" {
-                        return Err(syn::Error::new_spanned(mode, "bundle requires Mode::Pure"));
+                    if mode == "Pure" {
+                        sampled = false;
+                    } else if mode == "Sampled" {
+                        sampled = true;
+                    } else {
+                        return Err(syn::Error::new_spanned(mode, "bundle requires Mode::Pure or Mode::Sampled"));
                     }
+                }
+                "apis" => {
+                    let content;
+                    syn::bracketed!(content in input);
+                    let types = Punctuated::<Type, Token![,]>::parse_terminated(&content)?;
+                    apis = types.into_iter().collect();
                 }
                 "input" => input_ty = Some(input.parse()?),
                 "result" => result = Some(input.parse()?),
@@ -123,6 +137,8 @@ impl Parse for ProgramMeta {
             input: input_ty.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing input"))?,
             result: result.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing result"))?,
             async_run,
+            sampled,
+            apis,
         })
     }
 }

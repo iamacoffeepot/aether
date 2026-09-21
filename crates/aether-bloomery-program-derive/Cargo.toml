@@ -22,6 +22,7 @@ syn = { workspace = true }
 [dev-dependencies]
 aether-bloomery-program = { path = "../aether-bloomery-program" }
 aether-data = { path = "../aether-data", features = ["derive"] }
+aether-http = { path = "../aether-http", default-features = false }
 trybuild = "1"
 
 [lints]

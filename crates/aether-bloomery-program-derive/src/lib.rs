@@ -17,9 +17,10 @@ mod parse;
 
 /// Outer attribute on `impl Program for Name`.
 ///
-/// Takes no arguments. The impl must declare `NAME`, `INTENT`, `MODE = Mode::Pure`,
-/// `Input`, and `Result`. `run` is an associated function: no receiver.
-/// `fn run` pairs with `Env<Sync>`; `async fn run` pairs with `Env<Async>`.
+/// Takes no arguments. The impl must declare `NAME`, `INTENT`, `MODE` (`Pure`
+/// or `Sampled`), `Input`, and `Result`. `run` is an associated function: no
+/// receiver. `fn run` pairs with `Env<Sync>`; `async fn run` pairs with
+/// `Env<Async>`. Optional cap bindings follow `env`.
 #[proc_macro_attribute]
 pub fn program(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {

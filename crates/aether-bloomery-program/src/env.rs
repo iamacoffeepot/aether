@@ -6,12 +6,14 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::RefCell;
+use core::fmt;
 use core::future::Future;
 use core::marker::PhantomData;
 use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
 
+use aether_actor::{Addressable, MailSender, Replies, Sends};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
@@ -30,7 +32,8 @@ pub struct Async;
 struct Inner {
     closure: BTreeMap<Digest, ClosureArtifact>,
     staged: Vec<EncodedArtifact>,
-    pending: Option<PendingArtifact>,
+    pending: Option<Pending>,
+    call_reply: Option<Result<(KindId, Vec<u8>), Refusal>>,
     terminal: BTreeMap<Digest, Refusal>,
 }
 
@@ -41,6 +44,174 @@ pub struct PendingArtifact {
     pub digest: Digest,
     /// Kind the program's `read` / `read_text` expected.
     pub expected: KindId,
+}
+
+/// One cap send the invocation child must emit before polling again.
+///
+/// `mailbox` / `kind_id` / `expected_reply` are the pump's type-erased
+/// view. The request value stays `K` inside [`Self::dispatch`], which
+/// calls [`MailSender::send_to_named`].
+pub struct PendingCall {
+    /// `Addressable::NAMESPACE` of the binding's target actor.
+    pub mailbox: &'static str,
+    /// Kind id of the captured request.
+    pub kind_id: KindId,
+    /// Kind id the `#[fallback]` must match before resume.
+    pub expected_reply: KindId,
+    body: Box<dyn DispatchBody>,
+}
+
+trait DispatchBody: Send {
+    fn send(&self, sends: &mut Sends<'_>);
+}
+
+struct CapturedSend<A, K> {
+    mail: K,
+    _target: PhantomData<fn() -> A>,
+}
+
+impl<A, K> DispatchBody for CapturedSend<A, K>
+where
+    A: Addressable + Replies<K>,
+    K: Kind + Send,
+{
+    fn send(&self, sends: &mut Sends<'_>) {
+        sends.send_to_named(A::NAMESPACE, &self.mail);
+    }
+}
+
+impl PendingCall {
+    fn new<A, K>(mail: K) -> Self
+    where
+        A: Addressable + Replies<K> + 'static,
+        K: Kind + Send + 'static,
+    {
+        Self {
+            mailbox: A::NAMESPACE,
+            kind_id: K::ID,
+            expected_reply: A::Reply::ID,
+            body: Box::new(CapturedSend::<A, K> { mail, _target: PhantomData }),
+        }
+    }
+
+    /// Send the captured request through typed [`MailSender::send_to_named`].
+    pub fn dispatch(&self, sends: &mut Sends<'_>) {
+        self.body.send(sends);
+    }
+}
+
+impl fmt::Debug for PendingCall {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PendingCall")
+            .field("mailbox", &self.mailbox)
+            .field("kind_id", &self.kind_id)
+            .field("expected_reply", &self.expected_reply)
+            .finish_non_exhaustive()
+    }
+}
+
+/// First-poll wait the invocation child must discharge.
+#[derive(Debug)]
+pub enum Pending {
+    /// Journal `ReadArtifact` for [`PendingArtifact::digest`].
+    Artifact(PendingArtifact),
+    /// Cap send; `K` stays captured until [`PendingCall::dispatch`].
+    Send(PendingCall),
+}
+
+/// Trailing `run` argument constructed from [`Env<Async>`].
+pub trait InjectedApi: Sized {
+    /// Actor this binding may send to.
+    type Target: Addressable;
+    /// Sampled APIs cannot pair with [`crate::kinds::Mode::Pure`].
+    const SAMPLED: bool;
+    /// Build an unforgeable handle from the invocation's environment.
+    fn from_env(env: &mut Env<Async>) -> Self;
+}
+
+/// Generic actor handle sharing the invocation environment pointer with [`Env<Async>`].
+pub struct Binding<A: Addressable> {
+    env: Env<Async>,
+    _target: PhantomData<A>,
+}
+
+impl<A: Addressable> InjectedApi for Binding<A> {
+    type Target = A;
+    const SAMPLED: bool = true;
+
+    fn from_env(env: &mut Env<Async>) -> Self {
+        Self { env: *env, _target: PhantomData }
+    }
+}
+
+impl<A: Addressable> Binding<A> {
+    /// Send `mail` and await `<A as Replies<K>>::Reply`.
+    pub fn call<K>(
+        &mut self,
+        mail: K,
+    ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
+    where
+        A: Replies<K> + Unpin + 'static,
+        K: Kind + Send + Unpin + 'static,
+    {
+        Call::<A, K> { env: self.env, mail: Some(mail), _target: PhantomData }
+    }
+}
+
+/// Sampled HTTP sugar over [`Binding<aether_http::HttpCapability>`].
+pub struct Http(Binding<aether_http::HttpCapability>);
+
+impl InjectedApi for Http {
+    type Target = aether_http::HttpCapability;
+    const SAMPLED: bool = true;
+
+    fn from_env(env: &mut Env<Async>) -> Self {
+        Self(Binding::from_env(env))
+    }
+}
+
+impl Http {
+    /// Await [`aether_http::FetchResult`] for `mail`.
+    pub fn fetch(
+        &mut self,
+        mail: aether_http::Fetch,
+    ) -> impl Future<Output = Result<aether_http::FetchResult, Refusal>> + Send + 'static {
+        self.0.call(mail)
+    }
+}
+
+struct Call<A, K> {
+    env: Env<Async>,
+    mail: Option<K>,
+    _target: PhantomData<A>,
+}
+
+impl<A, K> Future for Call<A, K>
+where
+    A: Addressable + Replies<K> + Unpin + 'static,
+    K: Kind + Send + Unpin + 'static,
+{
+    type Output = Result<A::Reply, Refusal>;
+
+    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
+        let this = self.get_mut();
+        if let Some(result) = this.env.take_call_reply() {
+            return Poll::Ready(decode_call_reply::<A::Reply>(result));
+        }
+        if let Some(mail) = this.mail.take() {
+            this.env.request_send(PendingCall::new::<A, K>(mail));
+            return Poll::Pending;
+        }
+        Poll::Pending
+    }
+}
+
+fn decode_call_reply<R: Kind>(result: Result<(KindId, Vec<u8>), Refusal>) -> Result<R, Refusal> {
+    let (kind, bytes) = result?;
+    if kind != R::ID {
+        return Err(Refusal::InputDecode);
+    }
+    R::decode_from_bytes(&bytes).ok_or(Refusal::InputDecode)
 }
 
 /// Owns the injected map for the life of one `run`. [`Env`] handles clone the pointer.
@@ -59,6 +230,7 @@ impl EnvOwner {
                 closure: artifacts,
                 staged: Vec::new(),
                 pending: None,
+                call_reply: None,
                 terminal: BTreeMap::new(),
             })),
         }
@@ -190,8 +362,20 @@ impl Env<Async> {
         ReadText { env: *self, digest: r.digest(), requested: false }.await
     }
 
-    pub(crate) fn take_pending(self) -> Option<PendingArtifact> {
+    pub(crate) fn take_pending(self) -> Option<Pending> {
         self.cell().borrow_mut().pending.take()
+    }
+
+    pub(crate) fn take_call_reply(self) -> Option<Result<(KindId, Vec<u8>), Refusal>> {
+        self.cell().borrow_mut().call_reply.take()
+    }
+
+    pub(crate) fn fulfill_call(self, kind: KindId, bytes: Vec<u8>) {
+        self.cell().borrow_mut().call_reply = Some(Ok((kind, bytes)));
+    }
+
+    pub(crate) fn reject_call(self, refusal: Refusal) {
+        self.cell().borrow_mut().call_reply = Some(Err(refusal));
     }
 
     pub(crate) fn fail(self, digest: Digest, refusal: Refusal) {
@@ -219,7 +403,11 @@ impl Env<Async> {
     }
 
     fn request(self, digest: Digest, expected: KindId) {
-        self.cell().borrow_mut().pending = Some(PendingArtifact { digest, expected });
+        self.cell().borrow_mut().pending = Some(Pending::Artifact(PendingArtifact { digest, expected }));
+    }
+
+    fn request_send(self, pending: PendingCall) {
+        self.cell().borrow_mut().pending = Some(Pending::Send(pending));
     }
 }
 

@@ -30,13 +30,40 @@ pub fn reject_run_receiver(sig: &Signature) -> syn::Result<()> {
     Ok(())
 }
 
+pub fn trailing_apis(sig: &Signature, async_run: bool) -> syn::Result<Vec<(syn::Ident, Type)>> {
+    let extra = sig.inputs.iter().skip(2);
+    if !async_run && extra.clone().next().is_some() {
+        return Err(syn::Error::new_spanned(
+            sig,
+            "#[program] trailing cap bindings require async fn run after Env<Async>",
+        ));
+    }
+    let mut apis = Vec::new();
+    for arg in extra {
+        let FnArg::Typed(typed) = arg else {
+            return Err(syn::Error::new_spanned(arg, "#[program] trailing cap bindings must be typed parameters"));
+        };
+        let syn::Pat::Ident(ident) = &*typed.pat else {
+            return Err(syn::Error::new_spanned(
+                &typed.pat,
+                "#[program] trailing cap bindings must be ident parameters",
+            ));
+        };
+        apis.push((ident.ident.clone(), (*typed.ty).clone()));
+    }
+    Ok(apis)
+}
+
 fn env_arg_type(sig: &Signature) -> syn::Result<&Type> {
     let Some(FnArg::Typed(env)) = sig.inputs.iter().nth(1) else {
         return Err(syn::Error::new_spanned(
             sig,
-            "#[program] run takes `(input: Self::Input, env: &mut Env<Sync | Async>)`",
+            "#[program] run takes `(input: Self::Input, env: &mut Env<Sync | Async>, …bindings)`",
         ));
     };
+    if sig.inputs.len() > 2 && env_marker(&env.ty).is_err() {
+        return Err(syn::Error::new_spanned(&env.ty, "#[program] env is the second argument; cap bindings follow env"));
+    }
     Ok(&env.ty)
 }
 

@@ -6,22 +6,27 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::{format_ident, quote};
-use syn::{Ident, LitStr, Type};
+use syn::{Ident, Type};
 
-pub fn emit_program_export_desc(
-    self_ty: &Type,
-    name: &LitStr,
-    intent: &LitStr,
-    input: &Type,
-    result: &Type,
-    async_run: bool,
-) -> TokenStream2 {
-    let Some(ident) = type_last_ident(self_ty) else {
+use crate::parse::ProgramDef;
+
+pub fn emit_program_export_desc(def: &ProgramDef) -> TokenStream2 {
+    let Some(ident) = type_last_ident(&def.self_ty) else {
         return quote! {};
     };
     let unique = unique_macro_ident(ident);
     let discard = format_ident!("{unique}_discard");
-    let async_run = syn::LitBool::new(async_run, proc_macro2::Span::call_site());
+    let async_run = syn::LitBool::new(def.async_run, proc_macro2::Span::call_site());
+    let mode = if def.sampled {
+        format_ident!("Sampled")
+    } else {
+        format_ident!("Pure")
+    };
+    let name = &def.name;
+    let intent = &def.intent;
+    let input = &def.input;
+    let result = &def.result;
+    let api_tys = def.apis.iter().map(|(_, ty)| ty);
     quote! {
         #[doc(hidden)]
         #[macro_export]
@@ -35,10 +40,11 @@ pub fn emit_program_export_desc(
                             aether_bloomery_program {
                                 name: #name,
                                 intent: #intent,
-                                mode: Pure,
+                                mode: #mode,
                                 input: #input,
                                 result: #result,
                                 async_run: #async_run,
+                                apis: [#(#api_tys),*],
                             }
                         ]
                     }

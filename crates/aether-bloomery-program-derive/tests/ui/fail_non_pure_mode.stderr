@@ -1,8 +1,8 @@
-error: #[program] requires `const MODE: Mode = Mode::Pure`
-  --> tests/ui/fail_non_pure_mode.rs:21:24
+error: #[program] Mode::Sampled requires async fn run
+  --> tests/ui/fail_non_pure_mode.rs:19:18
    |
-21 |     const MODE: Mode = Mode::Sampled;
-   |                        ^^^^^^^^^^^^^
+19 | impl Program for SampledProg {
+   |                  ^^^^^^^^^^^
 
 warning: unused imports: `Mode` and `Refusal`
  --> tests/ui/fail_non_pure_mode.rs:1:29

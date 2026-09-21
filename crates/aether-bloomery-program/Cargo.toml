@@ -7,13 +7,16 @@ publish = false
 description = "Portable guest SDK for bloomery WASM programs: Program, Env, and invoke mail."
 
 [dependencies]
+aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-program-derive = { path = "../aether-bloomery-program-derive" }
 aether-data = { path = "../aether-data" }
+aether-http = { path = "../aether-http", default-features = false }
 
 [dev-dependencies]
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-http = { path = "../aether-http", default-features = false }
 aether-kinds = { path = "../aether-kinds" }
 wasmparser = "0.246"
 
