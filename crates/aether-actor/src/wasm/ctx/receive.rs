@@ -18,7 +18,7 @@ use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Embedded, Instanced,
     Reaches, Resolve, Singleton,
 };
-use crate::reference::ActorRef;
+use crate::reference::{ActorRef, AnyActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -307,6 +307,28 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         R::Resolver: DependencyResolver,
     {
         ActorRef::new(self.actor_with_namespace::<R>(R::NAMESPACE).mailbox_id())
+    }
+
+    /// This actor as a proven [`ActorRef`]: mints the ctx's own mailbox,
+    /// which the host bound at birth and which is `Live` for as long as a
+    /// handler can run — so no lookup is needed. Bounded `A: Addressable`
+    /// directly, so it does not exist on the erased ctx.
+    #[must_use]
+    pub fn me(&self) -> ActorRef<A>
+    where
+        A: Addressable,
+    {
+        ActorRef::new(MailboxId(self.mailbox))
+    }
+
+    /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
+    /// source the host stamped, with no lookup — exactly
+    /// [`Self::source_mailbox`], lifted into a reference. `None` for a
+    /// sourceless dispatch, as there. Needs no actor type, so it exists on
+    /// the erased ctx too.
+    #[must_use]
+    pub fn sender(&self) -> Option<AnyActorRef> {
+        self.source_mailbox().map(AnyActorRef::new)
     }
 
     /// Namespace-aware typed actor construction: the shared body behind

@@ -241,3 +241,48 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
     assert_eq!(ctx.actor_ref::<OneDep>().id(), ctx.actor::<OneDep>().mailbox_id());
     assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), ctx.actor::<EmbeddedPeer>().mailbox_id());
 }
+
+/// `me` mints the binding's own mailbox as a typed reference on a
+/// `NativeCtx<'_, Dependent>`: the id it proves equals `self_id()`. Owned
+/// logic: the birth-bound mint, which performs no registry read.
+#[test]
+fn me_mints_the_binding_mailbox_as_a_typed_reference() {
+    use aether_actor::Single;
+
+    use crate::testing::bare_substrate;
+
+    let (_registry, mailer) = bare_substrate();
+    let parent = MailboxId(0xC020);
+    let current = MailboxId(0xC010);
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+    let ctx: NativeCtx<'_, Dependent, Single> =
+        NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+
+    assert_eq!(ctx.me().id(), ctx.self_id());
+}
+
+/// `sender` mints the stamped dispatch source on the erased ctx: `Some` for
+/// a `SourceAddr::Component` source, `None` for `SourceAddr::None`. Owned
+/// logic: the `source_mailbox` lift, which adds no source-classification of
+/// its own.
+#[test]
+fn sender_mints_the_component_source_and_none_without_one() {
+    use crate::testing::bare_substrate;
+
+    let (_registry, mailer) = bare_substrate();
+    let parent = MailboxId(0xC020);
+    let current = MailboxId(0xC010);
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+
+    let component = NativeCtx::new(
+        &binding,
+        Source::with_correlation(SourceAddr::Component(MailboxId(0xC030)), 0),
+        MailId::NONE,
+        MailId::NONE,
+    );
+    assert!(component.sender().is_some(), "a component source mints a sender reference");
+
+    let sourceless =
+        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+    assert!(sourceless.sender().is_none(), "a sourceless dispatch has no sender reference");
+}

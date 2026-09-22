@@ -132,6 +132,19 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         Registry::declared_dependency(self.actor::<R>().mailbox_id())
     }
 
+    /// This actor as a proven [`ActorRef`]: mints the binding's own
+    /// mailbox, which the host bound at birth and which is `Live` for as
+    /// long as a handler can run — so no registry read is needed. Bounded
+    /// `A: Addressable` directly, so it does not exist on the erased ctx.
+    /// The one caller of the registry's `structural` mint.
+    #[must_use]
+    pub fn me(&self) -> ActorRef<A>
+    where
+        A: Addressable,
+    {
+        Registry::structural(self.binding.self_mailbox())
+    }
+
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses
     /// to `None` (chassis-root or close/init ctx).
