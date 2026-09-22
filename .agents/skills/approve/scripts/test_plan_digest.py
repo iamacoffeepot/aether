@@ -40,10 +40,6 @@ Use durable artifacts.
 .agents/skills/**
 ```
 
-## Dogfood brief
-
-N/A — workflow-only change.
-
 ## Side findings
 
 - unrelated observation
@@ -66,7 +62,6 @@ class PlanDigestTests(unittest.TestCase):
             BASE.replace("Use durable artifacts", "Use signed durable artifacts"),
             BASE.replace("Replace the control state", "Rewrite the control state"),
             BASE.replace(".agents/skills/**", ".agents/skills/approve/**"),
-            BASE.replace("workflow-only change", "tooling-only change"),
         ):
             with self.subTest(replacement=replacement):
                 self.assertNotEqual(plan_digest.digest_body(replacement).plan_sha256, original)
@@ -74,8 +69,8 @@ class PlanDigestTests(unittest.TestCase):
     def test_extra_managed_blank_line_invalidates_approval(self) -> None:
         original = plan_digest.digest_body(BASE).plan_sha256
         without_layout_separator = BASE.replace(
-            "N/A — workflow-only change.\n\n## Side findings",
-            "N/A — workflow-only change.\n## Side findings",
+            "```\n\n## Side findings",
+            "```\n## Side findings",
         )
         extra_managed_blank = BASE.replace(
             "Use durable artifacts.\n\n## Implementation plan",
@@ -155,20 +150,12 @@ class PlanDigestTests(unittest.TestCase):
         with self.assertRaisesRegex(plan_digest.PlanDigestError, "scope-owned order"):
             plan_digest.digest_body(reordered)
 
-    def test_body_without_dogfood_brief_is_valid(self) -> None:
-        # Catches a new-style Plan without a Dogfood brief being rejected by approve.
-        without_dogfood = BASE.replace("## Dogfood brief\n\nN/A — workflow-only change.\n\n", "")
-        result = plan_digest.digest_body(without_dogfood)
-        self.assertEqual(result.size, "m")
-        self.assertEqual(result.model, "sonnet")
-        self.assertNotIn("Dogfood brief", result.sections)
-
-    def test_legacy_dogfood_body_digest_is_unchanged(self) -> None:
-        # Tripwire: making the Dogfood brief optional must not change any
-        # existing body's approval digest.
+    def test_canonical_digest_is_pinned(self) -> None:
+        # Tripwire: the managed-span selection and canonicalization must not
+        # change an existing body's approval digest.
         self.assertEqual(
             plan_digest.digest_body(BASE).plan_sha256,
-            "b7ef1790e0dd03dec50f0fd1e22d3b597d1a618ab1b2cef2c68577e735f69c7d",
+            "a18329f3c2c7cf026ba01bbb38572886ff396bd62b04fbcce1bf2b17e1c9ea9c",
         )
 
     def test_missing_duplicate_and_invalid_routing_lines_are_rejected(self) -> None:

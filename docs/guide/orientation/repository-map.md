@@ -115,7 +115,7 @@ uses the nightly fuzzing toolchain.
 | `.agents/skills/` | current Codex repository workflows |
 | `.claude/skills/`, `.claude/hooks/` | the Claude Code workflows and local guardrail hooks |
 | `.codex/` | Codex MCP configuration and local guardrail hooks |
-| `.github/workflows/` | hosted CI, review, dogfood, reconciliation, and release jobs |
+| `.github/workflows/` | hosted CI, review, reconciliation, and release jobs |
 | `scripts/` | developer/operator helpers, including the MCP tunnel |
 | `fuzz/` | isolated nightly fuzz targets |
 

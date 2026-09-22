@@ -10,14 +10,12 @@ on:
     branches: [main]
     paths:
       - 'docs/guide/**'
-      - 'docs/evidence-viewer/**'
       - 'docs/pipeline-deck/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
   pull_request:
     paths:
       - 'docs/guide/**'
-      - 'docs/evidence-viewer/**'
       - 'docs/pipeline-deck/**'
       - 'docs/book.toml'
       - '.github/workflows/docs.yml'
@@ -43,13 +41,10 @@ jobs:
           tool: mdbook@0.4.40
       - name: Build the guide
         run: mdbook build docs
-      - name: Copy the evidence viewer
-        run: cp -r docs/evidence-viewer docs/book/evidence
       - name: Copy the pipeline deck
         run: cp -r docs/pipeline-deck docs/book/pipeline
-      - name: Verify standalone pages
+      - name: Verify the standalone page
         run: |
-          test -s docs/book/evidence/index.html
           test -s docs/book/pipeline/index.html
       - name: Archive the guide as a Pages artifact
         if: github.ref == 'refs/heads/main'

@@ -88,7 +88,6 @@ its own documented workflow and nothing adjacent.
 | Authorize a complete Plan | `approve` | A trusted hidden digest/base-bound record |
 | Implement approved work | `implement` | A reviewed, green draft PR with priced overflow reported |
 | Audit existing code or a non-PR change | `review` | A read-only findings rollup |
-| Trial a public surface as a fresh consumer | `dogfood` | Durable evidence and a consumer-friction rollup |
 | Land an accepted draft | `land` | Merged PR, closed issue, and safe cleanup |
 | Reclaim proven-stale local state | `sweep` | Only the explicitly confirmed cleanup |
 | Capture repeatable session friction | `retrospect` | Confirmed unscoped issues, if any |
@@ -103,7 +102,7 @@ adjacent consequential action; implementation never implies landing.
 
 `scope` owns the managed sections for the problem statement, design notes,
 implementation plan, optional sub-issues and dependencies, declared surface,
-optional legacy-only dogfood brief, and optional side findings. The Plan ends
+and optional side findings. The Plan ends
 with exact `Size`, `Implementation model`, and `Routing reason` lines. Those
 body lines—not labels—select the implementation route.
 

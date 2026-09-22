@@ -77,10 +77,9 @@ pushing the tag; see
 
 **Contributor lifecycle:** the tables above are the complete hosted workflow
 inventory. Issue scoping, digest-bound approval, implementation, direct review,
-dogfood, conflict resolution, and landing are direct-drive repository skills,
-not Actions jobs. Their evidence lives in issue bodies, owned branches and
-worktrees, draft pull requests, current-head checks/reviews/threads, and dogfood
-rollups. A repository script is not hosted behavior unless a checked-in workflow
+conflict resolution, and landing are direct-drive repository skills, not
+Actions jobs. Their evidence lives in issue bodies, owned branches and
+worktrees, draft pull requests, and current-head checks/reviews/threads. A repository script is not hosted behavior unless a checked-in workflow
 invokes it.
 
 ## Rules
