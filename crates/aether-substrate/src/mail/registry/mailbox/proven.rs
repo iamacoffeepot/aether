@@ -113,12 +113,9 @@ impl Registry {
     /// is ADR-0230's closing consequence — the proof is about the actor the
     /// position reaches, not about the shape of the route record.
     ///
-    /// Its callers are the two ctx verbs that spell it publicly —
-    /// [`NativeCtx::resolve_live`](crate::actor::native::NativeCtx::resolve_live)
-    /// for a position that arrived in a payload and
-    /// [`NativeInitCtx::resolve_live`](crate::actor::native::NativeInitCtx::resolve_live)
-    /// for one that arrived in boot params. A capability reaches for neither
-    /// the registry nor the mailer to ask this itself.
+    /// Its one caller is
+    /// [`NativeCtx::resolve_live`](crate::actor::native::NativeCtx::resolve_live),
+    /// the single public spelling a capability uses.
     pub(crate) fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {

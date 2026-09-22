@@ -242,35 +242,12 @@ impl NativeActor for LifecycleCapability {
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<LifecycleCapabilityState, BootError> {
         let LifecycleConfig { advance_timeout_millis } = config;
-        let LifecycleParams { graph, initial_subscribers } = params;
+        let LifecycleParams { graph } = params;
         let current_state = graph.start();
         let mailer = ctx.mailer();
-        let mut subscribers: BTreeMap<KindId, BTreeSet<AnyActorRef>> = BTreeMap::new();
-        for (stage, mailbox) in initial_subscribers {
-            // Reject unknown-stage subscriptions at boot rather than
-            // silently dropping mail at runtime — ADR-0082 §7's
-            // fail-fast contract applies to compile-site config too.
-            if graph.state(stage).is_none() && !graph.is_terminal(stage) {
-                return Err(BootError::Other(
-                    format!(
-                        "aether.lifecycle: initial subscriber references stage {stage:?} not \
-                         declared by graph"
-                    )
-                    .into(),
-                ));
-            }
-
-            // A params-borne id is a position like any other (ADR-0230):
-            // prove it here, in the loop that already fail-fasts, so the
-            // table holds only references.
-            let subscriber = ctx
-                .resolve_live(mailbox)
-                .map_err(|error| BootError::Other(format!("aether.lifecycle: initial subscriber {error}").into()))?;
-            subscribers.entry(stage).or_default().insert(subscriber);
-        }
         Ok(LifecycleCapabilityState {
             graph,
-            subscribers,
+            subscribers: BTreeMap::new(),
             current_state,
             terminal_reached: false,
             quit_pending: false,
