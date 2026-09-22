@@ -25,28 +25,35 @@ pub struct EditorShell {
 }
 
 impl EditorShell {
-    /// The proof the shell was handed for a routed position, or `None` with a
-    /// warning when the table names a position no region ever announced.
-    fn proof(&self, target: MailboxId) -> Option<AnyActorRef> {
-        let held = self.regions.iter().copied().find(|reference| reference.id() == target);
-        if held.is_none() {
+    /// Send `payload` to a routed position through the proof the shell was
+    /// handed for it, warning and dropping when the table names a position no
+    /// region ever announced.
+    ///
+    /// Every send the shell makes goes through here, because this is the one
+    /// place a proof is unwrapped back to a position, and one place is the
+    /// most that may exist: the inherit-by-id send still takes a `MailboxId`,
+    /// so the reference has to be spent to call it. Issue #6304 narrows that
+    /// signature to `AnyActorRef`, and this `reference.id()` goes with it —
+    /// the reference is then handed over whole and nothing else here moves.
+    fn send_proven<K: Kind>(&self, ctx: &mut WasmCtx<'_>, target: MailboxId, payload: &K) {
+        let Some(reference) = self.regions.iter().copied().find(|reference| reference.id() == target) else {
             tracing::warn!(
                 target: "aether_kit_widget_editor",
                 position = target.0,
                 "routed to a position no region announced; dropping the input",
             );
-        }
-        held
+            return;
+        };
+
+        ctx.send_to(reference.id(), payload);
     }
 
     fn prime_focus(&self, ctx: &mut WasmCtx<'_>, transition: Option<RegionFocusTransition>) {
         let Some(target) = transition.and_then(|transition| transition.next) else {
             return;
         };
-        if self.routing.target_accepts(target, RegionInputLane::Modifiers)
-            && let Some(reference) = self.proof(target)
-        {
-            ctx.send_to(reference.id(), &self.routing.cached_modifiers());
+        if self.routing.target_accepts(target, RegionInputLane::Modifiers) {
+            self.send_proven(ctx, target, &self.routing.cached_modifiers());
         }
     }
 
@@ -58,8 +65,8 @@ impl EditorShell {
         payload: &K,
     ) {
         self.prime_focus(ctx, focus);
-        if let Some(reference) = target.and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), payload);
+        if let Some(target) = target {
+            self.send_proven(ctx, target, payload);
         }
     }
 }
@@ -130,8 +137,8 @@ impl WasmActor for EditorShell {
 
     #[handler::single]
     fn on_mouse_button_release(&mut self, ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
-        if let Some(reference) = self.routing.pointer_release(release).and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &release);
+        if let Some(target) = self.routing.pointer_release(release) {
+            self.send_proven(ctx, target, &release);
         }
     }
 
@@ -143,18 +150,18 @@ impl WasmActor for EditorShell {
     #[handler::single]
     fn on_mouse_move(&mut self, ctx: &mut WasmCtx<'_>, moved: MouseMove) {
         let route = self.routing.pointer_motion(moved);
-        if let Some(exited) = route.exited.and_then(|exited| self.proof(exited)) {
-            ctx.send_to(exited.id(), &moved);
+        if let Some(exited) = route.exited {
+            self.send_proven(ctx, exited, &moved);
         }
-        if let Some(reference) = route.target.and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &moved);
+        if let Some(target) = route.target {
+            self.send_proven(ctx, target, &moved);
         }
     }
 
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
-        if let Some(reference) = self.routing.wheel(wheel).and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &wheel);
+        if let Some(target) = self.routing.wheel(wheel) {
+            self.send_proven(ctx, target, &wheel);
         }
     }
 
@@ -172,22 +179,22 @@ impl WasmActor for EditorShell {
 
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
-        if let Some(reference) = self.routing.text_input_target().and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &input);
+        if let Some(target) = self.routing.text_input_target() {
+            self.send_proven(ctx, target, &input);
         }
     }
 
     #[handler::single]
     fn on_ime_preedit(&mut self, ctx: &mut WasmCtx<'_>, preedit: ImePreedit) {
-        if let Some(reference) = self.routing.ime_preedit_target().and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &preedit);
+        if let Some(target) = self.routing.ime_preedit_target() {
+            self.send_proven(ctx, target, &preedit);
         }
     }
 
     #[handler::single]
     fn on_modifiers(&mut self, ctx: &mut WasmCtx<'_>, modifiers: Modifiers) {
-        if let Some(reference) = self.routing.modifiers(modifiers).and_then(|target| self.proof(target)) {
-            ctx.send_to(reference.id(), &modifiers);
+        if let Some(target) = self.routing.modifiers(modifiers) {
+            self.send_proven(ctx, target, &modifiers);
         }
     }
 }
