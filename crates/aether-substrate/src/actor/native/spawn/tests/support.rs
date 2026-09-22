@@ -179,7 +179,7 @@ pub(super) fn finalized_probe(
     let identity = spawner.prepare_identity::<ActivationProbe>(Subname::Named(name), None).unwrap();
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent.self_mailbox(), correlation);
-    let deferred = parent.dispatch_arm::<SpawnOutcome, _>(
+    let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
         spawner.mailer().acquire_settlement_hold(causing_chain),
         Source::NONE,
         (),
@@ -197,7 +197,10 @@ pub(super) fn finalized_probe(
     (spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain)), dispatch_id, key)
 }
 
-pub(super) fn await_spawn_done(parent: &NativeBinding, dispatch_id: DispatchId) -> TaskDone<SpawnOutcome, ()> {
+pub(super) fn await_spawn_done(
+    parent: &NativeBinding,
+    dispatch_id: DispatchId,
+) -> TaskDone<SpawnOutcome<ActivationProbe>, ()> {
     let deadline = Instant::now() + Duration::from_secs(1);
     loop {
         if let Some(done) = parent.dispatch_take(dispatch_id) {

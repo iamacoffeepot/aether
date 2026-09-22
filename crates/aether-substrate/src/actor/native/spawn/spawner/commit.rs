@@ -118,7 +118,7 @@ impl Spawner {
         }
         match birth.recv_timeout(BIRTH_PATIENCE) {
             Ok(SpawnOutcome { mailbox_id, canonical_name, result }) => {
-                result.map(|()| SpawnCommit { mailbox_id, canonical_name: canonical_name.to_string() })
+                result.map(|_| SpawnCommit { mailbox_id, canonical_name: canonical_name.to_string() })
             }
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 tracing::warn!(

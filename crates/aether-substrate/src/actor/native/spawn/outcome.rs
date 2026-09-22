@@ -2,7 +2,10 @@
 //! and the authoritative fate that follows it through the ADR-0093 task
 //! completion path once the registry owner has decided.
 
+use std::fmt;
 use std::sync::Arc;
+
+use aether_actor::ActorRef;
 
 use crate::actor::native::DispatchId;
 use crate::mail::MailboxId;
@@ -19,18 +22,34 @@ pub struct SpawnReceipt {
     pub completion: DispatchId,
 }
 
-/// The authoritative fate of one staged child birth, delivered through the
-/// ADR-0093 task completion path once the registry owner has decided it.
+/// The authoritative fate of one staged child birth of an `A`, delivered
+/// through the ADR-0093 task completion path once the registry owner has
+/// decided it.
 ///
 /// Self-identifying on **both** arms: `mailbox_id` and `canonical_name` name
 /// the child the handler staged whether or not it reached Live, so a completion
 /// handler correlates the result without a hand-rolled context struct whose
-/// only job was carrying an id back. `result` is `Ok(())` after the child is
-/// published Live and catch-up is armed, and the precise [`SpawnError`]
-/// otherwise.
-#[derive(Debug)]
-pub struct SpawnOutcome {
+/// only job was carrying an id back. `result` is the precise [`SpawnError`] on
+/// a refused birth. Its `Ok` arm is the ADR-0230 proof: the child's
+/// [`ActorRef<A>`], minted once by the registry after the child is published
+/// Live and catch-up is armed. A parent that keeps or mails its child holds
+/// that reference and sends through `ctx.to(&child)`; it never re-derives one
+/// from `mailbox_id`.
+pub struct SpawnOutcome<A> {
     pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,
-    pub result: Result<(), SpawnError>,
+    pub result: Result<ActorRef<A>, SpawnError>,
+}
+
+// By hand, because a derive would bound `A: Debug` and actor types do not
+// implement it.
+impl<A> fmt::Debug for SpawnOutcome<A> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SpawnOutcome")
+            .field("mailbox_id", &self.mailbox_id)
+            .field("canonical_name", &self.canonical_name)
+            .field("result", &self.result)
+            .finish()
+    }
 }

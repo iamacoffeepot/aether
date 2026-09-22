@@ -36,15 +36,15 @@ pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     binding: Arc<NativeBinding>,
     slots: Box<ActorSlots>,
     state: A::State,
-    finalizer: Option<Arc<NativeSpawnFinalizer>>,
+    finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
     /// The staging site's ADR-0168 §3 declaration, carried to the activation
     /// home so `wire` can attach a birth-completing effect to whatever chain
     /// it names.
     chain: EffectChain,
 }
 
-pub(super) struct NativeSpawnFinalizer {
-    state: Mutex<Option<NativeSpawnFinalizerState>>,
+pub(super) struct NativeSpawnFinalizer<A> {
+    state: Mutex<Option<NativeSpawnFinalizerState<A>>>,
     retained: Mutex<Vec<(MailId, MailId)>>,
     mailer: Arc<Mailer>,
 }
@@ -52,19 +52,19 @@ pub(super) struct NativeSpawnFinalizer {
 /// Where one birth's authoritative fate is delivered.
 ///
 /// A handler-staged child completes into its parent actor's mailbox as the
-/// ADR-0093 `TaskDone<SpawnOutcome, _>`. A post-seal external birth has no
+/// ADR-0093 `TaskDone<SpawnOutcome<A>, _>`. A post-seal external birth has no
 /// parent actor — its caller is an embedder thread reaching in through
 /// `PassiveChassis::spawn_actor` — so it has no mailbox to receive that, and
 /// completes into a channel that thread is blocked on instead. The same
 /// two-audience split `RegistryBatchCompletionSink` draws for owner batches
 /// one layer up: actors get mail, external threads get a channel.
-pub(super) enum SpawnCompletionSink {
-    Deferred(DeferredCompletion<SpawnOutcome>),
-    Channel(crossbeam_channel::Sender<SpawnOutcome>),
+pub(super) enum SpawnCompletionSink<A> {
+    Deferred(DeferredCompletion<SpawnOutcome<A>>),
+    Channel(crossbeam_channel::Sender<SpawnOutcome<A>>),
 }
 
-impl SpawnCompletionSink {
-    fn complete(self, outcome: SpawnOutcome) {
+impl<A: 'static> SpawnCompletionSink<A> {
+    fn complete(self, outcome: SpawnOutcome<A>) {
         match self {
             Self::Deferred(completion) => completion.complete(outcome),
             Self::Channel(sender) => drop(sender.send(outcome)),
@@ -80,21 +80,21 @@ struct ParentLink {
     child: Weak<NativeBinding>,
 }
 
-struct NativeSpawnFinalizerState {
+struct NativeSpawnFinalizerState<A> {
     parent: Option<ParentLink>,
-    completion: SpawnCompletionSink,
+    completion: SpawnCompletionSink<A>,
     /// The staged child's identity, carried onto **both** arms of the
     /// [`SpawnOutcome`] so a rejection names the birth it belongs to.
     mailbox_id: MailboxId,
     canonical_name: Arc<str>,
 }
 
-impl NativeSpawnFinalizer {
+impl<A: 'static> NativeSpawnFinalizer<A> {
     /// A handler-staged child birth: the parent holds a local reservation key
     /// for it and receives the outcome as an ADR-0093 `TaskDone`.
     pub(super) fn parented(
         parent_reservation: ParentReservation,
-        completion: DeferredCompletion<SpawnOutcome>,
+        completion: DeferredCompletion<SpawnOutcome<A>>,
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
         child: Weak<NativeBinding>,
@@ -113,7 +113,7 @@ impl NativeSpawnFinalizer {
     /// it, and the embedder thread that submitted it is blocked on `outcome`
     /// until this finalizer decides.
     pub(super) fn external(
-        outcome: crossbeam_channel::Sender<SpawnOutcome>,
+        outcome: crossbeam_channel::Sender<SpawnOutcome<A>>,
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
         mailer: Arc<Mailer>,
@@ -123,7 +123,7 @@ impl NativeSpawnFinalizer {
 
     fn new(
         parent: Option<ParentLink>,
-        completion: SpawnCompletionSink,
+        completion: SpawnCompletionSink<A>,
         mailbox_id: MailboxId,
         canonical_name: Arc<str>,
         mailer: Arc<Mailer>,
@@ -167,6 +167,9 @@ impl NativeSpawnFinalizer {
         });
     }
 
+    /// Complete the birth `Ok`. Called only from the activation's catch-up
+    /// suffix, which the owner runs after it has published the child's `Live`
+    /// route — the invariant [`Registry::spawned_child`] mints on.
     fn promote(&self) {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
@@ -180,7 +183,7 @@ impl NativeSpawnFinalizer {
         state.completion.complete(SpawnOutcome {
             mailbox_id: state.mailbox_id,
             canonical_name: state.canonical_name,
-            result: Ok(()),
+            result: Ok(Registry::spawned_child(state.mailbox_id)),
         });
     }
 }
@@ -209,7 +212,7 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
         Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, chain }
     }
 
-    pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer>) -> Self {
+    pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer<A>>) -> Self {
         self.finalizer = Some(finalizer);
         self
     }
@@ -508,7 +511,7 @@ struct LegacyLiveActivation<A: NativeActor> {
     strong_sender: Arc<mpsc::Sender<Envelope>>,
     binding: Arc<NativeBinding>,
     slot: Arc<DispatcherSlot<A>>,
-    finalizer: Option<Arc<NativeSpawnFinalizer>>,
+    finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
     failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
 }
 

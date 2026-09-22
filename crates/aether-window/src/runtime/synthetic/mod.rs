@@ -4,7 +4,7 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{Manual, runtime};
+use aether_actor::{ActorRef, Manual, runtime};
 use aether_data::MailboxId;
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
@@ -85,21 +85,21 @@ impl SyntheticWindowCapabilityState {
     /// Promote an authoritatively applied child into the live window set, or
     /// retire it and report why it could not become live. Either way the
     /// reservation's reply is sent exactly once.
-    fn publish_applied_window(&mut self, ctx: &mut NativeCtx<'_>, child: MailboxId, pending: PendingWindowCreate) {
+    fn publish_applied_window(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        child: ActorRef<SyntheticWindowInstance>,
+        pending: PendingWindowCreate,
+    ) {
         let PendingWindowCreate { window, mut reply } = pending;
-        // #6291 replaces this lookup with the reference `SpawnOutcome` will
-        // carry; until then the applied child's position is proven here.
-        let monitored = ctx
-            .resolve_live(child)
-            .map_err(|error| format!("spawned window child is not live: {error}"))
-            .and_then(|reference| {
-                ctx.monitor(reference).map_err(|error| format!("failed to monitor window child: {error:?}"))
-            });
-        let monitor = match monitored {
+        let monitor = match ctx.monitor(child.erase()) {
             Ok(monitor) => monitor,
             Err(error) => {
-                ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
-                answer(&mut reply, &CreateWindowResult::Err { error });
+                ctx.to(&child).send(&RetireWindow);
+                answer(
+                    &mut reply,
+                    &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
+                );
                 return;
             }
         };
@@ -186,13 +186,16 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler(task)]
-    fn on_window_child_spawn_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome, ()>) {
+    fn on_window_child_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>, ()>,
+    ) {
         // The birth names itself on both arms, so the reservation key comes
         // straight off the outcome rather than a context struct carrying it.
-        let child = done.output().mailbox_id;
-        let Some(mut pending) = state.pending_creates.remove(&WindowId(child.0)) else {
-            if done.output().result.is_ok() {
-                ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
+        let Some(mut pending) = state.pending_creates.remove(&WindowId(done.output().mailbox_id.0)) else {
+            if let Ok(child) = &done.output().result {
+                ctx.to(child).send(&RetireWindow);
             }
             done.release_no_reply();
             return;
@@ -202,7 +205,7 @@ impl NativeActor for SyntheticWindowCapability {
                 &mut pending.reply,
                 &CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") },
             ),
-            Ok(()) => state.publish_applied_window(ctx, child, pending),
+            Ok(child) => state.publish_applied_window(ctx, *child, pending),
         }
         done.release_no_reply();
     }

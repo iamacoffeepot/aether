@@ -3,7 +3,7 @@
   "patterns": {
     "send_to(": 28,
     "send_to_named(": 6,
-    "actor_at::<": 22,
+    "actor_at::<": 12,
     "send_envelope_tracked(": 12,
     "send_envelope_tracked_with_reply_to(": 3,
     "monitor(": 10,

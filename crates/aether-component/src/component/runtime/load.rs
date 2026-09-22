@@ -422,7 +422,7 @@ impl ComponentHostCapabilityState {
     pub(super) fn finish_spawn(
         &mut self,
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<SpawnOutcome, SpawnContext>,
+        done: TaskDone<SpawnOutcome<WasmTrampoline>, SpawnContext>,
     ) {
         match done.context().clone() {
             SpawnContext::ModuleBoot { plan, first } => self.finish_module_boot(ctx, done, *plan, *first),
@@ -435,12 +435,12 @@ impl ComponentHostCapabilityState {
     fn finish_module_boot(
         &mut self,
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<SpawnOutcome, SpawnContext>,
+        done: TaskDone<SpawnOutcome<WasmTrampoline>, SpawnContext>,
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
         let outcome = done.output();
-        let booted = outcome.result.as_ref().map(|()| outcome.mailbox_id).map_err(|error| format!("{error:?}"));
+        let booted = outcome.result.as_ref().map(|_| outcome.mailbox_id).map_err(|error| format!("{error:?}"));
         let mut pending =
             self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
         match booted {
@@ -509,7 +509,7 @@ impl ComponentHostCapabilityState {
     fn finish_requested_actor(
         &mut self,
         ctx: &mut NativeCtx<'_, ComponentHostCapability, Single>,
-        done: TaskDone<SpawnOutcome, SpawnContext>,
+        done: TaskDone<SpawnOutcome<WasmTrampoline>, SpawnContext>,
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
     ) {

@@ -44,7 +44,8 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// caller chains `after_init` and then `stage`, `stage_with`, or
     /// `continue_from` against. Those staged terminals are the only ones it
     /// has, so a handler cannot commit the birth itself; the authoritative
-    /// result arrives later as `TaskDone<SpawnOutcome, C>`. Eager commit belongs
+    /// result arrives later as `TaskDone<SpawnOutcome<C>, _>`, whose `Ok` arm
+    /// is the child's proven [`ActorRef<C>`](aether_actor::ActorRef). Eager commit belongs
     /// to the boot/embedder [`SpawnBuilder`] behind
     /// `PassiveChassis::spawn_actor` / `BuiltChassis::spawn_actor`; both
     /// builder shapes flow through the same [`crate::Spawner`].

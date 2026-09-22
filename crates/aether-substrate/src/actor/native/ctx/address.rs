@@ -69,13 +69,13 @@ macro_rules! native_sender_methods {
             )
         }
 
-        /// Address an actor by a [`MailboxId`] already in hand — the id a
-        /// `spawn_child` returned, or one a peer handed over. ADR-0099 §3:
-        /// a hosted / nested actor's id is the lineage fold, not
-        /// `hash(name)`, so it cannot be re-derived from a name; a supervisor
-        /// that tracks its children's ids addresses them through this rather
-        /// than re-resolving by name. Captures the in-flight lineage like
-        /// [`Self::actor`]. For a proven [`ActorRef`], use [`Self::to`] instead.
+        /// Address an actor by a [`MailboxId`] already in hand, with no proof
+        /// behind it. ADR-0099 §3: a hosted / nested actor's id is the lineage
+        /// fold, not `hash(name)`, so it cannot be re-derived from a name.
+        /// A spawned child is not a use: its staged birth completes with an
+        /// [`ActorRef`] on the `SpawnOutcome`'s `Ok` arm, which a supervisor
+        /// keeps and sends through [`Self::to`]. Captures the in-flight lineage
+        /// like [`Self::actor`].
         #[must_use]
         pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();

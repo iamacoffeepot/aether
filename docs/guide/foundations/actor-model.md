@@ -664,25 +664,27 @@ ctx.send_envelope_tracked(receipt.mailbox_id, Frame::ID, &frame.encode_into_byte
 The receipt says the birth was accepted locally; the registry owner applies it
 after the handler returns, and *that* result is authoritative. It arrives back
 at the spawner through the ordinary task-completion path as
-`TaskDone<SpawnOutcome, C>`, keyed by `receipt.completion` — so an apply-time
-conflict (a name another actor won first, say) surfaces as one typed failure
-rather than a silent half-spawn. A `SpawnOutcome` names itself on both arms:
+`TaskDone<SpawnOutcome<A>, C>` for a child of type `A`, keyed by
+`receipt.completion` — so an apply-time conflict (a name another actor won
+first, say) surfaces as one typed failure rather than a silent half-spawn. A
+`SpawnOutcome` names itself on both arms:
 
 ```rust
-struct SpawnOutcome {
+struct SpawnOutcome<A> {
     mailbox_id: MailboxId,
     canonical_name: Arc<str>,
-    result: Result<(), SpawnError>,
+    result: Result<ActorRef<A>, SpawnError>,
 }
 ```
 
 so a handler correlates the completion with the birth it staged straight off the
 outcome, and `C` stays `()` unless there is something the spawn genuinely does
 not know — a peer address, a channel, which leg of a multi-step plan this birth
-belongs to. A handler that must know the child is live before it reports success
-waits for that completion; one that only needs somewhere to send mail can use
-the receipt directly. Synchronous commit still exists, but only at the
-boot/embedder boundary — `BuiltChassis::spawn_actor` /
+belongs to. A handler that keeps or mails its child holds the `Ok` reference
+and sends through `ctx.to(&child)`. A handler that must know the child is live
+before it reports success waits for that completion; one that only needs
+somewhere to send mail can use the receipt directly. Synchronous commit still
+exists, but only at the boot/embedder boundary — `BuiltChassis::spawn_actor` /
 `PassiveChassis::spawn_actor` and their `.finish()` terminal, which block until
 the birth is live and hand back the `MailboxId` you can immediately address.
 

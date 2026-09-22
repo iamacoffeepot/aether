@@ -16,7 +16,7 @@ mod menu;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{Addressable, Manual, Single, runtime};
+use aether_actor::{ActorRef, Addressable, Manual, Single, runtime};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -152,6 +152,14 @@ struct PendingCreate {
     staged: Option<MailboxId>,
 }
 
+/// A window child that reached `Live`: the reference its spawn outcome proved,
+/// which every later retire is sent through, and the monitor whose notice
+/// removes the entry once the child departs.
+struct WindowChild {
+    reference: ActorRef<DesktopWindowInstance>,
+    _monitor: ActorMonitorHandle,
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum DesktopWindowLifecycle {
     Attaching,
@@ -208,7 +216,7 @@ pub struct DesktopWindowCapabilityState {
     windows: BTreeMap<WindowId, DesktopWindowState>,
     native_windows: HashMap<WindowId, Arc<Window>>,
     winit_windows: HashMap<WinitWindowId, WindowId>,
-    child_monitors: HashMap<WindowId, ActorMonitorHandle>,
+    children: HashMap<WindowId, WindowChild>,
     subscribers: WindowSubscribers,
     pending_creates: HashMap<WindowId, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
@@ -339,36 +347,31 @@ impl DesktopWindowCapabilityState {
     /// publishes; every failure retires the applied child and rolls the create
     /// back. Rollback effects go to the host-effect queue because this runs on
     /// an ordinary mail turn rather than inside a native callback.
-    fn finish_window_child_spawn(&mut self, ctx: &mut NativeCtx<'_>, outcome: &SpawnOutcome) {
+    fn finish_window_child_spawn(&mut self, ctx: &mut NativeCtx<'_>, outcome: &SpawnOutcome<DesktopWindowInstance>) {
         // The birth names itself on both arms, so the reservation key comes
         // straight off the outcome rather than a context struct carrying it.
-        let child = outcome.mailbox_id;
-        let id = WindowId(child.0);
+        let id = WindowId(outcome.mailbox_id.0);
         let Some(mut pending) = self.pending_creates.remove(&id) else {
-            if outcome.result.is_ok() {
-                ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
+            if let Ok(child) = &outcome.result {
+                ctx.to(child).send(&RetireWindow);
             }
             return;
         };
-        let effects = if let Err(error) = &outcome.result {
-            self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
-        } else {
-            // #6291 replaces this lookup with the reference `SpawnOutcome`
-            // will carry; until then the child's published position is
-            // proven here, where the outcome already says it reached `Live`.
-            let monitored = ctx
-                .resolve_live(child)
-                .map_err(|error| format!("spawned window child is not live: {error}"))
-                .and_then(|reference| {
-                    ctx.monitor(reference).map_err(|error| format!("failed to monitor window child: {error:?}"))
-                });
-            match monitored {
-                Ok(monitor) => self.promote_attached_window(ctx, id, child, monitor, &mut pending),
-                Err(reason) => {
-                    ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
-                    self.rollback_attached_create(id, &mut pending, reason)
-                }
+        let effects = match &outcome.result {
+            Err(error) => {
+                self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
             }
+            Ok(child) => match ctx.monitor(child.erase()) {
+                Ok(monitor) => self.promote_attached_window(ctx, id, *child, monitor, &mut pending),
+                Err(error) => {
+                    ctx.to(child).send(&RetireWindow);
+                    self.rollback_attached_create(
+                        id,
+                        &mut pending,
+                        format!("failed to monitor window child: {error:?}"),
+                    )
+                }
+            },
         };
         self.pending_host_effects.extend(effects);
     }
@@ -377,16 +380,16 @@ impl DesktopWindowCapabilityState {
         &mut self,
         ctx: &mut NativeCtx<'_>,
         id: WindowId,
-        child: MailboxId,
+        child: ActorRef<DesktopWindowInstance>,
         monitor: ActorMonitorHandle,
         pending: &mut PendingCreate,
     ) -> Vec<WindowHostEffect> {
         let Some(state) = self.windows.get_mut(&id) else {
             let error = format!("window {id:?} disappeared during attachment");
-            ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
+            ctx.to(&child).send(&RetireWindow);
             return self.rollback_attached_create(id, pending, error);
         };
-        self.child_monitors.insert(id, monitor);
+        self.children.insert(id, WindowChild { reference: child, _monitor: monitor });
         state.lifecycle = DesktopWindowLifecycle::Live;
         self.shutdown_when_idle = false;
         let info = state.info(id);
@@ -442,10 +445,13 @@ impl DesktopWindowCapabilityState {
             }
             return Vec::new();
         }
+        // A close with no caller retires the child through its stored
+        // reference; a child whose own departure notice already removed its
+        // entry has nothing left to retire.
         if let Some(reply) = close_reply {
             reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Ok));
-        } else {
-            ctx.actor_at::<DesktopWindowInstance>(MailboxId(id.0)).send(&RetireWindow);
+        } else if let Some(child) = self.children.get(&id) {
+            ctx.to(&child.reference).send(&RetireWindow);
         }
         self.publish(ctx, id, &WindowClosed { window: id });
         if self.windows.values().any(|window| window.lifecycle != DesktopWindowLifecycle::Attaching) {
@@ -844,7 +850,7 @@ impl NativeActor for DesktopWindowCapability {
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
-            child_monitors: HashMap::new(),
+            children: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
@@ -887,7 +893,11 @@ impl NativeActor for DesktopWindowCapability {
     }
 
     #[handler(task)]
-    fn on_window_child_spawn_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome, ()>) {
+    fn on_window_child_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<DesktopWindowInstance>, ()>,
+    ) {
         state.finish_window_child_spawn(ctx, done.output());
         done.release_no_reply();
     }
@@ -928,7 +938,7 @@ impl NativeActor for DesktopWindowCapability {
     #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
         let id = WindowId(notice.target.0);
-        if state.child_monitors.remove(&id).is_some() {
+        if state.children.remove(&id).is_some() {
             let _ = state.queue_close(id, None);
         }
         state.subscribers.purge_departed(notice);
@@ -1012,7 +1022,7 @@ mod tests {
             windows: BTreeMap::new(),
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
-            child_monitors: HashMap::new(),
+            children: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
@@ -1202,7 +1212,7 @@ mod tests {
 
         state.finish_window_child_spawn(
             &mut ctx,
-            &SpawnOutcome {
+            &SpawnOutcome::<DesktopWindowInstance> {
                 mailbox_id: MailboxId(id.0),
                 canonical_name: Arc::from("aether.window/aether.window.instance:tools"),
                 result: Err(SpawnError::OwnerClosed),

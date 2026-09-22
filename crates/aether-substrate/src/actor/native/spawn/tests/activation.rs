@@ -80,8 +80,11 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         spawner.prepare_identity::<ActivationProbe>(Subname::Named("owner-close-before-apply"), None).unwrap();
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent_id, 1);
-    let deferred =
-        parent.dispatch_arm::<SpawnOutcome, _>(mailer.acquire_settlement_hold(causing_chain), Source::NONE, ());
+    let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
+        mailer.acquire_settlement_hold(causing_chain),
+        Source::NONE,
+        (),
+    );
     let dispatch_id = deferred.dispatch_id();
     let finalizer = NativeSpawnFinalizer::parented(
         parent_reservation,
@@ -104,7 +107,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
     assert!(registry.entry(child_id).is_none(), "owner-close rejection publishes no route");
 
     let done = parent
-        .dispatch_take::<SpawnOutcome, ()>(dispatch_id)
+        .dispatch_take::<SpawnOutcome<ActivationProbe>, ()>(dispatch_id)
         .expect("owner-close finalization fills the typed deferred result");
     assert_eq!(done.output().mailbox_id, child_id, "a rejection still names the birth it belongs to");
     assert!(matches!(done.output().result, Err(SpawnError::OwnerClosed)));
@@ -259,7 +262,10 @@ fn closed_child_subname_restages_as_retired_not_in_use() {
     completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
 
     let done = await_spawn_done(&parent, dispatch_id);
-    assert!(matches!(done.output(), SpawnOutcome { mailbox_id, result: Ok(()), .. } if *mailbox_id == child_id));
+    assert!(matches!(
+        done.output(),
+        SpawnOutcome { mailbox_id, result: Ok(child), .. } if *mailbox_id == child_id && child.id() == child_id
+    ));
     done.release_no_reply();
     assert!(parent.reserve_child(key).is_none(), "Live promotion carries the same key into the live-child set");
 
