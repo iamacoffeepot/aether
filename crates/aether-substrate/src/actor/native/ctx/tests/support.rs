@@ -1,12 +1,12 @@
 //! Fixtures shared across the ctx test siblings: the stub actor the
-//! type-level asserts stand on, the resolver-flavoured peers the addressing
-//! tests send at, and the cast / request-context kinds they carry.
+//! type-level asserts stand on, the embedded peer the addressing tests send
+//! at, and the cast / request-context kinds they carry.
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 
-use aether_actor::{Addressable, CallerScope, CallerScoped, HandlesKind, Manual, Resolve};
-use aether_data::{Kind, KindId, MailboxId};
+use aether_actor::{Addressable, HandlesKind, Manual};
+use aether_data::{Kind, KindId};
 
 use crate::actor::native::{Dispatch, NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::error::BootError;
@@ -86,42 +86,6 @@ impl Addressable for EmbeddedPeer {
 }
 
 impl HandlesKind<CastOnly> for EmbeddedPeer {}
-
-pub(super) struct CurrentKeyedPeer;
-
-impl Addressable for CurrentKeyedPeer {
-    const NAMESPACE: &'static str = "test.native.current_keyed_peer";
-    type Resolver = aether_actor::Many;
-}
-
-impl HandlesKind<CastOnly> for CurrentKeyedPeer {}
-
-pub(super) struct ParentKeyed;
-
-impl Resolve for ParentKeyed {
-    type Args<'a> = &'a str;
-
-    fn resolve(caller_carry: u64, namespace: &str, name: &str) -> MailboxId {
-        <aether_actor::Many as Resolve>::resolve(caller_carry, namespace, name)
-    }
-
-    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-        key.map(|key| Self::resolve(caller_carry, namespace, key))
-    }
-}
-
-impl CallerScoped for ParentKeyed {
-    const SCOPE: CallerScope = CallerScope::Parent;
-}
-
-pub(super) struct ParentKeyedPeer;
-
-impl Addressable for ParentKeyedPeer {
-    const NAMESPACE: &'static str = "test.native.parent_keyed_peer";
-    type Resolver = ParentKeyed;
-}
-
-impl HandlesKind<CastOnly> for ParentKeyedPeer {}
 
 #[aether_data::kind(name = "test.native_request_context", partial_eq)]
 pub(super) struct NativeRequestContext {

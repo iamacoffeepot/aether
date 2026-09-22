@@ -8,7 +8,7 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Instanced, Reaches, Singleton};
+use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Reaches, Singleton};
 use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -27,8 +27,7 @@ use super::address::native_sender_methods;
 ///
 /// Issue 629 / Phase A: the legacy `peer::<A>() -> Arc<A>` accessor
 /// retired here (closes issue 628). Sibling caps communicate via mail
-/// at runtime ([`Self::actor`] / [`Self::resolve_actor`] return
-/// typed senders). Caps that genuinely need cross-thread state
+/// at runtime ([`Self::actor`] returns a typed sender). Caps that genuinely need cross-thread state
 /// access from drivers / embedders publish a handle bundle via
 /// [`Self::publish_handle`] and the consumer retrieves it through
 /// [`crate::DriverCtx::handle`].

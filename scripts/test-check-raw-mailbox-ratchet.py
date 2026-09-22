@@ -191,7 +191,7 @@ class ScannerTests(unittest.TestCase):
             "fn f(x: Actor) {\n"
             "    // mailbox_id_from_path(y); commented out, must not count\n"
             "    mailbox_id_from_path(y); // a real call\n"
-            "    <T as Trait>::send_to_named(a, b);\n"
+            "    <T as Trait>::send_envelope_detached(a, b);\n"
             "}\n"
             "#[allow(clippy::disallowed_methods)] // aether-suppression-request: legacy\n"
             "fn g() {}\n",
@@ -201,7 +201,7 @@ class ScannerTests(unittest.TestCase):
         counts = self.repo.count()
 
         self.assertEqual(counts["mailbox_id_from_path("], 1)
-        self.assertEqual(counts["send_to_named("], 1)
+        self.assertEqual(counts["send_envelope_detached("], 1)
         self.assertEqual(counts["clippy::disallowed_methods"], 1)
 
     def test_malformed_or_non_integer_baseline_is_an_operational_error(self) -> None:

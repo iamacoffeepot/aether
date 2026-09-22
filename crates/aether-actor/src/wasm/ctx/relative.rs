@@ -17,8 +17,7 @@ use crate::wasm::inline::{ChainMode, Registry};
 ///
 /// Unlike [`WasmActorMailbox`](crate::WasmActorMailbox) this carries no receiver type and no
 /// `R: HandlesKind<K>` bound — relative addressing is positional, so the
-/// target's handler set is not known at the call site (the by-id counterpart
-/// of the runtime-name `send_to_named` escape hatch). The send routes through
+/// target's handler set is not known at the call site. The send routes through
 /// the inline registry's cluster router: a cluster-member recipient (which a
 /// resolved relative always is) dispatches in place via the queue + drain,
 /// never the scheduler.

@@ -15,7 +15,7 @@ use aether_actor::{
     Addressable, AnyActorRef, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi,
     OutboundReply, ReplyMode, Singleton,
 };
-use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, KindId, MailId, MailboxId};
 
 use crate::mail::Source;
 
@@ -217,7 +217,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 }
 
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
-// `send` / `send_many` / `send_to_named` inherit this handler's
+// `send` / `send_many` inherit this handler's
 // in-flight lineage (ADR-0080 §7); `send_detached` /
 // `send_detached_to` explicitly suppress it. `shutdown` / `monitor`
 // are inherent methods on `NativeCtx` that reach into the
@@ -255,23 +255,6 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
             K::ID.0,
             bytes,
             count,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
-    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
-    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — resolves the written name by the same
-    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            mailbox_id_from_path(name).0,
-            K::ID.0,
-            &bytes,
-            1,
             self.outbound_parent(),
             self.outbound_root(),
         );

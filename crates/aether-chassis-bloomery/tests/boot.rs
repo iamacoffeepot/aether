@@ -28,7 +28,8 @@ use aether_substrate::config::ConfigSources;
 /// Await `Processed` through the mounted driver: resolve the driver's born id,
 /// spawn a probe that sends one `AwaitProcessed`, and wait thirty seconds.
 fn await_processed(built: &BuiltChassis<BloomeryChassis>, through: u64) -> Processed {
-    let driver = built.resolve_actor::<BundleDriver>("driver").expect("the driver is spawned at mount");
+    let driver =
+        built.resolve_address("aether.bloomery.driver:driver").expect("the driver is spawned at mount").mailbox_id;
     let (sink, rx) = mpsc::channel();
     built
         .spawn_actor::<Probe>(Subname::Named("probe"), (), ProbeParams { driver, through, sink })

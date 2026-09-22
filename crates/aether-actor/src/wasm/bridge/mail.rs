@@ -47,7 +47,7 @@ use crate::wasm::raw;
 /// host-side failure surfaces.
 ///
 /// Not `#[must_use]`: the public ctx surfaces (`MailSender::send`,
-/// `MailSender::send_to_named`, `OutboundReply::reply`, etc.) are
+/// `MailSender::send_detached`, `OutboundReply::reply`, etc.) are
 /// trait-defined as fire-and-forget and have no return channel for
 /// a lookup-miss status. The substrate warn-drops unknown
 /// recipients on its side, which is the diagnostic path; the guest

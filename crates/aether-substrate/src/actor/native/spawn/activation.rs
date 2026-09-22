@@ -31,7 +31,6 @@ use super::Spawner;
 pub(super) struct LegacyPreparedActivation<A: NativeActor> {
     spawner: Arc<Spawner>,
     id: MailboxId,
-    subname: String,
     sender: mpsc::Sender<Envelope>,
     binding: Arc<NativeBinding>,
     slots: Box<ActorSlots>,
@@ -195,21 +194,16 @@ impl<A: NativeActor> LegacyPreparedActivation<A> {
     /// builder step with a default: a default would be one of the three
     /// answers, and picking one silently is the shape the requirement exists
     /// to remove.
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "every argument is a distinct piece of the prepared birth; the ADR-0168 declaration is required, not defaulted"
-    )]
     pub(super) fn new(
         spawner: Arc<Spawner>,
         id: MailboxId,
-        subname: String,
         sender: mpsc::Sender<Envelope>,
         binding: Arc<NativeBinding>,
         slots: Box<ActorSlots>,
         state: A::State,
         chain: EffectChain,
     ) -> Self {
-        Self { spawner, id, subname, sender, binding, slots, state, finalizer: None, chain }
+        Self { spawner, id, sender, binding, slots, state, finalizer: None, chain }
     }
 
     pub(super) fn with_finalizer(mut self, finalizer: Arc<NativeSpawnFinalizer<A>>) -> Self {
@@ -506,7 +500,6 @@ struct LegacyLiveActivation<A: NativeActor> {
     spawner: Arc<Spawner>,
     id: MailboxId,
     token: ActivationToken,
-    subname: String,
     sender: mpsc::Sender<Envelope>,
     strong_sender: Arc<mpsc::Sender<Envelope>>,
     binding: Arc<NativeBinding>,
@@ -521,8 +514,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
         token: ActivationToken,
         failure: Arc<Mutex<Option<PreparedSpawnFailure>>>,
     ) -> Self {
-        let LegacyPreparedActivation { spawner, id, subname, sender, binding, slots, state, finalizer, chain } =
-            prepared;
+        let LegacyPreparedActivation { spawner, id, sender, binding, slots, state, finalizer, chain } = prepared;
         let slot = DispatcherSlot::new(
             Box::new(state),
             Arc::clone(&binding),
@@ -538,7 +530,6 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
             spawner,
             id,
             token,
-            subname,
             sender: sender.clone(),
             strong_sender: Arc::new(sender),
             binding,
@@ -566,7 +557,7 @@ impl<A: NativeActor> LegacyLiveActivation<A> {
 
 impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
     fn install(self: Box<Self>, bootstrap: Vec<PreparedMail>, parked: Vec<PreparedMail>) -> InstalledActivation {
-        let Self { spawner, id, token, subname, sender, strong_sender, binding, slot, finalizer, failure: _ } = *self;
+        let Self { spawner, id, token, sender, strong_sender, binding, slot, finalizer, failure: _ } = *self;
         for prepared in bootstrap.into_iter().chain(parked) {
             let PreparedMail { mail, bootstrap } = prepared;
             let t_enqueue = if bootstrap {
@@ -627,7 +618,7 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
             seize: Arc::clone(&seize_cell),
         };
 
-        spawner.actor_registry().promote_starting(id, token, strong_sender, TypeId::of::<A>(), subname);
+        spawner.actor_registry().promote_starting(id, token, strong_sender, TypeId::of::<A>());
         let slot_dyn: Arc<dyn Drainable> = slot.clone();
         let seize = SeizeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn));
         let wake = WakeHandle::new(Arc::clone(slot.state()), Arc::downgrade(&slot_dyn), spawner.wake_sink().clone());

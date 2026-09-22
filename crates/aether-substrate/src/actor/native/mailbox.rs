@@ -9,8 +9,8 @@
 //! FFI-shaped wrapper.
 //!
 //! Built via [`NativeCtx::actor`](crate::actor::native::ctx::NativeCtx) /
-//! [`NativeCtx::resolve_actor`](crate::actor::native::ctx::NativeCtx) and
-//! their init variants.
+//! [`NativeCtx::to`](crate::actor::native::ctx::NativeCtx) and their init
+//! variants.
 //! The compile-time `R: HandlesKind<K>` gate is the same as the prior
 //! parametric form: `ctx.actor::<RenderCapability>().send(&triangle)`
 //! compiles only when `RenderCapability: HandlesKind<DrawTriangle>`.
@@ -84,7 +84,7 @@ impl<'a, R> NativeActorMailbox<'a, R> {
 
     /// Not part of the public API; the per-handler
     /// [`NativeCtx`](crate::actor::native::ctx::NativeCtx)
-    /// constructors (`actor` / `resolve_actor` / `actor_at`) go through
+    /// constructors (`actor` / `to` / `actor_at`) go through
     /// here, capturing the handler's in-flight `parent` / `root` so a
     /// `send` from the returned handle inherits the caller's causal
     /// chain (ADR-0080 §7). `None`/`None` collapses to the same fresh-
@@ -241,7 +241,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// Uses this mailbox's stored per-instance id, so settlement
     /// subscription works uniformly for singleton actors
     /// (`ctx.actor::<R>()`) and instanced actors like wasm trampolines
-    /// (`ctx.resolve_actor::<R>(name)`). The compile-time
+    /// (`ctx.to(&reference)`). The compile-time
     /// `R: HandlesKind<K>` gate is the same as [`Self::send`].
     ///
     /// When the handle was built at a chassis-root edge (captured

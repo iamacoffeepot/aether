@@ -170,7 +170,7 @@ mod tests {
         // bridge with no engines cap in the picture, so it borrows the
         // test-support parentless placement rather than widening the proxy's
         // shipped ADR-0166 permissions to `root`.
-        chassis
+        let proxy_mailbox = chassis
             .spawn_actor_for_test::<FleetProxy>(
                 Subname::Named("e1"),
                 FleetProxyConfig {
@@ -187,7 +187,6 @@ mod tests {
             .finish()
             .expect("proxy spawns + connects");
 
-        let proxy_mailbox = chassis.resolve_actor::<FleetProxy>("e1").expect("proxy resolves Live");
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
         let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Addressable>::NAMESPACE);
 

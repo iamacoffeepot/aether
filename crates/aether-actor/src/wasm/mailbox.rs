@@ -15,8 +15,7 @@
 //! cannot be stored past the handler, so it can never carry a stale
 //! origin.
 //!
-//! Built via [`crate::wasm::ctx::WasmCtx::actor`] /
-//! [`crate::wasm::ctx::WasmCtx::resolve_actor`]. The compile-time
+//! Built via [`crate::wasm::ctx::WasmCtx::actor`]. The compile-time
 //! `R: HandlesKind<K>` gate is the same as the prior parametric form:
 //! `ctx.actor::<RenderCapability>().send(&triangle)` compiles only when
 //! `RenderCapability: HandlesKind<DrawTriangle>`.
@@ -30,7 +29,7 @@ use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 
 /// Phantom-typed receiver-actor handle for FFI guests, built by
-/// [`crate::wasm::WasmCtx::actor`] / [`crate::wasm::WasmCtx::resolve_actor`].
+/// [`crate::wasm::WasmCtx::actor`].
 ///
 /// Issue 1987 made it a ctx-bound transient (mirroring the native
 /// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::wasm::RelativeMailbox`]):

@@ -322,7 +322,7 @@ touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
 out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
-`send_to`, `actor`, `resolve_actor`, `resolve_embedded`, the detached family)
+`send_to`, `actor`, `to`, the detached family)
 with the marker dropped — so the helper takes `&mut Sends<'_>` and every
 handler class can call it:
 
@@ -543,18 +543,17 @@ to and never where that peer sits. Moving the caller under a nested or
 replacement host moves the route without a host lookup or a call-site change.
 
 A load name is the one thing the type cannot declare, because it is a runtime
-fact: `ctx.resolve_embedded::<Camera>("camera-1")` names a component loaded
-under an explicit `name`, or one of a `replicas` fan-out (replica 0 claims the
-bare base name, so the bare-type spelling already reaches it when the base is
-the type's own namespace). It accepts only `Addressable<Resolver = Embedded>`
-recipients; root (`One`), caller-relative (`Many`), and spawned embedded
-(`EmbeddedMany`) types describe other placements, and their keyed form is
-`ctx.resolve_actor::<R>(subname)`.
+fact. Replica 0 of a `replicas` fan-out claims the bare base name, so the
+bare-type spelling reaches it when the base is the type's own namespace; a
+component loaded under any other name is reached through the reference its load
+proved, never by folding the name at the send site.
 
-Keep `LoadResult.mailbox_id` for direct by-id addressing. `LoadResult.name` is
-the canonical rendered address for external/string addressing — `send_to_named`
-resolves one — but it is not a subname, so do not pass it to
-`resolve_embedded` or `resolve_actor`.
+`LoadResult.name` is a boundary string: the host's `resolve_address` parser, at
+the MCP, RPC, and harness boundary, is the one place text becomes a position
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
+`LoadResult.mailbox_id` is the position beside it; a native receiver proves it
+once at receipt through `ctx.resolve_live` and sends through the resulting
+reference.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one
@@ -582,17 +581,12 @@ typed methods on the mailbox handle that stand in for raw kind sends.
 (from `WindowManagerMailboxExt`), and `aether_fs::FsMailboxExt` is another.
 These name a *kind* the cap already handles; they never name a placement.
 
-Both component spellings — `ctx.actor::<Camera>()` and
-`ctx.resolve_embedded::<Camera>("camera-1")` — return the physical trampoline
-mailbox typed as `Camera`: the trampoline and its loaded guest share one
-mailbox, while the guest type supplies the compile-time mail-handling surface. Pass a name only when the
-name is a runtime fact — a `const` beside the call site holding what
-`Camera::NAMESPACE` already declares is a second naming authority nothing checks
-against the first, and the bare-type spelling exists so it has nothing to hold.
-Code with no co-hosted ctx to resolve from — a native driver, a test standing an
-address up independently — gets the same id from
-`aether_component::resolve_embedded(name)`, which folds the load name onto the
-root component host's own carry.
+`ctx.actor::<Camera>()` returns the physical trampoline mailbox typed as
+`Camera`: the trampoline and its loaded guest share one mailbox, while the guest
+type supplies the compile-time mail-handling surface. A `const` beside the call
+site holding what `Camera::NAMESPACE` already declares would be a second naming
+authority nothing checks against the first, and the bare-type spelling exists so
+it has nothing to hold.
 
 ## One or many: cardinality
 
@@ -612,20 +606,10 @@ with its `MailboxId` folding that ActorId under the parent's lineage, so two
 instances under one parent differ by subname. The case that drives this is
 sockets: a singleton listener accepts connections and spawns a session actor per
 connection with `ctx.spawn_child`
-([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one by subname,
-`ctx.resolve_actor::<SessionActor>("42")`.
-
-That `resolve_actor::<R>(key)` spelling is typed keyed addressing, not a flat
-string escape hatch. It accepts only an instanced, caller-addressable `R`, asks
-`R::Resolver` whether to select the ctx's current, root, or logical-parent
-mailbox, and calls `R::resolve(selected_mailbox.0, key)`. The built-in `Many`
-resolver selects the current actor, so a child instance resolves beneath its
-caller; another keyed resolver can deliberately select a different declared
-scope. By contrast, `send_to_named(name, payload)` has no recipient type or
-resolver: it folds `name` the way the registry folds a written name, so a
-rendered lineage path addresses its actor just as a root cap name does. Use it
-for a name you only know at runtime, never as a substitute for keyed typed
-resolution.
+([ADR-0079](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0079-instanced-actors-as-a-first-class-category.md)), then reaches a specific one through
+the reference that spawn returned, kept in its own child map. A subname is
+never folded at a send site: an instance is reached through the reference its
+spawn returned or through a `child` / `child_as` relative.
 
 `ctx.spawn_child` works on both hosts. A native capability names only the child
 type, and can spawn an `Instanced` native actor when that child declares

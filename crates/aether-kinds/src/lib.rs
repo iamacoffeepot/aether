@@ -610,8 +610,8 @@ mod control_plane {
     /// instance registered nothing at the name the compile-time resolver
     /// computes and every bare-type send to it silently missed. Suffixing
     /// from 1 also makes `replicas: 1` load exactly what an omitted field
-    /// loads, and leaves `ctx.resolve_embedded::<R>("{base}-2")` naming one
-    /// replica exactly.
+    /// loads, and leaves each later replica reached through the reference
+    /// its load proves.
     ///
     /// The rule lives here, beside the kind whose `name` field carries it,
     /// because two independent producers must agree on it byte for byte:

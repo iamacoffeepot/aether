@@ -5,8 +5,8 @@
 //! the `Bump` mails it receives and reports the count, so the probe stays
 //! observable like every other peer-routing fixture.
 
-use aether_actor::{ActorInitError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{Bump, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_test_fixtures_kinds::{Bump, SubstrateHarnessObserver, TickObserved};
 
 use super::peer_routing::ParentPeerTarget;
 
@@ -25,6 +25,6 @@ impl WasmActor for DependentProbe {
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
-        ctx.send_to_named::<TickObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &TickObserved { count: self.bumps });
+        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.bumps });
     }
 }

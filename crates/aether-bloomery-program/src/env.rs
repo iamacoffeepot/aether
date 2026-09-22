@@ -13,7 +13,7 @@ use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
 
-use aether_actor::{Addressable, MailSender, Replies, Sends};
+use aether_actor::{Addressable, CallerAddressable, Replies, Sends, Singleton};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
@@ -50,7 +50,7 @@ pub struct PendingArtifact {
 ///
 /// `mailbox` / `kind_id` / `expected_reply` are the pump's type-erased
 /// view. The request value stays `K` inside [`Self::dispatch`], which
-/// calls [`MailSender::send_to_named`].
+/// sends it to the binding's target by type.
 pub struct PendingCall {
     /// `Addressable::NAMESPACE` of the binding's target actor.
     pub mailbox: &'static str,
@@ -72,18 +72,18 @@ struct CapturedSend<A, K> {
 
 impl<A, K> DispatchBody for CapturedSend<A, K>
 where
-    A: Addressable + Replies<K>,
+    A: Singleton + CallerAddressable + Replies<K>,
     K: Kind + Send,
 {
     fn send(&self, sends: &mut Sends<'_>) {
-        sends.send_to_named(A::NAMESPACE, &self.mail);
+        sends.actor::<A>().send(&self.mail);
     }
 }
 
 impl PendingCall {
     fn new<A, K>(mail: K) -> Self
     where
-        A: Addressable + Replies<K> + 'static,
+        A: Singleton + CallerAddressable + Replies<K> + 'static,
         K: Kind + Send + 'static,
     {
         Self {
@@ -94,7 +94,7 @@ impl PendingCall {
         }
     }
 
-    /// Send the captured request through typed [`MailSender::send_to_named`].
+    /// Send the captured request to the binding's target through a typed send.
     pub fn dispatch(&self, sends: &mut Sends<'_>) {
         self.body.send(sends);
     }
@@ -151,7 +151,7 @@ impl<A: Addressable> Binding<A> {
         mail: K,
     ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
     where
-        A: Replies<K> + Unpin + 'static,
+        A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
         K: Kind + Send + Unpin + 'static,
     {
         Call::<A, K> { env: self.env, mail: Some(mail), _target: PhantomData }
@@ -210,7 +210,7 @@ struct Call<A, K> {
 
 impl<A, K> Future for Call<A, K>
 where
-    A: Addressable + Replies<K> + Unpin + 'static,
+    A: Singleton + CallerAddressable + Replies<K> + Unpin + 'static,
     K: Kind + Send + Unpin + 'static,
 {
     type Output = Result<A::Reply, Refusal>;

@@ -45,13 +45,10 @@ from pathlib import Path
 BASELINE_RELATIVE_PATH = "scripts/raw-mailbox-baseline.json"
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("send_to_named(", re.compile(r"(::|\.)send_to_named\(")),
     ("actor_at::<", re.compile(r"(::|\.)actor_at::<")),
     ("send_envelope_tracked(", re.compile(r"(::|\.)send_envelope_tracked\(")),
     ("send_envelope_tracked_with_reply_to(", re.compile(r"(::|\.)send_envelope_tracked_with_reply_to\(")),
     ("send_envelope_detached(", re.compile(r"(::|\.)send_envelope_detached\(")),
-    ("resolve_actor::<", re.compile(r"(::|\.)resolve_actor::<")),
-    ("resolve_embedded::<", re.compile(r"(::|\.)resolve_embedded::<")),
     ("mailer()", re.compile(r"(::|\.)mailer\(\)")),
     ("registry()", re.compile(r"\.registry\(\)")),
     ("mailbox_id_from_name(", re.compile(r"\bmailbox_id_from_name\(")),

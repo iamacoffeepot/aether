@@ -14,8 +14,7 @@ use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Embedded, Instanced,
-    Reaches, Resolve, Singleton,
+    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Reaches, Singleton,
 };
 use crate::reference::{ActorRef, AnyActorRef};
 use crate::wasm::bridge::mail;
@@ -277,7 +276,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     where
         A: Reaches<R>,
     {
-        self.actor_with_namespace::<R>(R::NAMESPACE)
+        self.singleton_handle::<R>()
     }
 
     /// Proven reference to a declared dependency (ADR-0230): mints an
@@ -291,7 +290,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        ActorRef::new(self.actor_with_namespace::<R>(R::NAMESPACE).mailbox_id())
+        ActorRef::new(self.singleton_handle::<R>().mailbox_id())
     }
 
     /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
@@ -306,74 +305,16 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         (self.source != NO_INBOUND_SOURCE).then(|| AnyActorRef::new(MailboxId(self.source)))
     }
 
-    /// Namespace-aware typed actor construction: the shared body behind
-    /// [`Self::actor`] (which supplies `R::NAMESPACE`) and
-    /// [`Self::resolve_embedded`] (which supplies a runtime load name). Uses
-    /// the same resolver-selected root/current/parent routing scope as
-    /// [`Self::actor`]; unlike [`Self::resolve_actor`], it does not flatten
-    /// `namespace` into a root mailbox name.
+    /// Typed singleton handle construction: the shared body behind
+    /// [`Self::actor`] and [`Self::actor_ref`]. Folds `R::NAMESPACE` under the
+    /// resolver-selected root/current/parent routing scope.
     #[must_use]
-    pub(crate) fn actor_with_namespace<R: Singleton + CallerAddressable>(
-        &self,
-        namespace: &str,
-    ) -> WasmActorMailbox<'_, R> {
+    pub(crate) fn singleton_handle<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(
-            <<R as Addressable>::Resolver as Resolve>::resolve(
-                self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
-                namespace,
-                (),
-            )
-            .0,
+            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             self.mailbox,
             self.inline,
         )
-    }
-
-    /// Multi-instance sender. Resolve a ctx-bound [`WasmActorMailbox`] from a
-    /// runtime instance key through `R`'s caller-scoped resolver, carrying
-    /// this actor's own id as the send's `from` and the inline registry the
-    /// send routes through.
-    #[must_use]
-    pub fn resolve_actor<R: Instanced + CallerAddressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), name).0,
-            self.mailbox,
-            self.inline,
-        )
-    }
-
-    /// The instance of embedded actor `R` that its host loaded under the
-    /// runtime name `name` — the keyed spelling of [`Self::actor`] for a
-    /// component whose load name is not the one its type declares (an explicit
-    /// `name` at load, or a later `{base}-{index}` replica).
-    ///
-    /// [`Embedded`] is keyless, so an embedded actor is a [`Singleton`] and
-    /// [`Self::resolve_actor`] — which addresses an [`Instanced`] recipient by
-    /// subname — cannot name one. A load name instead occupies the namespace
-    /// slot of the very fold [`Self::actor`] performs, under the same runtime
-    /// parent, so the two agree exactly when `name == R::NAMESPACE`.
-    ///
-    /// The `Resolver = Embedded` bound is the contract: root ([`One`](crate::One)),
-    /// caller-relative ([`Many`](crate::Many)), and spawned embedded
-    /// ([`EmbeddedMany`](crate::EmbeddedMany)) types describe other placements
-    /// and cannot be retyped onto this route.
-    ///
-    /// ```compile_fail
-    /// use aether_actor::{Addressable, One, WasmCtx};
-    ///
-    /// struct RootCap;
-    /// impl Addressable for RootCap {
-    ///     const NAMESPACE: &'static str = "example.root";
-    ///     type Resolver = One;
-    /// }
-    ///
-    /// fn named_root(ctx: &WasmCtx<'_>) {
-    ///     let _ = ctx.resolve_embedded::<RootCap>("example.root-1");
-    /// }
-    /// ```
-    #[must_use]
-    pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.actor_with_namespace::<R>(name)
     }
 
     /// Send through a proven [`ActorRef`]: returns a ctx-bound [`WasmActorMailbox`]

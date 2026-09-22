@@ -53,8 +53,8 @@ impl Ctx<'_, NativeCtx<'_, Erased, Manual>> {
     /// caller's, so one call site addresses both a native root cap (whose
     /// [`One`](aether_actor::One) resolver ignores the carry) and an embedded
     /// component (whose [`Embedded`](aether_actor::Embedded) resolver folds it
-    /// to the id [`resolve_embedded`](aether_component::resolve_embedded)
-    /// gives, under the component's default load name). That is why it is not
+    /// beneath the component host, under the component's default load name).
+    /// That is why it is not
     /// `ctx.actor::<R>()`, which supplies the caller's carry and therefore
     /// refuses an embedded target outright (ADR-0119 amendment).
     #[must_use = "a deferred request does nothing until `.to::<R>()` forwards it"]

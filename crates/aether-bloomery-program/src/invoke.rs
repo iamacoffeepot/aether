@@ -19,6 +19,19 @@ use crate::kinds::Detail;
 /// Journal mailbox the invocation child sends `ReadArtifact` to.
 pub const JOURNAL_NAMESPACE: &str = "aether.bloomery.journal";
 
+/// Typed root marker for [`JOURNAL_NAMESPACE`], the recipient of the
+/// generated bundle code's fetch-on-miss `ReadArtifact` send. Folds to the
+/// same root position the namespace names.
+#[doc(hidden)]
+pub struct JournalRoot;
+
+impl aether_actor::Addressable for JournalRoot {
+    const NAMESPACE: &'static str = JOURNAL_NAMESPACE;
+    type Resolver = aether_actor::One;
+}
+
+impl aether_actor::HandlesKind<aether_bloomery_kinds::ReadArtifact> for JournalRoot {}
+
 /// Run sync `P` against `invoke`. Never returns [`Invoked::Rejected`].
 #[must_use]
 pub fn invoke<P: SyncProgram>(invoke: Invoke) -> Invoked {

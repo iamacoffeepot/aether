@@ -216,9 +216,9 @@ mod sealed {
 /// A [`Resolve`] strategy that may back a declared `#[actor(depends(R))]`
 /// dependency (ADR-0230): the keyless strategies, whose candidate position
 /// the host folds without run-time data. Sealed: the only implementors are
-/// [`One`] and [`Embedded`]. A keyed strategy stays with
-/// `ctx.resolve_actor::<R>(key)`, where the caller supplies the key at run
-/// time.
+/// [`One`] and [`Embedded`]. A keyed strategy names an instance through
+/// run-time data, so its actor is reached through the reference its spawn
+/// returned rather than a declaration.
 pub trait DependencyResolver: Resolve + sealed::Sealed {
     /// The wire tag the `#[actor]` macro writes into the
     /// `InputsRecord::Dependency` record and the host reader matches on.
@@ -292,8 +292,8 @@ pub trait Addressable: Sized + Send + 'static {
     /// `caller_carry` (ADR-0099 §5), produced by delegating to the selected
     /// [`Resolver`](Self::Resolver). Declared once here, never overridden —
     /// variation lives in the chosen resolver, not in this method (ADR-0119).
-    /// `ctx.actor::<R>()` calls this with `()`; `ctx.resolve_actor::<R>(key)`
-    /// calls it with the borrowed key.
+    /// `ctx.actor::<R>()` calls this with `()`; a spawn places a keyed
+    /// instance by calling it with the borrowed subname.
     #[must_use]
     fn resolve(caller_carry: u64, args: <Self::Resolver as Resolve>::Args<'_>) -> MailboxId {
         <Self::Resolver as Resolve>::resolve(caller_carry, Self::NAMESPACE, args)
@@ -344,7 +344,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// Only keyless actors are declarable: `R: Singleton + CallerAddressable`
 /// with a [`DependencyResolver`] strategy. A keyed actor cannot be a
 /// declared dependency — which instance is meant is run-time data, and
-/// that case stays with `ctx.resolve_actor::<R>(key)`:
+/// that case is reached through the reference its spawn returned:
 ///
 /// ```compile_fail,E0277
 /// use aether_actor::{Addressable, DependsOn, Many, One};
@@ -576,27 +576,19 @@ pub trait Lifecycle<S> {
 /// Root-scoped singletons — every chassis cap, including catch-alls like
 /// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
 /// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside a
-/// parent resolves from the runtime-retained parent mailbox. For a loaded
-/// component, `ctx.actor::<R>()` selects the default load name
-/// (`R::NAMESPACE`) and `ctx.resolve_embedded::<R>(name)` supplies an explicit
-/// runtime load name to the same fold. Replica 0 claims the bare base name and
-/// the rest are `base-1`, `base-2`, …, so the bare type reaches the first and
-/// the named form reaches any particular one.
+/// parent resolves from the runtime-retained parent mailbox. A loaded
+/// component is reached by type: `ctx.actor::<R>()` folds its default load
+/// name (`R::NAMESPACE`). Replica 0 claims the bare base name and the rest
+/// are `base-1`, `base-2`, …, so the bare type reaches the first; any other
+/// replica is reached through the reference its load proved.
 ///
 /// The rendered address itself — `LoadResult.name`, e.g.
-/// `aether.component/aether.embedded:NAME` — is a path of nodes, and every
-/// string surface resolves one the same way (`mailbox_id_from_path`: the
-/// registry's name lookup, the MCP `recipient_name` surface, and
-/// `ctx.send_to_named(name, …)`), so handing a rendered address to the
-/// runtime-name escape hatch routes. `ctx.resolve_actor::<R>(key)` is
-/// different: it is a typed keyed route available only to [`Instanced`]
-/// actors, and delegates the key plus the resolver-selected current / root /
-/// parent scope to `R::resolve`, and `ctx.resolve_embedded::<R>(load_name)` is
-/// its [`Embedded`] counterpart for a component loaded under a non-default
-/// name. The id beside a rendered name
-/// (`LoadResult.mailbox_id`) skips resolution entirely: a caller already
-/// holding a proof of it sends to it directly, through the guest's
-/// `ctx.send_to(reference, &mail)` or the native `ctx.actor_at::<R>(id)`.
+/// `aether.component/aether.embedded:NAME` — is a boundary string: the host's
+/// `resolve_address` parser at the MCP, RPC, and harness boundary is the one
+/// place text becomes a position (ADR-0230). The id beside a rendered name
+/// (`LoadResult.mailbox_id`) skips resolution entirely: a native receiver
+/// proves it once at receipt through `ctx.resolve_live`, then sends through
+/// the resulting reference.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
@@ -618,65 +610,16 @@ impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = ()>>> Singleton for T {
 ///
 /// Forcing function is socket actors (ADR-0079): a singleton listener
 /// (e.g. `NetCapability`) accepts connections and spawns one
-/// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders address
-/// an instance by key through `ctx.resolve_actor::<R>(subname)`. That typed
-/// route requires [`CallerAddressable`], selects
-/// [`CallerScoped::SCOPE`] from the runtime context, then calls
-/// `R::resolve(selected_mailbox.0, subname)`; it is not the flat string
-/// addressing performed by `MailSender::send_to_named`.
+/// `SessionActor` per accepted socket via `ctx.spawn_child`. Senders reach
+/// an instance through the reference its spawn returned, or through a
+/// `child` / `child_as` relative; text never names one (ADR-0230).
 ///
 /// Mutually exclusive with [`Singleton`] at the type level. ADR-0079.
 /// Derived from the resolver (ADR-0119): a keyed [`Resolver`](Addressable::Resolver)
 /// (`Args<'a> = &'a str` — [`Many`], or [`EmbeddedMany`] for spawned
-/// siblings) makes the actor an `Instanced`, reached by
-/// `ctx.resolve_actor::<R>(subname)`. The blanket impl supplies it; nobody
-/// writes `impl Instanced`.
-///
-/// A singleton cannot use the keyed construction surface:
-///
-/// ```compile_fail
-/// use aether_actor::{Addressable, One, WasmCtx};
-///
-/// struct RootCap;
-/// impl Addressable for RootCap {
-///     const NAMESPACE: &'static str = "example.root";
-///     type Resolver = One;
-/// }
-///
-/// fn keyed_singleton(ctx: &WasmCtx<'_>) {
-///     let _ = ctx.resolve_actor::<RootCap>("instance");
-/// }
-/// ```
-///
-/// A keyed custom resolver must also declare a caller scope before a ctx can
-/// select its routing seed:
-///
-/// ```compile_fail
-/// use aether_actor::{Addressable, MailboxId, Resolve, WasmCtx};
-///
-/// struct UnscopedKeyed;
-/// impl Resolve for UnscopedKeyed {
-///     type Args<'a> = &'a str;
-///
-///     fn resolve(carry: u64, _namespace: &str, _key: &str) -> MailboxId {
-///         MailboxId(carry)
-///     }
-///
-///     fn candidate(carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-///         key.map(|key| Self::resolve(carry, namespace, key))
-///     }
-/// }
-///
-/// struct Peer;
-/// impl Addressable for Peer {
-///     const NAMESPACE: &'static str = "example.peer";
-///     type Resolver = UnscopedKeyed;
-/// }
-///
-/// fn unscoped_keyed(ctx: &WasmCtx<'_>) {
-///     let _ = ctx.resolve_actor::<Peer>("instance");
-/// }
-/// ```
+/// siblings) makes the actor an `Instanced`, reached through the reference
+/// its spawn returned. The blanket impl supplies it; nobody writes
+/// `impl Instanced`.
 pub trait Instanced: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>> {}
 impl<T: Addressable<Resolver: for<'a> Resolve<Args<'a> = &'a str>>> Instanced for T {}
 
@@ -761,7 +704,7 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// handler kind. Authors never write these by hand.
 ///
 /// Gates `ActorMailbox<'_, R, T>::send::<K>` (constructed via
-/// `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(key)`) so the compiler
+/// `ctx.actor::<R>()` or `ctx.to(&reference)`) so the compiler
 /// rejects sends to a kind the receiver doesn't handle.
 /// The single source of truth is the handler list on the actor's
 /// `impl` block; adding a `#[handler]` updates senders' compile-time
@@ -1055,7 +998,7 @@ mod tests {
         assert_eq!(
             Embedded::candidate(carry, "test.candidate.peer", Some("test.candidate.peer-1")),
             Some(Embedded::resolve(carry, "test.candidate.peer-1", ())),
-            "an embedded strategy folds a carried name in the namespace slot, like resolve_embedded",
+            "an embedded strategy folds a carried load name in the namespace slot",
         );
     }
 

@@ -22,8 +22,8 @@
 // the dispatch ABI even when the actor carries no state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, Erased, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SourceQuery, SourceReport};
+use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_test_fixtures_kinds::{SourceQuery, SourceReport, SubstrateHarnessObserver};
 
 pub struct SourceObserver;
 
@@ -46,7 +46,7 @@ impl WasmActor for SourceObserver {
         // with `log_tail` without relying on broadcast payload access.
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");
         // Broadcast to the observer for count-based assertions.
-        ctx.send_to_named::<SourceReport>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &SourceReport { mailbox_id });
+        ctx.actor::<SubstrateHarnessObserver>().send(&SourceReport { mailbox_id });
         // Reply to the harness when it sent `SourceQuery` directly (Session case).
         ctx.reply(&SourceReport { mailbox_id });
     }

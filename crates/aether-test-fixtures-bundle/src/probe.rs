@@ -59,7 +59,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{
-    ActorInitError, AssetWindow, Erased, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, AssetWindow, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -67,8 +67,8 @@ use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
-    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig,
-    SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SetRender, TextInputObserved, TickObserved,
+    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender,
+    SubstrateHarnessObserver, TextInputObserved, TickObserved,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
@@ -125,10 +125,7 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
-        ctx.send_to_named::<TickObserved>(
-            SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-            &TickObserved { count: self.tick_count },
-        );
+        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.tick_count });
         if self.tick_count == 1 {
             tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
         }
@@ -151,7 +148,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.send_to_named::<KeyObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &KeyObserved { code: key.code });
+        ctx.actor::<SubstrateHarnessObserver>().send(&KeyObserved { code: key.code });
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,
@@ -164,10 +161,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
-        ctx.send_to_named::<TextInputObserved>(
-            SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-            &TextInputObserved { text: input.text },
-        );
+        ctx.actor::<SubstrateHarnessObserver>().send(&TextInputObserved { text: input.text });
     }
 
     /// Updates the stored render state. Subsequent ticks paint the

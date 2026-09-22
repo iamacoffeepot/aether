@@ -27,16 +27,15 @@ use std::time::Instant;
 /// `ActorRegistry` as a Live entry, and that the parent-pre-loaded
 /// `after_init` mail dispatches as the child's first envelope.
 ///
-/// Tripwire: the completion arm addresses the newborn child by its rendered
-/// lineage name through `send_to_named`. That name is depth-2, so a
-/// `send_to_named` that flat-hashes its argument resolves an id nothing
-/// registered and the mail warn-drops instead of arriving (the third element
-/// of `child_received` disappears).
+/// Tripwire: the completion arm addresses the newborn child through the
+/// proof its `SpawnOutcome` carries. A completion whose reference named any
+/// position other than the registered child would warn-drop the mail instead
+/// of delivering it (the third element of `child_received` disappears).
 #[test]
 fn ctx_spawn_child_routes_through_handler() {
     use crate::actor::native::spawn::Subname;
     use crate::mail::registry::MailboxEntry;
-    use aether_actor::{HandlesKind, MailSender};
+    use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -149,12 +148,9 @@ fn ctx_spawn_child_routes_through_handler() {
                 let wake = TaskCompletionWake::decode_from_bytes(payload)?;
                 let done = ctx.take_task_done::<crate::SpawnOutcome<ChildCap>, ()>(DispatchId(wake.dispatch_id))?;
                 match &done.output().result {
-                    Ok(_) => {
+                    Ok(child) => {
                         state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
-                        ctx.send_to_named::<Ping>(
-                            "test.spawn_child.parent/test.spawn_child.child:0",
-                            &Ping { tag: 44 },
-                        );
+                        ctx.to(child).send(&Ping { tag: 44 });
                     }
                     Err(crate::SpawnError::SubnameInUse { .. }) => {
                         state.failure_count.fetch_add(1, AtomicOrdering::SeqCst);

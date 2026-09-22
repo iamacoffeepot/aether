@@ -86,7 +86,7 @@ pub enum BindListenerResult {
 
 /// `aether.tcp.unbind_listener` — request the singleton
 /// `TcpCapability` to close a listener by subname. The cap
-/// resolves the listener via `chassis.resolve_actor`, mails
+/// looks the listener up in its own child map, mails
 /// `Close` to it, monitors its close, and replies once
 /// `MonitorNotice` arrives. Asynchronous reply: the response
 /// only fires after the listener's accept thread has joined
@@ -109,9 +109,8 @@ pub enum UnbindListenerResult {
 }
 
 /// `aether.tcp.list_listeners` — enumerate every live listener
-/// the singleton knows about. The cap reaches for
-/// `chassis.resolve_actors::<TcpListenerActor>()` (Phase 5)
-/// and walks the live fleet. Reply: `ListListenersResult`.
+/// the singleton knows about. The cap walks its own child map
+/// of live listeners. Reply: `ListListenersResult`.
 #[aether_data::kind(name = "aether.tcp.list_listeners", default)]
 pub struct ListListeners {}
 

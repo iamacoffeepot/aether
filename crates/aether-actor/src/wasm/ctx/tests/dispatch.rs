@@ -2,11 +2,11 @@
 //! source, the reply correlation, the reply-mode views' layout, the multi
 //! class's emit, and the relative verbs' in-place routing.
 
-use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child, recording_target};
+use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
 use crate::model::ctx::{Emit, Erased, Manual, Multi, Single};
-use crate::model::{Addressable, CallerScope, CallerScoped, Embedded, HandlesKind, Many, Resolve};
+use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
 use crate::wasm::WasmActorMailbox;
-use crate::wasm::inline::{RouteDecision, drain_cluster_queue};
+use crate::wasm::inline::RouteDecision;
 use aether_data::{MailboxId, Source, mailbox_id_from_path};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,42 +20,6 @@ impl Addressable for EmbeddedPeer {
 }
 
 impl HandlesKind<()> for EmbeddedPeer {}
-
-struct CurrentKeyedPeer;
-
-impl Addressable for CurrentKeyedPeer {
-    const NAMESPACE: &'static str = "test.wasm.current_keyed_peer";
-    type Resolver = Many;
-}
-
-impl HandlesKind<()> for CurrentKeyedPeer {}
-
-struct ParentKeyed;
-
-impl Resolve for ParentKeyed {
-    type Args<'a> = &'a str;
-
-    fn resolve(caller_carry: u64, namespace: &str, name: &str) -> MailboxId {
-        Many::resolve(caller_carry, namespace, name)
-    }
-
-    fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-        key.map(|key| Self::resolve(caller_carry, namespace, key))
-    }
-}
-
-impl CallerScoped for ParentKeyed {
-    const SCOPE: CallerScope = CallerScope::Parent;
-}
-
-struct ParentKeyedPeer;
-
-impl Addressable for ParentKeyedPeer {
-    const NAMESPACE: &'static str = "test.wasm.parent_keyed_peer";
-    type Resolver = ParentKeyed;
-}
-
-impl HandlesKind<()> for ParentKeyedPeer {}
 
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
@@ -113,54 +77,6 @@ fn ffi_ctx_layout_identical_across_modes() {
     assert_eq!(align_of::<WasmCtx<'static, EmbeddedPeer, Manual>>(), align_of::<WasmCtx<'static, Erased, Manual>>(),);
 }
 
-/// Keyed typed construction selects the recipient resolver's declared scope:
-/// built-in `Many` folds from the calling actor, while a test-only keyed
-/// resolver can fold from its logical parent. Both returned handles retain
-/// the ctx's sender and inline registry, proven by local delivery observing
-/// the current actor as its source.
-#[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise scoped routing
-#[test]
-fn keyed_actor_resolution_selects_scope_and_retains_wasm_context() {
-    let registry = Registry::new();
-    let parent = mailbox_id_from_path("test.wasm.keyed_parent");
-    let current = mailbox_id_from_path("test.wasm.keyed_parent/test.wasm.keyed_caller");
-    let current_target = CurrentKeyedPeer::resolve(current.0, "current");
-    let parent_target = ParentKeyedPeer::resolve(parent.0, "parent");
-    let current_probe = recording_target();
-    let parent_probe = recording_target();
-
-    registry.set_self_id(current.0);
-    registry.set_parent_id(parent.0);
-    registry.insert_child(
-        current_target,
-        0,
-        String::from("current"),
-        false,
-        current.0,
-        Vec::new(),
-        current_probe.actor,
-    );
-    registry.insert_child(parent_target, 0, String::from("parent"), false, parent.0, Vec::new(), parent_probe.actor);
-
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
-    let current_peer = ctx.resolve_actor::<CurrentKeyedPeer>("current");
-    let parent_peer = ctx.resolve_actor::<ParentKeyedPeer>("parent");
-
-    assert_eq!(current_peer.mailbox_id(), current_target, "Many selects the current actor's mailbox");
-    assert_eq!(parent_peer.mailbox_id(), parent_target, "the custom keyed resolver selects the logical parent");
-
-    current_peer.send(&());
-    parent_peer.send(&());
-    drain_cluster_queue(&registry, |source| {
-        move |_mail| -> u32 { panic!("keyed target unexpectedly dispatched to cluster root from {source:#x}") }
-    });
-
-    assert_eq!(current_probe.dispatches.get(), 1, "the current-scoped handle retains the inline registry");
-    assert_eq!(parent_probe.dispatches.get(), 1, "the parent-scoped handle retains the inline registry");
-    assert_eq!(current_probe.source.get(), Some(current), "the current-scoped handle retains the ctx sender");
-    assert_eq!(parent_probe.source.get(), Some(current), "the parent-scoped handle retains the ctx sender");
-}
-
 #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents() {
@@ -169,7 +85,6 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     let entry = mailbox_id_from_path("test.wasm.host/test.wasm.entry");
     let child = mailbox_id_from_path("test.wasm.host/test.wasm.entry/test.wasm.child");
     let default_entry_peer = Embedded::resolve(entry_parent.0, EmbeddedPeer::NAMESPACE, ());
-    let named_entry_peer = Embedded::resolve(entry_parent.0, "named-peer", ());
     let nested_peer = Embedded::resolve(entry.0, EmbeddedPeer::NAMESPACE, ());
     registry.set_self_id(entry.0);
     registry.set_parent_id(entry_parent.0);
@@ -188,17 +103,6 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     .expect("install default embedded peer");
     install_inline_child::<SucceedingChild>(
         &registry,
-        named_entry_peer,
-        0,
-        String::from("named-peer"),
-        false,
-        entry.0,
-        Vec::new(),
-        (),
-    )
-    .expect("install named embedded peer");
-    install_inline_child::<SucceedingChild>(
-        &registry,
         nested_peer,
         0,
         String::from("nested-peer"),
@@ -213,16 +117,13 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     let child_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
 
     let default = entry_ctx.actor::<EmbeddedPeer>();
-    let named = entry_ctx.actor_with_namespace::<EmbeddedPeer>("named-peer");
     let nested = child_ctx.actor::<EmbeddedPeer>();
     assert_eq!(default.mailbox_id(), default_entry_peer);
-    assert_eq!(named.mailbox_id(), named_entry_peer);
     assert_eq!(nested.mailbox_id(), nested_peer);
 
     default.send(&());
-    named.send(&());
     nested.send(&());
-    assert_eq!(registry.queued_len(), 3, "default, named, and nested parent-scoped sends route locally");
+    assert_eq!(registry.queued_len(), 2, "default and nested parent-scoped sends route locally");
 }
 
 /// ADR-0114 addressing amendment: a ctx self-identified as the cluster

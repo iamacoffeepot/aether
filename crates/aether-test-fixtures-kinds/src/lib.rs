@@ -21,10 +21,25 @@ use aether_bloomery_reactor::kinds::{Head, OpaqueBytes, ProgramName, Ref, Utf8Te
 use alloc::string::String;
 use alloc::vec::Vec;
 
-/// Mirror of `aether_harness_substrate::SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME`.
-/// Inlined here so wasm guests don't pull the bundle (`std`-bound)
-/// into the FFI build.
-pub const SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME: &str = "aether.substrate_harness.observer";
+/// Typed root marker for the substrate harness's observer mailbox, the
+/// sink the fixtures report to through
+/// `ctx.actor::<SubstrateHarnessObserver>().send(&report)`. Its `NAMESPACE`
+/// mirrors `aether_harness_substrate::SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME`;
+/// it lives here so wasm guests don't pull the harness (`std`-bound) into the
+/// FFI build.
+///
+/// The blanket `HandlesKind<K>` is honest: the harness registers the observer
+/// as an inline closure that records every kind it receives. On a chassis that
+/// registers no observer (headless, `FleetHarness`) the send warn-drops, which
+/// is why the fixtures do not declare it as a dependency.
+pub struct SubstrateHarnessObserver;
+
+impl aether_actor::Addressable for SubstrateHarnessObserver {
+    const NAMESPACE: &'static str = "aether.substrate_harness.observer";
+    type Resolver = aether_actor::One;
+}
+
+impl<K: aether_data::Kind> aether_actor::HandlesKind<K> for SubstrateHarnessObserver {}
 
 /// Broadcast payload emitted on each tick. Structured-shaped — schema
 /// rides in the wasm's `aether.kinds` custom section, so the harness's

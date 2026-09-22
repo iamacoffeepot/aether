@@ -27,7 +27,7 @@ use std::time::Instant;
 ///
 /// Asserts:
 ///   1. Grandchild's `MailboxId` is `Live` in the registry.
-///   2. `chassis.resolve_actor::<Grandchild>(name)` resolves it.
+///   2. Its nested canonical name resolves to that id in the registry.
 ///   3. Grandchild's `after_init` mail dispatches as its first
 ///      envelope (received counter bumps to 1).
 ///   4. Closing the parent does NOT cascade-close the grandchild —
@@ -205,10 +205,6 @@ fn instanced_can_spawn_grandchild() {
         "grandchild should be Live in the registry under the lineage-folded id",
     );
 
-    // Issue 629 / Phase A: resolve_actor returns the address.
-    // Verify it resolves and matches the registry id.
-    let resolved = chassis.resolve_actor::<Grandchild>("only").expect("resolve_actor must find the grandchild");
-    assert_eq!(resolved, grandchild_id, "resolve_actor returns the matching MailboxId");
     assert_eq!(
         registry.lookup("test.recursive.parent:p1/test.recursive.grandchild:only"),
         Some(grandchild_id),
@@ -238,10 +234,6 @@ fn instanced_can_spawn_grandchild() {
     assert!(
         chassis.actor_registry().is_live(grandchild_id),
         "grandchild should outlive parent (no automatic cascade-close)",
-    );
-    assert!(
-        chassis.resolve_actor::<Grandchild>("only").is_some(),
-        "grandchild remains resolvable after parent's death",
     );
 
     drop(chassis);

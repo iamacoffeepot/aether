@@ -32,15 +32,13 @@
 //! with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId};
 
 use super::WasmCtx;
 use crate::mail::mailbox::Mailbox;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, HandlesKind, Instanced, Resolve, Singleton,
-};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
 use crate::reference::{ActorRef, AnyActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
@@ -86,47 +84,7 @@ impl Sends<'_> {
     /// receiver actor `R`, carrying this actor's id as the send's `from`.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        self.actor_with_namespace::<R>(R::NAMESPACE)
-    }
-
-    /// Namespace-aware typed actor construction, identical to
-    /// [`WasmCtx::actor_with_namespace`]: the shared body behind
-    /// [`Self::actor`] and [`Self::resolve_embedded`].
-    #[must_use]
-    pub(crate) fn actor_with_namespace<R: Singleton + CallerAddressable>(
-        &self,
-        namespace: &str,
-    ) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(
-            <<R as Addressable>::Resolver as Resolve>::resolve(
-                self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE),
-                namespace,
-                (),
-            )
-            .0,
-            self.mailbox,
-            self.inline,
-        )
-    }
-
-    /// Multi-instance sender, identical to [`WasmCtx::resolve_actor`]: resolve
-    /// a ctx-bound [`WasmActorMailbox`] from a runtime instance key through
-    /// `R`'s caller-scoped resolver.
-    #[must_use]
-    pub fn resolve_actor<R: Instanced + CallerAddressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), name).0,
-            self.mailbox,
-            self.inline,
-        )
-    }
-
-    /// The instance of embedded actor `R` loaded under the runtime name
-    /// `name`, identical to [`WasmCtx::resolve_embedded`]: a helper handed a
-    /// `Sends` names the same instance its caller would have named.
-    #[must_use]
-    pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.actor_with_namespace::<R>(name)
+        WasmActorMailbox::__new(self.resolve_singleton::<R>(), self.mailbox, self.inline)
     }
 
     /// Send through a proven [`ActorRef`], identical to [`WasmCtx::to`]: a
@@ -162,7 +120,8 @@ impl Sends<'_> {
         self.inline.route_or_enqueue(recipient, K::ID.0, bytes, count, chain, self.mailbox);
     }
 
-    /// The typed-recipient routing seed shared by the [`MailSender`] verbs.
+    /// The typed-recipient routing seed shared by [`Self::actor`] and the
+    /// [`MailSender`] verbs.
     fn resolve_singleton<R: Singleton + CallerAddressable>(&self) -> u64 {
         R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0
     }
@@ -188,13 +147,6 @@ impl MailSender for Sends<'_> {
     {
         let count = payloads.len() as u32;
         self.route::<K>(self.resolve_singleton::<R>(), bytemuck::cast_slice(payloads), count, ChainMode::Inherit);
-    }
-
-    // Runtime-name send escape hatch (the `MailSender::send_to_named` contract):
-    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold; a lineage address routes
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        self.route::<K>(mailbox_id_from_path(name).0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
     fn prev_correlation(&self) -> u64 {

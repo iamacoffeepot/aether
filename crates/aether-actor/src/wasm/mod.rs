@@ -17,7 +17,7 @@
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::model::ctx`].
 //!   - [`WasmActorMailbox<R>`] — actor-typed sender returned by
-//!     `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`, plus
+//!     `ctx.actor::<R>()`, plus
 //!     [`WasmActorMailboxWithContext`] for a typed request context bound to
 //!     subsequent sends.
 //!   - [`WasmActor`] trait — entry point with the `init` constructor and
