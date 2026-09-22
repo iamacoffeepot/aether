@@ -199,9 +199,9 @@ or concurrent edit.
 
 ## Hooks are defense in depth
 
-Codex hooks live in [`.codex/hooks.json`](https://github.com/iamacoffeepot/aether/blob/main/.codex/hooks.json) and
-`.codex/hooks/`; the Claude Code surface has its own set under `.claude/hooks/`,
-wired through `.claude/settings.json`. They can prepare a session worktree, warn
+The hook scripts live in `.hooks/`, shared by both agent surfaces: Codex wires
+them through [`.codex/hooks.json`](https://github.com/iamacoffeepot/aether/blob/main/.codex/hooks.json)
+and Claude Code through `.claude/settings.json`. They can prepare a session worktree, warn
 when the primary checkout becomes dirty, bind or release a session worktree, and
 check source-level guardrails such as the divider-comment and PR-body rules.
 Because hook definitions are trust-recorded, new or changed hooks may need

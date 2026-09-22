@@ -131,8 +131,9 @@ uses the nightly fuzzing toolchain.
 | `docs/adr/` | numbered architecture decisions and their status |
 | `docs/guide/` | this mdBook source |
 | `.agents/skills/` | current Codex repository workflows |
-| `.claude/skills/`, `.claude/hooks/` | the Claude Code workflows and local guardrail hooks |
-| `.codex/` | Codex MCP configuration and local guardrail hooks |
+| `.claude/skills/` | the Claude Code workflows |
+| `.codex/` | Codex MCP configuration and hook wiring |
+| `.hooks/` | local guardrail hook scripts, wired by `.claude/settings.json` and `.codex/hooks.json` |
 | `.github/workflows/` | hosted CI, review, dogfood, reconciliation, and release jobs |
 | `scripts/` | developer/operator helpers, including the MCP tunnel |
 | `fuzz/` | isolated nightly fuzz targets |
