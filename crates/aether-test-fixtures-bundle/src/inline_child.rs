@@ -83,10 +83,9 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Erased, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor, WasmCtx,
-    WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, AnyActorRef, Erased, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
+    WasmCtx, WasmInitCtx, actor,
 };
-use aether_data::MailboxId;
 use aether_test_fixtures_kinds::{
     Bump, CONFIGURED_CHILD_INITIAL, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT,
     InlineConfiguredChildConfig, InlineEcho, InlineProbe, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
@@ -122,8 +121,8 @@ impl WasmActor for InlineParent {
     }
 
     /// ADR-0114: co-locate an `InlineChild` under the `Named` subname
-    /// `widget`. The returned alias `MailboxId` is fire-and-forget here —
-    /// the `FleetHarness` addresses the child by its rendered lineage name.
+    /// `widget`. The returned handle is fire-and-forget here — the
+    /// `FleetHarness` addresses the child by its rendered lineage name.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         let _ = ctx.spawn_inline_child::<InlineParent, InlineChild>(Subname::Named("widget"), &());
     }
@@ -242,9 +241,9 @@ impl WasmActor for InlineStatefulChild {
 /// Load from the `inline_child` bundle with
 /// `export: Some("test.inline.despawn_parent")`.
 pub struct InlineDespawnParent {
-    /// The spawned child's alias `MailboxId` (set in `wire`), the handle
+    /// The spawned child as an erased proof (set in `wire`), the handle
     /// the `DespawnChild` handler tears down. `None` until `wire` runs.
-    child: Option<MailboxId>,
+    child: Option<AnyActorRef>,
 }
 
 #[actor]
@@ -262,7 +261,7 @@ impl WasmActor for InlineDespawnParent {
         if let Ok(child) =
             ctx.spawn_inline_child::<InlineDespawnParent, InlineDespawnChild>(Subname::Named("widget"), &())
         {
-            self.child = Some(child.id());
+            self.child = Some(child.erase());
         }
     }
 
@@ -305,13 +304,6 @@ impl WasmActor for InlineDespawnChild {
     #[handler::manual]
     fn on_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _probe: InlineProbe) {
         reply_who(ctx, INLINE_WHO_CHILD);
-    }
-
-    /// Self-despawn: tear *itself* down mid-dispatch (ADR-0114 reentrant
-    /// teardown). The child's own alias is the ctx's mailbox id.
-    #[handler::manual]
-    fn on_despawn(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _trigger: DespawnChild) {
-        let _ = ctx.despawn_inline_child(ctx.mailbox_id());
     }
 }
 
@@ -446,8 +438,8 @@ impl WasmActor for NestedLineageChild {
 
     #[handler::single]
     fn on_despawn(&mut self, ctx: &mut WasmCtx<'_>, _trigger: DespawnChild) {
-        if let Some(leaf) = ctx.child("leaf") {
-            let _ = ctx.despawn_inline_child(leaf.mailbox_id());
+        if let Some(leaf) = ctx.child_as::<NestedLineageLeaf>("leaf") {
+            let _ = ctx.despawn_inline_child(leaf.erase());
         }
     }
 }
@@ -517,8 +509,8 @@ impl WasmActor for NestedDetachedLeaf {
 /// Load from the `inline_child` bundle with
 /// `export: Some("test.inline.tag_parent")`.
 pub struct InlineTagParent {
-    /// The by-tag-spawned child's alias `MailboxId` (set in `wire`).
-    child: Option<MailboxId>,
+    /// The by-tag-spawned child as an erased proof (set in `wire`).
+    child: Option<AnyActorRef>,
     /// Whether the deliberately-unknown-tag spawn attempted in `wire`
     /// returned [`SpawnError::UnknownActorTag`] — the only correct outcome.
     unknown_tag_rejected: bool,
@@ -548,7 +540,7 @@ impl WasmActor for InlineTagParent {
         if let Ok(alias) =
             ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineStatefulChild>(), Subname::Named("tagged"), &[])
         {
-            self.child = Some(alias.id());
+            self.child = Some(alias);
         }
         self.wrong_parent_rejected = matches!(
             ctx.spawn_inline_child_by_tag(

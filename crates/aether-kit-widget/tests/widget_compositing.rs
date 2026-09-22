@@ -5,7 +5,7 @@
 //! root sender**. Unclipped baselines remain one ordered `DrawShapes`;
 //! distinct effective clips may require multiple ordered batches. These are
 //! the gate that the protocol's own
-//! logic — the filled-slot completion counter, `source_mailbox`
+//! logic — the filled-slot completion counter, `ctx.sender()`
 //! attribution, and the depth-first flatten — holds end-to-end through the
 //! real inline-cluster FIFO drain, not just in the unit tests over the
 //! `Composite` helper.

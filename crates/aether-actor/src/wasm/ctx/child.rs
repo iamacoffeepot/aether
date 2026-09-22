@@ -31,9 +31,9 @@ use crate::reference::AnyActorRef;
 ///
 /// A parent keeping children of several types erases the handle with
 /// [`Self::erase`] and keeps the [`AnyActorRef`] it yields — still a proof,
-/// minus the type. [`Self::id`] remains as the key for a positional surface
-/// (`despawn_inline_child`, a [`RelativeMailbox`](super::RelativeMailbox)
-/// hop), never as a send target: every by-id send takes a proof.
+/// minus the type, and what a send or `despawn_inline_child` takes.
+/// [`Self::id`] remains as the key for a registry lookup, never as a send or
+/// despawn target: every by-id send takes a proof.
 pub struct InlineChild<C> {
     id: MailboxId,
     /// `fn() -> C` rather than `C`: the handle owns no child state, so it must
@@ -101,18 +101,18 @@ impl<C: Addressable> InlineChild<C> {
         AnyActorRef::new(self.id)
     }
 
-    /// This child's alias [`MailboxId`] — the key a positional surface
-    /// (`despawn_inline_child`, a registry lookup) takes. A send takes
-    /// [`Self::erase`]'s proof instead.
+    /// This child's alias [`MailboxId`] — the key a registry lookup takes. A
+    /// send or `despawn_inline_child` takes [`Self::erase`]'s proof instead.
     #[must_use]
     pub const fn id(&self) -> MailboxId {
         self.id
     }
 
-    /// Whether `source` is this child — the identity check a parent makes on
-    /// `ctx.source_mailbox()` when attributing an inbound reply. Comparing
-    /// against a held handle rather than a loose stored id is what keeps a
-    /// stale-after-despawn comparison from silently matching a reused slot.
+    /// Whether `source` is this child — the identity check a parent makes
+    /// against `ctx.sender()`'s position when attributing an inbound reply.
+    /// Comparing against a held handle rather than a loose stored id is what
+    /// keeps a stale-after-despawn comparison from silently matching a reused
+    /// slot.
     #[must_use]
     pub fn matches(&self, source: MailboxId) -> bool {
         self.id == source

@@ -1020,7 +1020,7 @@ macro_rules! __export_internal {
                 };
                 // Top-level dispatch: the host threads the resolved inbound
                 // source on the `receive_p32` ABI (issue 2001), so the ctx
-                // carries it directly and `ctx.source_mailbox()` is a single
+                // carries it directly and `ctx.sender()` is a single
                 // field read — the same path the in-place drain takes. The
                 // membrane gets the same `source` so a mail routed straight to
                 // an inline-child alias (ADR-0114) hands the child its source
@@ -1736,7 +1736,7 @@ macro_rules! __export_multi_internal {
                 };
                 // Top-level dispatch: the host threads the resolved inbound
                 // source on the `receive_p32` ABI (issue 2001), so the ctx
-                // carries it directly and `ctx.source_mailbox()` is a single
+                // carries it directly and `ctx.sender()` is a single
                 // field read — the same path the in-place drain takes. The
                 // membrane gets the same `source` so a mail routed straight to
                 // an inline-child alias (ADR-0114) hands the child its source

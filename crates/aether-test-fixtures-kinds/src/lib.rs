@@ -212,9 +212,9 @@ pub const INLINE_WHO_CHILD: u32 = 2;
 
 /// ADR-0114 inline-child teardown trigger. Sent to the despawn fixture's
 /// parent (which tears down its stored child via `ctx.despawn_inline_child`)
-/// or to the child's alias (which despawns itself mid-dispatch). Carries no
-/// payload — the recipient address selects which actor tears the child
-/// down. Structured-shaped unit struct.
+/// or to the nested-lineage fixture's inline child (which tears down its
+/// leaf). Carries no payload — the recipient address selects which actor
+/// tears its child down. Structured-shaped unit struct.
 #[aether_data::kind(name = "aether.test_fixtures.despawn_child", default)]
 pub struct DespawnChild;
 
@@ -267,20 +267,20 @@ pub struct TagSpawnReport {
 /// declares `SourceObserver` as a dependency and mints the reference from that
 /// declaration (ADR-0230) — so the trigger carries no address; the forward
 /// makes the forwarder the component origin the reader's
-/// `ctx.source_mailbox()` reads back.
+/// `ctx.sender()` reads back.
 #[aether_data::kind(name = "aether.test_fixtures.send_source_query", default)]
 pub struct SendSourceQuery;
 
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
-/// `Manual`-class handler reads `ctx.source_mailbox()` and broadcasts a
+/// `Manual`-class handler reads `ctx.sender()` and broadcasts a
 /// `SourceReport` to the substrate-harness observer mailbox.
 #[aether_data::kind(name = "aether.test_fixtures.source_query", default)]
 pub struct SourceQuery;
 
 /// Issue 1958: broadcast emitted by the `source_observer` fixture after
-/// reading `ctx.source_mailbox()`. `mailbox_id` is the raw `MailboxId`
+/// reading `ctx.sender()`. `mailbox_id` is the raw `MailboxId`
 /// of the sender (`0` when the source was a Session / `EngineMailbox` /
-/// `None`, i.e. when `source_mailbox()` returned `None`).
+/// `None`, i.e. when `sender()` returned `None`).
 #[aether_data::kind(name = "aether.test_fixtures.source_report", eq)]
 pub struct SourceReport {
     pub mailbox_id: u64,
@@ -374,7 +374,7 @@ pub struct TcpLoadSnapshot {
 /// the parent drives every in-cluster addressing direction (parent → child,
 /// child → parent, child → sibling, child → self) and one cross-cluster send,
 /// and each participant records the cell it observed (did the mail arrive,
-/// what `ctx.source_mailbox()` did it read). The cross-cluster recipient is a
+/// what `ctx.sender()` did it read). The cross-cluster recipient is a
 /// declared dependency of the cluster's parent rather than an address on this
 /// kind: the parent mints its reference from that declaration (ADR-0230) and
 /// records it for the fanning-out child, so the driver is fieldless.
@@ -408,7 +408,7 @@ pub struct CollectMatrix;
 /// Issue 1977 structured matrix report — the `matrix_sweep` fixture's reply
 /// to [`CollectMatrix`]. Each `*_arrived` flag is `1` when that cell's mail
 /// was delivered (the recipient's handler ran), and each `*_source` is the
-/// raw `MailboxId` the recipient read from `ctx.source_mailbox()` for that
+/// raw `MailboxId` the recipient read from `ctx.sender()` for that
 /// cell (`0` for none). The cross-cluster cell is observed out-of-band by the
 /// separate observer component (read via `log_tail`), so it carries no field
 /// here. Structured-shaped.

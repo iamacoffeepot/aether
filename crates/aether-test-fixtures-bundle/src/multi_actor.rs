@@ -42,7 +42,7 @@ impl WasmActor for RootManager {
     /// calls within this one `receive`, which is exactly the shape
     /// issue #2503 covers (a second staged sibling spawn must not be
     /// dropped). `Subname::Counter` gives each spawn a bare counter
-    /// discriminator (`0`, `1`, …); the returned `MailboxId`s are
+    /// discriminator (`0`, `1`, …); each spawn's `Result` is
     /// fire-and-forget here.
     #[handler::single]
     fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, ping: Ping) {

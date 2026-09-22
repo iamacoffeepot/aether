@@ -2,7 +2,7 @@
 //! and the [`MailSender`] / [`OutboundReply`] / [`Emit`] impls on
 //! [`WasmCtx`].
 
-use aether_data::{Kind, MailboxId, RequestId, Source, mailbox_id_from_path};
+use aether_data::{Kind, RequestId, Source, mailbox_id_from_path};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
@@ -19,7 +19,7 @@ use crate::wasm::inline::{ChainMode, RouteDecision};
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Issue 1987: send `payload` through a stored [`Mailbox<K>`] addressing
     /// token, threading this actor's own id as the send's `from` so the
-    /// recipient's `ctx.source_mailbox()` resolves the sender and the host
+    /// recipient's `ctx.sender()` resolves the sender and the host
     /// stamps the correct origin. A `Mailbox<K>` is a pure address (it
     /// carries no origin), so the ctx supplies the "from" half — the
     /// by-token counterpart of `ctx.actor::<R>().send(&k)`. Routes through
@@ -166,14 +166,6 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
 
     fn reply_target(&self) -> Option<ReplyHandle> {
         self.sender
-    }
-
-    fn source_mailbox(&self) -> Option<MailboxId> {
-        // Issue 2687: delegate to the inherent generic accessor (the single
-        // source of truth), which the `Single` `#[fallback]` ctx also reads.
-        // The fully-qualified path resolves the inherent method, not this
-        // trait method, so there is no recursion.
-        WasmCtx::source_mailbox(self)
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {

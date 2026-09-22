@@ -102,17 +102,17 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// module — the wasm analogue of native `ctx.spawn_child::<P, C>`.
     /// `C` is one of this module's exported `Instanced` types and must
     /// declare `ChildOf<P>`; the SDK verifies that this ctx's actual actor
-    /// tag is `P`, resolves `C`'s tag, and encodes `C::Config`. Returns the new
-    /// instance's [`MailboxId`] synchronously — it is `hash(name)`
-    /// (ADR-0029) — and the instance becomes addressable at
-    /// `aether.embedded:<name>`.
+    /// tag is `P`, resolves `C`'s tag, and encodes `C::Config`. Nothing
+    /// addressable comes back: the birth completes after this call (ADR-0097
+    /// §4), so there is no live route to prove at return. The instance
+    /// becomes addressable at `aether.embedded:<name>`.
     ///
     /// Parent identity and subname validation can `Err` synchronously. A
     /// later spawn-time failure (a retired / in-use subname, or the sibling's
     /// `init` returning `Err`) is logged on the trampoline and does not come
     /// back through this `Result` (ADR-0097 §4). The spawned sibling's Source
     /// is this actor's mailbox, so its replies route here.
-    pub fn spawn_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<MailboxId, SpawnError>
+    pub fn spawn_child<P, C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<(), SpawnError>
     where
         P: WasmActor,
         C: ChildOf<P> + Instanced + WasmActor,
@@ -124,8 +124,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let type_tag = ActorTypeTag::of::<C>().0;
         let (is_counter, full_subname) = resolve_subname(subname)?;
         let config_bytes = config.encode_into_bytes();
-        let id = mail::spawn_sibling_scoped(self.mailbox, type_tag, is_counter, &full_subname, &config_bytes);
-        Ok(MailboxId(id))
+        let _ = mail::spawn_sibling_scoped(self.mailbox, type_tag, is_counter, &full_subname, &config_bytes);
+        Ok(())
     }
 
     /// ADR-0114: spawn an **inline child** — a co-located child actor that
@@ -156,8 +156,9 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// What comes back is an [`InlineChild<C>`] rather than a bare
     /// [`MailboxId`]: the call already names `C`, so the handle keeps it and
     /// [`InlineChild::send`] checks every subsequent send against `C`'s
-    /// handler set. [`InlineChild::id`] reads the alias out for a by-id
-    /// surface (`despawn_inline_child`, a slot table keyed on `MailboxId`).
+    /// handler set. [`InlineChild::erase`] yields the proof a send or
+    /// [`Self::despawn_inline_child`] takes, and [`InlineChild::id`] the key
+    /// for a registry lookup (a slot table keyed on `MailboxId`).
     pub fn spawn_inline_child<P, C>(
         &self,
         subname: Subname<'_>,
@@ -316,11 +317,12 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// ADR-0114: tear down an **inline child** spawned by
     /// [`Self::spawn_inline_child`]. Drops the child from this ctx's
     /// per-component [`Registry`] (running the child's `Drop`), so it
-    /// stops handling mail. `child` is the alias [`MailboxId`] the spawn's
-    /// [`InlineChild::id`] reads out (the registry key, the natural
-    /// handle). Returns `true` if a resident child was removed, `false` if
-    /// the alias named no inline child — idempotent, so despawning an
-    /// absent or already-gone alias is a clean `false`, not an error.
+    /// stops handling mail. `child` is the proof the spawn handed back —
+    /// [`InlineChild::erase`], [`Self::spawn_inline_child_by_tag`]'s `Ok`, or
+    /// `ctx.sender()` when the child mailed this actor. Returns `true` if a
+    /// resident child was removed, `false` if the alias named no inline
+    /// child — idempotent, so despawning an absent or already-gone alias is a
+    /// clean `false`, not an error.
     ///
     /// **The substrate alias route is retired too** (#4228): the address
     /// departs with the actor it named. The host retires the route and fans
@@ -363,7 +365,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     // The pedantic candidate lint only fires now that the body reads a
     // borrowed registry rather than mutating a crate-global static.
     #[allow(clippy::must_use_candidate)]
-    pub fn despawn_inline_child(&self, child: MailboxId) -> bool {
+    pub fn despawn_inline_child(&self, child: AnyActorRef) -> bool {
+        let child = child.id();
         // Take the resident box onto the stack, run its `unwire` through a
         // ctx addressed to its alias, then drop it; `remove` clears the
         // now-empty slot. A self-despawn (box already taken by dispatch)

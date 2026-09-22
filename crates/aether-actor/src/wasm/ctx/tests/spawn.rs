@@ -10,6 +10,7 @@ use super::{
 };
 use crate::model::Subname;
 use crate::model::ctx::{Erased, Manual};
+use crate::reference::AnyActorRef;
 use crate::wasm::__validate_inline_child_alias;
 use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::inline::compose::{InlineChildToReconstruct, reconstruct_one_child};
@@ -384,7 +385,7 @@ fn despawn_inline_child_runs_unwire() {
     assert_eq!(PROBE_WIRE_COUNT.get(), 1, "a fresh inline spawn runs the child's wire exactly once");
 
     let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x9200, &registry, NO_INBOUND_SOURCE);
-    let removed = ctx.despawn_inline_child(probe);
+    let removed = ctx.despawn_inline_child(AnyActorRef::new(probe));
     assert!(removed, "despawning a resident child returns true");
     assert_eq!(PROBE_UNWIRE_COUNT.get(), 1, "despawn runs the child's unwire exactly once");
     assert!(registry.take(probe).is_none(), "the despawned child's slot is gone");

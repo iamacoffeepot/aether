@@ -849,7 +849,7 @@ pub struct WidgetEligibilityChanged {
 /// `aether.kit.widget.open_changed` — an overlay-bearing widget opened
 /// (`open: true`) or closed (`open: false`) whatever it stands over the screen
 /// with. Reported once per edge; which widget it came from is the root's
-/// `source_mailbox` attribution.
+/// `ctx.sender()` attribution.
 ///
 /// The root answers `open: true` by granting the sender the modal pointer grab
 /// ([`crate::focus::Focus::begin_grab`]) so a press anywhere reaches the open
@@ -952,7 +952,7 @@ pub struct SetToggle {
 /// The widget set's config/style/layout/state/interaction data-down lanes and
 /// value/state events-up lanes. Events carry **no widget identity field**: the
 /// root attributes replies against the `MailboxId` recorded at spawn
-/// (`ctx.source_mailbox`), so identity stays the inline subname. Layout, focus,
+/// (`ctx.sender()`), so identity stays the inline subname. Layout, focus,
 /// hover, and external state flow down like compositing `Collect`; the root
 /// owns routing and the widget reacts.
 ///
@@ -1920,7 +1920,7 @@ pub struct VirtualListSelected {
 /// `aether.kit.widget.virtual_list.activated` — a verb bound to one row of a
 /// virtual list was pressed: `row_index` into the config's `items`,
 /// `action_index` into that row's [`RowAction`] vector. Which list it came from
-/// is the root's `source_mailbox` attribution, exactly as for
+/// is the root's `ctx.sender()` attribution, exactly as for
 /// [`VirtualListSelected`].
 ///
 /// It is not a selection. A press on a row's verb reports this and leaves the
@@ -1937,7 +1937,7 @@ pub struct VirtualListActivated {
 
 /// `aether.kit.widget.virtual_list.hover` — the row the pointer is resting on
 /// changed: `index` is into the config's `items`, or `None` once the pointer
-/// has left the rows. Which list it came from is the root's `source_mailbox`
+/// has left the rows. Which list it came from is the root's `ctx.sender()`
 /// attribution, exactly as for [`VirtualListSelected`].
 ///
 /// A list keeps its rows out of the host's hit table on purpose — the list owns
@@ -1970,7 +1970,7 @@ pub struct VirtualListHover {
 
 /// `aether.kit.widget.button.activated` — a button's value-up event, fired once
 /// per completed press-then-release-inside. Fieldless: the click carries no
-/// data, and which button clicked is the root's `source_mailbox` attribution.
+/// data, and which button clicked is the root's `ctx.sender()` attribution.
 #[aether_data::kind(name = "aether.kit.widget.button.activated")]
 pub struct ButtonActivated;
 
@@ -2006,7 +2006,7 @@ pub struct DropdownSelected {
 /// `aether.kit.widget.dropdown.hover` — the option under the pointer in the
 /// **open** list changed: `index` is into the config's `options`, or `None`
 /// once the pointer has left the list or the list has closed. Which
-/// dropdown it came from is the root's `source_mailbox` attribution, exactly as
+/// dropdown it came from is the root's `ctx.sender()` attribution, exactly as
 /// for [`DropdownSelected`].
 ///
 /// The dropdown's twin of [`VirtualListHover`], and it exists for the same

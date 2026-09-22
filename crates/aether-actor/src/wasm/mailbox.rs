@@ -46,7 +46,7 @@ pub struct WasmActorMailbox<'a, R> {
     mailbox: u64,
     /// The resolving actor's own folded [`MailboxId`] raw value —
     /// the "from" half threaded onto every send so the recipient's
-    /// `ctx.source_mailbox()` resolves who sent it, and so the host stamps the
+    /// `ctx.sender()` resolves who sent it, and so the host stamps the
     /// correct origin without an ambient per-receive cell (issue 1987). Set by
     /// the ctx-level constructors to the resolving ctx's own id.
     sender: u64,
@@ -162,7 +162,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     ///
     /// Threads the resolving actor's own id as the send's `from`
     /// (issue 1987): the host stamps it as origin (validated in-cluster),
-    /// so the recipient's `ctx.source_mailbox()` resolves the sender with
+    /// so the recipient's `ctx.sender()` resolves the sender with
     /// no ambient host cell. Inherits the handler's in-flight causal
     /// chain by default (ADR-0080 §7): the host stamps the dispatch's
     /// `parent`/`root` onto this send, so the recipient's work settles

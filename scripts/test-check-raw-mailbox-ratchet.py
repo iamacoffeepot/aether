@@ -91,21 +91,21 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(output, [])
 
     def test_added_call_site_fails_with_rise_message(self) -> None:
-        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    x.send_to(y);\n}\n")
+        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n}\n")
         self.repo.write_baseline(zero_baseline())
-        self.repo.commit("new send_to( call site")
+        self.repo.commit("new mailbox_id_from_path( call site")
 
         status, output = self.repo.run()
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `send_to(` — baseline 0, head 1 (+1)", text)
+        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_path(` — baseline 0, head 1 (+1)", text)
         self.assertIn("an old-door count may not rise during expand and migrate", text)
         self.assertIn("Raising the baseline is also a failure.", text)
 
     def test_removed_call_site_fails_naming_the_baseline_edit(self) -> None:
         baseline = zero_baseline()
-        baseline["send_to("] = 2
+        baseline["mailbox_id_from_path("] = 2
         self.repo.write("crates/example/src/lib.rs", "fn f() {}\n")
         self.repo.write_baseline(baseline)
         self.repo.commit("call sites already gone")
@@ -114,48 +114,48 @@ class ScannerTests(unittest.TestCase):
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `send_to(` — baseline 2, head 0 (-2)", text)
-        self.assertIn('Set "send_to(" to 0 in scripts/raw-mailbox-baseline.json, in this same change.', text)
+        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_path(` — baseline 2, head 0 (-2)", text)
+        self.assertIn('Set "mailbox_id_from_path(" to 0 in scripts/raw-mailbox-baseline.json, in this same change.', text)
 
     def test_absent_row_reads_as_zero_baseline(self) -> None:
         baseline = zero_baseline()
-        del baseline["monitor("]
+        del baseline["mailbox_id_from_name("]
         self.repo.write("crates/example/src/lib.rs", "fn f() {}\n")
         self.repo.write_baseline(baseline)
-        self.repo.commit("no monitor( row, no monitor( sites")
+        self.repo.commit("no mailbox_id_from_name( row, no mailbox_id_from_name( sites")
 
         status, output = self.repo.run()
         self.assertEqual(status, 0)
         self.assertEqual(output, [])
 
-        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    ctx.monitor(m);\n}\n")
-        self.repo.commit("one monitor( site with no baseline row")
+        self.repo.write("crates/example/src/lib.rs", "fn f(ctx: Ctx) {\n    mailbox_id_from_name(m);\n}\n")
+        self.repo.commit("one mailbox_id_from_name( site with no baseline row")
 
         status, output = self.repo.run()
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn("raw-mailbox ratchet: `monitor(` — baseline 0, head 1 (+1)", text)
+        self.assertIn("raw-mailbox ratchet: `mailbox_id_from_name(` — baseline 0, head 1 (+1)", text)
 
     def test_one_way_rule_fails_when_head_baseline_exceeds_base(self) -> None:
         baseline = zero_baseline()
-        baseline["send_to("] = 1
-        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    x.send_to(y);\n}\n")
+        baseline["mailbox_id_from_path("] = 1
+        self.repo.write("crates/example/src/lib.rs", "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n}\n")
         self.repo.write_baseline(baseline)
-        base_sha = self.repo.commit("base: one send_to( site, baseline 1")
+        base_sha = self.repo.commit("base: one mailbox_id_from_path( site, baseline 1")
 
-        baseline["send_to("] = 2
+        baseline["mailbox_id_from_path("] = 2
         self.repo.write(
             "crates/example/src/lib.rs",
-            "fn f(x: Actor) {\n    x.send_to(y);\n    x.send_to(z);\n}\n",
+            "fn f(x: Actor) {\n    mailbox_id_from_path(y);\n    mailbox_id_from_path(z);\n}\n",
         )
         self.repo.write_baseline(baseline)
-        self.repo.commit("head: two send_to( sites, baseline raised to match")
+        self.repo.commit("head: two mailbox_id_from_path( sites, baseline raised to match")
 
         status, output = self.repo.run("--base", base_sha)
 
         self.assertEqual(status, 1)
         text = "\n".join(output)
-        self.assertIn(f"raw-mailbox ratchet: `send_to(` — baseline raised 1 -> 2 against {base_sha}", text)
+        self.assertIn(f"raw-mailbox ratchet: `mailbox_id_from_path(` — baseline raised 1 -> 2 against {base_sha}", text)
         self.assertIn("The ratchet is one-way. Restore the baseline and drop the new call sites.", text)
 
     def test_base_without_baseline_file_bootstraps(self) -> None:
@@ -189,8 +189,8 @@ class ScannerTests(unittest.TestCase):
         self.repo.write(
             "crates/example/src/lib.rs",
             "fn f(x: Actor) {\n"
-            "    // x.send_to(y); commented out, must not count\n"
-            "    x.send_to(y); // a real call\n"
+            "    // mailbox_id_from_path(y); commented out, must not count\n"
+            "    mailbox_id_from_path(y); // a real call\n"
             "    <T as Trait>::send_to_named(a, b);\n"
             "}\n"
             "#[allow(clippy::disallowed_methods)] // aether-suppression-request: legacy\n"
@@ -200,7 +200,7 @@ class ScannerTests(unittest.TestCase):
 
         counts = self.repo.count()
 
-        self.assertEqual(counts["send_to("], 1)
+        self.assertEqual(counts["mailbox_id_from_path("], 1)
         self.assertEqual(counts["send_to_named("], 1)
         self.assertEqual(counts["clippy::disallowed_methods"], 1)
 
@@ -214,7 +214,7 @@ class ScannerTests(unittest.TestCase):
 
         self.repo.write(
             scanner.BASELINE_RELATIVE_PATH,
-            json.dumps({"note": "bad", "patterns": {"send_to(": "3"}}),
+            json.dumps({"note": "bad", "patterns": {"mailbox_id_from_path(": "3"}}),
         )
         self.repo.commit("non-integer baseline count")
 

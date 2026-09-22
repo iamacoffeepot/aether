@@ -134,7 +134,7 @@ pub struct LifecycleSubscribe {
 /// *sending* actor to a lifecycle stage broadcast, with no explicit
 /// `mailbox` field. The cap resolves the subscriber from the inbound
 /// envelope's host-stamped `Source` (ADR-0083) via
-/// `ctx.source_mailbox()`, so the subscriber cannot be forged and the
+/// `ctx.sender()`, so the subscriber cannot be forged and the
 /// op is gated to in-process actors by construction — an external
 /// session or another engine has no local mailbox and gets an `Err`
 /// reply, pushing it onto the named [`LifecycleSubscribe`] form. This
