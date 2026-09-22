@@ -6,9 +6,12 @@
 //! `Resolve` strategy; this module answers only whether the published route
 //! view holds a `Live` endpoint there, and mints the reference on `Live`
 //! alone. The `Registry::declared_dependency` caller proved the dependency
-//! `Live` at the dependent's birth instead, and mints with no read.
+//! `Live` at the dependent's birth instead, and mints with no read; the
+//! `Registry::structural` and `Registry::structural_any` callers mint
+//! host-supplied positions — the actor's own birth-bound mailbox and the
+//! stamped dispatch source — likewise with no read.
 
-use aether_actor::{__mint_actor_ref, ActorRef};
+use aether_actor::{__mint_actor_ref, __mint_any_actor_ref, ActorRef, AnyActorRef};
 
 use crate::mail::{KindId, MailboxId};
 
@@ -50,6 +53,30 @@ impl Registry {
     /// answer `None` for it.
     pub(crate) fn declared_dependency<R>(position: MailboxId) -> ActorRef<R> {
         __mint_actor_ref(position)
+    }
+
+    /// Mint a reference for the actor's own birth-bound `position`, with no
+    /// registry read (ADR-0230).
+    ///
+    /// The one caller,
+    /// [`NativeCtx::me`](crate::actor::native::NativeCtx::me),
+    /// discharges the obligation `A: Addressable`: the host bound this
+    /// position at the actor's birth, and it is `Live` for as long as a
+    /// handler can run, so the answer is already known.
+    pub(crate) fn structural<R>(position: MailboxId) -> ActorRef<R> {
+        __mint_actor_ref(position)
+    }
+
+    /// Mint an erased reference for the host-stamped dispatch `position`,
+    /// with no registry read (ADR-0230).
+    ///
+    /// The one caller,
+    /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender),
+    /// discharges the obligation its `source_mailbox` already answers: the
+    /// host stamped this position at dispatch, so the answer is already
+    /// known.
+    pub(crate) fn structural_any(position: MailboxId) -> AnyActorRef {
+        __mint_any_actor_ref(position)
     }
 }
 

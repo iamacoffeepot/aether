@@ -9,11 +9,12 @@
 
 use std::sync::Arc;
 
-use aether_actor::ReplyMode;
+use aether_actor::{AnyActorRef, ReplyMode};
 use aether_data::{Kind, MailId, MailboxId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
+use crate::mail::registry::Registry;
 use crate::mail::{Source, SourceAddr};
 use crate::runtime::trace::SettlementHold;
 
@@ -113,6 +114,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             SourceAddr::Component(id) => Some(id),
             _ => None,
         }
+    }
+
+    /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
+    /// source the host stamped, with no registry read — exactly
+    /// [`Self::source_mailbox`], lifted into a reference. `None` for mail
+    /// with no local sender, as there. Needs no actor type, so it exists
+    /// on the erased ctx too. The one caller of the registry's
+    /// `structural_any` mint.
+    #[must_use]
+    pub fn sender(&self) -> Option<AnyActorRef> {
+        self.source_mailbox().map(Registry::structural_any)
     }
 
     /// Correlation id of the request this inbound reply answers.
