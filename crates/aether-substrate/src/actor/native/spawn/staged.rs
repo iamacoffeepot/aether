@@ -23,7 +23,7 @@ use crate::runtime::effect_chain::{EffectChain, OrderingDevice};
 use crate::runtime::trace::SettlementHold;
 
 use super::reservation::ChildReservationKey;
-use super::{SpawnBuilder, SpawnError, SpawnReceipt, Subname};
+use super::{SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Subname};
 
 /// Handler-owned child builder, the only spawn surface
 /// [`NativeCtx::spawn_child`](crate::actor::native::ctx::NativeCtx::spawn_child) hands back.
@@ -93,7 +93,8 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     }
 
     /// Prepare and stage a birth with caller-owned completion context. The
-    /// authoritative result later lands as `TaskDone<SpawnOutcome, C>`.
+    /// authoritative result later lands as `TaskDone<SpawnOutcome<A>, C>`, whose
+    /// `Ok` arm is the child's `ActorRef<A>`.
     ///
     /// # Panics
     ///
@@ -122,7 +123,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             .reserve_child(key)
             .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
         let staged = spawner.build::<A>(identity, config, params, after_init)?;
-        let completion = parent_binding.dispatch_arm(
+        let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(
             spawner.mailer().acquire_settlement_hold(completion_root),
             completion_reply_to,
             context,
@@ -200,7 +201,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         // successor's own ctx no longer holds it, and the newborn's `wire`
         // hook needs it to cover a birth-completing effect (ADR-0168 §1).
         let chain = EffectChain::Held(hold.as_ref().map_or(MailId::NONE, SettlementHold::root));
-        let completion = parent_binding.dispatch_arm(hold, reply_to, context);
+        let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(hold, reply_to, context);
         let receipt = SpawnReceipt {
             mailbox_id: staged.identity.id,
             canonical_name: Arc::clone(&staged.identity.canonical_name),

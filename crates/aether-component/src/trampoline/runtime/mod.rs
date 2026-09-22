@@ -233,7 +233,7 @@ impl NativeActor for WasmTrampoline {
     fn on_sibling_spawn_done(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome, replace::SiblingSpawnContext>,
+        done: TaskDone<SpawnOutcome<WasmTrampoline>, replace::SiblingSpawnContext>,
     ) {
         state.finish_sibling_spawn(done);
     }

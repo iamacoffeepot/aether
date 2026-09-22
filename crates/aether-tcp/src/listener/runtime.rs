@@ -255,10 +255,10 @@ impl NativeActor for TcpListenerActor {
     fn on_session_spawn_done(
         _state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome, AcceptedSessionContext>,
+        done: TaskDone<SpawnOutcome<TcpSessionActor>, AcceptedSessionContext>,
     ) {
         match &done.output().result {
-            Ok(()) => {
+            Ok(_) => {
                 tracing::debug!(
                     target: "aether_tcp",
                     session = %done.context().session_name,

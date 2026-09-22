@@ -30,7 +30,7 @@ pub use aether_substrate::{KindId, Mail, Mailer};
 
 pub use aether_data::Kind;
 
-use aether_actor::runtime;
+use aether_actor::{ActorRef, runtime};
 use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
@@ -89,6 +89,9 @@ pub struct ListenerEntry {
     pub addr: String,
     pub port: u16,
     pub name: String,
+    /// The reference the listener's spawn outcome proved; `on_unbind` mails
+    /// `Close` through it.
+    pub listener: ActorRef<TcpListenerActor>,
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
@@ -111,14 +114,24 @@ pub struct PendingConnect {
     pub consumer: Option<aether_data::MailboxId>,
 }
 
-/// Which request a staged birth is answering, plus the request vocabulary its
-/// reply quotes. The child's identity rides its `SpawnOutcome`; the discriminant
-/// here selects the *reply kind* — a dial answers `ConnectResult`, a bind
-/// answers `BindListenerResult` — which no spawn result can tell you.
+/// The dial a staged session birth is answering, plus the request vocabulary
+/// its `ConnectResult` quotes. The child's identity rides its `SpawnOutcome`;
+/// the outcome's child type selects the reply kind, so a dial and a bind
+/// complete into separate handlers.
 #[derive(Clone)]
-pub enum TcpSpawnContext {
-    OutboundSession { addr: String, session_name: String, peer: String },
-    Listener { addr: String, listener_name: String, local_port: u16 },
+pub struct OutboundSessionSpawn {
+    pub addr: String,
+    pub session_name: String,
+    pub peer: String,
+}
+
+/// The bind a staged listener birth is answering, plus the request vocabulary
+/// its `BindListenerResult` quotes.
+#[derive(Clone)]
+pub struct ListenerSpawn {
+    pub addr: String,
+    pub listener_name: String,
+    pub local_port: u16,
 }
 
 fn reply_to_pending_connect<A>(ctx: &mut NativeCtx<'_, A, Manual>, owed: DeferredReply, result: &ConnectResult) {
@@ -241,11 +254,7 @@ impl NativeActor for TcpCapability {
                         )
                         .continue_from(
                             owed,
-                            TcpSpawnContext::OutboundSession {
-                                addr: addr.clone(),
-                                session_name: session_name.clone(),
-                                peer,
-                            },
+                            OutboundSessionSpawn { addr: addr.clone(), session_name: session_name.clone(), peer },
                         ) {
                         Ok(_) => {}
                         Err((error, owed)) => {
@@ -307,7 +316,7 @@ impl NativeActor for TcpCapability {
             )
             .continue_from(
                 owed,
-                TcpSpawnContext::Listener { addr: mail.addr.clone(), listener_name: subname_str.clone(), local_port },
+                ListenerSpawn { addr: mail.addr.clone(), listener_name: subname_str.clone(), local_port },
             )
         {
             owed.reply(ctx, &BindListenerResult::Err { addr: mail.addr, error: format!("spawn failed: {error:?}") });
@@ -315,55 +324,59 @@ impl NativeActor for TcpCapability {
     }
 
     #[handler(task)]
-    fn on_spawn_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<SpawnOutcome, TcpSpawnContext>) {
-        match done.context().clone() {
-            TcpSpawnContext::OutboundSession { addr, session_name, peer } => {
-                done.resolve_with(ctx, move |outcome, _| match &outcome.result {
-                    Ok(()) => ConnectResult::Ok { session_name, session_id: outcome.mailbox_id, peer },
-                    Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
-                });
-            }
-            TcpSpawnContext::Listener { addr, listener_name, local_port } => {
-                let listener_mailbox = done.output().mailbox_id;
-                if let Err(spawn_error) = &done.output().result {
-                    let error = format!("spawn failed: {spawn_error:?}");
-                    done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
-                    return;
-                }
-                // #6291 replaces this lookup with the reference `SpawnOutcome`
-                // will carry; until then the listener's position is proven
-                // here, after the outcome said it reached `Live`.
-                let monitored = ctx
-                    .resolve_live(listener_mailbox)
-                    .map_err(|error| format!("spawned listener is not live: {error}"))
-                    .and_then(|reference| {
-                        ctx.monitor(reference).map_err(|monitor_error| format!("monitor failed: {monitor_error:?}"))
-                    });
-                let monitor_handle = match monitored {
-                    Ok(handle) => handle,
-                    Err(error) => {
-                        ctx.actor_at::<TcpListenerActor>(listener_mailbox).send(&Close::default());
-                        done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
-                        return;
-                    }
-                };
+    fn on_session_spawn_done(
+        _state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<TcpSessionActor>, OutboundSessionSpawn>,
+    ) {
+        let OutboundSessionSpawn { addr, session_name, peer } = done.context().clone();
+        done.resolve_with(ctx, move |outcome, _| match &outcome.result {
+            Ok(_) => ConnectResult::Ok { session_name, session_id: outcome.mailbox_id, peer },
+            Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
+        });
+    }
 
-                state.listeners.insert(
-                    listener_mailbox,
-                    ListenerEntry {
-                        addr,
-                        port: local_port,
-                        name: listener_name.clone(),
-                        _monitor_handle: monitor_handle,
-                    },
-                );
-                done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
-                    listener_name,
-                    listener_id: listener_mailbox,
-                    local_port,
-                });
+    #[handler(task)]
+    fn on_listener_spawn_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<SpawnOutcome<TcpListenerActor>, ListenerSpawn>,
+    ) {
+        let ListenerSpawn { addr, listener_name, local_port } = done.context().clone();
+        let listener = match &done.output().result {
+            Ok(listener) => *listener,
+            Err(spawn_error) => {
+                let error = format!("spawn failed: {spawn_error:?}");
+                done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
+                return;
             }
-        }
+        };
+        let monitor_handle = match ctx.monitor(listener.erase()) {
+            Ok(handle) => handle,
+            Err(monitor_error) => {
+                ctx.to(&listener).send(&Close::default());
+                let error = format!("monitor failed: {monitor_error:?}");
+                done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
+                return;
+            }
+        };
+
+        let listener_mailbox = done.output().mailbox_id;
+        state.listeners.insert(
+            listener_mailbox,
+            ListenerEntry {
+                addr,
+                port: local_port,
+                name: listener_name.clone(),
+                listener,
+                _monitor_handle: monitor_handle,
+            },
+        );
+        done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
+            listener_name,
+            listener_id: listener_mailbox,
+            local_port,
+        });
     }
 
     /// Mail `Close` to the named listener and park the
@@ -379,8 +392,12 @@ impl NativeActor for TcpCapability {
         // Resolve listener_id from the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
-        let listener_id = state.listeners.iter().find(|(_, entry)| entry.name == mail.listener_name).map(|(id, _)| *id);
-        let Some(listener_id) = listener_id else {
+        let found = state
+            .listeners
+            .iter()
+            .find(|(_, entry)| entry.name == mail.listener_name)
+            .map(|(id, entry)| (*id, entry.listener));
+        let Some((listener_id, listener)) = found else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
                 error: "no such listener (or already closed)".into(),
@@ -405,13 +422,12 @@ impl NativeActor for TcpCapability {
             hold: ctx.acquire_settlement_hold(),
             listener_name: mail.listener_name,
         });
-        // Mail Close to the listener by its stored id. ADR-0099 §3:
-        // the listener is a spawned child, so its id is the lineage
-        // fold, not `hash(NAMESPACE:name)` — re-resolving by name
-        // would reach a flat id nothing is registered under. The cap
-        // already holds the folded id from the spawn (the
-        // `state.listeners` key), so address it directly.
-        ctx.actor_at::<TcpListenerActor>(listener_id).send(&Close::default());
+        // Mail Close through the reference the listener's spawn outcome
+        // proved. ADR-0099 §3: the listener is a spawned child, so its id
+        // is the lineage fold, not `hash(NAMESPACE:name)` — re-resolving by
+        // name would reach a flat id nothing is registered under. The cap
+        // kept the proof on the entry at spawn, so it sends through that.
+        ctx.to(&listener).send(&Close::default());
     }
 
     /// Walk the cap-local listener map and report metadata.

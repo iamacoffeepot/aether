@@ -26,6 +26,7 @@ mod module_cache;
 
 use self::module_cache::ModuleCache;
 use super::{ComponentHostCapability, LoadResult};
+use crate::trampoline::WasmTrampoline;
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
@@ -242,7 +243,7 @@ impl NativeActor for ComponentHostCapability {
     /// registers the kinds the wasm declared in its `aether.kinds`
     /// section, picks a final name (caller value > wasm's
     /// `aether.namespace` > `component_N`), spawns a
-    /// [`WasmTrampoline`](crate::trampoline::WasmTrampoline) under
+    /// [`WasmTrampoline`] under
     /// `aether.embedded:NAME`, and replies `LoadResult::Ok { mailbox_id,
     /// name, capabilities }` where `name` is the full trampoline
     /// address — agents send subsequent mail to that name.
@@ -280,7 +281,7 @@ impl NativeActor for ComponentHostCapability {
     fn on_component_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_, Self, Single>,
-        done: TaskDone<SpawnOutcome, load::SpawnContext>,
+        done: TaskDone<SpawnOutcome<WasmTrampoline>, load::SpawnContext>,
     ) {
         state.finish_spawn(ctx, done);
     }

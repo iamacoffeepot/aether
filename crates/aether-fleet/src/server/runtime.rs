@@ -1048,13 +1048,13 @@ impl NativeActor for FleetServer {
     fn on_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome, FleetSpawnContext>,
+        done: TaskDone<SpawnOutcome<FleetProxy>, FleetSpawnContext>,
     ) {
         let spawn = done.context().clone();
         let engine_id = spawn.engine_id;
         let origin = spawn.origin;
         let outcome = match &done.output().result {
-            Ok(()) => ProxySpawnOutcome::Applied(done.output().mailbox_id),
+            Ok(_) => ProxySpawnOutcome::Applied(done.output().mailbox_id),
             Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
         };
         let Some(reply) = state.settle_pending_spawn(spawn, outcome) else {

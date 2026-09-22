@@ -15,7 +15,7 @@
 //! (no dispatcher ctx), so it hands the connection to actor-owned state, fires
 //! a typed wake, and the *handler* stages the session child —
 //! `ctx.spawn_child(..).stage()` returns a receipt immediately and the
-//! authoritative result arrives later as `TaskDone<SpawnOutcome, _>`. A handler
+//! authoritative result arrives later as `TaskDone<SpawnOutcome<C>, _>`. A handler
 //! can therefore stage N births back-to-back, and all N sit in the owner queue
 //! at once. That is exactly the load this fixture exists to create, and it
 //! reaches the owner through the path production drives it through, so the
@@ -253,9 +253,9 @@ impl Dispatch<Self> for CommitParent {
         }
         if kind == TaskCompletionWake::ID {
             let wake = TaskCompletionWake::decode_from_bytes(payload)?;
-            let done = ctx.take_task_done::<SpawnOutcome, ()>(DispatchId(wake.dispatch_id))?;
+            let done = ctx.take_task_done::<SpawnOutcome<CommitChild>, ()>(DispatchId(wake.dispatch_id))?;
             match &done.output().result {
-                Ok(()) => state.succeeded += 1,
+                Ok(_) => state.succeeded += 1,
                 Err(_) => state.failed += 1,
             }
             // The discharge #4176 called a blocking contract. Without it the

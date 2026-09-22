@@ -1,13 +1,14 @@
-//! The registry's liveness read, [`Registry::is_live`], and the three mints
+//! The registry's liveness read, [`Registry::is_live`], and the four mints
 //! beside it.
 //!
-//! The callers of the gated mint outside the SDK itself. Two mint with no
+//! The callers of the gated mint outside the SDK itself. Three mint with no
 //! read: the `Registry::declared_dependency` caller proved the dependency
-//! `Live` at the dependent's birth, and the `Registry::structural_any`
-//! caller mints a host-supplied position — the stamped dispatch source.
-//! The third, `Registry::resolve_live`, is the only one that answers the
-//! liveness question itself, because the position it is handed arrived in a
-//! payload and nothing upstream proved it.
+//! `Live` at the dependent's birth, the `Registry::structural_any` caller
+//! mints a host-supplied position — the stamped dispatch source — and the
+//! `Registry::spawned_child` caller mints a staged child whose `Live` route
+//! the owner has just published. The fourth, `Registry::resolve_live`, is the
+//! only one that answers the liveness question itself, because the position
+//! it is handed arrived in a payload and nothing upstream proved it.
 
 use core::fmt;
 
@@ -73,6 +74,20 @@ impl Registry {
         __mint_actor_ref(position)
     }
 
+    /// Mint a reference for a staged child birth's `position`, with no
+    /// registry read (ADR-0230 section 3's spawned-child door).
+    ///
+    /// The one caller is the native spawn finalizer's `promote`, which runs
+    /// inside the catch-up suffix the registry owner calls only after it has
+    /// published the child's `Live` route. The answer is already known, so a
+    /// read would repeat what the owner just decided — exactly as for
+    /// [`Self::declared_dependency`]. The rejection path never reaches it: a
+    /// refused birth completes with its [`SpawnError`](crate::actor::native::SpawnError)
+    /// and mints nothing.
+    pub(crate) fn spawned_child<A>(position: MailboxId) -> ActorRef<A> {
+        __mint_actor_ref(position)
+    }
+
     /// Mint an erased reference for the host-stamped dispatch `position`,
     /// with no registry read (ADR-0230).
     ///
@@ -93,9 +108,10 @@ impl Registry {
     /// Prove a `position` that arrived in a payload (ADR-0230 section 3's
     /// payload-borne-id door), or say why it cannot be proven.
     ///
-    /// The module's first mint that performs a read. The other two discharge
-    /// an obligation something upstream already answered — a refused birth,
-    /// a host-stamped dispatch source — whereas a position carried in a kind
+    /// The module's first mint that performs a read. The other three
+    /// discharge an obligation something upstream already answered — a
+    /// refused birth, a host-stamped dispatch source, a published child
+    /// route — whereas a position carried in a kind
     /// field is a position and nothing more, so the only authority on whether
     /// it is occupied is this view. The read is the same published-route walk
     /// [`Self::entry`] takes, so a proof and a dispatch agree by construction

@@ -147,9 +147,9 @@ fn ctx_spawn_child_routes_through_handler() {
             }
             if kind == TaskCompletionWake::ID {
                 let wake = TaskCompletionWake::decode_from_bytes(payload)?;
-                let done = ctx.take_task_done::<crate::SpawnOutcome, ()>(DispatchId(wake.dispatch_id))?;
+                let done = ctx.take_task_done::<crate::SpawnOutcome<ChildCap>, ()>(DispatchId(wake.dispatch_id))?;
                 match &done.output().result {
-                    Ok(()) => {
+                    Ok(_) => {
                         state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
                         ctx.send_to_named::<Ping>(
                             "test.spawn_child.parent/test.spawn_child.child:0",

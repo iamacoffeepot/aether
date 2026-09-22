@@ -216,7 +216,7 @@ impl Spawner {
     pub(in crate::actor::native::spawn) fn prepare_commit<A>(
         self: &Arc<Self>,
         staged: StagedActor<A>,
-        finalizer: Option<Arc<NativeSpawnFinalizer>>,
+        finalizer: Option<Arc<NativeSpawnFinalizer<A>>>,
         chain: EffectChain,
     ) -> PreparedSpawnCommit
     where

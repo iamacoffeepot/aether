@@ -24,7 +24,7 @@
 // Parent-level items this module names. `HttpServerConfig` is named by
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
-use super::{HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
+use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
 use aether_actor::{Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
@@ -284,12 +284,12 @@ impl NativeActor for HttpServerCapability {
     fn on_shard_spawn_done(
         state: &mut Self::State,
         _ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome, ShardSpawnContext>,
+        done: TaskDone<SpawnOutcome<HttpDispatchShard>, ShardSpawnContext>,
     ) {
         let index = done.context().index;
         let subname = done.context().subname.clone();
         let sink = match &done.output().result {
-            Ok(()) => Some(WakeSink {
+            Ok(_) => Some(WakeSink {
                 inbound_tx: done.context().inbound_tx.clone(),
                 mailer: Arc::clone(&state.mailer),
                 self_id: done.output().mailbox_id,
