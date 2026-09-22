@@ -286,9 +286,7 @@ impl NativeActor for SyntheticWindowCapability {
     #[handler::single]
     fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: InjectWindowEvent) {
         for recipient in state.subscribers.recipients(mail.window, mail.kind) {
-            // The untyped wire-forwarding door still takes a position;
-            // narrowing it waits on the wire-recipient decision.
-            let _ = ctx.send_envelope_tracked(recipient.id(), mail.kind, &mail.payload);
+            let _ = ctx.send_envelope_tracked_to(recipient, mail.kind, &mail.payload);
         }
     }
 

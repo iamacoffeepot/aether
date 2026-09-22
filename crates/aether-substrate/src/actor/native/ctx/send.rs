@@ -1,9 +1,11 @@
 //! How mail leaves this ctx.
 //!
 //! Three surfaces over one buffered push. The untyped `send_envelope_*`
-//! family carries runtime `(recipient, kind, bytes)` for endpoints that hold
-//! no compile-time types (the RPC server forwarding a wire `Call`), and
-//! `fanout` multicasts one encoding to a runtime recipient set. The
+//! family carries already-encoded `(kind, bytes)` for endpoints that hold no
+//! compile-time types — addressed by position where the recipient arrived on
+//! the wire (the RPC server forwarding a `Call`) and by proof where the
+//! caller holds one (ADR-0230) — and `fanout` multicasts one encoding to a
+//! runtime recipient set of proofs. The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
@@ -94,9 +96,35 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// untyped dispatch always want the returned `MailId`. The typed
     /// `send` / `send_many` on `NativeActorMailbox` cover the
     /// fire-and-forget case.
+    ///
+    /// This stays the runtime-*position* door: the recipient arrived on
+    /// the wire or came back from the registry, and nothing has proven it
+    /// (ADR-0230). A caller that already holds a proof takes
+    /// [`Self::send_envelope_tracked_to`] instead, and this signature
+    /// narrows when its last positional caller migrates.
     #[must_use]
     pub fn send_envelope_tracked(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, self.outbound_parent(), self.outbound_root())
+    }
+
+    /// [`Self::send_envelope_tracked`] for a caller that holds a proof:
+    /// the ADR-0230 form of the untyped dispatch, taking the [`AnyActorRef`]
+    /// rather than the position under it.
+    ///
+    /// A capability fanning out pre-encoded bytes to its own subscriber
+    /// table is the shape this exists for — the rows are already proofs, so
+    /// unwrapping one back to a position at the moment of the send is
+    /// exactly what the stored-state rule removes. Its first consumer is
+    /// `SyntheticWindowCapability::on_inject`, which replays an injected
+    /// event to the window subscribers; `aether-lifecycle`'s
+    /// `broadcast_to_subscribers` (#6302) is the next.
+    ///
+    /// Differs from [`Self::fanout`] only in what it carries: `fanout`
+    /// encodes one typed `K` and pushes it to many recipients, while this
+    /// takes `(KindId, &[u8])` already encoded and dispatches one.
+    #[must_use]
+    pub fn send_envelope_tracked_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+        self.send_envelope_tracked(target.id(), kind, bytes)
     }
 
     /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
