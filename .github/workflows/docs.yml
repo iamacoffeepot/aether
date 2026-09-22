@@ -24,10 +24,16 @@ on:
 permissions:
   contents: read
 
-# Allow one concurrent deploy; don't cancel an in-progress publish.
+# A pull request's push cancels its own superseded build. Main runs share one
+# group and never cancel an in-progress run, unlike ci.yml's sha-keyed main
+# runs: each main run ends in a publish, and letting two build in parallel
+# would let an older tree finish last and overwrite the newer site. A queued
+# main run that a newer one replaces loses nothing — the newer tree contains
+# it. The `pages` group on the deploy job below is the Pages publish lock; it
+# used to sit here and so held pull-request builds to it as well.
 concurrency:
-  group: pages
-  cancel-in-progress: false
+  group: docs-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   build:
@@ -36,7 +42,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Install mdBook
-        uses: taiki-e/install-action@e658debeddbabf20b2b866d9235eb08a2375b1ad # nextest
+        uses: taiki-e/install-action@43aecc8d72668fbcfe75c31400bc4f890f1c5853 # v2.83.2
         with:
           tool: mdbook@0.4.40
       - name: Build the guide
@@ -69,6 +75,10 @@ jobs:
     if: github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    # Allow one concurrent deploy; don't cancel an in-progress publish.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
     permissions:
       pages: write
       id-token: write

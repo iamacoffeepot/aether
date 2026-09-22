@@ -3,8 +3,9 @@ name: Lint title
 # Enforces Conventional Commit pull-request titles (main squash-merges with
 # the title as the commit subject, so title quality is commit quality). Its
 # own workflow, not a ci.yml job: the `edited` trigger re-lints a fixed
-# title without re-running the Rust suite. `Lint title` is a required check
-# in branch protection alongside `CI pass`.
+# title without re-running the Rust suite. `main` carries no branch
+# protection, so nothing enforces it; `Lint title` is the check to wait on
+# for the title, alongside `CI pass` for the tree.
 
 on:
   pull_request:
@@ -12,6 +13,11 @@ on:
 
 permissions:
   pull-requests: read
+
+# A newer title edit or push supersedes the run judging the old one.
+concurrency:
+  group: lint-title-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
 
 jobs:
   lint-title:
