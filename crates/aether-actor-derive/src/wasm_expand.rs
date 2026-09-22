@@ -318,10 +318,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // The SDK no longer prepends subscribe calls to `init` for window
     // streams or lifecycle stages. Pre-#403 those calls fired during
     // `Component::instantiate` — i.e. *before* `try_register_component`
-    // published the mailbox — and were rejected by
-    // `validate_subscriber_mailbox`. Components subscribe from `wire`
-    // (`WindowCapability::subscribe` / `LifecycleCapability::subscribe`)
-    // after the trampoline mailbox is registered.
+    // published the mailbox — and were refused when the window cap
+    // proved the subscriber at receipt through `ctx.resolve_live`.
+    // Components subscribe from `wire` (`WindowCapability::subscribe` /
+    // `LifecycleCapability::subscribe`) after the trampoline mailbox is
+    // registered.
     let wrapped_init = init_method_emitted;
     let dispatch_body = build_dispatch_body(&handlers, fallback.as_ref(), opts.handler_set.as_ref());
 

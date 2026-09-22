@@ -4,7 +4,7 @@ use aether_actor::{Manual, OutboundReply, handler_set};
 use aether_data::{Kind, MailboxId};
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
-use super::subscribers::{WindowSubscribers, validate_subscriber_mailbox};
+use super::subscribers::WindowSubscribers;
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, RequestWindowRedraw, RequestWindowRedrawResult,
     SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowMode, SetWindowModeResult,
@@ -83,11 +83,13 @@ pub trait WindowManagerSurface {
     /// Subscribe an explicit mailbox to one kind for one selector.
     #[handler::single]
     fn on_subscribe(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: SubscribeWindow) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
+        match ctx.resolve_live(mail.mailbox) {
+            Ok(subscriber) => {
+                Self::subscribers(state).subscribe(ctx, mail.selector, mail.kind, subscriber);
+                SubscribeWindowResult::Ok
+            }
+            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
         }
-        Self::subscribers(state).subscribe(ctx, mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
     }
 
     /// Subscribe the calling actor to one kind for one selector.
@@ -110,11 +112,13 @@ pub trait WindowManagerSurface {
         ctx: &mut NativeCtx<'_>,
         mail: UnsubscribeWindow,
     ) -> SubscribeWindowResult {
-        if let Err(error) = validate_subscriber_mailbox(ctx, mail.mailbox) {
-            return SubscribeWindowResult::Err { error };
+        match ctx.resolve_live(mail.mailbox) {
+            Ok(subscriber) => {
+                Self::subscribers(state).unsubscribe(mail.selector, mail.kind, subscriber);
+                SubscribeWindowResult::Ok
+            }
+            Err(error) => SubscribeWindowResult::Err { error: error.to_string() },
         }
-        Self::subscribers(state).unsubscribe(mail.selector, mail.kind, mail.mailbox);
-        SubscribeWindowResult::Ok
     }
 
     /// Drop the calling actor's subscription to one kind for one selector.

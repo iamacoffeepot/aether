@@ -716,9 +716,9 @@ fn on_dehydrate_save_state_populates_bundle() {
 /// `instantiate` (which runs in `spawn_actor` step 4 — before
 /// the trampoline mailbox is registered) into the trampoline's
 /// `NativeActor::wire` body (post-registration), so wire-time
-/// `aether.window.subscribe` mail validates against a live closure
-/// entry rather than racing the window cap's
-/// `validate_subscriber_mailbox`. The fixture writes 0x77 to
+/// `aether.window.subscribe` mail proves against a live closure
+/// entry rather than racing the window cap proving the subscriber at
+/// receipt through `ctx.resolve_live`. The fixture writes 0x77 to
 /// offset 100 from inside its `wire` export; reading it back
 /// after `Component::wire()` proves the call dispatched.
 #[test]

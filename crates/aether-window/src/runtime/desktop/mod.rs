@@ -927,7 +927,7 @@ impl NativeActor for DesktopWindowCapability {
         if state.child_monitors.remove(&id).is_some() {
             let _ = state.queue_close(id, None);
         }
-        state.subscribers.purge_departed(notice.target);
+        state.subscribers.purge_departed(notice);
     }
 }
 
@@ -1075,7 +1075,15 @@ mod tests {
             "test.window.dropped",
             Arc::new(|_dispatch: MailDispatch<'_>| {}),
         );
-        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
+        assert!(matches!(
+            DesktopWindowCapability::on_subscribe(
+                &mut state,
+                &mut ctx,
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+            ),
+            SubscribeWindowResult::Ok
+        ));
+        let subscriber = ctx.resolve_live(dropped).expect("the subscriber proves while it is still live");
         mailer.registry().drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
 
         assert!(matches!(
@@ -1086,7 +1094,7 @@ mod tests {
             ),
             SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
         ));
-        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
+        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([subscriber]));
     }
 
     #[test]
@@ -1300,7 +1308,7 @@ mod tests {
     fn direct_publication_preserves_source_and_causal_lineage() {
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let subscriber = registry.register_inbox(
+        let inbox = registry.register_inbox(
             &boot_authority(),
             "test.window.subscriber",
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -1315,6 +1323,7 @@ mod tests {
         let root = MailId::new(MailboxId(0x100), 7);
         let parent = MailId::new(MailboxId(0x200), 9);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
+        let subscriber = ctx.resolve_live(inbox).expect("the registered subscriber proves");
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
         state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });
@@ -1372,7 +1381,7 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let subscriber = registry.register_inbox(
+        let inbox = registry.register_inbox(
             &boot_authority(),
             "test.window.pixel-space",
             Arc::new(move |dispatch: OwnedDispatch| {
@@ -1383,6 +1392,7 @@ mod tests {
         let binding =
             Arc::new(NativeBinding::new_for_test(Arc::new(Mailer::new(Arc::clone(&registry))), MailboxId(0xA37E)));
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let subscriber = ctx.resolve_live(inbox).expect("the registered subscriber proves");
 
         let mut state = test_state();
         let id = WindowId(1);
