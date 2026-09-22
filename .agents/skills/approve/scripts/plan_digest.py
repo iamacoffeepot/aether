@@ -20,7 +20,6 @@ MANAGED_ORDER = (
     "Sub-issues",
     "Depends on",
     "Declared surface",
-    "Dogfood brief",
     "Side findings",
 )
 DIGEST_ORDER = MANAGED_ORDER[:-1]

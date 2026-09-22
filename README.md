@@ -297,9 +297,9 @@ cargo clippy --all-targets -- -D warnings
 
 GitHub Actions owns the expensive build/test matrix; `CI pass` and `Lint title`
 are the required checks. The draft's current head must also have direct-review
-acceptance, resolved threads, declared-surface containment, and any required
-dogfood evidence. Landing is an explicit separate operation. Keep PRs focused,
-preserve unrelated user changes, and do not push directly to `main` or merge
+acceptance, resolved threads, and declared-surface containment. Landing is an
+explicit separate operation. Keep PRs focused, preserve unrelated user changes,
+and do not push directly to `main` or merge
 without that authority. The full lifecycle is written up in
 [Agent and contributor workflow](docs/guide/contributing/agent-workflow.md).
 

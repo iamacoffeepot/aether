@@ -50,7 +50,7 @@ python3 -I .agents/skills/approve/scripts/plan_digest.py \
   --body-file /tmp/aether-plan-body-<issue>.md
 ```
 
-Require stable JSON, required non-empty managed sections, unique headings in managed order, exact routing lines, and a valid Declared surface; a legacy Dogfood brief is approval-bearing but not validated. Retain `plan_sha256`, `size`, and `model`; recompute them from a fresh body immediately before writing.
+Require stable JSON, required non-empty managed sections, unique headings in managed order, exact routing lines, and a valid Declared surface. Retain `plan_sha256`, `size`, and `model`; recompute them from a fresh body immediately before writing.
 
 Side findings are excluded from approval identity and never block authorization.
 

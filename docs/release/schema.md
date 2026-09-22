@@ -33,11 +33,10 @@ Scope owns these H2 sections in this order:
 ## Sub-issues
 ## Depends on
 ## Declared surface
-## Dogfood brief
 ## Side findings
 ```
 
-`Sub-issues`, `Depends on`, and `Side findings` are optional. The other five are
+`Sub-issues`, `Depends on`, and `Side findings` are optional. The other four are
 required for a planned issue. Duplicate headings are invalid.
 
 The Implementation plan ends with exactly three non-empty lines:
@@ -53,8 +52,7 @@ not authority.
 
 The canonical Plan digest includes the exact managed spans for Problem
 statement, Design notes, Implementation plan, optional Sub-issues and Depends
-on, Declared surface, and Dogfood brief. It excludes Side findings and unmanaged
-prose. Use `.agents/skills/approve/scripts/plan_digest.py`; byte-level details
+on, and Declared surface. It excludes Side findings and unmanaged prose. Use `.agents/skills/approve/scripts/plan_digest.py`; byte-level details
 belong to that parser.
 
 ## Declared surface and dependencies
@@ -111,8 +109,8 @@ The workflow derives progress from concrete artifacts:
 | Owned issue worktree or branch | Implementation is in progress or paused |
 | Open draft pull request | Reviewable implementation exists |
 | Draft current head with pending/red required checks | Build/test proof is incomplete |
-| Green current head without a trusted current-fact direct-review record or clear thread/dogfood facts | QA evidence is incomplete |
-| Green, contained current head with hidden direct review accepted, native reviews and threads clear, and required dogfood current | Landable draft; explicit landing authority is still required |
+| Green current head without a trusted current-fact direct-review record or clear thread facts | QA evidence is incomplete |
+| Green, contained current head with hidden direct review accepted and native reviews and threads clear | Landable draft; explicit landing authority is still required |
 | Named pull request merged and closing issue closed | Done |
 
 Never infer one row from another. Each consumer re-reads the exact facts it
@@ -176,18 +174,12 @@ Native decisions remain separate: each reviewer's latest active
 dismissed. Every unresolved review thread blocks independently. Direct
 inspection does not waive either native signal.
 
-### Dogfood
-
-A specific `N/A` Dogfood brief is the exemption. Otherwise the durable rollup
-must name the current head and scoped surface, report complete engine cleanup,
-and contain no actionable result. Evidence from an older head is stale.
-
 ## Repair and conflict handling
 
-Review and dogfood findings are verified, fixed inside the approved surface or
+Review findings are verified, fixed inside the approved surface or
 justified with evidence, committed and plain-pushed, replied to, and resolved
 only after their disposition is visible. Every push creates a new head that must
-repeat checks, direct inspection, and required dogfood.
+repeat checks and direct inspection.
 
 A needed path outside the Declared surface, broken Plan premise, or incompatible
 design returns to the matching managed scope artifact. It is not license to
@@ -204,7 +196,7 @@ second PR, or land.
 Landing is separately authorized. Immediately before mutation it independently
 revalidates issue identity and digest, approval and ancestry, actual diff and
 surface, current-head checks, hidden semantic review, native reviews, threads,
-dogfood, branch ownership, and merge prediction.
+branch ownership, and merge prediction.
 
 An eligible landing clears draft state, performs an ordinary squash merge, and
 continues only after GitHub confirms the named PR is merged. Done additionally
@@ -216,7 +208,7 @@ explicit sweep.
 
 The checked-in Actions tree owns hosted behavior. Current branch protection has
 the two required checks named above and no required-pull-request-review rule.
-Direct-drive scope, approval, review, dogfood, conflict, and landing skills are
+Direct-drive scope, approval, review, conflict, and landing skills are
 not hosted jobs merely because repository scripts or prose describe them.
 
 Landing a PR is separate from building `dist/`, producing a package depot,

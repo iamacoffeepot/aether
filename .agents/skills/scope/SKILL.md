@@ -41,7 +41,7 @@ Reject duplicate managed headings or a downstream artifact that conceals an upst
 
 ## Own and preserve body sections
 
-Own exactly the H2 sections listed by the shared GitHub contract. Preserve every other byte, including the complete unmanaged prefix and its hidden approval history. Replace an existing managed span in place and append a missing span in scope-owned order. Omit Sub-issues, Depends on, Side findings, and Dogfood brief when empty; require the other four at completed Plan. A legacy Dogfood brief is preserved.
+Own exactly the H2 sections listed by the shared GitHub contract. Preserve every other byte, including the complete unmanaged prefix and its hidden approval history. Replace an existing managed span in place and append a missing span in scope-owned order. Omit Sub-issues, Depends on, and Side findings when empty; require the other four at completed Plan.
 
 Before every full-body `PATCH`:
 

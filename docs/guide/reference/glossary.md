@@ -235,8 +235,8 @@ status are independent facts.
 **Managed Plan**
 
 The scope-owned issue-body sections that define the problem, design,
-implementation steps, dependencies, declared surface, optional legacy-only
-dogfood brief, and exact size/model routing lines. Their canonical digest is
+implementation steps, dependencies, declared surface, and exact size/model
+routing lines. Their canonical digest is
 the approval identity.
 
 **Approval record**
@@ -266,11 +266,6 @@ authorization.
 
 The changed paths outside the approved declared surface, each priced auto,
 judge, or human at landing against the rules frozen when work started.
-
-**Dogfood**
-
-A consumer-view trial of a public surface. It is evidence about usability, not
-a substitute for correctness tests.
 
 **Worktree owner**
 
