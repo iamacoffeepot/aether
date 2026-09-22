@@ -1,8 +1,8 @@
 # ADR-0219: Bloomery admin mode
 
-- Status: Provisional
-- Date: 2026-09-15
-- Deciders: iamacoffeepot
+- **Status:** Provisional
+- **Date:** 2026-09-15
+- **Deciders:** iamacoffeepot
 
 ## Context
 

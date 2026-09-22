@@ -1,6 +1,6 @@
 # ADR-0202: The composition of workpieces is itself a workpiece
 
-- **Status:** Proposed
+- **Status:** Superseded in part by [ADR-0191](0191-the-composition-of-workpieces-is-itself-a-workpiece.md), which records and accepts the same decision under the same title; the ejection clause this ADR adds remains a proposal (see the status note below).
 - **Date:** 2026-08-18
 
 ## Status note (2026-09-09)

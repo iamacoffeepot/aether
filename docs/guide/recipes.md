@@ -56,7 +56,6 @@ cross, then verify volatile tool/type details against the linked system page and
 current source.
 
 - **Adding a config knob** (recompile) — the [ADR-0090](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0090-application-configuration.md) layered-config dance.
-- **Authoring terrain** (drive-only) — create a revisioned mark, stage a bounded edit, inspect its rendered preview, and explicitly commit or discard it.
 - **Adding a substrate kind** (recompile) — choose the correct kind owner,
   register/describe it, and prove the mail boundary end to end.
 - **Adding a chassis capability** (recompile) — a native actor, its mailbox,
@@ -72,6 +71,9 @@ current source.
   dispatch it with a uniform blob, and draw its output texture.
 - **Serving HTTP from a component** (recompile) — the `aether.http.server`
   capability, the request/response handler, and claiming a route.
+- **Supervising the hub with systemd** (drive-only) — run the standing fleet
+  hub from the checked-in `scripts/aether-hub.service` user unit with a
+  per-host environment file and journald.
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 

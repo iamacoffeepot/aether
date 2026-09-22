@@ -89,7 +89,7 @@ The workspace root has no default binary.
 ```sh
 cargo build
 cargo test
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt -- --check
 ```
 
@@ -292,7 +292,7 @@ commits use Conventional Commits. Before opening or updating a draft, run:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 GitHub Actions owns the expensive build/test matrix; `CI pass` and `Lint title`
@@ -332,14 +332,13 @@ changing navigation or adding a high-drift recipe.
 ## How this is built
 
 This codebase is developed with Claude Code. Every load-bearing decision is
-recorded as an Architecture Decision Record before the code lands: 215 of them
+recorded as an Architecture Decision Record before the code lands; the records
 sit under `docs/adr/`, each carrying the alternatives that were rejected and
-why. Every change arrives through a pull request that a required CI aggregate
-gates on formatting, clippy with warnings denied, rustdoc, the sharded test
-suite, duplicate-code detection, unused-dependency detection, and a check on
-newly added lint suppressions. Pull requests land on `main` by squash-merge;
-the in-tree pipeline lands its own work through the same gates and mirrors the
-result here.
+why. Every change arrives as a pull request. Its `CI pass` check aggregates
+formatting, clippy with warnings denied, rustdoc, the sharded test suite,
+duplicate-code detection, unused-dependency detection, lockfile freshness, and
+a check on newly added lint suppressions, and a pull request lands on `main` by
+squash-merge once that check and the `Lint title` check are green.
 
 ## License
 

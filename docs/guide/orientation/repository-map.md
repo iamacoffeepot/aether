@@ -13,10 +13,11 @@ operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
 reusable guest actors shipped with the engine        aether-kit-*, aether-puppet
+journal-driven programs and reactors (bloomery)      aether-bloomery-*
 ```
 
 The list is also the order to read it in. Everything above `aether-kit-*` is the
-engine; the remaining row holds consumers that happen to live in the same
+engine; the remaining rows hold consumers that happen to live in the same
 workspace.
 
 ## Foundation crates
@@ -85,6 +86,23 @@ server.
 These crates are valuable examples, but “in tree” does not mean “native.” The
 `aether-kit-*` crates are actor code hosted by the same component machinery
 available to other guest modules.
+
+## Bloomery crates
+
+The bloomery is a journal-driven engine built in this workspace: an
+append-only journal of typed events drives stateless wasm programs and
+journal-following reactors. `aether-chassis-bloomery` mounts the journal and
+the bundle driver on the `aether-bloomery` binary.
+
+| Crate | Owns |
+|---|---|
+| `aether-bloomery-kinds` | the shared `no_std` vocabulary: digests, typed citations, the tree, programs, heads, driver and reactor records and mail |
+| `aether-bloomery-journal` | the append-only, single-writer `SQLite` log of typed events and content-addressed artifacts (ADR-0220) |
+| `aether-bloomery-view` | folds over a journal prefix: the typed `Heads` last-move fold and the ADR-0226 request and activation folds |
+| `aether-bloomery-program`, `aether-bloomery-program-derive` | the guest SDK for stateless wasm programs (`Program`, `Env`, invoke mail) and its `#[program]` macro |
+| `aether-bloomery-reactor`, `aether-bloomery-reactor-derive` | reactor preparation and pure evaluation of typed stored-event arms, and the `#[reactor]` / `#[rule]` macros (ADR-0222) |
+| `aether-bloomery-bundle`, `aether-bloomery-bundle-derive` | the `bundle` export generator: one root for a module's programs and reactors |
+| `aether-bloomery-driver` | the sans-io driver core: journal folds in, driver commands out, for both programs and reactors (ADR-0226) |
 
 ## Derive, fixture, and tooling crates
 
