@@ -25,7 +25,6 @@ mod matrix_sweep;
 mod multi_actor;
 mod peer_routing;
 mod probe;
-mod resolve_probe;
 mod source_observer;
 mod stateful_replace;
 mod tcp_load_probe;
@@ -48,7 +47,6 @@ pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
 pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
-pub use resolve_probe::ResolveProbe;
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
@@ -65,7 +63,6 @@ aether_actor::export!(
     Panel,
     ParentPeerCaller,
     ParentPeerTarget,
-    ResolveProbe,
     Cube,
     EditorRegionProbe,
     FsDemux,

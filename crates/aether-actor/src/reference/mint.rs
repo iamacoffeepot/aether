@@ -8,20 +8,13 @@
 
 use aether_data::MailboxId;
 
-use super::{ActorRef, AnyActorRef, Recipient};
+use super::{ActorRef, AnyActorRef};
 
 /// Mint an [`ActorRef`] for a confirmed-`Live` id. See the module contract.
 #[doc(hidden)]
 #[must_use]
 pub const fn __mint_actor_ref<R>(id: MailboxId) -> ActorRef<R> {
     ActorRef::new(id)
-}
-
-/// Mint a [`Recipient`] for a confirmed-`Live` id. See the module contract.
-#[doc(hidden)]
-#[must_use]
-pub const fn __mint_recipient<K>(id: MailboxId) -> Recipient<K> {
-    Recipient::new(id)
 }
 
 /// Mint an [`AnyActorRef`] for a confirmed-`Live` id. See the module contract.

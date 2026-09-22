@@ -123,18 +123,6 @@ pub fn reply_correlation() -> u64 {
     unsafe { raw::reply_correlation() }
 }
 
-/// ADR-0230: ask the host whether `candidate` holds a `Live` route.
-/// Returns the echoed candidate on `Live`, zero otherwise — the one
-/// synchronous host call behind `WasmCtx::resolve`.
-#[must_use]
-pub fn resolve_live(candidate: u64) -> u64 {
-    // SAFETY: forwards to `raw::resolve_live`, whose ABI is documented
-    // at the import site in `raw.rs`. The argument is a plain scalar —
-    // no pointer crosses, so there is nothing for the host to read out
-    // of guest memory.
-    unsafe { raw::resolve_live(candidate) }
-}
-
 /// ADR-0097: stage a sibling-spawn request and return the new
 /// instance's `MailboxId`. `tag` is the sibling type's actor-type
 /// tag (`mailbox_id_from_name(NAMESPACE)`); `is_counter` selects

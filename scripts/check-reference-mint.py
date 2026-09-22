@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Reject reference mints outside the gate's allowlist.
 
-The gated mint (`__mint_actor_ref`, `__mint_recipient`, `__mint_any_actor_ref`)
-turns a confirmed-`Live` position into a proven reference, so only the paths in
+The gated mint (`__mint_actor_ref`, `__mint_any_actor_ref`) turns a
+confirmed-`Live` position into a proven reference, so only the paths in
 `ALLOWED_PATHS` may name it. Every other mention in tracked Rust source is a
 finding: nothing written in scanned source — no comment, attribute, marker, or
 flag — relaxes this scan, and widening the allowlist means editing this gate
@@ -25,7 +25,7 @@ ALLOWED_PATHS = (
     "crates/aether-substrate/src/mail/registry/mailbox/proven.rs",
 )
 
-MINT_RE = re.compile(r"\b__mint_(actor_ref|recipient|any_actor_ref)\b")
+MINT_RE = re.compile(r"\b__mint_(actor_ref|any_actor_ref)\b")
 
 
 class OperationalError(RuntimeError):

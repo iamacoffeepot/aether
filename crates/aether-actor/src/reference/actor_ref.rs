@@ -4,11 +4,10 @@ use core::fmt;
 use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
-use aether_data::{Address, Kind, MailboxId};
+use aether_data::{Address, MailboxId};
 use aether_kinds::MonitorNotice;
 
-use super::{AnyActorRef, Recipient, Tombstone};
-use crate::model::HandlesKind;
+use super::{AnyActorRef, Tombstone};
 
 /// Proof that an actor of type `R` reached `Live` at an id, in this engine
 /// session (ADR-0230).
@@ -70,22 +69,6 @@ impl<R> ActorRef<R> {
     #[must_use]
     pub const fn erase(self) -> AnyActorRef {
         AnyActorRef::new(self.id)
-    }
-
-    /// Re-tag this reference by one kind it handles: a [`Recipient`] for
-    /// the same position (ADR-0230).
-    ///
-    /// The `R: HandlesKind<K>` bound is the proof — no lookup: the
-    /// reference already proves an actor of type `R` reached `Live` here,
-    /// and the bound proves `R` handles `K`. The result claims only that
-    /// an actor handling `K` reached `Live` at this id, and nothing about
-    /// which actor that is.
-    #[must_use]
-    pub fn recipient<K: Kind>(&self) -> Recipient<K>
-    where
-        R: HandlesKind<K>,
-    {
-        Recipient::new(self.id())
     }
 
     /// The exact address of the proven position: how a held reference is

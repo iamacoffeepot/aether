@@ -8,10 +8,9 @@
 use core::marker::PhantomData;
 use core::ptr;
 
-use aether_data::{Address, Kind, KindId, MailboxId, RequestId, Source};
+use aether_data::{Kind, KindId, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
-use crate::model::address::address_candidate;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
@@ -309,18 +308,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         ActorRef::new(self.actor_with_namespace::<R>(R::NAMESPACE).mailbox_id())
     }
 
-    /// This actor as a proven [`ActorRef`]: mints the ctx's own mailbox,
-    /// which the host bound at birth and which is `Live` for as long as a
-    /// handler can run — so no lookup is needed. Bounded `A: Addressable`
-    /// directly, so it does not exist on the erased ctx.
-    #[must_use]
-    pub fn me(&self) -> ActorRef<A>
-    where
-        A: Addressable,
-    {
-        ActorRef::new(MailboxId(self.mailbox))
-    }
-
     /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
     /// source the host stamped, with no lookup — exactly
     /// [`Self::source_mailbox`], lifted into a reference. `None` for a
@@ -399,20 +386,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[must_use]
     pub fn resolve_embedded<R: Addressable<Resolver = Embedded>>(&self, name: &str) -> WasmActorMailbox<'_, R> {
         self.actor_with_namespace::<R>(name)
-    }
-
-    /// Resolve `address` to a proven [`ActorRef`]: `Some` only when the
-    /// host confirms a `Live` route at the position the address names,
-    /// `None` for `Starting`, `Dropped`, and `Unknown` alike (ADR-0230).
-    /// The one fallible conversion from a description to a proof, and the
-    /// only way a reference received from anywhere becomes usable. Costs
-    /// one synchronous host call carrying eight bytes, no mail.
-    #[must_use]
-    pub fn resolve<R: CallerAddressable>(&self, address: &Address<R>) -> Option<ActorRef<R>> {
-        let candidate =
-            address_candidate(address, MailboxId(self.mailbox), MailboxId(self.scope_mailbox(CallerScope::Parent)))?;
-        let answer = mail::resolve_live(candidate.0);
-        (answer != MailboxId::NONE.0 && answer == candidate.0).then(|| ActorRef::new(candidate))
     }
 
     /// Send through a proven [`ActorRef`]: returns a ctx-bound [`WasmActorMailbox`]
