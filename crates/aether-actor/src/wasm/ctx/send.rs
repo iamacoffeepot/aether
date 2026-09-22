@@ -69,33 +69,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
-
-    /// Send to a raw mailbox id and store a typed context for the reply
-    /// correlation id.
-    #[must_use]
-    pub fn send_to_with_context<K: Kind, C: Kind>(&mut self, id: MailboxId, payload: &K, context: &C) -> RequestId {
-        match self.inline.route_decision(id.0) {
-            RouteDecision::Local => {
-                tracing::warn!(
-                    kind = K::NAME,
-                    recipient = id.0,
-                    "send_to_with_context on an inline-cluster local route has no host correlation",
-                );
-                self.send_to(id, payload);
-                RequestId(Source::NO_CORRELATION)
-            }
-            RouteDecision::Remote => {
-                self.send_to(id, payload);
-                let request = RequestId(mail::prev_correlation());
-                // SAFETY: the macro-emitted registry is accessed only under the
-                // serialized wasm guest entrypoint.
-                unsafe {
-                    self.inline.request_contexts_mut().insert(request, context);
-                }
-                request
-            }
-        }
-    }
 }
 
 // ADR-0114 addressing amendment: every `WasmCtx` send resolves the recipient
@@ -167,21 +140,6 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
             R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Detached,
-            self.mailbox,
-        );
-    }
-
-    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
-    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            mailbox_id_from_path(name).0,
             K::ID.0,
             &bytes,
             1,

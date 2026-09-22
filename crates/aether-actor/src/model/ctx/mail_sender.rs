@@ -98,23 +98,21 @@ pub trait MailSender {
         R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind;
 
-    /// String-keyed counterpart to [`Self::send_detached`]. Same
-    /// fire-and-forget contract. Required so every implementation explicitly
-    /// chooses the causal behavior that suppresses lineage and mints a fresh
-    /// root.
-    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K);
-
     /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
     /// of `payload` to the proven `target`, minting a fresh causal root
     /// rather than inheriting the caller's in-flight chain (ADR-0080 §7).
     ///
     /// This fills the last cell of the send grid — typed / by-name / by-id
     /// crossed with inherit / detached. [`Self::send`] and
-    /// [`Self::send_detached`] are the typed pair; [`Self::send_to_named`]
-    /// / [`Self::send_detached_to_named`] the by-name pair; the
-    /// inherit-by-id send is each ctx's inherent `send_to`, and this is its
-    /// detached partner. The by-id cell takes the dispatch-stamped proof
-    /// (ADR-0230) rather than a position anyone can compute, so a hand-built
+    /// [`Self::send_detached`] are the typed pair; the by-name column now
+    /// has only its inherit cell, [`Self::send_to_named`] — a detached send
+    /// mints a fresh causal root, so it accepts only a proven recipient, a
+    /// compile-time `R` for [`Self::send_detached`] or a dispatch-stamped
+    /// `AnyActorRef` for `Self::send_detached_to`, and text is not a proof
+    /// (ADR-0230); the inherit-by-id send is each ctx's inherent
+    /// `send_to`, and this is its detached partner. The by-id cell takes the
+    /// dispatch-stamped proof (ADR-0230) rather than a position anyone can
+    /// compute, so a hand-built
     /// [`MailboxId`](aether_data::MailboxId) does not reach it; the inherent
     /// `send_to` is its inherit twin and narrows the same way when its
     /// consumer migrates. Its motivating consumer remains the stored stream
