@@ -5,7 +5,7 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
-use aether_actor::Single;
+use aether_actor::{AnyActorRef, Single};
 use aether_substrate::Erased;
 use aether_substrate::Subname;
 use std::collections::HashSet;
@@ -121,11 +121,11 @@ pub struct HttpSupervisorState {
     /// `MonitorNotice` purges the mailbox's routes. The handle's
     /// `Drop` deregisters, so the map is both the dedup guard and the
     /// RAII anchor.
-    pub monitors: HashMap<MailboxId, MonitorHandle>,
+    pub monitors: HashMap<AnyActorRef, MonitorHandle>,
     /// Mailboxes whose monitor attempt failed — remembered so the
     /// `route holder is not monitorable` warn fires once per mailbox,
     /// not once per route.
-    pub unmonitorable: HashSet<MailboxId>,
+    pub unmonitorable: HashSet<AnyActorRef>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -502,8 +502,8 @@ impl HttpSupervisorState {
         register_route(&self.routes, prefix, method, kind, mailbox, shared)
     }
 
-    /// Monitor `mailbox` on its first route claim so the cap purges
-    /// the mailbox's routes itself when the occupant departs — vacate
+    /// Monitor the proven route holder `subscriber` on its first route claim
+    /// so the cap purges its routes itself when the occupant departs — vacate
     /// or close, whichever comes first (ADR-0079 §8 amended).
     ///
     /// An `Err` (an actor outside the registry, or a spawner-less test
@@ -520,25 +520,25 @@ impl HttpSupervisorState {
     /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, mailbox: MailboxId) {
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
         // A monitor that already failed for this mailbox will fail again — the
         // condition is a property of the target, not of the attempt — so the
         // second route it registers must not re-report it.
-        if self.unmonitorable.contains(&mailbox) {
+        if self.unmonitorable.contains(&subscriber) {
             return;
         }
-        let Entry::Vacant(slot) = self.monitors.entry(mailbox) else {
+        let Entry::Vacant(slot) = self.monitors.entry(subscriber) else {
             return;
         };
-        match ctx.monitor(mailbox) {
+        match ctx.monitor(subscriber) {
             Ok(handle) => {
                 slot.insert(handle);
             }
             Err(error) => {
-                self.unmonitorable.insert(mailbox);
+                self.unmonitorable.insert(subscriber);
                 tracing::warn!(
                     target: "aether_http::server",
-                    %mailbox,
+                    ?subscriber,
                     ?error,
                     "route holder is not monitorable; its routes cannot be purged when it departs",
                 );

@@ -771,8 +771,9 @@ mod monitor_collapse {
     use aether_data::MailboxId;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
+    use aether_substrate::mail::registry::MailDispatch;
     use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::fresh_substrate;
+    use aether_substrate::testing::{boot_authority, fresh_substrate};
     use std::sync::Arc;
 
     /// The `route holder is not monitorable` warn must fire once per
@@ -781,11 +782,16 @@ mod monitor_collapse {
     /// `watch` for the same mailbox is a no-op.
     #[test]
     fn watch_remembers_unmonitorable_mailbox() {
-        let (_registry, mailer) = fresh_substrate();
+        let (registry, mailer) = fresh_substrate();
         let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAA)));
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let target = MailboxId(0xBEEF);
+        let proven = |ctx: &NativeCtx<'_>, name: &str| {
+            let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
+
+            ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
+        };
+        let target = proven(&ctx, "test.http.watch.target");
 
         assert!(!state.monitors.contains_key(&target));
         assert!(!state.unmonitorable.contains(&target));
@@ -798,7 +804,7 @@ mod monitor_collapse {
         state.watch(&mut ctx, target);
         assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
 
-        let other = MailboxId(0xCAFE);
+        let other = proven(&ctx, "test.http.watch.other");
         state.watch(&mut ctx, other);
         assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
         assert_eq!(state.unmonitorable.len(), after_first + 1);
