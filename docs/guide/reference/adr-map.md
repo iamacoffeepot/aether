@@ -4,6 +4,10 @@ The ADR directory is chronological; this page is a reading map. Always open the
 record and read its status/amendments. A number in source comments is a route to
 rationale, not proof that every paragraph remains current.
 
+The map covers records up to ADR-0148, the newest one it cites. Later records
+are not classified here; find them in `docs/adr/`, which lists every record by
+number.
+
 ## How to interpret a record
 
 | Status | Meaning |

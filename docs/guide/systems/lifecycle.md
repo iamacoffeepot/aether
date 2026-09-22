@@ -201,13 +201,13 @@ engine; let the chassis drive the frame.
 Which stages a chassis declares is its own choice; the driver walks whatever graph
 it's handed. The shipped graphs:
 
-- **Desktop and `substrate_harness`** run `frame_lifecycle_config` —
+- **Desktop and `substrate_harness`** run `frame_lifecycle_params` —
   `Tick → Render → Present → Tick`, looping, with the `Quit` escape to a
   `Shutdown` terminal on `Present`. A full `Tick → Render → Present` cycle runs
   per frame; `Render` broadcasts only after the `Tick` chain settles, and GPU
   submit/present runs after `Render` settles, so a submission integrates the
   fully-settled state of the frame.
-- **Headless** runs `tick_only_lifecycle_config` — `Tick → Tick`, looping, with
+- **Headless** runs `tick_only_lifecycle_params` — `Tick → Tick`, looping, with
   the `Quit` escape to `Shutdown` on `Tick`. Its render capability is a no-op, so
   a `Render` stage would settle to no work; a component that subscribes `Render`
   here gets the fail-fast `Err` and is a no-op on render, while its `Tick` path

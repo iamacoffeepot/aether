@@ -5,9 +5,9 @@
 
 Amends [ADR-0109](0109-handler-reply-contracts.md) (the handler return
 type is the reply contract, published on the inputs manifest) and
-[ADR-0112](0112-handler-reply-classes.md) / [ADR-0134](0134-multi-reply-class.md)
+[ADR-0112](0112-handler-reply-classes.md) / [ADR-0134](0134-multi-reply-class-and-explicit-handler-classes.md)
 (single / manual / multi). Parallel to `HandlesKind<K>`
-([ADR-0075](0075-capability-traits-replace-stringly-addressed-mail.md)
+([ADR-0075](0075-actor-typed-sender-api-and-chassis-cap-marker-split.md)
 decision 1, `crates/aether-actor/src/model/mod.rs`).
 
 ## Context

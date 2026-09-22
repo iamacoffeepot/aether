@@ -44,7 +44,7 @@ follow-on; this ADR does not add a `Caps` type parameter.
 
 Aether already has the mail FSM those programs need. Handlers do not
 block: `wait_reply` was retired ([ADR-0042](0042-synchronous-mail-wait.md),
-[ADR-0074](0074-unified-actor-macro.md)). The sanctioned pattern is send,
+[ADR-0074](0074-unified-actor-model-for-substrate-and-guests.md)). The sanctioned pattern is send,
 return from the handler, resume on the reply ([ADR-0139](0139-guest-reply-correlation-and-request-contexts.md)
 `send_with_context` / `in_reply_to`). Settlement is exact at emit time
 ([ADR-0086](0086-decouple-settlement-from-trace.md)):

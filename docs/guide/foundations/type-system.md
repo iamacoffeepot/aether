@@ -113,7 +113,10 @@ worth knowing beyond "it's a type tree":
   anywhere short-circuits the whole struct to structured. You don't choose this —
   the derive computes it at compile time (`CastEligible::ELIGIBLE` ANDs every
   field) — but it's why two similar-looking kinds can have different wire
-  encodings, and it's the `encode` vs `encode_struct` split in the SDK.
+  encodings. The send path carries the same split: the `Kind` derive emits
+  `Kind::encode_into_bytes` as a call to `encode_cast` (a `bytemuck` byte copy)
+  for a `#[repr(C)]` kind and to `encode_wire` (the ADR-0118 wire body)
+  otherwise, so a send site never picks the encoder itself.
 - **`Map` keys are restricted.** A map key may only be a `String`, an integer
   scalar, or `Bool` — the `BTreeMap<K: Ord, V>` bound rules out `f32`/`f64`/
   `Vec`/`Option` at the type level and the codec rejects them defensively.
