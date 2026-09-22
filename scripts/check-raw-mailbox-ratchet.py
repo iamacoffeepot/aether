@@ -50,6 +50,7 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("actor_at::<", re.compile(r"(::|\.)actor_at::<")),
     ("send_envelope_tracked(", re.compile(r"(::|\.)send_envelope_tracked\(")),
     ("send_envelope_tracked_with_reply_to(", re.compile(r"(::|\.)send_envelope_tracked_with_reply_to\(")),
+    ("send_envelope_detached(", re.compile(r"(::|\.)send_envelope_detached\(")),
     ("monitor(", re.compile(r"(::|\.)monitor\(")),
     ("despawn_inline_child(", re.compile(r"(::|\.)despawn_inline_child\(")),
     ("resolve_actor::<", re.compile(r"(::|\.)resolve_actor::<")),
