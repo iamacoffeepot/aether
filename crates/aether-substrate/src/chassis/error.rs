@@ -34,6 +34,11 @@ pub enum BootError {
     ///
     /// [`BootAuthority`]: crate::mail::registry::BootAuthority
     AlreadyComposed,
+    /// A native actor's declared `depends(R)` dependency has no `Live` route
+    /// at birth (ADR-0230): the chassis composed the dependent without its
+    /// dependency, or a spawned or pumped birth's dependency is not live.
+    /// Refused before `init` runs, naming both actors.
+    DependencyNotLive { actor: &'static str, namespace: &'static str },
     /// Anything else a capability's boot wants to surface.
     Other(Box<dyn StdError + Send + Sync + 'static>),
 }
@@ -46,6 +51,9 @@ impl fmt::Display for BootError {
             }
             Self::FallbackRouterAlreadyClaimed => f.write_str("fallback router slot already claimed"),
             Self::AlreadyComposed => f.write_str("substrate boot already composed — its boot authority is spent"),
+            Self::DependencyNotLive { actor, namespace } => {
+                write!(f, "{actor} depends on {namespace}, which is not live")
+            }
             Self::Other(e) => write!(f, "capability boot failed: {e}"),
         }
     }

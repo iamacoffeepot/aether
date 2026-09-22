@@ -10,6 +10,7 @@ use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::local;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
@@ -342,6 +343,11 @@ where
     let slots = Box::new(ActorSlots::new());
     slots.seed(ActorLogRing::with_capacity(ring_capacities.log));
     slots.seed(ActorTraceRing::with_growth(ring_capacities.trace, ring_capacities.trace_max));
+
+    // ADR-0230: a declared `depends(R)` with no `Live` route fails where a
+    // failed `init` fails, before `A::init` runs. A pumped actor is
+    // root-pinned, so it folds from the root like a passive one.
+    check_declared::<A>(mailer.registry(), MailboxId::NONE)?;
 
     // `init` under `with_stamped`. A driver-as-actor does not publish a
     // cross-thread handle bundle (the window actor's cell rides its

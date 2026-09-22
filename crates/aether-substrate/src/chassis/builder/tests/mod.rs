@@ -14,6 +14,7 @@ mod support;
 
 mod actor_cost;
 mod claim;
+mod dependencies;
 mod driver;
 mod inline_child_alias;
 mod monitor;

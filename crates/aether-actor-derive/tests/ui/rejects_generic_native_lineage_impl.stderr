@@ -1,4 +1,4 @@
-error: #[actor] `root` and `child_of(...)` require a concrete native actor identity; generic native actors cannot emit monomorphic RootEntry/ChildEntry inventory facts
+error: #[actor] `root`, `child_of(...)` and `depends(...)` require a concrete native actor identity; generic native actors cannot emit monomorphic RootEntry/ChildEntry/DependencyEntry inventory facts
  --> tests/ui/rejects_generic_native_lineage_impl.rs:6:6
   |
 6 | impl<T> NativeActor for Generic<T> {}

@@ -151,7 +151,7 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 
 | Source | Proof | Runtime cost |
 |---|---|---|
-| A declared dependency of the actor | the `#[actor]` dependency list is emitted to the wasm custom section; each entry folds to its position through its strategy — `One` at the root, `Embedded` beneath the placement's parent — and the host requires a `Live` route there before `init` (native: at chassis build). A missing dependency refuses the load and names it. | none for `One` — at depth 1 the fold is a `const`; one registry read per `Embedded` entry |
+| A declared dependency of the actor | the `#[actor]` dependency list is emitted to the wasm custom section; each entry folds to its position through its strategy — `One` at the root, `Embedded` beneath the placement's parent — and the host requires a `Live` route there before `init` (native: at chassis build, and at spawn for a spawned child). A missing dependency refuses the load and names it. | none for `One` — at depth 1 the fold is a `const`; one registry read per `Embedded` entry |
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
 | A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |

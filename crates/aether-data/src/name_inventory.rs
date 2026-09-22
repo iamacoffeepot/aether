@@ -204,6 +204,11 @@ pub fn handler_entries() -> impl Iterator<Item = &'static HandlerEntry> {
     inventory::iter::<HandlerEntry>.into_iter()
 }
 
+/// Iterate every native [`DependencyEntry`] collected at link time.
+pub fn dependency_entries() -> impl Iterator<Item = &'static DependencyEntry> {
+    inventory::iter::<DependencyEntry>.into_iter()
+}
+
 /// A native actor identity that may be placed without an actor parent
 /// (ADR-0166). Generated submissions derive both fields from the actor's
 /// `Addressable::NAMESPACE`.
@@ -231,6 +236,22 @@ pub struct ChildEntry {
 }
 
 inventory::collect!(ChildEntry);
+
+/// A native actor's declared dependency, collected at link time (ADR-0230).
+/// The `#[actor]` macro submits one entry per `depends(R)`: the declaring
+/// actor's `NAMESPACE`, the dependency's `NAMESPACE`, and the strategy tag —
+/// `DependencyResolver::TAG`, the same byte the wasm
+/// `InputsRecord::Dependency` carries.
+pub struct DependencyEntry {
+    /// The declaring actor's `NAMESPACE`.
+    pub actor: &'static str,
+    /// The dependency's resolver tag (`DependencyResolver::TAG`).
+    pub resolver: u8,
+    /// The dependency's `NAMESPACE`.
+    pub namespace: &'static str,
+}
+
+inventory::collect!(DependencyEntry);
 
 /// Iterate every native [`RootEntry`] collected at link time.
 pub fn root_entries() -> impl Iterator<Item = &'static RootEntry> {

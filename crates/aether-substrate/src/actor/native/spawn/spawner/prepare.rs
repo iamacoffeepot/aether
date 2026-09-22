@@ -21,6 +21,7 @@ use aether_actor::{Instanced, validate_namespace_segment};
 use aether_data::{ActorId, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::local;
@@ -165,6 +166,12 @@ impl Spawner {
         // the const-`Default` ring.
         slots.seed(ActorLogRing::with_capacity(self.ring_capacities.log));
         slots.seed(ActorTraceRing::with_growth(self.ring_capacities.trace, self.ring_capacities.trace_max));
+
+        // ADR-0230: a declared `depends(R)` with no `Live` route fails the
+        // spawn as a failed `init` does, before `A::init` runs.
+        if let Err(e) = check_declared::<A>(self.mailer.registry(), parent) {
+            return Err(SpawnError::InitFailed(e));
+        }
 
         let state = {
             // Instanced actors don't publish driver-facing sub-handles
