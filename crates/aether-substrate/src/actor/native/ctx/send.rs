@@ -10,8 +10,8 @@
 //! what it does fails to unify rather than lying in its manifest.
 
 use aether_actor::{
-    Addressable, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi, OutboundReply,
-    ReplyMode, Singleton,
+    Addressable, AnyActorRef, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi,
+    OutboundReply, ReplyMode, Singleton,
 };
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_path};
 
@@ -253,9 +253,9 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
 
     // By-id detached send — the by-name body with the caller's id, `None` /
     // `None` lineage minting a fresh root (ADR-0080 §7).
-    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(id.0, K::ID.0, &bytes, 1, None, None);
+        self.binding.push_envelope_buffered(target.id().0, K::ID.0, &bytes, 1, None, None);
     }
 }
 

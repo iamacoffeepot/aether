@@ -6,9 +6,14 @@
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
 a caller can *send to*), [ADR-0166](0166-typed-actor-lineage-and-abbreviated-external-addresses.md)
-(its string grammar becomes the text form of one typed value), and
+(its string grammar becomes the text form of one typed value),
 [ADR-0075](0075-actor-typed-sender-api-and-chassis-cap-marker-split.md)
-(`HandlesKind<K>` gains a stored, kind-typed reference).
+(`HandlesKind<K>` gains a stored, kind-typed reference), and
+[ADR-0133](0133-reply-based-stream-handles-for-the-http-server-data-phase.md) (its
+`send_detached_to(MailboxId)` recipient and its
+`{ counterparty: MailboxId, stream_id }` handle shape become the proven
+forms — an `AnyActorRef` constructed from `ctx.sender()`, so a stream
+handle cannot exist without the proof it sends to).
 
 ## Context
 
@@ -121,7 +126,7 @@ pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor |
+| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor, be the target of a detached untyped send |
 | `Tombstone<R>` | that actor is dead | exchanging a reference on its `MonitorNotice` | key cleanup of held state |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 

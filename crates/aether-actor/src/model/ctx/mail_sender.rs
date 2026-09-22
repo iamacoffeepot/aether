@@ -19,9 +19,10 @@
 //! sends uses the trait's [`MailSender::send`] / [`MailSender::send_many`]
 //! / [`MailSender::send_to_named`] methods.
 
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 
 use crate::model::{CallerAddressable, HandlesKind, Singleton};
+use crate::reference::AnyActorRef;
 
 /// Outbound-mail surface every actor ctx exposes.
 ///
@@ -104,7 +105,7 @@ pub trait MailSender {
     fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K);
 
     /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
-    /// of `payload` to the mailbox `id`, minting a fresh causal root
+    /// of `payload` to the proven `target`, minting a fresh causal root
     /// rather than inheriting the caller's in-flight chain (ADR-0080 §7).
     ///
     /// This fills the last cell of the send grid — typed / by-name / by-id
@@ -112,10 +113,16 @@ pub trait MailSender {
     /// [`Self::send_detached`] are the typed pair; [`Self::send_to_named`]
     /// / [`Self::send_detached_to_named`] the by-name pair; the
     /// inherit-by-id send is each ctx's inherent `send_to`, and this is its
-    /// detached partner. Its motivating consumer is a stored stream handle
-    /// that answers whoever dispatched to a handler (ADR-0133): the
-    /// counterparty address is captured at runtime, so a typed `R` can't
-    /// name it and a fresh root is wanted per send.
+    /// detached partner. The by-id cell takes the dispatch-stamped proof
+    /// (ADR-0230) rather than a position anyone can compute, so a hand-built
+    /// [`MailboxId`](aether_data::MailboxId) does not reach it; the inherent
+    /// `send_to` is its inherit twin and narrows the same way when its
+    /// consumer migrates. Its motivating consumer remains the stored stream
+    /// handle that answers whoever dispatched to a handler (ADR-0133): the
+    /// counterparty is `ctx.sender()`, captured at runtime, so a typed `R`
+    /// can't name it and a fresh root is wanted per send. The kind is
+    /// unchecked because that counterparty is deliberately untyped — a mock
+    /// or a middleware stands in for the cap.
     ///
     /// **Fire-and-forget only.** Same contract as [`Self::send_detached`]:
     /// the send mints no parent linkage, so any reply the recipient issues
@@ -125,5 +132,5 @@ pub trait MailSender {
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx
     /// inherent `send_to`), so each concrete ctx supplies its own body.
-    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K);
+    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K);
 }

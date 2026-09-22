@@ -2,8 +2,8 @@
 //! handlers that pace chunks against credit, a flooder that ignores it, and
 //! the request-side streaming upload handler.
 
-use aether_actor::{Manual, actor};
-use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
+use aether_actor::actor;
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{
@@ -73,11 +73,13 @@ impl NativeActor for StreamHttpHandler {
     /// Addressed through the ADR-0133 [`ResponseStream`] handle — the
     /// data phase goes to whichever dispatch shard granted the credit,
     /// never to the supervisor by type (ADR-0135).
-    #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
-        let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+    #[handler::single]
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
+        let Some(sender) = ctx.sender() else {
             return;
         };
+        let stream = ResponseStream::from_credit(sender, &credit);
+
         let mut budget = credit.credit;
         while budget > 0 && state.next_index < STREAM_CHUNK_COUNT {
             stream.chunk(ctx, stream_chunk_body(state.next_index));
@@ -130,11 +132,13 @@ impl NativeActor for StreamIdEchoHandler {
         }
     }
 
-    #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
-        let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+    #[handler::single]
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
+        let Some(sender) = ctx.sender() else {
             return;
         };
+        let stream = ResponseStream::from_credit(sender, &credit);
+
         if state.emitted {
             return;
         }
@@ -183,15 +187,18 @@ impl NativeActor for FloodHttpHandler {
         HttpResponseStreamOpen { status: 200, headers: Vec::new() }
     }
 
-    #[handler::manual]
-    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
+    #[handler::single]
+    fn on_credit(state: &mut Self::State, ctx: &mut NativeCtx<'_>, credit: HttpStreamCredit) {
         if state.flooded {
             return;
         }
         state.flooded = true;
-        let Some(stream) = ResponseStream::from_credit(ctx, &credit) else {
+
+        let Some(sender) = ctx.sender() else {
             return;
         };
+        let stream = ResponseStream::from_credit(sender, &credit);
+
         for _ in 0..FLOOD_CHUNK_COUNT {
             stream.chunk(ctx, vec![b'x'; 8]);
         }
@@ -233,10 +240,10 @@ impl NativeActor for StreamingUploadHandler {
         bind_catch_all(ctx);
     }
 
-    #[handler::manual]
-    fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, open: HttpRequestStreamOpen) {
+    #[handler::single]
+    fn on_stream_open(state: &mut Self::State, ctx: &mut NativeCtx<'_>, open: HttpRequestStreamOpen) {
         state.received = 0;
-        state.stream = RequestStream::from_open(ctx, &open);
+        state.stream = ctx.sender().map(|sender| RequestStream::from_open(sender, &open));
     }
 
     /// Count the piece and grant one credit back so the cap delivers the
