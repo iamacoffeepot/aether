@@ -85,8 +85,6 @@ fn named_journals_return_isolated_pages_and_correlated_replies() {
         chassis.spawn_actor::<JournalActor>(Subname::Named("alpha"), alpha_path, ()).finish().expect("alpha birth");
     let beta = chassis.spawn_actor::<JournalActor>(Subname::Named("beta"), beta_path, ()).finish().expect("beta birth");
     assert_ne!(alpha, beta);
-    assert_eq!(chassis.resolve_actor::<JournalActor>("alpha"), Some(alpha));
-    assert_eq!(chassis.resolve_actor::<JournalActor>("beta"), Some(beta));
 
     // Four outstanding requests exercise both addresses and two independent reply targets.
     request(&registry, alpha, first_caller, 11, &ReadEvents { after: 0, limit: 2 });
@@ -150,5 +148,4 @@ fn invalid_path_fails_actor_birth() {
 
     let result = chassis.spawn_actor::<JournalActor>(Subname::Named("invalid"), invalid_path, ()).finish();
     assert!(matches!(result, Err(SpawnError::InitFailed(_))), "invalid path must fail birth: {result:?}");
-    assert!(chassis.resolve_actor::<JournalActor>("invalid").is_none());
 }

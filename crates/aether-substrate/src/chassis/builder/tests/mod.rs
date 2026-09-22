@@ -19,7 +19,6 @@ mod driver;
 mod inline_child_alias;
 mod monitor;
 mod options;
-mod resolve;
 mod seal;
 mod singleton_boot;
 mod spawn_child;

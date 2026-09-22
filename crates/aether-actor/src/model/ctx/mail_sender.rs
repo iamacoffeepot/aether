@@ -10,14 +10,13 @@
 //! FFI bodies call `crate::wasm::bridge::mail::send_mail`, native bodies hit
 //! `NativeBinding`'s inherent `send_mail`.
 //!
-//! `actor::<R>()` / `resolve_actor::<R>(name)` retired from this trait
-//! because the returned typed-mailbox handle is per-side
-//! ([`crate::wasm::WasmActorMailbox<R>`] vs `NativeActorMailbox<'a, R>`).
-//! Each ctx provides them as inherent methods returning its own
-//! per-side type; the everyday user-facing `ctx.actor::<R>().send(&payload)`
-//! chain is unchanged. Generic-bounded code that needs cross-impl
-//! sends uses the trait's [`MailSender::send`] / [`MailSender::send_many`]
-//! / [`MailSender::send_to_named`] methods.
+//! `actor::<R>()` retired from this trait because the returned
+//! typed-mailbox handle is per-side ([`crate::wasm::WasmActorMailbox<R>`]
+//! vs `NativeActorMailbox<'a, R>`). Each ctx provides it as an inherent
+//! method returning its own per-side type; the everyday user-facing
+//! `ctx.actor::<R>().send(&payload)` chain is unchanged. Generic-bounded
+//! code that needs cross-impl sends uses the trait's [`MailSender::send`]
+//! / [`MailSender::send_many`] methods.
 
 use aether_data::Kind;
 
@@ -61,18 +60,6 @@ pub trait MailSender {
         R: Singleton + CallerAddressable + HandlesKind<K>,
         K: Kind + bytemuck::NoUninit;
 
-    /// String-keyed escape hatch for callers that genuinely don't
-    /// know the receiver type at compile site (debug tools, dynamic
-    /// dispatch, components addressing user-named mailboxes the
-    /// substrate registered without a corresponding Rust type).
-    ///
-    /// `name` resolves by the ADR-0099 §4 parse → fold — the same
-    /// resolution the registry applies to a written name — so a rendered
-    /// lineage address (`LoadResult.name`, e.g.
-    /// `aether.component/aether.embedded:NAME`) addresses its actor here
-    /// exactly as a depth-1 root cap name does.
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K);
-
     /// Correlation id the host minted for this actor's most recent
     /// outbound `send_mail` (ADR-0042). `0` before any send.
     /// Universal mail-level metadata — every send mints a
@@ -102,15 +89,11 @@ pub trait MailSender {
     /// of `payload` to the proven `target`, minting a fresh causal root
     /// rather than inheriting the caller's in-flight chain (ADR-0080 §7).
     ///
-    /// This fills the last cell of the send grid — typed / by-name / by-id
-    /// crossed with inherit / detached. [`Self::send`] and
-    /// [`Self::send_detached`] are the typed pair; the by-name column now
-    /// has only its inherit cell, [`Self::send_to_named`] — a detached send
-    /// mints a fresh causal root, so it accepts only a proven recipient, a
-    /// compile-time `R` for [`Self::send_detached`] or a dispatch-stamped
-    /// `AnyActorRef` for `Self::send_detached_to`, and text is not a proof
-    /// (ADR-0230); the inherit-by-id send is each ctx's inherent
-    /// `send_to`, and this is its detached partner. The by-id cell takes the
+    /// This fills the last cell of the send grid — typed / by-proof crossed
+    /// with inherit / detached. [`Self::send`] and [`Self::send_detached`]
+    /// are the typed pair; there is no by-name column, because text is not
+    /// a proof (ADR-0230). The inherit-by-proof send is each ctx's inherent
+    /// `send_to`, and this is its detached partner. The by-proof cell takes the
     /// dispatch-stamped proof (ADR-0230) rather than a position anyone can
     /// compute, so a hand-built
     /// [`MailboxId`](aether_data::MailboxId) does not reach it; the inherent

@@ -17,10 +17,10 @@
 //! a transport-only build of the identity never names the state nor pulls
 //! `aether_substrate` through this cap.
 //!
-//! `WasmTrampoline::NAMESPACE`,
-//! `spawn_child::<ComponentHostCapability, WasmTrampoline>`, and
-//! `resolve_actor::<WasmTrampoline>` resolve against the identity — `spawn_child`
-//! / `resolve_actor` bind `A: Instanced + NativeActor`, which is the identity.
+//! `WasmTrampoline::NAMESPACE` and
+//! `spawn_child::<ComponentHostCapability, WasmTrampoline>` resolve against the
+//! identity — `spawn_child` binds `A: Instanced + NativeActor`, which is the
+//! identity.
 //!
 //! ## Where this lives (issue 654)
 //!
@@ -87,6 +87,6 @@ pub use runtime::WasmTrampolineConfig;
 /// `feature = "runtime"` gate, so a transport-only build never names the state
 /// nor pulls `aether_substrate` through this cap. External consumers address
 /// this name — `spawn_child::<ComponentHostCapability, WasmTrampoline>`,
-/// `resolve_actor::<WasmTrampoline>`, `WasmTrampoline::NAMESPACE`.
+/// `WasmTrampoline::NAMESPACE`.
 #[actor(instanced, child_of(ComponentHostCapability), child_of(WasmTrampoline))]
 pub struct WasmTrampoline;

@@ -33,7 +33,7 @@ impl DependsOn<EmbeddedDep> for Dependent {}
 
 /// `actor_ref` and `actor` share one derivation: the reference proves the
 /// folded position for both declarable strategies. Owned logic: the shared
-/// `actor_with_namespace` fold behind both doors.
+/// `singleton_handle` fold behind `actor` and `actor_ref`.
 #[test]
 fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() {
     let registry = Registry::new();

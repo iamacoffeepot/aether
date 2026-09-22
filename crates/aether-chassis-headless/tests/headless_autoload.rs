@@ -32,7 +32,6 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
-use aether_component::WasmTrampoline;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
 use aether_lifecycle::LifecycleConfig;
@@ -105,15 +104,16 @@ mod tests {
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis");
+        let address = "aether.component://aether.embedded:probe";
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            if built.resolve_actor::<WasmTrampoline>("probe").is_some() {
+            let resolved = built.resolve_address(address);
+            if resolved.as_ref().is_ok_and(|live| built.actor_registry().is_live(live.mailbox_id)) {
                 break;
             }
             assert!(
                 Instant::now() < deadline,
-                "runtime-manifest probe trampoline did not come up within 30s; live instances: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
+                "runtime-manifest probe trampoline {address} did not come up within 30s; last lookup: {resolved:?}",
             );
             thread::sleep(Duration::from_millis(25));
         }

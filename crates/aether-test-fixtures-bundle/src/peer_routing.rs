@@ -8,8 +8,8 @@
 
 #![allow(clippy::unused_self)]
 
-use aether_actor::{ActorInitError, MailSender, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{Bump, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, TickObserved};
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_test_fixtures_kinds::{Bump, SubstrateHarnessObserver, TickObserved};
 
 pub struct ParentPeerCaller;
 
@@ -39,6 +39,6 @@ impl WasmActor for ParentPeerTarget {
 
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
-        ctx.send_to_named::<TickObserved>(SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, &TickObserved { count: 1 });
+        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: 1 });
     }
 }

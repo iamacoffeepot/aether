@@ -158,7 +158,6 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
 }
 
 fn wire_pass_mail_crosses_actors(pinger_first: bool) {
-    use aether_actor::MailSender;
     use aether_data::Kind;
     use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -182,7 +181,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
             Ok(Self { wire_ran: params })
         }
         fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
-            ctx.send_to_named::<WireBarrierPing>(Ponger::NAMESPACE, &WireBarrierPing { tag: 1 });
+            ctx.actor::<Ponger>().send(&WireBarrierPing { tag: 1 });
             state.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }

@@ -247,10 +247,8 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
             use ::aether_actor::MailSender;
             match pending {
                 #program::__macro_internals::Pending::Artifact(pending) => {
-                    ctx.send_to_named(
-                        #program::__macro_internals::JOURNAL_NAMESPACE,
-                        &#program::kinds::ReadArtifact { digest: pending.digest },
-                    );
+                    ctx.actor::<#program::__macro_internals::JournalRoot>()
+                        .send(&#program::kinds::ReadArtifact { digest: pending.digest });
                     let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
                     self.waiting.insert(request, #program::__macro_internals::Pending::Artifact(pending));
                 }

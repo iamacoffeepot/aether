@@ -193,8 +193,8 @@ impl MailboxId {
     /// Compute the deterministic id for a mailbox name. Same algorithm
     /// the guest SDK uses on the component side — ids round-trip
     /// verbatim across the FFI.
-    // Core name→id routing primitive — the runtime-name escape hatch
-    // (resolve_actor / wire-Call forwarding) builds on this.
+    // Core name→id routing primitive — the boundary address parser and
+    // wire-Call forwarding build on this.
     #[must_use]
     #[allow(clippy::disallowed_methods)]
     pub fn from_name(name: &str) -> Self {

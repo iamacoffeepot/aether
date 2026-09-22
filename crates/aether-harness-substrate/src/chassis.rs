@@ -40,9 +40,11 @@ pub const WORKERS: usize = 2;
 /// Test-harness observability mailbox. Scenarios that want to assert
 /// on component-emitted kinds (the probe's
 /// `aether.test_fixture.tick_observed`, for example) target this
-/// name with `ctx.send_to_named`; the pumped `aether.render` dispatch
-/// witnesses every kind it delivers here by mail (issue 5965); the
-/// substrate-harness chassis registers
+/// mailbox through the typed
+/// `aether_test_fixtures_kinds::SubstrateHarnessObserver` marker
+/// (`ctx.actor::<SubstrateHarnessObserver>().send(&k)`); the pumped
+/// `aether.render` dispatch witnesses every kind it delivers here by mail
+/// (issue 5965); the substrate-harness chassis registers
 /// a synchronous-handler closure under this namespace via
 /// `Registry::register_inline` (see `build_passive`) and the
 /// closure records each kind name in `SubstrateHarnessEnv::observed_kinds`.

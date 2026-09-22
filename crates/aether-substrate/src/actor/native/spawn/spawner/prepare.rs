@@ -223,7 +223,7 @@ impl Spawner {
         A: Instanced + NativeActor,
     {
         let StagedActor { identity, sender, transport, slots, state, after_init } = staged;
-        let SpawnIdentity { id, canonical_name, subname, .. } = identity;
+        let SpawnIdentity { id, canonical_name, .. } = identity;
         // The actor's own declared kinds are seeded on top of whatever its
         // `init` already staged, never instead of it (iamacoffeepot/aether#4269).
         // Most actors stage nothing, so this is the plain "seed from the
@@ -263,7 +263,7 @@ impl Spawner {
             })
             .collect();
         let activation =
-            LegacyPreparedActivation::<A>::new(Arc::clone(self), id, subname, sender, transport, slots, state, chain);
+            LegacyPreparedActivation::<A>::new(Arc::clone(self), id, sender, transport, slots, state, chain);
         let activation = match finalizer {
             Some(finalizer) => activation.with_finalizer(finalizer),
             None => activation,

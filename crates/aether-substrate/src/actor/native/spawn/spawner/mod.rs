@@ -17,7 +17,7 @@ use crate::actor::registry::ActorRegistry;
 use crate::config::RingCapacities;
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::{BootAuthority, Registry};
+use crate::mail::registry::{AddressResolutionError, BootAuthority, Registry, ResolvedAddress};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 
@@ -173,7 +173,7 @@ impl Spawner {
     /// registry through `transport.spawner().actor_registry()` is
     /// the wrong shape — caps that supervise a fleet hold their own
     /// child map; caps that just send mail use the typed `ctx.actor`
-    /// / `ctx.resolve_actor` shortcuts. ADR-0079 supervisor-as-cap
+    /// / `ctx.to` shortcuts. ADR-0079 supervisor-as-cap
     /// pattern.
     pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
         &self.actor_registry
@@ -191,6 +191,14 @@ impl Spawner {
 
     pub(crate) fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Resolve a canonical or ADR-0166 abbreviated actor address to one live
+    /// mailbox through the registry's boundary parser, keeping the registry
+    /// itself behind the spawner. The chassis handle's embedder lookup
+    /// forwards here.
+    pub(crate) fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
+        self.registry.resolve_address(address)
     }
 
     /// The chassis fatal-abort handle, cloned into each booted

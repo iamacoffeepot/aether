@@ -9,12 +9,10 @@
 //! actor: two in-flight reads carry distinct typed contexts, and the same
 //! `ReadResult` handler recovers them by probe-then-take.
 
-use aether_actor::{
-    ActorInitError, Erased, Kind, MailSender, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Erased, Kind, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
-    FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
+    FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SubstrateHarnessObserver,
 };
 
 const CONTEXT_A_PAYLOAD: u32 = 11;
@@ -96,10 +94,7 @@ impl WasmActor for FsDemux {
                 target: "test.fs_demux",
                 "fs_demux first_matched=true second_matched=true",
             );
-            ctx.send_to_named::<FsDemuxReport>(
-                SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-                &FsDemuxReport { first_matched: true, second_matched: true },
-            );
+            ctx.actor::<SubstrateHarnessObserver>().send(&FsDemuxReport { first_matched: true, second_matched: true });
         }
     }
 }
@@ -168,10 +163,7 @@ impl FsDemux {
                 second_payload,
                 "fs_context_demux probe-then-take recovered both contexts",
             );
-            ctx.send_to_named::<FsContextDemuxReport>(
-                SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME,
-                &FsContextDemuxReport { first_payload, second_payload },
-            );
+            ctx.actor::<SubstrateHarnessObserver>().send(&FsContextDemuxReport { first_payload, second_payload });
         }
         true
     }

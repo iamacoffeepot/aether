@@ -62,10 +62,9 @@ impl WasmInitCtx<'_> {
         resolve_mailbox::<K>(name)
     }
 
-    // Issue 1987: the init ctx exposes no `actor()` / `resolve_actor()`
-    // sender shortcut. A `WasmActorMailbox` is now a ctx-bound sender that
-    // routes through the per-component inline registry, which the init
-    // stage does not hold — and init is mail-forbidden anyway (the ctx
+    // Issue 1987: the init ctx exposes no `actor()` sender shortcut. A
+    // `WasmActorMailbox` is now a ctx-bound sender that routes through the
+    // per-component inline registry, which the init stage does not hold — and init is mail-forbidden anyway (the ctx
     // carries no send surface by design). Addressing + sending begin at
     // `wire`, where `WasmCtx` carries the registry.
 }

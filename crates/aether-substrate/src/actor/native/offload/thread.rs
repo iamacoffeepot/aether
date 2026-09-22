@@ -42,7 +42,7 @@ use std::thread::{self, JoinHandle};
 
 use aether_actor::{Addressable, AnyActorRef, HandlesKind};
 use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
-use aether_data::{Kind, MailId, mailbox_id_from_path};
+use aether_data::{Kind, MailId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::runtime::trace::SettlementHold;
@@ -152,23 +152,6 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         );
     }
 
-    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
-    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — resolves the written name by the same
-    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
-            mailbox_id_from_path(name).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
@@ -253,16 +236,6 @@ impl<A: Addressable> MailSender for RootCtx<A> {
             None,
             None,
         );
-    }
-
-    // Runtime-name send escape hatch (the `Resolver::send_to_named` contract):
-    // the recipient name is supplied at runtime, no compile-time `R` to resolve.
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — resolves the written name by the same
-    // ADR-0099 §4 parse → fold the registry does, so a lineage address routes
-    fn send_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, None, None);
     }
 
     fn prev_correlation(&self) -> u64 {
@@ -502,7 +475,7 @@ mod tests {
         assert_eq!(captured.lock().unwrap().len(), 2, "both offload ctx flavours resolve through the parent");
     }
 
-    /// `InheritCtx`-spawned thread's `send_to_named` carries the
+    /// `InheritCtx`-spawned thread's typed send carries the
     /// inherited root and stamps `parent_mail = inherited_mail_id`.
     /// Settlement is held open until the worker thread exits per
     /// ADR-0080 §12 / iamacoffeepot/aether#716; see
@@ -511,7 +484,7 @@ mod tests {
     #[test]
     fn inherit_ctx_send_carries_root_and_parent_mail() {
         let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, "test.spawn_thread.recipient");
+        let captured = register_capture(&registry, StubActor::NAMESPACE);
 
         let producer_mailbox = MailboxId(0xAA);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
@@ -524,9 +497,8 @@ mod tests {
             inherited_mail_id,
             inherited_root,
             move |mut inherit| {
-                <InheritCtx<StubActor> as MailSender>::send_to_named(
+                <InheritCtx<StubActor> as MailSender>::send::<StubActor, _>(
                     &mut inherit,
-                    "test.spawn_thread.recipient",
                     &aether_kinds::Tick::default(),
                 );
             },
@@ -578,22 +550,18 @@ mod tests {
         }
     }
 
-    /// `RootCtx`-spawned thread's `send_to_named` mints a fresh root
+    /// `RootCtx`-spawned thread's typed send mints a fresh root
     /// chain — root == its own `mail_id`, `parent_mail` = None.
     #[test]
     fn root_ctx_send_mints_fresh_root_with_no_parent() {
         let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, "test.spawn_thread.recipient");
+        let captured = register_capture(&registry, StubActor::NAMESPACE);
 
         let producer_mailbox = MailboxId(0xBB);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
-            <RootCtx<StubActor> as MailSender>::send_to_named(
-                &mut root,
-                "test.spawn_thread.recipient",
-                &aether_kinds::Tick::default(),
-            );
+            <RootCtx<StubActor> as MailSender>::send::<StubActor, _>(&mut root, &aether_kinds::Tick::default());
         });
         join.join().expect("root worker thread joins");
 
@@ -639,18 +607,14 @@ mod tests {
     #[test]
     fn root_ctx_each_send_is_an_independent_root() {
         let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, "test.spawn_thread.recipient");
+        let captured = register_capture(&registry, StubActor::NAMESPACE);
 
         let producer_mailbox = MailboxId(0xCC);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
             for _ in 0..3 {
-                <RootCtx<StubActor> as MailSender>::send_to_named(
-                    &mut root,
-                    "test.spawn_thread.recipient",
-                    &aether_kinds::Tick::default(),
-                );
+                <RootCtx<StubActor> as MailSender>::send::<StubActor, _>(&mut root, &aether_kinds::Tick::default());
             }
         });
         join.join().expect("root worker thread joins");

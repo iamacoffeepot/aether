@@ -421,7 +421,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
     // kind. Auto-generated marker impls gate
     // `ActorMailbox<'_, R, T>::send::<K>` (constructed via
-    // `ctx.actor::<R>()` / `ctx.resolve_actor::<R>(name)`) so wrong-kind
+    // `ctx.actor::<R>()` or `ctx.to(&reference)`) so wrong-kind
     // sends are compile errors at the call site. The handler list above
     // is the single source of truth — adding a `#[handler]` automatically
     // updates senders' compile-time checks.

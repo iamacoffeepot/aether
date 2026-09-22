@@ -1010,6 +1010,7 @@ dependencies = [
 name = "aether-test-fixtures-kinds"
 version = "0.3.0-alpha"
 dependencies = [
+ "aether-actor",
  "aether-bloomery-reactor",
  "aether-data",
  "bytemuck",

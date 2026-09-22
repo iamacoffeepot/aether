@@ -148,7 +148,7 @@ impl Spawner {
         A: Instanced + NativeActor,
     {
         let StagedActor { identity, sender: tx, transport, slots, state, after_init } = staged;
-        let SpawnIdentity { id, canonical_name: full_name, subname, .. } = identity;
+        let SpawnIdentity { id, canonical_name: full_name, .. } = identity;
 
         // Register sink + Live entry + pre-load mail. The actor
         // registry's `insert_live` and the mailbox registry's
@@ -208,8 +208,7 @@ impl Spawner {
 
         // Issue 629 / Phase A: dispatcher takes Box<A> ownership.
         // The chassis-side actor_registry no longer holds a clone of
-        // the actor — only the sender + type_id + subname for routing
-        // and resolve_actor.
+        // the actor — only the sender + type_id for routing.
         let mut actor = Box::new(state);
 
         // Insert before pre-loading mail: the actor_registry holding
@@ -217,7 +216,7 @@ impl Spawner {
         // The Arc<Sender> here is the same one the sink handler's
         // Weak references — when `mark_dead` drops this entry, the
         // weak upgrade fails for any further external mail.
-        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>(), subname).is_err() {
+        if self.actor_registry.insert_live(id, Arc::clone(&strong_sender), TypeId::of::<A>()).is_err() {
             // Hash collision against an existing Live entry on the
             // same id but a slot the mailbox registry didn't reject —
             // possible if a singleton + instanced collide on the same

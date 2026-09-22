@@ -39,11 +39,12 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
-use aether_component::WasmTrampoline;
+use aether_data::MailboxId;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
 use aether_lifecycle::LifecycleConfig;
+use aether_substrate::BuiltChassis;
 use aether_substrate::Chassis as _;
 use aether_substrate::config::ConfigSources;
 
@@ -81,6 +82,27 @@ const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 
 /// The `WebSocketHandler` fixture's `NAMESPACE` const (ADR-0129).
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
+
+/// Poll the chassis's boundary address parser until the handler loaded under
+/// `name` has a live trampoline, answering its position. Panics after 30s with
+/// the address and the parser's last answer.
+fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> MailboxId {
+    let address = format!("aether.component://aether.embedded:{name}");
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let resolved = built.resolve_address(&address);
+        if let Ok(live) = &resolved
+            && built.actor_registry().is_live(live.mailbox_id)
+        {
+            return live.mailbox_id;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "trampoline {address} did not come up within 30s; last lookup: {resolved:?}"
+        );
+        thread::sleep(Duration::from_millis(25));
+    }
+}
 
 /// RFC 6455 §1.3 worked-vector handshake key, and the `Sec-WebSocket-Accept`
 /// the server must echo for it (base64(SHA-1(key + GUID))). Using the fixed
@@ -382,19 +404,7 @@ mod tests {
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
         // Wait for the wasm handler trampoline to come up.
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if built.resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE).is_some() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "http_handler trampoline did not register within 30s; \
-                 live trampolines: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        await_live_trampoline(&built, HANDLER_NAMESPACE);
 
         // Retrieve the OS-assigned port from the published handle.
         let port =
@@ -490,19 +500,7 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if built.resolve_actor::<WasmTrampoline>(STREAM_HANDLER_NAMESPACE).is_some() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "streaming trampoline did not register within 30s; \
-                 live trampolines: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        await_live_trampoline(&built, STREAM_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
@@ -595,19 +593,7 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if built.resolve_actor::<WasmTrampoline>(ROUTED_STREAM_HANDLER_NAMESPACE).is_some() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "routed streaming trampoline did not register within 30s; \
-                 live trampolines: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        await_live_trampoline(&built, ROUTED_STREAM_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
@@ -705,19 +691,7 @@ mod tests {
 
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
-        let deadline = Instant::now() + Duration::from_secs(30);
-        loop {
-            if built.resolve_actor::<WasmTrampoline>(WS_HANDLER_NAMESPACE).is_some() {
-                break;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "websocket trampoline did not register within 30s; \
-                 live trampolines: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
-            );
-            thread::sleep(Duration::from_millis(25));
-        }
+        await_live_trampoline(&built, WS_HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;
@@ -938,20 +912,8 @@ mod tests {
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
         // Wait for both trampolines (fallback + routed guest).
-        let deadline = Instant::now() + Duration::from_secs(30);
-        let routed_mailbox = loop {
-            if let Some(routed) = built.resolve_actor::<WasmTrampoline>(ROUTED_NAMESPACE)
-                && built.resolve_actor::<WasmTrampoline>(HANDLER_NAMESPACE).is_some()
-            {
-                break routed;
-            }
-            assert!(
-                Instant::now() < deadline,
-                "trampolines did not register within 30s; live: {:?}",
-                built.resolve_actors::<WasmTrampoline>(),
-            );
-            thread::sleep(Duration::from_millis(25));
-        };
+        let routed_mailbox = await_live_trampoline(&built, ROUTED_NAMESPACE);
+        await_live_trampoline(&built, HANDLER_NAMESPACE);
 
         let port =
             built.handle::<HttpServerHandle>().expect("HttpServerHandle published by HttpServerCapability").local_port;

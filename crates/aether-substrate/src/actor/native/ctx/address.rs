@@ -15,8 +15,8 @@
 //! derives it belongs with the pair that reads it.
 
 use aether_actor::{
-    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Instanced,
-    Reaches, ReplyMode, Singleton,
+    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Reaches,
+    ReplyMode, Singleton,
 };
 use aether_data::{MailId, MailboxId};
 
@@ -27,7 +27,7 @@ use super::NativeCtx;
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
 /// [`NativeInitCtx`](super::NativeInitCtx): both hold the same `binding`, so `actor` /
-/// `resolve_actor` / `actor_at` resolve identically. Emitting them from
+/// `actor_at` resolve identically. Emitting them from
 /// one source keeps the two ctxs from drifting and means the bodies are
 /// not a `DuplicatedCode` clone (ADR-0099 §5 / issue 1431).
 ///
@@ -49,20 +49,6 @@ macro_rules! native_sender_methods {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(
                 R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
-                self.binding,
-                parent,
-                root,
-            )
-        }
-
-        /// Multi-instance sender: resolve a typed [`NativeActorMailbox`] from
-        /// a runtime instance key through `R`'s caller-scoped resolver.
-        /// Captures the in-flight lineage like [`Self::actor`].
-        #[must_use]
-        pub fn resolve_actor<R: Instanced + CallerAddressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-            let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(
-                R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, name).0,
                 self.binding,
                 parent,
                 root,

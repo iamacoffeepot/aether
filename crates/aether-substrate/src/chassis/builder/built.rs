@@ -15,20 +15,24 @@ use crate::chassis::ctx::{MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
-use crate::mail::MailboxId;
 use crate::mail::registry::effect::RegistryEffectError;
+use crate::mail::registry::{AddressResolutionError, ResolvedAddress};
 use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
     () => {
-        #[must_use]
-        pub fn resolve_actor<A: aether_actor::Instanced + NativeActor>(&self, subname: &str) -> Option<MailboxId> {
-            resolve_actor::<A>(&self.booted, subname)
-        }
-
-        #[must_use]
-        pub fn resolve_actors<A: aether_actor::Instanced + NativeActor>(&self) -> Vec<(String, MailboxId)> {
-            resolve_actors::<A>(&self.booted)
+        /// Resolve a canonical or ADR-0166 abbreviated actor address to the
+        /// position of one live mailbox. This is the host's boundary parser
+        /// (ADR-0230 §3), the one place text becomes a position; it answers
+        /// with a position and no proof, for an embedder that holds no spawn
+        /// result for the actor it observes.
+        ///
+        /// # Errors
+        ///
+        /// Returns the parser's [`AddressResolutionError`] when the address
+        /// is malformed, expands ambiguously, or names no live mailbox.
+        pub fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
+            self.booted.spawner.resolve_address(address)
         }
 
         pub fn spawn_actor<'a, A>(
@@ -93,7 +97,7 @@ impl<C: Chassis> BuiltChassis<C> {
 
 /// A chassis built without a driver. The embedder (`SubstrateHarness`, future
 /// embedded harnesses) drives any loop manually. Passives are booted
-/// and addressable via [`Self::resolve_actor`] / [`Self::resolve_actors`];
+/// and addressable via [`Self::resolve_address`];
 /// they shut down when the `PassiveChassis` is dropped.
 pub struct PassiveChassis<C: Chassis> {
     pub(super) booted: BootedPassives,
@@ -224,8 +228,8 @@ impl<C: Chassis> PassiveChassis<C> {
     /// server with no engines cap in the picture.
     ///
     /// The placement is the same parentless depth-1 one `spawn_actor`
-    /// produces — a flat `{NAMESPACE}:{subname}` id — so a test reaches the
-    /// spawned actor through the ordinary [`Self::resolve_actor`].
+    /// produces — a flat `{NAMESPACE}:{subname}` id — and the builder's
+    /// `finish()` answers the spawned actor's position.
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_actor_for_test<'a, A>(
         &'a self,
@@ -246,22 +250,6 @@ impl<C: Chassis> PassiveChassis<C> {
 /// already returns for every other failure.
 fn owner_boot_error(error: &RegistryEffectError) -> BootError {
     BootError::Other(Box::new(io::Error::other(format!("registry owner refused the pumped activation: {error}"))))
-}
-
-fn resolve_actor<A: aether_actor::Instanced + NativeActor>(
-    booted: &BootedPassives,
-    subname: &str,
-) -> Option<MailboxId> {
-    // ADR-0099 §3: a nested actor's id is its lineage fold, not
-    // `hash(NAMESPACE:subname)`, so resolve by the *registered* id —
-    // walk the live instances of `A` and match the subname — rather
-    // than recomputing a flat name-hash that only lands for a depth-1
-    // (chassis-level) instance.
-    resolve_actors::<A>(booted).into_iter().find(|(sn, _)| sn == subname).map(|(_, id)| id)
-}
-
-fn resolve_actors<A: aether_actor::Instanced + NativeActor>(booted: &BootedPassives) -> Vec<(String, MailboxId)> {
-    booted.actor_registry.live_subnames_of_type::<A>()
 }
 
 // The `Root` bound lives on the callers, not here: `spawn_actor` is the
