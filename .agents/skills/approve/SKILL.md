@@ -57,7 +57,7 @@ python3 -I .agents/skills/approve/scripts/plan_digest.py \
   --body-file /tmp/aether-plan-body-<N>.md
 ```
 
-Require stable JSON, the four required non-empty managed sections, scope-owned order, no duplicate headings, and valid final routing lines. A legacy Dogfood brief is approval-bearing but not validated. Side findings never block approval.
+Require stable JSON, the four required non-empty managed sections, scope-owned order, no duplicate headings, and valid final routing lines. Side findings never block approval.
 
 Retain the returned digest, size, and model. Recompute them from a fresh body immediately before appending approval.
 

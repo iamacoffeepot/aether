@@ -52,11 +52,10 @@ Implementation plan
 Sub-issues
 Depends on
 Declared surface
-Dogfood brief
 Side findings
 ```
 
-Preserve every other body byte, including the unmanaged prefix and hidden approval history. Replace existing managed spans in place and append missing spans in the order above. Omit Sub-issues, Depends on, Side findings, and Dogfood brief when empty; require the other four for a complete Plan. A legacy Dogfood brief is preserved.
+Preserve every other body byte, including the unmanaged prefix and hidden approval history. Replace existing managed spans in place and append missing spans in the order above. Omit Sub-issues, Depends on, and Side findings when empty; require the other four for a complete Plan.
 
 Before every full-body patch:
 

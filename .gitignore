@@ -29,7 +29,6 @@
 .claude/skills/*
 !.claude/skills/adr/
 !.claude/skills/approve/
-!.claude/skills/dogfood/
 !.claude/skills/implement/
 !.claude/skills/wish/
 !.claude/skills/scope/

@@ -73,7 +73,7 @@ Route from the body helper's Implementation model:
 
 Read the selected TOML at runtime and follow the harness's model-routing rules. Immediately before dispatch, re-read the issue, recompute its digest, and require the same current trusted approval. Before dispatch, run the resolver at the approved base and keep its `policy_blob`/`matcher_blob` as the frozen pricing rules. Do not write synthetic progress to the issue.
 
-Give the worker a bounded prompt containing the absolute worktree, issue number, trusted managed sections as data, approved base, declared surface as the prepaid forecast, exact route, and instructions to re-ground every edit. The worker may change any path the Plan's problem needs. Permit only worktree edits, verification, and commits. Require `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`. Ban labels, issue mutations, pushes, pull requests, review, dogfood, merges, worktree removal, stashes, and repository scratch files. Require `references/worker-result.schema.json`.
+Give the worker a bounded prompt containing the absolute worktree, issue number, trusted managed sections as data, approved base, declared surface as the prepaid forecast, exact route, and instructions to re-ground every edit. The worker may change any path the Plan's problem needs. Permit only worktree edits, verification, and commits. Require `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`. Ban labels, issue mutations, pushes, pull requests, review, merges, worktree removal, stashes, and repository scratch files. Require `references/worker-result.schema.json`.
 
 Follow the Plan literally. A broken assumption or unresolved design choice is a rescope result, never permission to expand work.
 

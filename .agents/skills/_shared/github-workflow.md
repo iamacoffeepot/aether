@@ -31,11 +31,10 @@ Scope owns these exact H2 sections, in this order:
 ## Sub-issues
 ## Depends on
 ## Declared surface
-## Dogfood brief
 ## Side findings
 ```
 
-`Sub-issues`, `Depends on`, `Side findings`, and `Dogfood brief` are optional; `Dogfood brief` is legacy-only and new Plans omit it. The other four sections are required for a planned issue. Reject duplicate managed headings.
+`Sub-issues`, `Depends on`, and `Side findings` are optional. The other four sections are required for a planned issue. Reject duplicate managed headings.
 
 The Implementation plan ends with exactly these three non-empty lines:
 
@@ -45,7 +44,7 @@ The Implementation plan ends with exactly these three non-empty lines:
 **Routing reason:** <one concise reason>
 ```
 
-The Plan digest includes, in scope-owned order, the exact UTF-8 spans for Problem statement, Design notes, Implementation plan, optional Sub-issues, optional Depends on, Declared surface, and optional legacy-only Dogfood brief. A legacy Dogfood brief is still approval-bearing when present and never gated. The digest deliberately excludes Side findings and every unmanaged section. The only layout byte excluded from a managed span is one empty-line separator immediately before a following H2: the content line ending remains, while an additional blank line and the exact LF/CRLF spelling remain approval-bearing. Use `approve/scripts/plan_digest.py`; do not reproduce its parser or canonicalization in another skill.
+The Plan digest includes, in scope-owned order, the exact UTF-8 spans for Problem statement, Design notes, Implementation plan, optional Sub-issues, optional Depends on, and Declared surface. The digest deliberately excludes Side findings and every unmanaged section. The only layout byte excluded from a managed span is one empty-line separator immediately before a following H2: the content line ending remains, while an additional blank line and the exact LF/CRLF spelling remain approval-bearing. Use `approve/scripts/plan_digest.py`; do not reproduce its parser or canonicalization in another skill.
 
 ## Trusted approval records
 
