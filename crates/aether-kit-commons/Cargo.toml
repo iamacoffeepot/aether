@@ -18,7 +18,7 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# An embedding cdylib (the shelved aether-kit-workbench inline-spawned `console::ConsoleOverlay`)
+# An embedding cdylib (the shelved aether-kit-workbench inline-spawned one of kit's actors)
 # enables this to strip this crate's `export!` entry surface: one `export!` emits
 # the FFI entries per wasm module, so the entry-free rlib face keeps the actor
 # impls without a second `receive_p32` / `init` colliding with the embedder's own
@@ -37,9 +37,6 @@ aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`.
 # kit is a wasm guest, so it takes the marker-only identity face.
 aether-render = { path = "../aether-render", default-features = false }
-# iamacoffeepot/aether#3727: the text cap was extracted to `aether-text`.
-# kit is a wasm guest, so it takes the marker-only identity face.
-aether-text = { path = "../aether-text", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — kit loads meshes / worlds
 # through it. Marker face only (kit is a wasm component addressing fs by mail).
 aether-fs = { path = "../aether-fs", default-features = false }
@@ -67,21 +64,9 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
-# iamacoffeepot/aether#5790: `console_render_interaction` builds a loaded
-# component's rendered lineage string from `WasmTrampoline::NAMESPACE`. That is
-# the crate's only remaining use of the component cap, so it takes the
-# marker-only identity face here rather than in `[dependencies]`.
-aether-component = { path = "../aether-component", default-features = false }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
-aether-text = { path = "../aether-text" }
-# iamacoffeepot/aether#3953: the workbench (kit's last source consumer of the
-# widget crate) moved to `aether-kit-workbench`, so the widget rlib dependency
-# left kit's `[dependencies]`. `console_render_interaction` still runtime-loads
-# the widget editor shell and imports its `EditorConfig` vocabulary at source,
-# so it stays as a dev-dependency here.
-aether-kit-widget = { path = "../aether-kit-widget" }
 
 [lints]
 workspace = true

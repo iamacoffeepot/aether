@@ -7,7 +7,7 @@
 > selected at load), and [ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md) / [ADR-0099](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0099-actor-identity-and-addressing.md) (sibling spawn and its
 > lineage-correct addressing). The authoring and loading surface here is **stable** — it's
 > what the reference component `aether-kit-commons` (a multi-actor module: camera,
-> console, and mesh viewer) is built on, and the signatures were read from the
+> camera-controller, and mesh viewer) is built on, and the signatures were read from the
 > current SDK.
 
 A **component** is the wasm host of an actor. The shared model — the `#[actor]`
