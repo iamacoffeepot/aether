@@ -52,15 +52,16 @@ mechanism.
    eligibility flag, its accepted input lanes, and an optional activation
    chord. It carries no address: a region that has given input ownership away
    mails `RegionAttach { region }` to the shell as it wires, and the shell
-   keeps that envelope's sender as the position it forwards to (ADR-0230 — an
-   id decoded from config is a position anyone can spell, while the sender is
-   one the host stamped). A new plain-state `Routing` struct — the
+   stores that envelope's sender as the region's target (ADR-0230 — an id
+   decoded from config is a position anyone can spell, while the sender is a
+   reference the host stamped). A new plain-state `Routing` struct — the
    editor-level analogue of `Focus` — holds the region entries, the focused
-   region, and the region-level press owner (drag capture). An entry's target
-   is empty until its region announces, and an entry with no target routes
-   nothing. `Routing` does no mail and holds no capability handle; the shell
-   drives it, mirroring how `Focus` and `Composite` are the bookkeeping halves
-   of ADR-0117 while the actor owns the sends.
+   region, and the region-level press owner (drag capture). Its targets are
+   those references, not positions: an entry's target is empty until its region
+   announces, and an entry with no target routes nothing. `Routing` does no
+   mail and holds no capability handle; the shell drives it, mirroring how
+   `Focus` and `Composite` are the bookkeeping halves of ADR-0117 while the
+   actor owns the sends.
 
 3. **Routing is two-level and deterministic.** The shell arbitrates *between*
    regions; each region root still owns focus/capture *within* itself.
@@ -137,13 +138,14 @@ through to a covered region.
 
 Issue #6306 removed the spec's target field. `RegionAttach { region }`
 (`aether.kit.widget.editor.region_attach`) is how a region supplies its
-address: the shell matches `region` against its declared table, stores the
-envelope sender as an `AnyActorRef`, and resolves each routed position back
-through those held proofs before forwarding — an unknown region name, a second
-announcement for a name already attached, and a routed position it holds no
-proof for are each warned and dropped. `Routing` keeps `MailboxId` as its table
-key, because a position is what a hit test and a focus cycle compare (ADR-0230
-§2); what changed is that the shell never sends to one it was not handed.
+address: the shell matches `region` against its declared table and hands the
+envelope sender straight to `Routing`, which stores it. Every routed target —
+the hit region, the press owner, the focus edge, the exited region — is that
+`AnyActorRef` rather than a position, so the shell has nothing to resolve and
+cannot address a region that never announced. Reference equality is id
+equality, so press ownership and the focus cycle compare what they always
+compared. An unknown region name and a second announcement for a name already
+attached are warned and ignored rather than re-pointing a live route.
 
 The plain `widget::routing::Routing` state records focus, cached `Modifiers`,
 and a named `RegionPressOwner { target, button }`. The first accepted press
