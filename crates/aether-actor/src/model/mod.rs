@@ -216,8 +216,9 @@ mod sealed {
 /// A [`Resolve`] strategy that may back a declared `#[actor(depends(R))]`
 /// dependency (ADR-0230): the keyless strategies, whose candidate position
 /// the host folds without run-time data. Sealed: the only implementors are
-/// [`One`] and [`Embedded`]. A keyed strategy stays with `ctx.resolve`,
-/// where the caller supplies the key at run time.
+/// [`One`] and [`Embedded`]. A keyed strategy stays with
+/// `ctx.resolve_actor::<R>(key)`, where the caller supplies the key at run
+/// time.
 pub trait DependencyResolver: Resolve + sealed::Sealed {
     /// The wire tag the `#[actor]` macro writes into the
     /// `InputsRecord::Dependency` record and the host reader matches on.
@@ -343,7 +344,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// Only keyless actors are declarable: `R: Singleton + CallerAddressable`
 /// with a [`DependencyResolver`] strategy. A keyed actor cannot be a
 /// declared dependency — which instance is meant is run-time data, and
-/// that case stays with `ctx.resolve`:
+/// that case stays with `ctx.resolve_actor::<R>(key)`:
 ///
 /// ```compile_fail,E0277
 /// use aether_actor::{Addressable, DependsOn, Many, One};
