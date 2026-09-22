@@ -82,6 +82,16 @@ jobs:
   # verify umbrella member, and this scan has none. Two limits follow: the
   # local verify lane does not predict a mint finding, and pushes and manual
   # runs are not scanned.
+  #
+  # The raw-mailbox ratchet (ADR-0230, issue #6314) rides here for the same
+  # reason again: its pattern table is the gate, so the scanner is
+  # materialized from the event base — with the same bootstrap fallback to
+  # the head as the suppression scanner above, since the base of the PR that
+  # introduces this gate has no scanner blob yet — and the checked-in
+  # baseline it compares against is read from the head, because lowering it
+  # is the half of the ratchet a candidate must do. It inherits the same two
+  # limits: the local verify lane does not predict a finding, and pushes and
+  # manual runs are not scanned.
   suppressions:
     name: New suppressions
     if: github.event_name == 'pull_request'
