@@ -184,6 +184,7 @@ fn panel_config() -> PanelConfig {
             },
         ],
         owns_input: true,
+        editor_region: String::new(),
     }
 }
 

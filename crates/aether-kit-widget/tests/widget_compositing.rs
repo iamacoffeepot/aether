@@ -207,6 +207,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
         theme: Theme::DEFAULT,
         children: vec![child],
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

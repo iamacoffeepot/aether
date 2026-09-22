@@ -130,6 +130,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetC
         theme: Theme::DEFAULT,
         children,
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

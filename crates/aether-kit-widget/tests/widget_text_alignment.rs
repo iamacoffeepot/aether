@@ -134,6 +134,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
         theme: Theme { font_id, ..Theme::DEFAULT },
         children: Vec::new(),
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

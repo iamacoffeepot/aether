@@ -153,7 +153,7 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
 | A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |
-| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. | — |
+| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
 
 The position and the proof have different owners. `Resolve` stays the single
 derivation of a position, fed by an `Address<R>` and never by text. The host

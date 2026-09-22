@@ -229,15 +229,18 @@ fn load_panel_with_children(
     font_id: u32,
     children: Vec<WidgetChildSpec>,
 ) -> MailboxId {
-    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true)
+    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "")
 }
 
+/// `editor_region` is the shell-declared region this panel announces itself as
+/// once it has given input ownership away; it is empty for a self-owned panel.
 fn load_panel_with_children_and_ownership(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
     font_id: u32,
     children: Vec<WidgetChildSpec>,
     owns_input: bool,
+    editor_region: &str,
 ) -> MailboxId {
     let config = PanelConfig {
         x: PANEL_X,
@@ -248,6 +251,7 @@ fn load_panel_with_children_and_ownership(
         theme: Theme { font_id, ..Theme::DEFAULT },
         children,
         owns_input,
+        editor_region: editor_region.to_owned(),
     };
     let loaded = harness
         .execute(vec![(
@@ -272,12 +276,7 @@ fn load_panel_with_children_and_ownership(
     }
 }
 
-struct LoadedProbe {
-    mailbox_id: MailboxId,
-    address: String,
-}
-
-fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> LoadedProbe {
+fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> String {
     let loaded = harness
         .execute(vec![(
             "load-region-probe",
@@ -293,12 +292,15 @@ fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> Loaded
         )])
         .expect("load editor region probe");
     match loaded.reply::<LoadResult>("load-region-probe").expect("decode probe LoadResult") {
-        LoadResult::Ok { mailbox_id, name: address, .. } => LoadedProbe { mailbox_id, address },
+        LoadResult::Ok { name: address, .. } => address,
         LoadResult::Err { error } => panic!("load editor region probe: {error}"),
     }
 }
 
-fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: MailboxId, probe: MailboxId) {
+/// Load the shell under its **default** name, so the panel and the probe can
+/// name it by bare type when they announce themselves. Its region table names
+/// no addresses: each region supplies its own by announcing.
+fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8]) {
     let probe_lanes = RegionInputLanes {
         pointer_press: true,
         pointer_release: true,
@@ -315,7 +317,6 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: Mailbox
                     width_pixels: 120.0,
                     height_pixels: WINDOW_HEIGHT as f32,
                 },
-                target: panel,
                 keyboard_focus_eligible: true,
                 input_lanes: RegionInputLanes::ALL,
                 activation_chord: None,
@@ -328,7 +329,6 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: Mailbox
                     width_pixels: 120.0,
                     height_pixels: WINDOW_HEIGHT as f32,
                 },
-                target: probe,
                 keyboard_focus_eligible: false,
                 input_lanes: probe_lanes,
                 activation_chord: None,
@@ -342,7 +342,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: Mailbox
                 "aether.component",
                 &LoadComponent {
                     wasm: wasm.to_vec(),
-                    name: Some("editor".to_owned()),
+                    name: None,
                     config: config.encode_into_bytes(),
                     export: Some("aether.kit.widget.editor".to_owned()),
                 },
@@ -355,12 +355,9 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8], panel: Mailbox
     }
 }
 
-fn drain_editor_probe(harness: &mut SubstrateHarness, probe: &LoadedProbe) -> DrainEditorInputsResult {
+fn drain_editor_probe(harness: &mut SubstrateHarness, probe: &str) -> DrainEditorInputsResult {
     harness
-        .execute(vec![(
-            "drain-editor-probe",
-            HarnessOp::send_and_await_reply(probe.address.as_str(), &DrainEditorInputs),
-        )])
+        .execute(vec![("drain-editor-probe", HarnessOp::send_and_await_reply(probe, &DrainEditorInputs))])
         .expect("drain editor region probe")
         .reply::<DrainEditorInputsResult>("drain-editor-probe")
         .expect("decode DrainEditorInputsResult")
@@ -1272,16 +1269,20 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     let kit_wasm = fs::read(&kit_wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
     let font_id = load_font(&mut harness);
-    let panel = load_panel_with_children_and_ownership(
+
+    // Shell first: a region that announces before the shell exists announces
+    // into nothing, so the shell is what the panel and the probe attach to.
+    load_editor_shell(&mut harness, &kit_wasm);
+    load_panel_with_children_and_ownership(
         &mut harness,
         &kit_wasm,
         font_id,
         vec![text_field_child("field", "abcd")],
         false,
+        "panel",
     );
     warm_panel(&mut harness);
     let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
-    load_editor_shell(&mut harness, &kit_wasm, panel, probe.mailbox_id);
 
     // The press begins in the panel editor region. Motion and release cross
     // x=120 into the peer region, but the shell's first-press ownership keeps
