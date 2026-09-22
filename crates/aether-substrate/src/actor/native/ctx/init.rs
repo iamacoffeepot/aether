@@ -9,7 +9,8 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use aether_actor::{
-    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, Singleton, address_candidate,
+    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, Erased, Instanced, Reaches, Singleton,
+    address_candidate,
 };
 use aether_data::{Address, MailId, MailboxId};
 
@@ -102,7 +103,7 @@ impl<'a> NativeInitCtx<'a> {
         (None, None)
     }
 
-    native_sender_methods!();
+    native_sender_methods!(Erased);
 }
 // Issue 703: NativeInitCtx no longer impls `MailSender`.
 // `init` is the sync constructor (ADR-0079) and must NOT mail —

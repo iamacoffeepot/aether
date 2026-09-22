@@ -690,7 +690,7 @@ mod tests {
             assert_eq!(thread::current().id(), caller_thread, "host ingress stays on its caller thread");
             assert!(ActorTraceRing::try_with(|_| ()).is_some(), "the pumped actor's Local slots are stamped");
             state.pings = 41;
-            ctx.actor::<Peer>().send(&Poke { note: 1 });
+            ctx.erase().actor::<Peer>().send(&Poke { note: 1 });
             assert!(
                 matches!(poke_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "buffered peer work cannot run before the host closure returns",
@@ -706,7 +706,7 @@ mod tests {
         assert!(first.parent_mail.is_none(), "a host-originated root has no parent mail");
         assert_eq!(Poke::decode_from_bytes(first.payload.bytes()).expect("first Poke decodes"), Poke { note: 1 });
 
-        slot.host_turn(|_, ctx| ctx.actor::<Peer>().send(&Poke { note: 2 })).expect("the slot remains live");
+        slot.host_turn(|_, ctx| ctx.erase().actor::<Peer>().send(&Poke { note: 2 })).expect("the slot remains live");
         let (second, second_thread) =
             poke_rx.recv_timeout(Duration::from_secs(2)).expect("the second host-turn peer send arrived");
         assert_ne!(second_thread, caller_thread, "the second peer delivery also runs off the host thread");

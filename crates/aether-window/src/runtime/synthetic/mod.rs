@@ -151,7 +151,7 @@ impl NativeActor for SyntheticWindowCapability {
             reply.reply(&CreateWindowResult::Err { error });
             return;
         }
-        let predicted = ctx.actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
+        let predicted = ctx.erase().actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
         let receipt = match ctx.spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ()).stage()
         {
             Ok(receipt) => receipt,

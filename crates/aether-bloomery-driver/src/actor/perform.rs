@@ -34,7 +34,7 @@ impl BundleDriver {
                     let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
                 }
                 Command::Load { ticket, bundle, wasm } => {
-                    let _ = ctx.actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
+                    let _ = ctx.erase().actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
                         wasm,
                         name: Some(bundle.to_string()),
                         config: Vec::new(),

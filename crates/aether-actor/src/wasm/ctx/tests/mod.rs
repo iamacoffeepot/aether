@@ -4,6 +4,7 @@
 //! creation and teardown, `child` for typed cluster-child resolution, and
 //! `dispatch` for what a ctx reads off the dispatch it was built for.
 
+mod actor_ref;
 mod child;
 mod dispatch;
 mod sends;

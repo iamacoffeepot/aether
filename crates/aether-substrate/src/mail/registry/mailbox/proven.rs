@@ -1,10 +1,12 @@
 //! The registry's answer to a resolution candidate: [`Registry::proven`]
 //! and the liveness read it is built on, [`Registry::is_live`].
 //!
-//! The one caller of the gated mint outside the SDK itself. The caller
-//! derived the candidate position through `R`'s `Resolve` strategy; this
-//! module answers only whether the published route view holds a `Live`
-//! endpoint there, and mints the reference on `Live` alone.
+//! The callers of the gated mint outside the SDK itself. The
+//! [`Registry::proven`] caller derived the candidate position through `R`'s
+//! `Resolve` strategy; this module answers only whether the published route
+//! view holds a `Live` endpoint there, and mints the reference on `Live`
+//! alone. The `Registry::declared_dependency` caller proved the dependency
+//! `Live` at the dependent's birth instead, and mints with no read.
 
 use aether_actor::{__mint_actor_ref, ActorRef};
 
@@ -33,6 +35,21 @@ impl Registry {
     /// [`Self::is_live`] plus the mint.
     pub fn proven<R>(&self, candidate: MailboxId) -> Option<ActorRef<R>> {
         self.is_live(candidate).then(|| __mint_actor_ref(candidate))
+    }
+
+    /// Mint a reference for a declared dependency's `position`, with no
+    /// registry read (ADR-0230).
+    ///
+    /// The one caller,
+    /// [`NativeCtx::actor_ref`](crate::actor::native::NativeCtx::actor_ref),
+    /// discharges the obligation `A: DependsOn<R>`: the dependent's birth was
+    /// refused unless `R` was `Live`, checked before `init`, so the answer is
+    /// already known. It performs no read because the claim an [`ActorRef`]
+    /// carries is "reached `Live`", not "is `Live` now" — a `Dropped`
+    /// dependency still reached `Live`, and [`Self::proven`] would wrongly
+    /// answer `None` for it.
+    pub(crate) fn declared_dependency<R>(position: MailboxId) -> ActorRef<R> {
+        __mint_actor_ref(position)
     }
 }
 
