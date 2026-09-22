@@ -9,7 +9,7 @@ alternatives were rejected, one file per decision from
 [TEMPLATE.md](adr/TEMPLATE.md). Read the guide to use the engine; read the ADR
 before changing the subsystem it governs. `design/` holds longer bloomery
 reactor design notes and work-order plans that accompany ADR-0222 and ADR-0223.
-`media/` holds images the top-level README embeds. `evidence-viewer/` and
-`pipeline-deck/` are standalone pages outside the mdBook source that CI copies
-into the published site after the build; `release/schema.md` records the
+`media/` holds images the top-level README embeds. `pipeline-deck/` is a
+standalone page outside the mdBook source that CI copies into the published
+site after the build; `release/schema.md` records the
 issue-body artifacts the contributor workflow is encoded in.

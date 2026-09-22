@@ -111,7 +111,7 @@ can currently see it.
 |---|---|---|
 | Issue worktree and branch | The issue workflow and verified issue/PR association | Clean and GitHub-confirmed merged, or an explicitly confirmed cleanup |
 | Detached session worktree | The current session identity or per-path user confirmation | Never remove the current one; preserve uncertain or dirty sessions |
-| Pull request state | The coordinating main thread and the named workflow authorization | Re-read current head, checks, review, threads, dogfood, and authorization immediately before mutation |
+| Pull request state | The coordinating main thread and the named workflow authorization | Re-read current head, checks, review, threads, and authorization immediately before mutation |
 | Live engine | The exact engine id returned to the creating owner or deliberately handed off | The recorded owner terminates that exact id |
 | Child-agent result | The assigned task, path, and return contract | Parent re-reads important evidence before acting |
 | Temporary credential or token | The process that obtained it | Never print, persist, or hand it to an unrelated worker |
@@ -128,8 +128,8 @@ does not reconnect the current Codex session; reconnect `aether-hub` through the
 active surface when necessary.
 
 Pass exact engine ids between agents. The agent that creates an engine owns its
-termination unless it explicitly hands that same id to another named agent,
-such as a dogfood judge. The receiver then owns termination. A coordinating
+termination unless it explicitly hands that same id to another named agent.
+The receiver then owns termination. A coordinating
 parent remains responsible for final cleanup after interruption, malformed
 output, or child failure when the workflow contract says so.
 

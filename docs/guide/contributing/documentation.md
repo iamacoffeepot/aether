@@ -115,9 +115,7 @@ dual test:
 - a fresh agent can complete it from public documentation and signatures.
 
 If either reader must inspect private implementation, tests, or producer
-reasoning merely to learn ordinary usage, record the friction. The
-[dogfood workflow](https://github.com/iamacoffeepot/aether/blob/main/.agents/skills/dogfood/SKILL.md) formalizes this
-fresh-consumer posture for runtime surfaces.
+reasoning merely to learn ordinary usage, record the friction.
 
 Prefer a real in-tree exemplar over a large frozen copy, but make the pointer
 specific enough to find. Small snippets are useful for the essential shape;

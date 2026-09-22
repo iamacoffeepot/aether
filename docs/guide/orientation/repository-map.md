@@ -134,7 +134,7 @@ uses the nightly fuzzing toolchain.
 | `.claude/skills/` | the Claude Code workflows |
 | `.codex/` | Codex MCP configuration and hook wiring |
 | `.hooks/` | local guardrail hook scripts, wired by `.claude/settings.json` and `.codex/hooks.json` |
-| `.github/workflows/` | hosted CI, review, dogfood, reconciliation, and release jobs |
+| `.github/workflows/` | hosted CI, review, reconciliation, and release jobs |
 | `scripts/` | developer/operator helpers, including the MCP tunnel |
 | `fuzz/` | isolated nightly fuzz targets |
 

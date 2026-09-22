@@ -51,7 +51,7 @@ and the session context.>
 Filed from `$retrospect session` on <YYYY-MM-DD>.
 ```
 
-Do not add `Problem statement`, `Design notes`, `Implementation plan`, `Sub-issues`, `Depends on`, `Dogfood brief`, or `Side findings`; those belong to later workflow stages.
+Do not add `Problem statement`, `Design notes`, `Implementation plan`, `Sub-issues`, `Depends on`, or `Side findings`; those belong to later workflow stages.
 
 If type or crate scope remains materially ambiguous, end the turn with one concise question before preparing the filing plan. Do not guess. Once resolved, show a self-contained confirmation plan containing:
 

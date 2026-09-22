@@ -19,7 +19,6 @@ MANAGED_HEADINGS = frozenset(
         "## Sub-issues",
         "## Depends on",
         "## Declared surface",
-        "## Dogfood brief",
         "## Side findings",
     }
 )

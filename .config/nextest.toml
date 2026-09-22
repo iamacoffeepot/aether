@@ -213,7 +213,8 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # our dev boxes); CI's 2-core runners still push it past 60s under
 # parallel contention with `aether-data-derive`'s ui binary, so all
 # derive crates keep the wider cap. Bloomery's reactor export fixtures also
-# compile nested projects and exceeded the default cap in CI.
+# compile nested projects and exceeded the default cap in CI; the program
+# derive's `trybuild` binary does the same and timed out at 60s on main.
 [[profile.ci.overrides]]
-filter = "package(=aether-data-derive) | package(=aether-derive) | package(=aether-actor-derive) | package(=aether-behavior-derive) | package(=aether-bloomery-reactor-derive) | package(=aether-bloomery-bundle-derive)"
+filter = "package(=aether-data-derive) | package(=aether-derive) | package(=aether-actor-derive) | package(=aether-behavior-derive) | package(=aether-bloomery-reactor-derive) | package(=aether-bloomery-bundle-derive) | package(=aether-bloomery-program-derive)"
 slow-timeout = { period = "300s", terminate-after = 1 }
