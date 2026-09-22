@@ -153,6 +153,7 @@ fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], ho
             config: host_spec.encode_into_bytes(),
         }],
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

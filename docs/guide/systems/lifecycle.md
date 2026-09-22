@@ -45,8 +45,8 @@ straight up to `aether.lifecycle`'s broadcast of the stage.
 
 **One mailbox, a graph of stages.** Everything addresses `aether.lifecycle`, owned
 by the `LifecycleCapability` actor — the sole owner of the compiled graph, the
-subscriber table (`KindId → set of mailboxes`), the fan-out, and the settlement
-gating. The cap is a bridged singleton, so a wasm guest names it by type:
+subscriber table (`KindId → set of proven subscriber references`), the fan-out,
+and the settlement gating. The cap is a bridged singleton, so a wasm guest names it by type:
 `ctx.actor::<LifecycleCapability>()`.
 
 **Stages are signals; `Tick` carries elapsed time.** `Tick` has one
@@ -161,6 +161,11 @@ mailbox. To subscribe a *different* mailbox (the rare cross-mailbox case) use
 explicit `unsubscribe_for::<K>(mailbox)` are the teardown twins. You don't
 unsubscribe on the way out — the host clears your subscriptions when the component
 drops.
+
+The explicit form names a mailbox the cap proves live at receipt, so an unknown or
+already-dropped one replies `Err` rather than registering a subscription whose
+broadcasts could never land; the reflexive form needs no such check, because the
+host stamped the sender on the envelope.
 
 Then handle each stage as its kind, like any other mail:
 

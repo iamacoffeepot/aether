@@ -77,14 +77,14 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, FocusGained, FocusLost,
-    HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig, NumericChanged, NumericConfig,
-    PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual, ScrollWidget,
-    SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig, TabStripSelected, TextAlign,
-    TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListActivated,
-    VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
-    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind, WidgetOpenChanged,
-    WidgetStateChanged,
+    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, EditorShell, FocusGained,
+    FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig, NumericChanged,
+    NumericConfig, PanelConfig, RadioConfig, RadioSelected, RegionAttach, ScrollConfig, ScrollExtent, ScrollOutcome,
+    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig,
+    TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
+    VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec,
+    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind,
+    WidgetOpenChanged, WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -1182,6 +1182,12 @@ impl WasmActor for WidgetPanel {
     /// Subscribe to pointer / keyboard streams from every window and the frame
     /// stage once, then kick off the font load. Widgets never subscribe — the
     /// root forwards everything.
+    ///
+    /// A panel that has given input ownership away instead announces itself to
+    /// the [`EditorShell`] as its configured region, so the shell keeps this
+    /// panel's envelope sender as the address it forwards to (ADR-0141,
+    /// ADR-0230). A panel that owns no input and names no region receives
+    /// nothing at all, which is worth saying out loud.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.owns_input {
             let window = ctx.actor::<WindowCapability>();
@@ -1194,6 +1200,13 @@ impl WasmActor for WidgetPanel {
             window.subscribe::<TextInput>(WindowSelector::All);
             window.subscribe::<ImePreedit>(WindowSelector::All);
             window.subscribe::<Modifiers>(WindowSelector::All);
+        } else if self.config.editor_region.is_empty() {
+            tracing::warn!(
+                target: "aether_kit_widget_panel",
+                "panel owns no input and names no editor region; it will receive none",
+            );
+        } else {
+            ctx.actor::<EditorShell>().send(&RegionAttach { region: self.config.editor_region.clone() });
         }
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.font_path.is_empty() {

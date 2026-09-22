@@ -262,15 +262,14 @@ pub struct TagSpawnReport {
     pub unknown_tag_rejected: bool,
 }
 
-/// Issue 1958: trigger sent to a `source_observer` fixture to request that
-/// it forward a `SourceQuery` to the named target mailbox. The fixture then
-/// sends `SourceQuery` to `MailboxId(to)`, making itself the component
-/// origin so the reader's `ctx.source_mailbox()` sees the sender's mailbox.
-#[aether_data::kind(name = "aether.test_fixtures.send_source_query", copy, default)]
-pub struct SendSourceQuery {
-    /// Raw `MailboxId` of the component to forward `SourceQuery` to.
-    pub to: u64,
-}
+/// Issue 1958: fieldless trigger sent to a `source_forwarder` fixture to make
+/// it forward a `SourceQuery`. The forwarder names its target by type — it
+/// declares `SourceObserver` as a dependency and mints the reference from that
+/// declaration (ADR-0230) — so the trigger carries no address; the forward
+/// makes the forwarder the component origin the reader's
+/// `ctx.source_mailbox()` reads back.
+#[aether_data::kind(name = "aether.test_fixtures.send_source_query", default)]
+pub struct SendSourceQuery;
 
 /// Issue 1958: unit query sent to a `source_observer` fixture. Its
 /// `Manual`-class handler reads `ctx.source_mailbox()` and broadcasts a
@@ -375,23 +374,21 @@ pub struct TcpLoadSnapshot {
 /// the parent drives every in-cluster addressing direction (parent → child,
 /// child → parent, child → sibling, child → self) and one cross-cluster send,
 /// and each participant records the cell it observed (did the mail arrive,
-/// what `ctx.source_mailbox()` did it read). `observer_mailbox` is the raw
-/// `MailboxId` of a separate loaded component the cluster sends cross-cluster
-/// to *during the in-place drain* — the recipient's observed source reflects
-/// the documented Task 2 boundary (the cluster's inbound identity, not the
-/// in-place child's id). `0` skips the cross-cluster cell.
-#[aether_data::kind(name = "aether.test_fixtures.run_matrix", copy, default)]
-pub struct RunMatrix {
-    /// Raw `MailboxId` of the cross-cluster observer component, or `0` to
-    /// skip the cross-cluster cell.
-    pub observer_mailbox: u64,
-}
+/// what `ctx.source_mailbox()` did it read). The cross-cluster recipient is a
+/// declared dependency of the cluster's parent rather than an address on this
+/// kind: the parent mints its reference from that declaration (ADR-0230) and
+/// records it for the fanning-out child, so the driver is fieldless.
+#[aether_data::kind(name = "aether.test_fixtures.run_matrix", default)]
+pub struct RunMatrix;
 
 /// Issue 1977 in-cluster ping for the `matrix_sweep` fixture. `cell` selects
 /// which matrix cell the recipient records (one of the `MATRIX_CELL_*`
 /// markers); `fan_out` (set only on the parent → child a ping) instructs the
 /// receiving child to drive the child-origin cells (child → parent, child →
-/// sibling, child → self) and the cross-cluster send. Structured-shaped.
+/// sibling, child → self) and the cross-cluster send. The cross-cluster
+/// recipient is not threaded here: the parent recorded its proven reference in
+/// the cluster-shared log and the child reads it back, because a reference has
+/// no codec and so cannot ride a kind (ADR-0230). Structured-shaped.
 #[aether_data::kind(name = "aether.test_fixtures.matrix_ping", copy, default)]
 pub struct MatrixPing {
     /// Which matrix cell the recipient records (a `MATRIX_CELL_*` marker).
@@ -399,10 +396,6 @@ pub struct MatrixPing {
     /// Set on the parent → child a ping: the receiving child fans out the
     /// child-origin cells and the cross-cluster send. `0` on every other ping.
     pub fan_out: u32,
-    /// Raw `MailboxId` of the cross-cluster observer, threaded to the
-    /// fanning-out child so it can address the cross-cluster send. `0` when
-    /// the cross-cluster cell is skipped.
-    pub observer_mailbox: u64,
 }
 
 /// Issue 1977 report query for the `matrix_sweep` fixture. Sent to the

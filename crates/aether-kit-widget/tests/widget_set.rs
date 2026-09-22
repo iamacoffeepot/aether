@@ -71,6 +71,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
         theme: Theme::DEFAULT,
         children: Vec::new(),
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(
@@ -300,6 +301,7 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
         theme: Theme::DEFAULT,
         children,
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

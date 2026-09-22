@@ -987,6 +987,7 @@ dependencies = [
  "aether-fs",
  "aether-http",
  "aether-kinds",
+ "aether-kit-widget",
  "aether-lifecycle",
  "aether-math",
  "aether-render",

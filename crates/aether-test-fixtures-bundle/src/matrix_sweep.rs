@@ -16,9 +16,9 @@
 //! - child\[a\] → self (in place): child\[a\]'s source is its own id.
 //! - cross-cluster (child\[a\] → a second loaded component, *during the drain*):
 //!   observed out-of-band by the observer (read via `log_tail`). The observer
-//!   reads child\[a\]'s id: the member's ctx-mediated `send_to` threads its own
-//!   id as the send's `from`, so the host stamps the member as origin
-//!   (validated host-side to the cluster), not the cluster's inbound parent.
+//!   reads child\[a\]'s id: the member's ctx-mediated send threads its own id
+//!   as the send's `from`, so the host stamps the member as origin (validated
+//!   host-side to the cluster), not the cluster's inbound parent.
 //!
 //! The observation log is a cluster-shared `static` with the same
 //! single-run-token `UnsafeCell` + blanket `Sync` discipline the inline
@@ -36,12 +36,14 @@
 use core::cell::UnsafeCell;
 
 use aether_actor::{
-    ActorInitError, Erased, MailboxId, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorRef, Erased, Manual, OutboundReply, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CollectMatrix, MATRIX_CELL_CHILD_TO_PARENT, MATRIX_CELL_CHILD_TO_SELF, MATRIX_CELL_CHILD_TO_SIBLING,
     MATRIX_CELL_PARENT_TO_CHILD, MatrixPing, MatrixReport, RunMatrix, SourceQuery,
 };
+
+use super::source_observer::SourceObserver;
 
 /// One cell's recorded observation: whether the mail arrived and the raw
 /// `MailboxId` the recipient read from `ctx.source_mailbox()`.
@@ -54,11 +56,15 @@ struct Cell {
 /// The cluster-shared observation log. Indexed by the `MATRIX_CELL_*`
 /// markers (1-based; index 0 is unused), plus the resolved parent / child\[a\]
 /// ids the parent records so the test can assert the sources against the
-/// actual folded addresses.
+/// actual folded addresses, plus the cross-cluster observer reference the
+/// parent minted from its declared dependency. The reference is shared through
+/// the log rather than threaded on `MatrixPing` because a proven reference has
+/// no codec (ADR-0230); it never leaves this module instance.
 struct MatrixLog {
     cells: [Cell; 5],
     parent_id: u64,
     child_a_id: u64,
+    observer: Option<ActorRef<SourceObserver>>,
 }
 
 /// Interior-mutable cluster-shared store for [`MatrixLog`].
@@ -76,7 +82,12 @@ struct LogSlot {
 unsafe impl Sync for LogSlot {}
 
 static MATRIX_LOG: LogSlot = LogSlot {
-    inner: UnsafeCell::new(MatrixLog { cells: [Cell { arrived: false, source: 0 }; 5], parent_id: 0, child_a_id: 0 }),
+    inner: UnsafeCell::new(MatrixLog {
+        cells: [Cell { arrived: false, source: 0 }; 5],
+        parent_id: 0,
+        child_a_id: 0,
+        observer: None,
+    }),
 };
 
 /// Record `(arrived, source)` for `cell` (a `MATRIX_CELL_*` marker) into the
@@ -98,6 +109,22 @@ fn record_ids(parent_id: u64, child_a_id: u64) {
     let log = unsafe { &mut *MATRIX_LOG.inner.get() };
     log.parent_id = parent_id;
     log.child_a_id = child_a_id;
+}
+
+/// Record the cross-cluster observer reference the parent minted from its
+/// declared dependency, so the fanning-out child can read it back during the
+/// one drained cascade.
+fn record_observer(observer: ActorRef<SourceObserver>) {
+    // SAFETY: see `LogSlot`'s `Sync` impl.
+    let log = unsafe { &mut *MATRIX_LOG.inner.get() };
+    log.observer = Some(observer);
+}
+
+/// The observer reference the parent recorded, or `None` before it ran.
+fn observer() -> Option<ActorRef<SourceObserver>> {
+    // SAFETY: see `LogSlot`'s `Sync` impl.
+    let log = unsafe { &*MATRIX_LOG.inner.get() };
+    log.observer
 }
 
 /// Snapshot the shared log into a `MatrixReport` for the `CollectMatrix`
@@ -129,7 +156,12 @@ fn snapshot_report() -> MatrixReport {
 /// child\[a\] → parent cell when it arrives, and answers `CollectMatrix`.
 pub struct MatrixParent;
 
-#[actor]
+// The cross-cluster recipient is a declared dependency, which is what turns
+// it into a reference the parent can hold: `MatrixParent` is the entry actor,
+// so its `Embedded` seed is the trampoline and the fold lands beside it under
+// the shared component host. An inline child's seed is its slot parent, which
+// is why the child reads the reference back instead of minting its own.
+#[actor(depends(SourceObserver))]
 impl WasmActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 
@@ -144,20 +176,20 @@ impl WasmActor for MatrixParent {
         let _ = ctx.spawn_inline_child::<MatrixParent, MatrixChild>(Subname::Named("b"), &());
     }
 
-    /// Drive the sweep: record the parent / child\[a\] ids, then send the
-    /// fan-out ping to child\[a\] in place. Child\[a\]'s handler drives the
-    /// child-origin cells (child → parent / sibling / self) and the
-    /// cross-cluster send. Everything settles in this one receive's drain.
+    /// Drive the sweep: record the parent / child\[a\] ids and the proven
+    /// observer reference, then send the fan-out ping to child\[a\] in place.
+    /// Child\[a\]'s handler drives the child-origin cells (child → parent /
+    /// sibling / self) and the cross-cluster send. Everything settles in this
+    /// one receive's drain. The handler spells its actor type because
+    /// `actor_ref` is bounded `A: DependsOn<R>`.
     #[handler::single]
-    fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_>, msg: RunMatrix) {
+    fn on_run_matrix(&mut self, ctx: &mut WasmCtx<'_, MatrixParent>, _msg: RunMatrix) {
+        record_observer(ctx.actor_ref::<SourceObserver>());
+
         let parent_id = ctx.mailbox_id();
         let child_a = ctx.child("a").expect("inline child a is resident");
         record_ids(parent_id.0, child_a.mailbox_id().0);
-        child_a.send(&MatrixPing {
-            cell: MATRIX_CELL_PARENT_TO_CHILD,
-            fan_out: 1,
-            observer_mailbox: msg.observer_mailbox,
-        });
+        child_a.send(&MatrixPing { cell: MATRIX_CELL_PARENT_TO_CHILD, fan_out: 1 });
     }
 
     /// child\[a\] → parent: a ping addressed to the parent's own id. Record the
@@ -203,29 +235,30 @@ impl WasmActor for MatrixChild {
 
         // child[a] → parent (in place): the parent records its own cell.
         if let Some(parent) = ctx.parent() {
-            parent.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_PARENT, fan_out: 0, observer_mailbox: 0 });
+            parent.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_PARENT, fan_out: 0 });
         }
 
         // child[a] → sibling child[b] (in place): the sibling records its cell.
         if let Some(sibling) = ctx.sibling("b") {
-            sibling.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SIBLING, fan_out: 0, observer_mailbox: 0 });
+            sibling.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SIBLING, fan_out: 0 });
         }
 
         // child[a] → self (in place): a child resolves itself as the child
         // of its own parent named with its own subname (`a`), routed in place
         // back to its own alias.
         if let Some(self_handle) = ctx.sibling("a").or_else(|| ctx.child("a")) {
-            self_handle.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SELF, fan_out: 0, observer_mailbox: 0 });
+            self_handle.send(&MatrixPing { cell: MATRIX_CELL_CHILD_TO_SELF, fan_out: 0 });
         }
 
-        // Cross-cluster send *during the in-place drain*: addressed by the
-        // observer's raw `MailboxId` via the ctx-mediated `send_to`, so it
-        // takes the host send path. The send threads this child's own id
-        // (`ctx.mailbox`, == child[a] during the drain) as the `from`, so the
-        // observer's `source_mailbox()` reads child[a]'s id — the host stamps
-        // the guest-carried, in-cluster-validated origin (issue 1987).
-        if ping.observer_mailbox != 0 {
-            ctx.send_to(MailboxId(ping.observer_mailbox), &SourceQuery);
+        // Cross-cluster send *during the in-place drain*: addressed through
+        // the reference the parent minted from its declared dependency and
+        // left in the cluster-shared log, so it still takes the host send
+        // path. The send threads this child's own id (`ctx.mailbox`, ==
+        // child[a] during the drain) as the `from`, so the observer's
+        // `source_mailbox()` reads child[a]'s id — the host stamps the
+        // guest-carried, in-cluster-validated origin (issue 1987).
+        if let Some(observer) = observer() {
+            ctx.to(&observer).send(&SourceQuery);
         }
     }
 }

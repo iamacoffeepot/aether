@@ -1,9 +1,9 @@
 //! Issue 1958: end-to-end proof that a WASM guest's `WasmCtx::source_mailbox()`
 //! correctly surfaces the inbound mail's component origin.
 //!
-//! Uses the `source_observer` test-fixture component — a single-actor module
-//! whose `on_source_query` manual handler reads `ctx.source_mailbox()`, logs
-//! the raw id, and broadcasts `SourceReport { mailbox_id }` to the observer.
+//! Uses the `source_observer` test-fixture component, whose `on_source_query`
+//! manual handler reads `ctx.source_mailbox()`, logs the raw id, and broadcasts
+//! `SourceReport { mailbox_id }` to the observer.
 //!
 //! Two invariants are checked:
 //!
@@ -11,12 +11,14 @@
 //!    directly (as a Session origin) via `send_and_await_reply`; the decoded reply
 //!    must carry `mailbox_id: 0`.
 //!
-//! 2. **Component source returns the sender's `MailboxId`**: a second
-//!    instance ("sender") is loaded; the harness triggers it with
-//!    `SendSourceQuery { to: reader_mailbox.0 }`. The sender forwards
-//!    `SourceQuery` to the reader (component-origin mail). The reader logs
-//!    `"source_mailbox={id}"`. After the chain settles, `log_tail` on the
-//!    reader confirms the id equals the sender's `MailboxId`.
+//! 2. **Component source returns the sender's `MailboxId`**: the observer is
+//!    loaded under its default name and a `source_forwarder` — which declares
+//!    the observer as a dependency, so the load order is load-bearing — beside
+//!    it. The harness triggers the forwarder with the fieldless
+//!    `SendSourceQuery`; the forwarder sends `SourceQuery` through the
+//!    reference it minted from that declaration (component-origin mail). The
+//!    observer logs `"source_mailbox={id}"`. After the chain settles, `log_tail`
+//!    on the observer confirms the id equals the forwarder's `MailboxId`.
 //!
 //! This file is an integration test that requires a pre-built
 //! `source_observer.wasm` fixture. CI builds component wasm before invoking
@@ -40,7 +42,15 @@ use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 
-fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+/// Load one non-entry actor out of the fixture bundle, under `name` or — with
+/// `None` — under the actor's own namespace, which is where a declared
+/// dependency looks for it.
+fn load_fixture(
+    harness: &mut SubstrateHarness,
+    wasm: Vec<u8>,
+    export: &str,
+    name: Option<&str>,
+) -> (MailboxId, String) {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -48,18 +58,21 @@ fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &st
                 ComponentHostCapability::NAMESPACE,
                 &LoadComponent {
                     wasm,
-                    name: Some(name.to_owned()),
+                    name: name.map(str::to_owned),
                     config: Vec::new(),
-                    // `SourceObserver` is a non-entry actor in the bundle.
-                    export: Some("test.source_observer".to_owned()),
+                    export: Some(export.to_owned()),
                 },
             ),
         )])
-        .expect("load source_observer");
+        .expect("load fixture actor");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
         LoadResult::Ok { mailbox_id, name: full_name, .. } => (mailbox_id, full_name),
-        LoadResult::Err { error } => panic!("load_component {name}: {error}"),
+        LoadResult::Err { error } => panic!("load_component {export} as {name:?}: {error}"),
     }
+}
+
+fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+    load_fixture(harness, wasm, "test.source_observer", Some(name))
 }
 
 /// Session-source case: the harness sends `SourceQuery` directly to the reader.
@@ -87,9 +100,10 @@ fn session_source_returns_none() {
     );
 }
 
-/// Component-source case: a sender component forwards `SourceQuery` to the
-/// reader. `source_mailbox()` must return `Some(sender_mailbox)`. Verified by
-/// checking the value the reader logged via `log_tail`.
+/// Component-source case: a forwarder component sends `SourceQuery` to the
+/// observer through the reference its declared dependency minted.
+/// `source_mailbox()` must return `Some(forwarder_mailbox)`. Verified by
+/// checking the value the observer logged via `log_tail`.
 #[test]
 fn component_source_returns_sender_mailbox() {
     let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
@@ -97,15 +111,17 @@ fn component_source_returns_sender_mailbox() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
+    // The reader loads under its own namespace and first: the forwarder
+    // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (reader_mailbox, reader_addr) = load_source_observer(&mut harness, wasm.clone(), "reader");
-    let (sender_mailbox, sender_addr) = load_source_observer(&mut harness, wasm, "sender");
+    let (reader_mailbox, reader_addr) = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
+    let (sender_mailbox, sender_addr) = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
 
-    // `send_and_settle`: the whole chain (sender → reader handler) settles
+    // `send_and_settle`: the whole chain (forwarder → reader handler) settles
     // before `execute` returns, so the log entry is already in the ring.
     harness
-        .execute(vec![("trigger", HarnessOp::send_and_settle(&sender_addr, &SendSourceQuery { to: reader_mailbox.0 }))])
-        .expect("SendSourceQuery to sender");
+        .execute(vec![("trigger", HarnessOp::send_and_settle(&sender_addr, &SendSourceQuery))])
+        .expect("SendSourceQuery to the forwarder");
 
     // Read the reader's log ring — the handler logs
     // "source_mailbox={id}" on every `SourceQuery` dispatch.

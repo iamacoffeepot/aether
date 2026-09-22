@@ -1,11 +1,18 @@
 //! Editor-wide input routing between independently-rooted peer regions.
 //!
 //! [`Routing`] owns only deterministic state. The [`EditorShell`](super::EditorShell)
-//! actor owns subscriptions and turns these named effects into raw mail sends.
+//! actor owns subscriptions and turns these named effects into mail sends.
+//!
+//! Every target here is an [`AnyActorRef`] — the proof a region handed the
+//! shell when it announced itself, never a position anyone derived (ADR-0230).
+//! The table stores what it was given and hands the same value back, so the
+//! shell has nothing to look up and no way to address a region that never
+//! announced.
 
+use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::MailboxId;
+use aether_actor::AnyActorRef;
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::{Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_math::{Aabb, Vec3};
@@ -58,7 +65,7 @@ impl EditorKeyChord {
 /// Region-level pointer capture, tied to the button that established it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPressOwner {
-    pub target: MailboxId,
+    pub target: AnyActorRef,
     pub button: u32,
 }
 
@@ -72,14 +79,14 @@ pub enum RegionFocusDirection {
 /// One editor-region focus edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionFocusTransition {
-    pub previous: Option<MailboxId>,
-    pub next: Option<MailboxId>,
+    pub previous: Option<AnyActorRef>,
+    pub next: Option<AnyActorRef>,
 }
 
 /// A pointer press route plus any focus edge it caused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPointerRoute {
-    pub target: Option<MailboxId>,
+    pub target: Option<AnyActorRef>,
     pub focus: Option<RegionFocusTransition>,
 }
 
@@ -94,21 +101,26 @@ pub struct RegionPointerRoute {
 /// motion is what re-derives that region's hover to nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPointerMotionRoute {
-    pub exited: Option<MailboxId>,
-    pub target: Option<MailboxId>,
+    pub exited: Option<AnyActorRef>,
+    pub target: Option<AnyActorRef>,
 }
 
 /// A key route. Reserved editor chords are consumed with no target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionKeyRoute {
-    pub target: Option<MailboxId>,
+    pub target: Option<AnyActorRef>,
     pub focus: Option<RegionFocusTransition>,
     pub consumed: bool,
 }
 
+/// One declared region. `target` is `None` until that region announces
+/// itself, and is then the proof the announcement's envelope sender carried —
+/// so a target read out of this table is a reference the shell was handed,
+/// never one it derived.
 #[derive(Debug, Clone)]
 struct RegionEntry {
-    target: MailboxId,
+    name: String,
+    target: Option<AnyActorRef>,
     rect: Aabb,
     keyboard_focus_eligible: bool,
     input_lanes: RegionInputLanes,
@@ -118,7 +130,8 @@ struct RegionEntry {
 impl RegionEntry {
     fn from_spec(spec: &RegionSpec) -> Option<Self> {
         valid_rect(spec.rect).then(|| Self {
-            target: spec.target,
+            name: spec.name.clone(),
+            target: None,
             rect: Aabb::from_min_max(
                 Vec3::new(spec.rect.x_pixels, spec.rect.y_pixels, 0.0),
                 Vec3::new(
@@ -150,13 +163,13 @@ fn valid_rect(rect: EditorRegionRect) -> bool {
 #[derive(Default)]
 pub struct Routing {
     entries: Vec<RegionEntry>,
-    focused: Option<MailboxId>,
+    focused: Option<AnyActorRef>,
     modifiers: Modifiers,
     cycle_armed: bool,
     press_owner: Option<RegionPressOwner>,
     /// The region the last motion was routed to, so the next one that routes
     /// elsewhere can name it as exited.
-    motion_target: Option<MailboxId>,
+    motion_target: Option<AnyActorRef>,
 }
 
 impl Routing {
@@ -165,8 +178,21 @@ impl Routing {
         Self { entries: regions.iter().filter_map(RegionEntry::from_spec).collect(), ..Self::default() }
     }
 
+    /// Bind `region` to `subscriber`, the first declared entry of that name
+    /// that is still unattached. Returns whether one was filled: `false` names
+    /// an undeclared region or a second announcement for one already attached,
+    /// both of which the caller reports rather than silently re-pointing a
+    /// live route.
+    pub fn attach(&mut self, region: &str, subscriber: AnyActorRef) -> bool {
+        let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == region && entry.target.is_none()) else {
+            return false;
+        };
+        entry.target = Some(subscriber);
+        true
+    }
+
     #[must_use]
-    pub fn focused(&self) -> Option<MailboxId> {
+    pub fn focused(&self) -> Option<AnyActorRef> {
         self.focused
     }
 
@@ -181,17 +207,17 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn target_accepts(&self, target: MailboxId, lane: RegionInputLane) -> bool {
+    pub fn target_accepts(&self, target: AnyActorRef, lane: RegionInputLane) -> bool {
         self.accepting_target(target, lane).is_some()
     }
 
     #[must_use]
-    pub fn hit_test(&self, x_pixels: f32, y_pixels: f32) -> Option<MailboxId> {
+    pub fn hit_test(&self, x_pixels: f32, y_pixels: f32) -> Option<AnyActorRef> {
         if !x_pixels.is_finite() || !y_pixels.is_finite() {
             return None;
         }
         let point = Vec3::new(x_pixels, y_pixels, 0.0);
-        self.entries.iter().rev().find(|entry| entry.rect.contains_point(point)).map(|entry| entry.target)
+        self.entries.iter().rev().find(|entry| entry.rect.contains_point(point)).and_then(|entry| entry.target)
     }
 
     pub fn pointer_press(&mut self, press: MouseButton) -> RegionPointerRoute {
@@ -211,7 +237,7 @@ impl Routing {
         RegionPointerRoute { target, focus }
     }
 
-    pub fn pointer_release(&mut self, release: MouseButtonRelease) -> Option<MailboxId> {
+    pub fn pointer_release(&mut self, release: MouseButtonRelease) -> Option<AnyActorRef> {
         if let Some(owner) = self.press_owner {
             if release.button == owner.button {
                 self.press_owner = None;
@@ -234,7 +260,7 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn wheel(&self, wheel: MouseWheel) -> Option<MailboxId> {
+    pub fn wheel(&self, wheel: MouseWheel) -> Option<AnyActorRef> {
         self.hit_test(wheel.x, wheel.y).and_then(|target| self.accepting_target(target, RegionInputLane::Wheel))
     }
 
@@ -269,45 +295,45 @@ impl Routing {
         RegionKeyRoute { target: self.focused_target(RegionInputLane::KeyRelease), focus: None, consumed: false }
     }
 
-    pub fn modifiers(&mut self, modifiers: Modifiers) -> Option<MailboxId> {
+    pub fn modifiers(&mut self, modifiers: Modifiers) -> Option<AnyActorRef> {
         self.modifiers = modifiers;
         self.focused_target(RegionInputLane::Modifiers)
     }
 
     #[must_use]
-    pub fn text_input_target(&self) -> Option<MailboxId> {
+    pub fn text_input_target(&self) -> Option<AnyActorRef> {
         self.focused_target(RegionInputLane::TextInput)
     }
 
     #[must_use]
-    pub fn ime_preedit_target(&self) -> Option<MailboxId> {
+    pub fn ime_preedit_target(&self) -> Option<AnyActorRef> {
         self.focused_target(RegionInputLane::ImePreedit)
     }
 
-    fn activation_target(&self, key: Key) -> Option<MailboxId> {
+    fn activation_target(&self, key: Key) -> Option<AnyActorRef> {
         self.entries
             .iter()
             .find(|entry| {
                 entry.keyboard_focus_eligible
                     && entry.activation_chord.is_some_and(|chord| chord.matches(key, self.modifiers))
             })
-            .map(|entry| entry.target)
+            .and_then(|entry| entry.target)
     }
 
-    fn accepting_target(&self, target: MailboxId, lane: RegionInputLane) -> Option<MailboxId> {
+    fn accepting_target(&self, target: AnyActorRef, lane: RegionInputLane) -> Option<AnyActorRef> {
         self.entries
             .iter()
-            .find(|entry| entry.target == target)
+            .find(|entry| entry.target == Some(target))
             .filter(|entry| entry.input_lanes.accepts(lane))
-            .map(|entry| entry.target)
+            .and_then(|entry| entry.target)
     }
 
-    fn focused_target(&self, lane: RegionInputLane) -> Option<MailboxId> {
+    fn focused_target(&self, lane: RegionInputLane) -> Option<AnyActorRef> {
         self.focused.and_then(|target| self.accepting_target(target, lane))
     }
 
-    fn focus_target(&mut self, target: MailboxId) -> Option<RegionFocusTransition> {
-        let eligible = self.entries.iter().any(|entry| entry.target == target && entry.keyboard_focus_eligible);
+    fn focus_target(&mut self, target: AnyActorRef) -> Option<RegionFocusTransition> {
+        let eligible = self.entries.iter().any(|entry| entry.target == Some(target) && entry.keyboard_focus_eligible);
         if !eligible || self.focused == Some(target) {
             return None;
         }
@@ -321,7 +347,8 @@ impl Routing {
         if count == 0 {
             return None;
         }
-        let current = self.focused.and_then(|target| self.entries.iter().position(|entry| entry.target == target));
+        let current =
+            self.focused.and_then(|target| self.entries.iter().position(|entry| entry.target == Some(target)));
         for offset in 0..count {
             let index = match (direction, current) {
                 (RegionFocusDirection::Forward, Some(index)) => (index + 1 + offset) % count,
@@ -329,8 +356,10 @@ impl Routing {
                 (RegionFocusDirection::Backward, Some(index)) => (index + count - 1 - offset) % count,
                 (RegionFocusDirection::Backward, None) => count - 1 - offset,
             };
-            if self.entries[index].keyboard_focus_eligible {
-                return self.focus_target(self.entries[index].target);
+            if self.entries[index].keyboard_focus_eligible
+                && let Some(target) = self.entries[index].target
+            {
+                return self.focus_target(target);
             }
         }
         None
@@ -339,25 +368,53 @@ impl Routing {
 
 #[cfg(test)]
 mod tests {
+    use aether_actor::WasmCtx;
+    use aether_actor::wasm::inline::Registry;
     use aether_kinds::WindowId;
 
     use super::*;
 
     const TEST_WINDOW_ID: WindowId = WindowId(1);
 
+    /// The position the synthetic shell ctx dispatches for. Only its
+    /// distinctness from the region ids matters.
+    const SHELL_MAILBOX: u64 = 0x5E11;
+
+    /// A proof for position `id`, minted the one way a guest can mint one:
+    /// from the dispatch source the host threaded, lifted by `ctx.sender()`.
+    /// There is no constructor to reach for instead — `AnyActorRef::new` is
+    /// private to `aether-actor` — and that closed door is exactly why the
+    /// table can hold proofs rather than positions.
+    fn proven(id: u64) -> AnyActorRef {
+        let registry = Registry::new();
+        WasmCtx::__new(SHELL_MAILBOX, &registry, id).sender().expect("a threaded dispatch source mints a proof")
+    }
+
     fn rect(x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) -> EditorRegionRect {
         EditorRegionRect { x_pixels, y_pixels, width_pixels, height_pixels }
     }
 
-    fn region(target: u64, rect: EditorRegionRect, keyboard: bool, input_lanes: RegionInputLanes) -> RegionSpec {
+    fn region(name: &str, rect: EditorRegionRect, keyboard: bool, input_lanes: RegionInputLanes) -> RegionSpec {
         RegionSpec {
-            name: format!("region-{target}"),
+            name: name.to_owned(),
             rect,
-            target: MailboxId(target),
             keyboard_focus_eligible: keyboard,
             input_lanes,
             activation_chord: None,
         }
+    }
+
+    /// The table the shell holds once the named regions have announced
+    /// themselves: `region-N` bound to `proven(N)`, which is the reference
+    /// every scenario below asserts against. A declared region left out of
+    /// `announced` — or one whose rect never made it into the table — stays
+    /// unattached.
+    fn announced(specs: &[RegionSpec], announced: &[u64]) -> Routing {
+        let mut routing = Routing::new(specs);
+        for id in announced {
+            assert!(routing.attach(&format!("region-{id}"), proven(*id)), "region-{id} is declared and unattached");
+        }
+        routing
     }
 
     fn press(button: u32, x: f32, y: f32) -> MouseButton {
@@ -374,40 +431,43 @@ mod tests {
 
     #[test]
     fn overlap_chooses_topmost_and_lane_rejection_does_not_fall_through() {
-        let lower = region(1, rect(0.0, 0.0, 20.0, 20.0), true, RegionInputLanes::ALL);
-        let upper = region(2, rect(10.0, 10.0, 20.0, 20.0), true, RegionInputLanes::default());
-        let mut routing = Routing::new(&[lower, upper]);
+        let lower = region("region-1", rect(0.0, 0.0, 20.0, 20.0), true, RegionInputLanes::ALL);
+        let upper = region("region-2", rect(10.0, 10.0, 20.0, 20.0), true, RegionInputLanes::default());
+        let mut routing = announced(&[lower, upper], &[1, 2]);
 
-        assert_eq!(routing.hit_test(15.0, 15.0), Some(MailboxId(2)));
+        assert_eq!(routing.hit_test(15.0, 15.0), Some(proven(2)));
         assert_eq!(routing.pointer_press(press(0, 15.0, 15.0)).target, None);
         assert_eq!(routing.press_owner(), None);
-        assert_eq!(routing.pointer_press(press(0, 5.0, 5.0)).target, Some(MailboxId(1)));
+        assert_eq!(routing.pointer_press(press(0, 5.0, 5.0)).target, Some(proven(1)));
     }
 
     #[test]
     fn first_press_owns_cross_region_motion_until_its_matching_release() {
-        let mut routing = Routing::new(&[
-            region(1, rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
-            region(2, rect(20.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
-        ]);
+        let mut routing = announced(
+            &[
+                region("region-1", rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
+                region("region-2", rect(20.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
+            ],
+            &[1, 2],
+        );
 
         let route = routing.pointer_press(press(0, 5.0, 5.0));
-        assert_eq!(route.target, Some(MailboxId(1)));
-        assert_eq!(route.focus, Some(RegionFocusTransition { previous: None, next: Some(MailboxId(1)) }));
-        assert_eq!(routing.pointer_press(press(1, 25.0, 5.0)).target, Some(MailboxId(1)));
+        assert_eq!(route.target, Some(proven(1)));
+        assert_eq!(route.focus, Some(RegionFocusTransition { previous: None, next: Some(proven(1)) }));
+        assert_eq!(routing.pointer_press(press(1, 25.0, 5.0)).target, Some(proven(1)));
         assert_eq!(
             routing.pointer_motion(moved(25.0, 5.0)),
-            RegionPointerMotionRoute { exited: None, target: Some(MailboxId(1)) },
+            RegionPointerMotionRoute { exited: None, target: Some(proven(1)) },
             "a drag over the peer exits nothing: the owner is still the target",
         );
 
-        assert_eq!(routing.pointer_release(release(1, 25.0, 5.0)), Some(MailboxId(1)));
-        assert_eq!(routing.press_owner(), Some(RegionPressOwner { target: MailboxId(1), button: 0 }));
-        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(MailboxId(1)));
+        assert_eq!(routing.pointer_release(release(1, 25.0, 5.0)), Some(proven(1)));
+        assert_eq!(routing.press_owner(), Some(RegionPressOwner { target: proven(1), button: 0 }));
+        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(proven(1)));
         assert_eq!(routing.press_owner(), None);
         assert_eq!(
             routing.pointer_motion(moved(25.0, 5.0)),
-            RegionPointerMotionRoute { exited: Some(MailboxId(1)), target: Some(MailboxId(2)) },
+            RegionPointerMotionRoute { exited: Some(proven(1)), target: Some(proven(2)) },
         );
     }
 
@@ -416,25 +476,28 @@ mod tests {
         // Tripwire: a region recomputes hover only from a motion it receives.
         // Routing named just the new target, so the pane the pointer left kept
         // the button it had lit lit — a hover wash under no pointer at all.
-        let mut routing = Routing::new(&[
-            region(1, rect(0.0, 0.0, 300.0, 600.0), true, RegionInputLanes::ALL),
-            region(2, rect(300.0, 0.0, 600.0, 600.0), true, RegionInputLanes::ALL),
-        ]);
+        let mut routing = announced(
+            &[
+                region("region-1", rect(0.0, 0.0, 300.0, 600.0), true, RegionInputLanes::ALL),
+                region("region-2", rect(300.0, 0.0, 600.0, 600.0), true, RegionInputLanes::ALL),
+            ],
+            &[1, 2],
+        );
 
         assert_eq!(
             routing.pointer_motion(moved(150.0, 100.0)),
-            RegionPointerMotionRoute { exited: None, target: Some(MailboxId(1)) },
+            RegionPointerMotionRoute { exited: None, target: Some(proven(1)) },
         );
         assert_eq!(routing.pointer_motion(moved(160.0, 110.0)).exited, None, "moving within a region exits nothing");
 
         assert_eq!(
             routing.pointer_motion(moved(500.0, 100.0)),
-            RegionPointerMotionRoute { exited: Some(MailboxId(1)), target: Some(MailboxId(2)) },
+            RegionPointerMotionRoute { exited: Some(proven(1)), target: Some(proven(2)) },
             "the pane the pointer left is named so it can go unlit",
         );
         assert_eq!(
             routing.pointer_motion(moved(500.0, 900.0)),
-            RegionPointerMotionRoute { exited: Some(MailboxId(2)), target: None },
+            RegionPointerMotionRoute { exited: Some(proven(2)), target: None },
             "leaving every region is the same edge",
         );
         assert_eq!(routing.pointer_motion(moved(500.0, 950.0)).exited, None, "and a region is let go exactly once");
@@ -444,29 +507,35 @@ mod tests {
     fn release_without_owner_and_wheel_route_by_current_hit_and_lane() {
         let mut no_wheel = RegionInputLanes::ALL;
         no_wheel.wheel = false;
-        let mut routing = Routing::new(&[
-            region(1, rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
-            region(2, rect(20.0, 0.0, 10.0, 10.0), true, no_wheel),
-        ]);
+        let mut routing = announced(
+            &[
+                region("region-1", rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
+                region("region-2", rect(20.0, 0.0, 10.0, 10.0), true, no_wheel),
+            ],
+            &[1, 2],
+        );
 
-        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(MailboxId(2)));
+        assert_eq!(routing.pointer_release(release(0, 25.0, 5.0)), Some(proven(2)));
         assert_eq!(
             routing.wheel(MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 2.0, x: 25.0, y: 5.0 }),
             None
         );
         assert_eq!(
             routing.wheel(MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: 2.0, x: 5.0, y: 5.0 }),
-            Some(MailboxId(1))
+            Some(proven(1))
         );
     }
 
     #[test]
     fn ctrl_tab_cycles_regions_reverse_with_shift_and_plain_tab_routes() {
-        let mut routing = Routing::new(&[
-            region(1, rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
-            region(2, rect(20.0, 0.0, 10.0, 10.0), false, RegionInputLanes::ALL),
-            region(3, rect(40.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
-        ]);
+        let mut routing = announced(
+            &[
+                region("region-1", rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
+                region("region-2", rect(20.0, 0.0, 10.0, 10.0), false, RegionInputLanes::ALL),
+                region("region-3", rect(40.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL),
+            ],
+            &[1, 2, 3],
+        );
         routing.pointer_press(press(0, 5.0, 5.0));
         routing.pointer_release(release(0, 5.0, 5.0));
 
@@ -474,47 +543,41 @@ mod tests {
         let forward = routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB });
         assert!(forward.consumed);
         assert_eq!(forward.target, None);
-        assert_eq!(
-            forward.focus,
-            Some(RegionFocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
-        );
+        assert_eq!(forward.focus, Some(RegionFocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }));
         assert!(routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB }).consumed);
 
         routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, shift: true, ..Modifiers::default() });
         assert_eq!(
             routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus,
-            Some(RegionFocusTransition { previous: Some(MailboxId(3)), next: Some(MailboxId(1)) })
+            Some(RegionFocusTransition { previous: Some(proven(3)), next: Some(proven(1)) })
         );
         routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB });
 
         routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() });
         let plain = routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB });
         assert!(!plain.consumed);
-        assert_eq!(plain.target, Some(MailboxId(1)));
+        assert_eq!(plain.target, Some(proven(1)));
         assert_eq!(plain.focus, None);
     }
 
     #[test]
     fn activation_chord_focuses_and_lane_filters_keyboard_text_and_ime() {
-        let first = region(1, rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL);
+        let first = region("region-1", rect(0.0, 0.0, 10.0, 10.0), true, RegionInputLanes::ALL);
         let mut second_lanes = RegionInputLanes::ALL;
         second_lanes.text_input = false;
         second_lanes.ime_preedit = false;
-        let mut second = region(2, rect(20.0, 0.0, 10.0, 10.0), true, second_lanes);
+        let mut second = region("region-2", rect(20.0, 0.0, 10.0, 10.0), true, second_lanes);
         second.activation_chord = Some(EditorKeyChord { key_code: 96, ..EditorKeyChord::default() });
-        let mut routing = Routing::new(&[first, second]);
+        let mut routing = announced(&[first, second], &[1, 2]);
 
         routing.pointer_press(press(0, 5.0, 5.0));
         routing.pointer_release(release(0, 5.0, 5.0));
         let activation = routing.key_press(Key { window: TEST_WINDOW_ID, code: 96 });
-        assert_eq!(activation.target, Some(MailboxId(2)));
-        assert_eq!(
-            activation.focus,
-            Some(RegionFocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(2)) })
-        );
+        assert_eq!(activation.target, Some(proven(2)));
+        assert_eq!(activation.focus, Some(RegionFocusTransition { previous: Some(proven(1)), next: Some(proven(2)) }));
         assert_eq!(routing.text_input_target(), None);
         assert_eq!(routing.ime_preedit_target(), None);
-        assert_eq!(routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: 96 }).target, Some(MailboxId(2)));
+        assert_eq!(routing.key_release(KeyRelease { window: TEST_WINDOW_ID, code: 96 }).target, Some(proven(2)));
     }
 
     #[test]
@@ -524,13 +587,23 @@ mod tests {
         empty.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
         assert_eq!(empty.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus, None);
 
-        let invalid = region(1, rect(0.0, 0.0, f32::NAN, 10.0), true, RegionInputLanes::ALL);
-        let overflowing = region(3, rect(f32::MAX, 0.0, f32::MAX, 10.0), true, RegionInputLanes::ALL);
-        let static_region = region(2, rect(20.0, 0.0, 10.0, 10.0), false, RegionInputLanes::ALL);
-        let mut routing = Routing::new(&[invalid, overflowing, static_region]);
+        let invalid = region("region-1", rect(0.0, 0.0, f32::NAN, 10.0), true, RegionInputLanes::ALL);
+        let overflowing = region("region-3", rect(f32::MAX, 0.0, f32::MAX, 10.0), true, RegionInputLanes::ALL);
+        let static_region = region("region-2", rect(20.0, 0.0, 10.0, 10.0), false, RegionInputLanes::ALL);
+        let mut routing = announced(&[invalid, overflowing, static_region], &[2]);
         assert_eq!(routing.hit_test(1.0, 1.0), None);
         assert_eq!(routing.pointer_press(press(0, 25.0, 5.0)).focus, None);
         routing.modifiers(Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() });
         assert_eq!(routing.key_press(Key { window: TEST_WINDOW_ID, code: KEY_TAB }).focus, None);
+    }
+
+    #[test]
+    fn a_declared_region_that_never_announced_routes_nothing() {
+        let mut routing = Routing::new(&[region("region-1", rect(0.0, 0.0, 20.0, 20.0), true, RegionInputLanes::ALL)]);
+
+        assert_eq!(routing.hit_test(5.0, 5.0), None, "a region with no announced address is nobody's hit target");
+        assert_eq!(routing.pointer_press(press(0, 5.0, 5.0)).target, None);
+        assert_eq!(routing.press_owner(), None, "an unrouted press establishes no capture");
+        assert_eq!(routing.text_input_target(), None, "and no focus lane has anywhere to go");
     }
 }
