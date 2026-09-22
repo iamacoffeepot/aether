@@ -6,18 +6,20 @@ each file opens with one.
 
 ## Taxonomy
 
-**Merge gates** — the only two required checks in branch protection:
+**Merge gates** — the two verdicts to wait on before landing. `main` has no
+branch protection and no required status checks, by the owner's decision, so
+nothing enforces them mechanically:
 
 | Workflow | Check | Covers |
 | --- | --- | --- |
-| `ci.yml` | `CI pass` | fmt, clippy, rustdoc lints, workspace tests, duplicate-code (jscpd), unused-deps (cargo-machete) |
+| `ci.yml` | `CI pass` | fmt, clippy, the component wasm warning gate, rustdoc lints, workspace tests, duplicate-code (jscpd), unused-deps (cargo-machete), Cargo.lock freshness; on pull requests also the new-suppression scan, the reference-mint allowlist, the raw-mailbox ratchet, and those three scanners' regression tests |
 | `lint-title.yml` | `Lint title` | Conventional Commit titles (main squash-merges with the title as the commit subject) |
 
 **Advisory checks** — run on pull requests but never block a merge:
 
 | Workflow | Fires on | Purpose |
 | --- | --- | --- |
-| `docs.yml` | `docs/**` paths | mdBook guide build check; deploys to Pages on main |
+| `docs.yml` | the guide sources (`docs/guide/**`, `docs/book.toml`), the standalone pages bundled into the book, and `docs.yml` itself | mdBook guide build check; deploys to Pages on main |
 | `perf-compare.yml` | substrate-runtime paths or the `perf` label | Noise-aware dispatch perf comparison vs merge-base (ADR-0085); sticky comment |
 
 **Nightlies** — scheduled, off the merge critical path, each also
@@ -66,8 +68,6 @@ pushing the tag; see
 | Workflow | Purpose |
 | --- | --- |
 | `perf-registry.yml` | Replicated real-`Registry` read-scaling + owner-ceiling band on Linux (ADR-0085) |
-| `transform.yml` | ADR-0149 zero-secret transform worker lane |
-| `transform-model.yml` | ADR-0149 BYO-credential model lane (fork-run only) |
 
 **Repo hygiene:**
 
@@ -85,15 +85,15 @@ invokes it.
 
 ## Rules
 
-1. **Two required status checks, ever.** Branch protection currently requires
-   exactly `Lint title` and `CI pass`; it does not configure required pull-request
-   reviews. A new merge-gating signal on the tree
-   becomes a job wired into `ci.yml`'s `ci-pass` aggregator — never a third
-   required context. A required context that stops reporting holds every
-   pull request at "Expected" forever, so the required set stays small and
-   lives in one place. A future check on pull-request metadata rather than
-   the tree follows the `Lint <thing>` naming of the title lint
-   (`lint-<thing>.yml`, workflow = job = check name).
+1. **Two verdicts, ever.** `main` has no branch protection and no required
+   status checks — the owner keeps it that way — so `CI pass` and `Lint title`
+   are the verdicts a landing waits on, not contexts GitHub enforces. A new
+   merge-gating signal on the tree becomes a job wired into `ci.yml`'s
+   `ci-pass` aggregator — never a third top-level check. One aggregate is what
+   keeps the verdict readable in one place, and it is what a required context
+   would point at if protection were ever turned on. A future check on
+   pull-request metadata rather than the tree follows the `Lint <thing>`
+   naming of the title lint (`lint-<thing>.yml`, workflow = job = check name).
 2. **Header comment contract.** Every workflow opens with a comment saying
    what it does and whether it gates merges. A reader should never need the
    Actions tab to understand a file's role.
@@ -105,7 +105,9 @@ invokes it.
 5. **Concurrency.** Pull-request-triggered workflows cancel a superseded run when the
    branch is pushed again. Main runs are never cancelled — each merge wants
    its full cache-save and signal — and are grouped by sha so back-to-back
-   merges don't serialize.
+   merges don't serialize. The exception is a main run that publishes
+   (`docs.yml`): its main runs share one group so an older tree cannot finish
+   last and overwrite a newer publish.
 6. **Skip is a pass.** Heavy Rust jobs key off the `changes` path filter and
    skip on docs-only diffs; `ci-pass` treats a skipped gated job as success.
    The full unconditional suite still runs on every push to main.

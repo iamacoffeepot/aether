@@ -35,7 +35,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      # The toolchain is `rust-toolchain.toml`'s pin, as in ci.yml: `rustup
+      # toolchain install` with no argument reads the file.
+      - run: rustup toolchain install
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
         # Third-party apt sources baked into the runner image (Google Chrome and
         # friends) are dropped before the update: nothing here installs from them,
@@ -50,9 +52,12 @@ jobs:
       # The band table goes to stderr and the JSON to stdout, so the step log
       # carries the readable result while the artifact carries every trial's raw
       # report — which is what a surprising band has to be re-examined against.
+      # The dispatch input reaches the shell through the environment, never by
+      # splicing `${{ }}` into the script text.
       - name: Run the replicated sweep
-        run: ./target/release/aether-perf-registry -k "${{ inputs.trials }}"
-          --out registry-band.json > /dev/null
+        env:
+          TRIALS: ${{ inputs.trials }}
+        run: ./target/release/aether-perf-registry -k "$TRIALS" --out registry-band.json > /dev/null
       - name: Upload the banded report
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1

@@ -102,11 +102,10 @@ jobs:
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
           sudo apt-get update && sudo apt-get install -y libasound2-dev
-      # Same toolchain provisioning as desktop-nightly.yml, the other lane
-      # that builds this workspace across all three host platforms.
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: wasm32-unknown-unknown
+      # The toolchain is `rust-toolchain.toml`'s pin, as in ci.yml and
+      # desktop-nightly.yml: `rustup toolchain install` with no argument
+      # reads the file, including the wasm32 target the component build needs.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
 
       # The platform half of every archive name, read off the toolchain's own

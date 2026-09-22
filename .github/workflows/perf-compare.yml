@@ -28,13 +28,25 @@ permissions:
 
 # Perf runs are expensive (two release builds + K interleaved trials);
 # cancel a superseded run when the PR is pushed again.
+#
+# `labeled` fires for every label, and a run's concurrency group applies
+# before any job condition is read, so a shared group let an unrelated label
+# (`crate:*`, `type:*`) cancel a comparison in flight. A label other than
+# `perf` (which starts a run) or `perf-skip` (which should stop one) gets a
+# group of its own, and the `changes` job skips it.
 concurrency:
-  group: perf-compare-${{ github.event.pull_request.number }}
+  group: >-
+    perf-compare-${{ github.event.pull_request.number }}${{
+    github.event.action == 'labeled' && github.event.label.name != 'perf' &&
+    github.event.label.name != 'perf-skip' && format('-ignored-{0}', github.run_id) || '' }}
   cancel-in-progress: true
 
 jobs:
   changes:
     name: Detect dispatch-path changes
+    # Any label fires `labeled`; only `perf` asks for a run. Skipping here
+    # skips `compare` too, which needs this job.
+    if: github.event.action != 'labeled' || github.event.label.name == 'perf'
     runs-on: ubuntu-latest
     permissions:
       # `paths-filter` reads the PR's changed files from
@@ -96,7 +108,10 @@ jobs:
         with:
           # merge-base needs full history (scripts/perf-compare.sh).
           fetch-depth: 0
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
+      # The toolchain is `rust-toolchain.toml`'s pin, as in ci.yml: `rustup
+      # toolchain install` with no argument reads the file, components and
+      # targets included.
+      - run: rustup toolchain install
       - name: Install Linux deps (ALSA for cpal, Mesa lavapipe for wgpu)
         # Third-party apt sources baked into the runner image (Google Chrome and
         # friends) are dropped before the update: nothing here installs from them,
@@ -110,9 +125,10 @@ jobs:
       # (iamacoffeepot/aether#1084). The merge-base is fixed for a PR's
       # life, so once built it can be reused on every re-push, skipping
       # the cold dependency compile. Key on the merge-base sha + the
-      # toolchain (rustc tracks `stable`, so a compiler bump rebuilds the
-      # base with the same rustc as the candidate — keeping the paired
-      # comparison apples-to-apples).
+      # toolchain: `rustc -V` here reports the candidate's
+      # `rust-toolchain.toml` pin, so a PR that bumps the pin (or a base that
+      # moves to a new one) takes a fresh key instead of reusing a base binary
+      # built by a different compiler.
       - name: Resolve base cache key
         id: perfbase
         run: |
@@ -174,10 +190,16 @@ jobs:
       # iamacoffeepot/aether#1155: push the PNGs to the `perf-plots` branch
       # and append inline embeds to the sticky comment, so the plots render
       # in the comment (not just as downloadable artifacts). Runs before
-      # the upsert so the embeds land in the same body. `continue-on-error`
-      # so a fork PR's read-only token (push fails) doesn't redden the job.
+      # the upsert so the embeds land in the same body. A fork PR's token is
+      # read-only, so the push cannot succeed there; the fork check skips the
+      # step outright rather than letting it fail. `continue-on-error` stays
+      # for the other failure this step has: two same-repo runs racing to
+      # push the shared `perf-plots` branch, where the loser's non-fast-forward
+      # push must not redden an informational job.
       - name: Publish span distributions + embed in the comment
-        if: hashFiles('perf-plots/*.png') != ''
+        if: >-
+          hashFiles('perf-plots/*.png') != '' &&
+          github.event.pull_request.head.repo.full_name == github.repository
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}

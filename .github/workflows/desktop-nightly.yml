@@ -36,9 +36,10 @@ jobs:
         os: [ macos-latest, windows-latest ]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: dtolnay/rust-toolchain@4be7066ada62dd38de10e7b70166bc74ed198c30 # stable
-        with:
-          targets: wasm32-unknown-unknown
+      # The toolchain is `rust-toolchain.toml`'s pin, as in ci.yml: `rustup
+      # toolchain install` with no argument reads the file, including the
+      # wasm32 target `cargo xtask dist` cross-builds components for.
+      - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # `aether-chassis-hub`'s FleetHarness suites fork a real chassis
       # binary resolved through `dist/manifest.json`, and the harness

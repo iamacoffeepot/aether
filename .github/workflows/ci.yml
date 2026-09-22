@@ -1,5 +1,14 @@
 name: CI
 
+# The merge gate. Every check on the tree is a job here: format, clippy (with
+# the component wasm warning gate), rustdoc lints, the workspace tests,
+# duplicate code (jscpd), unused dependencies (cargo-machete), Cargo.lock
+# freshness, and — on pull requests only — the new-suppression,
+# reference-mint, and raw-mailbox ratchet scans. The `CI pass` job at the
+# bottom folds them into one verdict. `main` carries no branch protection, so
+# nothing enforces that verdict mechanically; `CI pass` is the check to wait on
+# before landing. Pushes to `main` run the full unconditional suite.
+
 on:
   pull_request:
   push:
@@ -172,6 +181,16 @@ jobs:
           python3 "${RATCHET_SCANNER_PATH}"
           --root .
           --base "${{ github.event.pull_request.base.sha }}"
+      # The three scanners' own regression suites, run from the head tree so a
+      # pull request that edits a scanner is judged against its tests before
+      # it becomes the next event base. This step only tests: every verdict
+      # above already ran from the base's scanner blobs, and it runs last, so
+      # nothing a candidate puts in these files can reach those verdicts.
+      - name: Scanner regression tests
+        run: |
+          python3 scripts/test-check-suppressions.py
+          python3 scripts/test-check-reference-mint.py
+          python3 scripts/test-check-raw-mailbox-ratchet.py
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
@@ -206,7 +225,18 @@ jobs:
       - run: rustup toolchain install
       # The gate is now an xtask build, so the job caches like the other Rust
       # jobs rather than paying a cold compile of the executor every run.
+      #
+      # fmt, dup-check, unused-deps and lock-freshness build nothing but the
+      # xtask executor, so they share one `xtask` entry. Keyed per job, each
+      # saved its own near-identical ~600 MB copy on every Cargo.lock change —
+      # four copies per lock hash — and together they filled the repository's
+      # 10 GB cache budget and evicted the nightly and perf caches. Only
+      # unused-deps saves the shared entry, and only on `main`: its copy is
+      # the one that also carries the cargo-machete binary it installs.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: xtask
+          save-if: false
       - name: Format gate
         run: |
           set -uo pipefail
@@ -298,7 +328,13 @@ jobs:
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
           sudo apt-get update && sudo apt-get install -y libasound2-dev
+      # This job runs on the GitHub-hosted runner in both lanes, so a pull
+      # request that moves Cargo.lock would otherwise save a ~900 MB
+      # PR-scoped entry into the same 10 GB budget `main` depends on. Pull
+      # requests restore `main`'s entry and never save.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       # `[workspace.lints.rustdoc]` in the root Cargo.toml tracks the
       # rustdoc lints at `warn`. RUSTDOCFLAGS escalates the tracked
       # set to hard failures here without poisoning local `cargo doc`
@@ -637,7 +673,11 @@ jobs:
         with:
           node-version: 22
       - run: rustup toolchain install
+      # Shared `xtask` entry; see the note on the fmt job.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: xtask
+          save-if: false
       - name: Duplicate-code gate
         run: |
           set -uo pipefail
@@ -660,7 +700,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
+      # The one saver of the shared `xtask` entry; see the note on the fmt job.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: xtask
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo install cargo-machete --locked
       # `verify.deps` carries `--no-ignore` because cargo-machete skips
       # gitignored files by default, so a .gitignore pattern that happens to
@@ -695,7 +739,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
+      # Shared `xtask` entry; see the note on the fmt job.
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: xtask
+          save-if: false
       # The resolved graph goes to the arm's captured log rather than to this
       # job's, which is what the previous `> /dev/null` was for: the exit code
       # is the verdict and the JSON body is never read.
@@ -716,7 +764,8 @@ jobs:
           fi
           exit "$status"
 
-  # The one required check. Every job above must resolve to `success`
+  # The aggregate verdict to wait on (not an enforced branch-protection
+  # check: `main` has none). Every job above must resolve to `success`
   # here, or to `skipped` where the path filter is allowed to skip it —
   # any other result (`failure`, `cancelled`, or a `skipped` the filter
   # does not license) fails the gate. `needs.test.result` is the matrix

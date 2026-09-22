@@ -1,11 +1,26 @@
 name: Issue labels
 
+# Repository hygiene for issues; gates no merge. Lints each issue title
+# against `{type}({scope}): <subject>`, applies the matching `type:*` and
+# `crate:*` labels, and keeps one rolling bot comment (plus an
+# `invalid-title` label) on a title that does not match. Machine-filed
+# `alert` issues are exempt. The crate list comes from
+# `scripts/issue-title-scopes.sh` on the default branch.
+
 on:
   issues:
     types: [opened, edited, labeled, unlabeled, reopened]
 
 permissions:
   contents: read
+
+# One run at a time per issue. Creating an issue with labels fires `opened`
+# and `labeled` together, and two runs racing the same issue could each find
+# no bot comment and post one. Runs are serialized rather than cancelled: a
+# cancel could stop a run between adding and removing labels.
+concurrency:
+  group: issue-labels-${{ github.event.issue.number }}
+  cancel-in-progress: false
 
 jobs:
   enforce:
