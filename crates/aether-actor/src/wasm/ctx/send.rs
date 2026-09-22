@@ -12,6 +12,7 @@ use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
 use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
+use crate::reference::AnyActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
@@ -190,9 +191,9 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     }
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
-    fn send_detached_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
+        self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
     }
 }
 

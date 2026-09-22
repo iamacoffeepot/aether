@@ -749,7 +749,7 @@ mod tests {
 
         let state_after_turn = slot.host_turn(|state, ctx| {
             state.pings = 10;
-            ctx.send_detached_to(self_id, &Ping { seq: 1 });
+            ctx.send_detached_to(Registry::structural_any(self_id), &Ping { seq: 1 });
             state.pings
         });
         assert_eq!(state_after_turn, Some(10));

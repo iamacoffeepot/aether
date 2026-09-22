@@ -424,11 +424,12 @@ the stream, plus the `stream_id` — and emits every chunk through it. The strea
 flows back to that counterparty, so a test mock or a middleware forwarding in
 front of the server receives it exactly as the real server does. Each send is a
 detached chain root, so a chunk settles on its own causal chain instead of the
-credit grant that triggered it. Reading the dispatch's sender needs the `Manual`
-ctx, so the credit handler is `#[handler::manual]`:
+credit grant that triggered it. The handler reads the proven sender of the credit
+mail with `ctx.sender()` and hands it to `from_credit`, so the credit handler is
+an ordinary `#[handler::single]`:
 
 ```rust
-use aether_actor::{Manual, WasmCtx, WasmInitCtx};
+use aether_actor::{WasmCtx, WasmInitCtx};
 use aether_http::ResponseStream;
 use aether_http::kinds::{
     HttpResponseStreamOpen, HttpServerRequest, HttpStreamCredit,
@@ -460,14 +461,16 @@ impl WasmActor for Feed {
     // Spend the granted credit, then terminate once the body is exhausted.
     // The first credit mail arms the stream handle — its counterparty is
     // whoever paced the stream, and every chunk flows back through it.
-    #[handler::manual]
-    fn on_credit(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, credit: HttpStreamCredit) {
+    #[handler::single]
+    fn on_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: HttpStreamCredit) {
         let stream = match self.stream {
             Some(stream) => stream,
-            None => match ResponseStream::from_credit(ctx, &credit) {
-                Some(stream) => *self.stream.insert(stream),
-                None => return,
-            },
+            None => {
+                let Some(sender) = ctx.sender() else {
+                    return;
+                };
+                *self.stream.insert(ResponseStream::from_credit(sender, &credit))
+            }
         };
         let mut budget = credit.credit;
         while budget > 0 && self.next < 100 {
