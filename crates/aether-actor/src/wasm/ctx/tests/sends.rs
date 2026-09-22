@@ -4,7 +4,7 @@
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, MailSender, Manual};
 use crate::model::{Addressable, Embedded, HandlesKind};
-use crate::reference::ActorRef;
+use crate::reference::{ActorRef, AnyActorRef};
 use crate::wasm::inline::drain_cluster_queue;
 use aether_data::mailbox_id_from_path;
 use alloc::string::String;
@@ -46,9 +46,10 @@ fn sends_view_routes_and_stamps_like_the_ctx_it_came_from() {
     let root = mailbox_id_from_path("test.wasm.sends_host");
     registry.set_self_id(root.0);
 
-    let target = mailbox_id_from_path(CHILD_ADDRESS);
+    let target_id = mailbox_id_from_path(CHILD_ADDRESS);
     let probe = recording_target();
-    registry.insert_child(target, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
+    registry.insert_child(target_id, 0, String::from("test.wasm.sends_child"), false, root.0, Vec::new(), probe.actor);
+    let target = AnyActorRef::new(target_id);
 
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
 

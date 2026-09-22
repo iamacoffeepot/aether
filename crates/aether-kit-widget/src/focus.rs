@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use aether_data::MailboxId;
+use aether_actor::AnyActorRef;
 use aether_math::{Aabb, Vec3};
 
 use crate::WidgetControlState;
@@ -22,14 +22,14 @@ pub enum FocusDirection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusTransition {
-    pub previous: Option<MailboxId>,
-    pub next: Option<MailboxId>,
+    pub previous: Option<AnyActorRef>,
+    pub next: Option<AnyActorRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoverTransition {
-    pub previous: Option<MailboxId>,
-    pub next: Option<MailboxId>,
+    pub previous: Option<AnyActorRef>,
+    pub next: Option<AnyActorRef>,
 }
 
 /// Cleanup caused by a live availability or eligibility update. Losing
@@ -39,7 +39,7 @@ pub struct HoverTransition {
 pub struct AvailabilityEffects {
     pub focus: Option<FocusTransition>,
     pub hover: Option<HoverTransition>,
-    pub cleared_capture: Option<MailboxId>,
+    pub cleared_capture: Option<AnyActorRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +63,7 @@ struct Availability {
 }
 
 struct Entry {
-    child: MailboxId,
+    child: AnyActorRef,
     rect: Aabb,
     eligibility: FocusEligibility,
     availability: Availability,
@@ -82,14 +82,14 @@ impl Entry {
 #[derive(Default)]
 pub struct Focus {
     entries: Vec<Entry>,
-    focused: Option<MailboxId>,
-    hovered: Option<MailboxId>,
-    capture: Option<MailboxId>,
+    focused: Option<AnyActorRef>,
+    hovered: Option<AnyActorRef>,
+    capture: Option<AnyActorRef>,
     /// The modal pointer grab an open dropdown or popover holds: every
     /// pointer event routes here until it ends, across releases, so a press
     /// outside the widget's own slot still reaches it (to select a row drawn
     /// in its overlay, or to dismiss). Outranks drag capture.
-    grab: Option<MailboxId>,
+    grab: Option<AnyActorRef>,
 }
 
 impl Focus {
@@ -122,19 +122,19 @@ impl Focus {
     /// check every retained routing answer passes through, so a capture or a
     /// grab held over a rebuild that dropped its child is inert rather than a
     /// black hole every press falls into.
-    fn pointer_live_child(&self, child: MailboxId) -> bool {
+    fn pointer_live_child(&self, child: AnyActorRef) -> bool {
         self.entries.iter().any(|entry| entry.child == child && entry.pointer_live())
     }
 
     /// The same, for the keyboard ring.
-    fn focus_live_child(&self, child: MailboxId) -> bool {
+    fn focus_live_child(&self, child: AnyActorRef) -> bool {
         self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
     }
 
     /// Route every pointer event to `child` until [`Self::end_grab`] — the
     /// modal grab a widget asks for while its overlay is open (a dropdown's
     /// list). Ignored for a child the table does not hold live.
-    pub fn begin_grab(&mut self, child: MailboxId) {
+    pub fn begin_grab(&mut self, child: AnyActorRef) {
         if self.pointer_live_child(child) {
             self.grab = Some(child);
         }
@@ -147,7 +147,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn grabbed(&self) -> Option<MailboxId> {
+    pub fn grabbed(&self) -> Option<AnyActorRef> {
         self.grab.filter(|child| self.pointer_live_child(*child))
     }
 
@@ -155,7 +155,7 @@ impl Focus {
     /// updated later without rebuilding the table.
     pub fn register(
         &mut self,
-        child: MailboxId,
+        child: AnyActorRef,
         frame: FocusRect,
         eligibility: FocusEligibility,
         state: &WidgetControlState,
@@ -173,7 +173,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<MailboxId> {
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<AnyActorRef> {
         let point = Vec3::new(x, y, 0.0);
         self.entries
             .iter()
@@ -183,16 +183,16 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn pointer_target(&self, x: f32, y: f32) -> Option<MailboxId> {
+    pub fn pointer_target(&self, x: f32, y: f32) -> Option<AnyActorRef> {
         self.grabbed().or_else(|| self.captured()).or_else(|| self.hit_test(x, y))
     }
 
     #[must_use]
-    pub fn keyboard_target(&self) -> Option<MailboxId> {
+    pub fn keyboard_target(&self) -> Option<AnyActorRef> {
         self.focused.filter(|child| self.focus_live_child(*child))
     }
 
-    pub fn begin_capture(&mut self, child: MailboxId) {
+    pub fn begin_capture(&mut self, child: AnyActorRef) {
         if self.pointer_live_child(child) {
             self.capture = Some(child);
         }
@@ -219,11 +219,11 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn captured(&self) -> Option<MailboxId> {
+    pub fn captured(&self) -> Option<AnyActorRef> {
         self.capture.filter(|child| self.pointer_live_child(*child))
     }
 
-    pub fn set_focus(&mut self, next: Option<MailboxId>) -> Option<FocusTransition> {
+    pub fn set_focus(&mut self, next: Option<AnyActorRef>) -> Option<FocusTransition> {
         if let Some(child) = next
             && !self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
         {
@@ -243,7 +243,7 @@ impl Focus {
     /// second is what clears focus — and [`Self::focus_hit`] answers `None` to
     /// both.
     #[must_use]
-    pub fn focus_hit_test(&self, x: f32, y: f32) -> Option<MailboxId> {
+    pub fn focus_hit_test(&self, x: f32, y: f32) -> Option<AnyActorRef> {
         let point = Vec3::new(x, y, 0.0);
         self.entries
             .iter()
@@ -299,7 +299,7 @@ impl Focus {
     /// handshake (`grabbed() == source`) misses while the child is away, and
     /// the grab re-arms the moment the child comes back, swallowing every press
     /// on the panel. Becoming available does not auto-focus or synthesize hover.
-    pub fn update_availability(&mut self, child: MailboxId, state: &WidgetControlState) -> AvailabilityEffects {
+    pub fn update_availability(&mut self, child: AnyActorRef, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
@@ -316,7 +316,7 @@ impl Focus {
     /// either does not auto-focus or synthesize hover. Hidden or disabled
     /// children stay unavailable. Unknown sources and identical updates are
     /// inert. Ring order, frames, and unrelated routing are unchanged.
-    pub fn update_eligibility(&mut self, child: MailboxId, eligibility: FocusEligibility) -> AvailabilityEffects {
+    pub fn update_eligibility(&mut self, child: AnyActorRef, eligibility: FocusEligibility) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
@@ -331,7 +331,7 @@ impl Focus {
 
     fn reconcile_live_routing(
         &mut self,
-        child: MailboxId,
+        child: AnyActorRef,
         index: usize,
         was_pointer_live: bool,
         was_focus_live: bool,
@@ -361,7 +361,7 @@ impl Focus {
         effects
     }
 
-    fn next_live_from(&self, index: usize, direction: FocusDirection) -> Option<MailboxId> {
+    fn next_live_from(&self, index: usize, direction: FocusDirection) -> Option<AnyActorRef> {
         let count = self.entries.len();
         for offset in 0..count {
             let candidate = match direction {
@@ -380,6 +380,7 @@ impl Focus {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proven;
 
     fn available() -> WidgetControlState {
         WidgetControlState::default()
@@ -387,7 +388,7 @@ mod tests {
 
     fn register(focus: &mut Focus, child: u64, x: f32, y: f32, pointer: bool, keyboard: bool) {
         focus.register(
-            MailboxId(child),
+            proven(child),
             FocusRect { x, y, width: 10.0, height: 10.0 },
             FocusEligibility { pointer, keyboard },
             &available(),
@@ -406,23 +407,23 @@ mod tests {
     fn overlap_chooses_the_topmost_live_pointer_entry() {
         let mut focus = Focus::new();
         focus.register(
-            MailboxId(1),
+            proven(1),
             FocusRect { x: 0.0, y: 0.0, width: 20.0, height: 20.0 },
             FocusEligibility { pointer: true, keyboard: true },
             &available(),
         );
         focus.register(
-            MailboxId(2),
+            proven(2),
             FocusRect { x: 10.0, y: 10.0, width: 20.0, height: 20.0 },
             FocusEligibility { pointer: true, keyboard: true },
             &available(),
         );
-        assert_eq!(focus.hit_test(15.0, 15.0), Some(MailboxId(2)));
+        assert_eq!(focus.hit_test(15.0, 15.0), Some(proven(2)));
 
         let mut hidden = available();
         hidden.visible = false;
-        focus.update_availability(MailboxId(2), &hidden);
-        assert_eq!(focus.hit_test(15.0, 15.0), Some(MailboxId(1)));
+        focus.update_availability(proven(2), &hidden);
+        assert_eq!(focus.hit_test(15.0, 15.0), Some(proven(1)));
     }
 
     #[test]
@@ -430,89 +431,86 @@ mod tests {
         let mut focus = focus_with_three();
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: None, next: Some(MailboxId(1)) })
+            Some(FocusTransition { previous: None, next: Some(proven(1)) })
         );
         assert_eq!(
             focus.move_focus(FocusDirection::Backward),
-            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
+            Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) })
         );
 
         let mut disabled = available();
         disabled.enabled = false;
-        focus.update_availability(MailboxId(3), &disabled);
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(1)));
+        focus.update_availability(proven(3), &disabled);
+        assert_eq!(focus.keyboard_target(), Some(proven(1)));
         assert_eq!(focus.move_focus(FocusDirection::Forward), None);
 
-        focus.update_availability(MailboxId(3), &available());
+        focus.update_availability(proven(3), &available());
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
+            Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) })
         );
     }
 
     #[test]
     fn hover_reports_sibling_then_empty_edges() {
         let mut focus = focus_with_three();
-        assert_eq!(focus.update_hover(5.0, 5.0), Some(HoverTransition { previous: None, next: Some(MailboxId(1)) }));
+        assert_eq!(focus.update_hover(5.0, 5.0), Some(HoverTransition { previous: None, next: Some(proven(1)) }));
         assert_eq!(
             focus.update_hover(5.0, 45.0),
-            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
+            Some(HoverTransition { previous: Some(proven(1)), next: Some(proven(3)) })
         );
-        assert_eq!(
-            focus.update_hover(100.0, 100.0),
-            Some(HoverTransition { previous: Some(MailboxId(3)), next: None })
-        );
+        assert_eq!(focus.update_hover(100.0, 100.0), Some(HoverTransition { previous: Some(proven(3)), next: None }));
     }
 
     #[test]
     fn unavailable_focused_hovered_captor_returns_all_cleanup_effects() {
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
+        focus.set_focus(Some(proven(1)));
         focus.update_hover(5.0, 5.0);
-        focus.begin_capture(MailboxId(1));
+        focus.begin_capture(proven(1));
 
         let mut hidden = available();
         hidden.visible = false;
         assert_eq!(
-            focus.update_availability(MailboxId(1), &hidden),
+            focus.update_availability(proven(1), &hidden),
             AvailabilityEffects {
-                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
-                hover: Some(HoverTransition { previous: Some(MailboxId(1)), next: None }),
-                cleared_capture: Some(MailboxId(1)),
+                focus: Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
+                hover: Some(HoverTransition { previous: Some(proven(1)), next: None }),
+                cleared_capture: Some(proven(1)),
             }
         );
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(focus.keyboard_target(), Some(proven(3)));
         assert_eq!(focus.captured(), None);
     }
 
     #[test]
     fn release_clears_capture_and_recomputes_hover() {
         let mut focus = focus_with_three();
-        focus.begin_capture(MailboxId(1));
+        focus.begin_capture(proven(1));
         focus.update_hover(5.0, 5.0);
-        assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(1)));
+        assert_eq!(focus.pointer_target(5.0, 45.0), Some(proven(1)));
         assert_eq!(
             focus.release_capture(5.0, 45.0),
-            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) })
+            Some(HoverTransition { previous: Some(proven(1)), next: Some(proven(3)) })
         );
-        assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
+        assert_eq!(focus.pointer_target(5.0, 45.0), Some(proven(3)));
     }
 
     #[test]
     fn a_grab_outranks_capture_and_survives_until_it_is_ended() {
         let mut focus = focus_with_three();
-        focus.begin_capture(MailboxId(1));
-        focus.begin_grab(MailboxId(3));
-        assert_eq!(focus.grabbed(), Some(MailboxId(3)));
-        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)), "the grab takes a press over a captor's hit");
+        focus.begin_capture(proven(1));
+        focus.begin_grab(proven(3));
+        assert_eq!(focus.grabbed(), Some(proven(3)));
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(proven(3)), "the grab takes a press over a captor's hit");
 
         // A release clears capture; the grab is modal and outlives it.
         focus.release_capture(5.0, 5.0);
-        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(3)));
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(proven(3)));
 
         focus.end_grab();
         assert_eq!(focus.grabbed(), None);
-        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)));
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(proven(1)));
     }
 
     #[test]
@@ -526,9 +524,9 @@ mod tests {
         // grab still held, because a press on a disabled item leaves the menu
         // open (`MenuBarWidget::press_while_open`).
         let mut focus = focus_with_three();
-        focus.begin_capture(MailboxId(1));
+        focus.begin_capture(proven(1));
         focus.update_hover(5.0, 5.0);
-        focus.begin_grab(MailboxId(3));
+        focus.begin_grab(proven(3));
 
         assert_eq!(focus.release_capture(5.0, 45.0), None, "nothing under the overlay lights up on the release");
         assert_eq!(focus.captured(), None, "and the capture ends all the same");
@@ -536,7 +534,7 @@ mod tests {
         focus.end_grab();
         assert_eq!(
             focus.update_hover(5.0, 45.0),
-            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+            Some(HoverTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
             "the first motion after the overlay closes re-derives hover, and the child that was lit is \
              still told it lost it",
         );
@@ -545,13 +543,13 @@ mod tests {
     #[test]
     fn a_grab_is_refused_for_a_child_that_is_not_live_for_the_pointer() {
         let mut focus = focus_with_three();
-        focus.begin_grab(MailboxId(2));
+        focus.begin_grab(proven(2));
         assert_eq!(focus.grabbed(), None, "a pointer-ineligible child cannot hold the modal grab");
 
         let mut hidden = available();
         hidden.visible = false;
-        focus.update_availability(MailboxId(3), &hidden);
-        focus.begin_grab(MailboxId(3));
+        focus.update_availability(proven(3), &hidden);
+        focus.begin_grab(proven(3));
         assert_eq!(focus.grabbed(), None, "an unavailable child cannot hold it either");
     }
 
@@ -563,7 +561,7 @@ mod tests {
         // that dropped the hover left the strip lit, because the widget only
         // goes unlit when a `HoverLost` reaches it.
         let mut focus = focus_with_three();
-        focus.begin_capture(MailboxId(1));
+        focus.begin_capture(proven(1));
         focus.update_hover(5.0, 5.0);
 
         focus.clear();
@@ -571,11 +569,11 @@ mod tests {
         register(&mut focus, 2, 0.0, 20.0, false, false);
         register(&mut focus, 3, 0.0, 40.0, true, true);
 
-        assert_eq!(focus.captured(), Some(MailboxId(1)), "the drag survives the rebuild");
-        assert_eq!(focus.pointer_target(900.0, 900.0), Some(MailboxId(1)), "and still owns the pointer");
+        assert_eq!(focus.captured(), Some(proven(1)), "the drag survives the rebuild");
+        assert_eq!(focus.pointer_target(900.0, 900.0), Some(proven(1)), "and still owns the pointer");
         assert_eq!(
             focus.update_hover(5.0, 45.0),
-            Some(HoverTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+            Some(HoverTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
             "the child the pointer left is still told it lost the hover",
         );
     }
@@ -586,17 +584,17 @@ mod tests {
         // that replaced it. A capture left pointing at a child the relayout
         // dropped would swallow every press on the panel.
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
-        focus.begin_capture(MailboxId(1));
-        focus.begin_grab(MailboxId(3));
+        focus.set_focus(Some(proven(1)));
+        focus.begin_capture(proven(1));
+        focus.begin_grab(proven(3));
 
         focus.clear();
         register(&mut focus, 3, 0.0, 40.0, true, true);
 
         assert_eq!(focus.captured(), None, "the captor is not in the new table");
         assert_eq!(focus.keyboard_target(), None, "and neither is the focused child");
-        assert_eq!(focus.grabbed(), Some(MailboxId(3)), "the grab's child is, so the grab still holds");
-        assert_eq!(focus.pointer_target(5.0, 45.0), Some(MailboxId(3)));
+        assert_eq!(focus.grabbed(), Some(proven(3)), "the grab's child is, so the grab still holds");
+        assert_eq!(focus.pointer_target(5.0, 45.0), Some(proven(3)));
 
         focus.end_grab();
         assert_eq!(focus.pointer_target(5.0, 5.0), None, "and nothing is registered where the captor used to be");
@@ -611,16 +609,16 @@ mod tests {
         // still stored re-activates the moment the child is re-enabled, and
         // every press on the panel then falls into a closed dropdown.
         let mut focus = focus_with_three();
-        focus.begin_grab(MailboxId(3));
+        focus.begin_grab(proven(3));
 
         let mut disabled = available();
         disabled.enabled = false;
-        focus.update_availability(MailboxId(3), &disabled);
+        focus.update_availability(proven(3), &disabled);
         assert_eq!(focus.grabbed(), None, "an unavailable holder routes nothing while it is away");
 
-        focus.update_availability(MailboxId(3), &available());
+        focus.update_availability(proven(3), &available());
         assert_eq!(focus.grabbed(), None, "and the grab does not come back with the child");
-        assert_eq!(focus.pointer_target(5.0, 5.0), Some(MailboxId(1)), "so its siblings are reachable again");
+        assert_eq!(focus.pointer_target(5.0, 5.0), Some(proven(1)), "so its siblings are reachable again");
     }
 
     #[test]
@@ -632,8 +630,8 @@ mod tests {
         let mut focus = focus_with_three();
         let mut disabled = available();
         disabled.enabled = false;
-        focus.update_availability(MailboxId(1), &disabled);
-        focus.update_availability(MailboxId(3), &disabled);
+        focus.update_availability(proven(1), &disabled);
+        focus.update_availability(proven(3), &disabled);
         assert_eq!(focus.move_focus(FocusDirection::Backward), None);
         assert_eq!(focus.hit_test(5.0, 5.0), None);
     }
@@ -645,60 +643,60 @@ mod tests {
         register(&mut focus, 3, 0.0, 40.0, true, true);
 
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
             "gaining eligibility does not synthesize focus or hover",
         );
         assert_eq!(focus.keyboard_target(), None);
-        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(proven(1)));
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: None, next: Some(MailboxId(1)) }),
+            Some(FocusTransition { previous: None, next: Some(proven(1)) }),
             "the newly eligible child keeps its register order in the ring",
         );
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+            Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
         );
     }
 
     #[test]
     fn losing_eligibility_clears_focus_hover_capture_and_grab_without_rearming() {
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
+        focus.set_focus(Some(proven(1)));
         focus.update_hover(5.0, 5.0);
-        focus.begin_capture(MailboxId(1));
-        focus.begin_grab(MailboxId(1));
+        focus.begin_capture(proven(1));
+        focus.begin_grab(proven(1));
 
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: false, keyboard: false }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: false, keyboard: false }),
             AvailabilityEffects {
-                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
-                hover: Some(HoverTransition { previous: Some(MailboxId(1)), next: None }),
-                cleared_capture: Some(MailboxId(1)),
+                focus: Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
+                hover: Some(HoverTransition { previous: Some(proven(1)), next: None }),
+                cleared_capture: Some(proven(1)),
             },
         );
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(focus.keyboard_target(), Some(proven(3)));
         assert_eq!(focus.captured(), None);
         assert_eq!(focus.grabbed(), None);
         assert_eq!(focus.hit_test(5.0, 5.0), None);
-        assert_eq!(focus.hit_test(5.0, 45.0), Some(MailboxId(3)), "unrelated routing is unchanged");
+        assert_eq!(focus.hit_test(5.0, 45.0), Some(proven(3)), "unrelated routing is unchanged");
 
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
         );
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)), "restored eligibility does not re-focus");
+        assert_eq!(focus.keyboard_target(), Some(proven(3)), "restored eligibility does not re-focus");
         assert_eq!(focus.captured(), None, "and does not rearm capture");
         assert_eq!(focus.grabbed(), None, "or the modal grab");
         assert_eq!(
             focus.update_hover(5.0, 5.0),
-            Some(HoverTransition { previous: None, next: Some(MailboxId(1)) }),
+            Some(HoverTransition { previous: None, next: Some(proven(1)) }),
             "hover is a new edge, not a resurrected one",
         );
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: Some(MailboxId(3)), next: Some(MailboxId(1)) }),
+            Some(FocusTransition { previous: Some(proven(3)), next: Some(proven(1)) }),
             "the restored child keeps its original ring slot",
         );
     }
@@ -706,45 +704,45 @@ mod tests {
     #[test]
     fn eligibility_axes_reconcile_independently() {
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
+        focus.set_focus(Some(proven(1)));
         focus.update_hover(5.0, 5.0);
-        focus.begin_capture(MailboxId(1));
-        focus.begin_grab(MailboxId(1));
+        focus.begin_capture(proven(1));
+        focus.begin_grab(proven(1));
 
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: false }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: true, keyboard: false }),
             AvailabilityEffects {
-                focus: Some(FocusTransition { previous: Some(MailboxId(1)), next: Some(MailboxId(3)) }),
+                focus: Some(FocusTransition { previous: Some(proven(1)), next: Some(proven(3)) }),
                 hover: None,
                 cleared_capture: None,
             },
             "losing keyboard liveness moves focus and leaves pointer paths",
         );
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(3)));
-        assert_eq!(focus.captured(), Some(MailboxId(1)));
-        assert_eq!(focus.grabbed(), Some(MailboxId(1)));
-        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
+        assert_eq!(focus.keyboard_target(), Some(proven(3)));
+        assert_eq!(focus.captured(), Some(proven(1)));
+        assert_eq!(focus.grabbed(), Some(proven(1)));
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(proven(1)));
 
         let mut pointer = focus_with_three();
-        pointer.set_focus(Some(MailboxId(3)));
+        pointer.set_focus(Some(proven(3)));
         pointer.update_hover(5.0, 45.0);
-        pointer.begin_capture(MailboxId(3));
-        pointer.begin_grab(MailboxId(3));
+        pointer.begin_capture(proven(3));
+        pointer.begin_grab(proven(3));
         assert_eq!(
-            pointer.update_eligibility(MailboxId(3), FocusEligibility { pointer: false, keyboard: true }),
+            pointer.update_eligibility(proven(3), FocusEligibility { pointer: false, keyboard: true }),
             AvailabilityEffects {
                 focus: None,
-                hover: Some(HoverTransition { previous: Some(MailboxId(3)), next: None }),
-                cleared_capture: Some(MailboxId(3)),
+                hover: Some(HoverTransition { previous: Some(proven(3)), next: None }),
+                cleared_capture: Some(proven(3)),
             },
             "losing pointer liveness clears hover/capture/grab and keeps focus",
         );
-        assert_eq!(pointer.keyboard_target(), Some(MailboxId(3)));
+        assert_eq!(pointer.keyboard_target(), Some(proven(3)));
         assert_eq!(pointer.captured(), None);
         assert_eq!(pointer.grabbed(), None);
         assert_eq!(pointer.hit_test(5.0, 45.0), None);
         assert_eq!(pointer.pointer_target(5.0, 45.0), None);
-        pointer.begin_grab(MailboxId(3));
+        pointer.begin_grab(proven(3));
         assert_eq!(pointer.grabbed(), None, "a pointer-ineligible child cannot take a new grab");
     }
 
@@ -756,22 +754,22 @@ mod tests {
 
         let mut hidden = available();
         hidden.visible = false;
-        focus.update_availability(MailboxId(1), &hidden);
+        focus.update_availability(proven(1), &hidden);
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
         );
         assert_eq!(focus.hit_test(5.0, 5.0), None);
         assert_eq!(
             focus.move_focus(FocusDirection::Forward),
-            Some(FocusTransition { previous: None, next: Some(MailboxId(3)) })
+            Some(FocusTransition { previous: None, next: Some(proven(3)) })
         );
 
         let mut disabled = available();
         disabled.enabled = false;
-        focus.update_availability(MailboxId(3), &disabled);
+        focus.update_availability(proven(3), &disabled);
         assert_eq!(
-            focus.update_eligibility(MailboxId(3), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(3), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
             "an identical eligibility write on a disabled child is still gated",
         );
@@ -782,21 +780,21 @@ mod tests {
     #[test]
     fn unknown_and_unchanged_eligibility_updates_are_inert() {
         let mut focus = focus_with_three();
-        focus.set_focus(Some(MailboxId(1)));
+        focus.set_focus(Some(proven(1)));
         focus.update_hover(5.0, 5.0);
-        focus.begin_capture(MailboxId(1));
+        focus.begin_capture(proven(1));
 
         assert_eq!(
-            focus.update_eligibility(MailboxId(99), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(99), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
         );
         assert_eq!(
-            focus.update_eligibility(MailboxId(1), FocusEligibility { pointer: true, keyboard: true }),
+            focus.update_eligibility(proven(1), FocusEligibility { pointer: true, keyboard: true }),
             AvailabilityEffects::default(),
         );
-        assert_eq!(focus.keyboard_target(), Some(MailboxId(1)));
-        assert_eq!(focus.captured(), Some(MailboxId(1)));
-        assert_eq!(focus.hit_test(5.0, 5.0), Some(MailboxId(1)));
-        assert_eq!(focus.hit_test(5.0, 45.0), Some(MailboxId(3)));
+        assert_eq!(focus.keyboard_target(), Some(proven(1)));
+        assert_eq!(focus.captured(), Some(proven(1)));
+        assert_eq!(focus.hit_test(5.0, 5.0), Some(proven(1)));
+        assert_eq!(focus.hit_test(5.0, 45.0), Some(proven(3)));
     }
 }

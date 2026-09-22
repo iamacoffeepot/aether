@@ -12,12 +12,12 @@
     "resolve_embedded::<": 3,
     "mailer()": 50,
     "registry()": 33,
-    "source_mailbox()": 35,
+    "source_mailbox()": 14,
     "mailbox_id_from_name(": 114,
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 68,
     "MailboxId::NONE": 60,
-    "<recipient>.id() at a send": 2,
+    "<recipient>.id() at a send": 1,
     "clippy::disallowed_methods": 209
   }
 }

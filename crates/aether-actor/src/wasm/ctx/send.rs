@@ -58,16 +58,18 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         }
     }
 
-    /// Issue 1987: send `payload` to a raw [`MailboxId`], threading this
-    /// actor's own id as the send's `from`. The by-id escape hatch for a
-    /// recipient address known only at runtime (the typed-token counterpart
-    /// is [`Self::send`]; the by-name counterpart is
-    /// [`MailSender::send_to_named`]). Routes through the
-    /// inline registry and inherits the handler's causal chain like every
-    /// ctx send.
-    pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
+    /// Issue 1987: send `payload` to a proven [`AnyActorRef`], threading this
+    /// actor's own id as the send's `from`. The untyped cell for a recipient
+    /// known only at runtime takes the proof a spawn
+    /// ([`InlineChild::erase`](super::InlineChild::erase),
+    /// [`Self::spawn_inline_child_by_tag`]), a `child_as` / `sibling_as`
+    /// lookup, or [`Self::sender`] produced — never a computed position
+    /// (ADR-0230). The typed-token counterpart is [`Self::send`]; the by-name
+    /// counterpart is [`MailSender::send_to_named`]. Routes through the inline
+    /// registry and inherits the handler's causal chain like every ctx send.
+    pub fn send_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+        self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 }
 

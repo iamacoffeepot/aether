@@ -548,7 +548,7 @@ impl WasmActor for InlineTagParent {
         if let Ok(alias) =
             ctx.spawn_inline_child_by_tag(ActorTypeTag::of::<InlineStatefulChild>(), Subname::Named("tagged"), &[])
         {
-            self.child = Some(alias);
+            self.child = Some(alias.id());
         }
         self.wrong_parent_rejected = matches!(
             ctx.spawn_inline_child_by_tag(

@@ -15,6 +15,7 @@ use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, HandlesKind};
+use crate::reference::AnyActorRef;
 
 /// A typed sendable handle to an inline child of type `C` — what
 /// [`WasmCtx::spawn_inline_child`] hands back, and what
@@ -28,9 +29,11 @@ use crate::model::{Addressable, HandlesKind};
 /// instead of a substrate warn-drop — or, for a child with a `#[fallback]`,
 /// instead of nothing at all.
 ///
-/// The by-id escape hatch stays open through [`Self::id`], so an address that
-/// must be stored untyped (a memo keyed by `MailboxId`, a slot table, a
-/// [`RelativeMailbox`](super::RelativeMailbox) hop) still reads it out.
+/// A parent keeping children of several types erases the handle with
+/// [`Self::erase`] and keeps the [`AnyActorRef`] it yields — still a proof,
+/// minus the type. [`Self::id`] remains as the key for a positional surface
+/// (`despawn_inline_child`, a [`RelativeMailbox`](super::RelativeMailbox)
+/// hop), never as a send target: every by-id send takes a proof.
 pub struct InlineChild<C> {
     id: MailboxId,
     /// `fn() -> C` rather than `C`: the handle owns no child state, so it must
@@ -81,12 +84,26 @@ impl<C: Addressable> InlineChild<C> {
     where
         C: HandlesKind<K>,
     {
-        ctx.send_to(self.id, payload);
+        ctx.send_to(self.erase(), payload);
     }
 
-    /// This child's alias [`MailboxId`] — the untyped escape hatch, and the
-    /// key every by-id surface (`ctx.send_to`, `despawn_inline_child`, a
-    /// parent's slot table) still takes.
+    /// This child as an [`AnyActorRef`] — the ADR-0230 §3 spawn-result door
+    /// for a heterogeneous child set. A parent keeping children of several
+    /// types keeps proofs, not positions: the erased reference drops `C` but
+    /// keeps the fact that the spawn registered the child, so it is a valid
+    /// target for [`WasmCtx::send_to`] and a key for a table of children.
+    ///
+    /// Consumed by [`Self::send`] above, by `aether-kit-widget`'s panel spawn,
+    /// and by its composite node's spawn. The *reference* erasure: unrelated
+    /// to the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
+    #[must_use]
+    pub const fn erase(self) -> AnyActorRef {
+        AnyActorRef::new(self.id)
+    }
+
+    /// This child's alias [`MailboxId`] — the key a positional surface
+    /// (`despawn_inline_child`, a registry lookup) takes. A send takes
+    /// [`Self::erase`]'s proof instead.
     #[must_use]
     pub const fn id(&self) -> MailboxId {
         self.id

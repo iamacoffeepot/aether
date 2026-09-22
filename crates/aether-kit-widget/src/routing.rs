@@ -368,27 +368,12 @@ impl Routing {
 
 #[cfg(test)]
 mod tests {
-    use aether_actor::WasmCtx;
-    use aether_actor::wasm::inline::Registry;
     use aether_kinds::WindowId;
 
     use super::*;
+    use crate::test_support::proven;
 
     const TEST_WINDOW_ID: WindowId = WindowId(1);
-
-    /// The position the synthetic shell ctx dispatches for. Only its
-    /// distinctness from the region ids matters.
-    const SHELL_MAILBOX: u64 = 0x5E11;
-
-    /// A proof for position `id`, minted the one way a guest can mint one:
-    /// from the dispatch source the host threaded, lifted by `ctx.sender()`.
-    /// There is no constructor to reach for instead — `AnyActorRef::new` is
-    /// private to `aether-actor` — and that closed door is exactly why the
-    /// table can hold proofs rather than positions.
-    fn proven(id: u64) -> AnyActorRef {
-        let registry = Registry::new();
-        WasmCtx::__new(SHELL_MAILBOX, &registry, id).sender().expect("a threaded dispatch source mints a proof")
-    }
 
     fn rect(x_pixels: f32, y_pixels: f32, width_pixels: f32, height_pixels: f32) -> EditorRegionRect {
         EditorRegionRect { x_pixels, y_pixels, width_pixels, height_pixels }

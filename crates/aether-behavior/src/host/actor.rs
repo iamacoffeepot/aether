@@ -109,7 +109,7 @@ impl WasmActor for BehaviorHost {
             Subname::Named(&self.config.child.subname),
             &self.config.child.config,
         ) {
-            Ok(id) => self.wrapped_child = Some(id),
+            Ok(reference) => self.wrapped_child = Some(reference.id()),
             Err(SpawnError::UnknownActorTag(tag)) => {
                 tracing::warn!(
                     target: "aether_behavior",

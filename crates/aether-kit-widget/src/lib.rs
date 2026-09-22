@@ -50,6 +50,8 @@ pub mod routing;
 mod scroll;
 pub mod set;
 mod state;
+#[cfg(test)]
+mod test_support;
 pub mod text_edit;
 pub mod theme;
 
@@ -238,7 +240,7 @@ impl Widget {
             };
             match ctx.spawn_inline::<Self>(Subname::Named(&spec.subname), &child_config) {
                 Ok(child) => self.composite.register_slot(
-                    child.id(),
+                    child.erase(),
                     Vec2::new(spec.origin[0], spec.origin[1]),
                     spec.clip,
                     &spec.subname,
@@ -316,7 +318,7 @@ pub(crate) fn accept_child_list(
     ctx: &mut WasmCtx<'_, Erased, Manual>,
     list: WidgetDrawList,
 ) -> bool {
-    if let Some(source) = ctx.source_mailbox() {
+    if let Some(source) = ctx.sender() {
         composite.fill(source, list);
     }
     composite.is_complete()
@@ -686,7 +688,7 @@ fn emit_layer(ctx: &mut WasmCtx<'_, Erased, Manual>, items: &[WidgetDrawItem], l
 mod tests {
     use super::*;
     use crate::set::text_origin_y;
-    use aether_data::MailboxId;
+    use crate::test_support::proven;
     use aether_math::Rgba;
     use core::slice::from_ref;
 
@@ -1040,9 +1042,9 @@ mod tests {
         // every child's overlay back to the end of the lane put it over the
         // question instead and blanked the title.
         let title_row = WidgetClipRect { x: 300.0, y: 350.0, width: 420.0, height: 20.0 };
-        let background = MailboxId(1);
-        let title = MailboxId(2);
-        let ok = MailboxId(3);
+        let background = proven(1);
+        let title = proven(2);
+        let ok = proven(3);
 
         let mut composite = Composite::new();
         composite.register_slot(background, Vec2::ZERO, None, "sheet_numeric", "aether.kit.widget");

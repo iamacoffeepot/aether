@@ -38,7 +38,7 @@
 //!   `ButtonActivated` / `ToggleChanged` /
 //!   `SegmentedSelected` / `NumericChanged` / `DropdownSelected` /
 //!   `TabStripSelected`), attributed by
-//!   `ctx.source_mailbox()`, is the seam a real editor translates into
+//!   `ctx.sender()`, is the seam a real editor translates into
 //!   world-knob driver mail; the reference logs it.
 //! - **Grab.** `WidgetOpenChanged` is the one events-up kind the root
 //!   answers itself: an open list or menu takes the modal pointer grab
@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, Erased, ErasedWasmActor, Manual, ModuleChild, Sends, Subname, WasmActor, WasmCtx,
-    WasmInitCtx, actor,
+    ActorInitError, Addressable, AnyActorRef, Erased, ErasedWasmActor, Manual, ModuleChild, Sends, Subname, WasmActor,
+    WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::{Kind, MailboxId};
 use aether_kinds::keycode::KEY_TAB;
@@ -89,11 +89,11 @@ use crate::{
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
 
-/// One spawned child's alias plus the logical name the panel attributes its
+/// One spawned child's proof plus the logical name the panel attributes its
 /// value-up events under (for the map-editor translation / logging) — the
 /// child's spec subname.
 struct ChildRef {
-    id: MailboxId,
+    reference: AnyActorRef,
     name: String,
 }
 
@@ -120,7 +120,7 @@ impl ChildLayout {
 }
 
 pub struct SpawnedChild {
-    pub id: MailboxId,
+    pub reference: AnyActorRef,
     pub width_pixels: Option<f32>,
     pub height_pixels: f32,
     pub pointer_eligible: bool,
@@ -273,28 +273,28 @@ impl WidgetPanel {
         let frame = content_frame(&assigned, self.scroll_strip_pixels(child));
         let focus_rect = FocusRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height };
         self.composite.register_slot(
-            child.id,
+            child.reference,
             Vec2::new(assigned.x, assigned.y),
             Some(WidgetClipRect { x: assigned.x, y: assigned.y, width: assigned.width, height: assigned.height }),
             &name,
             child.type_namespace,
         );
         self.focus.register(
-            child.id,
+            child.reference,
             focus_rect,
             FocusEligibility { pointer: child.pointer_eligible, keyboard: child.focusable },
             &child.state,
         );
         if child.scroll_viewport.is_some() || child.wheel_eligible {
             self.scroll_focus.register(
-                child.id,
+                child.reference,
                 focus_rect,
                 FocusEligibility { pointer: true, keyboard: false },
                 &WidgetControlState::default(),
             );
         }
-        ctx.send_to(child.id, &frame);
-        self.children.push(ChildRef { id: child.id, name });
+        ctx.send_to(child.reference, &frame);
+        self.children.push(ChildRef { reference: child.reference, name });
     }
 
     /// How wide a column this child's scroll bar stands in beside its rows,
@@ -319,7 +319,7 @@ impl WidgetPanel {
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
     fn fan_theme<M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, Erased, M>) {
         for child in &self.children {
-            ctx.send_to(child.id, &SetTheme { theme: self.theme.clone() });
+            ctx.send_to(child.reference, &SetTheme { theme: self.theme.clone() });
         }
     }
 
@@ -336,9 +336,9 @@ impl WidgetPanel {
 
     /// The logical name of the child a value-up event came from, for
     /// attribution.
-    fn child_name(&self, source: Option<MailboxId>) -> &str {
+    fn child_name(&self, source: Option<AnyActorRef>) -> &str {
         source
-            .and_then(|id| self.children.iter().find(|child| child.id == id))
+            .and_then(|source| self.children.iter().find(|child| child.reference == source))
             .map_or("unknown", |child| child.name.as_str())
     }
 }
@@ -353,22 +353,22 @@ fn stack_column(config: &PanelConfig, gap: f32) -> Column {
     Column { origin: Vec2::new(config.x, config.y), width: config.width, gap }
 }
 
-/// One [`Row`] per spawned child, in spec order, keyed by that child's mailbox.
+/// One [`Row`] per spawned child, in spec order, keyed by that child's proof.
+///
+/// A spec that failed to spawn never reaches here, so it contributes neither a
+/// row nor the gap that would have preceded it.
+fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<AnyActorRef>> {
+    children.into_iter().map(|child| stack_row(child.reference, child.width_pixels, child.height_pixels)).collect()
+}
+
+/// One child's [`Row`], keyed by `key`.
 ///
 /// Each row is the height the child's own config asked for. A child that named
 /// its own width ([`SpawnedChild::width_pixels`] — a button sized to its label)
-/// gets exactly that width; one that did not takes the whole column. A spec
-/// that failed to spawn never reaches here, so it contributes neither a row nor
-/// the gap that would have preceded it.
-fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<MailboxId>> {
-    children
-        .into_iter()
-        .map(|child| {
-            let cell =
-                child.width_pixels.map_or_else(|| Cell::share(child.id, 1.0), |pixels| Cell::fixed(child.id, pixels));
-            Row::cells(child.height_pixels, vec![cell])
-        })
-        .collect()
+/// gets exactly that width; one that did not takes the whole column.
+fn stack_row<K: Copy>(key: K, width_pixels: Option<f32>, height_pixels: f32) -> Row<K> {
+    let cell = width_pixels.map_or_else(|| Cell::share(key, 1.0), |pixels| Cell::fixed(key, pixels));
+    Row::cells(height_pixels, vec![cell])
 }
 
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
@@ -414,9 +414,9 @@ fn spawn_content_child(
 ) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let id = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 // Pointer-eligible for hover only: a label whose text is wider
                 // than its slot reveals the rest on a raised plate while the
@@ -434,9 +434,9 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let id = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: false,
@@ -449,9 +449,9 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let id = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -465,9 +465,9 @@ fn spawn_content_child(
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let id = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 height_pixels: height,
                 pointer_eligible: true,
@@ -480,9 +480,9 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let id = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -496,9 +496,9 @@ fn spawn_content_child(
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let id = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
-                id,
+                reference,
                 width_pixels: None,
                 height_pixels: height,
                 pointer_eligible: true,
@@ -516,9 +516,9 @@ fn spawn_content_child(
 
 fn spawn_button_child(ctx: &mut WasmCtx<'_, Erased, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
-    let id = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
+    let reference = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
-        id,
+        reference,
         width_pixels: None,
         height_pixels: row,
         pointer_eligible: true,
@@ -540,8 +540,8 @@ fn spawn_virtual_list_child(
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
     let host_scroll_strip_units = host_scroll_strip_units(&config);
-    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-        id,
+    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+        reference,
         width_pixels: None,
         height_pixels: profile.height,
         pointer_eligible: profile.eligible,
@@ -617,8 +617,8 @@ fn spawn_composite_child(
     }
     decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
-        spawn::<Widget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-            id,
+        spawn::<Widget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            reference,
             width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
             height_pixels: intrinsic
                 .and_then(|extent| (extent[1].is_finite() && extent[1] >= 0.0).then_some(extent[1]))
@@ -653,8 +653,8 @@ fn spawn_scroll_child(
             return None;
         }
         let viewport = config.viewport_extent;
-        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-            id,
+        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            reference,
             width_pixels: Some(viewport.width_pixels),
             height_pixels: viewport.height_pixels,
             pointer_eligible: false,
@@ -678,8 +678,8 @@ fn spawn_row_control_child(
 ) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -692,8 +692,8 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -706,8 +706,8 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -720,8 +720,8 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
-            spawn::<DropdownWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<DropdownWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -734,8 +734,8 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
-            spawn::<TabStripWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<TabStripWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -748,8 +748,8 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
-            spawn::<MenuBarWidget>(ctx, &spec.subname, &config).map(|id| SpawnedChild {
-                id,
+            spawn::<MenuBarWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+                reference,
                 width_pixels: None,
                 height_pixels: row,
                 pointer_eligible: true,
@@ -894,13 +894,13 @@ fn apply_availability(sends: &mut Sends<'_>, effects: AvailabilityEffects, modif
 
 /// Spawn one inline widget under the caller's actual logical actor type,
 /// logging and dropping the slot on failure.
-fn spawn<A>(ctx: &mut WasmCtx<'_, Erased, Manual>, subname: &str, config: &A::Config) -> Option<MailboxId>
+fn spawn<A>(ctx: &mut WasmCtx<'_, Erased, Manual>, subname: &str, config: &A::Config) -> Option<AnyActorRef>
 where
     A: ModuleChild + ErasedWasmActor,
     <A as WasmActor>::State: ErasedWasmActor,
 {
     match ctx.spawn_inline::<A>(Subname::Named(subname), config) {
-        Ok(child) => Some(child.id()),
+        Ok(child) => Some(child.erase()),
         Err(error) => {
             tracing::warn!(
                 target: "aether_kit_widget",
@@ -1105,8 +1105,8 @@ fn spawn_behavior_host(
         Subname::Named(&spec.subname),
         &bytes,
     ) {
-        Ok(id) => Some(SpawnedChild {
-            id,
+        Ok(reference) => Some(SpawnedChild {
+            reference,
             width_pixels: None,
             height_pixels: profile.height,
             pointer_eligible: profile.pointer_eligible,
@@ -1230,7 +1230,7 @@ impl WasmActor for WidgetPanel {
         let background = quad(self.config.x, self.config.y, self.config.width, self.panel_height, self.theme.surface);
         self.composite.extend_chrome([background]);
         for child in &self.children {
-            ctx.send_to(child.id, &Collect);
+            ctx.send_to(child.reference, &Collect);
         }
         if self.composite.is_complete() {
             self.finish(ctx);
@@ -1388,7 +1388,7 @@ impl WasmActor for WidgetPanel {
     /// a child actually adopted. Source attribution identifies the panel slot.
     #[handler::manual]
     fn on_widget_state_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: WidgetStateChanged) {
-        let Some(source) = ctx.source_mailbox() else {
+        let Some(source) = ctx.sender() else {
             return;
         };
         let effects = self.focus.update_availability(source, &changed.state);
@@ -1404,7 +1404,7 @@ impl WasmActor for WidgetPanel {
         ctx: &mut WasmCtx<'_, Erased, Manual>,
         changed: WidgetEligibilityChanged,
     ) {
-        let Some(source) = ctx.source_mailbox() else {
+        let Some(source) = ctx.sender() else {
             return;
         };
         let effects = self
@@ -1456,7 +1456,7 @@ impl WasmActor for WidgetPanel {
     fn on_slider_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: SliderChanged) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             value = changed.value,
             committed = changed.committed,
             "widget slider changed",
@@ -1471,7 +1471,7 @@ impl WasmActor for WidgetPanel {
     fn on_text_committed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, committed: TextCommitted) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             text = %committed.text,
             "widget text committed",
         );
@@ -1485,7 +1485,7 @@ impl WasmActor for WidgetPanel {
     fn on_radio_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: RadioSelected) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = selected.index,
             "widget radio selected",
         );
@@ -1499,7 +1499,7 @@ impl WasmActor for WidgetPanel {
     fn on_virtual_list_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: VirtualListSelected) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = selected.index,
             "widget virtual list selected",
         );
@@ -1516,7 +1516,7 @@ impl WasmActor for WidgetPanel {
     fn on_virtual_list_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, action: VirtualListActivated) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = action.index,
             action = action.action,
             "widget virtual list activated",
@@ -1534,7 +1534,7 @@ impl WasmActor for WidgetPanel {
     fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: VirtualListHover) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = hover.index,
             "widget virtual list hover",
         );
@@ -1553,7 +1553,7 @@ impl WasmActor for WidgetPanel {
     fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: DropdownHover) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = hover.index,
             "widget dropdown hover",
         );
@@ -1567,7 +1567,7 @@ impl WasmActor for WidgetPanel {
     fn on_button_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _clicked: ButtonActivated) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             "widget button activated",
         );
     }
@@ -1577,7 +1577,7 @@ impl WasmActor for WidgetPanel {
     fn on_toggle_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: ToggleChanged) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             on = changed.on,
             "widget toggle changed",
         );
@@ -1588,7 +1588,7 @@ impl WasmActor for WidgetPanel {
     fn on_segmented_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: SegmentedSelected) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = selected.index,
             "widget segmented selected",
         );
@@ -1599,7 +1599,7 @@ impl WasmActor for WidgetPanel {
     fn on_dropdown_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: DropdownSelected) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = selected.index,
             "widget dropdown selected",
         );
@@ -1614,7 +1614,7 @@ impl WasmActor for WidgetPanel {
     /// one kind and not the next left that one open with no grab.
     #[handler::manual]
     fn on_widget_open_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: WidgetOpenChanged) {
-        let Some(source) = ctx.source_mailbox() else {
+        let Some(source) = ctx.sender() else {
             return;
         };
         if changed.open {
@@ -1629,7 +1629,7 @@ impl WasmActor for WidgetPanel {
     fn on_menu_bar_activated(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, activated: MenuBarActivated) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             menu = activated.menu,
             item = activated.item,
             "widget menu bar activated",
@@ -1641,7 +1641,7 @@ impl WasmActor for WidgetPanel {
     fn on_tab_strip_selected(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, selected: TabStripSelected) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             index = selected.index,
             "widget tab strip selected",
         );
@@ -1652,7 +1652,7 @@ impl WasmActor for WidgetPanel {
     fn on_numeric_changed(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, changed: NumericChanged) {
         tracing::info!(
             target: "aether_kit_widget",
-            widget = self.child_name(ctx.source_mailbox()),
+            widget = self.child_name(ctx.sender()),
             value = changed.value,
             committed = changed.committed,
             "widget numeric changed",
@@ -1686,24 +1686,6 @@ impl WasmActor for WidgetPanel {
 mod dispatch_tests {
     use super::*;
 
-    /// A spawned child reduced to the three fields the stack reads: which
-    /// mailbox it is, whether it named its own width, and how tall it is.
-    /// Everything else on `SpawnedChild` is routing, not layout.
-    fn child(id: u64, width_pixels: Option<f32>, height_pixels: f32) -> SpawnedChild {
-        SpawnedChild {
-            id: MailboxId(id),
-            width_pixels,
-            height_pixels,
-            pointer_eligible: false,
-            focusable: false,
-            state: WidgetControlState::default(),
-            type_namespace: "test",
-            scroll_viewport: None,
-            host_scroll_strip_units: None,
-            wheel_eligible: false,
-        }
-    }
-
     // Tripwire: the panel's vertical stack, pinned rect by rect against the
     // hand-rolled loop it replaced. The three things that loop got right and
     // a layout rewrite can silently lose: one gap *between* rows and none
@@ -1715,9 +1697,13 @@ mod dispatch_tests {
     #[test]
     fn the_stack_gaps_between_rows_only_and_keeps_a_self_sized_child_at_its_own_width() {
         let config = PanelConfig { x: 10.0, y: 20.0, width: 300.0, ..PanelConfig::default() };
-        let children = vec![child(1, None, 24.0), child(2, Some(80.0), 24.0), child(3, None, 48.0)];
+        let rows = vec![
+            stack_row(MailboxId(1), None, 24.0),
+            stack_row(MailboxId(2), Some(80.0), 24.0),
+            stack_row(MailboxId(3), None, 48.0),
+        ];
 
-        let placed = stack_column(&config, 8.0).place(&stack_rows(&children));
+        let placed = stack_column(&config, 8.0).place(&rows);
 
         let rect = |id: u64| {
             let frame = placed.frame(&MailboxId(id)).expect("every spawned child is placed");

@@ -24,11 +24,8 @@ impl EditorShell {
     /// The shell's only send: prime a newly focused region with the cached
     /// modifiers, then hand `payload` to `target`.
     ///
-    /// `reference.id()` is the one place this crate opens a proof back up into
-    /// a position, and it is interim: the inherit-by-id send still takes a
-    /// `MailboxId`, so the reference has to be opened to call it. Issue #6304
-    /// narrows that signature to `AnyActorRef`, and this line then hands the
-    /// reference over whole; nothing else here moves.
+    /// The reference [`Routing`] returned is handed to the send whole: no
+    /// position is opened anywhere in the shell.
     ///
     /// Priming recurses exactly once: the nested call carries no focus edge of
     /// its own, so it sends the modifiers and returns.
@@ -46,7 +43,7 @@ impl EditorShell {
         }
 
         if let Some(reference) = target {
-            ctx.send_to(reference.id(), payload);
+            ctx.send_to(reference, payload);
         }
     }
 }

@@ -9,6 +9,7 @@ use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
+use crate::reference::AnyActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
@@ -279,6 +280,12 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// the child's `init`, the runtime-data mirror of the typed verb's
     /// in-guest `encode` / `decode` round-trip.
     ///
+    /// The `Ok` is the child as an [`AnyActorRef`]: the host has just
+    /// registered the alias, which is the proof (ADR-0230 §3). It is the
+    /// by-tag equivalent of the typed verb's
+    /// [`InlineChild::erase`] — a spawner that stays non-generic over its
+    /// children keeps proofs of them, not positions.
+    ///
     /// A [`Subname::Named`] that fails validation returns
     /// [`SpawnError::SubnameInvalid`] before any type lookup. The generated
     /// resolver rejects an unknown tag, a non-instanced actor, an unavailable
@@ -290,7 +297,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         tag: ActorTypeTag,
         subname: Subname<'_>,
         config_bytes: &[u8],
-    ) -> Result<MailboxId, SpawnError> {
+    ) -> Result<AnyActorRef, SpawnError> {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         // The resolver is installed on the module's registry by every
         // `export!` init shim — it enumerates the exported type set the
@@ -303,7 +310,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let Some(resolver) = self.inline.spawn_resolver() else {
             return Err(SpawnError::UnknownActorTag(tag));
         };
-        resolver(self.inline, self.mailbox, tag, is_counter, &full_subname, config_bytes)
+        resolver(self.inline, self.mailbox, tag, is_counter, &full_subname, config_bytes).map(AnyActorRef::new)
     }
 
     /// ADR-0114: tear down an **inline child** spawned by

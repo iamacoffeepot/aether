@@ -595,8 +595,8 @@ pub trait Lifecycle<S> {
 /// its [`Embedded`] counterpart for a component loaded under a non-default
 /// name. The id beside a rendered name
 /// (`LoadResult.mailbox_id`) skips resolution entirely: a caller already
-/// holding one sends to it directly, through the guest's
-/// `ctx.send_to(id, &mail)` or the native `ctx.actor_at::<R>(id)`.
+/// holding a proof of it sends to it directly, through the guest's
+/// `ctx.send_to(reference, &mail)` or the native `ctx.actor_at::<R>(id)`.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under
