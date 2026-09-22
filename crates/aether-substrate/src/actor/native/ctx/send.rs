@@ -297,15 +297,15 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
 }
 
 // ADR-0134: the emit surface is the multi class's, implemented only for
-// the `Multi<K>` mode. Each `emit` addresses the dispatch source
-// (`source_mailbox`) and starts a fresh detached chain (the
-// `send_detached_to` body — `None` / `None` lineage), so an emission does
-// not hold the request chain open. A sourceless dispatch (broadcast /
-// substrate-generated mail, no `SourceAddr::Component`) has no routable
-// target, so the emission warn-drops.
+// the `Multi<K>` mode. Each `emit` is `send_detached_to` at the proven
+// `ctx.sender()` and starts a fresh detached chain (`None` / `None`
+// lineage), so an emission does not hold the request chain open. A
+// sourceless dispatch (broadcast / substrate-generated mail, no
+// `SourceAddr::Component`) has no routable target, so the emission
+// warn-drops.
 impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {
-        let Some(source) = self.source_mailbox() else {
+        let Some(target) = self.sender() else {
             tracing::warn!(
                 kind = <K as Kind>::NAME,
                 "multi handler emit dropped: the dispatch carries no routable \
@@ -313,7 +313,6 @@ impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
             );
             return;
         };
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(source.0, K::ID.0, &bytes, 1, None, None);
+        self.send_detached_to(target, payload);
     }
 }
