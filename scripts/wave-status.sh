@@ -4,9 +4,8 @@
 # review state, and head branch — all in a single script invocation so a
 # multi-PR status check costs one Bash tool call, not one command per PR per
 # fact. Snapshot mode has two sub-modes: given explicit PR numbers, it selects
-# those PRs with no author filter (a named PR, e.g. fleet-bot-authored, is
-# never dropped by who authored it); with no numbers, a bare sweep filters to
-# the owner (iamacoffeepot) and the fleet bot (iamabuilder[bot]).
+# those PRs with no author filter (a named PR is never dropped by who authored
+# it); with no numbers, a bare sweep filters to the owner (iamacoffeepot).
 #
 # Usage:
 #
@@ -20,20 +19,10 @@
 #                                            fix push instead of settling on a
 #                                            superseded head's verdict.
 #                                            Fast-fails (exits 1 early) the moment
-#                                            a deterministic check (fmt / clippy /
-#                                            docs / marker build / hook tests)
-#                                            concludes failure, without waiting
-#                                            for the slow jobs to finish.
-#   scripts/wave-status.sh --wait-verdict <pr>
-#                                            loop (every 20s) until critic holds a
-#                                            standing verdict on <pr>'s CURRENT
-#                                            head SHA (issue #3405 — the implement
-#                                            verdict loop's wait); exit 0 on
-#                                            APPROVED, 1 on CHANGES_REQUESTED. A
-#                                            verdict on a stale SHA keeps polling
-#                                            (a fix push dismissed it), and the
-#                                            head is re-read every tick so the
-#                                            wait follows a push.
+#                                            a deterministic check (Format /
+#                                            Clippy / Docs) concludes failure,
+#                                            without waiting for the slow jobs
+#                                            to finish.
 #
 # Output (snapshot mode):
 #
@@ -61,14 +50,11 @@
 set -euo pipefail
 
 OWNER="iamacoffeepot"
-FLEET_BOT="iamabuilder[bot]"
 REPO="iamacoffeepot/aether"
 WAIT_MODE=0
 WAIT_PR=""
-VERDICT_MODE=0
-VERDICT_PR=""
 
-# Collect optional PR-number filters and parse --wait / --wait-verdict.
+# Collect optional PR-number filters and parse --wait.
 FILTER_PRS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -77,14 +63,9 @@ while [[ $# -gt 0 ]]; do
             WAIT_PR="$2"
             shift 2
             ;;
-        --wait-verdict)
-            VERDICT_MODE=1
-            VERDICT_PR="$2"
-            shift 2
-            ;;
         --*)
             echo "unknown flag: $1" >&2
-            echo "usage: wave-status.sh [<pr> ...] | --wait <pr> | --wait-verdict <pr>" >&2
+            echo "usage: wave-status.sh [<pr> ...] | --wait <pr>" >&2
             exit 2
             ;;
         *)
@@ -164,8 +145,8 @@ print_pr_line() {
         "#$num" "$state_col" "$ci_col" "$review_col" "$branch"
 }
 
-# Guarded per-tick head-sha re-read shared by the --wait and --wait-verdict
-# loops — the wait follows a fix push instead of pinning the startup head.
+# Guarded per-tick head-sha re-read for the --wait loop — the wait follows a
+# fix push instead of pinning the startup head.
 # `echo "$prev"` on failure keeps the previous sha for this tick only; a bare
 # `sha=$(cmd 2>/dev/null) || true` would wipe $sha to empty on a transient
 # failure instead, since the assignment itself always succeeds.
@@ -215,46 +196,12 @@ if [[ $WAIT_MODE -eq 1 ]]; then
     done
 fi
 
-# --wait-verdict mode (issue #3405) — see the usage comment above for the
-# wait/exit semantics; re-reads sha every tick so a stale-SHA verdict (the
-# snapshot review column's known staleness gap) never short-circuits the wait.
-if [[ $VERDICT_MODE -eq 1 ]]; then
-    if [[ -z "$VERDICT_PR" ]]; then
-        echo "--wait-verdict requires a PR number" >&2
-        exit 2
-    fi
-    CRITIC_LOGIN="iamacritic[bot]"
-    # One unguarded fetch first (mirroring --wait): a bad PR number or auth
-    # failure surfaces gh's real error and exits now; the guarded in-loop
-    # re-reads absorb only transient hiccups.
-    sha=$(gh api "repos/$REPO/pulls/$VERDICT_PR" --jq '.head.sha')
-    echo "[wave-status] waiting for a $CRITIC_LOGIN verdict on PR #$VERDICT_PR's current head…"
-    while :; do
-        sha=$(pr_head_sha "$VERDICT_PR" "$sha")
-        # Stream matching reviews per page (chronological), keep the newest
-        # verdict on the current head; tail consumes fully, no SIGPIPE.
-        verdict=$(gh api "repos/$REPO/pulls/$VERDICT_PR/reviews" --paginate \
-            --jq ".[] | select(.user.login == \"$CRITIC_LOGIN\" and .commit_id == \"$sha\"
-                       and (.state == \"APPROVED\" or .state == \"CHANGES_REQUESTED\")) | .state" \
-            2>/dev/null | tail -1) || verdict=""
-        if [[ "$verdict" == "APPROVED" ]]; then
-            echo "[wave-status] verdict on ${sha:0:8}…: APPROVED"
-            exit 0
-        elif [[ "$verdict" == "CHANGES_REQUESTED" ]]; then
-            echo "[wave-status] verdict on ${sha:0:8}…: CHANGES_REQUESTED"
-            exit 1
-        fi
-        sleep 20
-    done
-fi
-
 # Snapshot mode: list open PRs, in one of two sub-modes.
 #   - Explicit PR numbers given: the caller named the PRs, so select by number
-#     against ALL open PRs — no author filter. A named PR (e.g. a fleet-bot-
-#     authored one) is never dropped by who authored it.
-#   - Bare sweep (no numbers): filter to the fleet author allowlist
-#     ($OWNER, $FLEET_BOT) so the sweep stays scoped to the owner's and the
-#     fleet's own PRs rather than listing every contributor's.
+#     against ALL open PRs — no author filter. A named PR is never dropped by
+#     who authored it.
+#   - Bare sweep (no numbers): filter to $OWNER so the sweep stays scoped to
+#     the owner's own PRs rather than listing every contributor's.
 prs_json=$(gh api "repos/$REPO/pulls?state=open&per_page=100" --paginate --jq '.' 2>/dev/null)
 
 if [[ ${#FILTER_PRS[@]} -gt 0 ]]; then
@@ -266,11 +213,11 @@ if [[ ${#FILTER_PRS[@]} -gt 0 ]]; then
         exit 0
     fi
 else
-    prs_json=$(echo "$prs_json" | jq --arg owner "$OWNER" --arg bot "$FLEET_BOT" \
-        '[.[] | select(.user.login == $owner or .user.login == $bot)]')
+    prs_json=$(echo "$prs_json" | jq --arg owner "$OWNER" \
+        '[.[] | select(.user.login == $owner)]')
     total=$(echo "$prs_json" | jq 'length')
     if [[ "$total" == "0" ]]; then
-        echo "No open PRs authored by $OWNER or $FLEET_BOT."
+        echo "No open PRs authored by $OWNER."
         exit 0
     fi
 fi

@@ -4,9 +4,10 @@
 Matcher and policy semantics are loaded from scripts/surface-match.py at the
 captured ref, which must be reachable from the local refs/remotes/origin/main —
 executing the matcher from an arbitrary fetched commit (a PR head, say) would
-hand the tier decision to that commit's author. This wrapper adds Codex's
-Plan-to-Ready validation and evidence; it deliberately does not carry a second
-glob implementation.
+hand the tier decision to that commit's author. This wrapper adds the approve
+skills' Plan-surface validation, the overflow pricing the implement and land
+skills run, and their evidence; it deliberately does not carry a second glob
+implementation.
 
 Approval mode (`--targets-file`) validates that every Plan target is covered
 by the declared surface and resolves the surface tier. Changed mode

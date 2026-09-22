@@ -99,7 +99,7 @@ A trusted direct-review artifact must satisfy every condition below:
 
 Do not trust a login name, payload field, issue comment, pull-request review or comment, native `APPROVED` review, legacy pull-request machine record, or record for another head as a substitute. A head or managed-Plan change makes prior artifacts stale automatically. Among valid trusted v2 records for the exact current issue, pull request, head, and digest, the last one in body order is the semantic verdict. `REQUEST_CHANGES` enters or durably records repair, while `APPROVE` satisfies only the direct-review gate.
 
-Appending is idempotent and concurrent-edit safe. Immediately before mutation, re-read the pull request head, closing issue number/title/body, effective editor, and Plan digest. If the last valid current-fact record already has the desired verdict, do not append another. Otherwise build the complete candidate body in a temporary file with `apply_patch`, changing only the insertion immediately before `## Problem statement`. Re-read the body immediately before `PATCH` and require it to equal the source snapshot byte-for-byte; if it changed, rebuild from the fresh body instead of overwriting either edit. Send the file with `-F body=@<path>`, then re-read the body and effective editor and require the appended line and all trust checks to pass. Never edit or delete older artifacts.
+Appending is idempotent and concurrent-edit safe. Immediately before mutation, re-read the pull request head, closing issue number/title/body, effective editor, and Plan digest. If the last valid current-fact record already has the desired verdict, do not append another. Otherwise build the complete candidate body in a temporary file with the harness's file-edit tool, changing only the insertion immediately before `## Problem statement`. Re-read the body immediately before `PATCH` and require it to equal the source snapshot byte-for-byte; if it changed, rebuild from the fresh body instead of overwriting either edit. Send the file with `-F body=@<path>`, then re-read the body and effective editor and require the appended line and all trust checks to pass. Never edit or delete older artifacts.
 
 Native review state remains an independent blocker. Read paginated pull-request reviews for native decisions only. For each reviewer, consider their newest non-dismissed native decision review (`APPROVED` or `CHANGES_REQUESTED`) across the pull request; a latest `CHANGES_REQUESTED` remains active across later commits until that reviewer submits a later `APPROVED` decision or GitHub reports the request dismissed. It blocks implementation success and landing even when the hidden semantic artifact says `APPROVE`. A hidden issue-body record cannot clear it. Every unresolved review thread also blocks independently. Native `APPROVED` reviews may satisfy branch protection, but they neither create nor replace the trusted direct-review artifact.
 
@@ -116,7 +116,7 @@ Use paginated REST endpoints for comments, issue timelines, pull requests, revie
 
 ## Bodies and comments
 
-- Put outbound markdown and JSON in a temporary file using `apply_patch`; never interpolate issue or review text into a shell command.
+- Put outbound markdown and JSON in a temporary file using the harness's file-edit tool; never interpolate issue or review text into a shell command.
 - Create or edit with file inputs such as `-F body=@/tmp/aether-issue-<N>.md`.
 - Preserve every unmanaged body byte when replacing managed sections.
 - Immediately before a full-body `PATCH`, re-read issue number, title, and body. Abort on a concurrent managed-section edit; merge only non-overlapping user prose.
@@ -150,6 +150,6 @@ Review-thread enumeration and resolution use the GraphQL `reviewThreads` query a
 
 - Re-read after an uncertain mutation before retrying, so a timeout cannot duplicate an issue, comment, pull request, review, or merge.
 - Preserve owned worktrees and branches on authentication, network, runner, or service failure. Report the concrete failing operation; do not encode the outage in issue metadata.
-- When implementation discovers a broken Plan assumption, hand the issue back with `$scope <issue> --phase plan` and evidence. Use `design` for a failed design choice and `define` for unclear intent.
+- When implementation discovers a broken Plan assumption, hand the issue back with `/scope <issue> --phase plan` (`$scope` in Codex) and evidence. Use `design` for a failed design choice and `define` for unclear intent.
 - Never edit Declared surface from implementation, resolution, or landing; overflow is priced instead.
 - Do not merge, delete a worktree, or delete a branch until REST proves the named pull request merged and the worktree is clean.

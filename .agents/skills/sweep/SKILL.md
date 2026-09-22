@@ -1,6 +1,6 @@
 ---
 name: sweep
-description: "Enumerate, classify, confirm, and reclaim stale Aether worktrees, Codex session worktrees, branches, ADR status drift, or fat issues. Use for cleanup and audits; never infer permission to discard dirty or live work."
+description: "Enumerate, classify, confirm, and reclaim stale Aether worktrees, session worktrees, branches, ADR status drift, or fat issues. Use for cleanup and audits; never infer permission to discard dirty or live work."
 ---
 
 # Sweep
@@ -14,7 +14,7 @@ Support:
 ```text
 $sweep                       # branch-backed worktrees
 $sweep worktrees
-$sweep sessions              # detached .agents/worktrees/codex-* entries
+$sweep sessions              # detached .agents/worktrees session entries
 $sweep branches
 $sweep adrs
 $sweep fat
@@ -34,7 +34,7 @@ Never remove `main_root`, `current_worktree`, or any worktree with uncertain own
 
 ## Worktrees
 
-Enumerate `git worktree list --porcelain`. This target handles Aether-managed, non-primary worktrees with a branch under `.agents/worktrees/issue-*` and `.agents/worktrees/adr-*`. Leave detached `codex-*` entries to `sessions` and retain every branch-backed path outside those managed prefixes unless the user separately establishes its ownership.
+Enumerate `git worktree list --porcelain`. This target handles Aether-managed, non-primary worktrees with a branch under `.agents/worktrees/issue-*` and `.agents/worktrees/adr-*`. Leave detached session entries to `sessions` and retain every branch-backed path outside those managed prefixes unless the user separately establishes its ownership.
 
 For every branch-backed entry, record:
 
@@ -48,9 +48,9 @@ Only a clean, Aether-managed worktree with a GitHub-confirmed merged PR is a rem
 
 After confirmation, re-read worktree status and PR state immediately before each removal. Delete the local branch with `-D` only after the merged-PR oracle has been re-confirmed; squash merges are not ancestry-identical.
 
-## Codex session worktrees
+## Session worktrees
 
-Enumerate detached registered worktrees beneath `$main_root/.agents/worktrees/codex-*`. The SessionStart hook creates them detached and does not provide a reliable live-session lock, so cleanliness or age alone is not a liveness oracle.
+Enumerate detached registered worktrees directly beneath `$main_root/.agents/worktrees/` that are session entries: Codex's `codex-*` and Claude Code's `<session-id>` entries. Each SessionStart hook creates them detached. The Codex hook takes no lock; the Claude Code hook locks its entry and releases the lock on a clean session end, which a crash skips. Cleanliness, age, or lock state alone is not a liveness oracle.
 
 For each entry, report:
 
@@ -58,11 +58,13 @@ For each entry, report:
 - clean/dirty state;
 - HEAD SHA and whether it is reachable from `origin/main`;
 - HEAD commit date and directory modification time as hints only;
-- registered/prunable status from `git worktree list --porcelain`.
+- locked and registered/prunable status from `git worktree list --porcelain`.
 
-Never auto-remove a session worktree and never include the current one as a candidate. Clean non-current entries may be offered for per-path confirmation with the warning that Codex cannot prove the owning conversation is closed. Dirty entries require a separate explicit instruction to discard their named changes; a bulk “confirm sweep” is insufficient.
+Never auto-remove a session worktree and never include the current one as a candidate. Clean non-current entries may be offered for per-path confirmation with the warning that the sweep cannot prove the owning conversation is closed. Dirty entries require a separate explicit instruction to discard their named changes; a bulk “confirm sweep” is insufficient.
 
 After a confirmed clean removal, run `git worktree remove <path>`. Use `git worktree prune` only for already-missing administrative entries and only after showing them in the plan. There is no branch to delete.
+
+`.claude/worktrees/` holds only legacy back-compat symlinks into `.agents/worktrees/`. List every dangling symlink there (its target no longer exists) and offer those for removal in the same plan. Removing one deletes only the link. Never remove a symlink whose target still exists, and never follow one to remove its target.
 
 ## Branches
 
@@ -109,4 +111,4 @@ After confirmation, file children sequentially through `$sketch` mechanics. Each
 
 ## All
 
-Build one combined plan in this order: branch-backed worktrees, Codex session worktrees, worktree-less branches, ADR audit. Ask once for an itemized confirmation, but retain each target's stricter per-item rules. Execute confirmed removals serially and re-enumerate between targets so an earlier worktree removal can make its branch eligible for the branch pass.
+Build one combined plan in this order: branch-backed worktrees, session worktrees, worktree-less branches, ADR audit. Ask once for an itemized confirmation, but retain each target's stricter per-item rules. Execute confirmed removals serially and re-enumerate between targets so an earlier worktree removal can make its branch eligible for the branch pass.

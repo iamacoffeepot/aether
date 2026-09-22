@@ -2,9 +2,10 @@
 """The declared-surface matcher — the one place gitwildmatch semantics are decided.
 
 An issue's `## Declared surface` is a block of globs; `approval-policy.toml`
-maps globs to approval tiers. The direct-drive Codex approve skill loads this
-matcher from the captured `origin/main` commit so Plan-to-Ready validation and
-tier resolution use owner-authored semantics. The CLI also retains containment
+maps globs to approval tiers. The approve skills' resolver
+(`.agents/skills/approve/scripts/resolve_approval_tier.py`) loads this matcher
+from the captured `origin/main` commit so Plan-surface validation, tier
+resolution, and overflow pricing use owner-authored semantics. The CLI also retains containment
 mode for deterministic local surface audits.
 
 Keeping both modes here gives them identical glob semantics; a second matcher
@@ -151,13 +152,10 @@ def read_globs(path):
 def load_policy_text(text):
     # The file's shape is owned by this repo (a `default` tier plus a list of
     # {glob, tier} rules). Parse it as typed TOML through the standard library
-    # so the Python matcher and the chassis host (`toml::from_str` into
-    # `ApprovalPolicy`, deny_unknown_fields) refuse the same surprises: unknown
-    # keys, unknown tier spellings, and structural surprises are None rather
-    # than a guessed tier. Tier resolution is most-restrictive-wins over the
-    # matching rules, falling back to the file's own `default` — the same
-    # resolution /approve applies at the Plan->Ready edge, so both consumers
-    # quote the tier a path would actually cost.
+    # and refuse surprises: unknown keys, unknown tier spellings, and structural
+    # surprises are None rather than a guessed tier. Tier resolution is
+    # most-restrictive-wins over the matching rules, falling back to the file's
+    # own `default`, so every caller quotes the tier a path would actually cost.
     if not text.strip():
         # The fetch failed (no policy on the default branch yet), so the tier is
         # honestly unresolved rather than assumed.

@@ -1,6 +1,6 @@
 ---
 name: sketch
-description: "Capture a rough idea as a lint-clean Aether Backlog issue while preserving the user's words. Use to file new work or a persisted wish leaf; do not scope, design, plan, or implement it."
+description: "Capture a rough idea as a lint-clean unscoped Aether issue while preserving the user's words. Use to file new work or a persisted wish leaf; do not scope, design, plan, or implement it."
 ---
 
 # Sketch

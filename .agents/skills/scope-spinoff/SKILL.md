@@ -1,6 +1,6 @@
 ---
 name: scope-spinoff
-description: "Turn selected Aether scope Side findings into linked Backlog issues, then remove only the filed findings from the parent. Use after scope when the user chooses indices or requests all/dry-run."
+description: "Turn selected Aether scope Side findings into linked unscoped issues, then remove only the filed findings from the parent. Use after scope when the user chooses indices or requests all/dry-run."
 ---
 
 # Scope Spinoff
@@ -23,7 +23,7 @@ For each confirmed selected finding, file sequentially with `$sketch` mechanics.
 Spun off from #<parent> Side findings via `$scope-spinoff` on <YYYY-MM-DD>.
 ```
 
-Children start at Backlog with no phase/size/model labels. Do not create dependency relationships or parent comments; the body reference creates the timeline cross-reference.
+Children start unscoped with no managed artifact or body routing. Do not create dependency relationships or parent comments; the body reference creates the timeline cross-reference.
 
 After each successful child create, re-read the parent and remove that exact finding from `## Side findings`, preserving every other byte of user and managed content. Delete the H2 only when no findings remain. Abort on a concurrent edit to the section rather than overwriting it.
 

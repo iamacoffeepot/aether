@@ -1,11 +1,19 @@
-# Approval policy — the tier guard the approve gate consults to decide whether an
-# issue's planned work may auto-advance, needs an LLM judge, or stops at the
-# owner's desk. It maps path globs to an approval tier over an issue's declared
-# surface (the `## Declared surface` glob block the scope revision carries).
-# ADR-0151.
+# Approval policy — maps path globs to an approval tier (`auto`, `judge`, or
+# `human`). ADR-0151.
 #
-# `scripts/surface-match.py` is the resolver, and this file's git history is the
-# delegation ladder's audit trail.
+# It is read by `.agents/skills/approve/scripts/resolve_approval_tier.py`, which
+# loads this file and the matcher `scripts/surface-match.py` from a captured
+# `origin/main` commit. Two skill steps call it:
+#
+#   - /approve resolves the tier of an issue's `## Declared surface`. `auto`
+#     work may be approved unattended (`authority: policy-auto`); `judge` and
+#     `human` work needs the owner's explicit approval.
+#   - /implement and /land price surface overflow: changed paths outside the
+#     approved surface. `auto` overflow lands with the ordinary direct review,
+#     `judge` overflow needs the landing agent's own acceptance of each path,
+#     and `human` overflow needs the owner's explicit confirmation.
+#
+# `.agents/skills/_shared/github-workflow.md` holds the full contract.
 #
 # Resolution is most-restrictive-match-wins (human > judge > auto): a path's
 # tier is the most restrictive rule that matches it, and a path matched by no
@@ -23,22 +31,22 @@
 #
 # Globs use gitignore-style ** semantics (gitwildmatch): ** spans path segments,
 # * stays within one segment, ? is one non-slash character, and a leading /
-# anchors the repository root. The host gate validates every glob against that
+# anchors the repository root. The resolver validates every glob against that
 # grammar and fails closed to `human` on anything outside it; an unreadable or
-# malformed policy is a gate FAILURE (never a silent `auto`).
+# malformed policy is a resolver FAILURE (never a silent `auto`).
 #
 # Relaxing a tier is a one-line, owner-signed diff to this file, so the file's
 # git history is the delegation ladder's audit trail. `approval-policy.toml` is
 # itself a `human`-tier glob below, so a relaxation can never auto-approve its
 # own relaxation.
 #
-# The ADR hard gate lives ABOVE this file, in the host gate's Rust (maturity-aware,
-# ADR-0146 §6 / ADR-0151): a change that writes a NEW ADR or edits an ESTABLISHED
-# (non-Proposed) one routes to the owner before any policy lookup. Only a change
-# whose every touched ADR is still `Status: Proposed` defers to this file — and
-# the `docs/adr/**` entry below is `judge` precisely so that fall-through resolves
-# to a shadow reader, not the owner. That new/established → owner guarantee lives
-# in the gate, not here (a glob matches paths, not maturity).
+# The ADR rule lives ABOVE this file, in the approve and land skills: a change
+# that writes a NEW ADR or edits an ESTABLISHED (non-Proposed) one is `human`
+# regardless of any policy lookup. Only a change whose every touched ADR is still
+# `Status: Proposed` defers to this file — and the `docs/adr/**` entry below is
+# `judge` precisely so that fall-through resolves to a second reader, not the
+# owner. That new/established → owner guarantee lives in the skills, not here (a
+# glob matches paths, not maturity).
 
 default = "judge"
 
@@ -91,10 +99,10 @@ tier = "human"
 glob = "/Cargo.lock"
 tier = "human"
 
-# ADRs. The routing decision lives in the ADR hard gate ABOVE this file
-# (maturity-aware): a new or established ADR is already routed to the owner by
-# the gate before this lookup runs, so this entry is only ever consulted on the
-# gate's in-progress fall-through — a change to a still-Proposed ADR mid-arc.
+# ADRs. The routing decision lives in the maturity-aware ADR rule described in
+# the header: the approve and land skills already route a new or established ADR
+# to the owner, so this entry is only ever consulted on the in-progress
+# fall-through — a change to a still-Proposed ADR mid-arc.
 [[rules]]
 glob = "docs/adr/**"
 tier = "judge"

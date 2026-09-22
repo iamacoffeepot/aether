@@ -25,7 +25,7 @@ Read the named pull request, closing issue, body editor, branch, worktree, check
 - an open draft targeting `main`, with a same-repository branch and exactly one closing issue;
 - a trusted current hidden approval whose digest and route match the current issue body;
 - approval base ancestry to branch head;
-- an owned clean `.claude/worktrees/issue-<issue>` on the exact branch;
+- an owned clean `.agents/worktrees/issue-<issue>` on the exact branch;
 - a fresh local merge-tree conflict or a repeated fresh platform content-conflict result;
 - a strict valid Declared surface.
 
