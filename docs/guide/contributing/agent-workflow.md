@@ -159,8 +159,7 @@ Fresh implementation requires a current trusted approval whose base is current
 `origin/main`. The active surface creates one issue branch and one issue
 worktree from that exact commit:
 
-- Codex: `.agents/worktrees/issue-<N>`;
-- Claude Code: `.claude/worktrees/issue-<N>`.
+- Codex and Claude Code alike: `.agents/worktrees/issue-<N>`.
 
 The implementation follows the Plan literally, runs focused verification plus
 `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`, reviews
@@ -169,8 +168,9 @@ a draft PR that closes the issue. Existing artifacts are possible live ownership
 claims and require a verified resume, never opportunistic deletion or
 recreation.
 
-GitHub Actions proves the build/test tree. Current branch protection requires
-`CI pass` and `Lint title`; it does not configure required pull-request reviews.
+GitHub Actions proves the build/test tree. `main` has no branch protection:
+`CI pass` and `Lint title` are the checks a head must pass before it lands, but
+nothing enforces them, and no pull-request review is required.
 The checked-in [workflow README](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/README.md)
 owns the exact hosted inventory.
 
