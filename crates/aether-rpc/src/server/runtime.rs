@@ -27,6 +27,7 @@
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
 use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, RpcServerParams, Settled};
 use aether_actor::runtime;
+use aether_substrate::mail::ResolveLiveError;
 use aether_substrate::net::teardown_connect_addr;
 
 // Re-export every substrate / std / cross-crate type the top-level
@@ -36,7 +37,7 @@ use aether_substrate::net::teardown_connect_addr;
 pub use crate::kinds::{CallSettled, RouteEnvelope};
 pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, KindId, MailId, MailboxId};
+pub use aether_data::{Kind, KindId, MailboxId};
 pub use aether_substrate::Mail;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -66,7 +67,7 @@ pub struct RpcServerHandle {
 /// wire). Looked up by the dispatch's auto-minted
 /// `correlation_id` (== `MailId.correlation_id` of the dispatched
 /// envelope, which is also the root id since we always dispatch
-/// as chassis-root via `send_envelope_detached`). Fields are
+/// as chassis-root via `send_envelope_detached_to`). Fields are
 /// `pub` so the parent's `on_settled` / `on_any` handlers can
 /// read them after `remove` / `get`.
 #[derive(Copy, Clone)]
@@ -265,13 +266,38 @@ impl RpcServerState {
             }
             return;
         }
+        // Prove the recipient once, at receipt (ADR-0230 section 3): the
+        // position crossed the wire and nothing upstream proved it. A
+        // position that does not prove `Live` dispatches nothing and closes
+        // the call with `ReplyEnd` `Err` rather than parking or dropping in
+        // the mailer. A dropped id and an unknown one stay distinct: the
+        // wire has no dropped variant, so the dropped refusal rides `Other`
+        // with the registry's text.
+        let recipient = match ctx.resolve_live(envelope.to.mailbox) {
+            Ok(recipient) => recipient,
+            Err(error) => {
+                let Some(wire_cid) = cid else {
+                    tracing::warn!(
+                        target: "aether_substrate::rpc",
+                        conn = conn_id,
+                        %error,
+                        "rpc call refused: recipient is not live",
+                    );
+                    return;
+                };
+                let refusal = match error {
+                    ResolveLiveError::Unknown(mailbox) => RpcError::UnknownMailbox { mailbox },
+                    ResolveLiveError::Dropped(_) => RpcError::Other { reason: error.to_string() },
+                };
+                self.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result: Err(refusal) });
+                return;
+            }
+        };
+
         // Dispatch the envelope as a fresh chain. The returned
         // MailId is the new chain's root; if cid is Some, subscribe
         // to its settlement to know when to write ReplyEnd.
-        let recipient = envelope.to.mailbox;
-        let kind = envelope.kind;
-        let payload = envelope.payload;
-        let mail_id: MailId = ctx.send_envelope_detached(recipient, kind, &payload);
+        let mail_id = ctx.send_envelope_detached_to(recipient, envelope.kind, &envelope.payload);
 
         let Some(wire_cid) = cid else {
             // Fire-and-forget at the wire layer. No bookkeeping.

@@ -64,8 +64,8 @@ use aether_kinds::{
     TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle,
-    RpcServerParams, WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcError, RpcServerCapability, RpcServerConfig,
+    RpcServerHandle, RpcServerParams, WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -704,6 +704,18 @@ impl FleetHarness {
         self.call(Some(engine), recipient, mail)
     }
 
+    /// [`send`](Self::send) that returns a `ReplyEnd::Err` instead of
+    /// panicking on it. An engine refuses a `Call` whose recipient does not
+    /// prove `Live` (ADR-0230) with `RpcError::UnknownMailbox`, so a poll
+    /// that waits for a spawned child to come up reads the refusal as "not
+    /// live yet" and retries.
+    pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<MailEnvelope>, RpcError>
+    where
+        K: Kind + Serialize,
+    {
+        self.try_call_with_budget(Some(engine), recipient, mail, reply_cap(), "reply")
+    }
+
     /// Write one `Call` frame and read until its `ReplyEnd`, returning
     /// the `ReplyEvent` envelopes seen in between and recording the call
     /// into [`calls`](Self::calls). Panics on a `ReplyEnd::Err` or a
@@ -739,6 +751,24 @@ impl FleetHarness {
     where
         K: Kind + Serialize,
     {
+        self.try_call_with_budget(engine, mailbox, request, budget, gate)
+            .unwrap_or_else(|error| panic!("call to {mailbox:?} ended with error: {error:?}"))
+    }
+
+    /// [`call_with_budget`](Self::call_with_budget) that returns a
+    /// `ReplyEnd::Err` rather than panicking on it. A refused call is not
+    /// recorded into [`calls`](Self::calls).
+    fn try_call_with_budget<K>(
+        &mut self,
+        engine: Option<EngineId>,
+        mailbox: &str,
+        request: &K,
+        budget: Duration,
+        gate: &str,
+    ) -> Result<Vec<MailEnvelope>, RpcError>
+    where
+        K: Kind + Serialize,
+    {
         let cid = self.next_cid;
         self.next_cid += 1;
 
@@ -755,7 +785,7 @@ impl FleetHarness {
                 }
                 Ok(WireFrame::ReplyEnd { cid: got_cid, result }) => {
                     assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
-                    result.unwrap_or_else(|e| panic!("call {cid} ended with error: {e:?}"));
+                    result?;
                     self.calls.push(CallRecord {
                         cid,
                         engine,
@@ -763,7 +793,7 @@ impl FleetHarness {
                         request_kind: K::ID,
                         reply_kinds: events.iter().map(|e| e.kind).collect(),
                     });
-                    return events;
+                    return Ok(events);
                 }
                 Ok(other) => panic!("unexpected frame for call {cid}: {other:?}"),
                 // Socket read-timeout: no frame yet. Re-arm until the

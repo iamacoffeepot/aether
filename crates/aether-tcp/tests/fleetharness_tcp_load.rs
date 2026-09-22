@@ -505,8 +505,11 @@ mod tests {
                 (0..connection_count).all(|offset| {
                     let offset = u64::try_from(offset).expect("connection offset fits u64");
                     let path = accepted_path(&format!("conn-{}", first_index + offset));
-                    let replies = harness.send(engine, &path, &CostTail { kind: None });
-                    matches!(replies.as_slice(), [reply] if reply.kind == CostTailResult::ID)
+                    // A session that is not live yet is refused at the
+                    // engine's RPC receipt (ADR-0230); poll again.
+                    harness
+                        .try_send(engine, &path, &CostTail { kind: None })
+                        .is_ok_and(|replies| matches!(replies.as_slice(), [reply] if reply.kind == CostTailResult::ID))
                 })
             }),
             "accepted session paths did not become live before traffic release",

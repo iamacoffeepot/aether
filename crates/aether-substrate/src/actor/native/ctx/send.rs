@@ -2,11 +2,11 @@
 //!
 //! Three surfaces over one buffered push. The untyped `send_envelope_*`
 //! family carries already-encoded `(kind, bytes)` for endpoints that hold no
-//! compile-time types — addressed by position where the recipient arrived on
-//! the wire (the RPC server forwarding a `Call`) and by proof where the
-//! caller holds one (ADR-0230) — and `fanout` multicasts one encoding to a
-//! runtime recipient set of proofs. The per-stage capability traits carry
-//! the typed vocabulary FFI guests share:
+//! compile-time types — addressed by proof where the caller holds one
+//! (ADR-0230), including the wire recipient the RPC server proves at
+//! receipt, and by position for callers not yet migrated — and `fanout`
+//! multicasts one encoding to a runtime recipient set of proofs. The
+//! per-stage capability traits carry the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
 //! what it does fails to unify rather than lying in its manifest.
@@ -77,12 +77,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Issue 750: the typed `send_tracked` path is gated on
     /// `R: HandlesKind<K>`, which requires the kind and receiver to be
     /// known at compile site. Endpoints that route mail with runtime
-    /// ids (the RPC server forwarding `Call.envelope` from the wire is
-    /// the motivating case) have neither — they hold a `MailboxId` +
-    /// `KindId` + opaque payload bytes. This method is the escape
-    /// hatch: skips the type-system check, dispatches the raw bytes
-    /// through the same lineage-aware path the typed helpers go
-    /// through.
+    /// ids have neither — they hold a `MailboxId` + `KindId` + opaque
+    /// payload bytes. This method is the escape hatch: skips the
+    /// type-system check, dispatches the raw bytes through the same
+    /// lineage-aware path the typed helpers go through.
     ///
     /// When `ctx` represents a chassis-root edge (`in_flight_mail_id`
     /// is `NONE`) the returned id is the root of a fresh causal chain;
@@ -125,7 +123,14 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// takes `(KindId, &[u8])` already encoded and dispatches one.
     #[must_use]
     pub fn send_envelope_tracked_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
-        self.send_envelope_tracked(target.id(), kind, bytes)
+        self.binding.push_envelope_buffered(
+            target.id().0,
+            kind.0,
+            bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        )
     }
 
     /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
@@ -146,9 +151,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Pass `ctx.reply_target()` as `reply_to` to forward to whoever
     /// invoked this cap. Single-Call paths (the RPC server's
-    /// `send_envelope_detached` dispatching directly at the receiver)
-    /// never reach this method — the default `reply_to` lands at the
-    /// dispatcher which is also the call-correlation owner.
+    /// [`Self::send_envelope_detached_to`] dispatching directly at the
+    /// receiver) never reach this method — the default `reply_to` lands
+    /// at the dispatcher which is also the call-correlation owner.
     #[must_use]
     pub fn send_envelope_tracked_with_reply_to(
         &self,
@@ -176,18 +181,38 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `SettlementRegistry::subscribe_settlement_mail` fires when the
     /// dispatch's entire descendant subtree drains.
     ///
-    /// Use this when the cap is acting on an external event (wire-
-    /// borne RPC call, file watcher, timer) rather than forwarding a
-    /// mail that was already in flight. The `RpcServer` cap's `Call`
-    /// handler is the motivating case: the inbound that wakes the cap
-    /// is an internal wake mail causally unrelated to the wire-borne
-    /// `Call` — inheriting its chain would attribute the dispatch to
-    /// the wrong root and `subscribe_settlement_mail` would never fire
-    /// (descendants don't settle individually; only the chain root
-    /// does).
+    /// Use this when the cap is acting on an external event (file
+    /// watcher, timer) rather than forwarding a mail that was already in
+    /// flight; [`Self::send_envelope_detached_to`] carries the full
+    /// motivation.
+    ///
+    /// This stays the runtime-*position* door: the recipient came back
+    /// from the registry or a stored table, and nothing has proven it
+    /// (ADR-0230). A caller that already holds a proof takes
+    /// [`Self::send_envelope_detached_to`] instead, and this signature
+    /// narrows when its last positional caller migrates.
     #[must_use]
     pub fn send_envelope_detached(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, None, None)
+    }
+
+    /// [`Self::send_envelope_detached`] for a caller that holds a proof:
+    /// the ADR-0230 form of the fresh-chain untyped dispatch, taking the
+    /// [`AnyActorRef`] rather than the position under it.
+    ///
+    /// Use this when the cap is acting on an external event (wire-borne
+    /// RPC call, file watcher, timer) rather than forwarding a mail that
+    /// was already in flight. Its first consumer is
+    /// `RpcServerState::handle_call`, which proves the wire `Call`'s
+    /// recipient once at receipt and sends through the proof: the inbound
+    /// that wakes the cap is an internal wake mail causally unrelated to
+    /// the wire-borne `Call` — inheriting its chain would attribute the
+    /// dispatch to the wrong root and `subscribe_settlement_mail` would
+    /// never fire (descendants don't settle individually; only the chain
+    /// root does).
+    #[must_use]
+    pub fn send_envelope_detached_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+        self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
     }
 }
 

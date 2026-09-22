@@ -164,8 +164,10 @@ impl MailboxAddress {
 /// from the responder, not an `RpcError`.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RpcError {
-    /// The target mailbox isn't registered in this server's local
-    /// actor system.
+    /// The target mailbox does not prove `Live` in this server's local
+    /// actor system: it was never registered, or it is still starting.
+    /// A dropped target is reported as `Other` carrying the registry's
+    /// text.
     UnknownMailbox { mailbox: MailboxId },
     /// The kind id isn't in this server's kind registry.
     UnknownKind { kind: KindId },
