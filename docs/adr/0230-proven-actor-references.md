@@ -126,7 +126,7 @@ pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of a detached untyped send, be held in a capability's own table and keyed in an ordered set |
+| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send, detached or tracked, be held in a capability's own table and keyed in an ordered set |
 | `Tombstone<R>` | that actor is dead | exchanging a reference on its `MonitorNotice` | key cleanup of held state |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 

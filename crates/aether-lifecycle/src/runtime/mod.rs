@@ -29,6 +29,7 @@ pub use super::subscribers::broadcast_to_subscribers;
 // Handler-argument and reply kinds named by the moved `#[runtime] impl`
 // bodies. Private to this module — the identity in the parent resolves the
 // lifted `HandlesKind<K>` markers through its own `aether_kinds` imports.
+use aether_actor::AnyActorRef;
 use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
@@ -79,8 +80,11 @@ fn stage_payload(stage: KindId, delta_micros: u32) -> Vec<u8> {
 /// file and the parent's handlers can read them.
 pub struct LifecycleCapabilityState {
     pub graph: LifecycleGraphData,
-    /// Subscriber table keyed by stage kind id (ADR-0082 §7).
-    pub subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>>,
+    /// Subscriber table keyed by stage kind id (ADR-0082 §7). The rows are
+    /// proven references (ADR-0230): a subscription is accepted only once
+    /// something has answered that an actor is live at the id, so the
+    /// fan-out never handles a position a caller computed.
+    pub subscribers: BTreeMap<KindId, BTreeSet<AnyActorRef>>,
     /// Kind id of the state the cap will broadcast on the next
     /// [`LifecycleAdvance`]. Starts at
     /// `graph.start()`; mutated after each settled advance to the resolved
@@ -107,30 +111,32 @@ pub struct LifecycleCapabilityState {
     /// `Arc<Mailer>` cached at init for `subscribe_settlement_mail`
     /// calls inside handlers.
     pub mailer: Arc<Mailer>,
-    /// One monitor per subscribing mailbox (ADR-0079 §8 amended),
-    /// registered on its first stage subscription and released when
-    /// its `MonitorNotice` purges the mailbox. The handle's `Drop`
-    /// deregisters, so the map is both the dedup guard and the RAII
-    /// anchor.
-    pub monitors: BTreeMap<DataMailboxId, MonitorHandle>,
+    /// One monitor per subscriber (ADR-0079 §8 amended), registered on its
+    /// first stage subscription and released when its `MonitorNotice`
+    /// purges it. The handle's `Drop` deregisters, so the map is both the
+    /// dedup guard and the RAII anchor. Keyed by the same proven reference
+    /// the stage sets hold (ADR-0230), never by a position.
+    pub monitors: BTreeMap<AnyActorRef, MonitorHandle>,
 }
 
 /// Read-only inspect surface on the runtime state (ADR-0122 split).
 /// Production callers observe lifecycle progress via subscribed stage
 /// broadcasts rather than peeking at these.
 impl LifecycleCapabilityState {
-    /// Monitor `mailbox` on its first stage subscription so the cap
-    /// purges the mailbox's rows itself when the occupant departs —
+    /// Monitor `subscriber` on its first stage subscription so the cap
+    /// purges its rows itself when the occupant departs —
     /// vacate or close, whichever comes first (ADR-0079 §8 amended).
     /// An `Err` (an actor outside the registry, or a spawner-less test
     /// binding) means "not monitorable": the rows then live until
     /// substrate teardown, exactly as they would for a mailbox that
     /// never goes away.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, mailbox: DataMailboxId) {
-        if !self.monitors.contains_key(&mailbox)
-            && let Ok(handle) = ctx.monitor(mailbox)
+    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
+        // `NativeCtx::monitor` still takes a position; #6303 narrows it to a
+        // proof. The handle is keyed on the proof either way.
+        if !self.monitors.contains_key(&subscriber)
+            && let Ok(handle) = ctx.monitor(subscriber.id())
         {
-            self.monitors.insert(mailbox, handle);
+            self.monitors.insert(subscriber, handle);
         }
     }
 
@@ -239,7 +245,7 @@ impl NativeActor for LifecycleCapability {
         let LifecycleParams { graph, initial_subscribers } = params;
         let current_state = graph.start();
         let mailer = ctx.mailer();
-        let mut subscribers: BTreeMap<KindId, BTreeSet<DataMailboxId>> = BTreeMap::new();
+        let mut subscribers: BTreeMap<KindId, BTreeSet<AnyActorRef>> = BTreeMap::new();
         for (stage, mailbox) in initial_subscribers {
             // Reject unknown-stage subscriptions at boot rather than
             // silently dropping mail at runtime — ADR-0082 §7's
@@ -253,7 +259,14 @@ impl NativeActor for LifecycleCapability {
                     .into(),
                 ));
             }
-            subscribers.entry(stage).or_default().insert(mailbox);
+
+            // A params-borne id is a position like any other (ADR-0230):
+            // prove it here, in the loop that already fail-fasts, so the
+            // table holds only references.
+            let subscriber = ctx
+                .resolve_live(mailbox)
+                .map_err(|error| BootError::Other(format!("aether.lifecycle: initial subscriber {error}").into()))?;
+            subscribers.entry(stage).or_default().insert(subscriber);
         }
         Ok(LifecycleCapabilityState {
             graph,
@@ -277,7 +290,10 @@ impl NativeActor for LifecycleCapability {
     ///
     /// # Agent
     /// `LifecycleSubscribe { stage, mailbox }`. Stage must be a kind
-    /// id registered as a state or terminal in the lifecycle graph.
+    /// id registered as a state or terminal in the lifecycle graph, and
+    /// `mailbox` must name an actor that is live right now: an unknown or
+    /// already-dropped id replies `Err` rather than registering a
+    /// subscription whose broadcasts could never land.
     #[handler::single]
     fn on_subscribe(
         state: &mut Self::State,
@@ -285,30 +301,39 @@ impl NativeActor for LifecycleCapability {
         payload: LifecycleSubscribe,
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
-        let mailbox = DataMailboxId(payload.mailbox);
         let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
-        if known {
-            state.subscribers.entry(stage_kind).or_default().insert(mailbox);
-            state.watch(ctx, mailbox);
-            LifecycleSubscribeResult::Ok
-        } else {
-            LifecycleSubscribeResult::Err {
+        if !known {
+            return LifecycleSubscribeResult::Err {
                 stage: payload.stage,
                 error: format!("stage {stage_kind:?} is not declared by this chassis's lifecycle graph"),
-            }
+            };
         }
+
+        // The payload's id is a position a caller computed (ADR-0230), so it
+        // is proven once here, at receipt, and the table keeps the proof.
+        let subscriber = match ctx.resolve_live(DataMailboxId(payload.mailbox)) {
+            Ok(subscriber) => subscriber,
+            Err(error) => {
+                return LifecycleSubscribeResult::Err { stage: payload.stage, error: error.to_string() };
+            }
+        };
+
+        state.subscribers.entry(stage_kind).or_default().insert(subscriber);
+        state.watch(ctx, subscriber);
+        LifecycleSubscribeResult::Ok
     }
 
     /// Subscribe the *sending* actor to a lifecycle stage broadcast
     /// (ADR-0082 §7, ADR-0083). Resolves the subscriber from the
     /// inbound envelope's host-stamped `Source` via
-    /// [`source_mailbox`](NativeCtx::source_mailbox) rather than a
-    /// caller-supplied mailbox, so the subscriber cannot be forged.
+    /// [`sender`](NativeCtx::sender) rather than a
+    /// caller-supplied mailbox, so the subscriber cannot be forged and
+    /// needs no registry read — the host already answered who sent this.
     /// `None` means the sender has no local mailbox (an external
     /// session or another engine) — reply `Err` and subscribe
     /// nothing, which gates the reflexive form to in-process actors
     /// by construction. Reuses [`Self::on_subscribe`]'s insert path
-    /// once the mailbox is resolved.
+    /// once the sender is in hand.
     ///
     /// # Agent
     /// `LifecycleSubscribeSelf { stage }`. Stage must be a kind id
@@ -320,7 +345,7 @@ impl NativeActor for LifecycleCapability {
         payload: LifecycleSubscribeSelf,
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
-        match ctx.source_mailbox() {
+        match ctx.sender() {
             None => LifecycleSubscribeResult::Err {
                 stage: payload.stage,
                 error: "aether.lifecycle.subscribe_self requires a local component sender; \
@@ -328,11 +353,11 @@ impl NativeActor for LifecycleCapability {
                             aether.lifecycle.subscribe with an explicit mailbox"
                     .to_string(),
             },
-            Some(sender) => {
+            Some(subscriber) => {
                 let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
                 if known {
-                    state.subscribers.entry(stage_kind).or_default().insert(DataMailboxId(sender.0));
-                    state.watch(ctx, DataMailboxId(sender.0));
+                    state.subscribers.entry(stage_kind).or_default().insert(subscriber);
+                    state.watch(ctx, subscriber);
                     LifecycleSubscribeResult::Ok
                 } else {
                     LifecycleSubscribeResult::Err {
@@ -350,6 +375,11 @@ impl NativeActor for LifecycleCapability {
     /// Unsubscribe a mailbox from a lifecycle stage broadcast.
     /// Idempotent on "not currently subscribed."
     ///
+    /// Takes a position, not a proof: a removal sends nothing, and a
+    /// subscriber that has already departed must stay removable — demanding
+    /// a proof here would refuse exactly the request this kind is for. The
+    /// position is compared against the references the table holds.
+    ///
     /// # Agent
     /// `LifecycleUnsubscribe { stage, mailbox }`.
     #[handler::single]
@@ -363,7 +393,7 @@ impl NativeActor for LifecycleCapability {
         let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
         if known {
             if let Some(set) = state.subscribers.get_mut(&stage_kind) {
-                set.remove(&mailbox);
+                set.retain(|reference| reference.id() != mailbox);
             }
             LifecycleSubscribeResult::Ok
         } else {
@@ -377,9 +407,13 @@ impl NativeActor for LifecycleCapability {
     /// Unsubscribe the *sending* actor from a lifecycle stage
     /// broadcast (ADR-0082 §7, ADR-0083). Resolves the subscriber
     /// from the inbound envelope's host-stamped `Source` via
-    /// [`source_mailbox`](NativeCtx::source_mailbox), mirroring
+    /// [`sender`](NativeCtx::sender), mirroring
     /// [`Self::on_subscribe_self`]. `None` (no local sender) replies
     /// `Err`. Idempotent on "not currently subscribed."
+    ///
+    /// The exact removal of the four: it holds a reference rather than a
+    /// position, and `AnyActorRef`'s `Eq` is id equality, so the set lookup
+    /// is `O(log n)` instead of the scan the wire-borne forms pay.
     ///
     /// # Agent
     /// `LifecycleUnsubscribeSelf { stage }`.
@@ -390,7 +424,7 @@ impl NativeActor for LifecycleCapability {
         payload: LifecycleUnsubscribeSelf,
     ) -> LifecycleSubscribeResult {
         let stage_kind = KindId(payload.stage);
-        match ctx.source_mailbox() {
+        match ctx.sender() {
             None => LifecycleSubscribeResult::Err {
                 stage: payload.stage,
                 error: "aether.lifecycle.unsubscribe_self requires a local component sender; \
@@ -398,11 +432,11 @@ impl NativeActor for LifecycleCapability {
                             aether.lifecycle.unsubscribe with an explicit mailbox"
                     .to_string(),
             },
-            Some(sender) => {
+            Some(subscriber) => {
                 let known = state.graph.state(stage_kind).is_some() || state.graph.is_terminal(stage_kind);
                 if known {
                     if let Some(set) = state.subscribers.get_mut(&stage_kind) {
-                        set.remove(&DataMailboxId(sender.0));
+                        set.remove(&subscriber);
                     }
                     LifecycleSubscribeResult::Ok
                 } else {
@@ -432,8 +466,9 @@ impl NativeActor for LifecycleCapability {
     /// `LifecycleUnsubscribeAll { mailbox }`. Idempotent.
     #[handler::single]
     fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: LifecycleUnsubscribeAll) {
+        let mailbox = DataMailboxId(payload.mailbox);
         for set in state.subscribers.values_mut() {
-            set.remove(&DataMailboxId(payload.mailbox));
+            set.retain(|reference| reference.id() != mailbox);
         }
     }
 
@@ -445,11 +480,15 @@ impl NativeActor for LifecycleCapability {
     /// fan-out from the component host. Releasing the handle keeps the
     /// monitor map bounded by live subscribers; a later occupant of
     /// the same mailbox re-registers through its own subscribe.
+    ///
+    /// The notice names the departed *position* while both tables hold
+    /// references, so this compares rather than looks up: the actor is gone,
+    /// which is precisely the state no proof of it can describe.
     #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        state.monitors.remove(&notice.target);
+        state.monitors.retain(|reference, _| reference.id() != notice.target);
         for set in state.subscribers.values_mut() {
-            set.remove(&notice.target);
+            set.retain(|reference| reference.id() != notice.target);
         }
     }
 
@@ -634,12 +673,33 @@ mod tests {
         assert!(stage_payload(Render::ID, 83_335).is_empty());
     }
 
+    /// Seed one stage set through the reflexive path — the only door a test
+    /// has now that the table holds proofs and nothing outside
+    /// `aether-substrate` can mint one.
+    #[cfg(test)]
+    fn subscribe_self_from(cap: &mut LifecycleCapabilityState, subscriber: DataMailboxId, stage: KindId) {
+        use aether_substrate::actor::native::binding::NativeBinding;
+        use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
+
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
+        let source = Source::to(SourceAddr::Component(MailboxId(subscriber.0)));
+        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+        LifecycleCapability::on_subscribe_self(cap, &mut ctx, LifecycleSubscribeSelf { stage: stage.0 });
+    }
+
+    #[cfg(test)]
+    fn subscribed(cap: &LifecycleCapabilityState, stage: KindId, subscriber: DataMailboxId) -> bool {
+        cap.subscribers.get(&stage).is_some_and(|set| set.iter().any(|r| r.id() == subscriber))
+    }
+
     #[test]
     fn on_unsubscribe_all_purges_mailbox_from_every_stage() {
         // A dropped trampoline's mailbox must leave every stage's
         // subscriber set in one shot (the drop-cleanup contract,
         // mirroring the window family's `aether.window.unsubscribe_all`),
-        // while co-subscribers on a shared stage survive.
+        // while co-subscribers on a shared stage survive. The bulk purge
+        // now matches a wire position against the references the table
+        // holds, which is the predicate this pins.
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::mail::{MailId, MailboxId, Source};
 
@@ -648,19 +708,71 @@ mod tests {
         let survivor = DataMailboxId(0xBEEF);
         let render = <Render as Kind>::ID;
         let present = <Present as Kind>::ID;
-        cap.subscribers.entry(render).or_default().insert(dropped);
-        cap.subscribers.entry(render).or_default().insert(survivor);
-        cap.subscribers.entry(present).or_default().insert(dropped);
+        subscribe_self_from(&mut cap, dropped, render);
+        subscribe_self_from(&mut cap, survivor, render);
+        subscribe_self_from(&mut cap, dropped, present);
 
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&cap.mailer), MailboxId(0)));
         let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
-        assert!(!cap.subscribers[&render].contains(&dropped), "dropped mailbox must leave the Render stage");
-        assert!(!cap.subscribers[&present].contains(&dropped), "dropped mailbox must leave the Present stage");
+        assert!(!subscribed(&cap, render, dropped), "dropped mailbox must leave the Render stage");
+        assert!(!subscribed(&cap, present, dropped), "dropped mailbox must leave the Present stage");
+        assert!(subscribed(&cap, render, survivor), "co-subscribers on a shared stage must survive the purge");
+    }
+
+    /// An explicit `subscribe` proves its payload-borne mailbox once, at
+    /// receipt (ADR-0230): a live id lands a reference in the stage set,
+    /// while a dropped or never-registered one replies `Err` and leaves the
+    /// table alone rather than registering a subscription whose broadcasts
+    /// could never land. The two refusals stay the registry's own distinct
+    /// renderings, so a caller can tell a component that unloaded from an id
+    /// it guessed.
+    #[test]
+    fn explicit_subscribe_proves_the_mailbox_and_refuses_an_unproven_one() {
+        use aether_substrate::actor::native::binding::NativeBinding;
+        use aether_substrate::mail::registry::noop_handler;
+        use aether_substrate::mail::{MailId, MailboxId, Source};
+        use aether_substrate::testing::{boot_authority, fresh_substrate};
+
+        let (registry, mailer) = fresh_substrate();
+        let authority = boot_authority();
+        let live = registry.register_inbox(&authority, "test.lifecycle.live", noop_handler());
+        let gone = registry.register_inbox(&authority, "test.lifecycle.gone", noop_handler());
+        registry.drop_mailbox(&authority, gone).expect("test setup: the second inbox drops");
+        let never = MailboxId(0xDEAD_BEEF);
+
+        let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
+        let render = <Render as Kind>::ID;
+        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let mut subscribe = |mailbox: MailboxId| {
+            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            LifecycleCapability::on_subscribe(
+                &mut cap,
+                &mut ctx,
+                LifecycleSubscribe { stage: render.0, mailbox: mailbox.0 },
+            )
+        };
+
+        assert!(matches!(subscribe(live), LifecycleSubscribeResult::Ok), "a live mailbox proves and subscribes");
+        let dropped_reply = subscribe(gone);
+        let unknown_reply = subscribe(never);
+
+        assert!(subscribed(&cap, render, DataMailboxId(live.0)), "the proven subscriber holds the live id");
+        assert!(!subscribed(&cap, render, DataMailboxId(gone.0)), "a dropped mailbox is not subscribed");
+        assert!(!subscribed(&cap, render, DataMailboxId(never.0)), "an unregistered mailbox is not subscribed");
+        assert_eq!(cap.subscribers[&render].len(), 1, "only the proven subscriber reached the stage set");
+
+        let LifecycleSubscribeResult::Err { error: dropped_error, .. } = dropped_reply else {
+            panic!("a dropped mailbox replies Err");
+        };
+        let LifecycleSubscribeResult::Err { error: unknown_error, .. } = unknown_reply else {
+            panic!("an unregistered mailbox replies Err");
+        };
+        assert!(dropped_error.contains("already dropped"), "the dropped refusal reads as the registry writes it");
         assert!(
-            cap.subscribers[&render].contains(&survivor),
-            "co-subscribers on a shared stage must survive the purge"
+            unknown_error.contains("unknown mailbox id"),
+            "the unknown refusal stays distinct from the dropped one"
         );
     }
 
@@ -682,7 +794,7 @@ mod tests {
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
 
         assert!(
-            cap.subscribers.get(&render).is_some_and(|s| s.contains(&sender)),
+            subscribed(&cap, render, sender),
             "a Component-source subscribe_self lands that mailbox in the stage set"
         );
     }
@@ -774,9 +886,6 @@ mod tests {
         let mut ctx = NativeCtx::new(&cap_transport, source, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);
 
-        assert!(
-            cap.subscribers.get(&<Tick as Kind>::ID).is_some_and(|s| s.contains(&sender)),
-            "the calling actor lands in the Tick stage set"
-        );
+        assert!(subscribed(&cap, <Tick as Kind>::ID, sender), "the calling actor lands in the Tick stage set");
     }
 }

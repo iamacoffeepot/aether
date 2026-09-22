@@ -8,12 +8,15 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Instanced, Reaches, Singleton};
+use aether_actor::{
+    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, Erased, Instanced, Reaches, Singleton,
+};
 use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::mailbox::NativeActorMailbox;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::ResolveLiveError;
 
 use super::ExportedHandles;
 use super::address::native_sender_methods;
@@ -68,6 +71,28 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn self_id(&self) -> MailboxId {
         self.binding.self_mailbox()
+    }
+
+    /// Prove a position that arrived in boot params (ADR-0230), the init-time
+    /// twin of [`NativeCtx::resolve_live`](super::NativeCtx::resolve_live).
+    ///
+    /// A cap whose `Params` carry ids has the same problem a cap whose kinds
+    /// carry ids has: the id is a position and nothing upstream proved it. Its
+    /// named consumer is `aether-lifecycle`'s `init`, which seeds its
+    /// subscriber table from `LifecycleParams::initial_subscribers` and must
+    /// hold proofs there — an entry that names nothing live fails the boot
+    /// instead of installing a row whose mail can never land.
+    ///
+    /// Init runs while the chassis is still assembling, so an actor spawned
+    /// after this one is legitimately not provable yet: this verb answers for
+    /// the routes published *by now*, which is why its consumer reads params a
+    /// chassis fixed before boot rather than a peer it expects to appear.
+    ///
+    /// Like its handler-ctx twin, this is the only spelling a capability uses —
+    /// never a `ctx.mailer().registry()` chain, which is how a cap ends up
+    /// owning a second answer to the registry's own liveness question.
+    pub fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
+        self.binding.mailer().registry().resolve_live(position)
     }
 
     /// Clone the substrate's mailer. Caps that need to register a

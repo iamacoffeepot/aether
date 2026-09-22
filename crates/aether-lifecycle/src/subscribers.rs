@@ -2,7 +2,8 @@
 //! [`LifecycleMailboxExt`] facade callers reach through
 //! `ctx.actor::<LifecycleCapability>()` (always-on, both transports) and
 //! the native [`broadcast_to_subscribers`] fan-out the receive side calls
-//! once per advance.
+//! once per advance, which pushes each stage payload to the proven
+//! references the cap's subscriber table holds (ADR-0230).
 
 use aether_actor::{MailboxForward, Publishes};
 use aether_data::{Kind, MailboxId};
@@ -14,13 +15,13 @@ use aether_kinds::{
 use super::LifecycleCapability;
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+use aether_actor::AnyActorRef;
+#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_data::KindId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::{Erased, NativeCtx};
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::mail::MailboxId as SubstrateMailboxId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -84,6 +85,12 @@ pub trait LifecycleMailboxExt: MailboxForward<LifecycleCapability> {
     /// Add an *explicit* `mailbox` to the subscriber set for stage `K`.
     /// The rare cross-mailbox form; [`subscribe`](Self::subscribe)
     /// covers the self case. Idempotent.
+    ///
+    /// Takes a [`MailboxId`] rather than a proven reference because the whole
+    /// body is building wire mail: ADR-0230 keeps a position at the wire and
+    /// a proof in memory, so a proof handed in here would be spent one line
+    /// later. The cap proves the id on arrival and replies `Err` if nothing
+    /// live stands under it.
     fn subscribe_for<K: Kind>(&self, mailbox: MailboxId)
     where
         LifecycleCapability: Publishes<K>,
@@ -105,6 +112,12 @@ pub trait LifecycleMailboxExt: MailboxForward<LifecycleCapability> {
     /// Mail `aether.lifecycle.unsubscribe { stage, mailbox }` to the
     /// cap. Remove an *explicit* `mailbox` from the subscriber set for
     /// stage `K`. Idempotent on "not currently subscribed."
+    ///
+    /// A [`MailboxId`] for the same reason as
+    /// [`subscribe_for`](Self::subscribe_for) — it builds wire mail — and for
+    /// one more: the cap matches the position against its held references
+    /// without proving it, so a subscriber that has already departed stays
+    /// removable.
     fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId)
     where
         LifecycleCapability: Publishes<K>,
@@ -116,22 +129,26 @@ pub trait LifecycleMailboxExt: MailboxForward<LifecycleCapability> {
 impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 
 /// Push the current stage payload to each subscriber as an untyped envelope.
-/// Uses the runtime-id `send_envelope_tracked` path because the broadcast
-/// kind is chosen at runtime (the current state's), not a compile-site `K`;
-/// the path preserves the inbound `(parent, root)` lineage so settlement
-/// counts each child against the root (ADR-0080 §6).
+/// Untyped because the broadcast kind is chosen at runtime (the current
+/// state's), not a compile-site `K`; the path preserves the inbound
+/// `(parent, root)` lineage so settlement counts each child against the root
+/// (ADR-0080 §6).
+///
+/// Takes the proven-target `send_envelope_tracked_to` form (ADR-0230): every
+/// row of the table was proven when its subscription was accepted, so the
+/// loop hands the send a reference and never unwraps one back to a position.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub fn broadcast_to_subscribers<M: ReplyMode>(
     ctx: &mut NativeCtx<'_, Erased, M>,
-    subscribers: &BTreeMap<KindId, BTreeSet<MailboxId>>,
+    subscribers: &BTreeMap<KindId, BTreeSet<AnyActorRef>>,
     stage: KindId,
     payload: &[u8],
 ) {
     let Some(set) = subscribers.get(&stage) else {
         return;
     };
-    for mailbox in set {
-        let _ = ctx.send_envelope_tracked(SubstrateMailboxId(mailbox.0), stage, payload);
+    for subscriber in set {
+        let _ = ctx.send_envelope_tracked_to(*subscriber, stage, payload);
     }
 }
 
