@@ -144,6 +144,34 @@ jobs:
         env:
           MINT_SCANNER_PATH: ${{ runner.temp }}/check-reference-mint.py
         run: python3 "${MINT_SCANNER_PATH}" --root .
+      - name: Materialize the trusted raw-mailbox ratchet
+        shell: bash
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RATCHET_SCANNER_PATH: ${{ runner.temp }}/check-raw-mailbox-ratchet.py
+        run: |
+          set -euo pipefail
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          if git cat-file -e "${BASE_SHA}:scripts/check-raw-mailbox-ratchet.py"; then
+            git show "${BASE_SHA}:scripts/check-raw-mailbox-ratchet.py" > "${RATCHET_SCANNER_PATH}"
+            echo "Using raw-mailbox ratchet scanner from event base ${BASE_SHA}"
+          else
+            # Bootstrap only: the base of the PR that introduces this gate has
+            # no trusted scanner blob yet. Once landed, every later PR takes
+            # the base branch above and cannot execute its proposed scanner.
+            git show "${HEAD_SHA}:scripts/check-raw-mailbox-ratchet.py" > "${RATCHET_SCANNER_PATH}"
+            echo "::notice::Event base has no raw-mailbox ratchet scanner; using head ${HEAD_SHA} for bootstrap"
+          fi
+          test -s "${RATCHET_SCANNER_PATH}"
+      - name: Raw-mailbox ratchet
+        env:
+          RATCHET_SCANNER_PATH: ${{ runner.temp }}/check-raw-mailbox-ratchet.py
+        run: >-
+          python3 "${RATCHET_SCANNER_PATH}"
+          --root .
+          --base "${{ github.event.pull_request.base.sha }}"
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's
