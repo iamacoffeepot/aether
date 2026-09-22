@@ -243,7 +243,7 @@ impl NativeActor for ComponentHostCapability {
     /// registers the kinds the wasm declared in its `aether.kinds`
     /// section, picks a final name (caller value > wasm's
     /// `aether.namespace` > `component_N`), spawns a
-    /// [`WasmTrampoline`](crate::trampoline::WasmTrampoline) under
+    /// [`WasmTrampoline`] under
     /// `aether.embedded:NAME`, and replies `LoadResult::Ok { mailbox_id,
     /// name, capabilities }` where `name` is the full trampoline
     /// address — agents send subsequent mail to that name.
