@@ -109,7 +109,7 @@ fn spawn_inline_child_by_tag_spawns_matched_type_and_threads_config() {
         .spawn_inline_child_by_tag(ActorTypeTag::of::<StubChild>(), Subname::Named("tagged"), &config_bytes)
         .expect("a known tag spawns its exported type");
 
-    assert!(registry.take(alias).is_some(), "the tagged child is resident under the resolver's alias");
+    assert!(registry.take(alias.id()).is_some(), "the tagged child is resident under the resolver's alias");
     assert_eq!(
         STUB_INIT_CONFIG.get(),
         Some(0x1234_5678),
@@ -153,7 +153,7 @@ fn spawn_inline_child_by_tag_parents_to_the_spawner_not_the_root() {
         .expect("a known tag spawns its exported type");
 
     assert_eq!(
-        registry.parent_of(alias),
+        registry.parent_of(alias.id()),
         Some(MailboxId(spawner)),
         "the by-tag child's recorded parent is the spawner, not the cluster root",
     );

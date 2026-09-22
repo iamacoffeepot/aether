@@ -26,13 +26,13 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_data::MailboxId;
+use aether_actor::AnyActorRef;
 use aether_math::Vec2;
 
 use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
 
-/// One child's place in a compositing node's layout. `child` is the
-/// inline-child alias the reply is attributed to; `subname` is the child's
+/// One child's place in a compositing node's layout. `child` is the proof of
+/// the inline child the reply is attributed to; `subname` is the child's
 /// inline address segment (recorded so a despawn can name what it removed
 /// without the caller re-supplying it); `origin` is the offset applied to
 /// every draw the child reports; `list` is that child's draws for the current
@@ -41,7 +41,7 @@ use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, Wi
 /// child's ordinary draws in the overlay lane instead of the ordinary one —
 /// see [`Composite::set_slot_overlay`].
 struct Slot {
-    child: MailboxId,
+    child: AnyActorRef,
     subname: String,
     origin: Vec2,
     clip: Option<WidgetClipRect>,
@@ -89,7 +89,7 @@ impl Composite {
     /// membership delta, so a re-register does not re-announce the child.
     pub fn register_slot(
         &mut self,
-        child: MailboxId,
+        child: AnyActorRef,
         origin: Vec2,
         clip: Option<WidgetClipRect>,
         subname: &str,
@@ -110,7 +110,7 @@ impl Composite {
     /// move one retained content root as their offset changes; re-registering
     /// would either be ignored as a duplicate or manufacture false membership
     /// churn.
-    pub fn update_slot_layout(&mut self, child: MailboxId, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
+    pub fn update_slot_layout(&mut self, child: AnyActorRef, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
             return false;
         };
@@ -137,7 +137,7 @@ impl Composite {
     /// There is no layer number and no z-index here: the group is a set of
     /// slots the root already ordered, and the lane is the two-step order the
     /// root already emits in.
-    pub fn set_slot_overlay(&mut self, child: MailboxId, overlay: bool) -> bool {
+    pub fn set_slot_overlay(&mut self, child: AnyActorRef, overlay: bool) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
             return false;
         };
@@ -150,7 +150,7 @@ impl Composite {
     /// toward completion. Records a membership delta naming the dropped slot's
     /// `subname` (self-derived, so the caller need only key by the stable
     /// `child` alias). Returns whether a slot was removed.
-    pub fn forget_slot(&mut self, child: MailboxId) -> bool {
+    pub fn forget_slot(&mut self, child: AnyActorRef) -> bool {
         let Some(index) = self.slots.iter().position(|slot| slot.child == child) else {
             return false;
         };
@@ -215,7 +215,7 @@ impl Composite {
     /// alias. A reply from a `child` with no registered slot is dropped
     /// (it cannot belong to this node's layout); a second reply from the
     /// same child overwrites. Returns whether the reply landed in a slot.
-    pub fn fill(&mut self, child: MailboxId, list: WidgetDrawList) -> bool {
+    pub fn fill(&mut self, child: AnyActorRef, list: WidgetDrawList) -> bool {
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) {
             slot.list = Some(list);
             true
@@ -291,6 +291,7 @@ impl Composite {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::proven;
     use aether_math::Rgba;
 
     /// A flat fill at `x`, its red channel carrying `tag` so a test can
@@ -343,8 +344,8 @@ mod tests {
     #[test]
     fn completion_gates_on_every_registered_slot() {
         let mut composite = Composite::new();
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let a = proven(1);
+        let b = proven(2);
         composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.register_slot(b, Vec2::ZERO, None, "b", "aether.kit.widget");
         composite.begin_frame();
@@ -358,10 +359,10 @@ mod tests {
     #[test]
     fn a_reply_from_an_unregistered_child_is_dropped() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "a", "aether.kit.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.begin_frame();
         assert!(
-            !composite.fill(MailboxId(99), list(vec![quad(0.0, 0.5)])),
+            !composite.fill(proven(99), list(vec![quad(0.0, 0.5)])),
             "a stray reply from a non-slot child does not land",
         );
         assert!(!composite.is_complete(), "and does not close the real slot's counter");
@@ -370,7 +371,7 @@ mod tests {
     #[test]
     fn begin_frame_resets_fills_but_keeps_slots() {
         let mut composite = Composite::new();
-        let a = MailboxId(1);
+        let a = proven(1);
         composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.begin_frame();
         composite.fill(a, list(vec![quad(0.0, 0.1)]));
@@ -382,7 +383,7 @@ mod tests {
     #[test]
     fn updating_slot_layout_moves_and_clips_without_membership_churn() {
         let mut composite = Composite::new();
-        let child = MailboxId(1);
+        let child = proven(1);
         composite.register_slot(child, Vec2::ZERO, None, "content", "aether.kit.widget");
         let initial_membership = composite.take_membership_changes().expect("registration emits membership");
         assert_eq!(initial_membership.added.len(), 1);
@@ -412,8 +413,8 @@ mod tests {
     #[test]
     fn forget_slot_removes_a_child_from_the_count() {
         let mut composite = Composite::new();
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let a = proven(1);
+        let b = proven(2);
         composite.register_slot(a, Vec2::ZERO, None, "a", "aether.kit.widget");
         composite.register_slot(b, Vec2::ZERO, None, "b", "aether.kit.widget");
         composite.begin_frame();
@@ -426,8 +427,8 @@ mod tests {
     #[test]
     fn flatten_lays_chrome_first_then_slots_offset_in_order() {
         let mut composite = Composite::new();
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let a = proven(1);
+        let b = proven(2);
         composite.register_slot(a, Vec2::new(100.0, 0.0), None, "a", "aether.kit.widget");
         composite.register_slot(b, Vec2::new(200.0, 0.0), None, "b", "aether.kit.widget");
         composite.begin_frame();
@@ -461,7 +462,7 @@ mod tests {
     fn nested_flatten_moves_textured_geometry_and_clip_but_not_payload() {
         let mut interior = Composite::new();
         interior.register_slot(
-            MailboxId(11),
+            proven(11),
             Vec2::new(4.0, 3.0),
             Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
             "leaf",
@@ -469,20 +470,20 @@ mod tests {
         );
         interior.begin_frame();
         assert!(interior.fill(
-            MailboxId(11),
+            proven(11),
             list(vec![textured(2.0, 1.0, WidgetClipRect { x: 3.0, y: 2.0, width: 20.0, height: 20.0 },)]),
         ));
 
         let mut root = Composite::new();
         root.register_slot(
-            MailboxId(22),
+            proven(22),
             Vec2::new(10.0, 8.0),
             Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
             "interior",
             "aether.kit.widget",
         );
         root.begin_frame();
-        assert!(root.fill(MailboxId(22), interior.flatten(None)));
+        assert!(root.fill(proven(22), interior.flatten(None)));
 
         assert_eq!(
             root.flatten(None).items,
@@ -507,7 +508,7 @@ mod tests {
     fn nested_flatten_translates_intersects_and_omits_without_reordering() {
         let mut interior = Composite::new();
         interior.register_slot(
-            MailboxId(11),
+            proven(11),
             Vec2::new(4.0, 3.0),
             Some(WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 }),
             "leaf",
@@ -516,7 +517,7 @@ mod tests {
         interior.begin_frame();
         interior.extend_chrome([clipped_quad(0.0, 0.2, WidgetClipRect { x: 0.0, y: 0.0, width: 30.0, height: 20.0 })]);
         assert!(interior.fill(
-            MailboxId(11),
+            proven(11),
             list(vec![
                 clipped_quad(0.0, 0.3, WidgetClipRect { x: 2.0, y: 1.0, width: 20.0, height: 20.0 },),
                 clipped_quad(1.0, 0.4, WidgetClipRect { x: 30.0, y: 30.0, width: 4.0, height: 4.0 },),
@@ -528,7 +529,7 @@ mod tests {
 
         let mut root = Composite::new();
         root.register_slot(
-            MailboxId(22),
+            proven(22),
             Vec2::new(10.0, 8.0),
             Some(WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 }),
             "interior",
@@ -536,7 +537,7 @@ mod tests {
         );
         root.begin_frame();
         root.extend_chrome([quad(0.0, 0.1)]);
-        assert!(root.fill(MailboxId(22), interior_list));
+        assert!(root.fill(proven(22), interior_list));
 
         let flat = root.flatten(None);
         let mut xs = Vec::new();
@@ -578,8 +579,8 @@ mod tests {
         // one lane, plate first, children after, each still cut to the slot the
         // root framed it in.
         let mut root = Composite::new();
-        let plate = MailboxId(1);
-        let outside = MailboxId(2);
+        let plate = proven(1);
+        let outside = proven(2);
         root.register_slot(
             plate,
             Vec2::new(100.0, 0.0),
@@ -589,7 +590,7 @@ mod tests {
         );
         root.register_slot(outside, Vec2::new(200.0, 0.0), None, "under_plate", "aether.kit.widget");
         assert!(root.set_slot_overlay(plate, true));
-        assert!(!root.set_slot_overlay(MailboxId(99), true), "an unregistered child has no lane to set");
+        assert!(!root.set_slot_overlay(proven(99), true), "an unregistered child has no lane to set");
 
         root.begin_frame();
         root.extend_chrome([quad(0.0, 0.1)]);
@@ -638,8 +639,8 @@ mod tests {
         // no registration order could fix it because chrome has no position
         // to move.
         let mut root = Composite::new();
-        let background = MailboxId(1);
-        let on_plate = MailboxId(2);
+        let background = proven(1);
+        let on_plate = proven(2);
         root.register_slot(background, Vec2::ZERO, None, "background", "aether.kit.widget");
         root.register_slot(on_plate, Vec2::ZERO, None, "on_plate", "aether.kit.widget");
         assert!(root.set_slot_overlay(on_plate, true));
@@ -676,8 +677,8 @@ mod tests {
     #[test]
     fn registers_buffer_one_batched_add_per_child_in_order() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget.slider");
-        composite.register_slot(MailboxId(2), Vec2::ZERO, None, "beta", "aether.kit.widget.button");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.kit.widget.slider");
+        composite.register_slot(proven(2), Vec2::ZERO, None, "beta", "aether.kit.widget.button");
         let changed = composite.take_membership_changes().expect("two adds are buffered and drain together");
         assert!(changed.removed.is_empty(), "no removals in an add-only batch");
         assert_eq!(
@@ -693,9 +694,9 @@ mod tests {
     #[test]
     fn forget_buffers_one_remove_naming_the_dropped_subname() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         composite.take_membership_changes().expect("drain the add so the remove stands alone");
-        assert!(composite.forget_slot(MailboxId(1)), "the slot is removed");
+        assert!(composite.forget_slot(proven(1)), "the slot is removed");
         let changed = composite.take_membership_changes().expect("the remove is buffered");
         assert!(changed.added.is_empty(), "no adds in a remove-only batch");
         assert_eq!(
@@ -709,7 +710,7 @@ mod tests {
     fn take_membership_changes_clears_the_buffer_and_is_none_when_quiet() {
         let mut composite = Composite::new();
         assert!(composite.take_membership_changes().is_none(), "nothing has changed yet, so there is no event");
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         assert!(composite.take_membership_changes().is_some(), "the buffered add drains as an event");
         assert!(
             composite.take_membership_changes().is_none(),
@@ -720,9 +721,9 @@ mod tests {
     #[test]
     fn a_dedup_suppressed_reregister_records_no_delta() {
         let mut composite = Composite::new();
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         composite.take_membership_changes().expect("drain the first, genuine add");
-        composite.register_slot(MailboxId(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
+        composite.register_slot(proven(1), Vec2::ZERO, None, "alpha", "aether.kit.widget");
         assert!(
             composite.take_membership_changes().is_none(),
             "a re-register of an existing child is dedup-suppressed and announces nothing",

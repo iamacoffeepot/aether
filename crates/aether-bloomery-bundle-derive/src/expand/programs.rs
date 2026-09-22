@@ -120,7 +120,7 @@ fn expand_invocation(
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
-            parent: ::core::option::Option<#program::__macro_internals::MailboxId>,
+            parent: ::core::option::Option<::aether_actor::AnyActorRef>,
             waiting: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
                 #program::__macro_internals::Pending,
@@ -147,7 +147,7 @@ fn expand_invocation(
                 ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
                 invoke: #program::Invoke,
             ) {
-                self.parent = ctx.source_mailbox();
+                self.parent = ctx.sender();
                 match #program::__macro_internals::start_invocation(&#table, invoke) {
                     #program::__macro_internals::Started::Finished(invoked) => {
                         self.reply_invoked(ctx, &invoked);

@@ -143,10 +143,10 @@ impl Sends<'_> {
         self.route::<K>(mailbox.mailbox(), &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
-    /// Send `payload` to a raw [`MailboxId`], inheriting the handler's causal
-    /// chain. Identical to [`WasmCtx::send_to`].
-    pub fn send_to<K: Kind>(&mut self, id: MailboxId, payload: &K) {
-        self.route::<K>(id.0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
+    /// Send `payload` to a proven [`AnyActorRef`], inheriting the handler's
+    /// causal chain. Identical to [`WasmCtx::send_to`].
+    pub fn send_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+        self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
     /// The routing seed for `scope`, mirroring `WasmCtx::scope_mailbox`.
