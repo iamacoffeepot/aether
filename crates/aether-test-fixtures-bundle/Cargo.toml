@@ -44,6 +44,16 @@ aether-tcp = { path = "../aether-tcp", default-features = false }
 # The `aether.fs` cap (iamacoffeepot/aether#3706) — the fs-demux fixture
 # addresses `FsCapability` + its kinds. Marker face only.
 aether-fs = { path = "../aether-fs", default-features = false }
+# ADR-0141 / ADR-0230: the editor-region probe names `EditorShell` by bare type
+# to announce itself, so it needs the widget crate's actor impls. `library`
+# strips that crate's own `export!` entry surface (one `export!` per wasm
+# module), leaving the impls without a second `receive_p32` / `init` colliding
+# with this bundle's. `aether-kit-widget` takes this bundle back as a
+# *dev*-dependency, and cargo permits that cycle because a dev-dependency edge
+# is not part of the normal build graph; `xtask dist` builds each component
+# package in its own cargo invocation, so the `library` feature enabled here
+# cannot unify into the widget crate's own cdylib build.
+aether-kit-widget = { path = "../aether-kit-widget", features = ["library"] }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-kinds = { path = "../aether-kinds" }
 aether-math = { path = "../aether-math" }

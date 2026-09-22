@@ -1,9 +1,14 @@
 //! Strict acceptance for ADR-0141 editor-wide input routing.
+//!
+//! Assembly is shell-first: the shell is loaded under its default name with an
+//! ordered, targetless region table, and each probe then announces itself under
+//! its region name. Nothing routes until that announcement lands, so every
+//! assertion below also proves the attach handshake by construction.
 
 use std::fs;
 use std::path::Path;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
@@ -18,18 +23,16 @@ use aether_test_fixtures_kinds::{
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
-struct LoadedActor {
-    mailbox_id: MailboxId,
-    address: String,
-}
-
+/// Load one in-bundle actor and return its registered lineage address. `name`
+/// is the load name, or `None` to load under the actor's own namespace — which
+/// is what the shell needs, since a region names it by bare type.
 fn load_actor<K: Kind>(
     harness: &mut SubstrateHarness,
     wasm_path: &Path,
     export: &str,
-    name: &str,
+    name: Option<&str>,
     config: &K,
-) -> LoadedActor {
+) -> String {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -37,7 +40,7 @@ fn load_actor<K: Kind>(
                 "aether.component",
                 &LoadComponent {
                     wasm: fs::read(wasm_path).expect("read wasm component"),
-                    name: Some(name.to_owned()),
+                    name: name.map(str::to_owned),
                     config: config.encode_into_bytes(),
                     export: Some(export.to_owned()),
                 },
@@ -45,33 +48,38 @@ fn load_actor<K: Kind>(
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name: address, .. } => LoadedActor { mailbox_id, address },
-        LoadResult::Err { error } => panic!("load {export} as {name}: {error}"),
+        LoadResult::Ok { name: address, .. } => address,
+        LoadResult::Err { error } => panic!("load {export} as {name:?}: {error}"),
     }
 }
 
-fn region(name: &str, target: MailboxId, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpec {
+fn region(name: &str, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpec {
     RegionSpec {
         name: name.to_owned(),
         rect: EditorRegionRect { x_pixels, y_pixels: 0.0, width_pixels: 100.0, height_pixels: 100.0 },
-        target,
         keyboard_focus_eligible: true,
         input_lanes,
         activation_chord: None,
     }
 }
 
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> LoadedActor {
-    load_actor(harness, wasm_path, "test.editor_region_probe", name, &EditorRegionProbeConfig { name: name.to_owned() })
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> String {
+    load_actor(
+        harness,
+        wasm_path,
+        "test.editor_region_probe",
+        Some(name),
+        &EditorRegionProbeConfig { name: name.to_owned() },
+    )
 }
 
 fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<RegionSpec>) {
-    let _shell = load_actor(harness, wasm_path, "aether.kit.widget.editor", "editor", &EditorConfig { regions });
+    let _shell = load_actor(harness, wasm_path, "aether.kit.widget.editor", None, &EditorConfig { regions });
 }
 
-fn drain(harness: &mut SubstrateHarness, actor: &LoadedActor, label: &'static str) -> DrainEditorInputsResult {
+fn drain(harness: &mut SubstrateHarness, address: &str, label: &'static str) -> DrainEditorInputsResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply(actor.address.as_str(), &DrainEditorInputs))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(address, &DrainEditorInputs))])
         .expect("drain sequence")
         .reply::<DrainEditorInputsResult>(label)
         .expect("decode DrainEditorInputsResult")
@@ -89,18 +97,16 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
-    let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
-    let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
     let mut b_lanes = RegionInputLanes::ALL;
     b_lanes.wheel = false;
     load_shell(
         &mut harness,
         &kit_wasm,
-        vec![
-            region("region-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL),
-            region("region-b", region_b.mailbox_id, 100.0, b_lanes),
-        ],
+        vec![region("region-a", 0.0, RegionInputLanes::ALL), region("region-b", 100.0, b_lanes)],
     );
+
+    let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
+    let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
 
     harness
         .execute(vec![
@@ -159,13 +165,14 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
-    let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
-    let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
-    let a = region("focus-a", region_a.mailbox_id, 0.0, RegionInputLanes::ALL);
-    let mut b = region("focus-b", region_b.mailbox_id, 100.0, RegionInputLanes::ALL);
+    let a = region("focus-a", 0.0, RegionInputLanes::ALL);
+    let mut b = region("focus-b", 100.0, RegionInputLanes::ALL);
     b.activation_chord =
         Some(EditorKeyChord { key_code: KEY_BACKQUOTE, shift: false, ctrl: false, alt: false, meta: false });
     load_shell(&mut harness, &kit_wasm, vec![a, b]);
+
+    let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
+    let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
 
     harness
         .execute(vec![

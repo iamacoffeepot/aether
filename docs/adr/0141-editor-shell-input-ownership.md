@@ -47,15 +47,21 @@ mechanism.
    (default `true`, today's standalone behavior); a shell spawns its panel
    regions with `owns_input = false` and forwards their input itself.
 
-2. **Regions are declared, not inferred.** The shell's config lists regions,
-   each a hit rect plus the `MailboxId` of the region's input target (a panel
-   root, the viewport's picking actor, or the console) and a keyboard-focus
-   eligibility flag. A new plain-state `Routing` struct — the editor-level
-   analogue of `Focus` — holds the region entries, the focused region, and the
-   region-level press owner (drag capture). It does no mail and holds no
-   capability handle; the shell drives it, mirroring how `Focus` and
-   `Composite` are the bookkeeping halves of ADR-0117 while the actor owns the
-   sends.
+2. **Regions are declared, not inferred — and address themselves.** The
+   shell's config lists regions, each a hit rect, a name, a keyboard-focus
+   eligibility flag, its accepted input lanes, and an optional activation
+   chord. It carries no address: a region that has given input ownership away
+   mails `RegionAttach { region }` to the shell as it wires, and the shell
+   stores that envelope's sender as the region's target (ADR-0230 — an id
+   decoded from config is a position anyone can spell, while the sender is a
+   reference the host stamped). A new plain-state `Routing` struct — the
+   editor-level analogue of `Focus` — holds the region entries, the focused
+   region, and the region-level press owner (drag capture). Its targets are
+   those references, not positions: an entry's target is empty until its region
+   announces, and an entry with no target routes nothing. `Routing` does no
+   mail and holds no capability handle; the shell drives it, mirroring how
+   `Focus` and `Composite` are the bookkeeping halves of ADR-0117 while the
+   actor owns the sends.
 
 3. **Routing is two-level and deterministic.** The shell arbitrates *between*
    regions; each region root still owns focus/capture *within* itself.
@@ -85,11 +91,16 @@ mechanism.
   a press/release split across a boundary, and single-region keyboard focus all
   have one arbiter, exercisable under TestBench without a live session.
 - Input ownership crosses cluster/component roots for the first time: the shell
-  forwards raw input kinds to peer mailboxes addressed by `MailboxId`, and
-  region roots relinquish self-subscription under a shell. This is the boundary
-  ADR-0117 did not cross and #2919 deferred here.
-- `PanelConfig` gains `owns_input`; standalone panels are unchanged by the
-  default, and existing loaders need no edit.
+  forwards raw input kinds to peer mailboxes each region proved by announcing
+  itself, and region roots relinquish self-subscription under a shell. This is
+  the boundary ADR-0117 did not cross and #2919 deferred here.
+- `PanelConfig` gains `owns_input` and `editor_region`; standalone panels are
+  unchanged by the defaults, and existing loaders need no edit. A panel that
+  owns no input and names no region receives nothing, and says so in a warning.
+- Assembly is shell-first and the shell is a singleton loaded under its default
+  name, because a region has to be able to name it by bare type before it can
+  announce. A region that announces before the shell exists announces into
+  nothing; boot order carries this, not parking (ADR-0230).
 - The shell is a foundation for the terrain workbench (#2932) and the terrain
   editor/selection/preview surfaces (#2929–#2931), which compose regions the
   shell arbitrates.
@@ -118,12 +129,23 @@ mechanism.
 
 Issue #2918 realizes the decision in `aether-kit` with `EditorShell` at export
 namespace `aether.kit.widget.editor`. Its `EditorConfig` contains ordered
-`RegionSpec` records. Each spec names an `EditorRegionRect`, a target
-`MailboxId`, whether it participates in editor keyboard focus, a
-`RegionInputLanes` record, and an optional exact `EditorKeyChord`. Invalid or
-non-positive rectangles are ignored. Hit testing is ordered and topmost-first;
-when that hit region rejects a lane, routing stops rather than falling through
-to a covered region.
+`RegionSpec` records. Each spec names an `EditorRegionRect`, the region's name,
+whether it participates in editor keyboard focus, a `RegionInputLanes` record,
+and an optional exact `EditorKeyChord`. Invalid or non-positive rectangles are
+ignored. Hit testing is ordered and topmost-first; when that hit region rejects
+a lane — or has not announced itself yet — routing stops rather than falling
+through to a covered region.
+
+Issue #6306 removed the spec's target field. `RegionAttach { region }`
+(`aether.kit.widget.editor.region_attach`) is how a region supplies its
+address: the shell matches `region` against its declared table and hands the
+envelope sender straight to `Routing`, which stores it. Every routed target —
+the hit region, the press owner, the focus edge, the exited region — is that
+`AnyActorRef` rather than a position, so the shell has nothing to resolve and
+cannot address a region that never announced. Reference equality is id
+equality, so press ownership and the focus cycle compare what they always
+compared. An unknown region name and a second announcement for a name already
+attached are warned and ignored rather than re-pointing a live route.
 
 The plain `widget::routing::Routing` state records focus, cached `Modifiers`,
 and a named `RegionPressOwner { target, button }`. The first accepted press
@@ -134,6 +156,12 @@ Ctrl+Tab is reserved for forward region cycling, Ctrl+Shift+Tab cycles
 backward, and the matching Tab release is consumed; plain Tab press/release is
 forwarded to the focused region for its internal focus ring.
 
+`EditorShell` is a keyless `Embedded` singleton, loaded under its default name.
+That is not a configuration choice: it subscribes *every* window's raw input
+with `WindowSelector::All`, so a second shell in one engine is a double-delivery
+bug, and a region can only name it by bare type when it occupies its own
+namespace. It therefore cannot be composed beneath a wasm parent.
+
 `EditorShell` subscribes only the nine interactive raw kinds: pointer press,
 pointer release, pointer motion, wheel, key press, key release, committed text,
 IME preedit, and modifiers. It has no lifecycle, render, or `WindowSize`
@@ -141,10 +169,13 @@ subscription. Focus transitions prime a target that accepts the modifier lane
 with the shell's cached named `Modifiers` record before forwarding the event
 that caused focus.
 
-`PanelConfig`, `ConsoleConfig`, and `MoverConfig` expose a default-compatible
-`owns_input: true`. Setting it to `false` gates only their interactive input
-subscriptions. The console and mover retain their direct `WindowSize`
-subscriptions, and every peer retains its existing lifecycle and render roles.
-Editor assembly therefore loads peer roots first, records their returned
-mailbox ids, disables their interactive ownership, and then loads one shell
-whose region config addresses those peers.
+`PanelConfig` and `MoverConfig` expose a default-compatible `owns_input: true`.
+Setting it to `false` gates only their interactive input subscriptions and
+turns on the region announcement instead; `PanelConfig.editor_region` names
+which declared region the panel announces itself as. The mover retains its
+direct `WindowSize` subscription, and every peer retains its existing
+lifecycle and render roles. Editor assembly is therefore shell-first: load one
+`EditorShell` under its default name with the ordered, targetless
+`EditorConfig`, then load each region root with its interactive ownership
+disabled and its region name set. Each announces itself as it wires, and no
+input reaches a region that has not.

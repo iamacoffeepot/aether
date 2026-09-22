@@ -46,15 +46,17 @@ mod tests {
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
 
-        // The cluster (parent + two inline children) and a separate
-        // cross-cluster observer component.
-        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
+        // A separate cross-cluster observer component and the cluster (parent
+        // plus two inline children). The observer loads first and under its
+        // own namespace: the parent declares it as a dependency, so its route
+        // has to be `Live` before the parent's load is accepted.
         let observer = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.source_observer");
+        let parent_addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.matrix.parent").addr;
 
         // Drive the sweep: the parent fans out every in-cluster direction
         // in place, plus a cross-cluster send to the observer during the
         // drain. The whole cascade settles before this `send` returns.
-        let run_replies = harness.send(engine, &parent_addr, &RunMatrix { observer_mailbox: observer.mailbox_id.0 });
+        let run_replies = harness.send(engine, &parent_addr, &RunMatrix);
         assert!(
             run_replies.is_empty(),
             "RunMatrix is fire-and-settle (no reply), got {} reply events",

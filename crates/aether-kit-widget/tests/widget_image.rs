@@ -100,6 +100,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
             config: config.encode_into_bytes(),
         }],
         owns_input: true,
+        editor_region: String::new(),
     };
     let loaded = harness
         .execute(vec![(

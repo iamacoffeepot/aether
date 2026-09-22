@@ -1,10 +1,17 @@
 //! Typed sink used to assert editor-shell routing without giving peer regions
 //! their own input subscriptions.
+//!
+//! The probe announces itself to the shell in `wire` under its configured
+//! region name, so the shell routes to the sender of that announcement rather
+//! than to an id the scenario computed (ADR-0230). That makes assembly
+//! shell-first: a probe loaded before the shell exists announces into nothing
+//! and is never routed to.
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
+use aether_kit_widget::{EditorShell, RegionAttach};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
@@ -22,6 +29,12 @@ impl WasmActor for EditorRegionProbe {
 
     fn init(config: EditorRegionProbeConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self { region_name: config.name, inputs: Vec::new() })
+    }
+
+    /// Tell the shell which declared region this probe stands behind. The
+    /// shell keeps this send's sender as the region's address.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        ctx.actor::<EditorShell>().send(&RegionAttach { region: self.region_name.clone() });
     }
 
     #[handler::single]

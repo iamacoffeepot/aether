@@ -2523,12 +2523,17 @@ pub struct EditorKeyChord {
     pub meta: bool,
 }
 
-/// One independently-rooted editor surface registered with the shell.
+/// One independently-rooted editor surface declared to the shell: where it
+/// sits, which lanes it takes, and whether it joins the editor focus cycle.
+///
+/// The spec carries no address. A region that does not own its own input
+/// announces itself with a [`RegionAttach`] naming this `name`, and the shell
+/// keeps that envelope's sender as the proof it routes to (ADR-0230). Until
+/// that announcement lands the entry routes nothing.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct RegionSpec {
     pub name: String,
     pub rect: EditorRegionRect,
-    pub target: MailboxId,
     pub keyboard_focus_eligible: bool,
     pub input_lanes: RegionInputLanes,
     pub activation_chord: Option<EditorKeyChord>,
@@ -2539,6 +2544,18 @@ pub struct RegionSpec {
 #[aether_data::kind(name = "aether.kit.widget.editor.config", default)]
 pub struct EditorConfig {
     pub regions: Vec<RegionSpec>,
+}
+
+/// `aether.kit.widget.editor.region_attach` — a region telling the shell it
+/// is the actor behind the declared region called `region`.
+///
+/// The payload names only the region; the address is the envelope's sender,
+/// which the shell reads as an `AnyActorRef` and stores. That is why the kind
+/// carries no mailbox field: an id in a decoded kind is a position anyone can
+/// spell, while the sender is a position the host stamped (ADR-0230).
+#[aether_data::kind(name = "aether.kit.widget.editor.region_attach")]
+pub struct RegionAttach {
+    pub region: String,
 }
 
 const fn owns_input_by_default() -> bool {
@@ -2567,9 +2584,17 @@ pub struct PanelConfig {
     pub theme: Theme,
     pub children: Vec<WidgetChildSpec>,
     /// Whether this standalone panel subscribes the raw interactive streams.
-    /// Set false when an [`EditorShell`](crate::EditorShell) owns them.
+    /// Set false when an [`EditorShell`](crate::EditorShell) owns them — and
+    /// then name the shell's [`RegionSpec::name`] in [`Self::editor_region`],
+    /// because that is what the panel announces itself as.
     #[serde(default = "owns_input_by_default")]
     pub owns_input: bool,
+    /// The shell-declared region this panel is the actor behind, announced as
+    /// a [`RegionAttach`] once the panel wires. Empty (the default) means the
+    /// panel is self-owned and announces nothing; leaving it empty under
+    /// `owns_input: false` is a panel that receives no input at all.
+    #[serde(default)]
+    pub editor_region: String,
 }
 
 impl Default for PanelConfig {
@@ -2583,6 +2608,7 @@ impl Default for PanelConfig {
             theme: Theme::default(),
             children: Vec::new(),
             owns_input: true,
+            editor_region: String::new(),
         }
     }
 }

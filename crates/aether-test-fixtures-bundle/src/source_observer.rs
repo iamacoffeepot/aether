@@ -1,35 +1,29 @@
-//! Issue 1958: `source_mailbox()` end-to-end fixture.
+//! Issue 1958: `source_mailbox()` end-to-end fixture — the reading half.
 //!
-//! A single-actor module with two handlers:
-//!
-//! - `on_send_source_query` (auto): receives `SendSourceQuery { to }` and
-//!   forwards a `SourceQuery` to `MailboxId(to)`, making this actor the
-//!   component origin so the reader's `ctx.source_mailbox()` sees this
-//!   actor's `MailboxId`.
-//!
-//! - `on_source_query` (manual): handles `SourceQuery`, reads
-//!   `ctx.source_mailbox()`, logs it, broadcasts `SourceReport { mailbox_id }`
-//!   to the substrate-harness observer mailbox, and replies it directly. `mailbox_id`
-//!   is `0` when `source_mailbox()` returns `None` (Session / no-sender origin).
+//! `on_source_query` (manual) handles `SourceQuery`, reads
+//! `ctx.source_mailbox()`, logs it, broadcasts `SourceReport { mailbox_id }`
+//! to the substrate-harness observer mailbox, and replies it directly.
+//! `mailbox_id` is `0` when `source_mailbox()` returns `None` (Session /
+//! no-sender origin).
 //!
 //! Integration test pattern:
 //! - Session case: the harness sends `SourceQuery` via `send_and_await_reply`; the
 //!   reply is `SourceReport { mailbox_id: 0 }` (Session source → None).
-//! - Component case: load two instances ("sender" + "reader"). Harness sends
-//!   `SendSourceQuery { to: reader_mailbox.0 }` (via `send_and_settle`) to sender.
-//!   Sender forwards `SourceQuery` to reader (component-origin mail). Reader
-//!   reads `source_mailbox()` → `Some(sender_mailbox)` → logs
-//!   `"source_mailbox={sender_mailbox.0}"`. Test uses `log_tail` on the reader's
-//!   address to verify the logged value equals `sender_mailbox.0`.
+//! - Component case: load this observer under its **default** name, then a
+//!   [`SourceForwarder`](super::source_forwarder::SourceForwarder), which
+//!   declares this actor as a dependency. The harness sends the fieldless
+//!   `SendSourceQuery` (via `send_and_settle`) to the forwarder; the forwarder
+//!   sends `SourceQuery` through its minted reference (component-origin mail);
+//!   this actor reads `source_mailbox()` → `Some(forwarder_mailbox)` → logs
+//!   `"source_mailbox={forwarder_mailbox.0}"`. The test uses `log_tail` on this
+//!   actor's address to verify the logged value equals the forwarder's id.
 
 // `#[handler::manual]` and `#[handler]` methods take `&mut self` to match
 // the dispatch ABI even when the actor carries no state.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{
-    ActorInitError, Erased, MailSender, MailboxId, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
-use aether_test_fixtures_kinds::{SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SendSourceQuery, SourceQuery, SourceReport};
+use aether_actor::{ActorInitError, Erased, MailSender, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_test_fixtures_kinds::{SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME, SourceQuery, SourceReport};
 
 pub struct SourceObserver;
 
@@ -39,17 +33,6 @@ impl WasmActor for SourceObserver {
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(SourceObserver)
-    }
-
-    /// Forward `SourceQuery` to the `MailboxId` named in `msg.to`, making
-    /// *this* actor the component origin so the reader can recover our id
-    /// via `ctx.source_mailbox()`. The target is a runtime-supplied `u64`
-    /// (not a compile-time type), so we address it by raw id via the
-    /// ctx-mediated `ctx.send_to`, which threads this actor's own id as the
-    /// send's `from` (issue 1987).
-    #[handler::single]
-    fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_>, msg: SendSourceQuery) {
-        ctx.send_to(MailboxId(msg.to), &SourceQuery);
     }
 
     /// Read `source_mailbox()` from the inbound `SourceQuery`, log the value

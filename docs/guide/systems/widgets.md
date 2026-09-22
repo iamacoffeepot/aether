@@ -1921,13 +1921,19 @@ the sole subscriber for interactive input across its configured regions; each
 panel still owns widget focus and capture inside its own cluster, while the
 shell owns region focus and capture between clusters.
 
-Assemble an editor peer-first. Load each region actor, retain the
-returned `MailboxId`, and set its config's `owns_input` to `false`. Then load
-one `EditorShell` with an ordered `EditorConfig { regions }`. Each `RegionSpec`
-contains a named pixel rectangle, target mailbox, keyboard eligibility,
-`RegionInputLanes`, and optional exact `EditorKeyChord`. Later entries are
-topmost. A topmost region that rejects a lane blocks that event; routing does
-not fall through to a covered region.
+Assemble an editor shell-first. Load one `EditorShell` under its **default**
+name — it is a singleton, and a region has to be able to name it by bare type —
+with an ordered `EditorConfig { regions }`. Each `RegionSpec` contains a name, a
+pixel rectangle, keyboard eligibility, `RegionInputLanes`, and an optional exact
+`EditorKeyChord`; it carries no address. Then load each region actor with its
+config's `owns_input` set to `false` and its `editor_region` set to the matching
+`RegionSpec.name`. As it wires, the region mails `RegionAttach { region }` to
+the shell, and the shell keeps that mail's sender as the address it forwards to
+— so nothing the shell sends to is a position anyone computed. Input to a region
+that has not announced is dropped, which is also what a region loaded before the
+shell gets: its announcement had nowhere to land. Later entries are topmost. A
+topmost region that rejects a lane blocks that event; routing does not fall
+through to a covered region.
 
 The first accepted pointer press owns pointer motion and releases across region
 boundaries until the matching button is released. Wheel uses the position in
@@ -1950,11 +1956,15 @@ own widget traversal remains intact.
 `owns_input` defaults to `true`, preserving standalone behavior. It gates only
 interactive subscriptions: each region actor's lifecycle and render roles are
 unchanged, and those that need it continue subscribing to `WindowSize` directly.
-The shell itself owns no lifecycle, render, or window-size work.
+`editor_region` defaults to empty, which under `owns_input: false` is a panel
+that announces nothing and therefore receives nothing — the panel warns when it
+finds itself in that state. The shell itself owns no lifecycle, render, or
+window-size work.
 
-The assembly this model is built for is peer-first: a tool panel, a
-camera-owning viewport, a second non-input-owning panel, and one
-`EditorShell` routing their non-overlapping regions.
+The assembly this model is built for is shell-first: one `EditorShell` routing
+non-overlapping regions, then a tool panel, a camera-owning viewport, and a
+second non-input-owning panel, each announcing itself as the region it was
+configured for.
 
 ## Layout
 
@@ -2083,7 +2093,8 @@ config kind and `describe_kinds` for its schema, and set `children` to `[]` to
 request the built-in stack above. `children: []` selects that fallback inside
 an otherwise complete `PanelConfig`; the MCP schema encoder does not fill the
 other fields from Rust's `Default`, so provide `x`, `y`, `width`,
-`font_namespace`, `font_path`, `owns_input`, and the complete `theme` object.
+`font_namespace`, `font_path`, `owns_input`, `editor_region`, and the complete
+`theme` object.
 
 That built-in stack is limited to `label`, `slider`, `radio`, `text_field`, and
 `button`; it does not demonstrate the other stock kinds, including `Toggle`,

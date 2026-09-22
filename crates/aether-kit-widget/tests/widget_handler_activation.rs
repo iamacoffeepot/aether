@@ -148,6 +148,7 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
                         theme: Theme::DEFAULT,
                         children,
                         owns_input: true,
+                        editor_region: String::new(),
                     }
                     .encode_into_bytes(),
                     export: Some("aether.kit.widget.panel".to_owned()),

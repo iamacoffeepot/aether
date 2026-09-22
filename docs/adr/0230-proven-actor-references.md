@@ -154,6 +154,7 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |
 | A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
+| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
 
 What arrived stays a position. The payload-borne door changes nothing about
 the wire: `SubscribeWindow.mailbox` is still a `MailboxId` and still decodes
