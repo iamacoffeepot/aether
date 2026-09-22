@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::ReplyMode;
+use aether_actor::{AnyActorRef, ReplyMode};
 use aether_data::MailboxId;
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
@@ -61,23 +61,30 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// vacated actor; either way the notice means state keyed by
     /// `target` is stale.
     ///
-    /// Validation: `target` must currently be `Live` in the
-    /// [`ActorRegistry`](crate::ActorRegistry), **or** be a live
-    /// inline-child alias in the routing [`Registry`](crate::Registry)
-    /// (ADR-0114 §2). An alias is a first-class address served by its target
-    /// parent's slot, so it has no actor entry of its own; refusing it would
-    /// make every row a cap keys on an inline child's stamped identity
-    /// (ADR-0114 §4) unreclaimable. Tombstoned (closed) and unknown ids
-    /// surface as [`MonitorError`]. Singletons today don't sit
-    /// in the actor registry as `Live` entries (their entries live in
-    /// the routing [`Registry`](crate::Registry) only); a future lift inserts
-    /// them so monitoring a singleton works the same way. Until then,
-    /// monitor only addresses instanced actors. A transport with no
-    /// spawner wired ([`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test)) has no monitor
-    /// index at all and surfaces as [`MonitorError::Unsupported`], so
-    /// handlers that monitor their registrants stay drivable under
-    /// test bindings.
-    pub fn monitor(&self, target: MailboxId) -> Result<MonitorHandle, MonitorError> {
+    /// Validation: `target` is the ADR-0230 proof that an actor reached
+    /// `Live` in the routing [`Registry`](crate::Registry). The runtime check
+    /// still runs, and still fails, because the proof and the check read
+    /// different tables: the proof reads the published routes, while the
+    /// monitor index registers against the actor-slot map of the
+    /// [`ActorRegistry`](crate::ActorRegistry).
+    ///
+    /// - [`MonitorError::TargetNotFound`] for a proven target with no `Live`
+    ///   actor slot: a chassis singleton not yet lifted into the slot map, and
+    ///   an inline-child alias (ADR-0114 §2), which is served by its target
+    ///   parent's slot and so has none of its own. The alias case is why the
+    ///   routing-registry fallback below stays — refusing an alias would make
+    ///   every row a cap keys on an inline child's stamped identity
+    ///   (ADR-0114 §4) unreclaimable.
+    /// - [`MonitorError::TargetTombstoned`] for a proven target that has since
+    ///   closed: a reference claims the actor reached `Live`, never that it is
+    ///   `Live` now (ADR-0230 §1).
+    /// - [`MonitorError::Unsupported`] for a caller whose transport has no
+    ///   spawner wired ([`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test)),
+    ///   so there is no monitor index at all — a property of the caller's
+    ///   binding, not of the target. Handlers that monitor their registrants
+    ///   treat it as "not monitorable" and stay drivable under test bindings.
+    pub fn monitor(&self, target: AnyActorRef) -> Result<MonitorHandle, MonitorError> {
+        let target = target.id();
         let spawner = self.binding.spawner().ok_or(MonitorError::Unsupported)?;
         let registry = Arc::clone(spawner.actor_registry());
         let watcher = self.binding.self_mailbox();

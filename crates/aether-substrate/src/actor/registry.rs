@@ -117,6 +117,8 @@ pub struct MonitorEntry {
 /// Tombstoned targets (retired-and-closed full names) can't be monitored
 /// — the mail wouldn't fire anyway, since the close fan-out already
 /// ran when the slot flipped `Live` → `Dead`.
+/// Every variant stays reachable for a proven (ADR-0230) target: the proof
+/// reads the routing registry, this check reads the actor-slot map.
 #[derive(Debug, PartialEq, Eq)]
 pub enum MonitorError {
     /// No `Live` entry at the target id. Either the actor never existed

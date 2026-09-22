@@ -87,14 +87,19 @@ impl SyntheticWindowCapabilityState {
     /// reservation's reply is sent exactly once.
     fn publish_applied_window(&mut self, ctx: &mut NativeCtx<'_>, child: MailboxId, pending: PendingWindowCreate) {
         let PendingWindowCreate { window, mut reply } = pending;
-        let monitor = match ctx.monitor(child) {
+        // #6291 replaces this lookup with the reference `SpawnOutcome` will
+        // carry; until then the applied child's position is proven here.
+        let monitored = ctx
+            .resolve_live(child)
+            .map_err(|error| format!("spawned window child is not live: {error}"))
+            .and_then(|reference| {
+                ctx.monitor(reference).map_err(|error| format!("failed to monitor window child: {error:?}"))
+            });
+        let monitor = match monitored {
             Ok(monitor) => monitor,
             Err(error) => {
                 ctx.actor_at::<SyntheticWindowInstance>(child).send(&RetireWindow);
-                answer(
-                    &mut reply,
-                    &CreateWindowResult::Err { error: format!("failed to monitor window child: {error:?}") },
-                );
+                answer(&mut reply, &CreateWindowResult::Err { error });
                 return;
             }
         };

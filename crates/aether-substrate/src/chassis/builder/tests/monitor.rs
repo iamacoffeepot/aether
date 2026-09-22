@@ -80,7 +80,9 @@ fn ctx_monitor_fires_notice_at_target_close() {
         ) -> Option<()> {
             if kind.0 == WatchOrder::ID.0 {
                 let order = WatchOrder::decode_from_bytes(payload)?;
-                let target = MailboxId(order.target_id);
+                let Ok(target) = ctx.resolve_live(MailboxId(order.target_id)) else {
+                    panic!("target must be Live at order time");
+                };
                 let h = ctx.monitor(target).expect("target must be Live at order time");
                 *state.handle.lock().unwrap() = Some(h);
                 return Some(());
@@ -260,7 +262,9 @@ fn watcher_close_prunes_targets_forward_index() {
         ) -> Option<()> {
             if kind.0 == WatchOrder::ID.0 {
                 let order = WatchOrder::decode_from_bytes(payload)?;
-                let target = MailboxId(order.target_id);
+                let Ok(target) = ctx.resolve_live(MailboxId(order.target_id)) else {
+                    panic!("target Live");
+                };
                 let h = ctx.monitor(target).expect("target Live");
                 *state.handle.lock().unwrap() = Some(h);
                 return Some(());
