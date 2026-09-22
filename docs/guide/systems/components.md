@@ -321,7 +321,7 @@ impl WasmActor for MeshViewer {
 Each entry names a keyless actor — a root singleton (`One`, like a chassis
 capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
 (`Instanced`) entry is a compile error: which instance is meant is run-time
-data, and that case stays with `ctx.resolve`. The declaration travels in the
+data, and that case stays with `ctx.resolve_actor::<R>(key)`. The declaration travels in the
 wasm inputs section, so the host reads it without running the guest, and the
 macro also emits `impl DependsOn<R>` for each entry.
 

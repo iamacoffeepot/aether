@@ -101,7 +101,7 @@ class ScannerTests(unittest.TestCase):
             "crates/aether-substrate/src/sneaky.rs",
             "#[allow(clippy::disallowed_methods)]\n"
             "fn sneak() {\n"
-            "    let reference = __mint_recipient(id); // aether-suppression-request: testing the gate\n"
+            "    let reference = __mint_any_actor_ref(id); // aether-suppression-request: testing the gate\n"
             "}\n",
         )
         self.repo.commit("sneaky mint with escapes")

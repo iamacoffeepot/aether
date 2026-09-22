@@ -111,7 +111,6 @@ nothing, and the receiver proves it again on its own side.
 pub struct Namespace(&'static str);
 pub enum Address<R> { Scoped { key }, Beneath { parent, key }, Exact { id } }
 pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
-pub struct Recipient<K: Kind> { id: MailboxId, _kind: PhantomData<fn(K)> }
 pub struct AnyActorRef { id: MailboxId }
 pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 ```
@@ -122,8 +121,7 @@ pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `Recipient<K>` | an actor that handles `K` reached `Live` at this id | `ctx.me().recipient::<K>()`, bounded on `HandlesKind<K>`; host-checked narrowing of an `AnyActorRef` | send `K`, monitor, be held in actor memory, yield its `Address` |
-| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor, narrow |
+| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor |
 | `Tombstone<R>` | that actor is dead | exchanging a reference on its `MonitorNotice` | key cleanup of held state |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 
@@ -136,12 +134,7 @@ exists is decided by `R`'s placement facts (`Root`, `ChildOf<P>`,
 component's key is its load name, a validated `LoadName`; a window's is its
 window id. There is one addressing system and this is its value type.
 
-`Recipient<K>` replaces `Mailbox<K>` and the string-taking `resolve_mailbox`.
-It is what a capability holds for a subscriber or consumer: the window
-capability knows its subscriber handles `Key` and nothing else about it. The
-subscribe mail itself carries an `Address`, or nothing when the envelope
-sender is the subscriber; the capability resolves it once and keeps the
-`Recipient`.
+A capability keeps the envelope sender as an `AnyActorRef`.
 
 The per-handler handle keeps its job of carrying origin, now fed by a
 reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
@@ -155,8 +148,7 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
 | A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |
-| `ctx.resolve(&address) -> Option<ActorRef<R>>` | `R`'s `Resolve` strategy folds the candidate position; the host confirms a `Live` route there. One synchronous host call carrying eight bytes, no mail. | one lookup per reference, ever |
-| An `Address<R>` that arrived in mail, config, saved state, or from another process | the same `ctx.resolve`; there is no second path for foreign bytes | one lookup per received address, by the receiver that wants to use it |
+| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. | — |
 
 The position and the proof have different owners. `Resolve` stays the single
 derivation of a position, fed by an `Address<R>` and never by text. The host

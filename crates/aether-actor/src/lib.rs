@@ -46,7 +46,7 @@ pub mod wasm;
 
 pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 pub use local::Local;
-pub use model::address::{address, address_at, address_candidate, address_named, child_address};
+pub use model::address::{address, address_at, address_named, child_address};
 pub use model::ctx::{Emit, Erased, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
@@ -56,8 +56,8 @@ pub use model::{
     validate_namespace_segment,
 };
 #[doc(hidden)]
-pub use reference::{__mint_actor_ref, __mint_any_actor_ref, __mint_recipient};
-pub use reference::{ActorRef, AnyActorRef, Recipient, Tombstone};
+pub use reference::{__mint_actor_ref, __mint_any_actor_ref};
+pub use reference::{ActorRef, AnyActorRef, Tombstone};
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
 };

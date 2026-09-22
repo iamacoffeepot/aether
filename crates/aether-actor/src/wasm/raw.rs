@@ -40,13 +40,6 @@ unsafe extern "C" {
     /// retires the host's ambient per-receive dispatch-identity cell.
     #[link_name = "send_mail_p32"]
     pub fn send_mail(recipient: u64, kind: u64, ptr: u32, len: u32, count: u32, detached: u32, from: u64) -> u32;
-    /// ADR-0230: confirm a resolution candidate holds a `Live` route.
-    /// `candidate` is the `MailboxId` raw value the guest folded through
-    /// its own `Resolve` strategy. The host echoes it back when the
-    /// published route view holds a `Live` endpoint there and returns zero
-    /// otherwise — no mail, no trace state, one synchronous call.
-    #[link_name = "resolve_live_p32"]
-    pub fn resolve_live(candidate: u64) -> u64;
     /// `from` (issue 1987) is the replying actor's own folded `MailboxId`
     /// raw value — the dispatch identity the host stamps on the reply's
     /// lineage, validated and fallback-resolved exactly like `send_mail`.
@@ -197,21 +190,6 @@ pub unsafe fn send_mail(
     _from: u64,
 ) -> u32 {
     panic!("aether-actor: send_mail called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::resolve_live` import (ADR-0230).
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_family = "wasm"))]
-#[must_use]
-pub unsafe fn resolve_live(_candidate: u64) -> u64 {
-    panic!("aether-actor: resolve_live called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::reply_mail` import. Always

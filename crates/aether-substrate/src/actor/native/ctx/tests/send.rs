@@ -71,11 +71,11 @@ fn handle_send_inherits_chain_detached_mints_fresh() {
 
 /// `ctx.to` sends through a proven reference: the routed envelope lands at
 /// the reference's id and inherits the in-flight root and parent like an
-/// `actor_at` send. The reference comes from `registry.proven`, so the test
-/// proves the whole resolve-then-send path without minting anything itself.
+/// `actor_at` send. The reference is minted for the registered inbox's own
+/// position, so the test proves the send path off a real route.
 #[test]
 fn to_send_through_a_proven_reference_inherits_chain() {
-    use crate::mail::registry::OwnedDispatch;
+    use crate::mail::registry::{OwnedDispatch, Registry};
     use crate::testing::{bare_substrate, boot_authority};
     use std::sync::mpsc;
 
@@ -89,7 +89,7 @@ fn to_send_through_a_proven_reference_inherits_chain() {
             let _ = tx.send(dispatch);
         }),
     );
-    let reference = registry.proven::<StubActor>(recipient).expect("a registered inbox proves a reference");
+    let reference = Registry::declared_dependency::<StubActor>(recipient);
 
     let actor_mailbox = MailboxId(0x00BE_EF04);
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));

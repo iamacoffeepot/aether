@@ -509,11 +509,3 @@ pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
 pub const MIXED_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.mixed.bundle");
 
 const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));
-
-/// Issue 6269: trigger for the ADR-0230 resolution probe fixture. `name` is
-/// a candidate load name the probe resolves beneath its runtime parent; the
-/// probe emits `TickObserved` only when the named peer is live.
-#[aether_data::kind(name = "aether.test_fixtures.resolve_peer")]
-pub struct ResolvePeer {
-    pub name: String,
-}

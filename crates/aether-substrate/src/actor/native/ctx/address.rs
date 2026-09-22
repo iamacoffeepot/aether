@@ -8,10 +8,10 @@
 //! derives it belongs with the pair that reads it.
 
 use aether_actor::{
-    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Instanced,
-    Reaches, ReplyMode, Singleton, address_candidate,
+    ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Instanced, Reaches,
+    ReplyMode, Singleton,
 };
-use aether_data::{Address, MailId, MailboxId};
+use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
 use crate::mail::registry::Registry;
@@ -83,22 +83,6 @@ macro_rules! native_sender_methods {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(target.id().0, self.binding, parent, root)
         }
-
-        /// Resolve `address` to a proven [`ActorRef`]: `Some` only when the
-        /// registry holds a `Live` route at the position the address names,
-        /// `None` for `Starting`, `Dropped`, and `Unknown` alike (ADR-0230).
-        /// The one fallible conversion from a description to a proof, and
-        /// the only way a reference received from anywhere becomes usable.
-        /// Sends no mail: a registry read of the published route view.
-        #[must_use]
-        pub fn resolve<R: CallerAddressable>(&self, address: &Address<R>) -> Option<ActorRef<R>> {
-            let candidate = address_candidate(
-                address,
-                self.binding.self_mailbox(),
-                self.binding.scope_mailbox(CallerScope::Parent),
-            )?;
-            self.binding.mailer().registry().proven(candidate)
-        }
     };
 }
 
@@ -130,19 +114,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         R::Resolver: DependencyResolver,
     {
         Registry::declared_dependency(self.actor::<R>().mailbox_id())
-    }
-
-    /// This actor as a proven [`ActorRef`]: mints the binding's own
-    /// mailbox, which the host bound at birth and which is `Live` for as
-    /// long as a handler can run — so no registry read is needed. Bounded
-    /// `A: Addressable` directly, so it does not exist on the erased ctx.
-    /// The one caller of the registry's `structural` mint.
-    #[must_use]
-    pub fn me(&self) -> ActorRef<A>
-    where
-        A: Addressable,
-    {
-        Registry::structural(self.binding.self_mailbox())
     }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound

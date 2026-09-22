@@ -1320,7 +1320,6 @@ const DENY_LIST: &[DeniedPath] = &[
     DeniedPath { tail: &["save_state_p32"] },
     DeniedPath { tail: &["resolve_mailbox_p32"] },
     DeniedPath { tail: &["resolve_kind_p32"] },
-    DeniedPath { tail: &["resolve_live_p32"] },
     // Handler-context types.
     DeniedPath { tail: &["aether_actor", "Ctx"] },
     DeniedPath { tail: &["aether_actor", "OutboundReply"] },
