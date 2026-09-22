@@ -67,11 +67,10 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 /// Route-member liveness for the shard reader's per-request pick
 /// (`reader.rs`), which walks a route's members from its round-robin
 /// cursor and hands the request to the first one still live. The
-/// registration forms no longer call
-/// it — `register_route` proves its mailbox at receipt through
-/// `ctx.resolve_live` — so this remains only because the route table
-/// holds positions rather than proven references; it goes when the
-/// table does.
+/// registration forms no longer call it — `register_route` proves its
+/// mailbox at receipt through `ctx.resolve_live` — so this remains only
+/// because the route table holds positions rather than proven
+/// references; it goes when the table does.
 pub fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
     match registry.entry(id) {
         Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
