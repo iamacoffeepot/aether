@@ -230,23 +230,22 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
 }
 
 // ADR-0134: the emit surface is the multi class's, implemented only for
-// the `Multi<K>` mode. Each `emit` is a detached chain root addressed at
-// the dispatch source (`self.source`, the `send_detached_to` body with the
-// source as recipient), so an emission starts a fresh chain rather than
-// holding the request chain open. A sourceless dispatch (session /
-// broadcast / substrate-origin mail, `MailboxId::NONE`) has no routable
-// target, so the emission warn-drops.
+// the `Multi<K>` mode. Each `emit` is `send_detached_to` at the proven
+// `ctx.sender()` (a detached chain root addressed at the dispatch source),
+// so an emission starts a fresh chain rather than holding the request
+// chain open. A sourceless dispatch (session / broadcast / substrate-origin
+// mail, `MailboxId::NONE`) has no routable target, so the emission
+// warn-drops.
 impl<A, K: Kind> Emit<K> for WasmCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {
-        if self.source == MailboxId::NONE.0 {
+        let Some(target) = self.sender() else {
             tracing::warn!(
                 kind = <K as Kind>::NAME,
                 "multi handler emit dropped: the dispatch carries no routable \
                  source (session / broadcast / substrate-origin mail)",
             );
             return;
-        }
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(self.source, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
+        };
+        self.send_detached_to(target, payload);
     }
 }

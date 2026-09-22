@@ -7,7 +7,7 @@
 //! with 0..n mails of the declared kind `K` by calling `emit`.
 //!
 //! Each emission is a **detached chain root addressed at the dispatch
-//! source** — the sugar for `send_detached_to(source_mailbox, payload)`.
+//! source** — the sugar for `send_detached_to(ctx.sender(), payload)`.
 //! Emissions never ride the request chain: settlement stays prompt (the
 //! request chain settles on the handler's return, not on the emissions),
 //! and detached-always gives every emission the same chain shape

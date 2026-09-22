@@ -24,7 +24,7 @@ pub use mailer::Mailer;
 pub use outbound::{DroppingBackend, EgressBackend, EgressEvent, HubOutbound, RecordingBackend};
 pub use registry::{
     ActorAddressInventoryError, AddressResolutionError, InboxHandler, InlineHandler, MailboxEntry, OwnedDispatch,
-    Registry, ResolvedAddress,
+    Registry, ResolveLiveError, ResolvedAddress,
 };
 
 /// Addressing token for any mailbox — component or substrate-owned sink.

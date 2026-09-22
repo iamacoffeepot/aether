@@ -11,8 +11,8 @@ pub struct Component {
     /// than called inside [`Self::instantiate`]) so the trampoline
     /// can fire it AFTER its mailbox is registered — issue 640
     /// Phase 2 surfaced a race where `wire`-time `aether.window.subscribe`
-    /// mail was rejected by the window cap's
-    /// `validate_subscriber_mailbox` because the trampoline mailbox
+    /// mail was rejected when the window cap proved the subscriber at
+    /// receipt through `ctx.resolve_live`, because the trampoline mailbox
     /// hadn't been registered yet (init runs in
     /// `spawn_actor` step 4, registration is step 5–7).
     /// `WasmTrampoline::wire` invokes [`Self::wire`] post-registration.
@@ -357,11 +357,12 @@ impl Component {
         // inside `spawn_actor` step 4 — BEFORE the trampoline mailbox
         // is registered (step 5–7). A wire-time send like
         // `aether.window.subscribe { mailbox: self.mailbox_id() }`
-        // would race the window cap's `validate_subscriber_mailbox`
-        // and warn-drop. `WasmTrampoline::wire` fires this hook
-        // post-registration via the `NativeActor::wire` lifecycle
-        // method. wire stays one-shot — the trampoline drops the
-        // typed-func handle after the call.
+        // would race the window cap proving the subscriber at receipt
+        // through `ctx.resolve_live` and warn-drop.
+        // `WasmTrampoline::wire` fires this hook post-registration via
+        // the `NativeActor::wire` lifecycle method. wire stays
+        // one-shot — the trampoline drops the typed-func handle after
+        // the call.
         let wire = instance.get_typed_func::<u64, u32>(&mut store, "wire").ok();
         Ok(Self {
             store,

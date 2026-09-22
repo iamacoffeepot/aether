@@ -286,7 +286,7 @@ impl NativeActor for SyntheticWindowCapability {
     #[handler::single]
     fn on_inject(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: InjectWindowEvent) {
         for recipient in state.subscribers.recipients(mail.window, mail.kind) {
-            let _ = ctx.send_envelope_tracked(recipient, mail.kind, &mail.payload);
+            let _ = ctx.send_envelope_tracked_to(recipient, mail.kind, &mail.payload);
         }
     }
 
@@ -296,7 +296,7 @@ impl NativeActor for SyntheticWindowCapability {
         if state.child_monitors.remove(&id).is_some() && state.windows.remove(&id).is_some() {
             state.publish(ctx, id, &WindowClosed { window: id });
         }
-        state.subscribers.purge_departed(notice.target);
+        state.subscribers.purge_departed(notice);
     }
 }
 
@@ -414,7 +414,15 @@ mod tests {
             "test.synthetic.dropped",
             Arc::new(|_dispatch: MailDispatch<'_>| {}),
         );
-        state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, dropped);
+        assert!(matches!(
+            SyntheticWindowCapability::on_subscribe(
+                &mut state,
+                &mut ctx,
+                SubscribeWindow { selector: crate::WindowSelector::All, kind: Key::ID, mailbox: dropped },
+            ),
+            SubscribeWindowResult::Ok
+        ));
+        let subscriber = ctx.resolve_live(dropped).expect("the subscriber proves while it is still live");
         mailer.registry().drop_mailbox(&boot_authority(), dropped).expect("drop subscriber mailbox");
 
         assert!(matches!(
@@ -425,7 +433,7 @@ mod tests {
             ),
             SubscribeWindowResult::Err { error } if error == format!("mailbox {dropped:?} already dropped")
         ));
-        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([dropped]));
+        assert_eq!(state.subscribers.recipients(WindowId(1), Key::ID), BTreeSet::from([subscriber]));
     }
 
     /// Reducer-only: drives `check_create` directly rather than the handler,

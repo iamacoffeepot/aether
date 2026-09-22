@@ -1,10 +1,12 @@
 //! How mail leaves this ctx.
 //!
 //! Three surfaces over one buffered push. The untyped `send_envelope_*`
-//! family carries runtime `(recipient, kind, bytes)` for endpoints that hold
-//! no compile-time types (the RPC server forwarding a wire `Call`), and
-//! `fanout` multicasts one encoding to a runtime recipient set. The
-//! per-stage capability traits carry the typed vocabulary FFI guests share:
+//! family carries already-encoded `(kind, bytes)` for endpoints that hold no
+//! compile-time types — addressed by position where the recipient arrived on
+//! the wire (the RPC server forwarding a `Call`) and by proof where the
+//! caller holds one (ADR-0230) — and `fanout` multicasts one encoding to a
+//! runtime recipient set of proofs. The per-stage capability traits carry
+//! the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
 //! what it does fails to unify rather than lying in its manifest.
@@ -42,15 +44,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the fanout — every subscriber-bound copy gets its own fresh
     /// `MailId` keyed under the same parent edge.
     ///
-    /// Recipients aren't known to share a receiver type at compile site
-    /// (subscribers register at runtime by mailbox id), so this takes
-    /// mailbox ids directly rather than the typed
-    /// `R: Singleton + HandlesKind<K>` shape of [`MailSender::send`]. The empty
-    /// recipient set is a fast no-op — encoding only runs when there's at
-    /// least one consumer.
+    /// Recipients still aren't known to share a receiver type at compile site
+    /// — subscribers register at runtime — so this keeps taking a runtime set
+    /// rather than the typed `R: Singleton + HandlesKind<K>` shape of
+    /// [`MailSender::send`]. What each one is has narrowed: an
+    /// [`AnyActorRef`] the publisher already holds, proven when the
+    /// subscription was accepted (ADR-0230), not a position handed over at
+    /// the fan-out. The empty recipient set is a fast no-op — encoding only
+    /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = MailboxId>, payload: &K) {
+    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = AnyActorRef>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -59,9 +63,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let parent = self.outbound_parent();
         let root = self.outbound_root();
         let kind = K::ID.0;
-        self.binding.push_envelope_buffered(first.0, kind, &bytes, 1, parent, root);
+        self.binding.push_envelope_buffered(first.id().0, kind, &bytes, 1, parent, root);
         for recipient in recipients {
-            self.binding.push_envelope_buffered(recipient.0, kind, &bytes, 1, parent, root);
+            self.binding.push_envelope_buffered(recipient.id().0, kind, &bytes, 1, parent, root);
         }
     }
 
@@ -92,9 +96,35 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// untyped dispatch always want the returned `MailId`. The typed
     /// `send` / `send_many` on `NativeActorMailbox` cover the
     /// fire-and-forget case.
+    ///
+    /// This stays the runtime-*position* door: the recipient arrived on
+    /// the wire or came back from the registry, and nothing has proven it
+    /// (ADR-0230). A caller that already holds a proof takes
+    /// [`Self::send_envelope_tracked_to`] instead, and this signature
+    /// narrows when its last positional caller migrates.
     #[must_use]
     pub fn send_envelope_tracked(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, self.outbound_parent(), self.outbound_root())
+    }
+
+    /// [`Self::send_envelope_tracked`] for a caller that holds a proof:
+    /// the ADR-0230 form of the untyped dispatch, taking the [`AnyActorRef`]
+    /// rather than the position under it.
+    ///
+    /// A capability fanning out pre-encoded bytes to its own subscriber
+    /// table is the shape this exists for — the rows are already proofs, so
+    /// unwrapping one back to a position at the moment of the send is
+    /// exactly what the stored-state rule removes. Its first consumer is
+    /// `SyntheticWindowCapability::on_inject`, which replays an injected
+    /// event to the window subscribers; `aether-lifecycle`'s
+    /// `broadcast_to_subscribers` (#6302) is the next.
+    ///
+    /// Differs from [`Self::fanout`] only in what it carries: `fanout`
+    /// encodes one typed `K` and pushes it to many recipients, while this
+    /// takes `(KindId, &[u8])` already encoded and dispatches one.
+    #[must_use]
+    pub fn send_envelope_tracked_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+        self.send_envelope_tracked(target.id(), kind, bytes)
     }
 
     /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
@@ -297,15 +327,15 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
 }
 
 // ADR-0134: the emit surface is the multi class's, implemented only for
-// the `Multi<K>` mode. Each `emit` addresses the dispatch source
-// (`source_mailbox`) and starts a fresh detached chain (the
-// `send_detached_to` body — `None` / `None` lineage), so an emission does
-// not hold the request chain open. A sourceless dispatch (broadcast /
-// substrate-generated mail, no `SourceAddr::Component`) has no routable
-// target, so the emission warn-drops.
+// the `Multi<K>` mode. Each `emit` is `send_detached_to` at the proven
+// `ctx.sender()` and starts a fresh detached chain (`None` / `None`
+// lineage), so an emission does not hold the request chain open. A
+// sourceless dispatch (broadcast / substrate-generated mail, no
+// `SourceAddr::Component`) has no routable target, so the emission
+// warn-drops.
 impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {
-        let Some(source) = self.source_mailbox() else {
+        let Some(target) = self.sender() else {
             tracing::warn!(
                 kind = <K as Kind>::NAME,
                 "multi handler emit dropped: the dispatch carries no routable \
@@ -313,7 +343,6 @@ impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
             );
             return;
         };
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(source.0, K::ID.0, &bytes, 1, None, None);
+        self.send_detached_to(target, payload);
     }
 }
