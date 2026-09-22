@@ -126,7 +126,7 @@ pub struct Tombstone<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender | reply, monitor, be the target of a detached untyped send |
+| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of a detached untyped send, be held in a capability's own table and keyed in an ordered set |
 | `Tombstone<R>` | that actor is dead | exchanging a reference on its `MonitorNotice` | key cleanup of held state |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 
@@ -153,7 +153,13 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
 | A child this actor spawned or loaded | the result mail carries the child's exact `Address`; the parent resolves it | one lookup per child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value | none |
-| An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. | — |
+| A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
+
+What arrived stays a position. The payload-borne door changes nothing about
+the wire: `SubscribeWindow.mailbox` is still a `MailboxId` and still decodes
+as one, because a proof cannot cross a boundary (section 1). The proof it
+yields lives only in the receiver's memory, from the moment of receipt until
+the row is dropped.
 
 The position and the proof have different owners. `Resolve` stays the single
 derivation of a position, fed by an `Address<R>` and never by text. The host

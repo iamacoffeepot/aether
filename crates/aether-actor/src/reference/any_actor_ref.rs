@@ -8,7 +8,12 @@ use aether_data::MailboxId;
 ///
 /// Memory-only like every proven reference: no codec, so an `AnyActorRef`
 /// can be held in actor state but never mailed, configured, or persisted.
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+///
+/// The order is over the proven position, exactly as the `Hash` and `Eq`
+/// beside it are, and exists so a cap can key an ordered set of subscribers
+/// on proofs rather than on positions — `WindowSubscribers` in
+/// `aether-window` is the consumer that asks for it.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
 pub struct AnyActorRef {
     id: MailboxId,
 }

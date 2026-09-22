@@ -1,5 +1,12 @@
 //! Who this ctx is, and who it can address.
 //!
+//! "Who it can address" has two halves. The receiver-addressing methods
+//! below take a position or a type and hand back a sender handle; the proof
+//! verbs — [`NativeCtx::actor_ref`] for a declared dependency and
+//! [`NativeCtx::resolve_live`] for a position that arrived in a payload —
+//! hand back a proven reference instead, which is what ADR-0230 lets a cap
+//! keep past the handler that received it.
+//!
 //! The receiver-addressing methods are emitted from one macro because
 //! [`NativeCtx`] and [`NativeInitCtx`](super::NativeInitCtx) hold the same
 //! binding and must resolve identically (ADR-0099 §5). Beside them sits the
@@ -8,13 +15,13 @@
 //! derives it belongs with the pair that reads it.
 
 use aether_actor::{
-    ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Instanced, Reaches,
-    ReplyMode, Singleton,
+    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Instanced,
+    Reaches, ReplyMode, Singleton,
 };
 use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
-use crate::mail::registry::Registry;
+use crate::mail::registry::{Registry, ResolveLiveError};
 
 use super::NativeCtx;
 
@@ -114,6 +121,29 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         R::Resolver: DependencyResolver,
     {
         Registry::declared_dependency(self.actor::<R>().mailbox_id())
+    }
+
+    /// Prove a position that arrived in a payload (ADR-0230): the third door
+    /// onto a proven reference on this ctx.
+    ///
+    /// The other two ask nothing of the registry. [`Self::to`] sends through
+    /// a proof the actor already holds, and [`Self::actor_ref`] mints a
+    /// declared dependency's proof from an answer the load already gave. This
+    /// one is for the id a caller put in a kind field — `SubscribeWindow`'s
+    /// `mailbox` is the motivating consumer — which nothing upstream proved,
+    /// so it pays one published-route read to find out. It runs once, at
+    /// receipt, and never on the send path; a handler that proves its
+    /// subscriber here keeps the proof, not the position.
+    ///
+    /// [`Self::sender`](super::NativeCtx::sender) remains the door for the
+    /// host-stamped source — that answer is already known and costs no read.
+    ///
+    /// This is the only spelling a capability uses. A cap must not chain
+    /// `ctx.mailer().registry()` to ask the same question itself: that chain
+    /// is how a cap ends up owning a second answer to the registry's own
+    /// liveness question, and the two answers drift.
+    pub fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
+        self.binding.mailer().registry().resolve_live(position)
     }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound

@@ -42,15 +42,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// the fanout — every subscriber-bound copy gets its own fresh
     /// `MailId` keyed under the same parent edge.
     ///
-    /// Recipients aren't known to share a receiver type at compile site
-    /// (subscribers register at runtime by mailbox id), so this takes
-    /// mailbox ids directly rather than the typed
-    /// `R: Singleton + HandlesKind<K>` shape of [`MailSender::send`]. The empty
-    /// recipient set is a fast no-op — encoding only runs when there's at
-    /// least one consumer.
+    /// Recipients still aren't known to share a receiver type at compile site
+    /// — subscribers register at runtime — so this keeps taking a runtime set
+    /// rather than the typed `R: Singleton + HandlesKind<K>` shape of
+    /// [`MailSender::send`]. What each one is has narrowed: an
+    /// [`AnyActorRef`] the publisher already holds, proven when the
+    /// subscription was accepted (ADR-0230), not a position handed over at
+    /// the fan-out. The empty recipient set is a fast no-op — encoding only
+    /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = MailboxId>, payload: &K) {
+    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = AnyActorRef>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -59,9 +61,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let parent = self.outbound_parent();
         let root = self.outbound_root();
         let kind = K::ID.0;
-        self.binding.push_envelope_buffered(first.0, kind, &bytes, 1, parent, root);
+        self.binding.push_envelope_buffered(first.id().0, kind, &bytes, 1, parent, root);
         for recipient in recipients {
-            self.binding.push_envelope_buffered(recipient.0, kind, &bytes, 1, parent, root);
+            self.binding.push_envelope_buffered(recipient.id().0, kind, &bytes, 1, parent, root);
         }
     }
 

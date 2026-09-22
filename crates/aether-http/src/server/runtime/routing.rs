@@ -65,11 +65,12 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 }
 
 /// Registrant-mailbox validation for the explicit-`mailbox`
-/// registration forms — the route twin of `aether.window`'s
-/// `validate_subscriber_mailbox` (that helper lives in the window cap's
-/// private runtime module, so the five-line check is mirrored rather
-/// than imported). The host-stamped `_self` forms skip it: the stamp
-/// already names a live in-process mailbox.
+/// registration forms — the route twin of the `ctx.resolve_live` call
+/// with which `aether.window` proves its subscriber at receipt (that
+/// verb hands back a proven reference the window cap stores, which this
+/// crate has no consumer for yet, so the check is mirrored rather than
+/// taken). The host-stamped `_self` forms skip it: the stamp already
+/// names a live in-process mailbox.
 pub fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
     match registry.entry(id) {
         Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
