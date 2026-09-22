@@ -52,8 +52,8 @@ jobs:
     outputs:
       perf: ${{ steps.filter.outputs.perf }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         with:
           filters: |
@@ -92,7 +92,7 @@ jobs:
     # validation is the perf-compare run on this PR itself.
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # merge-base needs full history (scripts/perf-compare.sh).
           fetch-depth: 0
@@ -104,8 +104,7 @@ jobs:
         # Hash Sum mismatch (2026-09-09). Only Ubuntu's own sources are consulted.
         run: |
           sudo find /etc/apt/sources.list.d -type f ! -name 'ubuntu*' -delete
-          sudo apt-get update && sudo apt-get install -y libasound2-dev
-          mesa-vulkan-drivers
+          sudo apt-get update && sudo apt-get install -y libasound2-dev mesa-vulkan-drivers
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # Cache the base (merge-base) trial binary across pushes
       # (iamacoffeepot/aether#1084). The merge-base is fixed for a PR's
@@ -123,7 +122,7 @@ jobs:
             echo "rustc=$(rustc -V | sha256sum | cut -c1-12)"
           } >> "$GITHUB_OUTPUT"
       - name: Cache base perf-trial binary
-        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .perf-cache/aether-perf-trial-base
           key: >-
@@ -167,7 +166,7 @@ jobs:
           fi
       - name: Upload span-distribution plots
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: perf-span-distributions
           path: perf-plots/

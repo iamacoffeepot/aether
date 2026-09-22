@@ -172,8 +172,12 @@ reason, and this is enforced by the types having no codec rather than by
 convention.
 
 Strings exist in exactly one place: the host's `resolve_address` parser
-behind the MCP, RPC, and harness boundary, which yields an `Address` and then
-takes the same `resolve` as everything else.
+behind the MCP, RPC, and harness boundary. It answers with a position, not an
+`Address`: the boundary holds no actor type, so there is no `R` to type one
+with, and the position crosses the wire as the `MailEnvelope` recipient. The
+engine that receives the `Call` proves that position once, through the
+payload-borne door above, and sends only through the proof. A position that
+does not prove closes the call with an error instead of parking or dropping.
 
 ### 4. Gate the eliminators, not the constructors
 

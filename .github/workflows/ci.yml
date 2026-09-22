@@ -42,8 +42,8 @@ jobs:
       # the filter rather than being classified by it.
       code: ${{ github.event_name == 'workflow_dispatch' || steps.filter.outputs.code == 'true' }}
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
         id: filter
         if: github.event_name != 'workflow_dispatch'
         with:
@@ -97,7 +97,7 @@ jobs:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Materialize the trusted suppression scanner
@@ -195,7 +195,7 @@ jobs:
     name: Format
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # The toolchain comes from `rust-toolchain.toml`, never from a channel
       # named here. A local `verify.check` runs the pinned toolchain (rustup
       # resolves the file), so a gate on `stable` judges the change with a
@@ -230,7 +230,7 @@ jobs:
     steps:
       - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
         if: github.event_name == 'pull_request'
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
         # Third-party apt sources baked into the runner image (Google Chrome and
@@ -288,7 +288,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - name: Install ALSA dev headers (cpal Linux backend)
         # Third-party apt sources baked into the runner image (Google Chrome and
@@ -399,7 +399,7 @@ jobs:
       # the test step.
       - uses: runs-on/action@4e5f72399b6b17f2e79c511c1b38a315a64d22dc # v2
         if: github.event_name == 'pull_request'
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: ${{ github.event_name == 'pull_request' && 2 || 0 }}
       # Main pushes run on GitHub-hosted runners, whose ~14 GB of free
@@ -454,7 +454,7 @@ jobs:
           echo "SCCACHE_S3_KEY_PREFIX=cache/sccache" >> "$GITHUB_ENV"
           echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
           echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
-      - uses: mozilla-actions/sccache-action@7d986dd989559c6ecdb630a3fd2557667be217ad # v0.0.9
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
         if: github.event_name == 'pull_request'
       # Pre-build the packaged artifact tree the scenario runner loads
       # at test time. Without this, ADR-0067 per-component scenarios
@@ -583,9 +583,9 @@ jobs:
       # fuzz-crash-artifact upload pattern in fuzz-nightly.yml.
       - name: Upload substrate-harness failure artifacts
         if: failure()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          # Shard-qualified: upload-artifact v4 rejects a second upload
+          # Shard-qualified: upload-artifact (v4 onward) rejects a second upload
           # under a name another job already claimed, so two failing
           # shards would race and one would lose its diagnostics.
           name: substrate-harness-artifacts-shard-${{ matrix.shard }}
@@ -594,7 +594,7 @@ jobs:
           retention-days: 7
       - name: Upload FleetHarness TCP load metrics
         if: always()
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           # Shard-qualified for the same reason as the upload above: only
           # the shard that drew the load test writes the file, but which
@@ -632,8 +632,8 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
-      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: 22
       - run: rustup toolchain install
@@ -658,7 +658,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       - run: cargo install cargo-machete --locked
@@ -693,7 +693,7 @@ jobs:
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - run: rustup toolchain install
       - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
       # The resolved graph goes to the arm's captured log rather than to this

@@ -236,6 +236,42 @@ fn call_echo_round_trip_event_then_end() {
     }
 }
 
+/// A `Call` whose recipient does not prove `Live` in the server's registry
+/// is refused at receipt (ADR-0230 section 3): nothing is dispatched and the
+/// call closes with `ReplyEnd` `Err(UnknownMailbox)`. Without the receipt
+/// check the mail parks in the mailer (a read timeout here) or drops and the
+/// call closes `Ok` with no reply events.
+#[test]
+fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
+    use crate::server::test_echo::TestEchoRequest;
+    use crate::{MailEnvelope, MailboxAddress, RpcError};
+    use aether_data::{Kind, MailboxId};
+
+    let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
+    complete_handshake(&mut stream);
+
+    write_frame(
+        &mut stream,
+        &WireFrame::Call {
+            cid: Some(7),
+            envelope: MailEnvelope {
+                to: MailboxAddress::local(MailboxId(0xdead_beef)),
+                from: None,
+                kind: <TestEchoRequest as Kind>::ID,
+                correlation_id: None,
+                payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
+            },
+        },
+    )
+    .expect("test: write_frame Call to rpc server");
+
+    let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
+    assert_eq!(
+        end,
+        WireFrame::ReplyEnd { cid: 7, result: Err(RpcError::UnknownMailbox { mailbox: MailboxId(0xdead_beef) }) },
+    );
+}
+
 /// iamacoffeepot/aether#1321 regression: a `Call` routed through the
 /// RPC server tags its reply `SourceAddr::Component(rpc_server)`, so
 /// a capability that replies via `HubOutbound::send_reply` (which
