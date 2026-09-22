@@ -44,9 +44,7 @@
 mod kinds;
 pub use kinds::*;
 
-use aether_actor::{ActorInitError, Addressable, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_component::component::resolve_embedded;
-use aether_data::MailboxId;
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
@@ -63,14 +61,11 @@ pub struct Turntable {
     /// every time it doubles, so a turntable left running overnight would
     /// visibly step rather than sweep.
     azimuth: f32,
-    /// Where the puppet is, folded once from its type and the shared
-    /// component-host lineage.
-    target: MailboxId,
     /// Ticks seen, for the sampling stride alone.
     ticks: u64,
 }
 
-#[actor]
+#[actor(depends(Puppet))]
 impl WasmActor for Turntable {
     type Config = TurntableConfig;
     const NAMESPACE: &'static str = "aether.puppet-turntable";
@@ -84,8 +79,7 @@ impl WasmActor for Turntable {
             );
         }
 
-        let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Ok(Self { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, target, ticks: 0 })
+        Ok(Self { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, ticks: 0 })
     }
 
     /// Subscribe the frame stage. `wire` is the placement rather than `init`
@@ -97,9 +91,9 @@ impl WasmActor for Turntable {
     /// Advance the sweep one tick and restate the pose. A parked turntable
     /// returns without sending, allocating, or touching the peer.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, tick: Tick) {
         if let Some(look) = self.advance(tick.delta_seconds()) {
-            ctx.send_to(self.target, &look);
+            ctx.actor::<Puppet>().send(&look);
         }
         self.sample();
     }
@@ -152,15 +146,7 @@ mod tests {
     const FRAME_SECONDS: f32 = 1.0 / 60.0;
 
     fn turntable(config: TurntableConfig) -> Turntable {
-        let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Turntable { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, target, ticks: 0 }
-    }
-
-    #[test]
-    fn target_is_the_embedded_puppet_lineage() {
-        let motor = turntable(TurntableConfig::default());
-
-        assert_eq!(motor.target, resolve_embedded(<Puppet as Addressable>::NAMESPACE));
+        Turntable { azimuth: config.azimuth.rem_euclid(FULL_TURN), config, ticks: 0 }
     }
 
     #[test]

@@ -42,9 +42,7 @@ pub use channel::{Authored, Shape, per_second, shaped};
 pub use kinds::*;
 
 use crate::{Pose, Puppet};
-use aether_actor::{ActorInitError, Addressable, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_component::component::resolve_embedded;
-use aether_data::MailboxId;
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 
@@ -62,16 +60,6 @@ pub struct Idle {
     /// which is what makes a solo hold the other seven still without a branch
     /// in the hot path.
     rates: [f32; CHANNELS],
-    /// Where the puppet is, folded once from its type.
-    ///
-    /// [`resolve_embedded`] is the by-name carry-supplier: it reads the
-    /// carry off [`ComponentHostCapability`], which is the lineage both
-    /// components hang off, and folds the peer's namespace onto it. The
-    /// name comes from `Puppet` itself, so nothing here is a spelling that
-    /// could drift from the type it addresses.
-    ///
-    /// [`ComponentHostCapability`]: aether_component::ComponentHostCapability
-    target: MailboxId,
     /// The last pose sent, so a motor whose channels have not moved the
     /// pose off its previous value sends nothing.
     last: Option<Pose>,
@@ -79,7 +67,7 @@ pub struct Idle {
     ticks: u64,
 }
 
-#[actor]
+#[actor(depends(Puppet))]
 impl WasmActor for Idle {
     type Config = IdleConfig;
     const NAMESPACE: &'static str = "aether.puppet-idle";
@@ -94,8 +82,7 @@ impl WasmActor for Idle {
             );
         }
 
-        let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Ok(Self { config, phases: [0.0; CHANNELS], rates, target, last: None, ticks: 0 })
+        Ok(Self { config, phases: [0.0; CHANNELS], rates, last: None, ticks: 0 })
     }
 
     /// Subscribe the frame stage. `wire` is the placement rather than `init`
@@ -106,16 +93,10 @@ impl WasmActor for Idle {
 
     /// Advance every channel one tick and restate the pose. A parked motor,
     /// and one whose pose has not changed, return without sending.
-    ///
-    /// Not `ctx.actor::<Puppet>()`: both components resolve through
-    /// `Embedded`, which folds the peer's namespace onto **the carry it is
-    /// handed**, and `ctx.actor` hands it this motor's own mailbox. That
-    /// names a puppet embedded under the motor — an address nothing
-    /// registered, so the mail resolves cleanly and is silently dropped.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, tick: Tick) {
         if let Some(pose) = self.advance(tick.delta_seconds()) {
-            ctx.send_to(self.target, &pose);
+            ctx.actor::<Puppet>().send(&pose);
         }
         self.sample();
     }
@@ -213,8 +194,7 @@ mod tests {
 
     fn motor(config: IdleConfig) -> Idle {
         let rates = rates(&config);
-        let target = resolve_embedded(<Puppet as Addressable>::NAMESPACE);
-        Idle { config, phases: [0.0; CHANNELS], rates, target, last: None, ticks: 0 }
+        Idle { config, phases: [0.0; CHANNELS], rates, last: None, ticks: 0 }
     }
 
     /// Whether this pose has one channel off rest. Zeroing the channel and
