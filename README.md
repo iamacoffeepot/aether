@@ -81,8 +81,12 @@ Prerequisites: `rust-toolchain.toml` pins the toolchain and adds the
 `wasm32-unknown-unknown` target, so rustup installs both on first use. On Linux
 the audio and GPU crates need system packages: `libasound2-dev` to build, and
 `mesa-vulkan-drivers` to run the rendering tests without a GPU (CI installs
-exactly these). Component scenarios in the test suite need the wasm built
-first: run `cargo xtask dist` once before `cargo test`, or they skip.
+exactly these). Component scenarios in the test suite need the component wasm
+built first: run `cargo xtask build-wasm` once before `cargo test`. A scenario
+whose wasm is missing fails rather than skipping; set `AETHER_ALLOW_WASM_SKIP=1`
+to take the skip deliberately. The fleet-harness scenarios also need the
+chassis binaries, which `cargo xtask dist` packages together with the wasm into
+`dist/`.
 
 The workspace root has no default binary.
 

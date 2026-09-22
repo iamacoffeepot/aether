@@ -103,9 +103,10 @@ consumes one and returns termination status. Use the id for engine-scoped tools,
 not for hub artifact-store or MCP-local queries.
 
 **Sending mail.** `send_mail` is the workhorse. You give it a batch of items, each
-`{engine_id, recipient_name, kind_name, params}` — the **mailbox** to deliver to,
+`{engine_id, address, kind_name, params}` — the **mailbox** to deliver to,
 the **kind** to deliver, and the structured params, which the tool schema-encodes to
-wire bytes against that kind's descriptor. A textual `recipient_name` may be a
+wire bytes against that kind's descriptor. (`recipient_name` is still accepted
+as an alias for `address`.) A textual `address` may be a
 canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
 abbreviation (`aether.component://camera`). The selected engine resolves either
 spelling to the same live mailbox id and canonical path before dispatch;
@@ -130,10 +131,10 @@ siblings.
 batch lands under one chassis-level trace root. The settled default returns a
 compact one-line-per-node `tree`, a matching `node_count`, and `mails: null`;
 each line names `sender → recipient`, kind, and handler duration, with indentation
-for causal depth. Pass `full: true` to restore the complete `mails` node values;
-that form omits `tree` and carries the same `node_count`. Both forms also carry
-the complete flat reply list and rely on the generic response spill rather than
-truncating. Reach for it when you
+for causal depth. Pass `format: "nodes"` to get the complete `mails` node
+values instead; that form omits `tree` and carries the same `node_count`. Both
+forms also carry the complete flat reply list and rely on the generic response
+spill rather than truncating. Reach for it when you
 need exact whole-chain settlement — proof that everything a mail set off has finished
 — or all-or-nothing dispatch where a single bad item aborts the batch before any mail
 moves. For independent items where you just want each reply, plain `send_mail` is the
@@ -143,17 +144,17 @@ simpler tool.
 default call returns a compact `[{name, shape}]` listing of every kind — a one-line
 field rendering per kind, small enough to read in one shot. Start with
 `families: true` for a sorted `[{family, count}]` digest; combine it with a
-case-sensitive `prefix` to digest one subtree (`full` is ignored in this mode).
+case-sensitive `prefix` to digest one subtree (`detail` is ignored in this mode).
 Compact enum shapes use the externally tagged JSON envelope that `send_mail`
 accepts: a unit variant is a quoted string such as `"Windowed"`, a tuple
 variant is a one-key object such as `{ "Ok": value }` (or an array body for
 multiple fields), and a struct variant is a one-key object such as
 `{ "Err": { reason: String } }`. When an enum appears inside a struct, that
 notation remains inside its named field; it does not become a top-level key.
-Use `names: ["aether.fs.write"]` for exact kinds, then add `full: true` when you
-need their nested `SchemaType`. `names` cannot combine with `families` or
-`prefix`, and a bare unfiltered `full: true` call is refused so schema output
-stays bounded. `describe_component` reports a loaded component's handler kinds,
+Use `names: ["aether.fs.write"]` for exact kinds, then add `detail: "schema"`
+when you need their nested `SchemaType`. `names` cannot combine with `families`
+or `prefix`, and a bare unfiltered `detail: "schema"` call is refused so schema
+output stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
 the component's loaded lineage name or an unambiguous ADR-0166 abbreviation.
 `load_component` returns the canonical
@@ -199,8 +200,10 @@ is omitted. These registry rows identify stored wasm, not live component
 instances; use the lineage returned by `load_component`, or the known expected
 lineage of a boot spec, for `describe_component`.
 
-**Observation.** `capture_frame` returns the engine's current frame as an optional
-inline PNG, bounded by a 768-pixel long-edge ceiling by default (never upscaled).
+**Observation.** `capture_frame` returns one window's current frame as an
+optional inline PNG, bounded by a 768-pixel long-edge ceiling by default (never
+upscaled). `window_id` is required: pass the tagged `mbx-…` string
+`aether.window.list` reports, since capture never guesses a window.
 Pass a finite `scale` in `(0, 1]` for proportional reduction, then
 `max_dimension` to clamp the scaled long edge; those controls compose in that
 order. A capture with `checks` returns the verdict and omits the image by default,
@@ -222,7 +225,7 @@ one handler.
 
 ## Conventions that bite
 
-- **Mailbox vs kind.** `recipient_name` is the mailbox; `kind_name` is the payload.
+- **Mailbox vs kind.** `address` is the mailbox; `kind_name` is the payload.
   They route independently even when they share a prefix — send the kind
   `aether.audio.note_on` to the mailbox `aether.audio`. See
   [Mail, kinds & scheduling](systems/mail-and-kinds.md).
