@@ -18,7 +18,7 @@ Every target uses the same contract: enumerate, classify with evidence, print ex
 /sweep all
 ```
 
-Resolve the shared repository root from the absolute common Git directory and capture the caller's current worktree. Never remove the main root, current worktree, or uncertain ownership. Managed Claude issue worktrees live under `.claude/worktrees/issue-*`; other branch-backed paths are manual or legacy unless explicitly identified.
+Resolve the shared repository root from the absolute common Git directory and capture the caller's current worktree. Never remove the main root, current worktree, or uncertain ownership. Worktrees live under `<main-root>/.agents/worktrees/`, shared with Codex: managed issue worktrees are `issue-*`, and each session's SessionStart hook creates a detached `<session-id>` entry there (Codex's are `codex-*`). `.claude/worktrees/` holds only legacy back-compat symlinks into `.agents/worktrees/`. Other branch-backed paths are manual or legacy unless explicitly identified.
 
 ## Worktrees
 
@@ -28,9 +28,11 @@ Only a clean managed worktree with a GitHub-confirmed merged pull request is a r
 
 ## Sessions
 
-Enumerate detached worktrees beneath `.claude/worktrees/` that are not owned issue or ADR worktrees. Cleanliness and age are hints, not liveness proof. Report path, current-worktree status, dirtiness, HEAD reachability from main, commit date, directory time, and registered/prunable state.
+Enumerate detached registered worktrees directly beneath `.agents/worktrees/` that are session entries — a Claude `<session-id>` or a Codex `codex-*` — and not issue or other branch-backed worktrees. Cleanliness, age, and a released lock are hints, not liveness proof. Report path, current-worktree status, dirtiness, lock state, HEAD reachability from main, commit date, directory time, and registered/prunable state.
 
 Never auto-remove a session worktree or include the current one. Offer clean non-current entries only for exact per-path confirmation with an ownership warning. Dirty entries require separate explicit authority to discard named changes. Use worktree prune only for already-missing administrative entries shown in the plan.
+
+Also list every dangling symlink in `.claude/worktrees/` (its target no longer exists) and offer those for removal in the same plan. Removing one deletes only the link. Never remove a symlink whose target still exists, and never follow one to remove its target.
 
 ## Branches
 

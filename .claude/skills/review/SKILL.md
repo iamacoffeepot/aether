@@ -5,7 +5,7 @@ description: "Run Aether's independent findings-first five-lens review over exis
 
 # /review — independent direct review engine
 
-This skill is read-only. It inspects repository and GitHub facts and returns structured review material to `/implement` or `/resolve`; the caller owns comments, reviews, fixes, pushes, and thread resolution.
+This skill is read-only. It is a standalone review, run on request or as a backfill audit; `/implement` and `/resolve` review their own heads directly and do not call it. It inspects repository and GitHub facts and returns structured review material to whoever invoked it; the caller owns comments, reviews, fixes, pushes, and thread resolution.
 
 ## Invocation
 

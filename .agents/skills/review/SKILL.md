@@ -17,7 +17,7 @@ $review <PR-number>
 $review <PR-number> --confirm <last-reviewed-sha>
 ```
 
-Use path/crate mode for a backfill audit that will not receive pull-request review. Use pull-request mode when called directly by `$implement`; capture the current head SHA, closing issue, approved base, managed Plan, and Declared surface. Confirm mode evaluates prior actionable findings plus only the delta since the supplied reviewed SHA.
+Use path/crate mode for a backfill audit that will not receive pull-request review. Use pull-request mode for a standalone review of a named pull request (`$implement` reviews its own head directly and does not call this skill); capture the current head SHA, closing issue, approved base, managed Plan, and Declared surface. Confirm mode evaluates prior actionable findings plus only the delta since the supplied reviewed SHA.
 
 The engine is read-only. It may inspect repository and GitHub facts and return structured review material, but it never edits files, commits, pushes, posts comments or reviews, resolves threads, changes issues, or merges. The caller owns those actions.
 

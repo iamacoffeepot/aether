@@ -58,7 +58,7 @@ Refuse `--quick --resume`.
 Resolve the shared repository root from the absolute common Git directory. Use:
 
 ```text
-<main-root>/.claude/worktrees/issue-<issue>
+<main-root>/.agents/worktrees/issue-<issue>
 ```
 
 Create a branch named `<type>/issue-<issue>-<slug>` from the approval's exact base, never from local main or the caller's checkout. Limit the slug to 30 lowercase alphanumeric/dash characters. Existing artifacts are possible live claims and require resume; cleanliness is not deletion authority.

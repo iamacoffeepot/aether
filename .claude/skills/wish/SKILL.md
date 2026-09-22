@@ -468,7 +468,7 @@ Output root: `wishes/<YYYY-MM-DD>-<theme-slug>/`. Write `index.md` and each `wis
 
 Read the index, drill into the wishes that interest you.
 Drill an alternative or sub-wish deeper: /wish --under <wish-path>
-File leaf plans you want to commit to as Backlog-Phase issues: /sketch --from-wish <leaf-path>.
+File leaf plans you want to commit to as unscoped issues: /sketch --from-wish <leaf-path>.
 ```
 
 Deep mode (`--deep`) reports from the workflow's returned stats instead:

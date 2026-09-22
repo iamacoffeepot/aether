@@ -1,11 +1,11 @@
 ---
 name: retrospect
-description: "Review the current Aether session for repeatable repository papercuts, classify every candidate, obtain confirmation on exact issue drafts, and file approved findings as papercut-labelled Backlog issues through sketch mechanics."
+description: "Review the current Aether session for repeatable repository papercuts, classify every candidate, obtain confirmation on exact issue drafts, and file approved findings as unscoped papercut-labelled issues through sketch mechanics."
 ---
 
 # Retrospect
 
-Turn repeatable tooling and process friction from the current session into confirmed Backlog issues. Keep session analysis in the main thread; it depends on the conversation and does not benefit from delegation.
+Turn repeatable tooling and process friction from the current session into confirmed unscoped issues. Keep session analysis in the main thread; it depends on the conversation and does not benefit from delegation.
 
 Read [Codex harness](../_shared/codex-harness.md), [GitHub workflow](../_shared/github-workflow.md), and the Codex [sketch skill](../sketch/SKILL.md) completely before drafting or filing.
 

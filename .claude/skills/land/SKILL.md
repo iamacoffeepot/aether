@@ -21,7 +21,7 @@ The named invocation authorizes clearing draft state, one ordinary squash merge,
 
 ## Correlate the artifacts
 
-Fetch `origin/main` without switching the caller's checkout. Read the pull request over REST and require it open, draft, targeting `main`, headed by a branch in this repository, conventionally titled, and closing exactly one open issue. Correlate that issue with the expected `.claude/worktrees/issue-<issue>` and branch, or with a documented already-cleaned local state.
+Fetch `origin/main` without switching the caller's checkout. Read the pull request over REST and require it open, draft, targeting `main`, headed by a branch in this repository, conventionally titled, and closing exactly one open issue. Correlate that issue with the expected `.agents/worktrees/issue-<issue>` and branch, or with a documented already-cleaned local state.
 
 Read the issue body and effective editor, pull-request head and commits, changed files, check suites/runs, reviews, and review threads. Failed, truncated, stale-head, or ambiguous reads are unknown and therefore ineligible.
 
