@@ -30,6 +30,7 @@ mod alias;
 mod apply;
 mod birth;
 mod commands;
+mod dependency;
 mod inventory;
 mod kinds;
 mod proven;

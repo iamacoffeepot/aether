@@ -910,6 +910,55 @@ fn macro_emits_native_singleton_root_inventory_from_actor_type() {
     assert_eq!(root.actor, ActorId::singleton(ReplyMacroCap::NAMESPACE));
 }
 
+struct DependsDepCap;
+
+#[aether_actor::actor(root)]
+impl NativeActor for DependsDepCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.depends_dep";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_greet(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {
+        let _ = self;
+    }
+}
+
+struct DependsMacroCap;
+
+#[aether_actor::actor(root, depends(DependsDepCap))]
+impl NativeActor for DependsMacroCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.depends";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_greet(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {
+        let _ = self;
+    }
+}
+
+#[test]
+fn macro_emits_native_dependency_inventory_from_actor_types() {
+    use aether_actor::{DependencyResolver, One};
+    use aether_data::name_inventory::dependency_entries;
+
+    fn depends<T: aether_actor::DependsOn<DependsDepCap>>() {}
+    depends::<DependsMacroCap>();
+
+    let entry = dependency_entries()
+        .find(|entry| entry.actor == DependsMacroCap::NAMESPACE)
+        .expect("the macro should submit a DependencyEntry");
+    assert_eq!(entry.resolver, One::TAG);
+    assert_eq!(entry.namespace, DependsDepCap::NAMESPACE);
+}
+
 #[test]
 fn macro_emits_native_instanced_child_inventory_from_actor_types() {
     use aether_data::ActorId;

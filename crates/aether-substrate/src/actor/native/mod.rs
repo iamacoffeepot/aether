@@ -68,6 +68,7 @@
 // off its own thread (`offload`), and how its outbound mail fans out (`blob`).
 pub mod binding;
 pub mod ctx;
+pub(crate) mod dependencies;
 pub mod envelope;
 pub(crate) mod identity;
 pub mod local;

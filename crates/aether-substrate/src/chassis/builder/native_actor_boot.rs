@@ -10,6 +10,7 @@ use aether_actor::trace::ActorTraceRing;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::dependencies::check_declared;
 use crate::actor::native::local;
 use crate::actor::native::slot::dispatcher::DispatcherSlot;
 use crate::actor::native::{ExportedHandles, NativeActor, NativeCtx, NativeInitCtx};
@@ -182,15 +183,19 @@ where
         let config = self.config.take().expect("PassiveBoot::init requires the resolve pass to have run first");
         let params = self.params.take().expect("PassiveBoot::init called twice — params already consumed");
 
+        // ADR-0230: a declared `depends(R)` with no `Live` route fails on the
+        // failed-`init` path below, before `A::init` runs. A root-pinned
+        // chassis capability folds from the root.
+        //
         // ADR-0081: wrap `init` in `local::with_stamped` so any
         // `tracing::*` event the cap fires lands in its per-actor
         // `ActorLogRing`. The pre-ADR `with_actor_dispatch` +
         // `drain_buffer` flush hop retired alongside `LogBatch`.
-        let init_result = {
+        let init_result = check_declared::<A>(ctx.registry(), MailboxId::NONE).and_then(|()| {
             let mailer_clone = ctx.mail_send_handle();
             let mut init_ctx = NativeInitCtx::new(&resources.transport, handles, mailer_clone);
             local::with_stamped(&resources.slots, || A::init(config, params, &mut init_ctx))
-        };
+        });
         let actor = match init_result {
             Ok(a) => a,
             Err(e) => {

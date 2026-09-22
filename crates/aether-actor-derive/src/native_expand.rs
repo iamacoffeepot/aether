@@ -48,14 +48,14 @@ fn erase_unless_ctx_names_actor(sig: &syn::Signature) -> TokenStream2 {
 }
 
 fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> syn::Result<()> {
-    if generics.params.is_empty() || (!opts.root && opts.child_of.is_empty()) {
+    if generics.params.is_empty() || (!opts.root && opts.child_of.is_empty() && opts.depends.is_empty()) {
         return Ok(());
     }
 
     Err(syn::Error::new_spanned(
         &generics.params,
-        "#[actor] `root` and `child_of(...)` require a concrete native actor identity; \
-         generic native actors cannot emit monomorphic RootEntry/ChildEntry inventory facts",
+        "#[actor] `root`, `child_of(...)` and `depends(...)` require a concrete native actor identity; \
+         generic native actors cannot emit monomorphic RootEntry/ChildEntry/DependencyEntry inventory facts",
     ))
 }
 
@@ -1006,8 +1006,9 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230: the native check happens at chassis build, in different code,
-    // and is its own issue — native expansion emits the `DependsOn` impls only.
+    // ADR-0230: native expansion emits the `DependsOn` impls plus one link-time
+    // `DependencyEntry` per `depends(R)` below, which the birth sites check
+    // before `init`.
     let depends_impls = opts.depends.iter().map(|target| {
         quote! {
             impl #impl_generics ::aether_actor::DependsOn<#target>
@@ -1047,9 +1048,23 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
             }
         }
     });
+    let dependency_entries = opts.depends.iter().map(|target| {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::name_inventory::inventory::submit! {
+                ::aether_data::name_inventory::DependencyEntry {
+                    actor: <#self_ty as ::aether_actor::Addressable>::NAMESPACE,
+                    resolver: <<#target as ::aether_actor::Addressable>::Resolver
+                        as ::aether_actor::DependencyResolver>::TAG,
+                    namespace: <#target as ::aether_actor::Addressable>::NAMESPACE,
+                }
+            }
+        }
+    });
     let inventory = quote! {
         #root_entry
         #(#child_entries)*
+        #(#dependency_entries)*
     };
 
     quote! {
