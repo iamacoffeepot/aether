@@ -27,9 +27,9 @@
 //! ```
 //!
 //! **What stays behind.** `reply` / `reply_to` / `emit` are the reply channel
-//! itself. `send_with_context` / `send_to_with_context` and `take_context` are
-//! its correlation machinery — a stashed context is recovered on the *reply*,
-//! so it belongs with the surface that owns replies. Child spawning and the
+//! itself. `send_with_context` and `take_context` are its correlation
+//! machinery — a stashed context is recovered on the *reply*, so it belongs
+//! with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
@@ -207,12 +207,6 @@ impl MailSender for Sends<'_> {
         K: Kind,
     {
         self.route::<K>(self.resolve_singleton::<R>(), &payload.encode_into_bytes(), 1, ChainMode::Detached);
-    }
-
-    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: ADR-0099 §4 path fold, as send_to_named
-    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        self.route::<K>(mailbox_id_from_path(name).0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 
     fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {

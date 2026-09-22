@@ -169,14 +169,6 @@ impl MailSender for WasmDropCtx<'_> {
         );
     }
 
-    // Runtime-name detached escape hatch — the `send_to_named` counterpart.
-    #[allow(clippy::disallowed_methods)]
-    // the runtime-name routing path itself — same ADR-0099 §4 parse → fold as `send_to_named`
-    fn send_detached_to_named<K: Kind>(&mut self, name: &str, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        mail::send_mail(mailbox_id_from_path(name).0, K::ID.0, &bytes, 1, true, self.mailbox);
-    }
-
     // By-id detached send — the by-name body with the caller's id.
     fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
