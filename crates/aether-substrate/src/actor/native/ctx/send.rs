@@ -116,8 +116,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// unwrapping one back to a position at the moment of the send is
     /// exactly what the stored-state rule removes. Its first consumer is
     /// `SyntheticWindowCapability::on_inject`, which replays an injected
-    /// event to the window subscribers; `aether-lifecycle`'s
-    /// `broadcast_to_subscribers` (#6302) is the next.
+    /// event to the window subscribers; its second is `aether-lifecycle`'s
+    /// `broadcast_to_subscribers` (#6302), which pushes each stage payload
+    /// to the proofs the cap's subscriber table holds.
     ///
     /// Differs from [`Self::fanout`] only in what it carries: `fanout`
     /// encodes one typed `K` and pushes it to many recipients, while this

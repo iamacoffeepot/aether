@@ -754,7 +754,7 @@ pub fn tick_only_lifecycle_params() -> LifecycleParams {
         .start::<Tick>()
         .build()
         .expect("tick-only lifecycle graph is structurally valid");
-    LifecycleParams { graph, initial_subscribers: vec![] }
+    LifecycleParams { graph }
 }
 
 /// Args every full-stack chassis hands to [`with_full_stack_caps`]. Kept

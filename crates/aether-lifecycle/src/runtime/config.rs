@@ -1,4 +1,3 @@
-use aether_data::{KindId, MailboxId as DataMailboxId};
 use aether_kinds::{Present, Render, Shutdown, Tick};
 
 use super::super::LifecycleGraphData;
@@ -52,14 +51,6 @@ pub struct LifecycleParams {
     /// [`LifecycleGraphData::builder`](LifecycleGraphData::builder)
     /// on the chassis side.
     pub graph: LifecycleGraphData,
-    /// Initial `(stage_kind, mailbox)` pairs to populate the
-    /// subscriber table at boot — a chassis builder can pre-subscribe
-    /// a mailbox to a stage this way without round-tripping a
-    /// `LifecycleSubscribe` mail. Each pair must
-    /// reference a stage kind declared by `graph` — the boot path
-    /// verifies this and returns `BootError` otherwise, so
-    /// misconfiguration fails fast at chassis-build.
-    pub initial_subscribers: Vec<(KindId, DataMailboxId)>,
 }
 
 /// Build the three-stage frame lifecycle params the display-driving
@@ -108,7 +99,7 @@ pub fn frame_lifecycle_params() -> LifecycleParams {
         .start::<Tick>()
         .build()
         .expect("frame lifecycle graph is structurally valid");
-    LifecycleParams { graph, initial_subscribers: vec![] }
+    LifecycleParams { graph }
 }
 
 #[cfg(test)]
@@ -123,8 +114,7 @@ mod tests {
         // `Quit` escape to a `Shutdown` terminal on the `Present` stage.
         // The graph's edge accessors (`next` / `quit` per state) are
         // module-private, so this check reads the public `Debug` (start +
-        // the non-terminal state kinds + terminals) plus the empty
-        // `initial_subscribers` set. Quit-edge *placement* (on `Present`,
+        // the non-terminal state kinds + terminals). Quit-edge *placement* (on `Present`,
         // not `Tick`) is verified by the `resolve_edge` tests and
         // end-to-end by the substrate-harness quit-drain scenario.
         let params = frame_lifecycle_params();
@@ -141,9 +131,5 @@ mod tests {
         assert!(graph_dbg.contains(&present), "expected a Present state in {graph_dbg}");
         // Shutdown is the sole terminal.
         assert!(graph_dbg.contains(&format!("terminals: [{shutdown}]")), "expected Shutdown terminal in {graph_dbg}");
-
-        // No initial subscribers: components subscribe the `Tick` stage
-        // directly on `aether.lifecycle` (ADR-0082 §7/§11).
-        assert!(params.initial_subscribers.is_empty());
     }
 }
