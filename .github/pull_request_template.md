@@ -6,9 +6,9 @@
 
 <!--
 How this was verified beyond CI. `cargo fmt -- --check` and
-`cargo clippy --all-targets -- -D warnings` run before pushing; `CI pass` and
-`Lint title` are the required checks, so a Conventional Commit title with a
-lowercase subject is part of the gate.
+`cargo clippy --workspace --all-targets -- -D warnings` run before pushing;
+`CI pass` and `Lint title` must pass before landing, so a Conventional Commit
+title with a lowercase subject is part of the gate.
 -->
 - [ ]
 

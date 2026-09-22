@@ -300,7 +300,8 @@ cargo clippy --workspace --all-targets -- -D warnings
 ```
 
 GitHub Actions owns the expensive build/test matrix; `CI pass` and `Lint title`
-are the required checks. The draft's current head must also have direct-review
+are the checks a head must pass before it lands (`main` has no branch
+protection, so nothing enforces them). The draft's current head must also have direct-review
 acceptance, resolved threads, and declared-surface containment. Landing is an
 explicit separate operation. Keep PRs focused, preserve unrelated user changes,
 and do not push directly to `main` or merge
