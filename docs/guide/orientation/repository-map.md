@@ -77,7 +77,7 @@ server.
 
 | Crate | Owns |
 |---|---|
-| `aether-kit-commons` | common standalone reference actors: camera + camera-controller, console overlay, mesh viewer |
+| `aether-kit-commons` | common standalone reference actors: camera + camera-controller, mesh viewer |
 | `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |

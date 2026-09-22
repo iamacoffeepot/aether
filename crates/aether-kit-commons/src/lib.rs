@@ -1,4 +1,4 @@
-//! `aether-kit-commons` — the common standalone actors (camera, console, mesh viewer).
+//! `aether-kit-commons` — the common standalone actors (camera, mesh viewer, asset bundle).
 //!
 //! Reusable game-building actors that run on the substrate. Each system is
 //! one module under the crate root that co-locates the actor with its own
@@ -14,9 +14,6 @@
 //!   `aether_kit_commons@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
-//! - [`console::ConsoleOverlay`] — a primitive-rendered developer console
-//!   overlay, selected by the `aether_kit_commons@aether.kit.console` export. Its
-//!   config and extension command vocabulary live in [`console`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
 //!   to the render sink, selected by the `aether_kit_commons@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
@@ -37,7 +34,7 @@
 //! in active use; git history holds them), so kit depends on none of them.
 //!
 //! `export!` (below) packs the actors into one cdylib (ADR-0096 multi-actor
-//! module); the explicit entry type is the bare-load target, and the FFI
+//! module); it declares no default, so every load names its export, and the FFI
 //! shims it emits are wasm32-only and inert in a host rlib, so the integration
 //! tests link the same artifact.
 
@@ -47,27 +44,19 @@ extern crate alloc;
 
 pub mod bundle;
 pub mod camera;
-pub mod console;
 pub mod mesh;
-
-pub use console::{
-    ConsoleCommandInvoked, ConsoleCommandOutput, ConsoleConfig, ConsoleTheme, RegisterConsoleCommand,
-    UnregisterConsoleCommand,
-};
 
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the
 // macro emits the wasm32 FFI shims and the `aether.kinds` custom section for
 // every listed actor. The kit is a subsystem library — a grab-bag of
-// unrelated actors (camera, mesh viewer, console) each loaded independently
-// — so ADR-0138's defaultless policy still governs every actor except the one
-// explicitly named as the default. `console::ConsoleOverlay` is the kit's
-// narrow bare-load target; all other actors stay selector-only by
-// `module@actor` selector, never by list position. The widget set and its
-// `EditorShell` arbiter live in `aether-kit-widget`, exported from its own
-// cdylib, not here (the shelved terrain / sim / workbench siblings likewise
-// owned their own cdylibs while they were in the workspace).
+// independently loaded actors (camera, camera controller, mesh viewer, asset
+// bundle) with no bare-load target, so ADR-0138's defaultless policy governs
+// every export here: each is reached by `module@actor` selector, never by
+// list position. The widget set and its `EditorShell` arbiter live in
+// `aether-kit-widget`, exported from its own cdylib, not here (the shelved
+// terrain / sim / workbench siblings likewise owned their own cdylibs while
+// they were in the workspace).
 aether_actor::export!(
-    default = console::ConsoleOverlay,
     camera::CameraComponent,
     camera::controller::CameraController,
     mesh::MeshViewer,

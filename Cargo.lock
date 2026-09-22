@@ -684,18 +684,15 @@ name = "aether-kit-commons"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
  "aether-harness-substrate-capture",
  "aether-kinds",
- "aether-kit-widget",
  "aether-lifecycle",
  "aether-math",
  "aether-mesh",
  "aether-render",
- "aether-text",
  "aether-window",
  "inventory",
  "serde",

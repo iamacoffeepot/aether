@@ -1921,7 +1921,7 @@ the sole subscriber for interactive input across its configured regions; each
 panel still owns widget focus and capture inside its own cluster, while the
 shell owns region focus and capture between clusters.
 
-Assemble an editor peer-first. Load each panel, console, or mover, retain the
+Assemble an editor peer-first. Load each region actor, retain the
 returned `MailboxId`, and set its config's `owns_input` to `false`. Then load
 one `EditorShell` with an ordered `EditorConfig { regions }`. Each `RegionSpec`
 contains a named pixel rectangle, target mailbox, keyboard eligibility,
@@ -1942,18 +1942,18 @@ abandoned region hit-tests the new position against its own table, finds
 nothing under it, and sends that child its `HoverLost`. A region that holds the
 press owns motion outright, so a drag over a peer exits nobody. Keyboard, committed text, IME preedit, and modifiers route only
 to the focused region. An exact activation chord can focus a region (for
-example, the console's backquote chord). Ctrl+Tab cycles editor regions,
+example, a backquote chord). Ctrl+Tab cycles editor regions,
 Ctrl+Shift+Tab cycles backward, and both the reserved press and matching
 release are consumed. Plain Tab is forwarded unchanged so the focused panel's
 own widget traversal remains intact.
 
 `owns_input` defaults to `true`, preserving standalone behavior. It gates only
-interactive subscriptions: panel/console/mover lifecycle and render roles are
-unchanged, and console/mover continue subscribing to `WindowSize` directly.
+interactive subscriptions: each region actor's lifecycle and render roles are
+unchanged, and those that need it continue subscribing to `WindowSize` directly.
 The shell itself owns no lifecycle, render, or window-size work.
 
 The assembly this model is built for is peer-first: a tool panel, a
-camera-owning viewport, a non-input-owning `ConsoleOverlay`, and one
+camera-owning viewport, a second non-input-owning panel, and one
 `EditorShell` routing their non-overlapping regions.
 
 ## Layout
