@@ -815,7 +815,6 @@ name = "aether-puppet"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
- "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",

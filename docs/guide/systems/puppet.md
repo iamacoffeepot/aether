@@ -11,6 +11,11 @@ aether.component/aether.embedded:aether.puppet
 The module is defaultless because it also exports the idle and turntable
 motors. Select `aether.puppet` when loading it.
 
+Both motors declare a dependency on `aether.puppet`, so a motor is refused at
+load — with a message naming `aether.puppet` — unless a puppet is already live
+under the same parent. Load the puppet first, the way
+`demo/puppet-turntable.boot.json` orders its boot manifest.
+
 ## Load a subject
 
 Send `aether.puppet.load` with paths in one of the substrate's file namespaces:
