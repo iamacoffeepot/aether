@@ -5,8 +5,8 @@
 //! compile-time types — addressed by position where the recipient arrived on
 //! the wire (the RPC server forwarding a `Call`) and by proof where the
 //! caller holds one (ADR-0230) — and `fanout` multicasts one encoding to a
-//! runtime recipient set of proofs. The
-//! per-stage capability traits carry the typed vocabulary FFI guests share:
+//! runtime recipient set of proofs. The per-stage capability traits carry
+//! the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
 //! what it does fails to unify rather than lying in its manifest.
