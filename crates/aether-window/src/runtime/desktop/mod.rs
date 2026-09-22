@@ -350,21 +350,25 @@ impl DesktopWindowCapabilityState {
             }
             return;
         };
-        let effects = match &outcome.result {
-            Err(error) => {
-                self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
-            }
-            Ok(()) => match ctx.monitor(child) {
+        let effects = if let Err(error) = &outcome.result {
+            self.rollback_attached_create(id, &mut pending, format!("failed to spawn window child: {error:?}"))
+        } else {
+            // #6291 replaces this lookup with the reference `SpawnOutcome`
+            // will carry; until then the child's published position is
+            // proven here, where the outcome already says it reached `Live`.
+            let monitored = ctx
+                .resolve_live(child)
+                .map_err(|error| format!("spawned window child is not live: {error}"))
+                .and_then(|reference| {
+                    ctx.monitor(reference).map_err(|error| format!("failed to monitor window child: {error:?}"))
+                });
+            match monitored {
                 Ok(monitor) => self.promote_attached_window(ctx, id, child, monitor, &mut pending),
-                Err(error) => {
+                Err(reason) => {
                     ctx.actor_at::<DesktopWindowInstance>(child).send(&RetireWindow);
-                    self.rollback_attached_create(
-                        id,
-                        &mut pending,
-                        format!("failed to monitor window child: {error:?}"),
-                    )
+                    self.rollback_attached_create(id, &mut pending, reason)
                 }
-            },
+            }
         };
         self.pending_host_effects.extend(effects);
     }

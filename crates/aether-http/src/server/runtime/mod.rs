@@ -317,7 +317,7 @@ impl NativeActor for HttpServerCapability {
     /// # Agent
     /// `RegisterRoute { prefix, method, kind, mailbox }`. The external
     /// form — an MCP session or test names the handler mailbox
-    /// explicitly; it is validated against the registry. An in-process
+    /// explicitly; it is proven live at receipt (ADR-0230). An in-process
     /// actor registering itself sends `register_route_self` instead.
     #[handler::single]
     fn on_register_route(
@@ -328,13 +328,14 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        if let Err(error) = validate_route_mailbox(state.mailer.registry(), payload.mailbox) {
-            return RegisterRouteResult::Err { error };
-        }
+        let handler = match ctx.resolve_live(payload.mailbox) {
+            Ok(handler) => handler,
+            Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
+        };
         let result =
             state.register_route(&payload.prefix, payload.method, payload.kind, payload.mailbox, payload.shared);
         if matches!(result, RegisterRouteResult::Ok) {
-            state.watch(ctx, payload.mailbox);
+            state.watch(ctx, handler);
         }
         result
     }
@@ -358,12 +359,12 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        match ctx.source_mailbox() {
-            Some(mailbox) => {
+        match ctx.sender() {
+            Some(sender) => {
                 let result =
-                    state.register_route(&payload.prefix, payload.method, payload.kind, mailbox, payload.shared);
+                    state.register_route(&payload.prefix, payload.method, payload.kind, sender.id(), payload.shared);
                 if matches!(result, RegisterRouteResult::Ok) {
-                    state.watch(ctx, mailbox);
+                    state.watch(ctx, sender);
                 }
                 result
             }
@@ -442,7 +443,7 @@ impl NativeActor for HttpServerCapability {
     /// the same mailbox re-registers through its own route claim.
     #[handler::single]
     fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        state.monitors.remove(&notice.target);
+        state.monitors.retain(|reference, _| reference.id() != notice.target);
         state.unregister_routes_all(notice.target);
     }
 }

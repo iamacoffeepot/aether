@@ -156,10 +156,8 @@ impl WindowSubscribers {
     }
 
     fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
-        // `NativeCtx::monitor` still takes a position; #6303 narrows it to a
-        // proof. The handle is keyed on the proof either way.
         if !self.monitors.contains_key(&subscriber)
-            && let Ok(handle) = ctx.monitor(subscriber.id())
+            && let Ok(handle) = ctx.monitor(subscriber)
         {
             self.monitors.insert(subscriber, handle);
         }

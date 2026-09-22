@@ -330,11 +330,19 @@ impl NativeActor for TcpCapability {
                     done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
                     return;
                 }
-                let monitor_handle = match ctx.monitor(listener_mailbox) {
+                // #6291 replaces this lookup with the reference `SpawnOutcome`
+                // will carry; until then the listener's position is proven
+                // here, after the outcome said it reached `Live`.
+                let monitored = ctx
+                    .resolve_live(listener_mailbox)
+                    .map_err(|error| format!("spawned listener is not live: {error}"))
+                    .and_then(|reference| {
+                        ctx.monitor(reference).map_err(|monitor_error| format!("monitor failed: {monitor_error:?}"))
+                    });
+                let monitor_handle = match monitored {
                     Ok(handle) => handle,
-                    Err(monitor_error) => {
+                    Err(error) => {
                         ctx.actor_at::<TcpListenerActor>(listener_mailbox).send(&Close::default());
-                        let error = format!("monitor failed: {monitor_error:?}");
                         done.resolve_with(ctx, move |_, _| BindListenerResult::Err { addr, error });
                         return;
                     }

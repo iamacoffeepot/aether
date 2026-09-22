@@ -118,10 +118,14 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
             payload: &[u8],
         ) -> Option<()> {
             if kind.0 == WatchOrder::ID.0 {
-                let target = MailboxId(WatchOrder::decode_from_bytes(payload)?.target_id);
+                let position = MailboxId(WatchOrder::decode_from_bytes(payload)?.target_id);
+                let Ok(target) = ctx.resolve_live(position) else {
+                    state.monitored.lock().unwrap().push(Err(MonitorError::TargetNotFound));
+                    return Some(());
+                };
                 state.monitored.lock().unwrap().push(ctx.monitor(target).map(|handle| {
                     state.handles.lock().unwrap().push(handle);
-                    target
+                    position
                 }));
                 return Some(());
             }
@@ -322,10 +326,14 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
             payload: &[u8],
         ) -> Option<()> {
             if kind.0 == WatchOrder::ID.0 {
-                let target = MailboxId(WatchOrder::decode_from_bytes(payload)?.target_id);
+                let position = MailboxId(WatchOrder::decode_from_bytes(payload)?.target_id);
+                let Ok(target) = ctx.resolve_live(position) else {
+                    state.monitored.lock().unwrap().push(Err(MonitorError::TargetNotFound));
+                    return Some(());
+                };
                 state.monitored.lock().unwrap().push(ctx.monitor(target).map(|handle| {
                     state.handles.lock().unwrap().push(handle);
-                    target
+                    position
                 }));
                 return Some(());
             }
