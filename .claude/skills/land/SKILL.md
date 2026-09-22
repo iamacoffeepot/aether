@@ -31,7 +31,7 @@ All evidence must describe one current head SHA.
 
 ### Approval identity
 
-Run the shared `plan_digest.py`, `approval_records.py`, surface matcher, and tier resolver against the current issue body. Validate body-editor provenance and select a trusted hidden v2 record whose issue, digest, size, model, tiers, and authority match current facts. Only when no current trusted v2 exists may a migration-era pull request inspect a strict trusted v1 comment.
+Run the shared `plan_digest.py`, `approval_records.py`, surface matcher, and tier resolver against the current issue body. Validate body-editor provenance and select a trusted hidden v2 record whose issue, digest, size, model, tiers, and authority match current facts.
 
 Require the approved base commit to exist and be an ancestor of pull-request head. Current main may have advanced since approval; that alone does not stale in-flight work. A changed digest, route, missing trusted record, or base outside head ancestry is ineligible.
 

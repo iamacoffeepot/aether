@@ -32,7 +32,7 @@ Fetch `origin/main` and read the issue body, effective editor, labels, dependenc
 - no owned issue worktree, branch, or pull request already present;
 - all dependencies complete and every Plan claim still grounded at the approved base.
 
-Validate owner authority from issue-body edit provenance over GraphQL, never from payload claims. Only when no current trusted v2 record exists may a migration-era resume inspect a strict trusted v1 comment. A stale digest, wrong route, changed fresh base, dependency regression, or broken Plan premise returns to `/scope <issue> --phase plan` or `/approve <issue>` with concrete evidence. Never implement a pure umbrella.
+Validate owner authority from issue-body edit provenance over GraphQL, never from payload claims. A stale digest, wrong route, changed fresh base, dependency regression, or broken Plan premise returns to `/scope <issue> --phase plan` or `/approve <issue>` with concrete evidence. Never implement a pure umbrella.
 
 ### Quick mode
 

@@ -27,7 +27,7 @@ Fetch `origin/main` without switching the caller's worktree. Read the pull reque
 - expected issue worktree/branch ownership or a documented already-cleaned local state;
 - Conventional Commit title.
 
-Read the closing issue body and edit provenance, migration-only comments when needed, current pull-request head, commits, changed files, check suites/runs, reviews, and review threads. A failed or truncated read is a hard unknown, never a pass.
+Read the closing issue body and edit provenance, current pull-request head, commits, changed files, check suites/runs, reviews, and review threads. A failed or truncated read is a hard unknown, never a pass.
 
 ## Independent landing gates
 
@@ -35,7 +35,7 @@ All evidence must describe the same current head SHA.
 
 ### Approval identity
 
-Run `approval_records.py` and `plan_digest.py` on the current issue body and resolve its current routing and policy evidence. Validate editor provenance and find a trusted v2 body record whose issue, Plan digest, size/model, and policy/effective tiers match. Only when no current trusted v2 exists may a migration-era run inspect strict trusted v1 comments. Require the selected record's approved base to exist and be an ancestor of the pull-request head.
+Run `approval_records.py` and `plan_digest.py` on the current issue body and resolve its current routing and policy evidence. Validate editor provenance and find a trusted v2 body record whose issue, Plan digest, size/model, and policy/effective tiers match. Require the selected record's approved base to exist and be an ancestor of the pull-request head.
 
 The remote-tracking main commit may have advanced since approval; that alone does not stale an in-flight pull request. A changed issue digest, changed route, missing trusted record, or approval base outside head ancestry is ineligible and must return to scope or approval.
 
@@ -92,7 +92,7 @@ Do not run full local tests or distributions unless the user explicitly asks; CI
 
 ## Clear draft and merge
 
-Immediately before mutation, re-read the pull request, issue body and editor provenance, migration-only approval comments when needed, head, checks, native reviews, threads, overflow, merge prediction, and every gate. Abort on any change.
+Immediately before mutation, re-read the pull request, issue body and editor provenance, head, checks, native reviews, threads, overflow, merge prediction, and every gate. Abort on any change.
 
 1. Read the pull request node id.
 2. Use GraphQL `markPullRequestReadyForReview` and verify draft is false.

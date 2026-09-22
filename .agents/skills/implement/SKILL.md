@@ -32,7 +32,7 @@ For a fresh run, require and list every failure:
 - no owned issue worktree, branch, or pull request already exists;
 - a current trusted approval record matching the fresh issue digest, route, policy tiers, and freshly fetched `origin/main` SHA.
 
-Re-run `approval_records.py`, `plan_digest.py`, and the surface resolver; do not trust copied values. Validate the v2 body record through the shared issue-editor provenance contract. Only when no current trusted v2 exists may a migration-era run inspect strict trusted v1 comments. The approval base must equal the fresh remote-tracking main commit before a new worktree is cut. Any body digest mismatch, routing mismatch, changed base, broken grounding claim, dependency regression, or surface failure returns the issue to `$scope <N> --phase plan` or `$approve <N>` as appropriate. A pure umbrella is never implemented.
+Re-run `approval_records.py`, `plan_digest.py`, and the surface resolver; do not trust copied values. Validate the v2 body record through the shared issue-editor provenance contract. The approval base must equal the fresh remote-tracking main commit before a new worktree is cut. Any body digest mismatch, routing mismatch, changed base, broken grounding claim, dependency regression, or surface failure returns the issue to `$scope <N> --phase plan` or `$approve <N>` as appropriate. A pure umbrella is never implemented.
 
 ### Quick gate
 
