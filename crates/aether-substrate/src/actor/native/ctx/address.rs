@@ -8,12 +8,13 @@
 //! derives it belongs with the pair that reads it.
 
 use aether_actor::{
-    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, Instanced, ReplyMode, Singleton,
-    address_candidate,
+    ActorRef, Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Instanced,
+    Reaches, ReplyMode, Singleton, address_candidate,
 };
 use aether_data::{Address, MailId, MailboxId};
 
 use crate::actor::native::mailbox::NativeActorMailbox;
+use crate::mail::registry::Registry;
 
 use super::NativeCtx;
 
@@ -22,14 +23,22 @@ use super::NativeCtx;
 /// `resolve_actor` / `actor_at` resolve identically. Emitting them from
 /// one source keeps the two ctxs from drifting and means the bodies are
 /// not a `DuplicatedCode` clone (ADR-0099 §5 / issue 1431).
+///
+/// Takes the type that must reach `R` through [`actor`](NativeCtx::actor):
+/// [`NativeCtx`] passes its actor parameter `A`, while the actor-less
+/// [`NativeInitCtx`](super::NativeInitCtx) passes [`Erased`](aether_actor::Erased)
+/// and keeps the old door.
 macro_rules! native_sender_methods {
-    () => {
+    ($reacher:ty) => {
         /// Singleton sender shortcut: returns a typed [`NativeActorMailbox`]
         /// addressing the unique instance of receiver actor `R`. The
         /// handle captures this ctx's in-flight lineage (ADR-0080 §7) so
         /// a `send` from it inherits the handler's causal chain.
         #[must_use]
-        pub fn actor<R: Singleton + CallerAddressable>(&self) -> NativeActorMailbox<'_, R> {
+        pub fn actor<R: Singleton + CallerAddressable>(&self) -> NativeActorMailbox<'_, R>
+        where
+            $reacher: Reaches<R>,
+        {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(
                 R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
@@ -106,7 +115,22 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.self_mailbox()
     }
 
-    native_sender_methods!();
+    native_sender_methods!(A);
+
+    /// Proven reference to a declared dependency (ADR-0230): mints an
+    /// [`ActorRef`] for the position [`Self::actor`] folds for `R`, with no
+    /// registry read — the load was refused unless `R` was `Live`, so the
+    /// answer is already known. Bounded `A: DependsOn<R>` directly, so it
+    /// does not exist on the erased ctx. The one caller of the registry's
+    /// `declared_dependency` mint.
+    #[must_use]
+    pub fn actor_ref<R: Singleton + CallerAddressable>(&self) -> ActorRef<R>
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        Registry::declared_dependency(self.actor::<R>().mailbox_id())
+    }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
     /// mail from this ctx's in-flight context. `MailId::NONE` collapses

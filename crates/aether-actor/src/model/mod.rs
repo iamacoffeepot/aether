@@ -26,6 +26,8 @@ pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
+use self::ctx::Erased;
+
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the
 /// actor's own `NAMESPACE`, and whatever args the strategy needs, produce
 /// the `MailboxId`. An actor selects one of these as its
@@ -407,6 +409,69 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
 where
     R::Resolver: DependencyResolver,
+{
+}
+
+mod reaches_sealed {
+    /// Private supertrait sealing [`super::Reaches`] — only the two impls in
+    /// the parent module can implement it, so the set of ctx actors that may
+    /// address `R` through `ctx.actor` is closed.
+    pub trait Sealed<R> {}
+}
+
+/// A ctx whose actor parameter is `Self` may address `R` through `ctx.actor`
+/// (ADR-0230).
+///
+/// Sealed: the only implementors are [`Erased`], which reaches every singleton
+/// `R` (the old door, kept until the contract step), and every
+/// `A: Addressable + DependsOn<R>`, whose load was refused unless `R` was
+/// `Live`. A helper states its need as
+/// `fn draw<A: DependsOn<RenderCapability>>(ctx: &mut WasmCtx<'_, A>)`, and the
+/// same call text that was the old door on an erased ctx is the proven one on
+/// a typed ctx.
+///
+/// The [`Addressable`] bound is spelled out even though [`DependsOn`] implies
+/// it as a supertrait: without it the two impls overlap. A downstream crate
+/// could write `impl DependsOn<Local> for Erased` — the local `R` satisfies
+/// the orphan rule — but it cannot write `impl Addressable for Erased`, a
+/// foreign trait for a foreign type, and this crate writes neither. So
+/// [`Erased`] provably never satisfies the blanket impl's bounds.
+///
+/// A typed ctx calling `actor::<R>()` for an `R` it has not declared does not
+/// type-check:
+///
+/// ```compile_fail,E0277
+/// use aether_actor::{Addressable, One, WasmCtx};
+///
+/// struct Undeclared;
+///
+/// impl Addressable for Undeclared {
+///     const NAMESPACE: &'static str = "example.undeclared";
+///     type Resolver = One;
+/// }
+///
+/// struct Lonely;
+///
+/// impl Addressable for Lonely {
+///     const NAMESPACE: &'static str = "example.lonely";
+///     type Resolver = One;
+/// }
+///
+/// fn missing_dependency(ctx: &WasmCtx<'_, Lonely>) {
+///     let _ = ctx.actor::<Undeclared>();
+/// }
+/// ```
+pub trait Reaches<R: Singleton + CallerAddressable>: reaches_sealed::Sealed<R> {}
+
+impl<R: Singleton + CallerAddressable> reaches_sealed::Sealed<R> for Erased {}
+impl<R: Singleton + CallerAddressable> Reaches<R> for Erased {}
+
+impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> reaches_sealed::Sealed<R> for A where
+    R::Resolver: DependencyResolver
+{
+}
+impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> Reaches<R> for A where
+    R::Resolver: DependencyResolver
 {
 }
 

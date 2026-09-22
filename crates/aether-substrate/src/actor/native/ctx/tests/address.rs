@@ -203,3 +203,41 @@ fn resolve_tracks_a_keyed_child_across_spawn() {
     let resolved = ctx.resolve(&address).expect("a spawned child resolves to a reference");
     assert_eq!(resolved.id(), child_id, "the reference proves the spawned child's position");
 }
+
+struct Dependent;
+
+impl Addressable for Dependent {
+    const NAMESPACE: &'static str = "test.native.actor_ref_dependent";
+    type Resolver = aether_actor::One;
+}
+
+struct OneDep;
+
+impl Addressable for OneDep {
+    const NAMESPACE: &'static str = "test.native.actor_ref_one_dep";
+    type Resolver = aether_actor::One;
+}
+
+impl aether_actor::DependsOn<OneDep> for Dependent {}
+impl aether_actor::DependsOn<EmbeddedPeer> for Dependent {}
+
+/// `actor_ref` and `actor` share one derivation on a `NativeCtx<'_, Dependent>`:
+/// the reference proves the folded position for a `One` and for an `Embedded`
+/// dependency, with no registry read. Owned logic: the shared `actor` fold
+/// behind both doors.
+#[test]
+fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() {
+    use aether_actor::Single;
+
+    use crate::testing::bare_substrate;
+
+    let (_registry, mailer) = bare_substrate();
+    let parent = MailboxId(0xC020);
+    let current = MailboxId(0xC010);
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+    let ctx: NativeCtx<'_, Dependent, Single> =
+        NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+
+    assert_eq!(ctx.actor_ref::<OneDep>().id(), ctx.actor::<OneDep>().mailbox_id());
+    assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), ctx.actor::<EmbeddedPeer>().mailbox_id());
+}

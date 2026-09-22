@@ -15,7 +15,8 @@ use crate::model::address::address_candidate;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, Embedded, Instanced, Resolve, Singleton,
+    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Embedded, Instanced,
+    Reaches, Resolve, Singleton,
 };
 use crate::reference::ActorRef;
 use crate::wasm::bridge::mail;
@@ -287,8 +288,25 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// actor's own id as the send's `from` (issue 1987) and a borrow of
     /// the inline registry the send routes through.
     #[must_use]
-    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
+    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R>
+    where
+        A: Reaches<R>,
+    {
         self.actor_with_namespace::<R>(R::NAMESPACE)
+    }
+
+    /// Proven reference to a declared dependency (ADR-0230): mints an
+    /// [`ActorRef`] for the position [`Self::actor`] folds for `R`, with no
+    /// host call — the load was refused unless `R` was `Live`, so the answer
+    /// is already known. Bounded `A: DependsOn<R>` directly, so it does not
+    /// exist on the erased ctx.
+    #[must_use]
+    pub fn actor_ref<R: Singleton + CallerAddressable>(&self) -> ActorRef<R>
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        ActorRef::new(self.actor_with_namespace::<R>(R::NAMESPACE).mailbox_id())
     }
 
     /// Namespace-aware typed actor construction: the shared body behind
