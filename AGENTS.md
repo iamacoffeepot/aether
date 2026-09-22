@@ -11,8 +11,8 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 ## Workflow
 
 - Planned work lives in GitHub issues. `scope` records the managed Plan sections, declared surface, and exact size/model routing lines in the issue body. `approve` appends a trusted hidden record bound to that Plan digest and an exact `origin/main` commit; taxonomy labels do not carry workflow state or routing authority.
-- Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, dogfood, and related flows. Codex skills and their shared contracts are authoritative for Codex and execute through the active Codex tools. `CLAUDE.md` and `.claude/skills/` are the separate Claude Code surface; consult them only when intentionally adapting a workflow.
-- Do not implement directly in the primary `main` checkout. Codex issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Other agent surfaces may use `.claude/worktrees/`; Codex issue work stays under `.agents/worktrees/`.
+- Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, and related flows. Codex skills and their shared contracts are authoritative for Codex and execute through the active Codex tools. `CLAUDE.md` and `.claude/skills/` are the separate Claude Code surface; consult them only when intentionally adapting a workflow.
+- Do not implement directly in the primary `main` checkout. Issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Every agent surface keeps its worktrees under `.agents/worktrees/`; `.claude/worktrees/` holds only legacy symlinks.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
 - An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and priced surface overflow. Repair findings in the implementation loop; a new head must prove those facts again.
@@ -21,18 +21,18 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 
 ## Commands
 
-- Build: `cargo build`
+- Build: `cargo build` (the root `default-members` leaves out `xtask`, `aether-puppet`, and the `aether-test-fixtures-*` wasm crates; add `--workspace` for every member)
 - Release build: `cargo build --release`
 - Run a crate: `cargo run -p <crate>`
 - Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`
 - Test: `cargo test`
 - Single test: `cargo test <name>`
-- Clippy: `cargo clippy --all-targets -- -D warnings`
+- Clippy: `cargo clippy --workspace --all-targets -- -D warnings`
 - Format: `cargo fmt`
 - Format check: `cargo fmt -- --check`
 - Check only: `cargo check`
 
-For implementation PRs, this repo uses GitHub Actions as the full build engine. Before pushing an implement branch, locally run the cheap deterministic tier: `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`; fix any red locally before opening or updating a draft PR. Let CI run the expensive checks unless the issue explicitly asks for local verification. If a user explicitly asks for full local build, test, or dist verification, report the result and then note that `target/` and generated `dist/` artifacts can be large, so clean them up when they are no longer needed or ask before preserving them.
+For implementation PRs, this repo uses GitHub Actions as the full build engine. Before pushing an implement branch, locally run the cheap deterministic tier: `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`; fix any red locally before opening or updating a draft PR. Let CI run the expensive checks unless the issue explicitly asks for local verification. If a user explicitly asks for full local build, test, or dist verification, report the result and then note that `target/` and generated `dist/` artifacts can be large, so clean them up when they are no longer needed or ask before preserving them.
 
 ## Codex Hooks
 
