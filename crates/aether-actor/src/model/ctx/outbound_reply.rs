@@ -5,7 +5,7 @@
 //! and drop ctxs deliberately do not — there's no inbound mail at boot
 //! and reply targets are not honoured during teardown.
 
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 
 use crate::model::ctx::mail_sender::MailSender;
 
@@ -34,16 +34,6 @@ pub trait OutboundReply: MailSender {
     /// inbound carries a routable originator (Claude session, peer
     /// component, remote engine mailbox).
     fn reply_target(&self) -> Option<Self::ReplyHandle>;
-
-    /// Immediate-sender mailbox of the mail currently being dispatched,
-    /// or `None` for mail with no local sender (broadcast,
-    /// substrate-generated, hub-bubbled). This is the *immediate*
-    /// sender (one hop, the addressing layer's `Source`), not the chain
-    /// origin — the origin lives in the tracing layer (`root` /
-    /// `parent_mail`, ADR-0080). Useful for caps that want to attribute
-    /// work to the sending component without going through the reply
-    /// path.
-    fn source_mailbox(&self) -> Option<MailboxId>;
 
     /// Reply to the originator of the mail currently being dispatched.
     /// No-op when there's no reply target. Wire shape (cast or structured)

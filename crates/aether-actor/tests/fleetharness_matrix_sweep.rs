@@ -2,7 +2,7 @@
 //! amendment): load the `matrix_sweep` cluster fixture + a cross-cluster
 //! `source_observer`, drive the sweep over the real `WireFrame::Call` wire,
 //! read back the structured `MatrixReport`, and assert every cell — delivery
-//! AND the source the recipient read (`ctx.source_mailbox()`).
+//! AND the source the recipient read (`ctx.sender()`).
 //!
 //! Cells asserted from the report (in-cluster, in-place dispatch):
 //!

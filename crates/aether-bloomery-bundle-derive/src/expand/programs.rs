@@ -80,13 +80,16 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             invoked: #program::Invoked,
         ) {
             use ::aether_actor::OutboundReply;
-            let Some((child, reply)) = self.programs.finish(&invoked, ctx.source_mailbox()) else {
+            let Some(sender) = ctx.sender() else {
+                return;
+            };
+            let Some((_, reply)) = self.programs.finish(&invoked, Some(sender.id())) else {
                 return;
             };
             if let Some(reply) = reply {
                 ctx.reply_to(reply, &invoked);
             }
-            ctx.despawn_inline_child(child);
+            ctx.despawn_inline_child(sender);
         }
     }
 }

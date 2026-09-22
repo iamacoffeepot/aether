@@ -17,7 +17,7 @@ use aether_actor::{
 };
 use aether_data::{Kind, KindId, MailId, MailboxId, mailbox_id_from_path};
 
-use crate::mail::{Source, SourceAddr};
+use crate::mail::Source;
 
 use super::NativeCtx;
 
@@ -317,19 +317,12 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
     /// Always `Some` on native — the substrate's per-handler dispatcher
     /// builds a `Source` for every inbound (broadcast / no-reply mail
     /// rides as `SourceAddr::None` inside the wrapper). The
-    /// always-Some invariant is preserved by [`Self::source_mailbox`] /
+    /// always-Some invariant is preserved by [`NativeCtx::sender`] /
     /// [`Self::reply`] inspecting the inner `SourceAddr`; the trait's
     /// `Option<Self::ReplyHandle>` shape exists for the FFI side,
     /// where a guest genuinely sees no reply target.
     fn reply_target(&self) -> Option<Source> {
         Some(self.source)
-    }
-
-    fn source_mailbox(&self) -> Option<MailboxId> {
-        match self.source.addr {
-            SourceAddr::Component(id) => Some(id),
-            _ => None,
-        }
     }
 
     fn reply<K: Kind>(&mut self, payload: &K) {

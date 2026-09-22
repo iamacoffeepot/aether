@@ -409,8 +409,8 @@ impl NativeActor for HttpServerCapability {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        match ctx.source_mailbox() {
-            Some(mailbox) => state.unregister_route(&payload.prefix, payload.method, mailbox),
+        match ctx.sender() {
+            Some(sender) => state.unregister_route(&payload.prefix, payload.method, sender.id()),
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.unregister_route_self requires a local sender; an \
                         external session or remote engine must use \

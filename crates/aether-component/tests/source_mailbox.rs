@@ -1,8 +1,8 @@
-//! Issue 1958: end-to-end proof that a WASM guest's `WasmCtx::source_mailbox()`
+//! Issue 1958: end-to-end proof that a WASM guest's `WasmCtx::sender()`
 //! correctly surfaces the inbound mail's component origin.
 //!
 //! Uses the `source_observer` test-fixture component, whose `on_source_query`
-//! manual handler reads `ctx.source_mailbox()`, logs the raw id, and broadcasts
+//! manual handler reads `ctx.sender()`, logs the raw id, and broadcasts
 //! `SourceReport { mailbox_id }` to the observer.
 //!
 //! Two invariants are checked:
@@ -76,7 +76,7 @@ fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &st
 }
 
 /// Session-source case: the harness sends `SourceQuery` directly to the reader.
-/// `source_mailbox()` must return `None` (no component origin) → `SourceReport
+/// `sender()` must return `None` (no component origin) → `SourceReport
 /// { mailbox_id: 0 }`.
 #[test]
 fn session_source_returns_none() {
@@ -95,14 +95,14 @@ fn session_source_returns_none() {
 
     assert_eq!(
         report.mailbox_id, 0,
-        "session-origin source_mailbox() must be None (mailbox_id 0), got {:#x}",
+        "session-origin sender() must be None (mailbox_id 0), got {:#x}",
         report.mailbox_id,
     );
 }
 
 /// Component-source case: a forwarder component sends `SourceQuery` to the
 /// observer through the reference its declared dependency minted.
-/// `source_mailbox()` must return `Some(forwarder_mailbox)`. Verified by
+/// `sender()` must return `Some(forwarder_mailbox)`. Verified by
 /// checking the value the observer logged via `log_tail`.
 #[test]
 fn component_source_returns_sender_mailbox() {

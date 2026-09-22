@@ -137,7 +137,7 @@ impl Component {
         // own mailbox id.
         //
         // Issue 2001: thread the resolved inbound source as the trailing
-        // slot too, so the guest's `WasmCtx::source_mailbox` is a single
+        // slot too, so the guest's `WasmCtx::sender` is a single
         // ctx-field read on both the in-place and top-level paths and the
         // `source_of_p32` host round-trip can be retired. Resolved exactly
         // as `source_of_p32` did — a peer-component origin yields its

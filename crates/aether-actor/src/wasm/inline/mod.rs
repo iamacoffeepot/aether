@@ -140,7 +140,7 @@ struct QueuedMail {
     /// (the local fast path is fire-and-forget), so the host reply table holds
     /// no immediate-sender for it; [`drain_cluster_queue`] instead threads this
     /// value onto the recipient's [`WasmCtx`] as its inbound source (issue
-    /// 1987), so the recipient's `ctx.source_mailbox()` resolves it. `0`
+    /// 1987), so the recipient's `ctx.sender()` resolves it. `0`
     /// (`MailboxId::NONE`) when the sender is unknown.
     sender: u64,
 }
@@ -641,7 +641,7 @@ impl Registry {
 /// the host-resolved inbound source for a top-level dispatch (the `receive_p32`
 /// membrane threads the same value it received over the ABI), or
 /// [`MailboxId::NONE`] (`0`) when there is no peer-component origin. The child's
-/// `ctx.source_mailbox()` is a single read of this field. The own-id path's ctx
+/// `ctx.sender()` is a single read of this field. The own-id path's ctx
 /// is built by `dispatch_own`, which the caller has already bound to the same
 /// `source`.
 ///
@@ -729,7 +729,7 @@ where
         // The dispatched member's inbound source is this item's "from" half
         // (`item.sender`): the child path threads it onto the membrane-built
         // ctx, and `mk_own(item.sender)` threads it onto the own-path ctx, so
-        // both read the same source via `ctx.source_mailbox()`. The member's
+        // both read the same source via `ctx.sender()`. The member's
         // *own* sends carry the member's id (`item.recipient`, the ctx's
         // identity) as their `from` through `route_or_enqueue` — no host
         // re-stamp.
@@ -742,6 +742,7 @@ where
 mod tests {
     use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::mail::{Mail, PriorState};
+    use crate::reference::AnyActorRef;
     use crate::wasm::ErasedWasmActor;
     use crate::{ActorTypeTag, CallerScope, WasmCtx};
     use aether_data::MailboxId;
@@ -751,7 +752,7 @@ mod tests {
     use alloc::vec::Vec;
     use core::cell::{Cell, RefCell};
 
-    /// Shared cell a [`RecordingChild`] writes the `source_mailbox()` it
+    /// Shared cell a [`RecordingChild`] writes the `sender()` position it
     /// observed into, read back by the source-attribution tests.
     type SourceCell = Rc<Cell<Option<MailboxId>>>;
 
@@ -762,13 +763,13 @@ mod tests {
 
     /// Minimal `ErasedWasmActor` for the membrane tests: bumps a
     /// test-local dispatch counter (shared via [`Rc`] so the test reads it
-    /// back without a process-global), records the `ctx.source_mailbox()`
+    /// back without a process-global), records the `ctx.sender()` position
     /// it observed on the most recent dispatch (the in-place "from" half),
     /// and returns [`CHILD_CODE`]. The lifecycle hooks are unreachable in
     /// these tests.
     struct RecordingChild {
         dispatches: Rc<Cell<u32>>,
-        /// The `source_mailbox()` the child read on its last dispatch,
+        /// The `sender()` position the child read on its last dispatch,
         /// shared with the test so it can assert the in-place sender. `None`
         /// until the first dispatch and whenever the source resolves to
         /// none.
@@ -803,7 +804,7 @@ mod tests {
         }
         fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, _mail: Mail<'_>) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
-            self.observed_source.set(ctx.source_mailbox());
+            self.observed_source.set(ctx.sender().map(AnyActorRef::id));
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
@@ -824,7 +825,7 @@ mod tests {
     /// reinserted) after it removed its own slot mid-dispatch. Carries its
     /// own alias id so `erased_dispatch` can despawn the matching slot.
     struct SelfDespawningChild {
-        id: MailboxId,
+        id: AnyActorRef,
         drops: Rc<Cell<u32>>,
     }
 
@@ -1071,7 +1072,7 @@ mod tests {
             false,
             0,
             Vec::new(),
-            Box::new(SelfDespawningChild { id: MailboxId(child), drops: Rc::clone(&drops) }),
+            Box::new(SelfDespawningChild { id: AnyActorRef::new(MailboxId(child)), drops: Rc::clone(&drops) }),
         );
 
         // Dispatch the child; it despawns its own slot mid-dispatch.
@@ -1299,7 +1300,7 @@ mod tests {
     }
 
     /// Task 1: a child dispatched off the drain reads
-    /// `ctx.source_mailbox()` == the enqueuing sender — the child → parent
+    /// `ctx.sender()` == the enqueuing sender — the child → parent
     /// direction. The parent (the cluster root) enqueues a send to the child
     /// stamped with the parent's own id; the drained child observes exactly
     /// that id, not `None`.
@@ -1327,7 +1328,7 @@ mod tests {
     }
 
     /// A `membrane_dispatch` called with a `NONE` source threads it verbatim,
-    /// so the dispatched child reads `source_mailbox() == None`. (In
+    /// so the dispatched child reads `sender() == None`. (In
     /// production the `receive_p32` shim threads the host-resolved inbound
     /// source instead of `NONE`; this exercises the function's `NONE`
     /// contract directly — there is no host reply-table fallback.)

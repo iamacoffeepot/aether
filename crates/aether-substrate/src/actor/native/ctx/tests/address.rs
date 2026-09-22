@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, AnyActorRef};
 use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_path};
 
 use crate::actor::native::NativeCtx;
@@ -164,9 +164,9 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
 }
 
 /// `sender` mints the stamped dispatch source on the erased ctx: `Some` for
-/// a `SourceAddr::Component` source, `None` for `SourceAddr::None`. Owned
-/// logic: the `source_mailbox` lift, which adds no source-classification of
-/// its own.
+/// a `SourceAddr::Component` source, proving exactly its id, and `None` for
+/// `SourceAddr::None`. Owned logic: the source classification `sender`
+/// performs itself.
 #[test]
 fn sender_mints_the_component_source_and_none_without_one() {
     use crate::testing::bare_substrate;
@@ -182,7 +182,11 @@ fn sender_mints_the_component_source_and_none_without_one() {
         MailId::NONE,
         MailId::NONE,
     );
-    assert!(component.sender().is_some(), "a component source mints a sender reference");
+    assert_eq!(
+        component.sender().map(AnyActorRef::id),
+        Some(MailboxId(0xC030)),
+        "a component source mints a sender reference to its id"
+    );
 
     let sourceless =
         NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);

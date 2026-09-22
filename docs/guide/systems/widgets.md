@@ -61,7 +61,7 @@ three is ever the accent.
 A widget reacts to config, style, layout, external state, and root-owned
 interaction data-down, then reports values and state changes events-up. The
 events-up kinds carry **no widget-identity field** — the root attributes a reply
-by the sender's `MailboxId` (`ctx.source_mailbox()`) against the children it
+by the sender's proven reference (`ctx.sender()`) against the children it
 recorded at spawn, so a widget's identity is its inline subname and nothing a
 widget sends can misreport it.
 
@@ -140,7 +140,7 @@ widget sends can misreport it.
   `WidgetStateChanged` so panel routing cannot drift. Content-derived pointer
   and keyboard eligibility is a separate events-up kind,
   `WidgetEligibilityChanged { pointer, keyboard }` — no identity field and no
-  data-down setter; the panel attributes `ctx.source_mailbox()`. Hidden widgets
+  data-down setter; the panel attributes `ctx.sender()`. Hidden widgets
   keep their slot and answer `Collect` with an empty `WidgetDrawList`; disabled
   widgets draw muted but leave input routing; read-only Slider, Radio,
   TextField, TextArea, VirtualList, Toggle, Segmented, TabStrip, and Numeric
@@ -659,7 +659,7 @@ fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover
 `VirtualListHover { index: Option<u32>, frame }` is sent whenever
 that answer **changes** — from a pointer move, a wheel, a thumb drag, or a
 fresh item vector arriving under a still pointer — and is attributed by
-`ctx.source_mailbox()` like every other value-up event. (A handler may spell
+`ctx.sender()` like every other value-up event. (A handler may spell
 its actor — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
 actor; the default `Erased` names no actor. The actor is the first parameter,
 the reply mode the second.) The rectangle is the
@@ -975,7 +975,7 @@ fn on_dropdown_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover: Dr
 `DropdownHover { index: Option<u32>, frame }` is sent whenever
 the answer **changes** — a pointer move, an arrow key scrolling the window
 under a still pointer, the list closing — and is attributed by
-`ctx.source_mailbox()` like every other value-up event. `None` is the pointer
+`ctx.sender()` like every other value-up event. `None` is the pointer
 having left the rows or the list having closed, and carries a zero rectangle:
 it is the event that takes the explanation down.
 
@@ -2036,7 +2036,7 @@ have no pointer/Tab router of their own.
 The vertical order follows the declared order, so what a panel
 contains is config data. Its
 value-up handlers are the seam: each attributes the event by
-`ctx.source_mailbox()` and is where a map editor translates a widget change
+`ctx.sender()` and is where a map editor translates a widget change
 into world-knob driver mail. Hand it your own `children` and fill in those
 handlers.
 

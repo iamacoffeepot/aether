@@ -39,7 +39,7 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// reply table is empty, so the ctx is the only carrier); for a top-level
     /// dispatch the host resolves the source from the inbound's `SourceAddr`
     /// and threads it as the trailing `receive_p32` ABI slot. So
-    /// [`Self::source_mailbox`] is a single read of this field on both paths.
+    /// [`Self::sender`] is a single read of this field on both paths.
     /// [`MailboxId::NONE`] (`0`) means no peer-component origin — a session,
     /// remote-engine, or broadcast mail, or a lifecycle hook with no inbound.
     pub(super) source: u64,
@@ -69,7 +69,7 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
 
 /// The `source` argument to [`WasmCtx::__new`] for a dispatch that carries no
 /// inbound source — a lifecycle hook (`wire` / `unwire` / `on_rehydrate`),
-/// where [`WasmCtx::source_mailbox`] returns `None`. Equals [`MailboxId::NONE`].
+/// where [`WasmCtx::sender`] returns `None`. Equals [`MailboxId::NONE`].
 /// (A top-level mail dispatch threads the host-resolved source over the
 /// `receive_p32` ABI; the drained-member path threads the enqueuing member's
 /// own id.) Named so the `__new` call sites read intent, not a bare `0`.
@@ -215,20 +215,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         self.sender
     }
 
-    /// The inbound source — the folded [`MailboxId`] of whoever sent the
-    /// mail currently being dispatched, or `None` for a sourceless dispatch
-    /// (session / remote-engine / broadcast mail, or a lifecycle hook with
-    /// no inbound). Reads the same `source` field as
-    /// [`OutboundReply::source_mailbox`](crate::OutboundReply::source_mailbox), but on the generic ctx so a
-    /// `#[fallback]` (which runs on the downgraded [`Single`] view, issue
-    /// 2687) can resolve a cluster-membrane interposer's lane direction —
-    /// compare the source against a stored child id: equal ⇒ up-lane, else
-    /// ⇒ down-lane.
-    #[must_use]
-    pub fn source_mailbox(&self) -> Option<MailboxId> {
-        (self.source != MailboxId::NONE.0).then_some(MailboxId(self.source))
-    }
-
     /// Correlation id of the request this inbound reply answers.
     ///
     /// Returns `None` for ordinary request mail, uncorrelated replies, and
@@ -309,13 +295,15 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     }
 
     /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
-    /// source the host stamped, with no lookup — exactly
-    /// [`Self::source_mailbox`], lifted into a reference. `None` for a
-    /// sourceless dispatch, as there. Needs no actor type, so it exists on
-    /// the erased ctx too.
+    /// source the host stamped, with no lookup. `None` for a sourceless
+    /// dispatch (session / remote-engine / broadcast mail, or a lifecycle
+    /// hook with no inbound). Needs no actor type, so it exists on the
+    /// erased ctx too: a `#[fallback]` runs on the downgraded [`Single`]
+    /// view (issue 2687), and a cluster-membrane interposer reads its lane
+    /// direction there by comparing the sender against a stored child.
     #[must_use]
     pub fn sender(&self) -> Option<AnyActorRef> {
-        self.source_mailbox().map(AnyActorRef::new)
+        (self.source != NO_INBOUND_SOURCE).then(|| AnyActorRef::new(MailboxId(self.source)))
     }
 
     /// Namespace-aware typed actor construction: the shared body behind

@@ -29,7 +29,7 @@ use crate::mail::{Source, SourceAddr};
 // ring and served via the `aether.log.read` /
 // `aether.log.read_result` kinds (the `aether_kinds::LogEntry` wire
 // shape is the only `LogEntry` left in the workspace). The cap reads
-// `ctx.source_mailbox()` directly off the mail envelope, so no substrate-side
+// `ctx.sender()` directly off the mail envelope, so no substrate-side
 // helper type is needed.
 
 /// Pluggable egress backend the substrate calls through `HubOutbound`.

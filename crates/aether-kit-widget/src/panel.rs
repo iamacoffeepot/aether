@@ -53,7 +53,7 @@ use aether_actor::{
     ActorInitError, Addressable, AnyActorRef, Erased, ErasedWasmActor, Manual, ModuleChild, Sends, Subname, WasmActor,
     WasmCtx, WasmInitCtx, actor,
 };
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::mouse_button;
 use aether_kinds::{
@@ -1421,7 +1421,7 @@ impl WasmActor for WidgetPanel {
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
         tracing::info!(
             target: "aether_kit_widget",
-            source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
+            source = ctx.sender().map_or(0, |sender| sender.id().0),
             container = outcome.container.0,
             offset_x_pixels = outcome.offset.x_pixels,
             offset_y_pixels = outcome.offset.y_pixels,
@@ -1440,7 +1440,7 @@ impl WasmActor for WidgetPanel {
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, residual: ScrollResidual) {
         tracing::info!(
             target: "aether_kit_widget",
-            source = ctx.source_mailbox().unwrap_or(MailboxId::NONE).0,
+            source = ctx.sender().map_or(0, |sender| sender.id().0),
             residual_x_pixels = residual.x_pixels,
             residual_y_pixels = residual.y_pixels,
             "widget terminal scroll residual",
@@ -1685,6 +1685,7 @@ impl WasmActor for WidgetPanel {
 #[cfg(test)]
 mod dispatch_tests {
     use super::*;
+    use aether_data::MailboxId;
 
     // Tripwire: the panel's vertical stack, pinned rect by rect against the
     // hand-rolled loop it replaced. The three things that loop got right and

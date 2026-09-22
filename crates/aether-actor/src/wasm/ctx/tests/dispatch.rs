@@ -57,24 +57,6 @@ impl Addressable for ParentKeyedPeer {
 
 impl HandlesKind<()> for ParentKeyedPeer {}
 
-/// Issue 2001: `source_mailbox()` is a single read of the ctx's
-/// `source` field on the top-level path — the host threads the resolved
-/// inbound source over the `receive_p32` ABI and the `export!` membrane
-/// hands it to `__new` (the same field the in-place drain threads). A
-/// non-`NONE` source yields `Some(id)`; `NONE` (the no-peer-origin
-/// sentinel) yields `None`. No host round-trip is involved.
-#[test]
-fn source_mailbox_reads_the_threaded_source_field() {
-    let registry = Registry::new();
-
-    let source = MailboxId(0x9999_0000_1234_5678);
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, source.0);
-    assert_eq!(ctx.source_mailbox(), Some(source), "a non-NONE threaded source must surface verbatim");
-
-    let none_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x10, &registry, NO_INBOUND_SOURCE);
-    assert_eq!(none_ctx.source_mailbox(), None, "MailboxId::NONE means no peer-component origin");
-}
-
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();

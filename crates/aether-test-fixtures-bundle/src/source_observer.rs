@@ -1,9 +1,9 @@
-//! Issue 1958: `source_mailbox()` end-to-end fixture — the reading half.
+//! Issue 1958: `ctx.sender()` end-to-end fixture — the reading half.
 //!
 //! `on_source_query` (manual) handles `SourceQuery`, reads
-//! `ctx.source_mailbox()`, logs it, broadcasts `SourceReport { mailbox_id }`
+//! `ctx.sender()`, logs its id, broadcasts `SourceReport { mailbox_id }`
 //! to the substrate-harness observer mailbox, and replies it directly.
-//! `mailbox_id` is `0` when `source_mailbox()` returns `None` (Session /
+//! `mailbox_id` is `0` when `sender()` returns `None` (Session /
 //! no-sender origin).
 //!
 //! Integration test pattern:
@@ -14,7 +14,7 @@
 //!   declares this actor as a dependency. The harness sends the fieldless
 //!   `SendSourceQuery` (via `send_and_settle`) to the forwarder; the forwarder
 //!   sends `SourceQuery` through its minted reference (component-origin mail);
-//!   this actor reads `source_mailbox()` → `Some(forwarder_mailbox)` → logs
+//!   this actor reads `sender()` → `Some(forwarder_mailbox)` → logs
 //!   `"source_mailbox={forwarder_mailbox.0}"`. The test uses `log_tail` on this
 //!   actor's address to verify the logged value equals the forwarder's id.
 
@@ -35,13 +35,13 @@ impl WasmActor for SourceObserver {
         Ok(SourceObserver)
     }
 
-    /// Read `source_mailbox()` from the inbound `SourceQuery`, log the value
+    /// Read `sender()` from the inbound `SourceQuery`, log its id
     /// (so `log_tail` can retrieve the exact raw id in the integration test),
     /// broadcast `SourceReport { mailbox_id }` to the observer, and reply to
     /// the direct sender with the same report.
     #[handler::manual]
     fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: SourceQuery) {
-        let mailbox_id = ctx.source_mailbox().map_or(0, |m| m.0);
+        let mailbox_id = ctx.sender().map_or(0, |sender| sender.id().0);
         // Log the raw value so the SubstrateHarness integration test can verify it
         // with `log_tail` without relying on broadcast payload access.
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");

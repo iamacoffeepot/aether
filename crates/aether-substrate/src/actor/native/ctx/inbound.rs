@@ -10,7 +10,7 @@
 use std::sync::Arc;
 
 use aether_actor::{AnyActorRef, ReplyMode};
-use aether_data::{Kind, MailId, MailboxId, RequestId};
+use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
 use crate::chassis::inbox::InboundMail;
@@ -100,31 +100,19 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.source
     }
 
-    /// Immediate-sender mailbox of the mail currently being dispatched,
-    /// or `None` for mail with no local sender (broadcast,
-    /// substrate-generated, hub-bubbled). This is the *immediate*
-    /// sender (one hop, the addressing layer's `Source`), not the chain
-    /// origin — the origin lives in the tracing layer (`root` /
-    /// `parent_mail`, ADR-0080). Issue #581's `LogCapability` reads this
-    /// to populate `LogEntry::origin` from the envelope rather than the
-    /// payload.
-    #[must_use]
-    pub fn source_mailbox(&self) -> Option<MailboxId> {
-        match self.source.addr {
-            SourceAddr::Component(id) => Some(id),
-            _ => None,
-        }
-    }
-
     /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
-    /// source the host stamped, with no registry read — exactly
-    /// [`Self::source_mailbox`], lifted into a reference. `None` for mail
-    /// with no local sender, as there. Needs no actor type, so it exists
-    /// on the erased ctx too. The one caller of the registry's
-    /// `structural_any` mint.
+    /// source the host stamped, with no registry read. This is the
+    /// *immediate* sender (one hop, the addressing layer's `Source`), not
+    /// the chain origin — the origin lives in the tracing layer (`root` /
+    /// `parent_mail`, ADR-0080). `None` for mail with no local sender
+    /// (broadcast, substrate-generated, hub-bubbled). Needs no actor type,
+    /// so it exists on the erased ctx too.
     #[must_use]
     pub fn sender(&self) -> Option<AnyActorRef> {
-        self.source_mailbox().map(Registry::structural_any)
+        match self.source.addr {
+            SourceAddr::Component(id) => Some(Registry::structural_any(id)),
+            _ => None,
+        }
     }
 
     /// Correlation id of the request this inbound reply answers.

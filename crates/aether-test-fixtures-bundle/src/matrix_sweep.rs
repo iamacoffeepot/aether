@@ -5,7 +5,7 @@
 //! wire) the parent drives every in-cluster addressing direction in place,
 //! plus one cross-cluster send made *during the in-place drain*; each
 //! participant records the cell it observed — whether the mail arrived and
-//! what `ctx.source_mailbox()` it read. A follow-up `CollectMatrix` query
+//! what `ctx.sender()` it read. A follow-up `CollectMatrix` query
 //! reads the cluster's shared observation log and replies a `MatrixReport`.
 //!
 //! Matrix cells (each asserts delivery AND the source the recipient read):
@@ -46,7 +46,7 @@ use aether_test_fixtures_kinds::{
 use super::source_observer::SourceObserver;
 
 /// One cell's recorded observation: whether the mail arrived and the raw
-/// `MailboxId` the recipient read from `ctx.source_mailbox()`.
+/// `MailboxId` the recipient read from `ctx.sender()`.
 #[derive(Clone, Copy, Default)]
 struct Cell {
     arrived: bool,
@@ -196,7 +196,7 @@ impl WasmActor for MatrixParent {
     /// cell with the source the parent read (the membrane's own-id path).
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
-        record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
+        record_cell(ping.cell, ctx.sender().map_or(0, |sender| sender.id().0));
     }
 
     /// Read the cluster's shared observation log and reply the structured
@@ -227,7 +227,7 @@ impl WasmActor for MatrixChild {
     /// cells and the cross-cluster send, all in place.
     #[handler::manual]
     fn on_matrix_ping(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, ping: MatrixPing) {
-        record_cell(ping.cell, ctx.source_mailbox().map_or(0, |m| m.0));
+        record_cell(ping.cell, ctx.sender().map_or(0, |sender| sender.id().0));
 
         if ping.fan_out == 0 {
             return;
@@ -255,7 +255,7 @@ impl WasmActor for MatrixChild {
         // left in the cluster-shared log, so it still takes the host send
         // path. The send threads this child's own id (`ctx.mailbox`, ==
         // child[a] during the drain) as the `from`, so the observer's
-        // `source_mailbox()` reads child[a]'s id — the host stamps the
+        // `sender()` reads child[a]'s id — the host stamps the
         // guest-carried, in-cluster-validated origin (issue 1987).
         if let Some(observer) = observer() {
             ctx.to(&observer).send(&SourceQuery);

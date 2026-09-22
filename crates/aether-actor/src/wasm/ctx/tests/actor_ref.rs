@@ -48,8 +48,8 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
 
 /// `sender` mints the threaded dispatch source: `None` for
 /// `NO_INBOUND_SOURCE`, `Some` proving the threaded id otherwise. Owned
-/// logic: the `source_mailbox` lift, which adds no source-classification of
-/// its own.
+/// logic: the threaded source-field read, which adds no source-classification
+/// of its own.
 #[test]
 fn sender_mints_the_threaded_source_and_none_without_one() {
     let registry = Registry::new();

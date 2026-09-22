@@ -33,7 +33,7 @@ pub struct RelativeMailbox<'a> {
     id: MailboxId,
     /// The addressing actor's own folded [`MailboxId`] raw value — the "from"
     /// half stamped on the in-place send so the relative recipient's
-    /// `ctx.source_mailbox()` resolves who sent it. Set by
+    /// `ctx.sender()` resolves who sent it. Set by
     /// [`WasmCtx::parent`] / [`WasmCtx::child`] / [`WasmCtx::sibling`] to the
     /// resolving ctx's `mailbox`.
     sender: u64,

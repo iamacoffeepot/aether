@@ -1,4 +1,4 @@
-//! Issue 1958 / ADR-0230: the component-origin half of the `source_mailbox()`
+//! Issue 1958 / ADR-0230: the component-origin half of the `ctx.sender()`
 //! fixture pair.
 //!
 //! `SourceForwarder` declares `SourceObserver` as a dependency, so the host
@@ -8,8 +8,8 @@
 //! address in the mail, which is why [`SendSourceQuery`] is fieldless.
 //!
 //! The forward makes this actor the component origin, so the observer's
-//! `ctx.source_mailbox()` reads the forwarder's own `MailboxId` — the property
-//! `aether-component`'s `source_mailbox` scenario asserts.
+//! `ctx.sender()` reads the forwarder's own `MailboxId` — the property
+//! `aether-component`'s source-attribution scenario asserts.
 //!
 //! A second actor rather than a self-dependency: the observer is loaded twice
 //! in that scenario (a "reader" and, before this split, a "sender"), and a

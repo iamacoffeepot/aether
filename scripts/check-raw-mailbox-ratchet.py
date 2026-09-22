@@ -45,19 +45,15 @@ from pathlib import Path
 BASELINE_RELATIVE_PATH = "scripts/raw-mailbox-baseline.json"
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("send_to(", re.compile(r"(::|\.)send_to\(")),
     ("send_to_named(", re.compile(r"(::|\.)send_to_named\(")),
     ("actor_at::<", re.compile(r"(::|\.)actor_at::<")),
     ("send_envelope_tracked(", re.compile(r"(::|\.)send_envelope_tracked\(")),
     ("send_envelope_tracked_with_reply_to(", re.compile(r"(::|\.)send_envelope_tracked_with_reply_to\(")),
     ("send_envelope_detached(", re.compile(r"(::|\.)send_envelope_detached\(")),
-    ("monitor(", re.compile(r"(::|\.)monitor\(")),
-    ("despawn_inline_child(", re.compile(r"(::|\.)despawn_inline_child\(")),
     ("resolve_actor::<", re.compile(r"(::|\.)resolve_actor::<")),
     ("resolve_embedded::<", re.compile(r"(::|\.)resolve_embedded::<")),
     ("mailer()", re.compile(r"(::|\.)mailer\(\)")),
     ("registry()", re.compile(r"\.registry\(\)")),
-    ("source_mailbox()", re.compile(r"(::|\.)source_mailbox\(\)")),
     ("mailbox_id_from_name(", re.compile(r"\bmailbox_id_from_name\(")),
     ("mailbox_id_from_name_pair(", re.compile(r"\bmailbox_id_from_name_pair\(")),
     ("mailbox_id_from_path(", re.compile(r"\bmailbox_id_from_path\(")),
@@ -195,7 +191,9 @@ def compare(
 
     A baseline row this scanner does not name is not a rule-3 zero; it is
     printed as a notice and never fails, since it names a pattern a later
-    scanner revision will track.
+    scanner revision will track, or one an earlier revision tracked for a
+    door that was narrowed to take a proof. The next baseline edit removes
+    that row.
     """
 
     findings: list[str] = []

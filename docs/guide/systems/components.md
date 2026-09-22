@@ -177,8 +177,8 @@ call names both identities:
 ```rust
 #[handler::single]
 fn on_open_panel(&mut self, ctx: &mut WasmCtx<'_>, _: OpenPanel) {
-    // -> Result<MailboxId, SpawnError>: the new instance's address
-    let panel = ctx.spawn_child::<RootManager, Panel>(
+    // -> Result<(), SpawnError>: the birth completes after this call, so no reference comes back
+    let _ = ctx.spawn_child::<RootManager, Panel>(
         Subname::Counter,
         &PanelConfig { /* … */ },
     );

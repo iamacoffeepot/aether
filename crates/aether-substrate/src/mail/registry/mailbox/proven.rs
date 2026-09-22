@@ -93,14 +93,14 @@ impl Registry {
     ///
     /// Its first caller,
     /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender),
-    /// discharges the obligation its `source_mailbox` already answers: the
-    /// host stamped this position at dispatch, so the answer is already
-    /// known.
+    /// discharges the obligation the stamped dispatch source already
+    /// answers: the host stamped this position at dispatch, so the answer is
+    /// already known.
     ///
     /// Its second is the `host_turn` self-mail test in
     /// `crate::actor::native::slot::pumped`, which names the position it
-    /// booted the probe at: a host turn carries no inbound, so
-    /// `source_mailbox` is `None` and `NativeCtx::sender` cannot serve.
+    /// booted the probe at: a host turn has no sender, so
+    /// `NativeCtx::sender` cannot serve.
     pub(crate) fn structural_any(position: MailboxId) -> AnyActorRef {
         __mint_any_actor_ref(position)
     }
