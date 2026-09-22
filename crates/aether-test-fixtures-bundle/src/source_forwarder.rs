@@ -17,9 +17,7 @@
 //! under the shared component-host parent, so the forwarder reaches the
 //! observer at the observer's default load name.
 
-// The handler takes `&mut self` to match the dispatch ABI even though the
-// forwarder carries no state.
-#![allow(clippy::unused_self)]
+#![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and this forwarder is stateless — the same allow `source_observer` and `matrix_sweep` already carry
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery};
