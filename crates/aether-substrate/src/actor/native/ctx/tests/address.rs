@@ -41,8 +41,8 @@ fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
             }),
         )
         .expect("register embedded peer beneath the runtime parent");
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
-    assert_eq!(binding.parent_mailbox(), parent);
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
+    assert_eq!(binding.parent_mailbox(), Some(parent));
 
     {
         let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
@@ -85,7 +85,7 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
     let (_registry, mailer) = bare_substrate();
     let parent = MailboxId(0xC020);
     let current = MailboxId(0xC010);
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
     let ctx: NativeCtx<'_, Dependent, Single> =
         NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
 
@@ -104,7 +104,7 @@ fn sender_mints_the_component_source_and_none_without_one() {
     let (_registry, mailer) = bare_substrate();
     let parent = MailboxId(0xC020);
     let current = MailboxId(0xC010);
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
 
     let component = NativeCtx::new(
         &binding,

@@ -9,10 +9,10 @@ use crate::testing::boot_authority as auth;
 fn route_generations_advance_only_for_successful_mutations() {
     let r = Registry::new();
     let kind = KindId(0);
-    let initial = r.route_lookup(kind, MailboxId::NONE).generation();
+    let initial = r.route_lookup(kind, MailboxId::CHASSIS_MAILBOX_ID).generation();
 
     assert!(r.try_register_inbox(&auth(), "aether.chassis", noop_handler()).is_err());
-    assert_eq!(r.route_lookup(kind, MailboxId::NONE).generation(), initial);
+    assert_eq!(r.route_lookup(kind, MailboxId::CHASSIS_MAILBOX_ID).generation(), initial);
 
     let id = r.try_register_inbox(&auth(), "generation", noop_handler()).expect("fresh route");
     let inserted = r.route_lookup(kind, id).generation();

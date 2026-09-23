@@ -99,14 +99,14 @@ fn ctx_with_parent(sender: MailboxId, parent: MailboxId) -> ComponentCtx {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let mut ctx = ComponentCtx::new(sender, registry, Arc::clone(&mailer), HubOutbound::disconnected());
-    ctx.install_binding(Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, parent)));
+    ctx.install_binding(Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, Some(parent))));
     ctx
 }
 
 fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, ComponentCtx) {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, parent));
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, Some(parent)));
     let build = || {
         let mut ctx =
             ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
@@ -982,8 +982,8 @@ fn wat_stores_reply_correlation() -> String {
 /// Issue 2001 end-to-end through the dispatch unit path: `deliver`
 /// resolves the inbound `SourceAddr` and threads it as the trailing
 /// `receive_p32` slot. A peer-component origin yields that mailbox's
-/// raw id; a session / engine / no-reply origin yields `0`
-/// (`MailboxId::NONE`) — the same contract `source_of_p32` had.
+/// raw id; a session / engine / no-reply origin yields `0` (no source) —
+/// the same contract `source_of_p32` had.
 #[test]
 fn deliver_threads_component_source_to_guest() {
     use crate::mail::{Mail as SubstrateMail, MailboxId as M, Source, SourceAddr};
@@ -1009,7 +1009,7 @@ fn deliver_threads_zero_source_for_session_origin() {
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
         .with_reply_to(Source::to(SourceAddr::Session(token)));
     component.deliver(&mail).expect("deliver");
-    assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (MailboxId::NONE) as the source param");
+    assert_eq!(component.read_u32(500), 0, "a session origin must thread 0 (no source) as the source param");
 }
 
 #[test]
@@ -1233,8 +1233,8 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 
     let unknown = MailboxId(0xDEAD_BEEF_u64);
     let kind = aether_data::KindId(0xABCD_u64);
-    // `from = NONE` → the dispatch identity falls back to `self.sender`.
-    ctx.send(unknown, kind, vec![1, 2, 3], 1, MailboxId::NONE);
+    // `from` is the dispatch identity the host fn resolves: the ctx's own id.
+    ctx.send(unknown, kind, vec![1, 2, 3], 1, sender);
 
     let event = outbound_rx.try_recv().expect("bubble-up event emitted");
     match event {
@@ -1265,7 +1265,7 @@ fn unknown_recipient_without_outbound_warn_drops() {
 
     let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
 
-    ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, MailboxId::NONE);
+    ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, sender);
     assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
 }
 
@@ -1292,7 +1292,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
     ctx.set_in_flight(inbound_mail, inbound_root);
 
-    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, MailboxId::NONE);
+    ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
@@ -1319,7 +1319,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
     let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
     // No `set_in_flight` call.
 
-    ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, MailboxId::NONE);
+    ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
@@ -1350,7 +1350,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
     ctx.set_in_flight(inbound_mail, inbound_root);
 
-    ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, MailboxId::NONE);
+    ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");

@@ -353,8 +353,8 @@ where
 
     // ADR-0230: a declared `depends(R)` with no `Live` route fails where a
     // failed `init` fails, before `A::init` runs. A pumped actor is
-    // root-pinned, so it folds from the root like a passive one.
-    check_declared::<A>(mailer.registry(), MailboxId::NONE)?;
+    // root-pinned, so it has no parent, like a passive one.
+    check_declared::<A>(mailer.registry(), None)?;
 
     // `init` under `with_stamped`. A driver-as-actor does not publish a
     // cross-thread handle bundle (the window actor's cell rides its

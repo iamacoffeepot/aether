@@ -54,7 +54,6 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("mailbox_id_from_name(", re.compile(r"\bmailbox_id_from_name\(")),
     ("mailbox_id_from_name_pair(", re.compile(r"\bmailbox_id_from_name_pair\(")),
     ("mailbox_id_from_path(", re.compile(r"\bmailbox_id_from_path\(")),
-    ("MailboxId::NONE", re.compile(r"\bMailboxId::NONE\b")),
     (
         "<recipient>.id() at a send",
         re.compile(r"\b(send_to|send_detached_to|send_envelope_tracked|monitor|despawn_inline_child)\(&?[A-Za-z_][A-Za-z0-9_]*\.id\(\)"),

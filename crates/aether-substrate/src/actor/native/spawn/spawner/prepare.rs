@@ -39,7 +39,7 @@ use super::Spawner;
 /// display/reverse-map value; `id` remains the lineage-folded route key.
 pub(in crate::actor::native::spawn) struct SpawnIdentity {
     pub(in crate::actor::native::spawn) id: MailboxId,
-    pub(in crate::actor::native::spawn) parent: MailboxId,
+    pub(in crate::actor::native::spawn) parent: Option<MailboxId>,
     pub(in crate::actor::native::spawn) carry: u64,
     pub(in crate::actor::native::spawn) canonical_name: Arc<str>,
     pub(in crate::actor::native::spawn) subname: String,
@@ -86,11 +86,11 @@ impl Spawner {
         //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
         let child_actor = ActorId::instanced(A::NAMESPACE, &subname);
         let (parent_mailbox, carry, full_name) = parent.map_or_else(
-            || (MailboxId::NONE, child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
+            || (None, child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
             |parent| {
                 let carry = fold_lineage(parent.carry(), child_actor);
                 let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname));
-                (parent.mailbox(), carry, name)
+                (Some(parent.mailbox()), carry, name)
             },
         );
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
@@ -137,7 +137,7 @@ impl Spawner {
         // the spawn thread doesn't exist yet.
         let (tx, rx) = mpsc::channel::<Envelope>();
 
-        let transport = Arc::new(NativeBinding::new_with_parent::<A>(
+        let transport = Arc::new(NativeBinding::new_with_parent(
             Arc::clone(&self.mailer),
             id,
             parent,

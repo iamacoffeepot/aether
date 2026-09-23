@@ -14,9 +14,9 @@ use crate::mail::registry::Registry;
 
 /// Refuse `A`'s birth when one of its declared `DependencyEntry` entries
 /// has no `Live` route, naming the actor and the missing namespace. A
-/// root-pinned birth folds from the root (`MailboxId::NONE`); a spawned
-/// child folds beneath its placement parent.
-pub fn check_declared<A: Addressable>(registry: &Registry, parent: MailboxId) -> Result<(), BootError> {
+/// root-pinned birth has no parent (`None`); a spawned child folds beneath
+/// its placement parent.
+pub fn check_declared<A: Addressable>(registry: &Registry, parent: Option<MailboxId>) -> Result<(), BootError> {
     let missing = registry.missing_dependency(
         parent,
         dependency_entries().filter(|entry| entry.actor == A::NAMESPACE).map(|entry| (entry.resolver, entry.namespace)),

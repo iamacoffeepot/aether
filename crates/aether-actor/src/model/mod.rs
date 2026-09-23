@@ -151,19 +151,27 @@ pub enum CallerScope {
     Parent,
 }
 
+/// The caller carry handed to a resolver when the scope names no lineage.
+///
+/// A root-pinned resolver ignores its carry, and no birth folds beneath this
+/// empty lineage, so a `Parent` scope with no logical parent resolves to an
+/// address that is never live.
+const EMPTY_CARRY: u64 = 0;
+
 impl CallerScope {
-    /// Select the routable lineage seed this scope names.
+    /// Select the caller carry this scope names.
     ///
-    /// Root-pinned resolvers receive [`MailboxId::NONE`] because they do not
-    /// consume caller lineage. Current and parent scopes receive the logical
-    /// actor mailboxes retained by the runtime; no separate untagged hash
-    /// state is required.
+    /// Root-pinned resolvers receive [`EMPTY_CARRY`] because they do not
+    /// consume caller lineage, and so does a `Parent` scope when the caller
+    /// has no logical parent. Current and parent scopes otherwise receive the
+    /// logical actor mailboxes retained by the runtime; no separate untagged
+    /// hash state is required.
     #[must_use]
-    pub const fn select(self, current: MailboxId, parent: MailboxId) -> MailboxId {
-        match self {
-            Self::Root => MailboxId::NONE,
-            Self::Current => current,
-            Self::Parent => parent,
+    pub(crate) const fn select(self, current: MailboxId, parent: Option<MailboxId>) -> u64 {
+        match (self, parent) {
+            (Self::Root, _) | (Self::Parent, None) => EMPTY_CARRY,
+            (Self::Current, _) => current.0,
+            (Self::Parent, Some(parent)) => parent.0,
         }
     }
 }
@@ -313,7 +321,7 @@ pub trait Root: Addressable {}
 /// Boot and driver code addresses a chassis capability before any actor ctx
 /// exists, so it cannot reach the target through `ctx.actor::<C>()`. It gets
 /// the same address anyway: [`One`] pins to the root and ignores the caller's
-/// carry (ADR-0099 §3), so the seed is [`MailboxId::NONE`] and the answer is
+/// carry (ADR-0099 §3), so the seed is the empty carry and the answer is
 /// the depth-1 fixed point — `resolve` stays the single derivation rather
 /// than the caller re-deriving `hash(NAMESPACE)` beside it.
 ///
@@ -324,7 +332,7 @@ pub trait Root: Addressable {}
 /// silently wrong depth-1 hash.
 #[must_use]
 pub fn root_mailbox<C: Root + Addressable<Resolver = One>>() -> MailboxId {
-    C::resolve(MailboxId::NONE.0, ())
+    C::resolve(EMPTY_CARRY, ())
 }
 
 /// Placement permission for an actor identity that may appear directly
@@ -383,7 +391,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 ///     }
 ///
 ///     fn resolve(_carry: u64, _namespace: &str, _key: ()) -> MailboxId {
-///         MailboxId::NONE
+///         unreachable!()
 ///     }
 /// }
 ///
@@ -868,13 +876,12 @@ mod tests {
     }
 
     #[test]
-    fn caller_scope_selects_root_current_and_parent_mailboxes() {
+    fn caller_scope_selects_current_and_parent_mailboxes() {
         let current = MailboxId(0x4010);
         let parent = MailboxId(0x4020);
 
-        assert_eq!(CallerScope::Root.select(current, parent), MailboxId::NONE);
-        assert_eq!(CallerScope::Current.select(current, parent), current);
-        assert_eq!(CallerScope::Parent.select(current, parent), parent);
+        assert_eq!(CallerScope::Current.select(current, Some(parent)), current.0);
+        assert_eq!(CallerScope::Parent.select(current, Some(parent)), parent.0);
     }
 
     /// `with_tag` replaces only the high nibble, while FNV-1a folding modulo

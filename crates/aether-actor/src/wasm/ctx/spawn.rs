@@ -60,8 +60,7 @@ impl ActorTypeTag {
 /// [`SpawnError::InitFailed`].
 #[derive(Debug, Clone)]
 pub enum SpawnError {
-    /// The host returned [`MailboxId::NONE`] while allocating an inline child
-    /// alias. The alias is a required first-class address, so spawning stops
+    /// The host returned the zero id while allocating an inline child alias. The alias is a required first-class address, so spawning stops
     /// before configuration decode, initialization, or registry insertion.
     AliasAllocationFailed,
     /// The ctx's mailbox did not identify either the constructed entry actor

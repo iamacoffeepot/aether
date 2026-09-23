@@ -52,7 +52,7 @@ macro_rules! native_sender_methods {
         {
             let (parent, root) = self.outbound_lineage();
             NativeActorMailbox::__new_in_flight(
-                R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+                R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
                 self.binding,
                 parent,
                 root,

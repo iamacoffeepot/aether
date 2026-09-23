@@ -170,7 +170,7 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
 // `ctx.sender()` (a detached chain root addressed at the dispatch source),
 // so an emission starts a fresh chain rather than holding the request
 // chain open. A sourceless dispatch (session / broadcast / substrate-origin
-// mail, `MailboxId::NONE`) has no routable target, so the emission
+// mail, `ctx.sender()` is `None`) has no routable target, so the emission
 // warn-drops.
 impl<A, K: Kind> Emit<K> for WasmCtx<'_, A, Multi<K>> {
     fn emit(&mut self, payload: &K) {

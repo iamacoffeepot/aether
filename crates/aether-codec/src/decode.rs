@@ -300,9 +300,8 @@ fn decode_cast_field(cur: &mut Cursor<'_>, ty: &SchemaType, path: &str) -> Resul
 
 /// u64 → JSON helper for `SchemaType::TypeId(type_id)`. Emits the
 /// ADR-0064 tagged string form when the id's tag bits are valid;
-/// falls back to a JSON number for the reserved-tag sentinels (e.g.
-/// `MailboxId::NONE = 0`) so the codec doesn't error on a sentinel
-/// payload. Errors with `UnsupportedSchema` if the schema's
+/// falls back to a JSON number for reserved-tag values (e.g. a zero
+/// id) so the codec doesn't error on a sentinel payload. Errors with `UnsupportedSchema` if the schema's
 /// `type_id` doesn't correspond to a typed-id newtype the codec
 /// knows how to translate.
 fn render_type_id_value(id: u64, type_id: u64, _path: &str) -> Result<Value, DecodeError> {
@@ -1021,7 +1020,7 @@ mod tests {
 
     #[test]
     fn type_id_round_trip_of_sentinel_uses_back_compat_number() {
-        // `MailboxId::NONE` (= 0) has reserved tag bits, so it
+        // A zero id has reserved tag bits, so it
         // serialises as a JSON number. Round-trip preserves the
         // sentinel value end to end.
         let schema = pc_struct(vec![NamedField {

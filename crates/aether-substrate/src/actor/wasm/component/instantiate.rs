@@ -1,4 +1,3 @@
-use aether_data::MailboxId;
 use wasmtime::{Engine, Linker, Memory, Module, Store, TypedFunc};
 
 use super::{ComponentCtx, DELIVERY_ALIGN, MAX_DELIVERABLE_MAIL_BYTES, ReallocFunc, ReceiveFunc, SMALL_REGION_BYTES};
@@ -216,10 +215,11 @@ impl Component {
         let mailbox_id = store.data().sender.0;
         // The component store is wired to the hosting trampoline's native
         // binding before instantiate. That binding owns the logical parent;
-        // raw test/legacy contexts without one make the limitation explicit
-        // as NONE and continue through the compatibility exports below.
+        // a root actor, or a raw test/legacy context without a binding, has
+        // none, which the parent-aware init ABI encodes as `0`, and continues
+        // through the compatibility exports below.
         let parent_mailbox_id =
-            store.data().binding.as_ref().map_or(MailboxId::NONE.0, |binding| binding.parent_mailbox().0);
+            store.data().binding.as_ref().and_then(|binding| binding.parent_mailbox()).map_or(0, |parent| parent.0);
         // ADR-0095: the guest's generic delivery allocator. Probed before the
         // config write because config delivery routes through it, exactly like
         // `deliver` routes mail. Present on macro-built guests (emitted by

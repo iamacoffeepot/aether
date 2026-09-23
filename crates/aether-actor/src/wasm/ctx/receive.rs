@@ -6,6 +6,7 @@
 //! verbs in `super::spawn`.
 
 use core::marker::PhantomData;
+use core::num::NonZeroU64;
 use core::ptr;
 
 use aether_data::{Kind, KindId, MailboxId, RequestId, Source};
@@ -31,17 +32,18 @@ use alloc::string::String;
 pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     pub(super) mailbox: u64,
     pub(super) sender: Option<ReplyHandle>,
-    /// The inbound source — the folded [`MailboxId`] raw value of whoever
-    /// sent the mail currently being dispatched, threaded onto the ctx at
+    /// The inbound source — a proof of whoever sent the mail currently being
+    /// dispatched, decoded once from the raw id threaded onto the ctx at
     /// construction (issues 1987 + 2001). For an in-place (intra-cluster)
     /// dispatch off the drain this is the enqueuing member's id (the in-place
     /// reply table is empty, so the ctx is the only carrier); for a top-level
     /// dispatch the host resolves the source from the inbound's `SourceAddr`
     /// and threads it as the trailing `receive_p32` ABI slot. So
     /// [`Self::sender`] is a single read of this field on both paths.
-    /// [`MailboxId::NONE`] (`0`) means no peer-component origin — a session,
-    /// remote-engine, or broadcast mail, or a lifecycle hook with no inbound.
-    pub(super) source: u64,
+    /// `None` (the raw [`NO_INBOUND_SOURCE`] encoding) means no peer-component
+    /// origin — a session, remote-engine, or broadcast mail, or a lifecycle
+    /// hook with no inbound.
+    pub(super) source: Option<ErasedActorRef>,
     /// Whether this ctx came from a top-level host dispatch. Cluster-drained
     /// in-place dispatches carry no host correlation, so `in_reply_to` must
     /// not read the outer dispatch's ambient host scalar.
@@ -68,12 +70,20 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
 
 /// The `source` argument to [`WasmCtx::__new`] for a dispatch that carries no
 /// inbound source — a lifecycle hook (`wire` / `unwire` / `on_rehydrate`),
-/// where [`WasmCtx::sender`] returns `None`. Equals [`MailboxId::NONE`].
-/// (A top-level mail dispatch threads the host-resolved source over the
-/// `receive_p32` ABI; the drained-member path threads the enqueuing member's
-/// own id.) Named so the `__new` call sites read intent, not a bare `0`.
+/// where [`WasmCtx::sender`] returns `None`. It is also the `receive_p32`
+/// source slot's encoding of "no source" (ADR-0033): a top-level mail dispatch
+/// threads the host-resolved source over that ABI slot, and `0` there means the
+/// mail has no peer-component origin. The drained-member path threads the
+/// enqueuing member's own id. Named so the `__new` call sites read intent, not
+/// a bare `0`.
 #[doc(hidden)]
-pub const NO_INBOUND_SOURCE: u64 = MailboxId::NONE.0;
+pub const NO_INBOUND_SOURCE: u64 = 0;
+
+/// Decode a raw inbound source into the proof [`WasmCtx::sender`] hands out,
+/// reading [`NO_INBOUND_SOURCE`] as no source.
+fn decode_source(source: u64) -> Option<ErasedActorRef> {
+    NonZeroU64::new(source).map(|raw| ErasedActorRef::new(MailboxId(raw.get())))
+}
 
 impl<'a> WasmCtx<'a, Erased, Manual> {
     /// Not part of the public API; called only by [`crate::export!`] and
@@ -86,14 +96,14 @@ impl<'a> WasmCtx<'a, Erased, Manual> {
     /// `source` is the inbound source (issues 1987 + 2001): the enqueuing
     /// member's id for an in-place drained dispatch, the host-resolved source
     /// for a top-level mail dispatch (threaded over the `receive_p32` ABI), or
-    /// [`MailboxId::NONE`] (`0`) for a lifecycle hook with no inbound mail.
+    /// [`NO_INBOUND_SOURCE`] (`0`) for a lifecycle hook with no inbound mail.
     #[doc(hidden)]
     #[must_use]
     pub fn __new(mailbox: u64, inline: &'a Registry, source: u64) -> Self {
         Self {
             mailbox,
             sender: None,
-            source,
+            source: decode_source(source),
             host_dispatch: true,
             inline,
             _borrow: PhantomData,
@@ -111,7 +121,7 @@ impl<'a> WasmCtx<'a, Erased, Manual> {
         Self {
             mailbox,
             sender: None,
-            source,
+            source: decode_source(source),
             host_dispatch: false,
             inline,
             _borrow: PhantomData,
@@ -195,7 +205,7 @@ impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     pub(super) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        self.inline.scope_mailbox(MailboxId(self.mailbox), scope).0
+        self.inline.scope_mailbox(MailboxId(self.mailbox), scope)
     }
 
     /// Not part of the public API; called only by the `#[actor]`
@@ -302,7 +312,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// direction there by comparing the sender against a stored child.
     #[must_use]
     pub fn sender(&self) -> Option<ErasedActorRef> {
-        (self.source != NO_INBOUND_SOURCE).then(|| ErasedActorRef::new(MailboxId(self.source)))
+        self.source
     }
 
     /// Typed singleton handle construction: the shared body behind

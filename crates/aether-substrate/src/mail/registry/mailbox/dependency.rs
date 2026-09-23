@@ -17,19 +17,24 @@ impl Registry {
     /// `None` when every entry is live. Each entry folds to its position
     /// through its own strategy — [`One`] at the root, [`Embedded`] beneath
     /// the placement's `parent` — and the registry answers whether a `Live`
-    /// route is there. A missing dependency is a refusal and nothing else: no
-    /// ordering, no retry, no wait.
+    /// route is there. A root placement (`parent` is `None`) has no parent to
+    /// host an embedded peer, so an [`Embedded`] entry refuses there. A
+    /// missing dependency is a refusal and nothing else: no ordering, no
+    /// retry, no wait.
     pub fn missing_dependency<'a>(
         &self,
-        parent: MailboxId,
+        parent: Option<MailboxId>,
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
         dependencies.into_iter().find_map(|(resolver, namespace)| {
-            let candidate = match resolver {
-                One::TAG => One::candidate(MailboxId::NONE.0, namespace, None),
-                Embedded::TAG => Embedded::candidate(parent.0, namespace, None),
-                // The inputs reader rejects a tag no strategy claims, so an
-                // unknown tag never arrives here; refuse closed anyway.
+            let candidate = match (resolver, parent) {
+                // `One` ignores the caller carry.
+                (One::TAG, _) => One::candidate(0, namespace, None),
+                (Embedded::TAG, Some(parent)) => Embedded::candidate(parent.0, namespace, None),
+                // An `Embedded` entry under a root placement (no parent to
+                // host the peer) refuses. The inputs reader rejects a tag no
+                // strategy claims, so an unknown tag never arrives here;
+                // refuse closed anyway.
                 _ => return Some(namespace),
             };
             match candidate {
@@ -72,25 +77,25 @@ mod tests {
         );
 
         // A `One` dependency folds from the root, so the registered root
-        // name satisfies it under any placement parent, including `NONE`.
+        // name satisfies it under any placement parent, including none.
         let one = (One::TAG, "test.dependency.one");
-        assert_eq!(registry.missing_dependency(parent, [one]), None);
-        assert_eq!(registry.missing_dependency(MailboxId::NONE, [one]), None);
+        assert_eq!(registry.missing_dependency(Some(parent), [one]), None);
+        assert_eq!(registry.missing_dependency(None, [one]), None);
 
         // An `Embedded` dependency folds beneath the placement's parent —
         // and only there.
         let peer = (Embedded::TAG, "test.dependency.peer");
-        assert_eq!(registry.missing_dependency(parent, [peer]), None);
-        assert_eq!(registry.missing_dependency(elsewhere, [peer]), Some("test.dependency.peer"));
+        assert_eq!(registry.missing_dependency(Some(parent), [peer]), None);
+        assert_eq!(registry.missing_dependency(Some(elsewhere), [peer]), Some("test.dependency.peer"));
 
         // An absent namespace is missing, and an unknown tag refuses closed
         // even when its namespace is live.
         let absent = (One::TAG, "test.dependency.absent");
-        assert_eq!(registry.missing_dependency(parent, [absent]), Some("test.dependency.absent"));
+        assert_eq!(registry.missing_dependency(Some(parent), [absent]), Some("test.dependency.absent"));
         let unknown = (0xFF, "test.dependency.one");
-        assert_eq!(registry.missing_dependency(parent, [unknown]), Some("test.dependency.one"));
+        assert_eq!(registry.missing_dependency(Some(parent), [unknown]), Some("test.dependency.one"));
 
         let none: [(u8, &str); 0] = [];
-        assert_eq!(registry.missing_dependency(parent, none), None);
+        assert_eq!(registry.missing_dependency(Some(parent), none), None);
     }
 }

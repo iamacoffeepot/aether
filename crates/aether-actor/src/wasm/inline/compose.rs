@@ -166,8 +166,7 @@ pub fn reconstruct_inline_children(
         let mut deferred = Vec::with_capacity(pending_count);
 
         for entry in pending {
-            let parent =
-                entry.parent_id.filter(|parent_id| *parent_id != MailboxId::NONE.0).map_or(cluster_root, MailboxId);
+            let parent = entry.parent_id.map_or(cluster_root, MailboxId);
             if parent != cluster_root && registry.actor_type_tag(parent).is_none() {
                 deferred.push(entry);
                 continue;
