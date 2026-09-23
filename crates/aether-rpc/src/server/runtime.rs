@@ -6,11 +6,14 @@
 //! `RpcServerHandle` boot artifact, and the per-connection helpers through
 //! the single `use runtime::*` glob.
 //!
-//! The accept thread (spawned in `init`) and the per-connection reader
-//! threads (spawned in [`RpcServerState::spawn_reader_for_peer`]) capture
-//! only cloned channels and a [`SelfWake`] handle built in `init` or cloned
-//! out of the state — never the `RpcServerState` value, and never a mailbox
-//! position (ADR-0230). The handle wakes the cap and can send nothing else.
+//! The accept thread (spawned by [`RpcServerState::start_accepting`], from
+//! `init` under [`RpcBind::Boot`] or when a held server's [`RpcBindGate`]
+//! opens) and the per-connection reader threads (spawned in
+//! [`RpcServerState::spawn_reader_for_peer`]) capture only cloned channels and
+//! a [`SelfWake`] handle built in `init` or cloned out of the state — never the
+//! `RpcServerState` value, and never a mailbox position (ADR-0230). The handle
+//! wakes the cap and can send nothing else. The gate carries the same two
+//! things: a sender on the inbound channel and a wake-only [`SelfWake`].
 
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
@@ -25,7 +28,7 @@
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
 use super::{
-    MonitorNotice, PeerKind, RegisterEngineRoute, RpcInboundReady, RpcServerCapability, RpcServerConfig,
+    MonitorNotice, PeerKind, RegisterEngineRoute, RpcBind, RpcInboundReady, RpcServerCapability, RpcServerConfig,
     RpcServerParams, Settled,
 };
 use aether_actor::runtime;
@@ -64,6 +67,55 @@ pub use std::time::Duration;
 #[derive(Clone)]
 pub struct RpcServerHandle {
     pub local_port: u16,
+}
+
+/// The boot artifact a held server publishes in place of an
+/// [`RpcServerHandle`] (issue #6399). A server composed with
+/// [`RpcBind::Held`] and a resolved port binds nothing in `init`; its composer
+/// reads this off the built chassis with `handle::<RpcBindGate>()` and calls
+/// [`Self::open`] once everything a caller may address is live. Until then a
+/// dial is refused, so a caller that reaches the server can address the whole
+/// engine.
+///
+/// It holds the resolved port, a sender on the cap's inbound channel, a
+/// wake-only [`SelfWake`] (ADR-0230: no mailbox position), and the flag that
+/// makes a second open fail. A server composed without a port publishes no
+/// gate.
+#[derive(Clone)]
+pub struct RpcBindGate {
+    port: u16,
+    inbound: mpsc::Sender<InboundEvent>,
+    wake: SelfWake<RpcInboundReady>,
+    opened: Arc<AtomicBool>,
+}
+
+impl RpcBindGate {
+    /// Bind `127.0.0.1:{port}` on the calling thread, hand the listener to
+    /// the cap, wake it, and return the bound port (the OS-picked one when
+    /// the resolved port is `0`).
+    ///
+    /// The listener is listening when this returns: a dial that lands before
+    /// the cap's next turn starts the accept thread waits in the backlog
+    /// rather than being refused.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the gate was already opened (whether that open
+    /// bound or not), when the port cannot be bound, or when the server has
+    /// already stopped and cannot take the listener.
+    pub fn open(&self) -> io::Result<u16> {
+        if self.opened.swap(true, Ordering::AcqRel) {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, "rpc bind gate is already open"));
+        }
+
+        let listener = TcpListener::bind(("127.0.0.1", self.port))?;
+        let port = listener.local_addr()?.port();
+        self.inbound
+            .send(InboundEvent::Bound { listener })
+            .map_err(|_| io::Error::new(io::ErrorKind::BrokenPipe, "rpc server stopped before its gate opened"))?;
+        self.wake.wake(&RpcInboundReady::default());
+        Ok(port)
+    }
 }
 
 /// Bookkeeping for one in-flight call (cid passed `Some` on the
@@ -146,6 +198,81 @@ pub struct RpcServerState {
 }
 
 impl RpcServerState {
+    /// A state with no listener: every map empty, no bound address, no
+    /// accept thread. `init` starts from this for every mode; a bound
+    /// server then starts accepting through [`Self::start_accepting`].
+    fn unbound(peer_kind: PeerKind, wake: SelfWake<RpcInboundReady>, mailer: Arc<Mailer>) -> Self {
+        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        Self {
+            peer_kind,
+            wake,
+            engine_routes: HashMap::new(),
+            route_owners: HashMap::new(),
+            mailer,
+            bind_addr: None,
+            listener_port: 0,
+            accept_shutdown: Arc::new(AtomicBool::new(false)),
+            accept_thread: None,
+            inbound_rx,
+            inbound_tx,
+            connections: HashMap::new(),
+            next_conn_id: 0,
+            in_flight: HashMap::new(),
+        }
+    }
+
+    /// Start accepting on a bound `listener`: spawn the
+    /// `aether-rpc-accept-{port}` thread and record the bound address, port
+    /// and thread so `unwire` tears it down. `init` calls this under
+    /// [`RpcBind::Boot`]; the `Bound` arm of `on_inbound_ready` calls it when
+    /// a held server's gate opens. Returns the bound port.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listener's address cannot be read, it cannot
+    /// be made blocking, or the accept thread cannot be spawned. Nothing is
+    /// recorded then, so `unwire` has nothing to join.
+    pub fn start_accepting(&mut self, listener: TcpListener) -> io::Result<u16> {
+        let local_addr = listener.local_addr()?;
+        let port = local_addr.port();
+        listener.set_nonblocking(false)?;
+
+        let accept_shutdown = Arc::clone(&self.accept_shutdown);
+        let inbound_tx = self.inbound_tx.clone();
+        let wake = self.wake.clone();
+
+        // Transport thread below the mail layer — it accepts sockets that carry
+        // inbound mail in; no inbound chain to inherit, no settlement umbrella.
+        #[allow(clippy::disallowed_methods)] // aether-suppression-request: accept-thread allow moved from init
+        let thread = thread::Builder::new().name(format!("aether-rpc-accept-{port}")).spawn(move || {
+            while !accept_shutdown.load(Ordering::Acquire) {
+                if let Ok((stream, peer)) = listener.accept() {
+                    if accept_shutdown.load(Ordering::Acquire) {
+                        drop(stream);
+                        break;
+                    }
+                    if inbound_tx.send(InboundEvent::PeerAccepted { stream, peer }).is_err() {
+                        break;
+                    }
+                    wake.wake(&RpcInboundReady::default());
+                } else if accept_shutdown.load(Ordering::Acquire) {
+                    break;
+                }
+            }
+        })?;
+
+        self.bind_addr = Some(local_addr.to_string());
+        self.listener_port = port;
+        self.accept_thread = Some(thread);
+        tracing::info!(
+            target: "aether_substrate::rpc",
+            addr = %local_addr,
+            port = port,
+            "rpc server bound",
+        );
+        Ok(port)
+    }
+
     /// Remove one in-flight call, and its correlation from the owner's
     /// [`RouteOwner::calls`] when it was forwarded. Both are keyed
     /// lookups.
@@ -485,8 +612,7 @@ impl NativeActor for RpcServerCapability {
         params: RpcServerParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RpcServerState, BootError> {
-        let wake = ctx.self_wake::<RpcInboundReady>();
-        let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
+        let mut state = RpcServerState::unbound(params.peer_kind, ctx.self_wake::<RpcInboundReady>(), ctx.mailer());
 
         // ADR-0155 §3: the cap is always composed and always claims its
         // mailbox; the resolved port gates only what Start does. A `None`
@@ -500,90 +626,40 @@ impl NativeActor for RpcServerCapability {
                 target: "aether_substrate::rpc",
                 "rpc server composed disabled (no bind port); claiming mailbox, binding no socket",
             );
-            return Ok(RpcServerState {
-                peer_kind: params.peer_kind,
-                wake,
-                engine_routes: HashMap::new(),
-                route_owners: HashMap::new(),
-                mailer: ctx.mailer(),
-                bind_addr: None,
-                listener_port: 0,
-                accept_shutdown: Arc::new(AtomicBool::new(false)),
-                accept_thread: None,
-                inbound_rx,
-                inbound_tx,
-                connections: HashMap::new(),
-                next_conn_id: 0,
-                in_flight: HashMap::new(),
-            });
+            return Ok(state);
         };
 
-        let bind_addr = format!("127.0.0.1:{bind_port}");
-        let listener = TcpListener::bind(&bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
-        let local_addr = listener.local_addr().map_err(|e| BootError::Other(Box::new(e)))?;
-        let port = local_addr.port();
-        listener.set_nonblocking(false).map_err(|e| BootError::Other(Box::new(e)))?;
-
-        let accept_shutdown = Arc::new(AtomicBool::new(false));
-        let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
-
-        let inbound_tx_for_thread = inbound_tx.clone();
-
-        let wake_for_thread = wake.clone();
-
-        // Transport thread below the mail layer — it accepts sockets that carry
-        // inbound mail in; no inbound chain to inherit, no settlement umbrella.
-        #[allow(clippy::disallowed_methods)]
-        let thread = thread::Builder::new()
-            .name(format!("aether-rpc-accept-{port}"))
-            .spawn(move || {
-                while !accept_shutdown_for_thread.load(Ordering::Acquire) {
-                    if let Ok((stream, peer)) = listener.accept() {
-                        if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                            drop(stream);
-                            break;
-                        }
-                        if inbound_tx_for_thread.send(InboundEvent::PeerAccepted { stream, peer }).is_err() {
-                            break;
-                        }
-                        wake_for_thread.wake(&RpcInboundReady::default());
-                    } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
-                        break;
-                    }
-                }
-            })
-            .map_err(|e| BootError::Other(Box::new(e)))?;
-
-        tracing::info!(
-            target: "aether_substrate::rpc",
-            addr = %bind_addr,
-            port = port,
-            "rpc server bound",
-        );
-
-        ctx.publish_handle(RpcServerHandle { local_port: port });
-
-        Ok(RpcServerState {
-            peer_kind: params.peer_kind,
-            wake,
-            engine_routes: HashMap::new(),
-            route_owners: HashMap::new(),
-            mailer: ctx.mailer(),
-            bind_addr: Some(bind_addr),
-            listener_port: port,
-            accept_shutdown,
-            accept_thread: Some(thread),
-            inbound_rx,
-            inbound_tx,
-            connections: HashMap::new(),
-            next_conn_id: 0,
-            in_flight: HashMap::new(),
-        })
+        match params.bind {
+            RpcBind::Boot => {
+                let port = TcpListener::bind(("127.0.0.1", bind_port))
+                    .and_then(|listener| state.start_accepting(listener))
+                    .map_err(|e| BootError::Other(Box::new(e)))?;
+                ctx.publish_handle(RpcServerHandle { local_port: port });
+            }
+            // Issue #6399: bind nothing yet. The composer opens the gate once
+            // the engine is ready; its `Bound` event reaches `on_inbound_ready`,
+            // which starts accepting through the same helper.
+            RpcBind::Held => {
+                tracing::info!(
+                    target: "aether_substrate::rpc",
+                    port = bind_port,
+                    "rpc server composed held; binding when its gate opens",
+                );
+                ctx.publish_handle(RpcBindGate {
+                    port: bind_port,
+                    inbound: state.inbound_tx.clone(),
+                    wake: state.wake.clone(),
+                    opened: Arc::new(AtomicBool::new(false)),
+                });
+            }
+        }
+        Ok(state)
     }
 
     fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        // A disabled server (ADR-0155 §3) bound no socket and spawned no
-        // accept thread, so there is nothing to unblock or join.
+        // A disabled server (ADR-0155 §3), or a held one whose gate never
+        // opened, bound no socket and spawned no accept thread, so there is
+        // nothing to unblock or join.
         let Some(bind_addr) = state.bind_addr.clone() else {
             return;
         };
@@ -631,6 +707,23 @@ impl NativeActor for RpcServerCapability {
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
+                InboundEvent::Bound { listener } => {
+                    if state.bind_addr.is_some() {
+                        tracing::warn!(
+                            target: "aether_substrate::rpc",
+                            port = state.listener_port,
+                            "rpc server already bound; dropping the second listener",
+                        );
+                        continue;
+                    }
+                    if let Err(error) = state.start_accepting(listener) {
+                        tracing::error!(
+                            target: "aether_substrate::rpc",
+                            %error,
+                            "rpc server could not start accepting on its opened gate; dials will be refused",
+                        );
+                    }
+                }
                 InboundEvent::PeerAccepted { stream, peer } => {
                     state.spawn_reader_for_peer(ctx, stream, peer);
                 }

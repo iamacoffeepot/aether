@@ -6,7 +6,8 @@ use crate::wire::PeerKind;
 /// source stack like any `#[derive(aether_substrate::Config)]` member: argv
 /// (`--rpc-port`) > env (`AETHER_RPC_PORT`) > the `[rpc]` config-file section >
 /// default. `Some(port)` binds `aether.rpc.server` on `127.0.0.1:{port}` (port
-/// `0` lets the OS pick) and starts the accept thread; `None` (unset) composes
+/// `0` lets the OS pick) and starts the accept thread, when
+/// [`RpcServerParams::bind`] says; `None` (unset) composes
 /// the cap disabled — it claims its mailbox but binds no socket and spawns no
 /// listener, so mail arriving there is answered rather than warn-dropped at an
 /// unknown mailbox. The port's presence is itself the enable signal (no
@@ -33,6 +34,21 @@ pub struct RpcServerConfig {
     pub port: Option<u16>,
 }
 
+/// When a server composed with a resolved port binds its listener (issue
+/// #6399). The port stays the operator knob that decides whether any socket
+/// binds at all (ADR-0155 §3); this is composer wiring that decides only when.
+/// A server composed without a port binds nothing in either mode.
+#[derive(Clone, Copy, Debug)]
+pub enum RpcBind {
+    /// Bind the listener and start accepting inside `init`, during the
+    /// chassis build, and publish the `RpcServerHandle` there.
+    Boot,
+    /// Bind nothing inside `init` and publish an `RpcBindGate` instead. The
+    /// composer opens the gate once everything a caller may address is live,
+    /// so a dial before that is refused and reachable means ready.
+    Held,
+}
+
 /// Composer-supplied construction params for `RpcServerCapability`
 /// (ADR-0156 §3). `peer_kind` identifies this server to connecting peers via
 /// the `HelloAck` reply; chassis builders supply a `PeerKind::Substrate {
@@ -41,4 +57,7 @@ pub struct RpcServerConfig {
 /// own route with the running server (`RegisterEngineRoute`).
 pub struct RpcServerParams {
     pub peer_kind: PeerKind,
+    /// When a resolved port binds: during the build, or when the composer
+    /// opens the published `RpcBindGate`.
+    pub bind: RpcBind,
 }

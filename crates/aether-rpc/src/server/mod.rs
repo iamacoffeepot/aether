@@ -1,10 +1,11 @@
 //! `aether.rpc.server` — generic TCP RPC server capability (issue 750).
 //!
 //! Singleton actor. Binds a `TcpListener` on the configured addr at
-//! init, runs a sidecar accept thread that spawns one reader thread
-//! per accepted connection. Reader threads read
-//! length-prefix frames via [`aether_codec::frame`] and push them
-//! through an internal mpsc; an `RpcInboundReady` wake mail tells the
+//! init — or, composed with [`RpcBind::Held`], when the composer opens the
+//! published [`RpcBindGate`] (issue #6399) — and runs a sidecar accept
+//! thread that spawns one reader thread per accepted connection. Reader
+//! threads read length-prefix frames via [`aether_codec::frame`] and push
+//! them through an internal mpsc; an `RpcInboundReady` wake mail tells the
 //! cap's dispatcher to drain.
 //!
 //! On `Call`, the cap proves the wire-borne recipient once at receipt
@@ -35,17 +36,18 @@ use aether_kinds::MonitorNotice;
 use aether_kinds::trace::Settled;
 
 // Re-export the cap's config + params at file root for chassis builders. The
-// `RpcServerConfig` / `RpcServerParams` types name no `aether_substrate` type,
-// so they stay top-level `not(wasm32)` plain structs; the `RpcServerHandle`
-// boot artifact lives in the runtime half and is re-exported below under the
-// runtime gate. `RpcServerConfig`'s `#[derive(aether_substrate::Config)]` emits
-// the `RpcServerConfigLayer` / `RpcServerOverlay` too (#3849) — the chassis
+// `RpcServerConfig` / `RpcServerParams` / `RpcBind` types name no
+// `aether_substrate` type, so they stay top-level `not(wasm32)` plain items;
+// the `RpcServerHandle` and `RpcBindGate` boot artifacts live in the runtime
+// half and are re-exported below under the runtime gate.
+// `RpcServerConfig`'s `#[derive(aether_substrate::Config)]` emits the
+// `RpcServerConfigLayer` / `RpcServerOverlay` too (#3849) — the chassis
 // flattens the overlay to expose `--rpc-port`.
 #[cfg(not(target_family = "wasm"))]
 mod config;
 #[cfg(not(target_family = "wasm"))]
-pub use config::{RpcServerConfig, RpcServerConfigLayer, RpcServerOverlay, RpcServerParams};
-pub use runtime::RpcServerHandle;
+pub use config::{RpcBind, RpcServerConfig, RpcServerConfigLayer, RpcServerOverlay, RpcServerParams};
+pub use runtime::{RpcBindGate, RpcServerHandle};
 
 // Named at file root so the runtime half reaches it through `super::`
 // (`RpcServerState` stores `peer_kind: PeerKind`).

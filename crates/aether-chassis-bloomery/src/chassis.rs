@@ -1,7 +1,9 @@
 //! Bloomery chassis: [`BloomeryChassis`] (issue #6244), the journal-driven
-//! engine. Boots the shared base stratum plus the component host and the RPC
-//! server, then the mount seam spawns the journal owner and the bundle driver
-//! over one journal file.
+//! engine. Boots the shared base stratum plus the component host and a held
+//! RPC server, then the mount seam spawns the journal owner and the bundle
+//! driver over one journal file, and only then does the RPC listener bind
+//! (issue #6399), so an engine a caller can reach can already take driver
+//! calls.
 //!
 //! The composition is deliberately narrow: no egress, exec, TCP, or
 //! HTTP-serving capability rides this engine (the zero-external-integration
@@ -11,12 +13,13 @@ use std::mem;
 use std::sync::Arc;
 
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, RegistryQueueConfig, RpcBind, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
 };
 use aether_chassis::cli::ChassisCli;
 use aether_chassis::entry::ChassisEnv;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
+use aether_rpc::RpcBindGate;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::composed;
@@ -53,24 +56,28 @@ impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
     /// lower the bloomery knobs, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
-    /// plus the component host and the RPC server, sweep for unknown env keys,
-    /// install the signal-blocking driver, and mount the journal owner and the
-    /// bundle driver before returning. The [`Mounted`] references come back
-    /// beside the chassis for an embedder that drives it in process.
+    /// plus the component host and the held RPC server, sweep for unknown env
+    /// keys, install the signal-blocking driver, mount the journal owner and
+    /// the bundle driver, and only then open the RPC server's bind gate. The
+    /// order is build, mount, bind: until the gate opens a dial is refused, so
+    /// a caller that reaches the engine can address both mounted actors
+    /// (issue #6399). A chassis composed with no RPC port publishes no gate
+    /// and binds nothing. The [`Mounted`] references come back beside the
+    /// chassis for an embedder that drives it in process.
     ///
     /// # Errors
     ///
     /// Returns [`BootError`] when the bloomery knobs do not lower, the
-    /// substrate or the composed chain fails to boot, or either mount spawn
-    /// fails.
+    /// substrate or the composed chain fails to boot, either mount spawn
+    /// fails, or the RPC port cannot be bound.
     pub fn build_mounted(mut env: BloomeryEnv) -> Result<(BuiltChassis<Self>, Mounted), BootError> {
         // Lower the bloomery knobs first, before anything with a side effect:
         // an unset journal or an out-of-range closure limit is a typo in the
         // operator's own argv, and refusing it here costs nothing, where
-        // refusing it at the mount seam would first stand up wasmtime and let
-        // the RPC server bind and drop a port. `--describe` / `--print-config`
-        // exit in `run_chassis_main`'s prelude before `build` is called, so
-        // they never reach this and still answer with no journal configured.
+        // refusing it at the mount seam would first stand up wasmtime.
+        // `--describe` / `--print-config` exit in `run_chassis_main`'s prelude
+        // before `build` is called, so they never reach this and still answer
+        // with no journal configured.
         let (journal, limit) = mem::take(&mut env.bloomery).to_journal_and_limit()?;
         let mut boot = SubstrateBoot::build()?;
         apply_filter(&env.runtime.log_filter);
@@ -79,6 +86,9 @@ impl BloomeryChassis {
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(BloomeryDriverCapability { boot }).build()?;
         let mounted = mount::mount(&built, &journal, limit)?;
+        if let Some(gate) = built.handle::<RpcBindGate>() {
+            gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
+        }
         Ok((built, mounted))
     }
 }
@@ -144,7 +154,8 @@ impl BootableChassis for BloomeryChassis {
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Adds only the
     /// component host (which the driver's `Command::Load` targets), the RPC
-    /// server (ADR-0155 §3), and the bloomery config declaration; the env
+    /// server (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`]
+    /// binds it after the mount, and the bloomery config declaration; the env
     /// carries values the delta resolves nothing from, so it takes no part.
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
@@ -152,7 +163,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params))
+        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params), RpcBind::Held)
             .declare_config_member::<BloomeryConfig>())
     }
 }

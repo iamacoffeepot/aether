@@ -39,8 +39,8 @@ use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps,
-    with_rpc_server,
+    ChassisBase, CommonEnv, RpcBind, boot_standard, chassis_residual_knobs, tick_only_lifecycle_params,
+    with_full_stack_caps, with_rpc_server,
 };
 use aether_substrate::config::{ConfigError, KnobRecord};
 
@@ -164,7 +164,7 @@ impl BootableChassis for HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
+        Ok(with_rpc_server(builder, RpcBind::Boot).with_actor::<HttpServerCapability>(()))
     }
 }
 

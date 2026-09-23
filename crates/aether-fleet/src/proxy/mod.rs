@@ -130,7 +130,7 @@ mod tests {
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
-    use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
+    use aether_rpc::server::{RpcBind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
     use aether_rpc::{ForwardEnvelope, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -149,7 +149,7 @@ mod tests {
     /// Params for the unbound RPC server a test chassis composes only
     /// because the proxy declares it as a dependency.
     fn unbound_rpc_params() -> RpcServerParams {
-        RpcServerParams { peer_kind: substrate_peer_kind() }
+        RpcServerParams { peer_kind: substrate_peer_kind(), bind: RpcBind::Boot }
     }
 
     /// Full bridge round-trip: boot an RPC server + the echo actor + a
@@ -172,7 +172,7 @@ mod tests {
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor::<FleetCapSink>(FleetCapCells::default())
             .with_actor_configured::<RpcServerCapability>(
-                RpcServerParams { peer_kind: substrate_peer_kind() },
+                RpcServerParams { peer_kind: substrate_peer_kind(), bind: RpcBind::Boot },
                 RpcServerConfig { port: Some(0) },
             )
             .build_passive()
