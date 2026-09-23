@@ -1,4 +1,4 @@
-// Per-component-instance mapping from guest-visible reply handles
+// Per-mailbox-slot mapping from guest-visible reply handles
 // (opaque `u32`) to the substrate-internal reply destination. Handles
 // are allocated when a component receives mail that carries a reply
 // target and resolved when the guest calls `reply_mail` to answer.
@@ -9,14 +9,17 @@
 // name at init, using the same `ctx.reply` API regardless of who
 // called. ADR-0037 widened it again with a remote-engine variant.
 //
-// Handles are monotonically increasing per instance. Exhaustion at
+// Handles are monotonically increasing per mailbox slot. Exhaustion at
 // 2³² dispatches is out of scope for V0; when it becomes real, the
 // handle becomes a generational index.
 //
 // The table lives on `ComponentCtx` rather than `Component` because
-// the host fn touches it via `Caller::data_mut()`. Putting it there
-// also means replace/drop on the component naturally clears it — the
-// old `Store<ComponentCtx>` is dropped and the table with it.
+// the host fn touches it via `Caller::data_mut()`. The ctx dies with
+// its instance, so the component trampoline moves the table out as an
+// opaque `PendingReplies` when a guest leaves the slot and installs it
+// on the next occupant — across replace, drop-then-refill and a
+// replacement that fails to start — so a pending handle still answers
+// its own requester and no number is reissued (#6409).
 
 use std::collections::HashMap;
 
@@ -69,7 +72,7 @@ impl ReplyEntry {
     }
 }
 
-/// Maintains the handle→entry map for one component instance.
+/// Maintains the handle→entry map for one mailbox slot.
 #[derive(Debug, Default)]
 pub struct ReplyTable {
     entries: HashMap<u32, ReplyEntry>,
@@ -86,7 +89,7 @@ impl ReplyTable {
     /// is never `NO_REPLY_HANDLE` — wraps past it silently.
     pub fn allocate(&mut self, entry: ReplyEntry) -> u32 {
         // Skip the sentinel. In practice `next` never hits `u32::MAX`
-        // before the instance is replaced/dropped; this is hygiene.
+        // within a mailbox slot's life; this is hygiene.
         if self.next == NO_REPLY_HANDLE {
             self.next = 0;
         }

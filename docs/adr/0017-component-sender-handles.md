@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-04-17
 - **Accepted:** 2026-04-17
+- **Amended (#6409):** 2026-09-23 — §4 and §6 are reversed: handles now cross instance boundaries within one mailbox slot. The component trampoline moves the reply table, pending handles and next-handle counter together, from a guest leaving its slot to the next occupant across `replace_component`, drop-then-refill and a replacement that fails to start, so a handle kept in a carried request context or saved state answers its own requester, and a replacement never reissues a pending number. A handle still means nothing outside its own mailbox.
 
 ## Context
 

@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-04-14
 - **Accepted:** 2026-04-17
+- **Amended (#6409):** 2026-09-23 — the expiry bullet no longer covers component replace or drop: a mailbox's reply table now belongs to its slot, and the component trampoline carries it across `replace_component`, drop-then-refill and a replacement that fails to start, so a handle stays answerable to its own requester until it is answered (ADR-0017 §4, amended).
 
 ## Context
 

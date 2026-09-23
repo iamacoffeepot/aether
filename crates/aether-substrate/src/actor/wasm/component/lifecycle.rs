@@ -4,8 +4,8 @@ use wasmtime::Store;
 
 use super::instantiate::Placement;
 use super::{
-    Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES,
-    StateBundle,
+    Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingReplies, PendingSpawn,
+    SMALL_REGION_BYTES, StateBundle,
 };
 use crate::mail::MailboxId;
 use crate::mail::registry::PreparedAliasRoute;
@@ -61,6 +61,26 @@ impl Component {
     #[must_use]
     pub fn correlation_cursor(&self) -> CorrelationCursor {
         self.store.data().correlation_cursor()
+    }
+
+    /// Move out the guest's reply table — its pending handles and the next
+    /// handle it would issue — when the guest leaves its slot. The consumer
+    /// is the component trampoline, which takes it after `unwire` and
+    /// `on_dehydrate` (both may still answer handles) and hands it to the
+    /// slot's next occupant through [`Self::resume_replies`] (#6409).
+    #[must_use]
+    pub fn take_pending_replies(&mut self) -> PendingReplies {
+        self.store.data_mut().take_pending_replies()
+    }
+
+    /// Install the reply table a guest that left this slot carried, so a
+    /// handle it issued still answers its own requester and this guest
+    /// numbers new handles past it (#6409). The consumer is the component
+    /// trampoline; call it after [`Self::instantiate`] succeeds and before
+    /// the first delivery or `on_rehydrate`, while this instance's own
+    /// table is still empty.
+    pub fn resume_replies(&mut self, replies: PendingReplies) {
+        self.store.data_mut().resume_replies(replies);
     }
 
     /// Extract the state bundle the guest deposited via `save_state`

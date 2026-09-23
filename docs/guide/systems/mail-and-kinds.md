@@ -123,7 +123,9 @@ dehydrate/rehydrate automatically. A take of the wrong type returns `None` and
 leaves the context stored, so a reply handler that serves several context kinds
 tries each type in turn. Keep contexts small: stash routing
 bookkeeping such as the caller's reply handle, origin, or parse mode; keep bulky
-domain state in actor fields and put only an id in the context.
+domain state in actor fields and put only an id in the context. A reply handle
+kept in a context stays answerable across `replace_component`: the mailbox's
+pending replies move to the replacement with it.
 
 The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still
 available when the request id itself is the domain key. `in_reply_to()` returns
