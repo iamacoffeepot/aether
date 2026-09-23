@@ -45,7 +45,7 @@ pub struct Autoloader {
     report: Option<Sender<LoadReport>>,
 }
 
-#[actor(instanced, root)]
+#[actor(instanced, root, depends(ComponentHostCapability))]
 impl NativeActor for Autoloader {
     type Config = ();
     type Params = AutoloaderParams;
