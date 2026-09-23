@@ -267,7 +267,7 @@ impl NativeActor for FleetProxy {
             mailer,
             conn,
             in_flight: HashMap::new(),
-            spawned: config.spawned,
+            spawned: config.spawned.take(),
             missed_heartbeats: 0,
             miss_limit,
             heartbeat_seq: 0,
@@ -283,9 +283,9 @@ impl NativeActor for FleetProxy {
     /// `Call` to the proxy that registered for `engine_id`. A send from
     /// `wire` starts a fresh root, so the registration alone would not keep
     /// the spawn open; the settlement hold on the causing chain (ADR-0168)
-    /// does, until [`Self::on_route_registered`] drops it. A chassis with no
-    /// RPC server warn-drops the registration, and the hold then lasts as
-    /// long as the proxy.
+    /// does, until [`Self::on_route_registered`] drops it. The proxy declares
+    /// the RPC server as a dependency, so the registration always has a live
+    /// recipient.
     ///
     /// The reader starts during `init`, before an instanced proxy's mailbox
     /// is published, so an early frame can enqueue successfully while its

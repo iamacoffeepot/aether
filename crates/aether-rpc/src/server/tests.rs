@@ -4,6 +4,7 @@
 use super::*;
 use crate::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
 use aether_codec::frame::{read_frame, write_frame};
+use aether_data::MailboxId;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -11,6 +12,11 @@ use aether_trace::TraceDispatchCapability;
 use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// A wire mailbox position no actor in these test chassis holds. The wire
+/// `MailboxAddress` requires a mailbox; the tests that address one need it
+/// to name nothing.
+const UNREGISTERED: MailboxId = MailboxId(0xdead_beef);
 
 fn test_peer_kind() -> PeerKind {
     PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
@@ -245,7 +251,7 @@ fn call_echo_round_trip_event_then_end() {
 fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
     use crate::server::test_echo::TestEchoRequest;
     use crate::{MailEnvelope, MailboxAddress, RpcError};
-    use aether_data::{Kind, MailboxId};
+    use aether_data::Kind;
 
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
     complete_handshake(&mut stream);
@@ -255,7 +261,7 @@ fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
         &WireFrame::Call {
             cid: Some(7),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(MailboxId(0xdead_beef)),
+                to: MailboxAddress::local(UNREGISTERED),
                 from: None,
                 kind: <TestEchoRequest as Kind>::ID,
                 correlation_id: None,
@@ -266,10 +272,7 @@ fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
     .expect("test: write_frame Call to rpc server");
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
-    assert_eq!(
-        end,
-        WireFrame::ReplyEnd { cid: 7, result: Err(RpcError::UnknownMailbox { mailbox: MailboxId(0xdead_beef) }) },
-    );
+    assert_eq!(end, WireFrame::ReplyEnd { cid: 7, result: Err(RpcError::UnknownMailbox { mailbox: UNREGISTERED }) });
 }
 
 /// A `Call` addressed at an engine no proxy has registered closes at once
@@ -281,7 +284,7 @@ fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
 fn engine_call_without_a_route_closes_with_unknown_engine() {
     use crate::server::test_echo::TestEchoRequest;
     use crate::{MailEnvelope, MailboxAddress, RpcError};
-    use aether_data::{EngineId, Kind, MailboxId, Uuid};
+    use aether_data::{EngineId, Kind, Uuid};
 
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
     complete_handshake(&mut stream);
@@ -292,7 +295,7 @@ fn engine_call_without_a_route_closes_with_unknown_engine() {
         &WireFrame::Call {
             cid: Some(11),
             envelope: MailEnvelope {
-                to: MailboxAddress { engine: Some(engine), mailbox: MailboxId(0xdead_beef) },
+                to: MailboxAddress { engine: Some(engine), mailbox: UNREGISTERED },
                 from: None,
                 kind: <TestEchoRequest as Kind>::ID,
                 correlation_id: None,
