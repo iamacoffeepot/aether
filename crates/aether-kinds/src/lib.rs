@@ -971,14 +971,15 @@ mod control_plane {
     /// the address the substrate resolves it by.
     /// The hub encodes each entry's `payload` via the kind's
     /// descriptor before wrapping it into the bundle, so the
-    /// substrate side just pushes `Mail::new(mailbox, kind_id,
-    /// payload, count)` directly.
+    /// substrate side delivers the payload bytes unchanged once the
+    /// recipient is proven.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct NamedMail {
         /// The recipient: a validated but unresolved ADR-0166 address,
-        /// canonical or abbreviated. The receiving capability resolves it
-        /// through `Registry::resolve_address`, which expands an
-        /// abbreviation and checks liveness.
+        /// canonical or abbreviated. The receiving capability proves it
+        /// once through `accept_bundle`, before any item of the bundle
+        /// moves: `Registry::resolve_address` expands an abbreviation, and
+        /// the position it answers must hold a live route.
         pub recipient: aether_data::ActorPath,
         pub kind_name: String,
         #[serde(with = "aether_data::bytes")]

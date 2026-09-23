@@ -87,8 +87,8 @@ pub(super) async fn send_mail_traced(mcp: &Mcp, args: SendMailTracedArgs) -> Res
     // Encode the batch before sending — a bad spec produces a
     // clean invalid-params error and never touches the wire.
     // Same shape `CaptureFrame` carries: `Vec<NamedMail>` with
-    // name-level addressing the substrate resolves at dispatch
-    // time via `resolve_bundle`. ADR-0091: descriptors come from
+    // `ActorPath` recipients the substrate proves once, before any
+    // item moves, via `accept_bundle`. ADR-0091: descriptors come from
     // the per-engine merged view so a component's own kinds
     // encode after `load_component`.
     let mails = mcp

@@ -1,10 +1,10 @@
 //! `aether.trace` capability: a thin dispatch cap.
 //!
 //! It owns the `aether.trace` mailbox to service [`DispatchTraced`], the
-//! atomic batched dispatch behind the MCP `send_mail_traced` tool. It resolves
-//! each envelope's name addressing through the substrate registry and
-//! dispatches every spec inheriting the inbound chain, so all children share
-//! one root.
+//! atomic batched dispatch behind the MCP `send_mail_traced` tool. It proves
+//! every envelope's recipient once through `ctx.accept_bundle` before any
+//! moves, then delivers every spec inheriting the inbound chain, so all
+//! children share one root.
 //!
 //! It is not a settlement authority and holds no trace fold. Settlement is an
 //! emit-time counter on the chassis `TraceHandle`, whose producer hooks fire
@@ -26,11 +26,10 @@ use aether_actor::actor;
 /// Thin `aether.trace` cap **identity** (ADR-0122 identity/runtime
 /// split, ADR-0086 Phase 3c). A ZST carrying only the addressing — the
 /// `Addressable` / `HandlesKind` markers and the name-inventory entry,
-/// all emitted always-on by `#[actor]`. The state-bearing runtime
-/// (`TraceDispatchCapabilityState`, holding the substrate registry
-/// handle) lives behind the one `feature = "runtime"` gate, so a
-/// transport-only build never names it nor pulls `aether_substrate`
-/// through this cap.
+/// all emitted always-on by `#[actor]`. The runtime holds no state — it
+/// proves each bundle's recipients through `ctx.accept_bundle` at receipt —
+/// and lives behind the one `feature = "runtime"` gate, so a
+/// transport-only build never pulls `aether_substrate` through this cap.
 ///
 /// Services [`DispatchTraced`] only; the trace fold + `Settled` emission
 /// it used to host retired with the central queue (see module doc).
@@ -41,13 +40,13 @@ pub struct TraceDispatchCapability;
 // macro's ADR-0109 `HandlerEntry` inventory submission — emitted on every
 // native build, runtime or not — names the handler's reply kind `::ID`,
 // so a transport-only build must still see it. The rest of the runtime
-// half (the `aether_substrate`-typed imports and the state struct + its
-// `with_registry` ctor) sits behind the one `feature = "runtime"` gate.
+// half (the `aether_substrate`-typed imports and the `#[runtime] impl`)
+// sits behind the one `feature = "runtime"` gate.
 #[cfg(not(target_family = "wasm"))]
 use aether_kinds::trace::DispatchTracedAck;
 
-// The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `TraceDispatchCapabilityState`, and the `#[runtime] impl`) — lives in
+// The runtime half — the whole `aether_substrate`-typed surface (imports
+// and the `#[runtime] impl`) — lives in
 // `runtime.rs`, gated once here. Nothing in this file names a runtime type
 // directly, so there is no `use runtime::*` glob (matching `fs/mod.rs`).
 #[cfg(feature = "runtime")]

@@ -1,8 +1,10 @@
 //! ADR-0166 §5 — the structured resolution diagnostic reaching the named-mail
 //! bundle path (issue 4125).
 //!
-//! `resolve_bundle` is what `spawn_substrate(mails=…)` and
-//! `capture_frame(mails=…)` resolve through. It used to call `Registry::lookup`,
+//! `NativeCtx::accept_bundle` is what `DispatchTraced` (`send_mail_traced`)
+//! and `capture_frame(mails=…)` prove their bundles through;
+//! `spawn_substrate(mails=…)` sends each item as its own `Call`, which the rpc
+//! server proves instead. The bundle path used to call `Registry::lookup`,
 //! which collapses every `AddressResolutionError` except the path caps to
 //! `None` — so an *ambiguous* abbreviated address reported "unknown recipient"
 //! with no candidates and no indication that the address was ambiguous rather
@@ -19,15 +21,17 @@
 // path is the reference value under test, not a sibling-cap address.
 #![allow(clippy::disallowed_methods)]
 
+use std::sync::Arc;
+
 use aether_actor::{Addressable, actor};
-use aether_data::{ActorPath, Kind, mailbox_id_from_path};
+use aether_data::{ActorPath, Kind, MailId, MailboxId, mailbox_id_from_path};
 use aether_kinds::NamedMail;
 use aether_substrate::Registry;
-use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeBinding, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::helpers::resolve_bundle;
+use aether_substrate::mail::Source;
 use aether_substrate::mail::registry::noop_handler;
-use aether_substrate::testing::boot_authority;
+use aether_substrate::testing::{bare_substrate, boot_authority};
 
 #[aether_data::kind(name = "test.bundle_diagnostics.poke", copy, default, eq)]
 struct Poke {
@@ -110,29 +114,30 @@ fn bundle(recipient: &str) -> Vec<NamedMail> {
 /// recipient was unknown.
 #[test]
 fn bundle_resolution_distinguishes_ambiguous_from_absent_and_resolves_canonical() {
-    let registry = Registry::new();
+    let (registry, mailer) = bare_substrate();
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xB0D1)));
+    let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
     registry.register_kind(&boot_authority(), <Poke as Kind>::NAME);
     let canonical = format!("{}/{}:one", DiagnosticsRoot::NAMESPACE, FirstChild::NAMESPACE);
     register(&registry, DiagnosticsRoot::NAMESPACE);
     register(&registry, &canonical);
 
     // Canonical input is unchanged — it never touched the abbreviation path.
-    let resolved = resolve_bundle(&registry, &bundle(&canonical), "test bundle").expect("canonical recipient resolves");
+    let resolved = ctx.accept_bundle(bundle(&canonical), "test bundle").expect("canonical recipient resolves");
     assert_eq!(resolved.len(), 1);
 
     // Ambiguous: two instanced children are declared beneath the root, so a
     // bare discriminator cannot pick one. The error must say so and list both
     // spellings that would disambiguate it.
     let ambiguous = format!("{}://one", DiagnosticsRoot::NAMESPACE);
-    let error =
-        resolve_bundle(&registry, &bundle(&ambiguous), "test bundle").expect_err("bare discriminator ambiguous");
+    let error = ctx.accept_bundle(bundle(&ambiguous), "test bundle").expect_err("bare discriminator ambiguous");
     assert!(error.contains("ambiguous"), "the error names the ambiguity: {error}");
     assert!(error.contains(FirstChild::NAMESPACE), "the error lists the first candidate: {error}");
     assert!(error.contains(SecondChild::NAMESPACE), "the error lists the second candidate: {error}");
 
     // Absent still reports absence, explicitly and distinguishably.
     let absent = format!("{}/{}:missing", DiagnosticsRoot::NAMESPACE, FirstChild::NAMESPACE);
-    let error = resolve_bundle(&registry, &bundle(&absent), "test bundle").expect_err("absent recipient");
+    let error = ctx.accept_bundle(bundle(&absent), "test bundle").expect_err("absent recipient");
     assert!(error.contains("no live mailbox"), "an absent recipient still reports absence: {error}");
     assert!(!error.contains("ambiguous"), "an absent recipient is not reported as ambiguous: {error}");
 }

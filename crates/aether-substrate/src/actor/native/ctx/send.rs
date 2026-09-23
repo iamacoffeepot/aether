@@ -5,7 +5,10 @@
 //! compile-time types — addressed by proof where the caller holds one
 //! (ADR-0230), including the wire recipient the RPC server proves at
 //! receipt, and by position for callers not yet migrated — and `fanout`
-//! multicasts one encoding to a runtime recipient set of proofs. The
+//! multicasts one encoding to a runtime recipient set of proofs. A
+//! boundary bundle item, proven by
+//! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle), leaves
+//! only through `deliver_detached` or `deliver_forwarded`. The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
@@ -17,7 +20,7 @@ use aether_actor::{
 };
 use aether_data::{Kind, KindId, MailId, MailboxId};
 
-use crate::mail::Source;
+use crate::mail::{BoundaryMail, Source};
 
 use super::NativeCtx;
 
@@ -236,6 +239,40 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             target.id().0,
             K::ID.0,
             &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+            Some(self.source),
+        );
+    }
+
+    /// Deliver a proven boundary bundle item on a fresh causal chain, as
+    /// [`Self::send_envelope_detached_to`] does, and return the minted
+    /// [`MailId`] — the root of that chain, which a settlement subscription
+    /// can wait on.
+    ///
+    /// Its consumer is `aether.render`'s `CaptureFrame`: each pre-mail's id
+    /// feeds the settlement bridge that gates the capture, and each
+    /// after-mail is released through it once the frame is read back.
+    #[must_use]
+    pub fn deliver_detached(&self, item: BoundaryMail) -> MailId {
+        let BoundaryMail { recipient, kind, payload } = item;
+        self.binding.push_envelope_buffered(recipient.id().0, kind.0, &payload, 1, None, None)
+    }
+
+    /// Deliver a proven boundary bundle item as part of the call this handler
+    /// is serving: it inherits this handler's chain, and its reply target is
+    /// pinned to the inbound one, so the recipient's reply goes to whoever
+    /// sent the inbound mail. The untyped sibling of [`Self::forward_to`].
+    ///
+    /// Its consumer is `aether.trace`'s `DispatchTraced`, whose children must
+    /// share the batch root and reply to the original caller (issue 1265).
+    pub fn deliver_forwarded(&self, item: BoundaryMail) {
+        let BoundaryMail { recipient, kind, payload } = item;
+        self.binding.push_envelope_buffered_with_reply_to(
+            recipient.id().0,
+            kind.0,
+            &payload,
             1,
             self.outbound_parent(),
             self.outbound_root(),
