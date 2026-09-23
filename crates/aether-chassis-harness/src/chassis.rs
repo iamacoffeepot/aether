@@ -25,7 +25,7 @@ use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_fs::FsCapability;
 use aether_lifecycle::{LifecycleCapability, frame_lifecycle_params};
-use aether_render::RenderTuningConfig;
+use aether_render::{RenderCapability, RenderTuningConfig};
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, NeverDriver};
 use aether_substrate::chassis::error::BootError;
@@ -97,12 +97,14 @@ impl BootableChassis for HarnessChassis {
     /// the fs roots last. The trace dispatcher and the four non-cap tuning
     /// members arrive ahead of all of it from [`ChassisBase`].
     ///
-    /// The pumped `aether.render` actor is deliberately absent: ADR-0161 has the
-    /// embedder claim that slot post-build so the offscreen GPU lives on the
-    /// pump thread. Its two config members are therefore *declared* rather than
-    /// composed — the chassis resolved them in [`HarnessEnv::resolve`], so
-    /// declaring them here is what keeps their keys in the known-key sweep and
-    /// their flags out of the orphaned-argv error.
+    /// The pumped `aether.render` actor is reserved rather than composed: the
+    /// slot is published at the Claim stage, so `aether.text` may declare its
+    /// dependency on render and the slot appears in the `--describe` roster,
+    /// while ADR-0161 has the embedder boot the actor in the build's start so
+    /// the offscreen GPU lives on the pump thread. Its two config members are
+    /// therefore *declared* rather than composed — the chassis resolved them in
+    /// [`HarnessEnv::resolve`], so declaring them here is what keeps their keys
+    /// in the known-key sweep and their flags out of the orphaned-argv error.
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, env: Self::Env) -> Result<Builder<Self>, BootError> {
         let HarnessEnv { base: _, namespace_roots, runtime: _, render: _, render_size: _, events } = env;
 
@@ -120,6 +122,7 @@ impl BootableChassis for HarnessChassis {
             .with_actor::<LifecycleCapability>(frame_lifecycle_params())
             // Programmatic: the fs cap uses the exact roots resolved chassis-side.
             .with_actor_configured::<FsCapability>((), namespace_roots)
+            .reserve_pumped::<RenderCapability>()
             .declare_config_member::<RenderTuningConfig>()
             .declare_config_member::<RenderSizeConfig>())
     }

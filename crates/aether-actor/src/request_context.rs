@@ -53,6 +53,13 @@ impl RequestContextTable {
         self.entries.is_empty()
     }
 
+    /// The kind of every stored context, one per entry. The host's replace
+    /// check reads it to refuse a replacement that cannot take a carried
+    /// context (#6429).
+    pub fn kinds(&self) -> impl Iterator<Item = KindId> + '_ {
+        self.entries.values().map(|entry| entry.kind)
+    }
+
     /// Store a context under `request`, replacing any older entry for the same
     /// correlation id. A no-correlation request is ignored because no reply can
     /// recover it exactly. A new request on a full table evicts the oldest

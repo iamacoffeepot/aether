@@ -51,8 +51,9 @@ pub use kinds::*;
 /// glyph atlas, and the request-context relay logic) lives behind the one
 /// `feature = "runtime"` gate, so a transport-only build never names
 /// `TextCapabilityState` nor pulls `fontdue` / `aether_substrate` through
-/// this cap.
-#[actor(singleton, root)]
+/// this cap. It declares its dependency on `aether.render`, where every glyph
+/// batch and atlas texture goes (ADR-0230).
+#[actor(singleton, root, depends(RenderCapability))]
 pub struct TextCapability;
 
 // The struct-hosted `#[actor(singleton)]` above lifts this cap's identity

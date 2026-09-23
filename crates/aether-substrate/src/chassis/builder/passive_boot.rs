@@ -23,6 +23,16 @@ impl DynShutdown for FallbackShutdown {
     }
 }
 
+/// The reserved pumped slot's no-op shutdown. The slot's inbox rides the
+/// Claim-stage stash until the Start stage recovers it, and the pumped slot
+/// built from it is shut down by whoever pumps it, so this entry owns
+/// nothing.
+struct ReservedPumpShutdown;
+
+impl DynShutdown for ReservedPumpShutdown {
+    fn shutdown_dyn(self: Box<Self>) {}
+}
+
 /// Issue 697: chassis boot is multi-pass. Every registered passive
 /// walks `claim → init → wire → spawn` synchronized across all
 /// passives — the chassis builder calls phase N on every passive
@@ -124,5 +134,39 @@ impl PassiveBoot for FallbackRouterBoot {
         // `&mut Option<FallbackRouter>` borrowed from `BootedPassives`).
         // Boot failure unwinds the entire `BootedPassives`, so the
         // slot drops with it. Nothing to do here.
+    }
+}
+
+/// Claim-only passive reserving a pumped actor's slot (ADR-0230 §3). Its
+/// `claim` publishes the namespace as a registered inbox through
+/// [`ChassisCtx::claim_driver_mailbox`], the Claim-stage reservation a
+/// driver's `claim` hook makes, so the slot is routable before any passive's
+/// `init` and a passive that declares a dependency on it passes the birth
+/// check. Mail sent to the slot waits in the inbox until the Start stage
+/// boots the pumped actor from the reservation. `init`, `wire` and `spawn`
+/// do nothing.
+pub(super) struct ReservedPumpBoot {
+    namespace: &'static str,
+}
+
+impl ReservedPumpBoot {
+    pub(super) const fn new(namespace: &'static str) -> Self {
+        Self { namespace }
+    }
+}
+
+impl PassiveBoot for ReservedPumpBoot {
+    fn claim(&mut self, ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_driver_mailbox(self.namespace)
+    }
+
+    fn spawn(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) -> Result<Box<dyn DynShutdown>, BootError> {
+        Ok(Box::new(ReservedPumpShutdown))
+    }
+
+    fn cleanup_after_failure(self: Box<Self>, _ctx: &mut ChassisCtx<'_>) {
+        // The reservation sits in the Claim-stage stash on `BootedPassives`,
+        // as a driver's does. A failed build drops the stash and the
+        // registry with it, so there is nothing to release here.
     }
 }

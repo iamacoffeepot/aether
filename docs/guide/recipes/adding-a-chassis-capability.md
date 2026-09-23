@@ -283,6 +283,17 @@ Where that line goes depends on which chassis should carry the cap:
   desktop driver (`ctx.boot_pumped_actor::<RenderCapability>(…)`) because it
   must run on the winit thread.
 
+A pumped actor is **reserved at the Claim stage**, before any passive's
+`init`: on a driver chassis the driver's `claim` hook calls
+`ctx.claim_driver_mailbox(…)`, and on a passive chassis the composition calls
+`reserve_pumped::<A>()` and terminates in `build_passive_with_start(|passive| …)`,
+whose start boots the actor with `passive.boot_pumped_actor::<A>(…)`. The
+reservation is a live route, so a passive may declare `depends(A)` on a pumped
+actor (`TextCapability` declares `depends(RenderCapability)`), and mail sent to
+the slot waits in its inbox until the pump boots. A reservation that is never
+booted fails the build, naming the slot: a plain `build_passive()` boots
+nothing, so a reservation fails it too.
+
 The builder claims `A::NAMESPACE` as it boots each cap and enforces
 **one claimant per name**: a second cap claiming an already-owned mailbox
 fails the build with `BootError::MailboxAlreadyClaimed { name }` (or a
@@ -312,7 +323,7 @@ Bloomery compose, instead owns the `SubstrateBoot` and blocks that thread on
 SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
 listener. A driver implements `DriverCapability` (not `NativeActor`) and is
 supplied with `.driver(d)` rather than `.with_actor`; the type-state builder
-enforces exactly one. The in-process SubstrateHarness uses `build_passive` and lets its
+enforces exactly one. The in-process SubstrateHarness uses `build_passive_with_start` and lets its
 embedder drive it, so it deliberately has no driver capability.
 
 If the cap drives — owns a loop or a peripheral — its name carries

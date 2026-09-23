@@ -62,13 +62,15 @@ members = [
     "crates/aether-mcp",
     # Test fixtures — single-output crates sitting alongside every other
     # member: one shared `kinds` rlib plus the component cdylibs (the main
-    # bundle, the typed↔reshaped replace-pair satellites, the ADR-0138
-    # defaultless multi-actor fixture, and the ADR-0147 boot-slot fixture)
-    # and the split-cap native lib.
+    # bundle, the typed↔reshaped replace-pair satellites, the reshaped
+    # carried-context replace target, the ADR-0138 defaultless multi-actor
+    # fixture, and the ADR-0147 boot-slot fixture) and the split-cap native
+    # lib.
     "crates/aether-test-fixtures-kinds",
     "crates/aether-test-fixtures-bundle",
     "crates/aether-test-fixtures-stateful-typed",
     "crates/aether-test-fixtures-stateful-reshaped",
+    "crates/aether-test-fixtures-carry-reshaped",
     "crates/aether-test-fixtures-split-cap",
     "crates/aether-test-fixtures-defaultless",
     "crates/aether-test-fixtures-boot",
@@ -77,6 +79,7 @@ members = [
     "crates/aether-test-fixtures-reactor",
     "crates/aether-test-fixtures-reactor-call",
     "crates/aether-test-fixtures-mixed-bundle",
+    "crates/aether-test-fixtures-inline-dependency",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:

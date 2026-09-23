@@ -3,9 +3,12 @@
 //! silently.
 //!
 //! Minimal composition — the companion opens no device and mails no peer, so
-//! it boots on the harness basics with no render / wgpu gate.
+//! it boots on the harness basics with no render / wgpu gate. It shares the
+//! `aether.audio` namespace, so it inherits the real runtime's declared
+//! `aether.fs` dependency, and the save-sandbox namespace roots compose fs.
 
 use aether_audio::{HeadlessAudioCapability, LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
 /// iamacoffeepot/aether#5705: `play_track` and `load_instrument` are the two
@@ -16,8 +19,11 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 /// answering, and a kind dropped off the companion's dispatch table.
 #[test]
 fn headless_audio_err_replies_to_play_track_and_load_instrument() {
-    let mut harness =
-        SubstrateHarness::builder().with_actor::<HeadlessAudioCapability>(()).build().expect("boot headless audio");
+    let mut harness = SubstrateHarness::builder()
+        .namespace_roots(test_namespace_roots(init_save_sandbox("headless-audio")))
+        .with_actor::<HeadlessAudioCapability>(())
+        .build()
+        .expect("boot headless audio");
     let audio = harness.actor_ref::<HeadlessAudioCapability>();
 
     let result = harness

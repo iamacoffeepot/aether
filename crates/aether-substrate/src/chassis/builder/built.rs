@@ -1,8 +1,9 @@
 use std::any::{Any, TypeId};
+use std::collections::HashMap;
 use std::fmt;
 use std::io;
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
 use aether_data::{KindId, LoadName, SessionToken};
@@ -13,7 +14,7 @@ use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
 use crate::actor::native::NativeActor;
 use crate::actor::native::slot::pumped::PumpedSlot;
 use crate::chassis::Chassis;
-use crate::chassis::ctx::{MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
+use crate::chassis::ctx::{MailboxClaim, MailboxWakeSlot, RelayInbox, prepare_relay_inbox};
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
@@ -163,6 +164,13 @@ impl<C: Chassis> BuiltChassis<C> {
 /// they shut down when the `PassiveChassis` is dropped.
 pub struct PassiveChassis<C: Chassis> {
     pub(super) booted: BootedPassives,
+    /// The pumped slots reserved at the Claim stage
+    /// ([`Builder::reserve_pumped`](super::Builder::reserve_pumped)), keyed by
+    /// namespace and moved off `booted` at build. An entry leaves the map
+    /// when [`Self::boot_pumped_actor`] boots its actor. A recovery whose boot
+    /// failed leaves `None` behind, so the slot still counts as never booted
+    /// when the build's start closure returns.
+    pub(super) reserved: Mutex<HashMap<String, Option<MailboxClaim>>>,
     pub(super) _chassis: PhantomData<fn() -> C>,
 }
 
@@ -171,7 +179,7 @@ impl<C: Chassis> fmt::Debug for PassiveChassis<C> {
         f.debug_struct("PassiveChassis")
             .field("profile", &C::PROFILE)
             .field("passives", &self.booted.shutdowns.len())
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -203,18 +211,29 @@ impl<C: Chassis> PassiveChassis<C> {
     /// [`DriverCtx::boot_pumped_actor`](super::DriverCtx::boot_pumped_actor).
     /// The substrate harness is the embedder-as-driver: it owns the pumped
     /// render slot and drains it at its step / capture pump points, so it
-    /// claims the slot here after `build_passive` rather than through a
-    /// driver's Start-stage `boot`.
+    /// boots the slot here, inside the start closure of
+    /// [`Builder::build_passive_with_start`](super::Builder::build_passive_with_start),
+    /// rather than through a driver's Start-stage `boot`.
     ///
-    /// Claims `A::NAMESPACE` fresh (a no-driver chassis reserved no
-    /// Claim-stage driver mailbox), then runs the two-ack activation
-    /// handshake against the ADR-0165 registry owner, returning the slot plus
-    /// its [`MailboxWakeSlot`] so the embedder installs whatever wake nudges
-    /// its pump cadence (or none — the harness busy-polls its drain).
+    /// Two cases, by whether the chassis reserved `A::NAMESPACE` at the Claim
+    /// stage with [`Builder::reserve_pumped`](super::Builder::reserve_pumped):
     ///
-    /// This runs post-seal by construction: `build_passive` seals immediately
-    /// before handing back the `PassiveChassis` this is called on, so the
-    /// route cannot be written directly and both acks go through the owner:
+    /// - **Reserved.** The reservation's inbox route has been live since
+    ///   Claim, so a passive that declares a dependency on `A` passed its
+    ///   birth check and any mail sent to `A` since waits in that inbox. The
+    ///   boot recovers the reservation, assembles the slot from it and records
+    ///   `A`'s reference. It writes nothing to the registry.
+    /// - **Not reserved.** Claims `A::NAMESPACE` fresh and runs the two-ack
+    ///   activation handshake against the ADR-0165 registry owner, below.
+    ///
+    /// Either way it returns the slot plus its [`MailboxWakeSlot`], so the
+    /// embedder installs whatever wake nudges its pump cadence (or none — the
+    /// harness busy-polls its drain).
+    ///
+    /// The fresh claim runs post-seal by construction: the build seals
+    /// immediately before handing out the `PassiveChassis` this is called on,
+    /// so the route cannot be written directly and both acks go through the
+    /// owner:
     ///
     /// 1. reserve `A::NAMESPACE` as a `Starting` route and take its token —
     ///    from here mail addressed to the actor parks in the owner instead of
@@ -227,9 +246,11 @@ impl<C: Chassis> PassiveChassis<C> {
     ///    and releases everything parked behind step 1 in the order it arrived.
     ///
     /// Errors if `A::NAMESPACE` is already owned by a different actor type, if
-    /// the owner refuses either ack, or if `A::init` returns `Err`; in each
-    /// failure the namespace claim is released and any accepted reservation is
-    /// cancelled before returning.
+    /// the owner refuses either ack, if `A::init` returns `Err`, or if an
+    /// earlier boot of the same reservation already failed; in each failure
+    /// the namespace claim is released and any accepted `Starting` reservation
+    /// is cancelled before returning. A failed boot of a Claim-stage
+    /// reservation leaves the slot unbooted, so the build fails too.
     pub fn boot_pumped_actor<A>(
         &self,
         config: A::Config,
@@ -247,27 +268,43 @@ impl<C: Chassis> PassiveChassis<C> {
             )))));
         }
 
-        let mailer = spawner.mailer();
-        let registry = mailer.registry();
-        let reserved = registry.reserve_starting_through_owner(A::NAMESPACE).map_err(|error| owner_boot_error(&error));
-        let boot = reserved.and_then(|(mailbox_id, token)| {
-            let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
-            let inbox = SettlingInbox::new(mailbox_id, receiver, Arc::clone(mailer));
-            match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall) {
-                Ok(slot) => registry
-                    .promote_starting_through_owner(mailbox_id, token, handler)
-                    .map(|()| {
-                        // ADR-0230: the owner has published the route `Live`.
+        let boot = if let Some(recovered) = self.recover_reservation(A::NAMESPACE) {
+            recovered.and_then(|MailboxClaim { id: mailbox_id, inbox, wake_slot, .. }| {
+                assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall).map(
+                    |slot| {
+                        // ADR-0230: the Claim-stage reservation published the
+                        // route before the seal and the actor is now wired.
                         self.booted.references.record(Registry::activated::<A>(mailbox_id));
+                        self.lock_reserved().remove(A::NAMESPACE);
                         (slot, wake_slot)
-                    })
-                    .map_err(|error| owner_boot_error(&error)),
-                Err(e) => {
-                    registry.cancel_starting_through_owner(mailbox_id, token);
-                    Err(e)
-                }
-            }
-        });
+                    },
+                )
+            })
+        } else {
+            let mailer = spawner.mailer();
+            let registry = mailer.registry();
+            registry.reserve_starting_through_owner(A::NAMESPACE).map_err(|error| owner_boot_error(&error)).and_then(
+                |(mailbox_id, token)| {
+                    let RelayInbox { receiver, wake_slot, handler } = prepare_relay_inbox();
+                    let inbox = SettlingInbox::new(mailbox_id, receiver, Arc::clone(mailer));
+                    match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall)
+                    {
+                        Ok(slot) => registry
+                            .promote_starting_through_owner(mailbox_id, token, handler)
+                            .map(|()| {
+                                // ADR-0230: the owner has published the route `Live`.
+                                self.booted.references.record(Registry::activated::<A>(mailbox_id));
+                                (slot, wake_slot)
+                            })
+                            .map_err(|error| owner_boot_error(&error)),
+                        Err(e) => {
+                            registry.cancel_starting_through_owner(mailbox_id, token);
+                            Err(e)
+                        }
+                    }
+                },
+            )
+        };
         match boot {
             Ok(pair) => Ok(pair),
             Err(e) => {
@@ -275,6 +312,29 @@ impl<C: Chassis> PassiveChassis<C> {
                 Err(e)
             }
         }
+    }
+
+    /// Take the Claim-stage reservation under `namespace`. `None` when the
+    /// chassis reserved nothing there. `Some(Err)` when the reservation was
+    /// already recovered by a boot that failed, which leaves the slot
+    /// unbooted for good.
+    fn recover_reservation(&self, namespace: &str) -> Option<Result<MailboxClaim, BootError>> {
+        let claim = self.lock_reserved().get_mut(namespace).map(Option::take)?;
+        Some(claim.ok_or_else(|| {
+            BootError::Other(Box::new(io::Error::other(format!(
+                "pumped slot {namespace:?} was reserved at the Claim stage and its boot already failed"
+            ))))
+        }))
+    }
+
+    fn lock_reserved(&self) -> MutexGuard<'_, HashMap<String, Option<MailboxClaim>>> {
+        self.reserved.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// Fail when a pumped slot reserved at the Claim stage was never booted:
+    /// the passive build's completion check, run after its start closure.
+    pub(super) fn check_reservations_booted(&self) -> Result<(), BootError> {
+        check_reservations_booted(self.lock_reserved().keys().map(String::as_str))
     }
 
     /// Push `payload` to the actor `to` proves as a chassis-root mail and
@@ -391,6 +451,23 @@ pub enum ReplyTarget {
     /// Another proven actor, which receives the reply as mail correlated by
     /// `correlation`.
     Actor { to: ErasedActorRef, correlation: u64 },
+}
+
+/// Fail naming every pumped slot reserved at the Claim stage that was never
+/// booted (ADR-0230 §3: once a boot completes, every declared dependency is
+/// live). `names` are the reservations still outstanding once the Start
+/// stage is over: a driver's unrecovered `claim_driver_mailbox` stash, or a
+/// passive build's unbooted `reserve_pumped` slots.
+pub(super) fn check_reservations_booted<'a>(names: impl Iterator<Item = &'a str>) -> Result<(), BootError> {
+    let mut unbooted: Vec<String> = names.map(|name| format!("{name:?}")).collect();
+    if unbooted.is_empty() {
+        return Ok(());
+    }
+    unbooted.sort_unstable();
+    Err(BootError::Other(Box::new(io::Error::other(format!(
+        "pumped slot {} was reserved at the Claim stage but never booted",
+        unbooted.join(", ")
+    )))))
 }
 
 /// Surface an owner refusal as the chassis boot error the pumped boot path

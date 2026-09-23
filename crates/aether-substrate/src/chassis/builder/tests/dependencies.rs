@@ -1,7 +1,9 @@
 //! Native declared dependencies checked at birth (ADR-0230): a
 //! `#[actor(depends(R))]` actor whose dependency is not `Live` is refused
 //! before `init` at every birth site — the passive boot, the spawner, and
-//! the pumped-slot boot — naming both actors.
+//! the pumped-slot boot — naming both actors. A dependency on a pumped slot
+//! reserved at the Claim stage passes, and the build fails if that slot is
+//! never booted.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -175,4 +177,44 @@ fn pumped_actor_with_missing_dependency_fails_boot() {
     };
     assert_eq!(actor, PumpedDependent::NAMESPACE);
     assert_eq!(namespace, AudioDep::NAMESPACE);
+}
+
+/// A passive that depends on a pumped actor builds when the chassis reserves
+/// the pumped slot at the Claim stage and boots it in the build's start: the
+/// reservation is live before the passive's `init`, and the start recovers it
+/// without re-claiming the name.
+#[test]
+fn passive_dependent_boots_on_a_reserved_pumped_slot() {
+    let (registry, mailer) = bare_substrate();
+
+    let (passive, (mut slot, _wake)) = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<OrderedDependent>(())
+        .reserve_pumped::<AudioDep>()
+        .build_passive_with_start(|passive| passive.boot_pumped_actor::<AudioDep>((), ()))
+        .expect("a passive depending on a reserved pumped slot builds once the start boots the slot");
+
+    let _audio = passive.actor_ref::<AudioDep>();
+    slot.shutdown();
+}
+
+/// A pumped slot reserved at the Claim stage and never booted fails the
+/// build naming the slot, through the start terminal and through the plain
+/// passive terminal alike.
+#[test]
+fn reserved_pumped_slot_never_booted_fails_the_build() {
+    let (registry, mailer) = bare_substrate();
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<OrderedDependent>(())
+        .reserve_pumped::<AudioDep>()
+        .build_passive_with_start(|_| Ok(()))
+        .expect_err("a start that never boots the reserved slot must fail the build");
+    assert!(err.to_string().contains("\"test.deps.audio\""), "the error names the unbooted slot: {err}");
+
+    let (registry, mailer) = bare_substrate();
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<OrderedDependent>(())
+        .reserve_pumped::<AudioDep>()
+        .build_passive()
+        .expect_err("the plain passive terminal boots nothing, so a reservation must fail it");
+    assert!(err.to_string().contains("\"test.deps.audio\""), "the error names the unbooted slot: {err}");
 }
