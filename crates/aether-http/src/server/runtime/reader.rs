@@ -261,7 +261,7 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 enum ReaderResolution {
     /// A live handler: the dispatch target, its dispatch kind, and
     /// whether it takes the streamed body path.
-    Live { handler: AnyActorRef, kind: KindId, streaming: bool },
+    Live { handler: ErasedActorRef, kind: KindId, streaming: bool },
     /// A route matched but no member of its set is live — `503`, never
     /// silently rerouted (that would reroute a claimed family).
     Dead,

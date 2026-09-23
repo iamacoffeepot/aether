@@ -1,7 +1,7 @@
 //! Route resolution: the alias-following walk every dispatch and name
 //! lookup shares, and the point-in-time answers it hands back.
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_data::{
     ActorPath, ActorPathError, ActorPathForm, ScopePathError, mailbox_id_from_path, validate_scope_path,
 };
@@ -192,7 +192,7 @@ impl Registry {
     /// Fetch the entry for the actor `actor` proves from a point-in-time view.
     /// Returns an owned compatibility projection of the private route.
     #[must_use]
-    pub fn entry(&self, actor: AnyActorRef) -> Option<MailboxEntry> {
+    pub fn entry(&self, actor: ErasedActorRef) -> Option<MailboxEntry> {
         self.entry_at(actor.id())
     }
 

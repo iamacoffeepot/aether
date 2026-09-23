@@ -6,7 +6,7 @@ use core::marker::PhantomData;
 
 use aether_data::{Address, MailboxId};
 
-use super::AnyActorRef;
+use super::ErasedActorRef;
 
 /// Proof that an actor of type `R` reached `Live` at an id, in this engine
 /// session (ADR-0230).
@@ -66,8 +66,8 @@ impl<R> ActorRef<R> {
 
     /// Forget the actor type, keeping the proof.
     #[must_use]
-    pub const fn erase(self) -> AnyActorRef {
-        AnyActorRef::new(self.id)
+    pub const fn erase(self) -> ErasedActorRef {
+        ErasedActorRef::new(self.id)
     }
 
     /// The exact address of the proven position: how a held reference is

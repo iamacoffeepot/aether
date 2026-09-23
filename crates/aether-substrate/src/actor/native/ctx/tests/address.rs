@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Addressable, AnyActorRef};
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_path};
 
 use crate::actor::native::NativeCtx;
@@ -113,7 +113,7 @@ fn sender_mints_the_component_source_and_none_without_one() {
         MailId::NONE,
     );
     assert_eq!(
-        component.sender().map(AnyActorRef::id),
+        component.sender().map(ErasedActorRef::id),
         Some(MailboxId(0xC030)),
         "a component source mints a sender reference to its id"
     );

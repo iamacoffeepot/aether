@@ -39,7 +39,7 @@ use crate::mail::mailbox::Mailbox;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
-use crate::reference::{ActorRef, AnyActorRef};
+use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -101,9 +101,9 @@ impl Sends<'_> {
         self.route::<K>(mailbox.mailbox(), &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
-    /// Send `payload` to a proven [`AnyActorRef`], inheriting the handler's
+    /// Send `payload` to a proven [`ErasedActorRef`], inheriting the handler's
     /// causal chain. Identical to [`WasmCtx::send_to`].
-    pub fn send_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    pub fn send_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
@@ -161,7 +161,7 @@ impl MailSender for Sends<'_> {
         self.route::<K>(self.resolve_singleton::<R>(), &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 
-    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 }

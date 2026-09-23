@@ -57,8 +57,8 @@ pub use model::{
     validate_namespace_segment,
 };
 #[doc(hidden)]
-pub use reference::{__mint_actor_ref, __mint_any_actor_ref};
-pub use reference::{ActorRef, AnyActorRef};
+pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
+pub use reference::{ActorRef, ErasedActorRef};
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
 };

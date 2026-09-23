@@ -7,7 +7,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{AnyActorRef, ReplyMode};
+use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::MailboxId;
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
@@ -58,7 +58,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// unloads while the slot stays live), whichever comes first
     /// (ADR-0079 §8, amended). The watcher receives that notice as
     /// ordinary mail whose envelope sender is the departed actor, so its
-    /// handler reads `ctx.sender()` to get the same [`AnyActorRef`] it
+    /// handler reads `ctx.sender()` to get the same [`ErasedActorRef`] it
     /// monitored; either way the notice means state keyed by that
     /// reference is stale.
     ///
@@ -84,7 +84,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///   so there is no monitor index at all — a property of the caller's
     ///   binding, not of the target. Handlers that monitor their registrants
     ///   treat it as "not monitorable" and stay drivable under test bindings.
-    pub fn monitor(&self, target: AnyActorRef) -> Result<MonitorHandle, MonitorError> {
+    pub fn monitor(&self, target: ErasedActorRef) -> Result<MonitorHandle, MonitorError> {
         let target = target.id();
         let spawner = self.binding.spawner().ok_or(MonitorError::Unsupported)?;
         let registry = Arc::clone(spawner.actor_registry());

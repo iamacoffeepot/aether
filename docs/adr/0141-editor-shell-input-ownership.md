@@ -141,7 +141,7 @@ Issue #6306 removed the spec's target field. `RegionAttach { region }`
 address: the shell matches `region` against its declared table and hands the
 envelope sender straight to `Routing`, which stores it. Every routed target —
 the hit region, the press owner, the focus edge, the exited region — is that
-`AnyActorRef` rather than a position, so the shell has nothing to resolve and
+`ErasedActorRef` rather than a position, so the shell has nothing to resolve and
 cannot address a region that never announced. Reference equality is id
 equality, so press ownership and the focus cycle compare what they always
 compared. An unknown region name and a second announcement for a name already

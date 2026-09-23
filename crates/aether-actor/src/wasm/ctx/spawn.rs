@@ -9,7 +9,7 @@ use super::{InlineChild, NO_INBOUND_SOURCE, WasmCtx, WasmInitCtx};
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, validate_namespace_segment};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, WasmActor};
@@ -281,7 +281,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// the child's `init`, the runtime-data mirror of the typed verb's
     /// in-guest `encode` / `decode` round-trip.
     ///
-    /// The `Ok` is the child as an [`AnyActorRef`]: the host has just
+    /// The `Ok` is the child as an [`ErasedActorRef`]: the host has just
     /// registered the alias, which is the proof (ADR-0230 §3). It is the
     /// by-tag equivalent of the typed verb's
     /// [`InlineChild::erase`] — a spawner that stays non-generic over its
@@ -298,7 +298,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         tag: ActorTypeTag,
         subname: Subname<'_>,
         config_bytes: &[u8],
-    ) -> Result<AnyActorRef, SpawnError> {
+    ) -> Result<ErasedActorRef, SpawnError> {
         let (is_counter, full_subname) = resolve_subname(subname)?;
         // The resolver is installed on the module's registry by every
         // `export!` init shim — it enumerates the exported type set the
@@ -311,7 +311,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         let Some(resolver) = self.inline.spawn_resolver() else {
             return Err(SpawnError::UnknownActorTag(tag));
         };
-        resolver(self.inline, self.mailbox, tag, is_counter, &full_subname, config_bytes).map(AnyActorRef::new)
+        resolver(self.inline, self.mailbox, tag, is_counter, &full_subname, config_bytes).map(ErasedActorRef::new)
     }
 
     /// ADR-0114: tear down an **inline child** spawned by
@@ -365,7 +365,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     // The pedantic candidate lint only fires now that the body reads a
     // borrowed registry rather than mutating a crate-global static.
     #[allow(clippy::must_use_candidate)]
-    pub fn despawn_inline_child(&self, child: AnyActorRef) -> bool {
+    pub fn despawn_inline_child(&self, child: ErasedActorRef) -> bool {
         let child = child.id();
         // Take the resident box onto the stack, run its `unwire` through a
         // ctx addressed to its alias, then drop it; `remove` clears the

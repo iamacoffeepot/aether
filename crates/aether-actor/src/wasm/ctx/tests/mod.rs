@@ -14,7 +14,7 @@ use super::{ActorTypeTag, NO_INBOUND_SOURCE, SpawnError, WasmCtx, install_inline
 use crate::mail::{Mail, PriorState};
 use crate::model::Subname;
 use crate::model::ctx::{Erased, Manual};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 use crate::wasm::inline::Registry;
 use crate::wasm::inline::compose::spawn_one_child;
 use crate::wasm::{
@@ -401,7 +401,7 @@ impl ErasedWasmActor for RecordingTarget {
 
     fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {
         self.dispatches.set(self.dispatches.get() + 1);
-        self.source.set(ctx.sender().map(AnyActorRef::id));
+        self.source.set(ctx.sender().map(ErasedActorRef::id));
         0
     }
 

@@ -14,7 +14,7 @@
 //! boundary-derived reference cannot land in actor state as something a cap
 //! sends other kinds through.
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_kinds::NamedMail;
 
 use crate::mail::KindId;
@@ -29,7 +29,7 @@ use crate::mail::registry::Registry;
 /// the only thing a holder can do with it.
 #[derive(Debug)]
 pub struct BoundaryMail {
-    pub(crate) recipient: AnyActorRef,
+    pub(crate) recipient: ErasedActorRef,
     pub(crate) kind: KindId,
     pub(crate) payload: Vec<u8>,
 }

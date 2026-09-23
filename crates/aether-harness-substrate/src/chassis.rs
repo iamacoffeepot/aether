@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::Kind;
 use aether_data::KindId;
@@ -160,7 +160,7 @@ pub trait FrameHook {
     /// The pumped render actor's proven reference, where `capture_frame`
     /// requests route — recorded when the hook booted the slot and supplied
     /// by the hook so the core stays render-free.
-    fn render(&self) -> AnyActorRef;
+    fn render(&self) -> ErasedActorRef;
     /// Run the pumped slot's Closed-path teardown (`unwire`, cost-row drop,
     /// registry close + monitor fan-out). Called once on harness drop.
     fn shutdown(&mut self);

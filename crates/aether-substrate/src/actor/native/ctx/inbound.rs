@@ -9,7 +9,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{AnyActorRef, ReplyMode};
+use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::envelope::Envelope;
@@ -100,7 +100,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.source
     }
 
-    /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
+    /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
     /// source the host stamped, with no registry read. This is the
     /// *immediate* sender (one hop, the addressing layer's `Source`), not
     /// the chain origin — the origin lives in the tracing layer (`root` /
@@ -111,9 +111,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// a watcher reads which actor it lost from here. Needs no actor type,
     /// so it exists on the erased ctx too.
     #[must_use]
-    pub fn sender(&self) -> Option<AnyActorRef> {
+    pub fn sender(&self) -> Option<ErasedActorRef> {
         match self.source.addr {
-            SourceAddr::Component(id) => Some(Registry::structural_any(id)),
+            SourceAddr::Component(id) => Some(Registry::structural_erased(id)),
             _ => None,
         }
     }

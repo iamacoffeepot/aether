@@ -2550,7 +2550,7 @@ pub struct EditorConfig {
 /// is the actor behind the declared region called `region`.
 ///
 /// The payload names only the region; the address is the envelope's sender,
-/// which the shell reads as an `AnyActorRef` and stores. That is why the kind
+/// which the shell reads as an `ErasedActorRef` and stores. That is why the kind
 /// carries no mailbox field: an id in a decoded kind is a position anyone can
 /// spell, while the sender is a position the host stamped (ADR-0230).
 #[aether_data::kind(name = "aether.kit.widget.editor.region_attach")]

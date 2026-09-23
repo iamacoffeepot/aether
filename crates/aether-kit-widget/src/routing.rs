@@ -3,7 +3,7 @@
 //! [`Routing`] owns only deterministic state. The [`EditorShell`](super::EditorShell)
 //! actor owns subscriptions and turns these named effects into mail sends.
 //!
-//! Every target here is an [`AnyActorRef`] — the proof a region handed the
+//! Every target here is an [`ErasedActorRef`] — the proof a region handed the
 //! shell when it announced itself, never a position anyone derived (ADR-0230).
 //! The table stores what it was given and hands the same value back, so the
 //! shell has nothing to look up and no way to address a region that never
@@ -12,7 +12,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_kinds::keycode::KEY_TAB;
 use aether_kinds::{Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
 use aether_math::{Aabb, Vec3};
@@ -65,7 +65,7 @@ impl EditorKeyChord {
 /// Region-level pointer capture, tied to the button that established it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPressOwner {
-    pub target: AnyActorRef,
+    pub target: ErasedActorRef,
     pub button: u32,
 }
 
@@ -79,14 +79,14 @@ pub enum RegionFocusDirection {
 /// One editor-region focus edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionFocusTransition {
-    pub previous: Option<AnyActorRef>,
-    pub next: Option<AnyActorRef>,
+    pub previous: Option<ErasedActorRef>,
+    pub next: Option<ErasedActorRef>,
 }
 
 /// A pointer press route plus any focus edge it caused.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPointerRoute {
-    pub target: Option<AnyActorRef>,
+    pub target: Option<ErasedActorRef>,
     pub focus: Option<RegionFocusTransition>,
 }
 
@@ -101,14 +101,14 @@ pub struct RegionPointerRoute {
 /// motion is what re-derives that region's hover to nothing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionPointerMotionRoute {
-    pub exited: Option<AnyActorRef>,
-    pub target: Option<AnyActorRef>,
+    pub exited: Option<ErasedActorRef>,
+    pub target: Option<ErasedActorRef>,
 }
 
 /// A key route. Reserved editor chords are consumed with no target.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RegionKeyRoute {
-    pub target: Option<AnyActorRef>,
+    pub target: Option<ErasedActorRef>,
     pub focus: Option<RegionFocusTransition>,
     pub consumed: bool,
 }
@@ -120,7 +120,7 @@ pub struct RegionKeyRoute {
 #[derive(Debug, Clone)]
 struct RegionEntry {
     name: String,
-    target: Option<AnyActorRef>,
+    target: Option<ErasedActorRef>,
     rect: Aabb,
     keyboard_focus_eligible: bool,
     input_lanes: RegionInputLanes,
@@ -163,13 +163,13 @@ fn valid_rect(rect: EditorRegionRect) -> bool {
 #[derive(Default)]
 pub struct Routing {
     entries: Vec<RegionEntry>,
-    focused: Option<AnyActorRef>,
+    focused: Option<ErasedActorRef>,
     modifiers: Modifiers,
     cycle_armed: bool,
     press_owner: Option<RegionPressOwner>,
     /// The region the last motion was routed to, so the next one that routes
     /// elsewhere can name it as exited.
-    motion_target: Option<AnyActorRef>,
+    motion_target: Option<ErasedActorRef>,
 }
 
 impl Routing {
@@ -183,7 +183,7 @@ impl Routing {
     /// an undeclared region or a second announcement for one already attached,
     /// both of which the caller reports rather than silently re-pointing a
     /// live route.
-    pub fn attach(&mut self, region: &str, subscriber: AnyActorRef) -> bool {
+    pub fn attach(&mut self, region: &str, subscriber: ErasedActorRef) -> bool {
         let Some(entry) = self.entries.iter_mut().find(|entry| entry.name == region && entry.target.is_none()) else {
             return false;
         };
@@ -192,7 +192,7 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn focused(&self) -> Option<AnyActorRef> {
+    pub fn focused(&self) -> Option<ErasedActorRef> {
         self.focused
     }
 
@@ -207,12 +207,12 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn target_accepts(&self, target: AnyActorRef, lane: RegionInputLane) -> bool {
+    pub fn target_accepts(&self, target: ErasedActorRef, lane: RegionInputLane) -> bool {
         self.accepting_target(target, lane).is_some()
     }
 
     #[must_use]
-    pub fn hit_test(&self, x_pixels: f32, y_pixels: f32) -> Option<AnyActorRef> {
+    pub fn hit_test(&self, x_pixels: f32, y_pixels: f32) -> Option<ErasedActorRef> {
         if !x_pixels.is_finite() || !y_pixels.is_finite() {
             return None;
         }
@@ -237,7 +237,7 @@ impl Routing {
         RegionPointerRoute { target, focus }
     }
 
-    pub fn pointer_release(&mut self, release: MouseButtonRelease) -> Option<AnyActorRef> {
+    pub fn pointer_release(&mut self, release: MouseButtonRelease) -> Option<ErasedActorRef> {
         if let Some(owner) = self.press_owner {
             if release.button == owner.button {
                 self.press_owner = None;
@@ -260,7 +260,7 @@ impl Routing {
     }
 
     #[must_use]
-    pub fn wheel(&self, wheel: MouseWheel) -> Option<AnyActorRef> {
+    pub fn wheel(&self, wheel: MouseWheel) -> Option<ErasedActorRef> {
         self.hit_test(wheel.x, wheel.y).and_then(|target| self.accepting_target(target, RegionInputLane::Wheel))
     }
 
@@ -295,22 +295,22 @@ impl Routing {
         RegionKeyRoute { target: self.focused_target(RegionInputLane::KeyRelease), focus: None, consumed: false }
     }
 
-    pub fn modifiers(&mut self, modifiers: Modifiers) -> Option<AnyActorRef> {
+    pub fn modifiers(&mut self, modifiers: Modifiers) -> Option<ErasedActorRef> {
         self.modifiers = modifiers;
         self.focused_target(RegionInputLane::Modifiers)
     }
 
     #[must_use]
-    pub fn text_input_target(&self) -> Option<AnyActorRef> {
+    pub fn text_input_target(&self) -> Option<ErasedActorRef> {
         self.focused_target(RegionInputLane::TextInput)
     }
 
     #[must_use]
-    pub fn ime_preedit_target(&self) -> Option<AnyActorRef> {
+    pub fn ime_preedit_target(&self) -> Option<ErasedActorRef> {
         self.focused_target(RegionInputLane::ImePreedit)
     }
 
-    fn activation_target(&self, key: Key) -> Option<AnyActorRef> {
+    fn activation_target(&self, key: Key) -> Option<ErasedActorRef> {
         self.entries
             .iter()
             .find(|entry| {
@@ -320,7 +320,7 @@ impl Routing {
             .and_then(|entry| entry.target)
     }
 
-    fn accepting_target(&self, target: AnyActorRef, lane: RegionInputLane) -> Option<AnyActorRef> {
+    fn accepting_target(&self, target: ErasedActorRef, lane: RegionInputLane) -> Option<ErasedActorRef> {
         self.entries
             .iter()
             .find(|entry| entry.target == Some(target))
@@ -328,11 +328,11 @@ impl Routing {
             .and_then(|entry| entry.target)
     }
 
-    fn focused_target(&self, lane: RegionInputLane) -> Option<AnyActorRef> {
+    fn focused_target(&self, lane: RegionInputLane) -> Option<ErasedActorRef> {
         self.focused.and_then(|target| self.accepting_target(target, lane))
     }
 
-    fn focus_target(&mut self, target: AnyActorRef) -> Option<RegionFocusTransition> {
+    fn focus_target(&mut self, target: ErasedActorRef) -> Option<RegionFocusTransition> {
         let eligible = self.entries.iter().any(|entry| entry.target == Some(target) && entry.keyboard_focus_eligible);
         if !eligible || self.focused == Some(target) {
             return None;

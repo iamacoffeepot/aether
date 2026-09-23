@@ -742,7 +742,7 @@ where
 mod tests {
     use super::{ChainMode, Registry, RouteDecision, drain_cluster_queue, membrane_dispatch};
     use crate::mail::{Mail, PriorState};
-    use crate::reference::AnyActorRef;
+    use crate::reference::ErasedActorRef;
     use crate::wasm::ErasedWasmActor;
     use crate::{ActorTypeTag, CallerScope, WasmCtx};
     use aether_data::MailboxId;
@@ -804,7 +804,7 @@ mod tests {
         }
         fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, _mail: Mail<'_>) -> u32 {
             self.dispatches.set(self.dispatches.get() + 1);
-            self.observed_source.set(ctx.sender().map(AnyActorRef::id));
+            self.observed_source.set(ctx.sender().map(ErasedActorRef::id));
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
@@ -825,7 +825,7 @@ mod tests {
     /// reinserted) after it removed its own slot mid-dispatch. Carries its
     /// own alias id so `erased_dispatch` can despawn the matching slot.
     struct SelfDespawningChild {
-        id: AnyActorRef,
+        id: ErasedActorRef,
         drops: Rc<Cell<u32>>,
     }
 
@@ -1072,7 +1072,7 @@ mod tests {
             false,
             0,
             Vec::new(),
-            Box::new(SelfDespawningChild { id: AnyActorRef::new(MailboxId(child)), drops: Rc::clone(&drops) }),
+            Box::new(SelfDespawningChild { id: ErasedActorRef::new(MailboxId(child)), drops: Rc::clone(&drops) }),
         );
 
         // Dispatch the child; it despawns its own slot mid-dispatch.

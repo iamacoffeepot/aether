@@ -4,7 +4,7 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, AnyActorRef, Manual, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
@@ -44,7 +44,7 @@ pub struct SyntheticWindowCapabilityState {
     pending_creates: HashMap<WindowId, PendingWindowCreate>,
     /// Each live child's window and monitor, keyed by the child's reference:
     /// the `MonitorNotice` sender a departing child is found by (ADR-0230).
-    child_monitors: HashMap<AnyActorRef, (WindowId, MonitorHandle)>,
+    child_monitors: HashMap<ErasedActorRef, (WindowId, MonitorHandle)>,
     subscribers: WindowSubscribers,
 }
 

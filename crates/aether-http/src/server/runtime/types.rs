@@ -137,7 +137,7 @@ pub enum InboundEvent {
     /// and read its accept-set; the shard opens the inbound request
     /// stream and replies [`ReaderControl::Stream`] down the control
     /// channel. Buffered requests never take this round trip.
-    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: AnyActorRef },
+    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: ErasedActorRef },
     /// A complete, size-bounded buffered request, resolved and encoded
     /// at the reader (ADR-0135 §2): `payload` is the ready-to-send
     /// `HttpServerRequest` (or routed-kind) wire image; the shard's
@@ -145,7 +145,7 @@ pub enum InboundEvent {
     RequestParsed {
         conn_id: ConnId,
         payload: Vec<u8>,
-        handler: AnyActorRef,
+        handler: ErasedActorRef,
         kind: KindId,
         method: HttpMethod,
         keep_alive: bool,
@@ -257,7 +257,7 @@ pub struct ConnState {
 pub struct WsConn {
     /// The handler resolved at handshake — inbound messages dispatch here,
     /// and outbound credit grants address it.
-    pub handler: AnyActorRef,
+    pub handler: ErasedActorRef,
     /// The `stream_id` of this connection's outbound writer [`StreamState`].
     pub stream_id: u64,
 }
@@ -279,7 +279,7 @@ pub struct PendingRequest {
     /// The handler this request dispatched to. Carried so a `WebSocketAccept`
     /// reply (ADR-0129) resolves the same handler for the upgraded
     /// connection's inbound dispatch + credit grants without re-resolving.
-    pub handler: AnyActorRef,
+    pub handler: ErasedActorRef,
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
@@ -296,7 +296,7 @@ pub struct StreamState {
     /// credit replenishment addresses the right actor without a re-lookup.
     /// `None` for a response stream whose in-flight record was already gone
     /// at open, which then grants no credit.
-    pub handler: Option<AnyActorRef>,
+    pub handler: Option<ErasedActorRef>,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant
     /// `credit_outstanding + queued <= window`, so a slot is always free when
@@ -343,7 +343,7 @@ pub struct RequestStreamState {
     /// The resolved handler the cap delivers `HttpRequestChunk` /
     /// `HttpRequestStreamEnd` to. Captured at stream open so mid-stream
     /// delivery skips route re-resolution.
-    pub handler: AnyActorRef,
+    pub handler: ErasedActorRef,
     /// The request method, carried to the final response's [`PendingRequest`]
     /// so a HEAD response suppresses its body.
     pub method: HttpMethod,
@@ -408,7 +408,7 @@ pub struct ShardSink {
     /// The shard's wake-coalescing flag, shared with its own sidecar sinks.
     pub dirty: Arc<AtomicBool>,
     /// The shard, proven by its `SpawnOutcome`.
-    pub shard: AnyActorRef,
+    pub shard: ErasedActorRef,
 }
 
 impl ShardSink {

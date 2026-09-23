@@ -29,7 +29,7 @@ pub use super::subscribers::broadcast_to_subscribers;
 // Handler-argument and reply kinds named by the moved `#[runtime] impl`
 // bodies. Private to this module — the identity in the parent resolves the
 // lifted `HandlesKind<K>` markers through its own `aether_kinds` imports.
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_actor::runtime;
 use aether_kinds::trace::Settled;
 use aether_kinds::{
@@ -84,7 +84,7 @@ pub struct LifecycleCapabilityState {
     /// proven references (ADR-0230): a subscription is accepted only once
     /// something has answered that an actor is live at the id, so the
     /// fan-out never handles a position a caller computed.
-    pub subscribers: BTreeMap<KindId, BTreeSet<AnyActorRef>>,
+    pub subscribers: BTreeMap<KindId, BTreeSet<ErasedActorRef>>,
     /// Kind id of the state the cap will broadcast on the next
     /// [`LifecycleAdvance`]. Starts at
     /// `graph.start()`; mutated after each settled advance to the resolved
@@ -116,7 +116,7 @@ pub struct LifecycleCapabilityState {
     /// purges it. The handle's `Drop` deregisters, so the map is both the
     /// dedup guard and the RAII anchor. Keyed by the same proven reference
     /// the stage sets hold (ADR-0230), never by a position.
-    pub monitors: BTreeMap<AnyActorRef, MonitorHandle>,
+    pub monitors: BTreeMap<ErasedActorRef, MonitorHandle>,
 }
 
 /// Read-only inspect surface on the runtime state (ADR-0122 split).
@@ -130,7 +130,11 @@ impl LifecycleCapabilityState {
     /// binding) means "not monitorable": the rows then live until
     /// substrate teardown, exactly as they would for a mailbox that
     /// never goes away.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
+    pub fn watch<M: aether_actor::ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Erased, M>,
+        subscriber: ErasedActorRef,
+    ) {
         if !self.monitors.contains_key(&subscriber)
             && let Ok(handle) = ctx.monitor(subscriber)
         {
@@ -387,7 +391,7 @@ impl NativeActor for LifecycleCapability {
     /// `Err`. Idempotent on "not currently subscribed."
     ///
     /// The exact removal of the four: it holds a reference rather than a
-    /// position, and `AnyActorRef`'s `Eq` is id equality, so the set lookup
+    /// position, and `ErasedActorRef`'s `Eq` is id equality, so the set lookup
     /// is `O(log n)` instead of the scan the wire-borne forms pay.
     ///
     /// # Agent

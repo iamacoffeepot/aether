@@ -1,4 +1,4 @@
-//! [`AnyActorRef`]: proof that some actor reached `Live` at an id.
+//! [`ErasedActorRef`]: proof that some actor reached `Live` at an id.
 
 use aether_data::MailboxId;
 
@@ -6,7 +6,7 @@ use aether_data::MailboxId;
 /// (ADR-0230). The envelope sender arrives in this form: it can reply,
 /// monitor, and narrow, and carries no actor type.
 ///
-/// Memory-only like every proven reference: no codec, so an `AnyActorRef`
+/// Memory-only like every proven reference: no codec, so an `ErasedActorRef`
 /// can be held in actor state but never mailed, configured, or persisted.
 ///
 /// The order is over the proven position, exactly as the `Hash` and `Eq`
@@ -14,11 +14,11 @@ use aether_data::MailboxId;
 /// on proofs rather than on positions — `WindowSubscribers` in
 /// `aether-window` is the consumer that asks for it.
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
-pub struct AnyActorRef {
+pub struct ErasedActorRef {
     id: MailboxId,
 }
 
-impl AnyActorRef {
+impl ErasedActorRef {
     /// Mint a reference for a confirmed-`Live` id. The guest SDK calls this
     /// on the host's answers; native code goes through the gated mint.
     pub(crate) const fn new(id: MailboxId) -> Self {

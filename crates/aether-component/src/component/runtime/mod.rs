@@ -44,7 +44,7 @@ pub use aether_actor::Manual;
 // imports: drop-time cleanup rides the ADR-0079 vacate/close
 // `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{AnyActorRef, OutboundReply, ReplyMode, Single};
+use aether_actor::{ErasedActorRef, OutboundReply, ReplyMode, Single};
 use aether_data::ActorPath;
 use aether_data::{Kind, MailboxCategory, Source};
 
@@ -118,7 +118,7 @@ pub struct ComponentHostCapabilityState {
     /// for actors sourced from a module that declares a boot slot, so a drop /
     /// replace can find and decrement the right boot refcount. A bootless module
     /// inserts nothing.
-    pub boot_hash_by_actor: HashMap<AnyActorRef, String>,
+    pub boot_hash_by_actor: HashMap<ErasedActorRef, String>,
     /// ADR-0147: in-flight `aether.component.replace` forwards awaiting their
     /// trampoline `ReplaceResult`, keyed by the forward's correlation id. The
     /// boot-refcount transfer for a replace is committed only after the swap
@@ -132,12 +132,12 @@ pub struct ComponentHostCapabilityState {
     /// immediately makes it dominant. A proof compares by the position it
     /// proves, so entries survive the deterministic mailbox id's drop/reload
     /// boundary and an older incarnation can never become current again.
-    pub boot_operation_sequence_by_actor: HashMap<AnyActorRef, u64>,
+    pub boot_operation_sequence_by_actor: HashMap<ErasedActorRef, u64>,
     /// Latest successful replacement or drop operation that is allowed to
     /// mutate each actor's boot mapping, keyed like the sequence table. Failed
     /// replacements never enter this table, so they cannot suppress an earlier
     /// successful replacement.
-    pub dominant_boot_operation_by_actor: HashMap<AnyActorRef, u64>,
+    pub dominant_boot_operation_by_actor: HashMap<ErasedActorRef, u64>,
 }
 
 /// ADR-0147: a parked `aether.component.replace` forward. `source` is the
@@ -151,7 +151,7 @@ pub struct ComponentHostCapabilityState {
 #[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,
-    pub actor: AnyActorRef,
+    pub actor: ErasedActorRef,
     pub new_wasm: Arc<[u8]>,
     pub boot_operation: u64,
 }

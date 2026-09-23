@@ -3,7 +3,7 @@
 //! `actor::<Dep>()` folds, for a `One` and for an `Embedded` dependency.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 use crate::{Addressable, DependsOn, Embedded, One};
 use aether_data::MailboxId;
 
@@ -61,5 +61,5 @@ fn sender_mints_the_threaded_source_and_none_without_one() {
 
     let threaded = MailboxId(0xC002);
     let mut mail = WasmCtx::__new(0xC000, &registry, threaded.0);
-    assert_eq!(mail.__for_actor::<Dependent>().sender(), Some(AnyActorRef::new(threaded)));
+    assert_eq!(mail.__for_actor::<Dependent>().sender(), Some(ErasedActorRef::new(threaded)));
 }

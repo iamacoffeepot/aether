@@ -30,7 +30,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_kinds::ComponentCapabilities;
 
 use crate::mail::{KindId, MailboxId};
@@ -111,7 +111,7 @@ impl CapabilityRegistry {
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::accepts`]).
     #[must_use]
-    pub fn accepts_actor(&self, target: AnyActorRef, kind: KindId) -> bool {
+    pub fn accepts_actor(&self, target: ErasedActorRef, kind: KindId) -> bool {
         self.accepts(target.id(), kind)
     }
 

@@ -5,7 +5,7 @@
 
 use std::net::{TcpListener, TcpStream};
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 
 /// Init config for [`TcpListenerActor`](super::TcpListenerActor).
 /// `TcpCapability::on_bind` binds the socket on the dispatcher thread
@@ -18,7 +18,7 @@ pub struct TcpListenerConfig {
     pub listener: Option<TcpListener>,
     pub addr: String,
     pub port: u16,
-    pub consumer: Option<AnyActorRef>,
+    pub consumer: Option<ErasedActorRef>,
 }
 
 /// Init config for [`TcpSessionActor`](super::TcpSessionActor). A listener's
@@ -32,5 +32,5 @@ pub struct TcpSessionConfig {
     pub stream: Option<TcpStream>,
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<AnyActorRef>,
+    pub consumer: Option<ErasedActorRef>,
 }

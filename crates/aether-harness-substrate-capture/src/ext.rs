@@ -12,7 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use aether_actor::{Addressable, AnyActorRef};
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::{Kind, MailId};
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
@@ -40,7 +40,7 @@ pub struct GpuFrameHook {
     render_mailbox: MailboxId,
     /// The pumped render actor's proven reference, recorded by its boot —
     /// where the harness routes `capture_frame`.
-    render: AnyActorRef,
+    render: ErasedActorRef,
 }
 
 impl GpuFrameHook {
@@ -107,7 +107,7 @@ impl FrameHook for GpuFrameHook {
         self.slot.read_state(|state| state.capture_ready()).unwrap_or(false)
     }
 
-    fn render(&self) -> AnyActorRef {
+    fn render(&self) -> ErasedActorRef {
         self.render
     }
 

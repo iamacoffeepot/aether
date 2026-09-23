@@ -13,7 +13,7 @@ impl HttpShardState {
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
-        handler: AnyActorRef,
+        handler: ErasedActorRef,
         method: HttpMethod,
         head: ParsedHead,
     ) {

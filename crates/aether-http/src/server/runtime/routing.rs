@@ -12,7 +12,7 @@ use super::*;
 #[derive(Default)]
 pub struct RouteTable {
     pub routes: HashMap<RouteKey, Route>,
-    pub held: HashMap<AnyActorRef, HashSet<RouteKey>>,
+    pub held: HashMap<ErasedActorRef, HashSet<RouteKey>>,
 }
 
 /// A route's identity: a normalized path prefix and an optional method
@@ -39,7 +39,7 @@ pub struct Route {
     pub shared: bool,
     /// The target set, in registration order. Never empty — the last
     /// member's unregistration drops the whole route.
-    pub members: Vec<AnyActorRef>,
+    pub members: Vec<ErasedActorRef>,
 }
 
 /// The winning route for `(path, method)` (ADR-0130): the longest
@@ -111,7 +111,7 @@ pub fn register_route(
     prefix: &str,
     method: Option<HttpMethod>,
     kind: KindId,
-    holder: AnyActorRef,
+    holder: ErasedActorRef,
     shared: bool,
 ) -> RegisterRouteResult {
     match normalize_prefix(prefix) {
@@ -134,7 +134,7 @@ pub fn unregister_route(
     routes: &SharedRoutes,
     prefix: &str,
     method: Option<HttpMethod>,
-    holder: AnyActorRef,
+    holder: ErasedActorRef,
 ) -> RegisterRouteResult {
     match normalize_prefix(prefix) {
         Ok(prefix) => {
@@ -153,13 +153,13 @@ pub fn unregister_route(
 /// # Panics
 /// Panics if the route-table `RwLock` is poisoned — fail-fast per
 /// ADR-0063.
-pub fn unregister_routes_all(routes: &SharedRoutes, holder: AnyActorRef) {
+pub fn unregister_routes_all(routes: &SharedRoutes, holder: ErasedActorRef) {
     routes.write().expect("route table lock poisoned").release_all(holder);
 }
 
 impl RouteTable {
     /// [`register_route`]'s body over the locked table.
-    fn claim(&mut self, key: RouteKey, kind: KindId, holder: AnyActorRef, shared: bool) -> RegisterRouteResult {
+    fn claim(&mut self, key: RouteKey, kind: KindId, holder: ErasedActorRef, shared: bool) -> RegisterRouteResult {
         if let Some(existing) = self.routes.get_mut(&key) {
             let RouteKey { prefix, method } = &key;
             // Exclusive re-claim by the sole holder stays the idempotent
@@ -211,7 +211,7 @@ impl RouteTable {
     }
 
     /// [`unregister_route`]'s body over the locked table.
-    fn release(&mut self, key: &RouteKey, holder: AnyActorRef) {
+    fn release(&mut self, key: &RouteKey, holder: ErasedActorRef) {
         if let Some(keys) = self.held.get_mut(&holder) {
             keys.remove(key);
             if keys.is_empty() {
@@ -222,7 +222,7 @@ impl RouteTable {
     }
 
     /// [`unregister_routes_all`]'s body over the locked table.
-    fn release_all(&mut self, holder: AnyActorRef) {
+    fn release_all(&mut self, holder: ErasedActorRef) {
         for key in self.held.remove(&holder).unwrap_or_default() {
             self.release_member(&key, holder);
         }
@@ -231,7 +231,7 @@ impl RouteTable {
     /// Remove `holder` from the route under `key`, dropping the route once
     /// its member set is empty. Linear only in that route's members, which
     /// its replica count bounds.
-    fn release_member(&mut self, key: &RouteKey, holder: AnyActorRef) {
+    fn release_member(&mut self, key: &RouteKey, holder: ErasedActorRef) {
         if let Some(route) = self.routes.get_mut(key) {
             route.members.retain(|member| *member != holder);
             if route.members.is_empty() {

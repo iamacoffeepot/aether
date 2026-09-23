@@ -15,7 +15,7 @@ use aether_kinds::{
 use super::LifecycleCapability;
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -140,7 +140,7 @@ impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 pub fn broadcast_to_subscribers<M: ReplyMode>(
     ctx: &mut NativeCtx<'_, Erased, M>,
-    subscribers: &BTreeMap<KindId, BTreeSet<AnyActorRef>>,
+    subscribers: &BTreeMap<KindId, BTreeSet<ErasedActorRef>>,
     stage: KindId,
     payload: &[u8],
 ) {

@@ -5,7 +5,7 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
-use aether_actor::{AnyActorRef, Single};
+use aether_actor::{ErasedActorRef, Single};
 use aether_substrate::Erased;
 use aether_substrate::Subname;
 use std::collections::HashSet;
@@ -120,11 +120,11 @@ pub struct HttpSupervisorState {
     /// `MonitorNotice` purges the mailbox's routes. The handle's
     /// `Drop` deregisters, so the map is both the dedup guard and the
     /// RAII anchor.
-    pub monitors: HashMap<AnyActorRef, MonitorHandle>,
+    pub monitors: HashMap<ErasedActorRef, MonitorHandle>,
     /// Mailboxes whose monitor attempt failed — remembered so the
     /// `route holder is not monitorable` warn fires once per mailbox,
     /// not once per route.
-    pub unmonitorable: HashSet<AnyActorRef>,
+    pub unmonitorable: HashSet<ErasedActorRef>,
 }
 
 /// Dispatch-shard state (ADR-0135): today's whole per-connection machine —
@@ -505,7 +505,7 @@ impl HttpSupervisorState {
         prefix: &str,
         method: Option<HttpMethod>,
         kind: KindId,
-        holder: AnyActorRef,
+        holder: ErasedActorRef,
         shared: bool,
     ) -> RegisterRouteResult {
         register_route(&self.routes, prefix, method, kind, holder, shared)
@@ -529,7 +529,7 @@ impl HttpSupervisorState {
     /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
-    pub fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
+    pub fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: ErasedActorRef) {
         // A monitor that already failed for this mailbox will fail again — the
         // condition is a property of the target, not of the attempt — so the
         // second route it registers must not re-report it.
@@ -568,7 +568,7 @@ impl HttpSupervisorState {
         &mut self,
         prefix: &str,
         method: Option<HttpMethod>,
-        holder: AnyActorRef,
+        holder: ErasedActorRef,
     ) -> RegisterRouteResult {
         unregister_route(&self.routes, prefix, method, holder)
     }
@@ -580,7 +580,7 @@ impl HttpSupervisorState {
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
-    pub fn unregister_routes_all(&mut self, holder: AnyActorRef) {
+    pub fn unregister_routes_all(&mut self, holder: ErasedActorRef) {
         unregister_routes_all(&self.routes, holder);
     }
 }
@@ -720,7 +720,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
         payload: &[u8],
-        handler: AnyActorRef,
+        handler: ErasedActorRef,
         kind: KindId,
         method: HttpMethod,
         keep_alive: bool,
@@ -752,7 +752,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
         head: ParsedHead,
-        handler: AnyActorRef,
+        handler: ErasedActorRef,
     ) {
         let Some(method) = parse_http_method(&head.method) else {
             self.write_status_response(conn_id, 501, "method not implemented");

@@ -9,7 +9,7 @@ use aether_data::{Kind, MailboxId};
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
 use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::{mail, persist};
 use alloc::vec::Vec;
 
@@ -160,7 +160,7 @@ impl MailSender for WasmDropCtx<'_> {
     }
 
     // By-id detached send — the by-name body with the caller's id.
-    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(target.id().0, K::ID.0, &bytes, 1, true, self.mailbox);
     }

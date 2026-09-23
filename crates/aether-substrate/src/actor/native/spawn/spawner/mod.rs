@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_data::ActorPath;
 use crossbeam_channel::Receiver;
 
@@ -233,7 +233,7 @@ impl Spawner {
     /// the mailer — every built chassis does, before any cap boots.
     pub(crate) fn push_tracked(
         &self,
-        to: AnyActorRef,
+        to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
         correlation: u64,
@@ -258,7 +258,7 @@ impl Spawner {
 
     /// Body of the chassis handle's `send_for_reply`: push `payload` to the
     /// actor `to` proves, untracked, with its reply routed to `reply`.
-    pub(crate) fn push_for_reply(&self, to: AnyActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+    pub(crate) fn push_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
         self.mailer.push(Mail::new(to.id(), kind, payload, 1).with_reply_to(reply_source(reply)));
     }
 

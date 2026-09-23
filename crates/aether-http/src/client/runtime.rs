@@ -15,7 +15,7 @@
 // type and `HttpConfig` is named by `init`'s signature.
 use super::egress::PerSenderEgress;
 use super::{HttpCapability, HttpConfig};
-use aether_actor::{AnyActorRef, runtime};
+use aether_actor::{ErasedActorRef, runtime};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -167,7 +167,7 @@ impl NativeActor for HttpCapability {
     fn on_fetch_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<FetchResult, Option<AnyActorRef>>,
+        done: TaskDone<FetchResult, Option<ErasedActorRef>>,
     ) {
         let sender = *done.context();
         done.resolve(ctx);

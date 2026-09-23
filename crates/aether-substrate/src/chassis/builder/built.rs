@@ -4,7 +4,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, AnyActorRef, Root};
+use aether_actor::{ActorRef, ErasedActorRef, Root};
 use aether_data::{KindId, SessionToken};
 use crossbeam_channel::Receiver;
 
@@ -252,7 +252,7 @@ impl<C: Chassis> PassiveChassis<C> {
     #[must_use]
     pub fn send_tracked(
         &self,
-        to: AnyActorRef,
+        to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
         correlation: u64,
@@ -263,7 +263,7 @@ impl<C: Chassis> PassiveChassis<C> {
 
     /// Push `payload` to the actor `to` proves, untracked, with its reply
     /// routed to `reply` — a hub session or another proven actor.
-    pub fn send_for_reply(&self, to: AnyActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+    pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
         self.booted.spawner.push_for_reply(to, kind, payload, reply);
     }
 
@@ -311,7 +311,7 @@ pub enum ReplyTarget {
     Session { session: SessionToken, correlation: u64 },
     /// Another proven actor, which receives the reply as mail correlated by
     /// `correlation`.
-    Actor { to: AnyActorRef, correlation: u64 },
+    Actor { to: ErasedActorRef, correlation: u64 },
 }
 
 /// Surface an owner refusal as the chassis boot error the pumped boot path

@@ -11,7 +11,7 @@ use crate::mail::MailboxId;
 use crate::mail::registry;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
-use aether_actor::{Addressable, AnyActorRef};
+use aether_actor::{Addressable, ErasedActorRef};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -87,8 +87,8 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     // records the sender of every `MonitorNotice` it is handed.
     struct Watcher {
         monitored: Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-        watched: Arc<Mutex<Vec<AnyActorRef>>>,
-        notices: Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+        watched: Arc<Mutex<Vec<ErasedActorRef>>>,
+        notices: Arc<Mutex<Vec<Option<ErasedActorRef>>>>,
         handles: Mutex<Vec<MonitorHandle>>,
     }
     impl Addressable for Watcher {
@@ -102,8 +102,8 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         type Config = ();
         type Params = (
             Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-            Arc<Mutex<Vec<AnyActorRef>>>,
-            Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+            Arc<Mutex<Vec<ErasedActorRef>>>,
+            Arc<Mutex<Vec<Option<ErasedActorRef>>>>,
         );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
@@ -223,7 +223,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     }
     let mut observed = notices.lock().unwrap().clone();
     observed.sort_unstable();
-    let mut expected: Vec<Option<AnyActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
+    let mut expected: Vec<Option<ErasedActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
     expected.sort_unstable();
     assert_eq!(
         observed, expected,
@@ -307,8 +307,8 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     // is handed.
     struct Watcher {
         monitored: Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-        watched: Arc<Mutex<Vec<AnyActorRef>>>,
-        notices: Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+        watched: Arc<Mutex<Vec<ErasedActorRef>>>,
+        notices: Arc<Mutex<Vec<Option<ErasedActorRef>>>>,
         handles: Mutex<Vec<MonitorHandle>>,
     }
     impl Addressable for Watcher {
@@ -322,8 +322,8 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         type Config = ();
         type Params = (
             Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-            Arc<Mutex<Vec<AnyActorRef>>>,
-            Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+            Arc<Mutex<Vec<ErasedActorRef>>>,
+            Arc<Mutex<Vec<Option<ErasedActorRef>>>>,
         );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
@@ -450,7 +450,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     while notices.lock().unwrap().is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    let expected: Vec<Option<AnyActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
+    let expected: Vec<Option<ErasedActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
     assert_eq!(
         *notices.lock().unwrap(),
         expected,

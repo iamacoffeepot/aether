@@ -21,7 +21,7 @@
 use aether_data::Kind;
 
 use crate::model::{CallerAddressable, HandlesKind, Singleton};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 
 /// Outbound-mail surface every actor ctx exposes.
 ///
@@ -113,5 +113,5 @@ pub trait MailSender {
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx
     /// inherent `send_to`), so each concrete ctx supplies its own body.
-    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K);
+    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K);
 }

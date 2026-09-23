@@ -8,7 +8,7 @@
 
 use aether_data::MailboxId;
 
-use super::{ActorRef, AnyActorRef};
+use super::{ActorRef, ErasedActorRef};
 
 /// Mint an [`ActorRef`] for a confirmed-`Live` id. See the module contract.
 #[doc(hidden)]
@@ -17,9 +17,9 @@ pub const fn __mint_actor_ref<R>(id: MailboxId) -> ActorRef<R> {
     ActorRef::new(id)
 }
 
-/// Mint an [`AnyActorRef`] for a confirmed-`Live` id. See the module contract.
+/// Mint an [`ErasedActorRef`] for a confirmed-`Live` id. See the module contract.
 #[doc(hidden)]
 #[must_use]
-pub const fn __mint_any_actor_ref(id: MailboxId) -> AnyActorRef {
-    AnyActorRef::new(id)
+pub const fn __mint_erased_actor_ref(id: MailboxId) -> ErasedActorRef {
+    ErasedActorRef::new(id)
 }

@@ -12,7 +12,7 @@ use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
 use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
@@ -58,7 +58,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         }
     }
 
-    /// Issue 1987: send `payload` to a proven [`AnyActorRef`], threading this
+    /// Issue 1987: send `payload` to a proven [`ErasedActorRef`], threading this
     /// actor's own id as the send's `from`. The untyped cell for a recipient
     /// known only at runtime takes the proof a spawn
     /// ([`InlineChild::erase`](super::InlineChild::erase),
@@ -68,7 +68,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// by-name counterpart, because text is not a proof. Routes through the
     /// inline registry and inherits the handler's causal chain like every ctx
     /// send.
-    pub fn send_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    pub fn send_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
@@ -135,7 +135,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     }
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
-    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
     }
