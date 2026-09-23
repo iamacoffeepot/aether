@@ -148,8 +148,8 @@ where
 ///
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
-pub fn dispatch_log_tail_if_matching(
-    ctx: &mut NativeCtx<'_, crate::Erased, crate::Manual>,
+pub fn dispatch_log_tail_if_matching<A>(
+    ctx: &mut NativeCtx<'_, A, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -176,8 +176,8 @@ pub fn dispatch_log_tail_if_matching(
 ///
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
-pub fn dispatch_trace_tail_if_matching(
-    ctx: &mut NativeCtx<'_, crate::Erased, crate::Manual>,
+pub fn dispatch_trace_tail_if_matching<A>(
+    ctx: &mut NativeCtx<'_, A, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {
@@ -206,9 +206,9 @@ pub fn dispatch_trace_tail_if_matching(
 ///
 /// #1774: takes `(kind, payload)` instead of `&Envelope` — the
 /// only fields this arm reads.
-pub fn dispatch_cost_tail_if_matching(
+pub fn dispatch_cost_tail_if_matching<A>(
     binding: &NativeBinding,
-    ctx: &mut NativeCtx<'_, crate::Erased, crate::Manual>,
+    ctx: &mut NativeCtx<'_, A, crate::Manual>,
     kind: KindId,
     payload: &[u8],
 ) -> bool {

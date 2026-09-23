@@ -442,10 +442,15 @@ mod reaches_sealed {
 /// Sealed: the only implementors are [`Erased`], which reaches every singleton
 /// `R` (the old door, kept until the contract step), and every
 /// `A: Addressable + DependsOn<R>`, whose load was refused unless `R` was
-/// `Live`. A helper states its need as
-/// `fn draw<A: DependsOn<RenderCapability>>(ctx: &mut WasmCtx<'_, A>)`, and the
-/// same call text that was the old door on an erased ctx is the proven one on
-/// a typed ctx.
+/// `Live`. The same call text that was the old door on an erased ctx is the
+/// proven one on a typed ctx.
+///
+/// A helper that calls `ctx.actor::<R>()` states its need as
+/// `fn draw<A: Reaches<RenderCapability>>(ctx: &mut WasmCtx<'_, A>)`: an erased
+/// caller satisfies it today, and a caller typed by its actor satisfies it
+/// exactly when that actor declares `depends(R)`. A helper that calls a flat
+/// verb (`ctx.send::<R>`) states `A: DependsOn<R>` instead, since the erased
+/// ctx has no flat send.
 ///
 /// The [`Addressable`] bound is spelled out even though [`DependsOn`] implies
 /// it as a supertrait: without it the two impls overlap. A downstream crate

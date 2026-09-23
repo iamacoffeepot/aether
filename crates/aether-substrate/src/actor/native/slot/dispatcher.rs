@@ -590,15 +590,16 @@ where
         let payload_view = env.payload.clone();
         // Issue 4158: typed by the actor being dispatched, so a handler that
         // named it in its ctx signature can parent a child under it. The
-        // framework arms below take the `erase()`d view — none of them spawn.
+        // framework arms below are generic over the dispatched actor, and none
+        // of them spawns.
         let mut ctx = NativeCtx::<'_, A, crate::Manual>::with_inbound(binding, sender, mail_id, root, env);
         let payload = payload_view.bytes();
         // ADR-0081 / ADR-0086 / iamacoffeepot/aether#1128 framework-built-in
         // dispatch arms for `aether.log.tail` + `aether.trace.tail` +
         // `aether.cost.tail`. See the helper docs in `dispatch`.
-        let typed_arm_ran = if super::dispatch::dispatch_log_tail_if_matching(ctx.erase(), kind, payload)
-            || super::dispatch::dispatch_trace_tail_if_matching(ctx.erase(), kind, payload)
-            || super::dispatch::dispatch_cost_tail_if_matching(binding, ctx.erase(), kind, payload)
+        let typed_arm_ran = if super::dispatch::dispatch_log_tail_if_matching(&mut ctx, kind, payload)
+            || super::dispatch::dispatch_trace_tail_if_matching(&mut ctx, kind, payload)
+            || super::dispatch::dispatch_cost_tail_if_matching(binding, &mut ctx, kind, payload)
         {
             false
         } else {

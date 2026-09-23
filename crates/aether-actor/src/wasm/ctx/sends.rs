@@ -12,11 +12,13 @@
 //! the author discovers that through a mismatched-`Single`/`Manual` error.
 //!
 //! `ctx.sends()` hands out this view: the same addressing and outbound-mail
-//! verbs, none of the reply channel. Helpers take `&mut Sends<'_>` and are
-//! callable from every handler class:
+//! verbs, none of the reply channel. The view keeps the actor of the ctx it
+//! came from, so helpers take `&mut Sends<'_, A>` and are callable from every
+//! handler class. A helper that reaches an actor through the view takes
+//! `A: Reaches<R>`, the bound `ctx.actor::<R>()` carries:
 //!
 //! ```ignore
-//! fn announce(sends: &mut Sends<'_>, frame: &Frame) {
+//! fn announce<A: Reaches<RenderCapability>>(sends: &mut Sends<'_, A>, frame: &Frame) {
 //!     sends.actor::<RenderCapability>().send(frame);
 //! }
 //!
@@ -32,12 +34,15 @@
 //! with the surface that owns replies. Child spawning and the
 //! cluster-relative verbs are their own concerns and stay on the full ctx.
 
+use core::marker::PhantomData;
+
 use aether_data::{Kind, MailboxId};
 
 use super::WasmCtx;
+use crate::model::ctx::Erased;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
-use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
+use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Reaches, Singleton};
 use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
@@ -54,9 +59,15 @@ use crate::wasm::mailbox::WasmActorMailbox;
 /// Obtained from [`WasmCtx::sends`]. The `&mut self` borrow of the ctx is held
 /// for the view's life, so an actor never holds a send view and the reply
 /// channel open at once.
-pub struct Sends<'a> {
+///
+/// The view keeps the actor `A` of the ctx it came from, so it reaches exactly
+/// what that ctx reaches. `Sends<'_>` alone names the erased view.
+pub struct Sends<'a, A = Erased> {
     mailbox: u64,
     inline: &'a Registry,
+    /// `fn() -> A`, the same marker [`WasmCtx`] carries: the view owns no
+    /// actor state, so it inherits none of `A`'s auto-traits or drop glue.
+    _actor: PhantomData<fn() -> A>,
 }
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
@@ -65,24 +76,48 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// stays callable from a `single` and a `manual` handler alike
     /// without a `M: ReplyMode` parameter of its own.
     #[must_use]
-    pub fn sends(&mut self) -> Sends<'_> {
-        Sends { mailbox: self.mailbox, inline: self.inline }
+    pub fn sends(&mut self) -> Sends<'_, A> {
+        Sends { mailbox: self.mailbox, inline: self.inline, _actor: PhantomData }
     }
 }
 
-impl Sends<'_> {
-    /// The sending actor's own mailbox id — the value the substrate uses to
-    /// address `receive` calls to it. Mirrors [`WasmCtx::mailbox_id`].
-    #[must_use]
-    pub fn mailbox_id(&self) -> MailboxId {
-        MailboxId(self.mailbox)
-    }
-
+impl<A> Sends<'_, A> {
     /// Singleton sender shortcut, identical to [`WasmCtx::actor`]: a
     /// ctx-bound [`WasmActorMailbox`] addressing the unique instance of
     /// receiver actor `R`, carrying this actor's id as the send's `from`.
+    ///
+    /// Bounded `A: Reaches<R>` exactly like [`WasmCtx::actor`]: the erased
+    /// view reaches every singleton, and a view typed by its actor reaches
+    /// only that actor's declared dependencies. A typed ctx's view calling
+    /// `actor::<R>()` for an `R` its actor has not declared does not
+    /// type-check:
+    ///
+    /// ```compile_fail,E0277
+    /// use aether_actor::{Addressable, One, WasmCtx};
+    ///
+    /// struct Undeclared;
+    ///
+    /// impl Addressable for Undeclared {
+    ///     const NAMESPACE: &'static str = "example.undeclared";
+    ///     type Resolver = One;
+    /// }
+    ///
+    /// struct Lonely;
+    ///
+    /// impl Addressable for Lonely {
+    ///     const NAMESPACE: &'static str = "example.lonely";
+    ///     type Resolver = One;
+    /// }
+    ///
+    /// fn missing_dependency(ctx: &mut WasmCtx<'_, Lonely>) {
+    ///     let _ = ctx.sends().actor::<Undeclared>();
+    /// }
+    /// ```
     #[must_use]
-    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
+    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R>
+    where
+        A: Reaches<R>,
+    {
         WasmActorMailbox::new(self.resolve_singleton::<R>(), self.mailbox, self.inline)
     }
 
@@ -125,7 +160,7 @@ impl Sends<'_> {
 // view resolves recipients through the same resolver scopes and routes through
 // the same registry, so a helper handed a `Sends` sends exactly what its caller
 // would have sent.
-impl MailSender for Sends<'_> {
+impl<A> MailSender for Sends<'_, A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,

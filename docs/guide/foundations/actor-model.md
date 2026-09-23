@@ -317,13 +317,15 @@ nothing: a helper you factor out of a handler to *send* something never
 touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
-out `Sends<'_>` — the same addressing and outbound-mail verbs (`send`,
-`send_to`, `actor`, `to`, the detached family)
-with the marker dropped — so the helper takes `&mut Sends<'_>` and every
-handler class can call it:
+out `Sends<'_, A>`, typed by the handler's actor — the same addressing and
+outbound-mail verbs (`send`, `send_to`, `actor`, `to`, the detached family)
+with the marker dropped — so the helper takes `&mut Sends<'_, A>` and every
+handler class can call it. A helper that reaches an actor through the view
+states `A: Reaches<R>`, the bound `ctx.actor::<R>()` carries, and `Sends<'_>`
+alone still names the erased view:
 
 ```rust
-fn announce(sends: &mut Sends<'_>, frame: &Frame) {
+fn announce<A: Reaches<RenderCapability>>(sends: &mut Sends<'_, A>, frame: &Frame) {
     sends.actor::<RenderCapability>().send(frame);
 }
 
@@ -340,7 +342,7 @@ fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _r: Redraw) {
 ```
 
 `reply` / `reply_to` / `emit` — and `send_with_context`, whose stashed context
-is recovered on the reply — stay on `WasmCtx<'_, Erased, M>`, so a helper that needs
+is recovered on the reply — stay on `WasmCtx<'_, A, M>`, so a helper that needs
 those still states which class it belongs to. That's the line: the reply class
 is load-bearing exactly where the reply is.
 
