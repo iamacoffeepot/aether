@@ -3,10 +3,10 @@
   "patterns": {
     "actor_at::<": 5,
     "send_envelope_tracked(": 6,
-    "send_envelope_tracked_with_reply_to(": 3,
-    "send_envelope_detached(": 8,
+    "send_envelope_tracked_with_reply_to(": 2,
+    "send_envelope_detached(": 7,
     "mailer()": 46,
-    "registry()": 33,
+    "registry()": 31,
     "mailbox_id_from_name(": 109,
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 55,

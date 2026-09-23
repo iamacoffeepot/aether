@@ -188,6 +188,10 @@ with, and the position crosses the wire as the `MailEnvelope` recipient. The
 engine that receives the `Call` proves that position once, through the
 payload-borne door above, and sends only through the proof. A position that
 does not prove closes the call with an error instead of parking or dropping.
+A mail bundle — the `NamedMail` list that `DispatchTraced` and `CaptureFrame`
+carry — is the same boundary inside a payload: the receiving capability proves
+every `ActorPath` recipient once, before any item moves, and a proven item can
+only be delivered, with the bytes the boundary encoded.
 
 ### 4. Gate the eliminators, not the constructors
 

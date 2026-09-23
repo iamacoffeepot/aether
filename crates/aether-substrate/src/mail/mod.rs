@@ -7,9 +7,9 @@
 //! interaction lives in the actor SDK (`aether_actor::Mailbox<K>`) and
 //! per-cap dispatchers.
 
+pub mod boundary;
 pub mod capability;
 pub mod cost;
-pub mod helpers;
 pub mod mail_ref;
 pub mod mailer;
 pub mod outbound;
@@ -17,6 +17,7 @@ pub mod registry;
 pub mod ring;
 pub mod view;
 
+pub use boundary::BoundaryMail;
 pub use capability::{CapabilityRegistry, MailboxCaps};
 pub use cost::{CostCell, CostCells, CostTable};
 pub use mail_ref::MailRef;

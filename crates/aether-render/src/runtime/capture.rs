@@ -17,7 +17,7 @@ use std::time::Instant;
 use aether_kinds::{FrameCheck, SimilarityCheck, WindowId};
 use aether_substrate::capture::ReferenceCapture;
 use aether_substrate::chassis::inbox::InboundMail;
-use aether_substrate::mail::Mail;
+use aether_substrate::mail::BoundaryMail;
 
 /// Resolve the optional reference image for a `#1780` similarity
 /// check, reading it synchronously on the cap dispatcher thread so all
@@ -70,7 +70,7 @@ pub struct PendingCapture {
     /// Selected desktop target. `None` is the explicit surfaceless path.
     pub window: Option<WindowId>,
     pub reply: InboundMail,
-    pub after_mails: Vec<Mail>,
+    pub after_mails: Vec<BoundaryMail>,
     /// `FrameCheck` verdict requests, scored on the read-back RGBA in
     /// `on_frame`'s ready-branch (ADR-0161 §Decision 4). The scorer lives in
     /// `aether_substrate::render::visual`, so the branch is reachable without
