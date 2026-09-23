@@ -37,7 +37,7 @@ use std::fs;
 
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::require_runtime;
+use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
 use aether_kit_widget::{
@@ -234,12 +234,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
 /// way the probe scenarios synthesize `aether.lifecycle.tick` to drive a
 /// draw right before readback.
 fn tick_to_root() -> NamedMail {
-    NamedMail {
-        recipient_name: panel_address(),
-        kind_name: Tick::NAME.to_owned(),
-        payload: Tick::default().encode_into_bytes(),
-        count: 1,
-    }
+    envelope(&panel_address(), &Tick::default())
 }
 
 /// The RGB of the captured pixel at `(x, y)`. The frame is 8-bit RGBA,

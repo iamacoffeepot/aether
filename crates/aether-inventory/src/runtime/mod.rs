@@ -11,6 +11,8 @@
 // kinds, which previously resolved at `mod.rs` root — now sourced here
 // beside the body.
 use aether_actor::runtime;
+#[cfg(not(target_family = "wasm"))]
+use aether_data::ActorPath;
 
 use super::{InventoryCapability, ListHandlers, ListKinds, Manifest, Resolve, ResolveAddress};
 
@@ -174,11 +176,14 @@ impl NativeActor for InventoryCapability {
         ctx: &mut NativeCtx<'_>,
         mail: ResolveAddress,
     ) -> ResolveAddressResult {
-        match ctx.mailer().registry().resolve_address(&mail.address) {
+        let resolved = ActorPath::new(&mail.address)
+            .map_err(|error| error.to_string())
+            .and_then(|address| ctx.mailer().registry().resolve_address(&address).map_err(|error| error.to_string()));
+        match resolved {
             Ok(resolved) => {
                 ResolveAddressResult::Ok { mailbox_id: resolved.mailbox_id, canonical_path: resolved.canonical_path }
             }
-            Err(error) => ResolveAddressResult::Err { error: error.to_string() },
+            Err(error) => ResolveAddressResult::Err { error },
         }
     }
 

@@ -33,10 +33,7 @@ use aether_codec::frame::max_frame_size;
 use aether_data::MailId;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
-use aether_data::{
-    EngineId, Kind, KindDescriptor, KindId, MailboxId, ScopePathError, Tag, Uuid, mailbox_id_from_name, tagged_id,
-    validate_scope_path,
-};
+use aether_data::{EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name, tagged_id};
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_inventory::kinds::{ListKinds, ListKindsResult, ResolveAddress, ResolveAddressResult};
 #[cfg(test)]
@@ -101,7 +98,7 @@ use self::components::{MAX_REPLICAS, components_all_loaded, reject_replicas_out_
 use self::components::{
     component_config_bytes, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export,
 };
-use self::envelope::{engine_envelope, local_envelope, validate_recipient_scope};
+use self::envelope::{engine_envelope, local_envelope};
 #[cfg(test)]
 use self::failure_evidence::{
     FAILURE_EVIDENCE_LOG_ENTRIES, FailureEvidenceQuery, FailureEvidenceSource, FailureEvidenceValue, MAX_ADDRESS_BYTES,

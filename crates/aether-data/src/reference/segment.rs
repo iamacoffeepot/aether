@@ -1,5 +1,5 @@
-//! Segment grammar shared by [`crate::Namespace`] and
-//! [`crate::LoadName`]: the rules of
+//! Segment grammar shared by [`crate::Namespace`], [`crate::LoadName`], and
+//! each part of an [`crate::ActorPath`] segment: the rules of
 //! `aether_actor::model::validate_namespace_segment` as a byte loop usable
 //! in `const` context, so an invalid `Namespace` literal fails to compile
 //! while `LoadName` enforces the same rules at run time.

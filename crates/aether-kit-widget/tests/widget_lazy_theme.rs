@@ -22,7 +22,7 @@ use aether_actor::Addressable;
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime};
+use aether_harness_substrate_capture::test_helpers::{envelope, init_save_sandbox, require_runtime};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, Tick};
 use aether_kit_widget::{
     ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, Theme, WidgetChildSpec,
@@ -43,12 +43,7 @@ fn panel_address() -> String {
 }
 
 fn tick_to_panel() -> NamedMail {
-    NamedMail {
-        recipient_name: panel_address(),
-        kind_name: Tick::NAME.to_owned(),
-        payload: Tick::default().encode_into_bytes(),
-        count: 1,
-    }
+    envelope(&panel_address(), &Tick::default())
 }
 
 fn row_height() -> f32 {

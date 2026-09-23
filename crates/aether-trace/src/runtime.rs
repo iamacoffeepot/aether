@@ -158,6 +158,7 @@ mod tests {
     /// carrying the inbound mail id.
     #[test]
     fn on_dispatch_traced_resolves_each_envelope_and_acks_with_root() {
+        use aether_data::ActorPath;
         use aether_kinds::NamedMail;
         use std::sync::Mutex;
 
@@ -199,13 +200,13 @@ mod tests {
             DispatchTraced {
                 mails: vec![
                     NamedMail {
-                        recipient_name: "aether.test.spec_a".into(),
+                        recipient: ActorPath::new("aether.test.spec_a").expect("a well-formed actor path"),
                         kind_name: "aether.test.kind_a".into(),
                         payload: vec![1u8, 2],
                         count: 1,
                     },
                     NamedMail {
-                        recipient_name: "aether.test.spec_b".into(),
+                        recipient: ActorPath::new("aether.test.spec_b").expect("a well-formed actor path"),
                         kind_name: "aether.test.kind_b".into(),
                         payload: vec![3u8, 4, 5],
                         count: 1,
@@ -252,6 +253,7 @@ mod tests {
     /// to `DispatchTracedAck::Err`; no envelope dispatches.
     #[test]
     fn on_dispatch_traced_replies_err_on_unknown_recipient() {
+        use aether_data::ActorPath;
         use aether_kinds::NamedMail;
 
         let mut fix = dispatch_traced_fixture();
@@ -262,7 +264,7 @@ mod tests {
             &mut ctx,
             DispatchTraced {
                 mails: vec![NamedMail {
-                    recipient_name: "aether.test.does_not_exist".into(),
+                    recipient: ActorPath::new("aether.test.does_not_exist").expect("a well-formed actor path"),
                     kind_name: "aether.test.also_missing".into(),
                     payload: vec![],
                     count: 1,
