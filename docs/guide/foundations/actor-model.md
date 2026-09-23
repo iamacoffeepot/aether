@@ -636,8 +636,11 @@ ordered prepared birth to the parent's buffer
 ([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
 registry moves while the handler runs, so no spawn takes a global lock
 mid-turn. What comes back is a `SpawnReceipt`: the child's `mailbox_id` and
-`canonical_name`, both derived from the parent's identity and usable
-immediately as a send target, plus a `completion` `DispatchId`.
+`canonical_name`, both derived from the parent's identity, which name the child
+for correlation, plus a `completion` `DispatchId`. Neither is a send target: the
+child is not `Live` yet, so nothing can prove it. Mail the child must see first
+rides `after_init` on the birth itself, and later mail goes through
+`ctx.to(&child)` once the `Ok` completion hands back its reference.
 
 ```rust
 let Ok(receipt) = ctx
@@ -647,7 +650,6 @@ let Ok(receipt) = ctx
 else {
     return;
 };
-ctx.send_envelope_tracked(receipt.mailbox_id, Frame::ID, &frame.encode_into_bytes());
 ```
 
 The receipt says the birth was accepted locally; the registry owner applies it
@@ -670,9 +672,9 @@ so a handler correlates the completion with the birth it staged straight off the
 outcome, and `C` stays `()` unless there is something the spawn genuinely does
 not know — a peer address, a channel, which leg of a multi-step plan this birth
 belongs to. A handler that keeps or mails its child holds the `Ok` reference
-and sends through `ctx.to(&child)`. A handler that must know the child is live
-before it reports success waits for that completion; one that only needs
-somewhere to send mail can use the receipt directly. Synchronous commit still
+and sends through `ctx.to(&child)`, so a handler that mails its child after the
+bootstrap waits for that completion the same way one that must know the child
+is live before it reports success does. Synchronous commit still
 exists, but only at the boot/embedder boundary — `BuiltChassis::spawn_actor` /
 `PassiveChassis::spawn_actor` and their `.finish()` terminal, which block until
 the birth is live and hand back its `ActorRef<A>`, a proof you can immediately

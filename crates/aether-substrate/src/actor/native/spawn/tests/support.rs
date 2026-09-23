@@ -6,8 +6,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
-use aether_data::{ActorId, Kind};
+use aether_actor::{Addressable, ErasedActorRef, MailSender};
+use aether_data::ActorId;
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
@@ -20,7 +20,7 @@ use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::PreparedSpawnCommit;
 use crate::mail::registry::{MailDispatch, Registry};
-use crate::mail::{KindId, MailId, MailboxId, Source};
+use crate::mail::{KindId, MailId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{Pool, PoolConfig, PoolHandle};
@@ -45,12 +45,12 @@ pub(super) enum ActivationEvent {
 
 pub(super) struct ActivationProbe {
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: Option<MailboxId>,
+    lifecycle_target: Option<ErasedActorRef>,
 }
 
 pub(super) struct ActivationConfig {
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: Option<MailboxId>,
+    lifecycle_target: Option<ErasedActorRef>,
 }
 
 impl ActivationConfig {
@@ -60,7 +60,7 @@ impl ActivationConfig {
 
     pub(super) fn with_lifecycle_target(
         events: crossbeam_channel::Sender<ActivationEvent>,
-        lifecycle_target: MailboxId,
+        lifecycle_target: ErasedActorRef,
     ) -> Self {
         Self { events, lifecycle_target: Some(lifecycle_target) }
     }
@@ -83,7 +83,7 @@ impl NativeActor for ActivationProbe {
 
     fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
         if let Some(target) = state.lifecycle_target {
-            let _ = ctx.send_envelope_detached(target, ActivationPoke::ID, &ActivationPoke.encode_into_bytes());
+            ctx.send_detached_to(target, &ActivationPoke);
         }
         let _ = state.events.send(ActivationEvent::Wire(thread::current().id()));
     }
@@ -101,7 +101,7 @@ impl NativeActor for ActivationProbe {
 
     fn unwire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
         if let Some(target) = state.lifecycle_target {
-            let _ = ctx.send_envelope_detached(target, ActivationPoke::ID, &ActivationPoke.encode_into_bytes());
+            ctx.send_detached_to(target, &ActivationPoke);
         }
         let _ = state.events.send(ActivationEvent::Unwire(thread::current().id()));
     }
@@ -137,7 +137,7 @@ pub(super) fn prepared_probe_with_lifecycle_target(
     spawner: &Arc<Spawner>,
     name: &str,
     events: crossbeam_channel::Sender<ActivationEvent>,
-    lifecycle_target: MailboxId,
+    lifecycle_target: ErasedActorRef,
 ) -> PreparedSpawnCommit {
     let identity = spawner.preflight::<ActivationProbe>(Subname::Named(name), None).unwrap();
     let staged = spawner
@@ -151,7 +151,10 @@ pub(super) fn prepared_probe_with_lifecycle_target(
     spawner.prepare_commit(staged, None, EffectChain::Uncaused(Uncaused::EmbedderCall))
 }
 
-pub(super) fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, crossbeam_channel::Receiver<KindId>) {
+pub(super) fn activation_sink(
+    registry: &Registry,
+    name: &str,
+) -> (ErasedActorRef, crossbeam_channel::Receiver<KindId>) {
     let (sender, receiver) = crossbeam_channel::unbounded();
     let id = registry.register_inline(
         &boot_authority(),
@@ -160,7 +163,7 @@ pub(super) fn activation_sink(registry: &Registry, name: &str) -> (MailboxId, cr
             let _ = sender.send(dispatch.kind);
         }),
     );
-    (id, receiver)
+    (registry.resolve_live(id).expect("a freshly registered inline sink proves"), receiver)
 }
 
 pub(super) fn finalized_probe(

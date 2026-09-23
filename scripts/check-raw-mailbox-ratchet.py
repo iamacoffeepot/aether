@@ -45,8 +45,6 @@ from pathlib import Path
 BASELINE_RELATIVE_PATH = "scripts/raw-mailbox-baseline.json"
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
-    ("send_envelope_tracked(", re.compile(r"(::|\.)send_envelope_tracked\(")),
-    ("send_envelope_detached(", re.compile(r"(::|\.)send_envelope_detached\(")),
     ("mailer()", re.compile(r"(::|\.)mailer\(\)")),
     ("registry()", re.compile(r"\.registry\(\)")),
     ("mailbox_id_from_name(", re.compile(r"\bmailbox_id_from_name\(")),
@@ -54,7 +52,7 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("mailbox_id_from_path(", re.compile(r"\bmailbox_id_from_path\(")),
     (
         "<recipient>.id() at a send",
-        re.compile(r"\b(send_to|send_detached_to|send_envelope_tracked|monitor|despawn_inline_child)\(&?[A-Za-z_][A-Za-z0-9_]*\.id\(\)"),
+        re.compile(r"\b(send_to|send_detached_to|monitor|despawn_inline_child)\(&?[A-Za-z_][A-Za-z0-9_]*\.id\(\)"),
     ),
     ("clippy::disallowed_methods", re.compile(r"clippy::disallowed_methods")),
 )
