@@ -166,8 +166,10 @@ Their drop contracts differ for the same reason. Every drained envelope earns
 exactly one `Finished` whether or not anyone wanted an answer, so dropping an
 `InboundMail` unreplied is ordinary. A hold is taken only when a caller is
 waiting, so dropping a `DeferredReply` unreplied strands that caller forever —
-which is why its drop releases the hold and then `debug_assert`s, in that order,
-so the release still happens in a release build.
+which is why its drop releases the hold and then panics, in that order and in
+every build, so the chain still settles and the scheduler escalates the lost reply
+through the chassis aborter. An actor closing with debts parked discharges them
+with `abandon_for_actor_close`, the one path that releases without failing fast.
 
 ## The trace tree
 

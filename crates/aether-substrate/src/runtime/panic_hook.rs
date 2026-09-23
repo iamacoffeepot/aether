@@ -287,7 +287,7 @@ fn write_jsonl(
 // Chained if-let on disjoint downcasts reads cleaner than a deep
 // `map_or_else` ladder over two Options.
 #[allow(clippy::option_if_let_else)]
-fn payload_string(payload: &(dyn Any + Send)) -> String {
+pub(crate) fn payload_string(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
         (*s).to_string()
     } else if let Some(s) = payload.downcast_ref::<String>() {

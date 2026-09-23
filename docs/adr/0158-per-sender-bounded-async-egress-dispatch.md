@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — bounded per-sender async egress in `crates/aether-http/src/client/egress.rs`)
 - **Date:** 2026-07-21
+- **Amended (#6421):** 2026-09-23 — the inherited resolve-or-leak guard fails fast in every build (ADR-0093, amended).
 
 ## Context
 
@@ -82,7 +83,7 @@ Stated plainly for the wasm HTTP provider arc: **a guest must never queue pendin
 ### Negative
 
 - **Cap state and a completion handler are new surface.** The cap gains a per-sender table plus a `#[handler(task)]` completion handler, where today it has a single synchronous handler. The per-sender-with-global composition is more moving parts than one flat queue, and the drain-fairness rotation is the subtlest piece.
-- **The resolve-or-leak invariant is a runtime guard, not a compile-time proof.** Inherited from ADR-0093: a dropped `TaskDone` `debug_assert`s rather than failing to compile. Idle-reclamation narrows the per-sender leak surface but cannot statically prove every hold is eventually resolved.
+- **The resolve-or-leak invariant is a runtime guard, not a compile-time proof.** Inherited from ADR-0093: a dropped `TaskDone` `debug_assert`s rather than failing to compile. *Amended (#6421): the inherited guard now panics in every build and escalates through the chassis aborter (ADR-0063).* Idle-reclamation narrows the per-sender leak surface but cannot statically prove every hold is eventually resolved.
 - **Sessions share the `MailboxId(0)` bucket.** All non-component senders — including concurrent MCP-driven fetches — contend for one per-sender budget. This is acceptable for a harness-facing caller and the global ceiling still bounds the host, but it is coarser isolation than a component sender gets.
 - **Worst-case native thread count rises.** Up to the global ceiling of blocking workers can run at once, against one dispatch thread today. This is the intended cost of removing head-of-line blocking; the ceiling bounds it.
 

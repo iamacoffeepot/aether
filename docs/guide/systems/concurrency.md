@@ -111,6 +111,11 @@ hand-rolled `InFlightDispatch` the content-gen capabilities used to carry. (Nati
 capabilities today; a wasm/FFI form is a deferred superset — guests use shapes 1
 and 3.)
 
+A panic inside the closure is fatal (ADR-0063): the worker escalates it through
+the chassis `FatalAborter` the same way the scheduler escalates a handler panic,
+and no completion lands. Return an expected failure as a value instead — a
+`Result`-shaped output — and map it to an error reply in the completion.
+
 **3. Heavy async compute → off-thread, by reference.** Multi-step compute that
 produces handles belongs off the actor thread entirely; stage it through the
 offload primitives below and pass results by handle rather than copying them

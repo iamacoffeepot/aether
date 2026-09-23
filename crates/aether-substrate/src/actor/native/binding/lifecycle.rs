@@ -273,6 +273,14 @@ impl NativeBinding {
         self.aborter.abort(reason);
     }
 
+    /// The chassis aborter behind [`Self::fatal_abort`], for an off-thread
+    /// worker that must escalate a panic (ADR-0063) without holding the
+    /// binding: a `dispatch_blocking` worker keeps only a weak binding
+    /// reference, so it takes this handle before it spawns.
+    pub(crate) fn fatal_aborter(&self) -> Arc<dyn FatalAborter> {
+        Arc::clone(&self.aborter)
+    }
+
     /// Read the self-shutdown flag. Polled by the dispatcher trampoline
     /// after each handler dispatch — substrate-shutdown
     /// (channel-disconnect) flows through the same drain path without

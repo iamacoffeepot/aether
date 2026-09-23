@@ -33,6 +33,7 @@ use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
+use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
@@ -337,8 +338,8 @@ fn macro_pending_request_borrow_completion_replies_once() {
 
 /// ADR-0109: a borrow-form `&TaskDone -> ()` completion releases the
 /// hold without sending any reply. The macro emits `release_no_reply`,
-/// so the completion runs cleanly (no lost-reply `debug_assert`) and
-/// nothing routes back to the caller.
+/// so the completion runs cleanly (no lost-reply panic) and nothing
+/// routes back to the caller.
 #[test]
 fn macro_borrow_task_no_reply_releases_without_replying() {
     let (registry, mailer) = bare_substrate();
@@ -375,6 +376,37 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
         reply_rx.recv_timeout(Duration::from_millis(200)).is_err(),
         "a `&TaskDone -> ()` completion sends nothing back to the caller"
     );
+
+    drop(chassis);
+}
+
+/// ADR-0063: a `-> Pending<R>` handler whose `dispatch_blocking` worker
+/// panics escalates the panic through the chassis aborter, carrying the
+/// panic payload in the reason, and no completion runs. The abort panics
+/// only the detached worker thread, so the test process survives.
+#[test]
+fn macro_pending_worker_panic_fails_fast() {
+    let (registry, mailer) = bare_substrate();
+    let obs = DeferredObs::new();
+    let record = Arc::new(FatalAbortRecord::new());
+
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_aborter(Arc::new(RecordingAborter::new(Arc::new(PanicAborter), Arc::clone(&record))))
+        .with_actor::<DeferredReplyCap>(obs.clone())
+        .build_passive()
+        .expect("deferred-reply cap boots");
+
+    push_envelope_replying_to(
+        &registry,
+        chassis.actor_ref::<DeferredReplyCap>().erase(),
+        &KickPanic { seed: 4217 },
+        Source::NONE,
+    );
+
+    let _tripped = record.tripwire().recv_timeout(Duration::from_secs(2));
+    let reason = record.reason().expect("the worker panic reached the chassis aborter");
+    assert!(reason.contains("worker probe panic 4217"), "the abort reason carries the panic payload: {reason}");
+    assert_eq!(obs.echo_calls.load(AtomicOrdering::SeqCst), 0, "no completion ran for the panicked worker");
 
     drop(chassis);
 }
@@ -1095,6 +1127,14 @@ struct KickS {
     seed: u64,
 }
 
+/// Trigger for the worker-panic path: makes the cap dispatch a worker
+/// behind a `-> Pending<EchoReply>` request handler that panics.
+#[repr(C)]
+#[aether_data::kind(name = "test.macro_native_actor.kick_panic", pod, partial_eq)]
+struct KickPanic {
+    seed: u64,
+}
+
 /// The deferred reply kind — what the `&TaskDone -> EchoReply` completion
 /// returns and the macro sends via `resolve_value`. Structured-shape so the
 /// reply (wire-encoded by `Mailer::send_reply`) round-trips through
@@ -1158,6 +1198,15 @@ impl NativeActor for DeferredReplyCap {
     fn on_kick_p(&self, ctx: &mut NativeCtx<'_>, mail: KickP) -> Pending<EchoReply> {
         let seed = mail.seed;
         ctx.dispatch_blocking(move || EchoReply { value: seed })
+    }
+
+    /// Worker-panic path: the worker panics with a probe naming the seed,
+    /// so no `EchoReply` output ever lands.
+    #[allow(clippy::unused_self)] // aether-suppression-request: required native handler receiver
+    #[aether_actor::handler::single]
+    fn on_kick_panic(&self, ctx: &mut NativeCtx<'_>, mail: KickPanic) -> Pending<EchoReply> {
+        let seed = mail.seed;
+        ctx.dispatch_blocking(move || -> EchoReply { panic!("worker probe panic {seed}") })
     }
 
     /// Borrow-form completion: returns the reply; the macro calls
