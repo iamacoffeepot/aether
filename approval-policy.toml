@@ -21,13 +21,14 @@
 # over every path in its declared surface; order in the `rules` list does not
 # matter.
 #
-# THE DEFAULT IS `judge` — not `auto`, and not `human`. Most work is fine to
-# advance on its own: a change the owner scoped and expects to come back correct
-# should not sit waiting on him. A `human` default encodes "trust nothing", which
-# is false and makes him the bottleneck on every doc tweak. An `auto` default
-# encodes "trust everything", which silently auto-approves a brand-new, unpoliced
-# top-level surface the moment somebody creates one. `judge` is the honest
-# middle: an unknown surface gets a second reader rather than a rubber stamp.
+# THE DEFAULT IS `judge` — not `auto`, and not `human`. An `auto` default would
+# let an unattended run approve work on a brand-new, unpoliced top-level surface
+# the moment somebody creates one. At /approve time `judge` and `human` set the
+# same bar: both need the owner's explicit approval. The two differ only when a
+# path is priced as surface overflow: an unlisted path changed outside the
+# approved surface is accepted path by path by the landing agent under `judge`,
+# where a `human` default would stop every such overflow, a doc tweak included,
+# for the owner's confirmation.
 #
 # Globs use gitignore-style ** semantics (gitwildmatch): ** spans path segments,
 # * stays within one segment, ? is one non-slash character, and a leading /
@@ -132,6 +133,12 @@ tier = "human"
 
 [[rules]]
 glob = "/.mcp.json"
+tier = "human"
+
+# The guardrail hook scripts both harnesses wire (`.claude/settings.json`,
+# `.codex/hooks.json`) and their tests.
+[[rules]]
+glob = ".hooks/**"
 tier = "human"
 
 [[rules]]
