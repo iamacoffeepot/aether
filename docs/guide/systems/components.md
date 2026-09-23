@@ -306,6 +306,9 @@ Replacement is phase-aware rather than transactionally rolled back:
 
 - candidate compile, manifest, or export-selection errors happen before the old
   instance is touched;
+- a candidate whose hosted type drops or changes a handler row of the type the
+  slot hosts is refused before the old instance is touched; added rows are
+  allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
 - a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
   hooks have run;
 - an instantiation error occurs after the old instance was dropped and leaves the

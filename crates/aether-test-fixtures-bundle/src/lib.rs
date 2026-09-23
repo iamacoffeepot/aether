@@ -14,6 +14,7 @@
 //! here: a cross-module `replace_component` needs two distinct binaries,
 //! so each lives in its own satellite crate.
 
+mod contract_replace;
 mod correlation_carry;
 mod cube;
 mod dependent_probe;
@@ -32,6 +33,7 @@ mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
 
+pub use contract_replace::{ContractBase, ContractChanged, ContractDropped, ContractExtended};
 pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
@@ -98,6 +100,10 @@ aether_actor::export!(
     DependentProbe,
     CarryRequester,
     ReplyHolder,
+    ContractBase,
+    ContractDropped,
+    ContractChanged,
+    ContractExtended,
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

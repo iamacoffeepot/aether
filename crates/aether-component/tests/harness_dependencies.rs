@@ -5,7 +5,10 @@
 //! `depends(ParentPeerTarget)`: loading it alone is a `LoadResult::Err`
 //! naming the target, and loading the target first makes the same load
 //! `Ok`. Replacing toward the dependent while the target is absent is a
-//! `ReplaceResult::Err` that keeps the running module.
+//! `ReplaceResult::Err` that keeps the running module. The replaced victim is
+//! a second `ParentPeerTarget` loaded under its own name, so it is not the
+//! dependency, and its only row (`Bump`) is one the dependent keeps, so the
+//! satisfied replace passes the contract check (ADR-0231 §5).
 
 use std::fs;
 
@@ -122,7 +125,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     };
 
     let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
-    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), PROBE_EXPORT);
+    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), TARGET_EXPORT);
     let victim_path = ActorPath::new(&victim).expect("a loaded component's address is an actor path");
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
@@ -150,10 +153,19 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     );
 
     // A refused replacement keeps the running module: the victim still
-    // answers ticks at its mailbox.
+    // answers `Bump` at its mailbox with exactly one `TickObserved`.
+    let victim_trampoline = harness
+        .child::<WasmTrampoline, WasmTrampoline>(&root_trampoline(&harness, "outer"), key("victim"))
+        .expect("the victim is live");
     let baseline = harness.count_observed(TICK_OBSERVED);
-    harness.execute(vec![("tick", HarnessOp::advance(2))]).expect("post-refusal advance");
-    assert!(harness.count_observed(TICK_OBSERVED) > baseline, "the victim must still serve after a refused replace");
+    harness
+        .execute(vec![("bump", HarnessOp::send_and_settle(victim_trampoline.erase(), &Bump))])
+        .expect("bump the victim");
+    assert_eq!(
+        harness.count_observed(TICK_OBSERVED),
+        baseline + 1,
+        "the victim must still serve after a refused replace"
+    );
 
     load_named(&mut harness, &wasm, "target", Some(&outer), None, TARGET_EXPORT);
 

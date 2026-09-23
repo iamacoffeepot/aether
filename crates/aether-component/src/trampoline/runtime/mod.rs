@@ -10,10 +10,12 @@
 //! The cap is heavy and already decomposed, so unlike `aether.fs`'s
 //! single-file `runtime.rs` the runtime half is a directory module:
 //! [`state`] (the field-bearing `WasmTrampolineState`), [`config`] (the
-//! `WasmTrampolineConfig` init bundle), and [`replace`] (the inherent replace /
-//! sibling-spawn impl on the state).
+//! `WasmTrampolineConfig` init bundle), [`replace`] (the inherent replace /
+//! sibling-spawn impl on the state), and [`contract`] (the replace-time
+//! contract refusal, ADR-0231 §5).
 
 mod config;
+mod contract;
 mod replace;
 mod state;
 
