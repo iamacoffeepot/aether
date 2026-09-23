@@ -21,11 +21,13 @@
 //! the actor SDK.
 
 pub mod address;
+mod contract;
 pub mod ctx;
 pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
+pub use self::contract::{Contract, Contracts, ReplyShape, Silent, Undeclared};
 use self::ctx::Erased;
 
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the
@@ -721,6 +723,11 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// RenderCapability`) are an opt-in extension if a real conversion case
 /// wants them; the default macro emission is strict so wire bytes stay
 /// obvious.
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` has no handler for `{K}`",
+    label = "`{Self}` does not handle `{K}`",
+    note = "a `#[fallback]` does not count as handling a kind"
+)]
 pub trait HandlesKind<K: Kind>: Addressable {}
 
 /// Per-handler reply marker: `R: Replies<K, Reply = O>` means actor `R`

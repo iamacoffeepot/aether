@@ -17,6 +17,10 @@
 //!   `[u8; N]`: an associated const whose *type* mentions `Self::LEN` is not
 //!   expressible on a trait, and `<[u8]>::len` is const, so the adopter
 //!   recovers the length for its own array arithmetic.
+//! - `__AETHER_HANDLER_SET_CONTRACTS` (wasm sets) — the set's ADR-0231
+//!   `CONTRACTS` rows, each under its handler's `#[cfg]`s, which an adopter
+//!   appends to its own `Contracts` list. A native set carries the same rows in
+//!   its marker bridge (see Markers below).
 //! - `__aether_handler_set_capabilities` (native sets) — the set's
 //!   `HandlerCapability` rows, which an adopter splices into its own
 //!   `Dispatch::capabilities` / `measured_kinds` so the native describe surface
@@ -28,12 +32,22 @@
 //! # Markers
 //!
 //! A native set additionally emits a `#[macro_export] macro_rules!` bridge that
-//! pastes the set's `impl HandlesKind<K> for $ty {}` markers and the matching
-//! `HandlerEntry` inventory rows. The bridge exists because the orphan rule
-//! forecloses the set declaring the markers itself — `impl<T: Set>
-//! HandlesKind<K> for T` puts the `Self` type parameter ahead of the first
-//! local type in the trait reference. The adopter's `#[actor]` emits one
-//! invocation of it.
+//! pastes the set's `impl HandlesKind<K> for $ty {}` markers, its ADR-0231
+//! `impl Contract<K> for $ty` rows (and the `Replies<K>` marker of a replying
+//! handler), and the matching `HandlerEntry` inventory rows. The bridge exists
+//! because the orphan rule forecloses the set declaring the markers itself —
+//! `impl<T: Set> HandlesKind<K> for T` puts the `Self` type parameter ahead of
+//! the first local type in the trait reference. The adopter's `#[actor]` emits
+//! one invocation of it.
+//!
+//! The bridge's `@contracts` arm expands to the set's `CONTRACTS` rows as a
+//! `&'static [(KindId, ReplyContract)]` expression, which the adopter appends
+//! to its own `Contracts` list (ADR-0231 §4). A native set carries its rows
+//! there rather than in a trait const because a struct-hosted adopter cannot
+//! always name the set trait: it may sit in a private module of the runtime
+//! tree. A wasm set has no bridge, so it carries the rows as the hidden trait
+//! const `__AETHER_HANDLER_SET_CONTRACTS`, which its adopters name through the
+//! trait path they already hold.
 //!
 //! Two properties of that bridge are load-bearing. It is invoked **unqualified**
 //! rather than as `crate::__aether_handler_set_markers_…!` — a macro-expanded
@@ -48,7 +62,8 @@
 //!
 //! A wasm set emits no bridge. Its adopters — the widget family — address each
 //! other by name through `RelativeMailbox::send<K: Kind>`, which carries no
-//! `HandlesKind` bound, so a marker there would gate nothing.
+//! `HandlesKind` bound, so a marker there would gate nothing. Its kinds reach
+//! the adopter's `CONTRACTS` list but get no per-kind `Contract` row.
 //!
 //! # Gated handlers
 //!
@@ -72,7 +87,9 @@
 //! adopter expands already carries the resolved answer whatever features the
 //! adopter enables. The gate is a pass-through over `$($t:tt)*` rather than one
 //! macro per item, so a handler's marker and its inventory row share a single
-//! pair and the count stays linear in gated handlers. A handler with no `#[cfg]`
+//! pair and the count stays linear in gated handlers. Its `@select [kept]
+//! [stripped]` arm serves expression position, where an empty expansion is not
+//! allowed: the `@contracts` rows pick the handler's row or an empty slice. A handler with no `#[cfg]`
 //! gets no gate and its tokens stay inline, so an unchanged set expands to
 //! exactly what it expanded to before.
 
@@ -87,7 +104,10 @@ use crate::handler_parse::{
     parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
-use crate::reply_markers::{ReplyMarkerSite, native_reply_contract, reply_marker_impl};
+use crate::reply_markers::{
+    ReplyMarkerSite, concat_contract_rows, contract_element, contract_element_ty, contract_row_impl,
+    contract_rows_expr, native_reply_contract, reply_marker_impl,
+};
 
 /// Which actor transport a set's handlers are written against, read off the
 /// ctx parameter's type name the same way `expand_handlers` reads the trait
@@ -344,6 +364,14 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
                 #[doc(hidden)]
                 const __AETHER_HANDLER_SET_MANIFEST: &'static [u8] = #manifest_const;
             });
+            let element_ty = contract_element_ty();
+            let elements: Vec<TokenStream2> =
+                handlers.iter().map(|h| contract_element(h.class, &h.reply, &h.kind_ty, &h.cfgs)).collect();
+            let rows = contract_rows_expr(&elements);
+            item.items.push(syn::parse_quote! {
+                #[doc(hidden)]
+                const __AETHER_HANDLER_SET_CONTRACTS: &'static [#element_ty] = #rows;
+            });
         }
         SetTransport::Native => {
             let capability_rows = build_native_capability_rows(&handlers);
@@ -443,11 +471,17 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
                 #[cfg(#predicate)]
                 #[macro_export]
                 #[doc(hidden)]
-                macro_rules! #gate_ident { ($($__aether_gated:tt)*) => { $($__aether_gated)* }; }
+                macro_rules! #gate_ident {
+                    (@select [$($__aether_kept:tt)*] [$($__aether_stripped:tt)*]) => { $($__aether_kept)* };
+                    ($($__aether_gated:tt)*) => { $($__aether_gated)* };
+                }
                 #[cfg(not(#predicate))]
                 #[macro_export]
                 #[doc(hidden)]
-                macro_rules! #gate_ident { ($($__aether_gated:tt)*) => {}; }
+                macro_rules! #gate_ident {
+                    (@select [$($__aether_kept:tt)*] [$($__aether_stripped:tt)*]) => { $($__aether_stripped)* };
+                    ($($__aether_gated:tt)*) => {};
+                }
             });
             Ok(Some(gate_ident))
         })
@@ -469,8 +503,32 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         if !reply.is_empty() {
             markers.push(wrap_in_gate(gate.as_ref(), reply));
         }
+        let contract = contract_row_impl(
+            h.class,
+            &h.reply,
+            kind_ty,
+            &ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs: &[] },
+        );
+        markers.push(wrap_in_gate(gate.as_ref(), contract));
         markers
     });
+    // ADR-0231 §4: the set's `CONTRACTS` rows, one single-row slice per
+    // handler. A gated handler's slice picks between its row and an empty one
+    // through the gate's `@select` arm, so the choice is made in this crate
+    // like every other artifact of the handler, and the stripped row's kind
+    // type is never expanded.
+    let contract_parts: Vec<TokenStream2> = handlers
+        .iter()
+        .zip(&gate_idents)
+        .map(|(h, gate)| {
+            let row = contract_rows_expr(&[contract_element(h.class, &h.reply, &h.kind_ty, &[])]);
+            match gate {
+                Some(gate_ident) => quote! { #gate_ident! { @select [#row] [&[]] } },
+                None => row,
+            }
+        })
+        .collect();
+    let contract_rows = concat_contract_rows(&contract_parts);
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
         let reply_expr = native_reply_contract(h.class, &h.reply);
@@ -495,6 +553,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
         #[macro_export]
         #[doc(hidden)]
         macro_rules! #macro_ident {
+            (@contracts) => { #contract_rows };
             ($ty:ty) => {
                 #(#markers)*
                 #(#inventory)*
@@ -634,12 +693,14 @@ mod tests {
     /// routing hole ADR-0183 exists to close — an adopter would gain a
     /// `HandlesKind` marker for a kind the set's dispatch chain answers
     /// `DISPATCH_UNKNOWN_KIND` for, so the send compiles and the mail is
-    /// dropped at run time.
-    fn gate_arm(index: usize, predicate: &str, transcriber: &str) -> String {
+    /// dropped at run time. `select` is the arm's `@select` transcriber, which
+    /// must pick the kept tokens exactly where `transcriber` passes through.
+    fn gate_arm(index: usize, predicate: &str, select: &str, transcriber: &str) -> String {
         format!(
             "# [cfg ({predicate})] # [macro_export] # [doc (hidden)] \
              macro_rules ! __aether_handler_set_gate_Set_{index} \
-             {{ ($ ($ __aether_gated : tt) *) => {transcriber} ; }}"
+             {{ (@ select [$ ($ __aether_kept : tt) *] [$ ($ __aether_stripped : tt) *]) => {select} ; \
+             ($ ($ __aether_gated : tt) *) => {transcriber} ; }}"
         )
     }
 
@@ -647,6 +708,10 @@ mod tests {
     const PASS_THROUGH: &str = "{ $ ($ __aether_gated) * }";
     /// The transcriber that drops them.
     const SWALLOW: &str = "{ }";
+    /// The `@select` transcriber that picks the handler's own row.
+    const SELECT_KEPT: &str = "{ $ ($ __aether_kept) * }";
+    /// The `@select` transcriber that picks the empty stand-in.
+    const SELECT_STRIPPED: &str = "{ $ ($ __aether_stripped) * }";
 
     /// Tripwire: the gate arm that passes a gated handler's marker and
     /// inventory row through to the adopter is the one carrying the handler's
@@ -664,12 +729,12 @@ mod tests {
             }
         });
 
-        let passes_through = gate_arm(0, r#"all (feature = "extra")"#, PASS_THROUGH);
+        let passes_through = gate_arm(0, r#"all (feature = "extra")"#, SELECT_KEPT, PASS_THROUGH);
         assert!(
             expanded.contains(&passes_through),
             "the handler's own predicate guards the pass-through arm, contiguously:\n{passes_through}\nin: {expanded}"
         );
-        let swallows = gate_arm(0, r#"not (all (feature = "extra"))"#, SWALLOW);
+        let swallows = gate_arm(0, r#"not (all (feature = "extra"))"#, SELECT_STRIPPED, SWALLOW);
         assert!(
             expanded.contains(&swallows),
             "and its exact negation guards the empty one:\n{swallows}\nin: {expanded}"
@@ -704,12 +769,12 @@ mod tests {
             }
         });
 
-        let passes_through = gate_arm(0, r#"all (unix , feature = "extra")"#, PASS_THROUGH);
+        let passes_through = gate_arm(0, r#"all (unix , feature = "extra")"#, SELECT_KEPT, PASS_THROUGH);
         assert!(
             expanded.contains(&passes_through),
             "the predicates conjoin in declaration order:\n{passes_through}\nin: {expanded}"
         );
-        let swallows = gate_arm(0, r#"not (all (unix , feature = "extra"))"#, SWALLOW);
+        let swallows = gate_arm(0, r#"not (all (unix , feature = "extra"))"#, SELECT_STRIPPED, SWALLOW);
         assert!(expanded.contains(&swallows), "and the negation covers the conjunction:\n{swallows}\nin: {expanded}");
     }
 

@@ -14,7 +14,9 @@ use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
 };
 use crate::opts::{ActorCardinality, ActorOpts};
-use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
+use crate::reply_markers::{
+    ReplyMarkerSite, contract_element, contract_row_impl, contract_rows_expr, contracts_impl, reply_marker_impl,
+};
 
 /// Wasm-actor expansion — `#[actor] impl WasmActor for X` (or
 /// the back-compat `impl Component for X`). Emits the full wasm
@@ -447,6 +449,41 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         )
     });
 
+    // ADR-0231 §1 / §4: one `Contract<K>` row per handler and the actor's
+    // `CONTRACTS` list, derived from the same row types. An adopted set's rows
+    // join the list; a wasm set emits no marker bridge, so its kinds get list
+    // entries but no per-kind row (ADR-0169).
+    let impl_generics_ts = quote! { #impl_generics };
+    let self_ty_ts = quote! { #self_ty };
+    let where_clause_ts = quote! { #where_clause };
+    let contract_rows = handlers.iter().map(|h| {
+        contract_row_impl(
+            h.class,
+            &h.reply,
+            &h.kind_ty,
+            &ReplyMarkerSite {
+                impl_generics: &impl_generics_ts,
+                self_ty: &self_ty_ts,
+                where_clause: &where_clause_ts,
+                cfgs: &h.cfgs,
+            },
+        )
+    });
+    let contract_elements: Vec<TokenStream2> =
+        handlers.iter().map(|h| contract_element(h.class, &h.reply, &h.kind_ty, &h.cfgs)).collect();
+    let set_contract_rows =
+        opts.handler_set.as_ref().map(|set| quote! { <#self_ty as #set>::__AETHER_HANDLER_SET_CONTRACTS });
+    let contracts_list = contracts_impl(
+        &ReplyMarkerSite {
+            impl_generics: &impl_generics_ts,
+            self_ty: &self_ty_ts,
+            where_clause: &where_clause_ts,
+            cfgs: &[],
+        },
+        &contract_rows_expr(&contract_elements),
+        set_contract_rows.as_ref(),
+    );
+
     // ADR-0090: emit the `type Config = …` line in the trait impl —
     // either the user's declaration (passed through) or the macro's
     // synthesized `type Config = ();`.
@@ -583,6 +620,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
 
         #(#handles_kind_impls)*
         #(#reply_marker_impls)*
+        #(#contract_rows)*
+        #contracts_list
 
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
         // For an un-split component `State = Self`, so `init` returns `Self` and
