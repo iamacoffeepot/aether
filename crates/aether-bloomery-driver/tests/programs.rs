@@ -7,6 +7,8 @@ use std::fs;
 use std::path::Path;
 use std::sync::mpsc;
 
+use aether_actor::ActorRef;
+use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::{Batch, Journal, Seq};
 use aether_bloomery_kinds::{
     Call, CallOutcome, CallRefusal, Digest, FaultReason, Head, NativeOrigin, OpaqueBytes, ProgramName, RecordedHead,
@@ -56,7 +58,7 @@ fn seed_program_journal(path: &Path, wasm: &[u8]) -> Result<Seed, Box<dyn Error>
 /// Send one `Call` and wait for its outcome.
 fn send_call(
     registry: &Registry,
-    driver: MailboxId,
+    driver: ActorRef<BundleDriver>,
     inbox: MailboxId,
     rx: &mpsc::Receiver<OwnedDispatch>,
     correlation: u64,

@@ -572,6 +572,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
                 &mut booted.claimed_actor_mailboxes,
                 &booted.spawner,
                 &mut booted.reserved_driver_mailboxes,
+                &booted.references,
             );
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles);
             driver_boot(&mut driver_ctx)?

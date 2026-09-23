@@ -8,12 +8,13 @@
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 
-use aether_actor::Addressable;
 use aether_actor::local::ActorSlots;
+use aether_actor::{ActorRef, Addressable};
 
 use aether_data::KindId;
 
 use crate::actor::native::envelope::Envelope;
+use crate::chassis::builder::ComposedReferences;
 use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::mail::MailboxId;
@@ -421,12 +422,17 @@ pub struct ChassisCtx<'a> {
     /// per ctx — a ctx exists only inside a boot pass, so the authority
     /// cannot outlive the boot that created it.
     authority: BootAuthority,
+    /// ADR-0230: the chassis's record of the root actors it composed. A boot
+    /// that publishes a composed actor's `Live` route records its reference
+    /// here; the chassis handle's `actor_ref` reads it back by type.
+    references: &'a ComposedReferences,
 }
 
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by the ADR-0071
     /// [`crate::chassis::builder::Builder`].
-    pub(crate) fn new(
+    #[allow(clippy::too_many_arguments)] // aether-suppression-request: one borrowed boot accumulator per argument
+    pub(in crate::chassis) fn new(
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
         fallback: &'a mut Option<FallbackRouter>,
@@ -434,6 +440,7 @@ impl<'a> ChassisCtx<'a> {
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
         spawner: &'a Arc<crate::Spawner>,
         reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
+        references: &'a ComposedReferences,
     ) -> Self {
         Self {
             registry,
@@ -444,7 +451,14 @@ impl<'a> ChassisCtx<'a> {
             reserved_driver_mailboxes,
             spawner,
             authority: BootAuthority::new(),
+            references,
         }
+    }
+
+    /// Record the reference a boot minted for the composed root actor `A`
+    /// once its `Live` route is published (ADR-0230).
+    pub(crate) fn record_reference<A: 'static>(&self, reference: ActorRef<A>) {
+        self.references.record(reference);
     }
 
     /// Borrow this boot's [`BootAuthority`] — the proof a cap needs to name
@@ -727,6 +741,7 @@ mod tests {
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
         let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+        let references = ComposedReferences::default();
         let mut ctx = ChassisCtx::new(
             &registry,
             &mailer,
@@ -735,6 +750,7 @@ mod tests {
             &mut claimed_actor_mailboxes,
             &spawner,
             &mut reserved_driver_mailboxes,
+            &references,
         );
 
         let claim = ctx.claim_mailbox_with_override("test.iamacoffeepot.1272.driver").expect("first claim succeeds");
@@ -821,6 +837,7 @@ mod tests {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
             let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let references = ComposedReferences::default();
             let mut ctx = ChassisCtx::new(
                 &registry,
                 &mailer,
@@ -829,6 +846,7 @@ mod tests {
                 &mut claimed_actor_mailboxes,
                 &spawner,
                 &mut reserved_driver_mailboxes,
+                &references,
             );
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.sender_gone").expect("claim succeeds");
@@ -838,7 +856,7 @@ mod tests {
             drop(claim.mailbox_sender);
             drop(claim.receiver);
         }
-        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(claim_id) else {
+        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry_at(claim_id) else {
             panic!("claimed mailbox should be an Inbox entry");
         };
         // Pre-fix this dropped the armed dispatch and panicked the guard.
@@ -859,6 +877,7 @@ mod tests {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
             let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let references = ComposedReferences::default();
             let mut ctx = ChassisCtx::new(
                 &registry,
                 &mailer,
@@ -867,6 +886,7 @@ mod tests {
                 &mut claimed_actor_mailboxes,
                 &spawner,
                 &mut reserved_driver_mailboxes,
+                &references,
             );
             let claim =
                 ctx.claim_mailbox_drop_on_shutdown_with_override("test.1564.receiver_gone").expect("claim succeeds");
@@ -874,7 +894,7 @@ mod tests {
             drop(claim.receiver);
             _keep_sender = claim.mailbox_sender;
         }
-        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(claim_id) else {
+        let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry_at(claim_id) else {
             panic!("claimed mailbox should be an Inbox entry");
         };
         // Pre-fix this dropped the armed dispatch and panicked the guard.

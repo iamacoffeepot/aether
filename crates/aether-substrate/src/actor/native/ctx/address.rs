@@ -5,7 +5,9 @@
 //! verbs — [`NativeCtx::actor_ref`] for a declared dependency and
 //! [`NativeCtx::resolve_live`] for a position that arrived in a payload —
 //! hand back a proven reference instead, which is what ADR-0230 lets a cap
-//! keep past the handler that received it.
+//! keep past the handler that received it. [`NativeCtx::accept_bundle`] is
+//! the bundle front of the payload-borne door: it proves a mail bundle's
+//! addresses and hands back items that can only be delivered.
 //!
 //! The receiver-addressing methods are emitted from one macro because
 //! [`NativeCtx`] and [`NativeInitCtx`](super::NativeInitCtx) hold the same
@@ -19,9 +21,11 @@ use aether_actor::{
     ReplyMode, Singleton,
 };
 use aether_data::{MailId, MailboxId};
+use aether_kinds::NamedMail;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
 use crate::mail::registry::{Registry, ResolveLiveError};
+use crate::mail::{BoundaryMail, boundary};
 
 use super::NativeCtx;
 
@@ -130,6 +134,23 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// liveness question, and the two answers drift.
     pub fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
         self.binding.mailer().registry().resolve_live(position)
+    }
+
+    /// Prove a mail bundle that crossed the MCP or harness boundary inside a
+    /// payload (ADR-0230 §3): the bundle front of [`Self::resolve_live`].
+    ///
+    /// Every item's [`ActorPath`](aether_data::ActorPath) recipient resolves
+    /// and is proven before any item is returned, so a refusal — an absent,
+    /// ambiguous, dropped, or still-starting recipient, or an unknown kind —
+    /// moves no mail; the error names the recipient and `label`. The items
+    /// come back as [`BoundaryMail`]s, which can only be delivered, through
+    /// [`Self::deliver_detached`] or [`Self::deliver_forwarded`].
+    ///
+    /// Its consumers are `aether.trace`'s `DispatchTraced` and
+    /// `aether.render`'s `CaptureFrame`, which proves both of its bundles
+    /// before either moves.
+    pub fn accept_bundle(&self, bundle: Vec<NamedMail>, label: &str) -> Result<Vec<BoundaryMail>, String> {
+        boundary::accept(self.binding.mailer().registry(), bundle, label)
     }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound

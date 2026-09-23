@@ -168,7 +168,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
 
     /// Complete the birth `Ok`. Called only from the activation's catch-up
     /// suffix, which the owner runs after it has published the child's `Live`
-    /// route — the invariant [`Registry::spawned_child`] mints on.
+    /// route — the invariant [`Registry::activated`] mints on.
     fn promote(&self) {
         let Some(state) = self.state.lock().expect("native spawn finalizer lock poisoned").take() else {
             return;
@@ -182,7 +182,7 @@ impl<A: 'static> NativeSpawnFinalizer<A> {
         state.completion.complete(SpawnOutcome {
             mailbox_id: state.mailbox_id,
             canonical_name: state.canonical_name,
-            result: Ok(Registry::spawned_child(state.mailbox_id)),
+            result: Ok(Registry::activated(state.mailbox_id)),
         });
     }
 }

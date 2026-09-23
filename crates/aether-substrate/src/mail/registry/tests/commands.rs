@@ -377,7 +377,7 @@ fn owner_captures_authoritative_live_route_but_only_relay_invokes_inline() {
 
     assert!(live.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
     assert!(dropped.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
-    assert!(matches!(registry.entry(id), Some(MailboxEntry::Dropped)));
+    assert!(matches!(registry.entry_at(id), Some(MailboxEntry::Dropped)));
     assert!(received.lock().unwrap().is_empty(), "the registry-owner turn never invokes captured Inline code");
 
     relay.run_once();

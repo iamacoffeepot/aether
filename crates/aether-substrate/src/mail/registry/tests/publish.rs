@@ -35,7 +35,7 @@ fn route_generations_advance_only_for_successful_mutations() {
     assert!(r.remove_closure(&auth(), id));
     let removed = r.route_lookup(kind, id).generation();
     assert!(removed > reregistered);
-    assert!(r.entry(id).is_none());
+    assert!(r.entry_at(id).is_none());
 
     assert!(!r.remove_closure(&auth(), id));
     assert_eq!(r.route_lookup(kind, id).generation(), removed);

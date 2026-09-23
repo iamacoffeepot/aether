@@ -1,7 +1,7 @@
 //! The native bundle driver: the core's commands performed as mail.
 //!
 //! Native code spawns [`BundleDriver`] over a born journal owner, passing the
-//! journal's id in [`DriverParams`]. `init` builds the [`ProgramCore`] and
+//! journal's reference in [`DriverParams`]. `init` builds the [`ProgramCore`] and
 //! keeps its first commands; `wire` performs them once the mailbox is live.
 //! Commands go to the journal owner (reads, appends, and the watch), the
 //! component host (loads) and bundle roots. Inbound [`Call`]
@@ -17,13 +17,12 @@ pub use root::BundleRoot;
 
 use std::mem;
 
-use aether_actor::{Manual, actor};
-use aether_bloomery_journal::MAX_READ_EVENTS;
+use aether_actor::{ActorRef, Manual, actor};
+use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
     AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Evaluated, Invoked, ReadArtifactResult, ReadClosureResult,
     ReadEventsResult, Status, Warmed, WatchHeadResult,
 };
-use aether_data::MailboxId;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -38,15 +37,15 @@ use crate::{
 // must stay equal or every startup read fails with `Err`.
 const _: () = assert!(EVENTS_PAGE == MAX_READ_EVENTS);
 
-/// Composer-supplied construction input: the born journal owner's id.
+/// Composer-supplied construction input: the born journal owner's reference.
 ///
-/// The id comes from the journal's own `spawn_actor(..).finish()`, so holding
-/// it proves the journal was born; a driver cannot be built over a journal
-/// that does not exist. The driver addresses it through `actor_at`, never by
-/// resolving a name.
+/// The reference is what the journal's own `spawn_actor(..).finish()` returns,
+/// so holding it proves the journal was born (ADR-0230); a driver cannot be
+/// built over a journal that does not exist. The driver sends through it,
+/// never by resolving a name.
 pub struct DriverParams {
-    /// The journal owner's mailbox id, handed over at spawn.
-    pub journal: MailboxId,
+    /// The journal owner's proven reference, handed over at spawn.
+    pub journal: ActorRef<JournalActor>,
 }
 
 /// Native bundle driver over the sans-io program core.
@@ -58,7 +57,7 @@ pub struct DriverParams {
 /// and bundle roots. One driver per engine; the type does not enforce it.
 pub struct BundleDriver {
     core: ProgramCore,
-    journal: MailboxId,
+    journal: ActorRef<JournalActor>,
     startup: Vec<Command>,
     callers: Vec<(CallerId, DeferredReply)>,
 }

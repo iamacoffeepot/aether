@@ -5,6 +5,7 @@ mod actor_support;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 
+use aether_actor::ActorRef;
 use aether_bloomery_journal::{Entry, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{
     Activated, AppendRecords, AppendRecordsResult, Detail, Digest, DriverRecord, EncodedArtifact, Head, NativeOrigin,
@@ -23,7 +24,7 @@ use actor_support::{TestAnchor, caller, reply, request};
 struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
-    actor: MailboxId,
+    actor: ActorRef<JournalActor>,
     caller: MailboxId,
     replies: mpsc::Receiver<OwnedDispatch>,
     journal: Journal,

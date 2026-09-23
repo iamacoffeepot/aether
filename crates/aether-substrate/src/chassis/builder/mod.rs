@@ -27,10 +27,12 @@ mod claim;
 mod driver;
 mod native_actor_boot;
 mod passive_boot;
+mod references;
 mod state;
 
-pub use built::{BuiltChassis, PassiveChassis};
+pub use built::{BuiltChassis, PassiveChassis, ReplyTarget};
 pub use driver::{DriverCapability, DriverCtx, DriverRunning, NeverDriver, NeverDriverRunning, RunError};
+pub(in crate::chassis) use references::ComposedReferences;
 pub use state::{Builder, BuilderState, HasDriver, NoDriver};
 
 #[cfg(test)]

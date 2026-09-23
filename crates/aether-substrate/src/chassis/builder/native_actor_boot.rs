@@ -19,6 +19,7 @@ use crate::chassis::error::BootError;
 use crate::config::{ConfigError, ConfigMember, ConfigSources};
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
+use crate::mail::registry::Registry;
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 use crate::scheduler::{Drainable, SeizeHandle, WakeHandle};
 
@@ -312,6 +313,11 @@ where
             let _ = wake.wake();
         }));
         let _ = manual_wake.wake();
+        // ADR-0230: the boot claim published this capability's route, and
+        // `init` and `wire` succeeded, so the actor is `Live` and its dispatcher
+        // slot is installed. Record the reference the chassis handle's
+        // `actor_ref` reads back.
+        ctx.record_reference(Registry::activated::<A>(mailbox_id));
         Ok(Box::new(PooledActorShutdown::<A> { slot: Some(slot), mailbox_sender: Some(mailbox_sender) })
             as Box<dyn DynShutdown>)
     }

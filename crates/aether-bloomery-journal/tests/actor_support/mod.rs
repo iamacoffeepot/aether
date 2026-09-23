@@ -3,7 +3,7 @@
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use aether_actor::actor;
+use aether_actor::{ActorRef, actor};
 use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::BootError;
@@ -51,8 +51,8 @@ pub fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<Own
 }
 
 /// Enqueue `mail` on `target` as if `caller` sent it with `correlation`.
-pub fn request<K: Kind>(registry: &Registry, target: MailboxId, caller: MailboxId, correlation: u64, mail: &K) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
+pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: MailboxId, correlation: u64, mail: &K) {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target.erase()).expect("actor mailbox registered") else {
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(

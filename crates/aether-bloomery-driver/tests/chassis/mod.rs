@@ -9,6 +9,7 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use aether_actor::ActorRef;
 use aether_bloomery_driver::{BundleDriver, DriverParams};
 use aether_bloomery_journal::{Entry, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::ClosureLimit;
@@ -23,7 +24,9 @@ use aether_substrate::{Subname, SubstrateBoot};
 
 /// Boot the component host, then spawn the journal owner and the driver over it.
 #[must_use]
-pub fn boot_driver(journal: &Path) -> (PassiveChassis<TestChassis>, Arc<Registry>, MailboxId, MailboxId) {
+pub fn boot_driver(
+    journal: &Path,
+) -> (PassiveChassis<TestChassis>, Arc<Registry>, ActorRef<JournalActor>, ActorRef<BundleDriver>) {
     let boot = SubstrateBoot::build().expect("substrate boot");
     let chassis = boot_test_chassis_with::<ComponentHostCapability>(
         &boot.registry,
@@ -65,8 +68,8 @@ pub fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<Own
 }
 
 /// Enqueue `mail` on `target` as if `caller` sent it with `correlation`.
-pub fn request<K: Kind>(registry: &Registry, target: MailboxId, caller: MailboxId, correlation: u64, mail: &K) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
+pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: MailboxId, correlation: u64, mail: &K) {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target.erase()).expect("actor mailbox registered") else {
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(

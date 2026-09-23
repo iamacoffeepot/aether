@@ -26,7 +26,7 @@ fn closure_handler_runs_on_call() {
             c2.fetch_add(dispatch.count, Ordering::SeqCst);
         }),
     );
-    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry(id) else {
+    let Some(MailboxEntry::Inbox { handler: h, .. }) = r.entry_at(id) else {
         panic!("expected closure entry")
     };
     // Test-side id is irrelevant — the handler ignores it.

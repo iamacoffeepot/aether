@@ -1,8 +1,6 @@
 //! The `aether.trace` runtime half (ADR-0122 identity/runtime split):
-//! the `aether_substrate`-typed imports and the state struct + its
-//! `with_registry` ctor, gated once by this module rather than per-import.
-//! The `#[actor] impl` reaches them through the single `use runtime::*`
-//! glob in the parent.
+//! the `aether_substrate`-typed imports and the `#[runtime] impl`, gated
+//! once by this module rather than per-import.
 
 use super::{DispatchTraced, TraceDispatchCapability};
 use aether_actor::runtime;
@@ -12,34 +10,12 @@ use super::DispatchTracedAck;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::helpers::resolve_bundle;
-pub use aether_substrate::mail::registry::Registry;
-pub use std::sync::Arc;
-
-/// `aether.trace` runtime state (ADR-0086 Phase 3c). Holds the
-/// substrate registry handle for `DispatchTraced`'s per-envelope name
-/// resolution (recipient mailbox name → id, kind name → id). The
-/// addressing identity is the distinct ZST `TraceDispatchCapability`.
-pub struct TraceDispatchCapabilityState {
-    /// Substrate registry handle for `DispatchTraced`'s per-envelope
-    /// name resolution. Cloned from `ctx.mailer().registry()` at init;
-    /// matches the `RenderCapability` pattern that resolves
-    /// `CaptureFrame` mail bundles through the same registry.
-    pub registry: Arc<Registry>,
-}
-
-impl TraceDispatchCapabilityState {
-    /// The single struct-construction site.
-    pub fn with_registry(registry: Arc<Registry>) -> Self {
-        Self { registry }
-    }
-}
 
 #[runtime]
 impl NativeActor for TraceDispatchCapability {
-    /// The runtime state this identity boots into (ADR-0122 split): the
-    /// substrate registry handle.
-    type State = TraceDispatchCapabilityState;
+    /// The runtime state this identity boots into (ADR-0122 split): none.
+    /// Every recipient is proven through `ctx.accept_bundle` at receipt.
+    type State = ();
 
     type Config = ();
     // `aether.trace` (matches
@@ -47,9 +23,8 @@ impl NativeActor for TraceDispatchCapability {
     // here for the `#[actor]` macro's expansion.
     const NAMESPACE: &'static str = "aether.trace";
 
-    fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<TraceDispatchCapabilityState, BootError> {
-        let registry = Arc::clone(ctx.mailer().registry());
-        Ok(TraceDispatchCapabilityState::with_registry(registry))
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<(), BootError> {
+        Ok(())
     }
 
     /// # Agent
@@ -63,46 +38,35 @@ impl NativeActor for TraceDispatchCapability {
     /// per-actor trace rings from this root (`aether.trace.tail`,
     /// stitched client-side — ADR-0086 Phase 3b). Issue 749.
     ///
-    /// **Reply forwarding (issue 1265).** Each child is dispatched
-    /// with `reply_to = ctx.reply_target()` (the caller of this
-    /// `DispatchTraced` — typically the RPC server holding the wire
-    /// `cid`'s in-flight entry) rather than the default
-    /// `Component(self_mailbox)`. This trace cap is a re-dispatcher
-    /// with no handler for child reply kinds, so without the
-    /// forward each child's deferred reply (the ADR-0093
-    /// hold-until-resolve dispatch in content-gen caps) lands here and
-    /// silently drops, leaving the wire call with no `ReplyEvent`s.
-    /// Forwarding lets every child's reply (sync or deferred)
-    /// bubble straight to the original caller with the same
-    /// `correlation_id`, so the RPC server's `on_any` fallback wraps
-    /// each into a `ReplyEvent` on the wire.
+    /// **Reply forwarding (issue 1265).** Each child is delivered
+    /// through `ctx.deliver_forwarded`, which pins its reply target to
+    /// this `DispatchTraced`'s own (the caller — typically the RPC
+    /// server holding the wire `cid`'s in-flight entry) rather than
+    /// to this cap. This trace cap is a re-dispatcher with no handler
+    /// for child reply kinds, so without the forward each child's
+    /// deferred reply (the ADR-0093 hold-until-resolve dispatch in
+    /// content-gen caps) lands here and silently drops, leaving the
+    /// wire call with no `ReplyEvent`s. Forwarding lets every child's
+    /// reply (sync or deferred) bubble straight to the original caller
+    /// with the same `correlation_id`, so the RPC server's `on_any`
+    /// fallback wraps each into a `ReplyEvent` on the wire.
     #[handler::single]
     fn on_dispatch_traced(
-        state: &mut Self::State,
+        _state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
         batch: DispatchTraced,
     ) -> DispatchTracedAck {
         let root = ctx.in_flight_mail_id();
-        let forward_reply_to = ctx.reply_target();
-        let DispatchTraced { mails } = batch;
-        // Resolve every envelope's name addressing through the
-        // substrate registry — same path `CaptureFrame`'s bundle
-        // resolution uses (`render::on_capture_frame`). A single
-        // unresolved name aborts the whole batch, surfaced as the
-        // ack's `Err` variant so the MCP caller fails fast.
-        let resolved = match resolve_bundle(&state.registry, &mails, "dispatch_traced batch") {
-            Ok(v) => v,
-            Err(error) => {
-                return DispatchTracedAck::Err { error };
-            }
+        // Prove every recipient before any child moves (ADR-0230 §3). A
+        // single unprovable recipient or unknown kind aborts the whole
+        // batch, surfaced as the ack's `Err` variant so the MCP caller
+        // fails fast.
+        let batch = match ctx.accept_bundle(batch.mails, "dispatch_traced batch") {
+            Ok(items) => items,
+            Err(error) => return DispatchTracedAck::Err { error },
         };
-        for mail in resolved {
-            let _ = ctx.send_envelope_tracked_with_reply_to(
-                mail.recipient,
-                mail.kind,
-                mail.payload.bytes(),
-                forward_reply_to,
-            );
+        for item in batch {
+            ctx.deliver_forwarded(item);
         }
         DispatchTracedAck::Ok { root }
     }
@@ -113,24 +77,24 @@ impl NativeActor for TraceDispatchCapability {
 // so the snapshot reads atomically against the concurrent push.
 #[allow(clippy::significant_drop_tightening)]
 mod tests {
+    use std::sync::Arc;
+
     use super::*;
     use aether_data::{KindId, MailId, MailboxId, SessionToken, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
-    use aether_substrate::mail::registry::MailDispatch;
+    use aether_substrate::mail::registry::{MailDispatch, Registry};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::testing::boot_authority;
 
     /// Shared scaffolding for the `on_dispatch_traced` tests:
-    /// fresh registry + mailer + outbound + transport + state wired
-    /// together. The state doesn't go through `init` (which reads ctx
-    /// state); construct it directly with the registry handle the
-    /// resolve path needs.
+    /// fresh registry + mailer + outbound + transport wired together.
+    /// The registry registers the stub recipients and kinds the
+    /// bundle proof reads.
     struct DispatchTracedFixture {
         registry: Arc<Registry>,
         transport: Arc<NativeBinding>,
-        state: TraceDispatchCapabilityState,
     }
 
     fn dispatch_traced_fixture() -> DispatchTracedFixture {
@@ -138,8 +102,7 @@ mod tests {
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
         let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x7ACE)));
-        let state = TraceDispatchCapabilityState::with_registry(Arc::clone(&registry));
-        DispatchTracedFixture { registry, transport, state }
+        DispatchTracedFixture { registry, transport }
     }
 
     /// Build a chassis-root `NativeCtx` against the fixture's
@@ -150,10 +113,10 @@ mod tests {
         NativeCtx::new(transport, sender, inbound, inbound)
     }
 
-    /// Issue 749: `on_dispatch_traced` resolves each envelope's
-    /// name addressing through the registry (matching
-    /// `CaptureFrame`'s bundle pattern), dispatches each via
-    /// `send_envelope_tracked` so children inherit the chain, and
+    /// Issue 749: `on_dispatch_traced` proves each envelope's
+    /// recipient through `accept_bundle` (matching `CaptureFrame`'s
+    /// bundle pattern), delivers each via `deliver_forwarded` so
+    /// children inherit the chain, and
     /// replies synchronously with `DispatchTracedAck::Ok { root }`
     /// carrying the inbound mail id.
     #[test]
@@ -182,8 +145,8 @@ mod tests {
             );
         }
 
-        let mut fix = dispatch_traced_fixture();
-        // Resolve_bundle needs both mailbox (by name) and kind to
+        let fix = dispatch_traced_fixture();
+        // The bundle proof needs both mailbox (by name) and kind to
         // be registered, else it short-circuits with the early-
         // abort `Err` path the other test exercises.
         let captured: Arc<Mutex<Vec<Capture>>> = Arc::new(Mutex::new(Vec::new()));
@@ -195,7 +158,7 @@ mod tests {
         let inbound = MailId::new(MailboxId(0xC0DE), 7);
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
-            &mut fix.state,
+            &mut (),
             &mut ctx,
             DispatchTraced {
                 mails: vec![
@@ -256,11 +219,11 @@ mod tests {
         use aether_data::ActorPath;
         use aether_kinds::NamedMail;
 
-        let mut fix = dispatch_traced_fixture();
+        let fix = dispatch_traced_fixture();
         let inbound = MailId::new(MailboxId(0xC0DE), 99);
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
-            &mut fix.state,
+            &mut (),
             &mut ctx,
             DispatchTraced {
                 mails: vec![NamedMail {

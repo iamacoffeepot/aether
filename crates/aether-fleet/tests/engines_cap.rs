@@ -17,7 +17,6 @@ use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId, Uuid, mailbox_id_from_name, mailbox_id_from_path};
 use aether_fleet::{FleetConfig, FleetProxy, FleetServer};
 use aether_kinds::descriptors;
-use aether_kinds::trace::Nanos;
 use aether_kinds::{
     BinarySelector, DeathReason, ListComponentBinaries, ListComponentBinariesResult, ListEngineBinaries,
     ListEngineBinariesResult, ListEngines, ListEnginesResult, SetArtifactPinned, SetArtifactPinnedResult, SpawnEngine,
@@ -25,13 +24,14 @@ use aether_kinds::{
     UploadComponentResult,
 };
 use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_substrate::ReplyTarget;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::content_store::{ContentStore, EvictionPolicy};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
-use aether_substrate::mail::registry::{MailboxEntry, OwnedDispatch, Registry};
-use aether_substrate::mail::{Mail, MailId, MailRef, Source, SourceAddr};
+use aether_substrate::mail::registry::{OwnedDispatch, Registry};
+use aether_substrate::mail::{Mail, Source, SourceAddr};
 use aether_substrate::testing::{TestChassis, boot_authority};
 use std::collections::HashSet;
 use std::env;
@@ -317,31 +317,6 @@ fn wait_for<T>(deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
     }
 }
 
-/// Inject one request with an explicit trace root. This pins the deferred
-/// reply's correlation and lets the test prove that the original settlement
-/// stays open through the later staged-spawn task turn.
-fn enqueue_with_root<K: Kind>(registry: &Registry, mailer: &Mailer, request: &K, root: MailId, correlation_id: u64) {
-    let server = registry.lookup(FleetServer::NAMESPACE).expect("fleet server mailbox registered");
-    let sink = registry.lookup(ReplySink::NAMESPACE).expect("reply sink mailbox registered");
-    mailer.record_sent(root, root, None, root.sender, server, K::ID);
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(server).expect("fleet server route exists") else {
-        panic!("fleet server route is an inbox");
-    };
-    handler.enqueue(OwnedDispatch::disarmed(
-        K::ID,
-        None,
-        Source::with_correlation(SourceAddr::Component(sink), correlation_id),
-        MailRef::from(request.encode_into_bytes()),
-        1,
-        root,
-        root,
-        None,
-        Nanos(0),
-        0,
-        MailboxId(0),
-    ));
-}
-
 fn register_proxy_collision(registry: &Registry, engine_id: Uuid) -> MailboxId {
     let canonical_name = format!("{}/{}:{}", FleetServer::NAMESPACE, FleetProxy::NAMESPACE, engine_id.simple());
     let mailbox_id = mailbox_id_from_path(&canonical_name);
@@ -427,21 +402,19 @@ mod tests {
         let store_dir = env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
 
-        let (registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
+        let (_registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
         // Spawn: the cap assigns a port, forks the substrate, and the proxy
-        // retries the dial until the fresh process binds. The explicit root
+        // retries the dial until the fresh process binds. The tracked root
         // proves the manual handler retains the original correlation and
         // settlement through owner apply and the later task turn.
         let correlation_id = 0x4068;
-        let root_mail = MailId::new(MailboxId(0x4068_5A6E), correlation_id);
-        let settled = chassis.settlement_registry().subscribe_settlement(root_mail);
-        enqueue_with_root(
-            &registry,
-            &mailer,
-            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
-            root_mail,
+        let settled = chassis.send_tracked(
+            chassis.actor_ref::<FleetServer>().erase(),
+            SpawnEngine::ID,
+            SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
             correlation_id,
+            Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
         let spawn = wait_for(Duration::from_secs(30), || {
             cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
@@ -514,14 +487,12 @@ mod tests {
         let expected_engine = Uuid::from_u128(1);
         let collision = register_proxy_collision(&registry, expected_engine);
         let correlation_id = 0x4068_C011;
-        let root_mail = MailId::new(MailboxId(0x4068_C011), correlation_id);
-        let settled = chassis.settlement_registry().subscribe_settlement(root_mail);
-        enqueue_with_root(
-            &registry,
-            &mailer,
-            &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
-            root_mail,
+        let settled = chassis.send_tracked(
+            chassis.actor_ref::<FleetServer>().erase(),
+            SpawnEngine::ID,
+            SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None }.encode_into_bytes(),
             correlation_id,
+            Some(ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: correlation_id }),
         );
 
         let rejected = wait_for(Duration::from_secs(30), || {

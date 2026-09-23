@@ -5,6 +5,7 @@ mod actor_support;
 use std::path::Path;
 use std::sync::{Arc, mpsc};
 
+use aether_actor::ActorRef;
 use aether_bloomery_journal::{Batch, Journal, JournalActor, Ref, Seq};
 use aether_bloomery_kinds::{
     Digest, EncodedArtifact, Head, MoveHead, MoveHeadResult, Publish, PublishResult, RecordedHeadMove,
@@ -43,7 +44,7 @@ const MAIN: Head<LinkedNote> = Head::new("main");
 struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
-    actor: MailboxId,
+    actor: ActorRef<JournalActor>,
     caller: MailboxId,
     replies: mpsc::Receiver<OwnedDispatch>,
     journal: Journal,

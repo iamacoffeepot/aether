@@ -5,9 +5,10 @@
 //! The callers of the gated mint outside the SDK itself. Three mint with no
 //! read: the `Registry::declared_dependency` caller proved the dependency
 //! `Live` at the dependent's birth, the `Registry::structural_any` caller
-//! mints a host-supplied position — the stamped dispatch source — and the
-//! `Registry::spawned_child` caller mints a staged child whose `Live` route
-//! the owner has just published. The fourth, `Registry::resolve_live`, is the
+//! mints a host-supplied position — the stamped dispatch source — and every
+//! `Registry::activated` caller has just published the actor's own `Live`
+//! route, whether the birth was a staged child, an embedder spawn, or a
+//! chassis-composed capability. The fourth, `Registry::resolve_live`, is the
 //! only one that answers the liveness question itself, because the position
 //! it is handed arrived in a payload and nothing upstream proved it.
 
@@ -87,17 +88,28 @@ impl Registry {
         __mint_actor_ref(position)
     }
 
-    /// Mint a reference for a staged child birth's `position`, with no
-    /// registry read (ADR-0230 section 3's spawned-child door).
+    /// Mint a reference for an actor whose `Live` route the caller has just
+    /// published at `position`, with no registry read (ADR-0230 section 3's
+    /// spawned-or-loaded door).
     ///
-    /// The one caller is the native spawn finalizer's `promote`, which runs
-    /// inside the catch-up suffix the registry owner calls only after it has
-    /// published the child's `Live` route. The answer is already known, so a
-    /// read would repeat what the owner just decided — exactly as for
-    /// [`Self::declared_dependency`]. The rejection path never reaches it: a
-    /// refused birth completes with its [`SpawnError`](crate::actor::native::SpawnError)
+    /// The one claim every caller discharges is that it has itself just made
+    /// this actor `Live`, so a read would repeat what the caller just decided —
+    /// exactly as for [`Self::declared_dependency`]. The callers:
+    ///
+    /// - the native spawn finalizer's `promote`, which runs inside the catch-up
+    ///   suffix the registry owner calls only after it has published a staged
+    ///   child's `Live` route;
+    /// - the eager [`SpawnBuilder::finish`](crate::SpawnBuilder::finish) terminals,
+    ///   whose commit returns only once the route is `Live` — written directly
+    ///   before the ADR-0165 seal, promoted by the owner after it;
+    /// - the chassis boot of a composed capability, which records the reference
+    ///   once the boot claim published the route and `init` and `wire` succeeded;
+    /// - both pumped-actor boots, after the route was published `Live`.
+    ///
+    /// A refused birth never reaches it: it completes with its
+    /// [`SpawnError`](crate::actor::native::SpawnError) or [`BootError`](crate::BootError)
     /// and mints nothing.
-    pub(crate) fn spawned_child<A>(position: MailboxId) -> ActorRef<A> {
+    pub(crate) fn activated<A>(position: MailboxId) -> ActorRef<A> {
         __mint_actor_ref(position)
     }
 
@@ -127,7 +139,7 @@ impl Registry {
     /// route — whereas a position carried in a kind
     /// field is a position and nothing more, so the only authority on whether
     /// it is occupied is this view. The read is the same published-route walk
-    /// [`Self::entry`] takes, so a proof and a dispatch agree by construction
+    /// [`Self::entry_at`] takes, so a proof and a dispatch agree by construction
     /// rather than by two lookups kept in step.
     ///
     /// `Starting` reads as [`ResolveLiveError::Unknown`]: ADR-0230 section 1

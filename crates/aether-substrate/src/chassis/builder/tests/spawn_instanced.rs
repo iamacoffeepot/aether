@@ -156,12 +156,12 @@ fn instanced_can_spawn_grandchild() {
     let spawned_name = Arc::new(Mutex::new(None));
     let parent_id = chassis
         .spawn_actor::<Parent>(Subname::Named("p1"), (), (Arc::clone(&grandchild_received), Arc::clone(&spawned_name)))
-        .finish()
+        .finish_commit()
         .expect("spawn parent");
 
     // Trigger parent → grandchild spawn.
     let MailboxEntry::Inbox { handler: parent_handler, .. } =
-        registry.entry(parent_id).expect("parent sink registered")
+        registry.entry_at(parent_id).expect("parent sink registered")
     else {
         panic!("expected mailbox entry for parent");
     };
@@ -201,7 +201,7 @@ fn instanced_can_spawn_grandchild() {
         "the staged receipt must carry the exact nested canonical registration name",
     );
     assert!(
-        chassis.actor_registry().is_live(grandchild_id),
+        chassis.actor_registry().is_live_at(grandchild_id),
         "grandchild should be Live in the registry under the lineage-folded id",
     );
 
@@ -226,13 +226,13 @@ fn instanced_can_spawn_grandchild() {
 
     // Wait for parent slot to flip Dead.
     let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live(parent_id) && Instant::now() < deadline {
+    while chassis.actor_registry().is_live_at(parent_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(chassis.actor_registry().is_tombstoned(parent_id), "parent should have tombstoned");
     // Grandchild survives — no cascade.
     assert!(
-        chassis.actor_registry().is_live(grandchild_id),
+        chassis.actor_registry().is_live_at(grandchild_id),
         "grandchild should outlive parent (no automatic cascade-close)",
     );
 
@@ -286,9 +286,10 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
         .finish_with_name()
         .expect("named spawn succeeds");
 
-    assert_eq!(registry.lookup("test.spawn_name.return:id-only"), Some(id_only));
+    let proven = |name: &str| registry.resolve_live(registry.lookup(name).expect("registered name resolves"));
+    assert_eq!(proven("test.spawn_name.return:id-only"), Ok(id_only.erase()));
     assert_eq!(canonical_name, "test.spawn_name.return:exact-name");
-    assert_eq!(registry.lookup(&canonical_name), Some(named_id));
+    assert_eq!(proven(&canonical_name), Ok(named_id.erase()));
 
     drop(chassis);
 }

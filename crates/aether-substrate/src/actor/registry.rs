@@ -27,6 +27,8 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 
+use aether_actor::AnyActorRef;
+
 use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::ActivationToken;
@@ -136,8 +138,8 @@ impl ActorRegistry {
         Self::default()
     }
 
-    /// Issue 629 / Phase A: `true` only if the slot at `id` is `Live`.
-    /// Replaces the pre-629 `live_actor(id) -> Option<Arc<dyn Any +
+    /// Issue 629 / Phase A: `true` only if the slot `actor` proves is still
+    /// `Live`. Replaces the pre-629 `live_actor(id) -> Option<Arc<dyn Any +
     /// Send + Sync>>` accessor; the actor itself no longer escapes its
     /// dispatcher thread. Callers that needed the actor reference now
     /// read a cap-exported handle (drivers) or send mail (peers).
@@ -146,11 +148,25 @@ impl ActorRegistry {
     /// to lookup; spawn-time retirement check goes through
     /// [`Self::is_tombstoned`]).
     ///
+    /// Takes the proof the caller was handed at spawn (ADR-0230): a
+    /// reference claims the actor reached `Live`, and this answers whether
+    /// it still is.
+    ///
     /// # Panics
     /// Panics if the `actors` `RwLock` is poisoned — fail-fast per
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
-    pub fn is_live(&self, id: MailboxId) -> bool {
+    #[must_use]
+    pub fn is_live(&self, actor: AnyActorRef) -> bool {
+        self.is_live_at(actor.id())
+    }
+
+    /// The positional body of [`Self::is_live`]: substrate-internal glue for
+    /// the crate's own callers that hold a slot position rather than a proof.
+    ///
+    /// # Panics
+    /// Panics if the `actors` `RwLock` is poisoned (see [`Self::is_live`]).
+    pub(crate) fn is_live_at(&self, id: MailboxId) -> bool {
         let actors = self.actors.read().expect("actors lock poisoned; fail-fast per ADR-0063");
         matches!(actors.get(&id), Some(ActorEntry::Live { .. }))
     }
@@ -548,7 +564,7 @@ mod tests {
     #[test]
     fn fresh_registry_is_empty() {
         let r = ActorRegistry::new();
-        assert!(!r.is_live(MailboxId(1)));
+        assert!(!r.is_live_at(MailboxId(1)));
         assert!(r.live_sender(MailboxId(1)).is_none());
         assert!(r.type_id_at(MailboxId(1)).is_none());
         assert!(!r.is_tombstoned(MailboxId(1)));
@@ -669,7 +685,7 @@ mod tests {
         // stays addressable, and a fresh registration against it (the
         // next occupant's watcher) succeeds where a closed slot would
         // refuse with TargetTombstoned.
-        assert!(r.is_live(target));
+        assert!(r.is_live_at(target));
         assert!(!r.is_tombstoned(target));
         r.register_monitor(watcher_a, target).expect("vacated slot accepts new monitors");
         assert_eq!(r.monitor_count(target), 1);

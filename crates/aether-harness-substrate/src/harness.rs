@@ -38,16 +38,16 @@ use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
 use aether_kinds::{LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
-// `push_to_mailbox` encodes any sent kind through the descriptor-aware
+// The driver sends encode each kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use aether_actor::Root;
+use aether_actor::{ActorRef, Root};
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, RingCapacities, SchedulerTuning,
-    Source, SourceAddr, SubstrateBoot,
+    EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget, RingCapacities,
+    SchedulerTuning, Source, SourceAddr, SubstrateBoot,
     mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
 };
 use aether_substrate_harness_cap::SubstrateHarnessCapability;
@@ -230,11 +230,12 @@ pub struct SubstrateHarness {
     /// the hook owns the pumped `aether.render` slot.
     hook: Option<Box<dyn FrameHook>>,
 
-    /// `aether.lifecycle` mailbox id, cached at boot. `advance()`
-    /// fires one `LifecycleAdvance` here per requested tick; the
-    /// lifecycle driver broadcasts the `Tick` stage directly to its
-    /// stage subscriber set per ADR-0082.
-    lifecycle_mailbox: MailboxId,
+    /// The `aether.lifecycle` capability's proven reference, read off the
+    /// chassis's composed record at boot. `advance()` fires one
+    /// `LifecycleAdvance` here per requested tick; the lifecycle driver
+    /// broadcasts the `Tick` stage directly to its stage subscriber set per
+    /// ADR-0082.
+    lifecycle: ActorRef<aether_lifecycle::LifecycleCapability>,
     /// Kind id of [`aether_kinds::LifecycleAdvance`], pre-resolved so the advance
     /// loop body stays alloc-free per tick.
     kind_lifecycle_advance: KindId,
@@ -713,9 +714,9 @@ impl SubstrateHarness {
         let queue = Arc::clone(&boot.queue);
         let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
-        // The loopback driver's route to the lifecycle cap; ctx-less harness
-        // setup, so the root-pinned resolver answers directly.
-        let lifecycle_mailbox = aether_actor::root_mailbox::<aether_lifecycle::LifecycleCapability>();
+        // The loopback driver's route to the lifecycle cap: the reference the
+        // chassis recorded when it composed the cap.
+        let lifecycle = passive.actor_ref::<aether_lifecycle::LifecycleCapability>();
         let kind_lifecycle_advance = <aether_kinds::LifecycleAdvance as Kind>::ID;
         let _ = kind_tick; // PR 3b retired direct Tick push; kept on the
         // build result for wire-compat with binaries that haven't migrated yet.
@@ -727,7 +728,7 @@ impl SubstrateHarness {
             loopback_rx,
             events_rx,
             hook,
-            lifecycle_mailbox,
+            lifecycle,
             kind_lifecycle_advance,
             frame: 0,
             next_correlation_id: AtomicU64::new(1),
@@ -1009,9 +1010,9 @@ impl SubstrateHarness {
     }
 
     /// Borrow the harness's [`aether_substrate::ActorRegistry`]. Used
-    /// alongside `spawn_actor` so the in-crate spawn test can inspect
-    /// the live entry's `MailboxId` directly. Test-only, same
-    /// rationale as [`Self::spawn_actor`].
+    /// alongside `spawn_actor` so the in-crate spawn test can check each
+    /// spawn's proof names a live slot. Test-only, same rationale as
+    /// [`Self::spawn_actor`].
     #[cfg(test)]
     pub(crate) fn actor_registry(&self) -> &Arc<aether_substrate::ActorRegistry> {
         self.passive.actor_registry()
@@ -1161,11 +1162,11 @@ impl SubstrateHarness {
         // Issue 603 Phase 4: advance migrated from `aether.control`
         // (chassis_handler closure) onto `aether.substrate_harness`
         // (`SubstrateHarnessCapability`).
-        self.push_to_mailbox(
-            // Ctx-less driver-side push to the harness's own cap mailbox.
-            aether_actor::root_mailbox::<SubstrateHarnessCapability>(),
-            &Advance { ticks, delta_micros },
-            cid,
+        self.passive.send_for_reply(
+            self.passive.actor_ref::<SubstrateHarnessCapability>().erase(),
+            Advance::ID,
+            Advance { ticks, delta_micros }.encode_into_bytes(),
+            self.session_reply(cid),
         );
         match self.pump_until_reply::<AdvanceResult>(cid, "AdvanceResult")? {
             AdvanceResult::Ok { ticks_completed } => Ok(ticks_completed),
@@ -1206,19 +1207,20 @@ impl SubstrateHarness {
         after: Vec<aether_kinds::NamedMail>,
     ) -> Result<Vec<u8>, SubstrateHarnessError> {
         // ADR-0161 slice R4: capture_frame routes to the pumped render
-        // actor's mailbox; the hook supplies the id so the core stays
+        // actor; the hook supplies its reference so the core stays
         // render-free. No hook ⇒ no render slot booted ⇒ fail fast instead
         // of warn-dropping the mail. The pumped `on_capture_frame` parks the
         // request; `pump_until_reply` drives the slot (drain + frame) until
         // the deferred reply lands on the loopback.
-        let render_mailbox =
-            self.hook.as_ref().map(|hook| hook.render_mailbox()).ok_or_else(|| {
+        let render =
+            self.hook.as_ref().map(|hook| hook.render()).ok_or_else(|| {
                 SubstrateHarnessError::Capture("render not composed — no capture pipeline".to_owned())
             })?;
         let cid = self.fresh_correlation_id();
-        self.push_to_mailbox(
-            render_mailbox,
-            &CaptureFrame {
+        self.passive.send_for_reply(
+            render,
+            CaptureFrame::ID,
+            CaptureFrame {
                 window: None,
                 mails: pre,
                 after_mails: after,
@@ -1228,8 +1230,9 @@ impl SubstrateHarness {
                 // exercised through `HarnessOp::send_and_await_reply` scenarios.
                 checks: Vec::new(),
                 similarity: None,
-            },
-            cid,
+            }
+            .encode_into_bytes(),
+            self.session_reply(cid),
         );
         match self.pump_until_reply::<CaptureFrameResult>(cid, "CaptureFrameResult")? {
             CaptureFrameResult::Ok { png, .. } => Ok(png),
@@ -1237,19 +1240,13 @@ impl SubstrateHarness {
         }
     }
 
-    /// Push a typed mail addressed to a specific chassis-owned mailbox
-    /// with our session as the reply target and `cid` as the correlation
-    /// id. Issue 603 retired `aether.control` as the catch-all for
+    /// This harness's session as the reply target for correlation `cid`.
+    /// Issue 603 retired `aether.control` as the catch-all for
     /// chassis-peripheral kinds; each one now routes to its own cap
     /// (`aether.render.capture_frame`, `aether.substrate_harness.advance`,
-    /// `aether.window.set_mode`, etc.).
-    fn push_to_mailbox<K>(&self, mailbox: MailboxId, mail: &K, cid: u64)
-    where
-        K: Kind,
-    {
-        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        let payload = mail.encode_into_bytes();
-        self.queue.push(Mail::new(mailbox, K::ID, payload, 1).with_reply_to(reply_to));
+    /// `aether.window.set_mode`, etc.) and replies to the session here.
+    const fn session_reply(&self, cid: u64) -> ReplyTarget {
+        ReplyTarget::Session { session: self.session, correlation: cid }
     }
 
     fn fresh_correlation_id(&self) -> u64 {
@@ -1540,34 +1537,17 @@ impl SubstrateHarness {
         // advance never races the overlap guard.
         loop {
             let cid = self.fresh_correlation_id();
-            // Mint a chassis-root `LifecycleAdvance` (so the trace
-            // pipeline tracks the broadcast subtree and `on_settled`
-            // fires) that *also* carries this harness's session as the
-            // reply target — the driver routes `LifecycleAdvanceComplete`
-            // there via `on_settled`'s `ctx.reply_to`. `push_chassis_root_mail`
-            // doesn't take a reply target, so the chassis-root push is
-            // open-coded here (mint id → record `Sent` → push with both
-            // lineage and reply-to), mirroring its three steps.
-            let advance_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, self.fresh_correlation_id());
-            self.queue.record_sent(
-                advance_root,
-                advance_root,
-                None,
-                MailboxId::CHASSIS_MAILBOX_ID,
-                self.lifecycle_mailbox,
+            // Push a chassis-root `LifecycleAdvance` (so the trace pipeline
+            // tracks the broadcast subtree and `on_settled` fires) that *also*
+            // carries this harness's session as the reply target — the driver
+            // routes `LifecycleAdvanceComplete` there via `on_settled`'s
+            // `ctx.reply_to`.
+            let settlement = self.passive.send_tracked(
+                self.lifecycle.erase(),
                 self.kind_lifecycle_advance,
-            );
-            let settlement = self.passive.settlement_registry().subscribe_settlement(advance_root);
-            let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-            self.queue.push(
-                Mail::new(
-                    self.lifecycle_mailbox,
-                    self.kind_lifecycle_advance,
-                    aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
-                    1,
-                )
-                .with_lineage(advance_root, advance_root, None)
-                .with_reply_to(reply_to),
+                aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
+                cid,
+                Some(self.session_reply(cid)),
             );
             // Block until the driver replies `LifecycleAdvanceComplete`
             // for this advance. A `Timeout` here means the chain never
@@ -1910,14 +1890,13 @@ mod tests {
 
     /// Issue 607 Phase 3 verify: spawn an instanced actor through
     /// `SubstrateHarness::spawn_actor`, exercise `Subname::Counter` +
-    /// `Subname::Named`, assert returned `MailboxId` matches the
-    /// deterministic full-name hash, confirm reused subnames fail,
-    /// and confirm `after_init` mail lands as the actor's first
-    /// dispatch.
+    /// `Subname::Named`, assert each returned proof names a live slot,
+    /// confirm reused subnames fail, and confirm `after_init` mail lands
+    /// as the actor's first dispatch.
     #[test]
     fn spawn_instanced_actor_smoke() {
         use aether_actor::{Addressable as ActorTrait, HandlesKind};
-        use aether_data::{Kind as DataKind, KindId as DataKindId, mailbox_id_from_name};
+        use aether_data::{Kind as DataKind, KindId as DataKindId};
         use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname};
         use std::sync::atomic::{AtomicU32, Ordering as AtomicOrdering};
 
@@ -1987,16 +1966,10 @@ mod tests {
             .after_init(Bump { tag: 2 })
             .finish()
             .expect("first counter spawn");
-        assert_eq!(
-            id_a,
-            MailboxId(mailbox_id_from_name("test.spawn.child:0").0),
-            "Counter subname allocates from a per-Spawner counter starting at 0"
-        );
 
         // Subname::Named — second instance, full name "test.spawn.child:alpha".
         let id_b =
             tb.spawn_actor::<Child>(Subname::Named("alpha"), Arc::clone(&received), ()).finish().expect("named spawn");
-        assert_eq!(id_b, MailboxId(mailbox_id_from_name("test.spawn.child:alpha").0),);
 
         // Reused subname → SubnameInUse.
         let err = tb
@@ -2017,8 +1990,8 @@ mod tests {
             "both pre-loaded after_init mails should dispatch to the first instance"
         );
 
-        // Live registry slots are populated by id.
-        assert!(tb.actor_registry().is_live(id_a), "first instance should be Live in the actor registry");
-        assert!(tb.actor_registry().is_live(id_b), "second instance should be Live in the actor registry");
+        // Each spawn's proof names a live registry slot.
+        assert!(tb.actor_registry().is_live(id_a.erase()), "first instance should be Live in the actor registry");
+        assert!(tb.actor_registry().is_live(id_b.erase()), "second instance should be Live in the actor registry");
     }
 }

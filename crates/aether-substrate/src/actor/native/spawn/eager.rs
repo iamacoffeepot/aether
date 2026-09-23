@@ -12,13 +12,14 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aether_actor::{HandlesKind, Instanced, validate_namespace_segment};
+use aether_actor::{ActorRef, HandlesKind, Instanced, validate_namespace_segment};
 use aether_data::Kind;
 use aether_kinds::trace::Nanos;
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
+use crate::mail::registry::Registry;
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 
 use super::spawner::Spawner;
@@ -181,22 +182,35 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         spawner.commit(staged)
     }
 
-    /// Consume the builder and run the spawn lifecycle. Returns the
-    /// new actor's [`MailboxId`] on success, or a typed [`SpawnError`]
+    /// Consume the builder and run the spawn lifecycle. Returns the new
+    /// actor's proven [`ActorRef`] on success, or a typed [`SpawnError`]
     /// describing which lifecycle step failed.
+    ///
+    /// The commit returns only once the actor's route is `Live`, so the
+    /// reference is minted on that answer (ADR-0230 section 3) rather than
+    /// looked up afterwards: an embedder holds the proof of what it spawned.
     ///
     /// Boot/embedder authority: the commit half writes shared registry and
     /// scheduler state on the calling thread, which the ADR-0165 owner seal
     /// permits only before the owner takes over. A handler stages instead —
     /// see [`HandlerSpawnBuilder::stage`](super::HandlerSpawnBuilder::stage).
-    pub fn finish(self) -> Result<MailboxId, SpawnError> {
-        self.finish_internal().map(|commit| commit.mailbox_id)
+    pub fn finish(self) -> Result<ActorRef<A>, SpawnError> {
+        self.finish_internal().map(|commit| Registry::activated(commit.mailbox_id))
     }
 
-    /// Consume the builder and return both the mailbox id and the exact
+    /// Consume the builder and return both the proven reference and the exact
     /// canonical name registered for the new actor. Carries the same
     /// boot/embedder authority as [`Self::finish`].
-    pub fn finish_with_name(self) -> Result<(MailboxId, String), SpawnError> {
-        self.finish_internal().map(|commit| (commit.mailbox_id, commit.canonical_name))
+    pub fn finish_with_name(self) -> Result<(ActorRef<A>, String), SpawnError> {
+        self.finish_internal().map(|commit| (Registry::activated(commit.mailbox_id), commit.canonical_name))
+    }
+
+    /// Consume the builder and return the committed position. Substrate-internal
+    /// glue for the crate's own unit tests of the spawn and registry machinery,
+    /// which assert positional registry state; everything else takes the proof
+    /// [`Self::finish`] returns.
+    #[cfg(test)]
+    pub(crate) fn finish_commit(self) -> Result<MailboxId, SpawnError> {
+        self.finish_internal().map(|commit| commit.mailbox_id)
     }
 }
