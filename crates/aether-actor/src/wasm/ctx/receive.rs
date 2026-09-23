@@ -246,9 +246,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// consumes it.
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
-        // SAFETY: the macro-emitted registry is accessed only under the
-        // serialized wasm guest entrypoint.
-        unsafe { self.inline.request_contexts_mut().take(request) }
+        self.inline.take_request_context(request)
     }
 
     /// The component's own mailbox id — the value the substrate uses to

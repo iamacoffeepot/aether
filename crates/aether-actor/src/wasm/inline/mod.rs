@@ -42,14 +42,14 @@ use alloc::boxed::Box;
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
-use core::cell::{Cell, UnsafeCell};
+use core::cell::{Cell, RefCell, UnsafeCell};
 use core::num::NonZeroU64;
 
-use aether_data::MailboxId;
+use aether_data::{Kind, MailboxId, RequestId};
 
 use crate::mail::{Mail, NO_REPLY_HANDLE};
 use crate::model::CallerScope;
-use crate::request_context::RequestContextTable;
+use crate::request_context::{RequestContextTable, compose_state_envelope};
 use crate::wasm::ErasedWasmActor;
 use crate::wasm::bridge::mail;
 use crate::wasm::ctx::{ActorTypeTag, SpawnError, WasmCtx};
@@ -237,8 +237,11 @@ pub struct Registry {
     queue: UnsafeCell<VecDeque<QueuedMail>>,
     /// SDK-owned request contexts keyed by host reply correlation id
     /// (ADR-0139). Lives beside the inline registry because every wasm ctx and
-    /// mailbox already carries this macro-emitted per-component static.
-    request_contexts: UnsafeCell<RequestContextTable>,
+    /// mailbox already carries this macro-emitted per-component static. A
+    /// `RefCell`, so a reentrant borrow panics instead of aliasing; every
+    /// borrow is taken inside one method below and released before it
+    /// returns.
+    request_contexts: RefCell<RequestContextTable>,
     /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
     /// on a raw registry never wired by `export!` (a host-unit registry).
     /// Set once from each init shim — the resolver enumerates the module's
@@ -254,11 +257,14 @@ pub struct Registry {
 // under the run token, so a `static __AETHER_INLINE` is only ever touched
 // from one thread at a time. On the host unit-test build each test owns a
 // local registry, reached from one test thread. The same argument covers
-// the added interior-mutable fields (`self_id`, `queue`): each is touched
-// only from the single run-token thread, and every borrow of `queue` is
-// taken fresh and released before return (never spanning a dispatch). The
-// `spawn_resolver` cell is written once from an init shim and read from
-// guest handler code — again, only ever from the single run-token thread.
+// the added interior-mutable fields (`self_id`, `queue`,
+// `request_contexts`): each is touched only from the single run-token
+// thread, and every borrow of `queue` or `request_contexts` is taken fresh
+// and released before return (never spanning a dispatch). The
+// `request_contexts` `RefCell` needs `Sync` only for that single-thread
+// reason; its borrow flag still catches reentrancy. The `spawn_resolver`
+// cell is written once from an init shim and read from guest handler code —
+// again, only ever from the single run-token thread.
 unsafe impl Sync for Registry {}
 
 impl Registry {
@@ -271,32 +277,35 @@ impl Registry {
             parent_id: Cell::new(None),
             entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
-            request_contexts: UnsafeCell::new(RequestContextTable::new()),
+            request_contexts: RefCell::new(RequestContextTable::new()),
             spawn_resolver: Cell::new(None),
         }
     }
 
-    /// Mutably borrow the per-component request-context table.
-    ///
-    /// # Safety
-    /// The caller must be running under the serialized wasm guest entrypoint,
-    /// the same invariant required by the rest of `Registry`'s interior
-    /// mutable state.
+    /// Store a typed request context under `request` (ADR-0139).
+    pub(crate) fn insert_request_context<C: Kind>(&self, request: RequestId, context: &C) {
+        self.request_contexts.borrow_mut().insert(request, context);
+    }
+
+    /// Remove and decode the typed request context stored under `request`;
+    /// a wrong-kind take leaves it stored (ADR-0139 §4).
+    pub(crate) fn take_request_context<C: Kind>(&self, request: RequestId) -> Option<C> {
+        self.request_contexts.borrow_mut().take(request)
+    }
+
+    /// Wrap the dehydrating guest's user state with the request-context
+    /// snapshot, for the `export!` `on_dehydrate` shims.
     #[doc(hidden)]
-    #[allow(clippy::mut_from_ref)]
-    pub unsafe fn request_contexts_mut(&self) -> &mut RequestContextTable {
-        // SAFETY: caller upholds the serialized-dispatch invariant.
-        unsafe { &mut *self.request_contexts.get() }
+    #[must_use]
+    pub fn compose_request_context_state(&self, user_state: Option<(u32, Vec<u8>)>) -> Option<(u32, Vec<u8>)> {
+        compose_state_envelope(&self.request_contexts.borrow(), user_state)
     }
 
     /// Replace the per-component request-context table during rehydrate.
     #[doc(hidden)]
     #[allow(dead_code)]
     pub fn restore_request_contexts(&self, table: RequestContextTable) {
-        // SAFETY: see [`Self::request_contexts_mut`].
-        unsafe {
-            *self.request_contexts.get() = table;
-        }
+        *self.request_contexts.borrow_mut() = table;
     }
 
     /// Record the instance's real folded [`MailboxId`] — the `mailbox_id`

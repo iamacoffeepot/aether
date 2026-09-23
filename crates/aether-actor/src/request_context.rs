@@ -4,11 +4,19 @@
 //! request. Context values are ordinary `Kind`s, so the stored bytes carry a
 //! schema-derived `KindId` and can be restored across guest replacement.
 //!
-//! Entries are found by key. Capacity eviction follows the table's own
-//! `insert_seq`, kept in a separate age index, never the request id: request
-//! ids are minted outside the table, so their order says nothing about when a
-//! context was stored, while `insert_seq` is persisted in the snapshot and
-//! continues from it after a restore.
+//! Request ids are monotonic per mailbox (ADR-0139 §3): a native actor mints
+//! them from its binding's counter, and a wasm guest's counter carries across
+//! `replace_component`. The smallest stored id is therefore the oldest
+//! context, so capacity eviction pops the first key.
+//!
+//! The snapshot keeps the layout older SDKs wrote: `next_seq`, `count`, then
+//! per entry `request`, `kind`, `insert_seq`, `len`, `bytes`. The table no
+//! longer tracks insertion sequence, so restore ignores both sequence fields.
+//! The writer sets `next_seq` to the entry count and each `insert_seq` to the
+//! entry's position in id order, which an older reader takes as the same age
+//! order. Keeping the layout, rather than bumping the envelope version, lets
+//! snapshots cross in both directions: an older reader treats an unknown
+//! version as plain user state.
 
 use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
@@ -25,22 +33,19 @@ const ENVELOPE_MAGIC: &[u8; 8] = b"AECTX001";
 struct RequestContextEntry {
     kind: KindId,
     bytes: Vec<u8>,
-    insert_seq: u64,
 }
 
 /// Per-actor request-context table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestContextTable {
     entries: BTreeMap<RequestId, RequestContextEntry>,
-    by_age: BTreeMap<u64, RequestId>,
-    next_seq: u64,
     capacity: usize,
 }
 
 impl RequestContextTable {
     #[must_use]
     pub const fn new() -> Self {
-        Self { entries: BTreeMap::new(), by_age: BTreeMap::new(), next_seq: 0, capacity: REQUEST_CONTEXT_CAPACITY }
+        Self { entries: BTreeMap::new(), capacity: REQUEST_CONTEXT_CAPACITY }
     }
 
     #[must_use]
@@ -50,40 +55,27 @@ impl RequestContextTable {
 
     /// Store a context under `request`, replacing any older entry for the same
     /// correlation id. A no-correlation request is ignored because no reply can
-    /// recover it exactly.
+    /// recover it exactly. A new request on a full table evicts the oldest
+    /// context, the one with the smallest request id.
     pub fn insert<C: Kind>(&mut self, request: RequestId, context: &C) {
         if request.0 == Source::NO_CORRELATION {
             tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id",);
             return;
         }
 
-        let insert_seq = self.next_seq;
-        self.next_seq = self.next_seq.wrapping_add(1);
-
-        if let Some(existing) = self.entries.get_mut(&request) {
-            self.by_age.remove(&existing.insert_seq);
-            existing.kind = C::ID;
-            existing.bytes = context.encode_into_bytes();
-            existing.insert_seq = insert_seq;
-            self.by_age.insert(insert_seq, request);
-            return;
-        }
-
-        if self.entries.len() >= self.capacity
-            && let Some((dropped_seq, dropped_request)) = self.by_age.pop_first()
-            && let Some(dropped) = self.entries.remove(&dropped_request)
+        if !self.entries.contains_key(&request)
+            && self.entries.len() >= self.capacity
+            && let Some((dropped_request, dropped)) = self.entries.pop_first()
         {
             tracing::warn!(
                 request = dropped_request.0,
                 kind = dropped.kind.0,
-                age = insert_seq.saturating_sub(dropped_seq),
+                age = request.0.saturating_sub(dropped_request.0),
                 "request context table full; dropped oldest context",
             );
         }
 
-        self.entries
-            .insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes(), insert_seq });
-        self.by_age.insert(insert_seq, request);
+        self.entries.insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes() });
     }
 
     /// Remove and decode the context associated with `request`.
@@ -99,8 +91,6 @@ impl RequestContextTable {
         }
 
         let entry = self.entries.remove(&request)?;
-        self.by_age.remove(&entry.insert_seq);
-
         let decoded = C::decode_from_bytes(&entry.bytes);
         if decoded.is_none() {
             tracing::warn!(request = request.0, kind = C::ID.0, "request context decode failed",);
@@ -111,13 +101,12 @@ impl RequestContextTable {
     #[must_use]
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_u64(&mut out, self.next_seq);
+        push_u64(&mut out, self.entries.len() as u64);
         push_len(&mut out, self.entries.len());
-        for request in self.by_age.values() {
-            let entry = &self.entries[request];
+        for (position, (request, entry)) in (0_u64..).zip(&self.entries) {
             push_u64(&mut out, request.0);
             push_u64(&mut out, entry.kind.0);
-            push_u64(&mut out, entry.insert_seq);
+            push_u64(&mut out, position);
             push_len(&mut out, entry.bytes.len());
             out.extend_from_slice(&entry.bytes);
         }
@@ -126,10 +115,7 @@ impl RequestContextTable {
 
     pub fn restore_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         let mut cursor = bytes;
-        let Some(next_seq) = take_u64(&mut cursor) else {
-            return false;
-        };
-        let Some(count) = take_u32(&mut cursor) else {
+        let (Some(_next_seq), Some(count)) = (take_u64(&mut cursor), take_u32(&mut cursor)) else {
             return false;
         };
         if count as usize > self.capacity {
@@ -137,9 +123,8 @@ impl RequestContextTable {
         }
 
         let mut entries = BTreeMap::new();
-        let mut by_age = BTreeMap::new();
         for _ in 0..count {
-            let (Some(request), Some(kind), Some(insert_seq), Some(len)) =
+            let (Some(request), Some(kind), Some(_insert_seq), Some(len)) =
                 (take_u64(&mut cursor), take_u64(&mut cursor), take_u64(&mut cursor), take_u32(&mut cursor))
             else {
                 return false;
@@ -151,14 +136,8 @@ impl RequestContextTable {
             let (payload, rest) = cursor.split_at(len);
             cursor = rest;
 
-            // A sequence at or past `next_seq` would collide with the next
-            // insert's age key; the writer never produces one.
-            let request = RequestId(request);
-            if insert_seq >= next_seq || by_age.insert(insert_seq, request).is_some() {
-                return false;
-            }
-            let entry = RequestContextEntry { kind: KindId(kind), bytes: payload.to_vec(), insert_seq };
-            if entries.insert(request, entry).is_some() {
+            let entry = RequestContextEntry { kind: KindId(kind), bytes: payload.to_vec() };
+            if entries.insert(RequestId(request), entry).is_some() {
                 return false;
             }
         }
@@ -167,8 +146,6 @@ impl RequestContextTable {
         }
 
         self.entries = entries;
-        self.by_age = by_age;
-        self.next_seq = next_seq;
         true
     }
 }
@@ -317,28 +294,49 @@ mod tests {
         assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
-    /// A replaced guest mints request ids from a counter that need not
-    /// continue the old guest's, so the smallest request id is not the oldest
-    /// context. Eviction must follow the age index across an overwrite, a
-    /// take, and a snapshot restore.
+    /// Request ids are monotonic per mailbox, so the smallest id is the
+    /// oldest context. Eviction must pick it after a take and a snapshot
+    /// restore, when larger ids arrive on a full table.
     #[test]
-    fn eviction_drops_the_oldest_context_not_the_smallest_request_id() {
+    fn eviction_drops_the_smallest_request_id() {
         let mut table = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
         table.insert(RequestId(100), &TestContext { value: 0 });
         table.insert(RequestId(101), &TestContext { value: 1 });
         table.insert(RequestId(102), &TestContext { value: 2 });
-        table.insert(RequestId(100), &TestContext { value: 3 });
         assert_eq!(table.take::<TestContext>(RequestId(101)), Some(TestContext { value: 1 }));
 
         let mut restored = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
         assert!(restored.restore_snapshot_bytes(&table.snapshot_bytes()));
-        restored.insert(RequestId(1), &TestContext { value: 4 });
-        restored.insert(RequestId(2), &TestContext { value: 5 });
+        restored.insert(RequestId(103), &TestContext { value: 3 });
+        restored.insert(RequestId(104), &TestContext { value: 4 });
 
-        assert_eq!(restored.take::<TestContext>(RequestId(102)), None, "the oldest context is evicted");
-        assert_eq!(restored.take::<TestContext>(RequestId(100)), Some(TestContext { value: 3 }));
-        assert_eq!(restored.take::<TestContext>(RequestId(1)), Some(TestContext { value: 4 }));
-        assert_eq!(restored.take::<TestContext>(RequestId(2)), Some(TestContext { value: 5 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(100)), None, "the oldest context is evicted");
+        assert_eq!(restored.take::<TestContext>(RequestId(102)), Some(TestContext { value: 2 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(103)), Some(TestContext { value: 3 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(104)), Some(TestContext { value: 4 }));
+    }
+
+    /// An older SDK wrote entries in insertion order with its own sequence
+    /// numbers; a guest on this SDK must still restore that snapshot, whatever
+    /// the sequence fields hold.
+    #[test]
+    fn older_sdk_snapshot_restores_whatever_its_sequence_fields_hold() {
+        let mut bytes = Vec::new();
+        push_u64(&mut bytes, 5);
+        push_len(&mut bytes, 2);
+        for (request, value, insert_seq) in [(9, 1, 40), (7, 2, 12)] {
+            let payload = TestContext { value }.encode_into_bytes();
+            push_u64(&mut bytes, request);
+            push_u64(&mut bytes, TestContext::ID.0);
+            push_u64(&mut bytes, insert_seq);
+            push_len(&mut bytes, payload.len());
+            bytes.extend_from_slice(&payload);
+        }
+
+        let mut restored = RequestContextTable::new();
+        assert!(restored.restore_snapshot_bytes(&bytes));
+        assert_eq!(restored.take::<TestContext>(RequestId(9)), Some(TestContext { value: 1 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(7)), Some(TestContext { value: 2 }));
     }
 
     #[test]
