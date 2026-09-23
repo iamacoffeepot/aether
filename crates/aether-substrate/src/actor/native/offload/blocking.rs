@@ -18,8 +18,9 @@
 //!   and an opt-in context `C`. Its consuming [`TaskDone::resolve`]
 //!   re-replies through the carried reply target **first**, then drops
 //!   the hold (`Sent` before `Release`, ADR-0080 §12). Dropping a
-//!   `TaskDone` without resolving releases the hold and `debug_assert`s
-//!   (a silent lost reply).
+//!   `TaskDone` without resolving releases the hold and then panics outside
+//!   an unwind, in every build, which the scheduler escalates through the
+//!   chassis aborter (ADR-0063) — a lost reply is never silent.
 //! - the in-flight ledger (`InflightTable`) — a per-actor map from
 //!   `DispatchId` to its held `(hold, reply_to, context)` plus a
 //!   completion output slot the worker fills. Lives behind a `&self`
@@ -44,6 +45,7 @@ use std::any::Any;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, Weak};
+use std::thread;
 
 use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
 use aether_data::{Kind, KindId, MailId};
@@ -264,8 +266,9 @@ pub(crate) enum FillOutcome {
 /// consuming `resolve` family re-replies **first**, then drops the hold,
 /// making the `Sent`-before-`Release` ordering (ADR-0080 §12) structural
 /// rather than a remembered drop order. Dropping a `TaskDone` without
-/// resolving releases the hold and `debug_assert`s — catching the silent
-/// lost reply that discipline misses today.
+/// resolving releases the hold and then panics outside an unwind, in every
+/// build, which the scheduler escalates through the chassis aborter
+/// (ADR-0063) — catching the silent lost reply that discipline misses.
 #[must_use = "a TaskDone holds the chain open; resolve it (or resolve_err) to send the deferred reply and release the hold"]
 pub struct TaskDone<O, C = ()> {
     output: O,
@@ -297,8 +300,10 @@ pub struct TaskDone<O, C = ()> {
 /// succeeds; a preparation error must return it to the caller so the terminal
 /// error can still be replied exactly once. Dropping one without replying
 /// strands the caller forever, which is why [`Drop`] releases the hold and then
-/// `debug_assert`s — the distinction from a plain context value, whose drop
-/// means nothing.
+/// panics outside an unwind, in every build, which the scheduler escalates
+/// through the chassis aborter (ADR-0063) — the distinction from a plain
+/// context value, whose drop means nothing. [`Self::abandon_for_actor_close`]
+/// is the only quiet discharge.
 ///
 /// # Distinct from `InboundMail`
 ///
@@ -344,7 +349,8 @@ impl DeferredReply {
 
     /// Release the obligation because the actor that owned its pending state
     /// is itself closing. This is the no-spurious-reply parent-disappearance
-    /// path, not an ordinary business completion.
+    /// path, not an ordinary business completion, and the only way to
+    /// discharge a debt without replying that does not fail fast.
     #[doc(hidden)]
     pub fn abandon_for_actor_close(mut self) {
         drop(self.hold.take());
@@ -356,8 +362,11 @@ impl Drop for DeferredReply {
     fn drop(&mut self) {
         if !self.consumed {
             drop(self.hold.take());
-            debug_assert!(
-                false,
+            // Fails fast outside an unwind. A panic already unwinding past this
+            // debt is the one the aborter should see; a second panic here would
+            // abort the process instead.
+            assert!(
+                thread::panicking(),
                 "DeferredReply dropped without successor staging or terminal reply (the hold was released, but the owed reply was lost)"
             );
         }
@@ -495,9 +504,9 @@ impl<O, C> TaskDone<O, C> {
     /// Release the hold **without** sending any reply — the sanctioned
     /// no-reply completion (ADR-0109): a `#[handler(task)]` that borrows
     /// the `TaskDone` and returns `()` discharges the chain without
-    /// replying. Unlike dropping an un-resolved `TaskDone` (a silent lost
-    /// reply), this is a deliberate signature choice, so it releases
-    /// cleanly and skips the lost-reply `debug_assert`.
+    /// replying. Unlike dropping an un-resolved `TaskDone` (a lost reply),
+    /// this is a deliberate signature choice, so it releases cleanly and
+    /// skips the lost-reply panic.
     pub fn release_no_reply(mut self) {
         self.release();
     }
@@ -516,17 +525,18 @@ impl<O, C> TaskDone<O, C> {
 }
 
 impl<O, C> Drop for TaskDone<O, C> {
-    /// A `TaskDone` dropped without a `resolve*` call is a silent lost
-    /// reply: the caller was owed a deferred reply that never went out.
-    /// Release the hold so the chain can still settle (a stuck hold
-    /// would wedge settlement forever), then `debug_assert` so the bug
-    /// is loud in debug builds — the failure surface discipline misses
-    /// today (ADR-0093 §4 / Consequences).
+    /// A `TaskDone` dropped without a `resolve*` call is a lost reply:
+    /// the caller was owed a deferred reply that never went out. Release
+    /// the hold so the chain can still settle (a stuck hold would wedge
+    /// settlement forever), then panic outside an unwind, in every build,
+    /// so the scheduler escalates the bug through the chassis aborter
+    /// (ADR-0063; ADR-0093 §4 / Consequences). A panic already unwinding
+    /// past the completion stays the one reported.
     fn drop(&mut self) {
         if !self.resolved {
             drop(self.hold.take());
-            debug_assert!(
-                false,
+            assert!(
+                thread::panicking(),
                 "TaskDone dropped without resolve — the deferred reply was never sent (the \
                  carried hold has been released so settlement isn't wedged, but the caller is \
                  owed a reply that never went out)"
@@ -914,11 +924,9 @@ mod tests {
     }
 
     /// Dropping a `TaskDone` without resolving releases the hold (so
-    /// settlement isn't wedged) and `debug_assert`s. Gated `#[should_panic]`
-    /// — the assertion only fires in debug builds, which is where tests run.
+    /// settlement isn't wedged) and then panics, in every build profile.
     #[test]
     #[should_panic(expected = "TaskDone dropped without resolve")]
-    #[cfg(debug_assertions)]
     fn dropping_task_done_without_resolve_releases_and_asserts() {
         let (_registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
@@ -932,14 +940,13 @@ mod tests {
         let done: TaskDone<u64, ()> =
             TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
         // The drop releases the hold (verified indirectly: the chain
-        // returns to 0 even as the assertion unwinds) then debug_asserts.
+        // returns to 0 even as the panic unwinds) then panics.
         drop(done);
     }
 
     /// Companion to the panic test: a [`TaskDone`] dropped unresolved still
-    /// releases its hold (so settlement isn't permanently wedged). Built
-    /// with the assertion compiled out — verifies the release half in
-    /// isolation by catching the unwind.
+    /// releases its hold (so settlement isn't permanently wedged). Verifies
+    /// the release half in isolation by catching the unwind.
     #[test]
     fn dropping_task_done_releases_hold_even_when_unresolved() {
         let (_registry, mailer) = bare_substrate();
@@ -953,8 +960,7 @@ mod tests {
                 TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
             drop(done);
         }));
-        // In debug the drop asserts (unwinds); in release it doesn't.
-        // Either way the hold released.
+        // The drop panics after releasing, so the hold is already gone.
         let _ = result;
         assert_eq!(counter.held_open(root), 0, "an unresolved TaskDone releases its hold on drop");
     }
@@ -1150,14 +1156,11 @@ mod tests {
 
     /// Tripwire: an owed reply that is dropped without being replied to or
     /// staged onto a successor releases its hold (so settlement isn't wedged)
-    /// and `debug_assert`s. The assert is what separates [`DeferredReply`] from
-    /// a plain context value — dropping a context means nothing, dropping a
-    /// debt strands the caller forever — so the reshape onto the new name must
-    /// keep it. Gated `#[should_panic]`: the assertion only fires in debug
-    /// builds, which is where tests run.
+    /// and then panics, in every build profile. The panic is what separates
+    /// [`DeferredReply`] from a plain context value — dropping a context means
+    /// nothing, dropping a debt strands the caller forever.
     #[test]
     #[should_panic(expected = "DeferredReply dropped without successor staging or terminal reply")]
-    #[cfg(debug_assertions)]
     fn dropping_deferred_reply_without_replying_releases_and_asserts() {
         let (_registry, mailer) = bare_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
@@ -1184,8 +1187,8 @@ mod tests {
     }
 
     /// Abandoning for actor close is the sanctioned no-reply path: the hold
-    /// releases and the lost-reply assertion stays quiet, so a parent that
-    /// disappears with pending state doesn't panic every debug build.
+    /// releases and the lost-reply panic stays quiet, so a parent that
+    /// disappears with pending state doesn't take the engine down.
     #[test]
     fn abandoning_a_deferred_reply_for_actor_close_releases_without_asserting() {
         let (_registry, mailer) = bare_substrate();
@@ -1194,6 +1197,27 @@ mod tests {
 
         DeferredReply::new(mailer.acquire_settlement_hold(root), Source::NONE).abandon_for_actor_close();
         assert_eq!(counter.held_open(root), 0, "actor-close abandonment releases the chain");
+    }
+
+    /// A handler that panics while holding a debt surfaces its own panic: the
+    /// debt's drop runs during the unwind, releases the hold, and stays quiet
+    /// rather than panicking inside cleanup (which would abort the process
+    /// and skip the chassis aborter).
+    #[test]
+    fn dropping_deferred_reply_while_unwinding_keeps_the_original_panic() {
+        let (_registry, mailer) = bare_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let root = root_id(22);
+        let hold = mailer.acquire_settlement_hold(root);
+
+        let payload = catch_unwind(AssertUnwindSafe(|| {
+            let _owed = DeferredReply::new(hold, Source::NONE);
+            panic!("handler probe");
+        }))
+        .expect_err("the handler panic propagates");
+
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"handler probe"), "the original panic payload survives");
+        assert_eq!(counter.held_open(root), 0, "the unwinding drop still releases the hold");
     }
 
     #[test]

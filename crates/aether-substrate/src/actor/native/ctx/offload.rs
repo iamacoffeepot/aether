@@ -7,6 +7,7 @@
 //! this thread, parks it in the per-actor in-flight ledger, and replies from
 //! a later handler turn when the completion wake lands.
 
+use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
@@ -18,6 +19,7 @@ use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
 use crate::actor::native::{InheritCtx, RootCtx};
 use crate::mail::Source;
+use crate::runtime::panic_hook::payload_string;
 use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
@@ -100,6 +102,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// completion handler decodes that wake's [`DispatchId`] and calls
     /// [`Self::take_task_done`] to rebuild the [`TaskDone`], then
     /// `resolve`s it.
+    ///
+    /// A panic in `f` is fatal (ADR-0063): the worker escalates it through
+    /// the chassis aborter with the panic payload in the reason, exactly as
+    /// the scheduler escalates a handler panic, and no completion lands. An
+    /// expected failure belongs in the output value `O` (a `Result`-shaped
+    /// output the completion maps to an error reply), never in a panic.
     ///
     /// Returns a [`Pending<R>`] (ADR-0109) — the type-level receipt a
     /// request handler returns to declare `-> Pending<R>`, naming `R` as
@@ -191,13 +199,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     {
         let completion = self.binding.dispatch_arm(hold, reply_to, cx);
         let id = completion.dispatch_id();
+        let aborter = self.binding.fatal_aborter();
 
         // The worker captures the binding + dispatch id, runs the
         // blocking closure, parks its output in the ledger, then pushes
         // the completion-wake to the actor's own mailbox. It touches no
         // actor state beyond the ledger slot it owns and dies after the
-        // push. This is the one sanctioned raw spawn for the
-        // hold-until-resolve shape (ADR-0093) — umbrella-aware because
+        // push. A panic in the closure is fatal (ADR-0063): the worker
+        // escalates it through the aborter it holds strongly, even when the
+        // owning actor has already closed, and leaves the completion armed;
+        // an aborter that unwinds rather than exits drops it, which abandons
+        // the entry and releases the hold. This is the one sanctioned raw
+        // spawn for the hold-until-resolve shape (ADR-0093) — umbrella-aware because
         // the hold (held in the ledger, not here) keeps the chain open
         // until the resolve. The per-request spawn is a placeholder; the
         // scalable form is a reused work-stealing blocking pool isolated
@@ -205,9 +218,21 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         // This IS the ADR-0093 dispatch_blocking primitive — the hold lives in the
         // ledger (not on this worker), so the chain stays open until the resolve.
         #[allow(clippy::disallowed_methods)]
-        let spawned = ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(move || {
-            completion.complete(f());
-        });
+        let spawned =
+            ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(
+                move || match panic::catch_unwind(AssertUnwindSafe(f)) {
+                    Ok(output) => completion.complete(output),
+                    Err(payload) => {
+                        let reason = format!("dispatch_blocking worker panicked: {}", payload_string(payload.as_ref()));
+                        tracing::error!(
+                            target: "aether_substrate::actor::native::offload::blocking",
+                            reason = %reason,
+                            "dispatch_blocking worker caught a panic; escalating fatal abort",
+                        );
+                        aborter.abort(reason);
+                    }
+                },
+            );
         if let Err(e) = spawned {
             tracing::error!(
                 target: "aether_substrate::actor::native::offload::blocking",

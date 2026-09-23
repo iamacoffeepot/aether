@@ -718,8 +718,10 @@ match ctx.spawn_child::<Worker>(Subname::Named(&name), config, ()).continue_from
 A handler with no `TaskDone` in hand — one that parks a caller across a worker
 thread, say — mints the same debt from its ctx with `ctx.defer_reply_to(target)`
 and passes that to `continue_from` instead. Dropping a `DeferredReply` without
-replying releases its hold (settlement is never wedged) and trips a
-`debug_assert`, because a lost reply strands the caller forever.
+replying releases its hold (settlement is never wedged) and then panics, in every
+build, which the scheduler escalates through the chassis aborter, because a lost
+reply strands the caller forever. An actor that closes with debts still parked
+discharges each one with `abandon_for_actor_close`, the one quiet path.
 
 Wasm enforces
 the same `ChildOf` permission, and names both types to do it: a component spawns

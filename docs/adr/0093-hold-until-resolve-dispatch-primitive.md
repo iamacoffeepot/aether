@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-06-04
+- **Amended (#6421):** 2026-09-23 — the drop-without-resolve guard in §4 fails fast in every build rather than `debug_assert`ing, and a panic in the dispatched closure escalates through the chassis aborter per ADR-0063 instead of silently abandoning the dispatch.
 
 ## Context
 
@@ -61,7 +62,7 @@ Semantics and decisions:
 
 3. **Completion arrives as `TaskDone<Output>` in a `#[handler(task)]` handler.** When the worker finishes, the framework reunites the held `(hold, reply_to)` with the worker's `output` and routes a move-only `TaskDone<Output>` to the cap's task handler — matched by its `TaskDone<K>` parameter the same way a mail `#[handler]` matches its mail-kind parameter. The completion handler is a *variant* of `#[handler]`, not a separate attribute. Three spellings, one family: `#[handler]` is the default inbound-mail handler; `#[handler(mail)]` is the same thing written explicitly (accepted for symmetry, never required); `#[handler(task)]` marks a dispatch completion. Keeping all three under one `handler` family unifies the concept, while the explicit `(task)` / `(mail)` marker states the category — so neither the author nor the dispatch inference has to ask whether `TaskDone<K>` is a mail kind.
 
-4. **`resolve` consumes the `TaskDone` and replies, then drops the hold** — so `Sent` precedes `Release` (ADR-0080 §12) *by construction* rather than by remembering the drop order. The common form `done.resolve(ctx)` re-replies with the carried `output` through the carried `reply_to` (the worker already shaped it); variants map the carried output — and the context, when present — to a different reply, or land a provider-failure error (`resolve_err`). Dropping a `TaskDone` without resolving releases the hold and `debug_assert`s (a silent lost reply — caught, where discipline misses it today).
+4. **`resolve` consumes the `TaskDone` and replies, then drops the hold** — so `Sent` precedes `Release` (ADR-0080 §12) *by construction* rather than by remembering the drop order. The common form `done.resolve(ctx)` re-replies with the carried `output` through the carried `reply_to` (the worker already shaped it); variants map the carried output — and the context, when present — to a different reply, or land a provider-failure error (`resolve_err`). Dropping a `TaskDone` without resolving releases the hold and `debug_assert`s (a silent lost reply — caught, where discipline misses it today). *Amended (#6421): the drop now panics in every build once the hold is released, unless a panic is already unwinding, and the scheduler escalates it through the chassis aborter (ADR-0063); a panic in the worker closure escalates through the same aborter.*
 
 5. **No context by default; context is an opt-in fed by `Into`.** The closure already `move`-captures everything the worker needs and produces a self-contained `output`, so the default `TaskDone<Output>` carries no extra cap state — and the call site declares nothing (own `req`, read it inside the closure, borrow rather than consume). When the *completion* handler genuinely needs actor-thread state the worker shouldn't take (a non-`Send` handle, or a deliberately pure worker), an opt-in `dispatch_blocking_with(cx, closure)` carries a `C` derived from the request via `Into`/`From` (e.g. `req.context()`) and surfaces as `TaskDone<C, Output>` — never hand-assembled fields at the call site.
 
@@ -84,7 +85,7 @@ Semantics and decisions:
 
 - **New surface to maintain**: the ctx primitive, a framework per-actor in-flight table, and the `#[handler(task)]` variant + its dispatch-routing in the `#[actor]` macro.
 - **Migration of the two content-gen caps** onto the primitive, with the existing settlement tests re-pointed.
-- **The resolve-or-cancel invariant is a runtime `debug_assert`, not a compile-time proof.** "This hold outlives the worker and is resolved in the right later turn" is inherently cross-thread, cross-handler-turn state; Rust's static guarantees stop at the call stack. The primitive narrows the failure surface (you can't fumble the drop order) but can't statically prove you eventually resolved.
+- **The resolve-or-cancel invariant is a runtime `debug_assert`, not a compile-time proof.** "This hold outlives the worker and is resolved in the right later turn" is inherently cross-thread, cross-handler-turn state; Rust's static guarantees stop at the call stack. The primitive narrows the failure surface (you can't fumble the drop order) but can't statically prove you eventually resolved. *Amended (#6421): the runtime guard is now a fail-fast panic in every build, escalated through the chassis aborter (ADR-0063), and still not a compile-time proof.*
 
 ### Neutral / forward
 
