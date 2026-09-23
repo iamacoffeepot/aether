@@ -5,7 +5,7 @@
 //! once per advance, which pushes each stage payload to the proven
 //! references the cap's subscriber table holds (ADR-0230).
 
-use aether_actor::{MailboxForward, Publishes};
+use aether_actor::{MailboxForward, Publisher, Publishes};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     InitCaps, InitComponents, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe,
@@ -26,7 +26,8 @@ use aether_substrate::actor::native::NativeCtx;
 use std::collections::{BTreeMap, BTreeSet};
 
 // The stage kinds this cap broadcasts to its subscriber set, one
-// `Publishes` impl each — the compile-time gate on
+// `Publishes` impl each — the compile-time gate on the flat
+// `ctx.subscribe::<LifecycleCapability, K>()` verb and on
 // `LifecycleMailboxExt::subscribe`. The list is the ADR-0082 stage
 // vocabulary a chassis lifecycle graph can declare as a state; the
 // runtime still fail-fasts on a stage *this* chassis's graph omits
@@ -41,6 +42,27 @@ impl Publishes<InitComponents> for LifecycleCapability {}
 impl Publishes<Render> for LifecycleCapability {}
 impl Publishes<Present> for LifecycleCapability {}
 impl Publishes<Shutdown> for LifecycleCapability {}
+
+/// The flat subscribe verbs send the same self-addressed stage requests the
+/// [`LifecycleMailboxExt`] facade sends.
+impl Publisher for LifecycleCapability {
+    type Subscribe = LifecycleSubscribeSelf;
+    type Unsubscribe = LifecycleUnsubscribeSelf;
+
+    fn subscribe_request<K: Kind>() -> LifecycleSubscribeSelf
+    where
+        Self: Publishes<K>,
+    {
+        LifecycleSubscribeSelf { stage: K::ID.0 }
+    }
+
+    fn unsubscribe_request<K: Kind>() -> LifecycleUnsubscribeSelf
+    where
+        Self: Publishes<K>,
+    {
+        LifecycleUnsubscribeSelf { stage: K::ID.0 }
+    }
+}
 
 /// Sender-side facade for callers addressing [`LifecycleCapability`]
 /// via `ctx.actor::<LifecycleCapability>()` (ADR-0082 §7, §12).

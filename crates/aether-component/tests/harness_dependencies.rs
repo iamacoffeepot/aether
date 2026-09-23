@@ -175,10 +175,11 @@ fn replace_with_unmet_dependency_keeps_running_module() {
     }
 
     // A bare replace reuses the hosted type, which the host does not track,
-    // so it checks the entry group's dependencies: the entry probe declares
-    // none, and the replace proceeds.
+    // so it checks the entry group's dependencies: the entry probe's declared
+    // dependencies, lifecycle and window, are live in the harness, and the
+    // replace proceeds.
     match replace(&mut harness, "replace-bare", None) {
         ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("a bare replace past a dependency-free entry must succeed: {error}"),
+        ReplaceResult::Err { error } => panic!("a bare replace past a satisfied entry must succeed: {error}"),
     }
 }

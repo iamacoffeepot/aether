@@ -54,6 +54,30 @@ impl<O: Kind> ReplyShape for O {
     const CONTRACT: ReplyContract = ReplyContract::One(O::ID);
 }
 
+mod silent_sealed {
+    /// Private supertrait sealing [`super::SilentRow`] to [`super::Silent`]
+    /// and [`super::Undeclared`], so no reply kind can be marked silent.
+    pub trait Sealed {}
+
+    impl Sealed for super::Silent {}
+    impl Sealed for super::Undeclared {}
+}
+
+/// A row that answers a published event with no typed reply (ADR-0231 §8):
+/// [`Silent`], or a manual handler's [`Undeclared`]. Sealed.
+///
+/// The flat [`ctx.subscribe::<P, K>()`](crate::WasmCtx::subscribe) verb
+/// requires the subscriber's [`Contract<K>`] row to be one, because a
+/// publisher's broadcast has no one waiting for a reply.
+#[diagnostic::on_unimplemented(
+    message = "a subscriber's handler for a published kind replies `{Self}`",
+    note = "a published event has no one waiting for a reply; the handler must return `()` (ADR-0231 §8)"
+)]
+pub trait SilentRow: ReplyShape + silent_sealed::Sealed {}
+
+impl SilentRow for Silent {}
+impl SilentRow for Undeclared {}
+
 /// The contract row a target has for `K`: `T: Contract<K, Reply = O>` means
 /// `T` handles `K` and answers it with `O`, with nothing ([`Silent`]), or by
 /// hand ([`Undeclared`]).
