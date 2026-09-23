@@ -17,6 +17,10 @@
 //! holder instead, with the tag-1 handle parked, and sends tag 2 to the
 //! replacement: both replies match only when the replacement answers the
 //! carried handle to its own requester and numbers the tag-2 handle past it.
+//!
+//! Issue 6422: a third scenario has the holder answer once before the replace
+//! and once after, so the two replies' trace `MailId`s differ only when the
+//! replacement's reply-lineage counter continues past its predecessor's.
 
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `CarryRequester` is stateless so its first request takes the mailbox's first id — the same allow `source_forwarder` carries
 

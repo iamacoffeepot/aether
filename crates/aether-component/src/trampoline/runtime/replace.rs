@@ -251,8 +251,9 @@ impl WasmTrampolineState {
             }
             let saved = old.take_saved_state();
             // #6400: record the leaving guest's cursor after `unwire` and
-            // `on_dehydrate`, which may still send, so the replacement —
-            // or a later refill, if its instantiate fails — resumes past it.
+            // `on_dehydrate`, which may still send or reply, so the
+            // replacement — or a later refill, if its instantiate fails —
+            // resumes past its request ids and, #6422, its reply ids.
             self.retired_correlations = Some(old.correlation_cursor());
             // #6409: likewise move out its reply table, after both hooks
             // (which may still answer handles), so the replacement answers
@@ -268,9 +269,11 @@ impl WasmTrampolineState {
 
         // Build a fresh `ComponentCtx` for the new instance — same
         // mailer + registry/outbound/input references. Mailbox id is
-        // preserved across replace per ADR-0022 §4, and so is its
-        // correlation sequence (ADR-0139 §3): the new instance resumes
-        // from the guest that last left the slot. Its reply table starts
+        // preserved across replace per ADR-0022 §4, and so are its
+        // correlation and reply-lineage sequences (ADR-0139 §3, #6422): the
+        // new instance resumes both from the guest that last left the slot,
+        // so it reuses neither a request id nor a reply `MailId`. Its reply
+        // table starts
         // empty and is replaced by the carried one once instantiate
         // succeeds (#6409).
         let mut substrate_ctx = ComponentCtx::new(
