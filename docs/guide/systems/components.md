@@ -353,6 +353,13 @@ not live"`), and a refused replacement keeps the running module. There is no
 ordering, retry, or wait: two actors that declare each other both refuse, and
 one of them takes the fallible path instead.
 
+Loading or replacing a module also checks the dependencies of every actor in it
+that can be spawned inline — a `composable` actor, or a `child_of` a type in the
+same module — and refuses with the same message before anything in the module
+runs. Such an actor's `Embedded` dependency would sit beneath its spawner, which
+does not exist while the module loads, so it cannot be proven live then and the
+load refuses.
+
 ## Where to read more
 
 - The actor this specializes — its lifecycle, `#[actor]`, handlers, addressing —
