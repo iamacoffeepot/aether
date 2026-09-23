@@ -141,8 +141,12 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// Recover and remove the typed context for the request this inbound reply
-    /// answers. Returns `None` for ordinary mail, unmatched replies, wrong
-    /// context kind, or decode failure.
+    /// answers. Returns `None` for ordinary mail, unmatched replies, a wrong
+    /// context kind, or a decode failure.
+    ///
+    /// A wrong-kind take leaves the context stored, so a handler that serves
+    /// several context kinds tries each type in turn. A decode failure
+    /// consumes it.
     pub fn take_context<C: Kind>(&mut self) -> Option<C> {
         let request = self.in_reply_to()?;
         self.binding.take_request_context(request)
