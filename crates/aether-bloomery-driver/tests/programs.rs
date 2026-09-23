@@ -33,7 +33,7 @@ const PROGRAM: Head<OpaqueBytes> = Head::new("program");
 
 #[test]
 fn program_calls_record_caused_outcomes_from_one_loaded_root() -> Result<(), Box<dyn Error>> {
-    // Catches a broken cause link, an unpinned digest, unstored staged artifacts, a reload per call, and re-running a repeated key.
+    // Catches a broken cause link, an unpinned digest, unstored staged artifacts, a reload per call, re-running a repeated key, and a Call whose chain stays open after its outcome (the journal watch re-armed on it).
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
         return Ok(());
     };
