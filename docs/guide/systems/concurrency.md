@@ -136,6 +136,11 @@ causal chain open*:
 | `spawn_detached` | no — each send mints a fresh root | true fire-and-forget background work |
 | `dispatch_blocking` (hold-until-resolve) | yes — until you `resolve`, *outliving* the worker | the "reply in a later turn" shape above |
 
+A panic in any of the three is fatal
+([ADR-0063](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0063-fail-fast-on-abnormal-component-lifecycle.md)):
+the worker escalates it through the chassis aborter with the panic payload in the
+reason, as the scheduler does for a handler panic.
+
 The hold is what stops a deferred reply from settling early: if a handler kicks
 off work that replies later, the chain must stay open until that last send, or a
 waiter is told "done" before the reply arrives ([ADR-0080](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0080-substrate-mail-tracing-and-settlement.md) §12).
@@ -161,10 +166,12 @@ handful of infrastructure capabilities — not how actors run, and not something
 reach for from ordinary actor logic (use one of the three shapes above). It's a
 cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0050-llm-completion-sink.md)).
 
-Such a thread wakes its actor through the handle `ctx.self_wake::<K>()` returns
-(on the `init` ctx as well as a handler's), never through a stored mailbox id
-plus a mailer. The `SelfWake<K>` names no position and sends nothing but that one
-wake, and a wake after the actor has dropped does nothing
+A cap spawns that thread from the handle `ctx.self_wake::<K>()` returns (on the
+`init` ctx as well as a handler's): `wake.spawn_sidecar(name, body)`. A panic in
+`body` fails the chassis fast, like a handler panic, even after the actor has
+closed. The thread wakes its actor through the same `SelfWake<K>`, never through
+a stored mailbox id plus a mailer. The handle names no position and sends nothing
+but that one wake, and a wake after the actor has dropped does nothing
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 
 ## Where to read more

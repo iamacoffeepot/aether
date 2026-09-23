@@ -10,7 +10,6 @@
 pub use std::collections::HashMap;
 pub use std::net::{TcpListener, TcpStream};
 pub use std::sync::mpsc;
-pub use std::thread;
 
 pub use aether_actor::Manual;
 // The manual handlers issue their own replies through `ctx.reply` /
@@ -236,8 +235,7 @@ impl NativeActor for TcpCapability {
 
         // Transport thread below the mail layer — it carries a dial result
         // in; no inbound chain to inherit, so no settlement umbrella applies.
-        #[allow(clippy::disallowed_methods)]
-        let spawn_result = thread::Builder::new().name(format!("aether-tcp-connect-{id}")).spawn(move || {
+        let spawn_result = state.connect_wake.spawn_sidecar(format!("aether-tcp-connect-{id}"), move || {
             if connect_tx
                 .send((id, TcpStream::connect(&addr).map_err(|error| format!("connect failed: {error}"))))
                 .is_ok()
