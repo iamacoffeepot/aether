@@ -35,6 +35,7 @@ use core::fmt;
 
 pub mod bytes;
 pub mod canonical;
+pub mod contract;
 pub mod hash;
 pub mod ids;
 pub mod mail;
@@ -48,6 +49,7 @@ pub mod tagged_id;
 pub mod transform;
 pub mod wire;
 pub mod wire_id;
+pub use contract::first_contract_break;
 pub use hash::{
     FIELD_DOMAIN, KIND_DOMAIN, MAILBOX_DOMAIN, MAX_SCOPE_PATH_BYTES, MAX_SCOPE_PATH_DEPTH, ScopePathError,
     THREAD_DOMAIN, TRANSFORM_DOMAIN, TYPE_DOMAIN, VARIANT_DOMAIN, fnv1a_64_bytes, fnv1a_64_fold, fnv1a_64_prefixed,

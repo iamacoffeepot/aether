@@ -197,7 +197,9 @@ selector so the replacement is unambiguous.
 On success the trampoline mailbox stays stable and the returned capabilities
 describe the replacement actor type. An omitted export reuses the actor type the
 trampoline currently hosts; it does not necessarily select the new module's
-default entry.
+default entry. The replacement must keep every handler row of the hosted type,
+including on a refill after a drop: a dropped or changed row is refused and a
+changed reply means loading under a new name.
 
 There is no drain phase and no drain timeout. ADR-0038 made the splice
 structural, so the replace kind's `drain_timeout_ms` field is vestigial wire

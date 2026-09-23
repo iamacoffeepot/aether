@@ -71,28 +71,36 @@ fn cap_registry_reports_fallback() {
     assert!(!caps.accepts_actor(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
-/// `aether.component.replace` swaps the probe wasm for `aether-kit-commons`'s
-/// non-entry `camera` export (a distinct handler set), exercising
-/// `ReplaceComponent.export` (#2027) — the trampoline's hosted type is
-/// `probe`, so reaching the camera handler set requires naming the
-/// export. The registry reflects the post-replace accept-set at the
-/// same mailbox id (stable across replace per ADR-0022): `SetRender`
-/// flips accepted→rejected, `CameraCreate` flips rejected→accepted.
+/// `aether.component.replace` swaps the bundle's `test.cube` export for
+/// `aether-kit-commons`'s non-entry `camera` export (a larger handler set
+/// that keeps the cube's only row, `Tick`, so the replace passes the
+/// ADR-0231 §5 contract check), exercising `ReplaceComponent.export` (#2027)
+/// — the trampoline's hosted type is `cube`, so reaching the camera handler
+/// set requires naming the export. The registry reflects the post-replace
+/// accept-set at the same mailbox id (stable across replace per ADR-0022):
+/// `CameraCreate` flips rejected→accepted and `Tick` stays accepted.
 #[test]
 fn cap_registry_updates_on_replace() {
-    let Some(probe_path) = require_wasm("aether_test_fixtures_bundle") else {
+    let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let Some(kit_path) = require_wasm("aether_kit_commons") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let (swappable, path) = load_named(&mut harness, &probe_path, "swappable");
+    let cube = LoadComponent {
+        wasm: fs::read(&bundle_path).expect("read fixture wasm"),
+        name: Some("swappable".to_owned()),
+        config: Vec::new(),
+        export: Some("test.cube".to_owned()),
+    };
+    let (swappable, path) =
+        harness.load_any(&cube).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
 
-    // Pre-replace: probe accepts SetRender, rejects CameraCreate.
+    // Pre-replace: the cube accepts Tick, rejects CameraCreate.
     {
         let caps = harness.capability_registry();
-        assert!(caps.accepts_actor(swappable, SetRender::ID));
+        assert!(caps.accepts_actor(swappable, Tick::ID));
         assert!(!caps.accepts_actor(swappable, CameraCreate::ID));
     }
 
@@ -110,7 +118,7 @@ fn cap_registry_updates_on_replace() {
                     config: Vec::new(),
                     // ADR-0096 / #2027: select the non-entry `aether.camera`
                     // export from the multi-actor kit module; a bare
-                    // replace would reuse the trampoline's probe tag.
+                    // replace would reuse the trampoline's cube tag.
                     export: Some("aether.kit.camera".to_owned()),
                 },
             ),
@@ -126,10 +134,6 @@ fn cap_registry_updates_on_replace() {
     assert!(
         caps.accepts_actor(swappable, CameraCreate::ID),
         "camera should accept its declared CameraCreate handler after replace",
-    );
-    assert!(
-        !caps.accepts_actor(swappable, SetRender::ID),
-        "the probe's SetRender handler must be gone after replacing with the camera",
     );
     // Both components declare a Tick handler, so it survives the swap.
     assert!(caps.accepts_actor(swappable, Tick::ID));

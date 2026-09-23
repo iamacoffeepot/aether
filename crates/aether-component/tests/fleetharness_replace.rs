@@ -1,5 +1,5 @@
 //! `FleetHarness` `replace_component` proof (issue 1459, Tier-A): load the
-//! `probe` fixture into a forked substrate, then atomically swap it for
+//! `cube` fixture into a forked substrate, then atomically swap it for
 //! `aether-kit-commons`'s `aether.kit.camera` export (selector `aether_kit_commons@aether.kit.camera`) at the
 //! same trampoline mailbox id (ADR-0022) and assert the returned
 //! capability set reflects the new binary while the lineage address
@@ -11,21 +11,20 @@ mod tests {
     use aether_data::Kind;
     use aether_kinds::{ComponentCapabilities, LogTailResult, Ping, Tick};
     use aether_kit_commons::camera::CameraCreate;
-    use aether_test_fixtures_kinds::SetRender;
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
-    /// Load `probe` (handlers `SetRender` + `Tick`), then `replace`
-    /// it with `aether-kit-commons`'s non-entry `aether.camera` export (selector
-    /// `aether_kit_commons@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
-    /// camera-driver kinds) targeting the captured trampoline
-    /// address — exercising `ReplaceComponent.export` (#2027)
-    /// end-to-end over the wire. The returned
-    /// `ReplaceResult::Ok.capabilities` must carry the camera
-    /// handler set and not the probe's, with `Tick` surviving the
-    /// swap; the lineage address — unchanged by construction, since
-    /// the trampoline keeps its load-time name — must still route to
-    /// the live mailbox afterward.
+    /// Load `cube` (its only handler is `Tick`), then `replace` it with
+    /// `aether-kit-commons`'s non-entry `aether.camera` export (selector
+    /// `aether_kit_commons@aether.kit.camera`; handlers `CameraCreate` +
+    /// `Tick` + the camera-driver kinds) targeting the captured trampoline
+    /// address — exercising `ReplaceComponent.export` (#2027) end-to-end over
+    /// the wire. The camera keeps the cube's only row, so the replace passes
+    /// the contract check (ADR-0231 §5). The returned
+    /// `ReplaceResult::Ok.capabilities` must carry the camera handler set,
+    /// with `Tick` surviving the swap; the lineage address — unchanged by
+    /// construction, since the trampoline keeps its load-time name — must
+    /// still route to the live mailbox afterward.
     #[test]
     fn fleetharness_replaces_probe_with_camera_at_a_stable_address() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -33,38 +32,32 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let loaded = harness.load_full(engine, "aether_test_fixtures_bundle");
+        let loaded = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.cube");
 
         let has = |caps: &ComponentCapabilities, id| caps.handlers.iter().any(|h| h.id == id);
 
-        // Pre-replace sanity: the probe declares SetRender, not the
-        // camera's create kind, and registers at its ADR-0099 lineage
-        // address.
+        // Pre-replace sanity: the cube declares Tick, not the camera's
+        // create kind, and registers at its ADR-0099 lineage address.
         assert!(
-            has(&loaded.capabilities, SetRender::ID),
-            "probe should declare a SetRender handler: {:?}",
+            has(&loaded.capabilities, Tick::ID),
+            "cube should declare a Tick handler: {:?}",
             loaded.capabilities.handlers,
         );
         assert!(
             !has(&loaded.capabilities, CameraCreate::ID),
-            "probe should not declare a CameraCreate handler: {:?}",
+            "cube should not declare a CameraCreate handler: {:?}",
             loaded.capabilities.handlers,
         );
-        let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
+        let expected = format!("aether.component/{}:test.cube", WasmTrampoline::NAMESPACE);
+        assert_eq!(loaded.addr, expected, "cube should load at its ADR-0099 lineage address");
 
         let caps = harness.replace_export(engine, &loaded.addr, "aether_kit_commons", "aether.kit.camera");
 
-        // Post-replace: the camera handler set is active, the probe's
-        // is gone, and Tick (declared by both) survives the swap.
+        // Post-replace: the camera handler set is active, and Tick
+        // (declared by both) survives the swap.
         assert!(
             has(&caps, CameraCreate::ID),
             "post-replace should declare a CameraCreate handler: {:?}",
-            caps.handlers,
-        );
-        assert!(
-            !has(&caps, SetRender::ID),
-            "post-replace should not declare the probe's SetRender handler: {:?}",
             caps.handlers,
         );
         assert!(
