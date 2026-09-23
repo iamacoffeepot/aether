@@ -13,9 +13,8 @@
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-pub use aether_actor::root_mailbox;
-use aether_actor::runtime;
-pub use aether_data::{EngineId, Kind, MailboxId};
+use aether_actor::{Single, runtime};
+pub use aether_data::{EngineId, Kind};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
 pub use aether_rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
@@ -41,14 +40,6 @@ use crate::FleetServer;
 // glob reaches them alongside the rest of the runtime half.
 pub use super::connect::connect_proxy;
 pub use super::heartbeat::spawn_heartbeat;
-
-/// Mailbox of the engines cap (`aether.fleet`) — where a proxy
-/// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
-/// issue 1339). Resolved from the cap's own root-pinned resolver, so there is
-/// no host round-trip.
-fn fleet_cap_mailbox() -> MailboxId {
-    root_mailbox::<FleetServer>()
-}
 
 /// `aether.fleet.proxy:<id>` runtime state (ADR-0122 split): one outbound
 /// RPC connection to one substrate, plus the in-flight reply-correlation
@@ -120,12 +111,12 @@ impl Drop for FleetProxyState {
 impl FleetProxyState {
     /// Report a confirmed liveness signal to the engines cap so it
     /// refreshes this engine's last-heartbeat timestamp (issue
-    /// 1339). Sent as a fresh root: the `Pong` that triggered it is
-    /// an external event causally unrelated to whatever inbound
-    /// mail woke the handler.
-    pub fn report_alive(&self, ctx: &NativeCtx<'_>) {
+    /// 1339). Sent through the declared dependency's proof as a fresh
+    /// root: the `Pong` that triggered it is an external event causally
+    /// unrelated to whatever inbound mail woke the handler.
+    pub fn report_alive(&self, ctx: &NativeCtx<'_, FleetProxy, Single>) {
         let alive = EngineAlive { engine_id: self.engine_id.0.to_string() };
-        let _ = ctx.send_envelope_detached(fleet_cap_mailbox(), <EngineAlive as Kind>::ID, &alive.encode_into_bytes());
+        ctx.to(&ctx.actor_ref::<FleetServer>()).send_detached(&alive);
     }
 
     /// Report this engine's death to the engines cap so it drops the
@@ -134,11 +125,11 @@ impl FleetProxyState {
     /// (`Crashed`, connection-close) from a heartbeat eviction
     /// (`Evicted`); a deliberate terminate never reaches here.
     /// Idempotent on the cap side — a `died` for an already-evicted
-    /// engine is a no-op. Sent as a fresh root for the same reason as
-    /// [`Self::report_alive`].
-    pub fn report_died(&self, ctx: &NativeCtx<'_>, reason: DeathReason) {
+    /// engine is a no-op. Sent through the declared dependency's proof
+    /// as a fresh root, for the same reason as [`Self::report_alive`].
+    pub fn report_died(&self, ctx: &NativeCtx<'_, FleetProxy, Single>, reason: DeathReason) {
         let died = EngineDied { engine_id: self.engine_id.0.to_string(), reason };
-        let _ = ctx.send_envelope_detached(fleet_cap_mailbox(), <EngineDied as Kind>::ID, &died.encode_into_bytes());
+        ctx.to(&ctx.actor_ref::<FleetServer>()).send_detached(&died);
     }
 
     /// Route a `ReplyEvent`'s envelope back to whoever sent the
@@ -355,7 +346,7 @@ impl NativeActor for FleetProxy {
     /// surface. The reader thread fires this after pushing a frame;
     /// the handler drains `conn.inbound` and routes each frame.
     #[handler::single]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: RpcInboundReady) {
         while let Ok(frame) = state.conn.inbound.try_recv() {
             match frame {
                 WireFrame::ReplyEvent { cid, envelope } => state.route_reply(cid, envelope),
@@ -440,7 +431,7 @@ impl NativeActor for FleetProxy {
     /// to the engines cap and self-shuts-down (its `Drop` terminates
     /// the wedged child's group). Otherwise it sends a fresh `Ping`.
     #[handler::single]
-    fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: EngineHeartbeatTick) {
+    fn on_heartbeat_tick(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: EngineHeartbeatTick) {
         state.heartbeat_seq += 1;
         // A write failure means the socket is already broken — the
         // reader sidecar will surface a `Bye` and `on_inbound_ready`

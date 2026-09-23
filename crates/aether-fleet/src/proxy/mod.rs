@@ -91,8 +91,10 @@ pub use connect::is_reforkable_spawn_failure;
 /// [`RpcServerCapability`](aether_rpc::RpcServerCapability): the proxy
 /// registers its engine's route there from `wire` and holds its spawn open
 /// until the route is answered, so a chassis with no RPC server refuses the
-/// proxy before `init` rather than leaving that spawn unsettled.
-#[actor(instanced, child_of(FleetServer), depends(RpcServerCapability))]
+/// proxy before `init` rather than leaving that spawn unsettled. It also
+/// depends on the [`FleetServer`](crate::FleetServer), because it reports its engine's liveness
+/// there.
+#[actor(instanced, child_of(FleetServer), depends(RpcServerCapability), depends(FleetServer))]
 pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
@@ -106,7 +108,7 @@ pub struct FleetProxy;
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,
-// `FleetProxyState`, its `Drop` + helper methods, `fleet_cap_mailbox`) plus
+// `FleetProxyState`, its `Drop` + helper methods) plus
 // the `#[runtime] impl NativeActor` — lives in `runtime.rs`, gated once here.
 // The struct-hosted `#[actor]` above reads it off disk to emit the identity.
 mod runtime;
@@ -168,6 +170,7 @@ mod tests {
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
+            .with_actor::<FleetCapSink>(FleetCapCells::default())
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams { peer_kind: substrate_peer_kind() },
                 RpcServerConfig { port: Some(0) },
@@ -240,9 +243,10 @@ mod tests {
     fn proxy_spawn_fails_when_substrate_unreachable() {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<FleetCapSink>(FleetCapCells::default())
             .with_actor_configured::<RpcServerCapability>(unbound_rpc_params(), RpcServerConfig { port: None })
             .build_passive()
-            .expect("chassis with only the proxy's dependency boots");
+            .expect("chassis carrying the proxy's dependencies boots");
 
         // Bind then drop a listener to get a definitely-closed port.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
