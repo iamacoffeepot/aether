@@ -1,8 +1,8 @@
-error[E0277]: the trait bound `Child: HandlesKind<Unhandled>` is not satisfied
+error[E0277]: `Child` has no handler for `Unhandled`
   --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:66:21
    |
 66 |     child.send(ctx, &Unhandled { seq: 3 });
-   |           ----      ^^^^^^^^^^^^^^^^^^^^^ unsatisfied trait bound
+   |           ----      ^^^^^^^^^^^^^^^^^^^^^ `Child` does not handle `Unhandled`
    |           |
    |           required by a bound introduced by this call
    |
@@ -11,6 +11,7 @@ help: the trait `HandlesKind<Unhandled>` is not implemented for `Child`
    |
 43 | struct Child;
    | ^^^^^^^^^^^^
+   = note: a `#[fallback]` does not count as handling a kind
 help: `Child` implements trait `HandlesKind<K>`
   --> tests/ui/rejects_inline_child_send_unhandled_kind.rs:45:1
    |

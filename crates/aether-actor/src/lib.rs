@@ -49,10 +49,10 @@ pub use model::address::{address, address_at, address_named, child_address};
 pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
-    Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, DependencyResolver, DependsOn,
-    EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN,
-    NamespaceError, One, Publishes, Reaches, Replies, Resolve, Root, Singleton, Subname, root_mailbox,
-    validate_namespace_segment,
+    Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, DependencyResolver,
+    DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
+    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publishes, Reaches, Replies, ReplyShape, Resolve, Root, Silent,
+    Singleton, Subname, Undeclared, root_mailbox, validate_namespace_segment,
 };
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
@@ -104,7 +104,7 @@ pub const DISPATCH_UNKNOWN_KIND: u32 = 1;
 pub mod __macro_internals {
     pub use crate::wasm::{ActorTypeTag, WasmPlacementFacts};
     pub use aether_data::__derive_runtime::{Cow, KindLabels, SchemaType, canonical};
-    pub use aether_data::{ActorId, Kind, Schema, mailbox_id_from_name};
+    pub use aether_data::{ActorId, Kind, KindId, ReplyContract, Schema, mailbox_id_from_name};
     // Section-version bytes the `#[actor]` / `export!` writers emit as
     // token references so the literals const-fold from one source of
     // truth in `aether-data`.

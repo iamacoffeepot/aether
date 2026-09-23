@@ -1,0 +1,20 @@
+error[E0277]: `FallbackProbe` has no contract row for `Unhandled`
+  --> tests/ui/rejects_contract_row_for_unhandled_kind.rs:42:18
+   |
+42 |     assert_row::<FallbackProbe, Unhandled>();
+   |                  ^^^^^^^^^^^^^ no handler for `Unhandled` on this target
+   |
+   = note: a `#[fallback]` does not count as handling a kind
+help: the trait `Contract<Unhandled>` is not implemented for `FallbackProbe`
+      but trait `Contract<Handled>` is implemented for it
+  --> tests/ui/rejects_contract_row_for_unhandled_kind.rs:23:1
+   |
+23 | #[actor]
+   | ^^^^^^^^
+   = help: for that trait implementation, expected `Handled`, found `Unhandled`
+note: required by a bound in `assert_row`
+  --> tests/ui/rejects_contract_row_for_unhandled_kind.rs:38:18
+   |
+38 | fn assert_row<T: Contract<K>, K: Kind>() {}
+   |                  ^^^^^^^^^^^ required by this bound in `assert_row`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
