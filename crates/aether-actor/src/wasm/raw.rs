@@ -1,14 +1,17 @@
 // Raw FFI boundary with the substrate. This is the only place in a
 // guest tree that should write `extern "C"` decls or host-stub panics;
-// everything else goes through the typed wrappers in `lib.rs`.
+// the module is private to `crate::wasm`, and everything else goes
+// through the typed wrappers in `crate::wasm::bridge`.
 //
 // On the FFI guest target (today: `wasm32-unknown-unknown`) the fns
 // are imports from the `aether` module the substrate's wasm runtime
 // exposes (see `aether-substrate/src/actor/wasm/host_fns.rs`). On
-// any other target they're stubs that panic if called, which keeps
-// the crate (and every actor crate that depends on it) compilable
-// for `cargo test --workspace` on the host — actors can still be
-// unit-tested for pure logic there, they just can't cross the FFI.
+// any other target, the imports a host build reaches have stubs that
+// panic if called, which keeps the crate (and every actor crate that
+// depends on it) compilable for `cargo test --workspace` on the host —
+// actors can still be unit-tested for pure logic there, they just
+// can't cross the FFI. An import whose every caller is wasm-gated has
+// no host stub.
 //
 // The `target_family = "wasm"` cfg gate matches the only FFI host
 // the substrate ships today. A future C / OS-process host would
@@ -18,7 +21,7 @@
 // ADR-0024 Phase 1: the FFI-visible import names carry a `_p32`
 // suffix in anticipation of a future `_p64` sibling for wasm64
 // guests. The Rust-side identifiers stay un-suffixed (`send_mail`,
-// not `send_mail_p32`) so callers in `lib.rs` don't have to thread
+// not `send_mail_p32`) so callers in `bridge` don't have to thread
 // the suffix through every call site — `#[link_name]` does the
 // remap.
 
@@ -252,34 +255,6 @@ pub unsafe fn reply_correlation() -> u64 {
     panic!("aether-actor: reply_correlation called outside the FFI guest");
 }
 
-/// Host-side stub for the FFI `aether::init_failed` import.
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_family = "wasm"))]
-pub unsafe fn init_failed(_ptr: u32, _len: u32) {
-    panic!("aether-actor: init_failed called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::log_event` import.
-/// Always panics — callers outside the FFI guest are misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_family = "wasm"))]
-pub unsafe fn log_event(_level: u32, _target_ptr: u32, _target_len: u32, _message_ptr: u32, _message_len: u32) {
-    panic!("aether-actor: log_event called outside the FFI guest");
-}
-
 /// Host-side stub for the FFI `aether::spawn_sibling` import (ADR-0097).
 /// Always panics — callers outside the FFI guest are misusing the SDK.
 ///
@@ -352,22 +327,6 @@ pub unsafe fn spawn_inline_child(_is_counter: u32, _subname_ptr: u32, _subname_l
 #[must_use]
 pub unsafe fn spawn_inline_child_scoped(_parent: u64, _is_counter: u32, _subname_ptr: u32, _subname_len: u32) -> u64 {
     panic!("aether-actor: spawn_inline_child_scoped called outside the FFI guest");
-}
-
-/// Host-side stub for the FFI `aether::despawn_inline_child` import
-/// (ADR-0114). Always panics — callers outside the FFI guest are
-/// misusing the SDK.
-///
-/// # Safety
-/// FFI-import stub; the wasm32 variant is `unsafe extern "C"`.
-///
-/// # Panics
-/// Always panics — fail-fast per ADR-0063: the host build of the SDK
-/// has no FFI host to call, so any invocation is a bug.
-#[cfg(not(target_family = "wasm"))]
-#[must_use]
-pub unsafe fn despawn_inline_child(_alias: u64) -> u32 {
-    panic!("aether-actor: despawn_inline_child called outside the FFI guest");
 }
 
 /// Host-side stub for the FFI `aether::asset_fetch` import (ADR-0163).
