@@ -15,6 +15,7 @@ replace, and drop behavior.
 | new wasm compile, manifest parse, or export selection | prior slot is unchanged: old guest or an already-empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | replacement drops or changes a handler row of the hosted type (ADR-0231 §5) | prior slot is unchanged: old guest or empty post-drop slot | existing descriptions still reflect the prior registry snapshot, not a new guest |
 | `save_state` host-call rejection during dehydrate | old guest object is restored after its unwire/dehydrate hooks already ran | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
+| replacement does not declare the kind of a request context the old guest carries (ADR-0139 §4) | old guest object is restored after its unwire/dehydrate hooks already ran, keeping its contexts, pending replies and counters | old description remains the best snapshot, but the guest may have changed its own lifecycle state |
 | new guest instantiation failure after old guest was taken | trampoline can be empty | old capability registry and MCP cache can remain even though no guest is live |
 | new guest rehydrate failure | new guest remains installed despite `Err` | capability re-registration has not run; old substrate and MCP descriptions can remain |
 | successful replacement | new guest remains and new capabilities are registered | MCP refreshes its cache from the success result |

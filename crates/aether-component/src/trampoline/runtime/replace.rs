@@ -1,17 +1,19 @@
 #![allow(clippy::needless_pass_by_value)]
 
+use std::collections::HashSet;
 use std::fmt::Display;
 use std::sync::Arc;
 
 use aether_actor::Local as _;
 use aether_actor::Single;
+use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{
     Dispatch, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::asset_manifest;
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::registry::PreparedAliasRoute;
@@ -211,10 +213,81 @@ impl WasmTrampolineState {
         })
     }
 
+    /// ADR-0139 §4 (#6429): every request context the old instance carries
+    /// in its saved bundle must have a kind the replacement module declares.
+    /// Only kinds the predecessor module declares are judged: a context kind
+    /// defined in a shared kinds crate may be missing from both sections, and
+    /// the host has no record to judge it by.
+    fn check_carried_contexts(
+        &self,
+        target: &impl Display,
+        saved: Option<&StateBundle>,
+        replacement: &HashSet<KindId>,
+    ) -> Result<(), String> {
+        let Some(bundle) = saved else {
+            return Ok(());
+        };
+        let (table, _, _) = aether_actor::split_state_envelope(bundle.version, &bundle.bytes);
+        if table.is_empty() {
+            return Ok(());
+        }
+
+        let predecessor = declared_kinds(&self.wasm_bytes)?;
+        contract::undeclared_context(table.kinds(), &predecessor, replacement).map_or(Ok(()), |kind| {
+            let name = self.registry.kind_name(kind).unwrap_or_else(|| kind.to_string());
+            Err(contract::context_refusal(target, &name))
+        })
+    }
+
+    /// Run `unwire` then `on_dehydrate` on the old instance and lift any
+    /// saved-state bundle. If the trampoline is currently empty (a refill
+    /// after `DropComponent`), there's no prior wasm to drain; the new
+    /// instance starts from scratch. Issue 584 Phase 2b: `unwire` fires first
+    /// so the old instance can announce its retirement before the swap.
+    fn retire_guest(
+        &mut self,
+        target: &impl Display,
+        replacement: &HashSet<KindId>,
+    ) -> Result<Option<StateBundle>, String> {
+        let Some(mut old) = self.component.take() else {
+            return Ok(None);
+        };
+        old.unwire();
+        old.on_dehydrate();
+        if let Some(err) = old.take_save_error() {
+            // Restore the old component so the trampoline isn't
+            // accidentally emptied by a save-state failure.
+            self.component = Some(old);
+            return Err(err);
+        }
+        let saved = old.take_saved_state();
+        // #6429: refuse a replacement that cannot take a carried request
+        // context, restoring the old component as the save-error arm does.
+        // It runs before the cursor and reply table move out, so the old
+        // guest keeps both, and its context table was only borrowed to
+        // compose the bundle. Whatever `unwire` and `on_dehydrate` tore down
+        // stays gone (#6134).
+        if let Err(error) = self.check_carried_contexts(target, saved.as_ref(), replacement) {
+            self.component = Some(old);
+            return Err(error);
+        }
+        // #6400: record the leaving guest's cursor after `unwire` and
+        // `on_dehydrate`, which may still send or reply, so the
+        // replacement — or a later refill, if its instantiate fails —
+        // resumes past its request ids and, #6422, its reply ids.
+        self.retired_correlations = Some(old.correlation_cursor());
+        // #6409: likewise move out its reply table, after both hooks
+        // (which may still answer handles), so the replacement answers
+        // the rest to their own requesters. The old component drops at the
+        // end of scope — the `Component`'s own `Drop` releases the wasm store.
+        self.retired_replies = Some(old.take_pending_replies());
+        Ok(saved)
+    }
+
     pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
         // `payload.wasm` is the new module bytes; `target` named this
         // trampoline and the host proved it before forwarding, so the field
-        // only names the actor in a contract refusal.
+        // only names the actor in a contract or carried-context refusal.
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {
@@ -251,6 +324,15 @@ impl WasmTrampolineState {
             return ReplaceResult::Err { error };
         }
 
+        // #6429: the replacement's kind vocabulary, parsed before the old
+        // guest is touched so a malformed manifest refuses cleanly. The
+        // carried contexts it is checked against surface only after the old
+        // guest's `on_dehydrate`, below.
+        let replacement_kinds = match declared_kinds(&payload.wasm) {
+            Ok(kinds) => kinds,
+            Err(error) => return ReplaceResult::Err { error },
+        };
+
         // ADR-0163 §3 (#3984): re-index the replacement module's assets into
         // a load window. Its catalog feeds the post-swap
         // `describe_component` / `ReplaceResult`; the window itself is
@@ -265,38 +347,9 @@ impl WasmTrampolineState {
         };
         capabilities.assets = load_window.catalog();
 
-        // Run unwire then on_dehydrate on the old instance and lift
-        // any saved-state bundle. If the trampoline is currently
-        // empty (post-DropComponent — load-after-drop refill),
-        // there's no prior wasm to drain; the new instance starts
-        // from scratch. Issue 584 Phase 2b: unwire fires first so
-        // the old instance can announce its retirement before the
-        // swap.
-        let saved = if let Some(mut old) = self.component.take() {
-            old.unwire();
-            old.on_dehydrate();
-            if let Some(err) = old.take_save_error() {
-                // Restore the old component so the trampoline isn't
-                // accidentally emptied by a save-state failure.
-                self.component = Some(old);
-                return ReplaceResult::Err { error: err };
-            }
-            let saved = old.take_saved_state();
-            // #6400: record the leaving guest's cursor after `unwire` and
-            // `on_dehydrate`, which may still send or reply, so the
-            // replacement — or a later refill, if its instantiate fails —
-            // resumes past its request ids and, #6422, its reply ids.
-            self.retired_correlations = Some(old.correlation_cursor());
-            // #6409: likewise move out its reply table, after both hooks
-            // (which may still answer handles), so the replacement answers
-            // the rest to their own requesters.
-            self.retired_replies = Some(old.take_pending_replies());
-            // Old component drops at end of scope — the `Component`'s
-            // own `Drop` releases the wasm store.
-            drop(old);
-            saved
-        } else {
-            None
+        let saved = match self.retire_guest(&payload.target, &replacement_kinds) {
+            Ok(saved) => saved,
+            Err(error) => return ReplaceResult::Err { error },
         };
 
         // Build a fresh `ComponentCtx` for the new instance — same
@@ -422,6 +475,16 @@ impl WasmTrampolineState {
 
         ReplaceResult::Ok { capabilities }
     }
+}
+
+/// Every kind a module's `aether.kinds` section declares, by the id the
+/// registry derives from its name and schema, so a reshaped kind reads as a
+/// different kind.
+fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
+    Ok(kind_manifest::read_from_bytes(wasm)?
+        .iter()
+        .map(|descriptor| KindId(kind_id_from_parts(&descriptor.name, &descriptor.schema)))
+        .collect())
 }
 
 #[derive(Clone)]
