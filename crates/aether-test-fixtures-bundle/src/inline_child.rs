@@ -102,7 +102,7 @@ pub struct InlineCounterState {
 
 /// Reply to an `InlineProbe` with the `who` marker of whichever actor
 /// handled it — shared by the basic and despawn parent/child actors.
-fn reply_who(ctx: &mut WasmCtx<'_, Erased, Manual>, who: u32) {
+fn reply_who<A>(ctx: &mut WasmCtx<'_, A, Manual>, who: u32) {
     if ctx.reply_target().is_some() {
         ctx.reply(&InlineEcho { who });
     }

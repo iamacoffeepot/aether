@@ -219,7 +219,12 @@ impl JournalActor {
     /// The one caller of [`Journal::append`]. Wakes every watcher the
     /// commit's head passed; never reached on a conflict or refusal, so a
     /// write that doesn't commit wakes nobody.
-    fn commit(&mut self, ctx: &mut NativeCtx<'_>, expected: Seq, batch: &Batch) -> Result<Range<Seq>, AppendError> {
+    fn commit<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        expected: Seq,
+        batch: &Batch,
+    ) -> Result<Range<Seq>, AppendError> {
         let range = self.journal.append(expected, batch)?;
         self.watchers.wake(ctx, range.end.0.saturating_sub(1));
         Ok(range)

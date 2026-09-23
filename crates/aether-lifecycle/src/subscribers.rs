@@ -21,7 +21,7 @@ use aether_actor::ReplyMode;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_data::KindId;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-use aether_substrate::actor::native::{Erased, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -138,8 +138,8 @@ impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 /// row of the table was proven when its subscription was accepted, so the
 /// loop hands the send a reference and never unwraps one back to a position.
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub fn broadcast_to_subscribers<M: ReplyMode>(
-    ctx: &mut NativeCtx<'_, Erased, M>,
+pub fn broadcast_to_subscribers<A, M: ReplyMode>(
+    ctx: &mut NativeCtx<'_, A, M>,
     subscribers: &BTreeMap<KindId, BTreeSet<ErasedActorRef>>,
     stage: KindId,
     payload: &[u8],

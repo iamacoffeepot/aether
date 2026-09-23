@@ -12,6 +12,7 @@ use std::collections::HashMap;
 pub use std::sync::Arc;
 
 pub use aether_actor::OutboundReply;
+use aether_actor::Reaches;
 pub use aether_data::Source;
 pub use aether_kinds::QuadSpace;
 use aether_substrate::Erased;
@@ -147,8 +148,8 @@ impl TextCapabilityState {
     /// request context. The `ReadResult` routes back to `on_read_result`,
     /// which recovers the context, parses the bytes, and replies in the shape
     /// `reply` selects.
-    pub fn forward_font_read(
-        ctx: &mut NativeCtx<'_, Erased, Manual>,
+    pub fn forward_font_read<A: Reaches<FsCapability>>(
+        ctx: &mut NativeCtx<'_, A, Manual>,
         namespace: String,
         path: String,
         reply: PendingReply,
@@ -165,8 +166,8 @@ impl TextCapabilityState {
     /// Parse caller-supplied font bytes off the hot path, then resume through
     /// `on_font_parsed` with the same registration and reply shaping used by
     /// the `aether.fs.read` path.
-    pub fn dispatch_font_parse(
-        ctx: &mut NativeCtx<'_, Erased, Manual>,
+    pub fn dispatch_font_parse<A>(
+        ctx: &mut NativeCtx<'_, A, Manual>,
         source: Source,
         namespace: String,
         path: String,
@@ -185,7 +186,7 @@ impl TextCapabilityState {
     /// already in flight. The reply (`CreateTextureResult`) routes back
     /// to this cap's own mailbox, where `on_create_texture_result`
     /// stores the assigned id.
-    pub fn ensure_atlas_texture(&mut self, ctx: &mut NativeCtx<'_>) {
+    pub fn ensure_atlas_texture<A: Reaches<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         if self.atlas_texture_id.is_some() || self.atlas_create_inflight {
             return;
         }
@@ -205,7 +206,12 @@ impl TextCapabilityState {
     }
 
     /// Send one `update_texture` for a newly-rasterized glyph's rect.
-    pub fn upload_glyph(&self, ctx: &mut NativeCtx<'_>, texture_id: u32, entry: &AtlasEntry) {
+    pub fn upload_glyph<A: Reaches<RenderCapability>>(
+        &self,
+        ctx: &mut NativeCtx<'_, A>,
+        texture_id: u32,
+        entry: &AtlasEntry,
+    ) {
         let update = UpdateTexture {
             texture_id,
             x: entry.x,
@@ -221,7 +227,7 @@ impl TextCapabilityState {
     /// zeroed buffer. This ensures the render cap's staged pixels are a
     /// clean mirror of the reset CPU atlas before per-glyph uploads layer
     /// on top. Uses the same `update_texture` path as `upload_glyph`.
-    pub fn resync_atlas(&self, ctx: &mut NativeCtx<'_>, texture_id: u32) {
+    pub fn resync_atlas<A: Reaches<RenderCapability>>(&self, ctx: &mut NativeCtx<'_, A>, texture_id: u32) {
         let update = UpdateTexture {
             texture_id,
             x: 0,
@@ -252,7 +258,7 @@ impl TextCapabilityState {
 
     /// Return the live atlas texture, lazily creating it when needed and
     /// resetting a saturated atlas before the caller lays out its items.
-    fn atlas_texture_for_draw(&mut self, ctx: &mut NativeCtx<'_>) -> Option<u32> {
+    fn atlas_texture_for_draw<A: Reaches<RenderCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) -> Option<u32> {
         let Some(texture_id) = self.atlas_texture_id else {
             // No atlas texture yet — kick off creation; immediate mode
             // resends this draw next frame once the id lands.

@@ -983,7 +983,7 @@ impl WasmActor for Puppet {
     /// A loader that cannot report failure is a bad surface and this one
     /// proved it: a mesh that overran the mail bound reported `delivered`
     /// to the caller and left the reason only in the actor log.
-    fn settle(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: &LoadResult) {
+    fn settle<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>, result: &LoadResult) {
         self.pending = None;
         if let Some(sender) = self.owed.take() {
             ctx.reply_to(sender, result);
