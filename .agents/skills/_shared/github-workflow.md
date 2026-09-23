@@ -66,16 +66,7 @@ A current approval matches all of:
 - the policy and effective tiers resolved for that same base;
 - an authority permitted for the effective tier.
 
-Any managed approval-bearing edit changes the digest. A different base commit requires a new approval. Changes to Side findings or unmanaged prose do not. Preserve old v2 lines byte-for-byte; non-matching records are durable history, not current authority. When several body records match, use the last trusted one in body order. Appending an exact matching record is idempotent and must not add another line.
-
-During migration only, when no current trusted v2 body record exists, consumers may fall back to a legacy v1 issue comment with exactly these two lines:
-
-```text
-<!-- aether-approval:v1 -->
-{"authority":"owner","base_sha":"<full commit>","effective_tier":"human","issue":123,"model":"opus","plan_sha256":"<64 lowercase hex>","policy_tier":"human","size":"l"}
-```
-
-The v1 comment must satisfy the same strict payload and current-identity checks. Trust still comes from its GitHub `author_association`: owner authority requires `OWNER`, while policy-auto accepts `OWNER`, `MEMBER`, or `COLLABORATOR`. Approve never writes v1. Once an equivalent v2 line has been inserted and verified, the redundant visible v1 comment may be deleted; otherwise old comments remain read-only history.
+Any managed approval-bearing edit changes the digest. A different base commit requires a new approval. Changes to Side findings or unmanaged prose do not. Preserve old v2 lines byte-for-byte; non-matching records are durable history, not current authority. When several body records match, use the last trusted one in body order. Appending an exact matching record is idempotent and must not add another line. A trusted v2 body record is the only accepted approval: an issue comment, whatever its marker or author association, never carries approval authority.
 
 ## Trusted direct-review verdicts
 
