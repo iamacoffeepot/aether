@@ -122,6 +122,19 @@ Long-lived HTTP/TCP/callback paths must distinguish the opening request chain
 from detached data-phase work. Missing end/close events, over-credit teardown,
 or a drain that failed to discharge an owned dispatch can strand obligations.
 
+### A long poll inherited the chain
+
+A request whose recipient parks the reply until something changes (a watch or a
+subscription-style wait) holds the sender's chain open for as long as it waits
+when it inherits that chain. The outcome still arrives, so nothing looks wrong
+except that the chain never settles. If the running chain did not cause the
+wait, send the request detached with its reply context
+(`NativeCtx::send_detached_with_context`): it roots a fresh chain, and its reply
+still correlates home through the stored context. The bundle driver's
+`WatchHead` is the worked case: the journal owner parks the watch until the head
+moves, and the driver re-arms it on whichever chain goes idle, which kept every
+appending `Call` open before the watch was detached.
+
 ### Merely slow work
 
 Provider calls and large fan-out can legitimately approach the tool timeout.

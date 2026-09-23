@@ -3,9 +3,11 @@
 //!
 //! Every request goes out through the embedder's
 //! `BuiltChassis::send_for_reply` with the sink as its reply target and a
-//! correlation the harness minted. A reply that arrives for a request the
-//! scenario is not waiting on yet is kept until it is, so two requests can be
-//! in flight at once.
+//! correlation the harness minted; a `Call` goes out through
+//! `BuiltChassis::send_tracked` instead, so `call` also waits for the call's
+//! causal chain to settle. A reply that arrives for a request the scenario is
+//! not waiting on yet is kept until it is, so two requests can be in flight at
+//! once.
 
 mod sink;
 
@@ -87,14 +89,31 @@ impl Answer for MoveHeadResult {}
 impl Answer for Processed {}
 
 impl BloomeryHarness {
-    /// Send one `Call` to the bundle driver and wait for its outcome.
+    /// Send one `Call` to the bundle driver as a tracked root, wait for its
+    /// outcome, then wait for the call's causal chain to settle.
     ///
     /// # Panics
     ///
-    /// Panics when no outcome arrives within thirty seconds.
+    /// Panics when no outcome arrives within thirty seconds, or when the
+    /// call's chain has not settled within thirty seconds of its outcome.
     pub fn call(&mut self, call: &Call) -> CallOutcome {
-        let pending = self.request(self.mounted.driver.erase(), call);
-        self.wait(pending)
+        let correlation = self.next_correlation();
+        let settled = self.chassis.send_tracked(
+            self.mounted.driver.erase(),
+            Call::ID,
+            call.encode_into_bytes(),
+            correlation,
+            Some(ReplyTarget::Actor { to: self.sink.erase(), correlation }),
+        );
+        let outcome =
+            self.wait(Pending { correlation, request: format!("{} {call:?}", Call::NAME), answer: PhantomData });
+
+        assert!(
+            settled.recv_timeout(REPLY_TIMEOUT).is_ok(),
+            "the Call's causal chain did not settle within {} seconds of its outcome: {call:?}",
+            REPLY_TIMEOUT.as_secs()
+        );
+        outcome
     }
 
     /// Send one fenced `MoveHead` to the journal owner and wait for its result.
@@ -150,8 +169,7 @@ impl BloomeryHarness {
     /// Send `mail` to `to` with the sink as its reply target, under a fresh
     /// correlation.
     fn request<K: Kind + Debug, A>(&mut self, to: ErasedActorRef, mail: &K) -> Pending<A> {
-        self.correlations += 1;
-        let correlation = self.correlations;
+        let correlation = self.next_correlation();
         self.chassis.send_for_reply(
             to,
             K::ID,
@@ -159,6 +177,12 @@ impl BloomeryHarness {
             ReplyTarget::Actor { to: self.sink.erase(), correlation },
         );
         Pending { correlation, request: format!("{} {mail:?}", K::NAME), answer: PhantomData }
+    }
+
+    /// Mint a fresh correlation for one request.
+    fn next_correlation(&mut self) -> u64 {
+        self.correlations += 1;
+        self.correlations
     }
 
     /// Receive arrivals until the reply to `request` under `correlation`,

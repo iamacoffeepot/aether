@@ -137,11 +137,10 @@ impl NativeBinding {
         }
     }
 
-    /// Install the receiver half of the actor's inbox so the
-    /// dispatcher's [`Self::recv_blocking`] / [`Self::try_recv`] have
-    /// somewhere to pull from. Called once per transport, before the
-    /// dispatcher starts draining. Subsequent calls panic — the slot
-    /// is single-claim by construction.
+    /// Install the receiver half of the actor's inbox: the receiver the
+    /// scheduler slots drain through the crate-private `try_recv`.
+    /// Called once per transport, before the scheduler starts draining.
+    /// Subsequent calls panic — the slot is single-claim by construction.
     ///
     /// # Panics
     /// Panics if called more than once — fail-fast per ADR-0063: the
@@ -248,8 +247,8 @@ impl NativeBinding {
     }
 
     /// Issue 607 Phase 4a (ADR-0079): set the self-shutdown flag the
-    /// actor's dispatcher polls between handler dispatches. Subsequent
-    /// `recv_blocking` calls still process incoming mail, but
+    /// actor's dispatcher polls between handler dispatches. Later
+    /// dispatches still process incoming mail, but
     /// `should_shutdown` reports `true` so the trampoline can drain
     /// the inbox synchronously, run `unwire`, and exit. Idempotent.
     pub fn signal_shutdown(&self) {
@@ -277,43 +276,15 @@ impl NativeBinding {
         self.shutdown_flag.load(Ordering::Acquire)
     }
 
-    /// Block until the next envelope arrives on this actor's inbox.
-    /// Returns `None` when the channel disconnects (the channel-drop
-    /// shutdown signal — capability's `RunningCapability::shutdown`
-    /// dropped its [`crate::chassis::ctx::MailboxSender`], the registry
-    /// handler can no longer upgrade its [`std::sync::Weak`], the
-    /// inbox's last sender is gone) or when no inbox is installed.
-    ///
-    /// The natural shape for a dispatcher loop:
-    ///
-    /// ```ignore
-    /// while let Some(env) = transport.recv_blocking() {
-    ///     handle_envelope(env);
-    /// }
-    /// ```
+    /// The scheduler slots' non-blocking drain: take the next queued
+    /// envelope. Returns `None` when the inbox is empty, disconnected,
+    /// or not yet installed; a slot drains by calling until `None`.
     ///
     /// # Panics
     /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063:
     /// a poisoned mutex means a prior holder panicked inside the
     /// guard, which is itself a substrate-level invariant violation.
-    pub fn recv_blocking(&self) -> Option<Envelope> {
-        let inbox = self.inbox.get()?;
-        // The mutex guard stays held across the blocking recv. Dispatcher
-        // threads are single-tasked while parked here; nothing else
-        // on this thread contends.
-        inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").recv_blocking()
-    }
-
-    /// Non-blocking variant of [`Self::recv_blocking`]. Returns
-    /// `None` for "no envelope available right now" or "channel
-    /// disconnected" or "no inbox installed". A capability that
-    /// needs to distinguish drains via repeated calls until `None`.
-    ///
-    /// # Panics
-    /// Panics if the inbox mutex is poisoned — fail-fast per ADR-0063:
-    /// a poisoned mutex means a prior holder panicked inside the
-    /// guard, which is itself a substrate-level invariant violation.
-    pub fn try_recv(&self) -> Option<Envelope> {
+    pub(crate) fn try_recv(&self) -> Option<Envelope> {
         let inbox = self.inbox.get()?;
         inbox.lock().expect("inbox mutex poisoned; fail-fast per ADR-0063").try_recv()
     }

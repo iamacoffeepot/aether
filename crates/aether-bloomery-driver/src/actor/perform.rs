@@ -18,7 +18,9 @@ impl BundleDriver {
     /// to the reference the digest's load reply was stamped with, and answers
     /// release the parked reply. Every send carries its ticket as the request
     /// context, so the reply routes back to the core continuation that issued
-    /// it.
+    /// it. The head watch rides a fresh chain: the journal parks it until the
+    /// head moves, and the chain that happens to re-arm it did not cause the
+    /// wait.
     pub(crate) fn perform<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, commands: Vec<Command>) {
         for command in commands {
             match command {
@@ -45,7 +47,7 @@ impl BundleDriver {
                 }
                 Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
                 Command::WatchHead { ticket, request } => {
-                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.send_detached_with_context(&self.journal.erase(), &request, &ticket);
                 }
                 Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
                 Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
