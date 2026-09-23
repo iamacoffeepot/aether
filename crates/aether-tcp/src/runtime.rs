@@ -430,17 +430,21 @@ impl NativeActor for TcpCapability {
         ctx.to(&listener).send(&Close::default());
     }
 
-    /// Walk the cap-local listener map and report metadata.
+    /// Walk the cap-local listener map and report metadata, ordered by
+    /// listener name.
     ///
     /// # Agent
     /// Reply: `ListListenersResult`.
     #[handler::single]
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListListeners) -> ListListenersResult {
-        let listeners: Vec<ListenerInfo> = state
+        let mut listeners: Vec<ListenerInfo> = state
             .listeners
             .values()
             .map(|entry| ListenerInfo { name: entry.name.clone(), addr: entry.addr.clone(), port: entry.port })
             .collect();
+        // The table is keyed by reference, so its iteration order is
+        // arbitrary; the reply is ordered by name so it is deterministic.
+        listeners.sort_unstable_by(|a, b| a.name.cmp(&b.name));
         ListListenersResult { listeners }
     }
 

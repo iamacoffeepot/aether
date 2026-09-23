@@ -3,10 +3,9 @@
 //! alongside the rest of the shared manager surface (ADR-0169).
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::mem;
 
 use aether_actor::{AnyActorRef, ReplyMode};
-use aether_data::{KindId, MailboxId};
+use aether_data::KindId;
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
@@ -102,38 +101,19 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    /// Drop every subscription held at `mailbox`, addressed by position
-    /// rather than by proof.
+    /// Drop every subscription `subscriber` holds and release its monitor.
     ///
-    /// `aether.window.unsubscribe_all` exists to reclaim a mailbox that is
-    /// usually already gone — a component that unloaded, an actor that
-    /// retired — so demanding a proof would refuse exactly the request the
-    /// kind is for. The kind carries a position, so the holder is found by a
-    /// key comparison; its rows then go by keyed removal. The monitor stays,
-    /// so a later subscription by the same actor is still purged on its
-    /// departure.
-    pub fn unsubscribe_all(&mut self, mailbox: MailboxId) {
-        let Some((&subscriber, holder)) = self.holders.iter_mut().find(|(reference, _)| reference.id() == mailbox)
-        else {
-            return;
-        };
-        for row in mem::take(&mut holder.rows) {
-            self.remove_row(row, subscriber);
-        }
-    }
-
-    /// Drop the departed actor's rows on its `MonitorNotice`, whose host-
-    /// stamped sender is `departed` (ADR-0230).
-    ///
-    /// The holder index names exactly the rows `departed` holds, so this
-    /// removes those and touches nothing else. Removing the holder releases
-    /// its monitor handle.
-    pub fn purge_departed(&mut self, departed: AnyActorRef) {
-        let Some(holder) = self.holders.remove(&departed) else {
+    /// Two callers: `aether.window.unsubscribe_all`, whose position the
+    /// manager proves once at receipt, and the `MonitorNotice` handlers,
+    /// whose host-stamped sender is the departed subscriber (ADR-0230). The
+    /// holder index names exactly the rows `subscriber` holds, so this
+    /// removes those and touches nothing else.
+    pub fn unsubscribe_all(&mut self, subscriber: AnyActorRef) {
+        let Some(holder) = self.holders.remove(&subscriber) else {
             return;
         };
         for row in holder.rows {
-            self.remove_row(row, departed);
+            self.remove_row(row, subscriber);
         }
     }
 
@@ -200,7 +180,7 @@ impl WindowSubscribers {
 mod tests {
     use std::sync::Arc;
 
-    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_data::{Kind, MailboxId, SessionToken, Uuid};
     use aether_kinds::{Key, MouseMove};
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -299,7 +279,7 @@ mod tests {
         subscribers.unsubscribe(WindowSelector::All, Key::ID, subscriber);
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([subscriber, other]));
 
-        subscribers.unsubscribe_all(subscriber.id());
+        subscribers.unsubscribe_all(subscriber);
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([other]));
     }
 
@@ -314,7 +294,7 @@ mod tests {
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, survivor);
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), MouseMove::ID, departed);
 
-        subscribers.purge_departed(departed);
+        subscribers.unsubscribe_all(departed);
 
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([survivor]));
         assert!(subscribers.recipients(WindowId(3), MouseMove::ID).is_empty());

@@ -309,7 +309,7 @@ impl NativeActor for SyntheticWindowCapability {
         {
             state.publish(ctx, id, &WindowClosed { window: id });
         }
-        state.subscribers.purge_departed(departed);
+        state.subscribers.unsubscribe_all(departed);
     }
 }
 

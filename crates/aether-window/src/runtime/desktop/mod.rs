@@ -946,7 +946,7 @@ impl NativeActor for DesktopWindowCapability {
         {
             let _ = state.queue_close(id, None);
         }
-        state.subscribers.purge_departed(departed);
+        state.subscribers.unsubscribe_all(departed);
     }
 }
 
