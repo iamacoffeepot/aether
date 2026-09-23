@@ -37,7 +37,7 @@
 // sanctioned wire-`Call`-forwarding use.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
@@ -53,7 +53,7 @@ use std::time::{Duration, Instant};
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::ActorPath;
 use aether_data::{EngineId, Kind, KindId, MailId, Uuid, mailbox_id_from_path};
-use aether_fleet::{FleetConfig, FleetServer};
+use aether_fleet::{FleetConfig, FleetServer, RestartPolicy};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
 use aether_kinds::trace::{DispatchTraced, DispatchTracedAck, TRACE_MAILBOX_NAME};
@@ -74,7 +74,6 @@ use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
 use aether_substrate::testing::{TestChassis, boot_authority};
 use aether_trace::TraceDispatchCapability;
-use serde::Serialize;
 
 /// Re-arm interval for the client→hub socket read: how often a blocked
 /// `read_frame` wakes to log a slow-gate line and re-check its cumulative
@@ -247,6 +246,13 @@ enum DistComponentRequirement {
     StemMissing,
 }
 
+/// One reply frame for the call being read: a `ReplyEvent`'s envelope, or
+/// the `ReplyEnd` result that closes the call.
+enum CallFrame {
+    Event(MailEnvelope),
+    End(Result<(), RpcError>),
+}
+
 /// The two `LoadResult::Ok` fields a loaded component exposes: the rendered
 /// ADR-0099 lineage `addr` (the [`replace`](FleetHarness::replace) target and
 /// every later recipient), and the advertised receive-side `capabilities`.
@@ -269,6 +275,10 @@ pub struct FleetHarness {
     next_cid: u64,
     spawned: Vec<EngineId>,
     calls: Vec<CallRecord>,
+    /// Calls [`send_for_reply`](Self::send_for_reply) returned from before
+    /// their `ReplyEnd`. Their late frames are discarded, and each leaves
+    /// the set when its `ReplyEnd` arrives.
+    left_open: BTreeSet<u64>,
     /// Per-harness scratch root the forked substrates materialize their
     /// per-engine executables under (ADR-0115), so they can't collide with
     /// another concurrent fork+exec test on the shared default root.
@@ -280,8 +290,28 @@ impl FleetHarness {
     /// Boot the hub-shaped passive chassis, connect a client
     /// `TcpStream`, and complete the `Hello`/`HelloAck` handshake.
     pub fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    /// [`start`](Self::start) with the engines cap's restart supervision
+    /// armed under `policy`: an engine that dies of anything but a
+    /// deliberate terminate is re-forked from its retained recipe after the
+    /// policy's backoff, under a fresh engine id. Pair it with
+    /// [`await_restart`](Self::await_restart) to find the successor.
+    ///
+    /// # Panics
+    ///
+    /// Panics when `policy.backoff` does not fit the config's `u64`
+    /// milliseconds — a test-setup bug.
+    pub fn start_restarting(policy: RestartPolicy) -> Self {
+        Self::start_with(Some(policy))
+    }
+
+    /// Shared boot body: the hub, restart supervision per `restart`, the
+    /// connected client, and the handshake.
+    fn start_with(restart: Option<RestartPolicy>) -> Self {
         let store_root = isolate_store_root();
-        let (chassis, port) = boot_hub(&store_root.join("binaries"), &store_root);
+        let (chassis, port) = boot_hub(&store_root.join("binaries"), &store_root, restart);
         let stream = TcpStream::connect(format!("127.0.0.1:{port}"))
             .expect("test setup: connecting to the hub's bound RPC port succeeds");
         // The read timeout is the re-arm *interval*, not a deadline: every
@@ -292,8 +322,15 @@ impl FleetHarness {
             .set_read_timeout(Some(READ_REARM))
             .expect("test setup: setting a read timeout on a connected stream succeeds");
 
-        let mut harness =
-            Self { _chassis: chassis, stream, next_cid: 1, spawned: Vec::new(), calls: Vec::new(), store_root };
+        let mut harness = Self {
+            _chassis: chassis,
+            stream,
+            next_cid: 1,
+            spawned: Vec::new(),
+            calls: Vec::new(),
+            left_open: BTreeSet::new(),
+            store_root,
+        };
         harness.handshake();
         harness
     }
@@ -325,6 +362,56 @@ impl FleetHarness {
         self.spawn_headless_inner(Some(boot_manifest_path.to_string_lossy().into_owned()))
     }
 
+    /// Fork the binary at `path` through the hub's engines cap with `args`
+    /// ahead of the fleet's own `--rpc-port`, and return its `EngineId`.
+    /// Records the engine for teardown.
+    ///
+    /// The file is uploaded unnamed and spawned by exactly its content hash,
+    /// the same pinning [`spawn_headless`](Self::spawn_headless) does, so a
+    /// test can fork a binary the dist tree does not package — one only
+    /// `CARGO_BIN_EXE_*` locates. The hub forks `<path> --describe` at
+    /// upload, so the file must answer it like a chassis binary.
+    pub fn spawn_binary(&mut self, path: &Path, args: Vec<String>) -> EngineId {
+        let hash = match self.upload_binary(&path.to_string_lossy(), None) {
+            UploadBinaryResult::Ok { hash, .. } => hash,
+            UploadBinaryResult::Err { error } => panic!("spawn_binary upload of {} failed: {error}", path.display()),
+        };
+        self.spawn_hash(hash, args, None)
+    }
+
+    /// Wait for the fleet to restart `dead` and return the successor's
+    /// `EngineId`, which replaces `dead` in the teardown set.
+    ///
+    /// A restart mints a fresh engine id and replies to nobody, so the
+    /// successor is the first listed engine that is neither `dead` nor one
+    /// this harness already tracks. Polls `ListEngines` under the cold-start
+    /// backstop, since the successor pays a full fork and boot.
+    ///
+    /// # Panics
+    ///
+    /// Panics when no successor appears within the backstop, printing the
+    /// recently-died ring so the reason `dead` stayed dead is visible.
+    pub fn await_restart(&mut self, dead: EngineId) -> EngineId {
+        let budget = spawn_cap();
+        let start = Instant::now();
+        loop {
+            let successor = self.list_engines().into_iter().find_map(|listed| {
+                let engine = EngineId(Uuid::parse_str(&listed.engine_id).expect("engine_id parses as a UUID"));
+                (engine != dead && !self.spawned.contains(&engine)).then_some(engine)
+            });
+            if let Some(successor) = successor {
+                self.spawned.retain(|engine| *engine != dead);
+                self.spawned.push(successor);
+                return successor;
+            }
+            if start.elapsed() >= budget {
+                let died = self.recently_died();
+                panic!("engine {dead:?} was not restarted within {budget:?}; recently died: {died:?}");
+            }
+            thread::sleep(POLL_INTERVAL);
+        }
+    }
+
     /// Shared spawn body: pin the headless bin by content hash, fork it
     /// through the engines cap, optionally injecting a boot manifest path.
     fn spawn_headless_inner(&mut self, boot_manifest: Option<String>) -> EngineId {
@@ -333,6 +420,12 @@ impl FleetHarness {
             UploadBinaryResult::Ok { hash, .. } => hash,
             UploadBinaryResult::Err { error } => panic!("spawn_headless upload failed: {error}"),
         };
+        self.spawn_hash(hash, Vec::new(), boot_manifest)
+    }
+
+    /// Fork the stored binary `hash` through the engines cap with `args` and
+    /// an optional boot manifest path, and record the engine for teardown.
+    fn spawn_hash(&mut self, hash: String, args: Vec<String>, boot_manifest: Option<String>) -> EngineId {
         // The cold fork+bind+connect rides this call's reply (the hub holds
         // `SpawnEngineResult::Ok` until its proxy connects to the freshly
         // bound substrate), so it waits under the generous cold-start
@@ -342,7 +435,7 @@ impl FleetHarness {
             "aether.fleet",
             &SpawnEngine {
                 selector: BinarySelector { query: Some(hash), chassis: None, caps: vec![], target: None },
-                args: vec![],
+                args,
                 boot_manifest,
             },
             spawn_cap(),
@@ -351,7 +444,7 @@ impl FleetHarness {
         let payload = single_reply(&replies, "SpawnEngine");
         let engine_id = match SpawnEngineResult::decode_from_bytes(&payload) {
             Some(SpawnEngineResult::Ok { engine_id, .. }) => engine_id,
-            Some(SpawnEngineResult::Err { error, .. }) => panic!("spawn_headless failed: {error}"),
+            Some(SpawnEngineResult::Err { error, .. }) => panic!("SpawnEngine failed: {error}"),
             None => panic!("undecodable SpawnEngineResult"),
         };
         let engine = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses as a UUID"));
@@ -692,7 +785,7 @@ impl FleetHarness {
     /// lineage address (`aether.component/aether.embedded:<name>`).
     pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.call(Some(engine), recipient, mail)
     }
@@ -704,9 +797,46 @@ impl FleetHarness {
     /// live yet" and retries.
     pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<MailEnvelope>, RpcError>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.try_call_with_budget(Some(engine), recipient, mail, reply_cap(), "reply")
+    }
+
+    /// Route a mail like [`send`](Self::send), but return its first reply
+    /// envelope rather than waiting for the call's `ReplyEnd`.
+    ///
+    /// The hub writes `ReplyEnd` when the dispatched chain settles, and a
+    /// recipient can answer long before that: the bloomery driver answers a
+    /// native `Call` once its outcome is recorded, while the journal watch it
+    /// re-arms may hold the call's chain open indefinitely. The call stays
+    /// open on the wire, and the next read discards any frame that later
+    /// arrives for it, such as the `ReplyEnd` `Err` the hub writes when the
+    /// engine leaves.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the call ends before any reply, or no reply arrives
+    /// within the steady-state reply backstop
+    /// (`AETHER_HARNESS_FLEET_REPLY_CAP_SECS`).
+    pub fn send_for_reply<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> MailEnvelope
+    where
+        K: Kind,
+    {
+        let cid = self.write_request(Some(engine), recipient, mail);
+        match self.next_call_frame(cid, recipient, reply_cap(), "reply", Instant::now()) {
+            CallFrame::Event(envelope) => {
+                self.left_open.insert(cid);
+                self.calls.push(CallRecord {
+                    cid,
+                    engine: Some(engine),
+                    mailbox: recipient.to_owned(),
+                    request_kind: K::ID,
+                    reply_kinds: vec![envelope.kind],
+                });
+                envelope
+            }
+            CallFrame::End(result) => panic!("call {cid} to {recipient:?} ended before any reply: {result:?}"),
+        }
     }
 
     /// Write one `Call` frame and read until its `ReplyEnd`, returning
@@ -720,7 +850,7 @@ impl FleetHarness {
     /// gate (issue 2064).
     fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.call_with_budget(engine, mailbox, request, reply_cap(), "reply")
     }
@@ -742,7 +872,7 @@ impl FleetHarness {
         gate: &str,
     ) -> Vec<MailEnvelope>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         self.try_call_with_budget(engine, mailbox, request, budget, gate)
             .unwrap_or_else(|error| panic!("call to {mailbox:?} ended with error: {error:?}"))
@@ -760,24 +890,15 @@ impl FleetHarness {
         gate: &str,
     ) -> Result<Vec<MailEnvelope>, RpcError>
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
-        let cid = self.next_cid;
-        self.next_cid += 1;
-
-        self.write_call(cid, engine, mailbox, K::ID, request.encode_into_bytes())
-            .expect("test setup: writing a Call frame to the hub succeeds");
-
+        let cid = self.write_request(engine, mailbox, request);
         let mut events: Vec<MailEnvelope> = Vec::new();
         let start = Instant::now();
         loop {
-            match read_frame(&mut self.stream) {
-                Ok(WireFrame::ReplyEvent { cid: got_cid, envelope }) => {
-                    assert_eq!(got_cid, cid, "ReplyEvent cid mismatch");
-                    events.push(envelope);
-                }
-                Ok(WireFrame::ReplyEnd { cid: got_cid, result }) => {
-                    assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
+            match self.next_call_frame(cid, mailbox, budget, gate, start) {
+                CallFrame::Event(envelope) => events.push(envelope),
+                CallFrame::End(result) => {
                     result?;
                     self.calls.push(CallRecord {
                         cid,
@@ -787,6 +908,39 @@ impl FleetHarness {
                         reply_kinds: events.iter().map(|e| e.kind).collect(),
                     });
                     return Ok(events);
+                }
+            }
+        }
+    }
+
+    /// Assign the next wire correlation id and write `request` as one `Call`
+    /// frame under it.
+    fn write_request<K: Kind>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> u64 {
+        let cid = self.next_cid;
+        self.next_cid += 1;
+        self.write_call(cid, engine, mailbox, K::ID, request.encode_into_bytes())
+            .expect("test setup: writing a Call frame to the hub succeeds");
+        cid
+    }
+
+    /// Read the next `ReplyEvent` or `ReplyEnd` for call `cid`, discarding
+    /// the late frames of calls [`send_for_reply`](Self::send_for_reply) left
+    /// open. Re-arms on each `READ_REARM` socket timeout until `budget`
+    /// measured from `start` is exhausted — a genuine wedge, panicked with
+    /// `gate` naming the latency class (cold-start vs reply), the cid, the
+    /// mailbox, and the budget (issue 2064). A frame for any other call, or a
+    /// non-timeout read error (the connection genuinely failed), panics
+    /// immediately, distinct from a wedge.
+    fn next_call_frame(&mut self, cid: u64, mailbox: &str, budget: Duration, gate: &str, start: Instant) -> CallFrame {
+        loop {
+            match read_frame(&mut self.stream) {
+                Ok(WireFrame::ReplyEvent { cid: got_cid, envelope }) if got_cid == cid => {
+                    return CallFrame::Event(envelope);
+                }
+                Ok(WireFrame::ReplyEnd { cid: got_cid, result }) if got_cid == cid => return CallFrame::End(result),
+                Ok(WireFrame::ReplyEvent { cid: got_cid, .. }) if self.left_open.contains(&got_cid) => {}
+                Ok(WireFrame::ReplyEnd { cid: got_cid, .. }) if self.left_open.contains(&got_cid) => {
+                    self.left_open.remove(&got_cid);
                 }
                 Ok(other) => panic!("unexpected frame for call {cid}: {other:?}"),
                 // Socket read-timeout: no frame yet. Re-arm until the
@@ -882,7 +1036,7 @@ impl FleetHarness {
     /// carrier the empty-config [`load`](Self::load) sends.
     pub fn load_with_config<C>(&mut self, engine: EngineId, stem: &str, config: &C) -> String
     where
-        C: Kind + Serialize,
+        C: Kind,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -905,7 +1059,7 @@ impl FleetHarness {
     /// module's entry type. Returns the registered ADR-0099 lineage address.
     pub fn load_with_config_export<C>(&mut self, engine: EngineId, stem: &str, config: &C, export: &str) -> String
     where
-        C: Kind + Serialize,
+        C: Kind,
     {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -941,7 +1095,7 @@ impl FleetHarness {
     /// `Err`/undecodable ack, mirroring `single_reply`.
     pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<MailEnvelope>)
     where
-        K: Kind + Serialize,
+        K: Kind,
     {
         let batch = DispatchTraced {
             mails: vec![NamedMail {
@@ -1015,8 +1169,21 @@ pub fn allocate_store_root_for_test() -> PathBuf {
 /// hub's content-addressed store (ADR-0115) per-harness, and
 /// `fleet_store_root` isolates the per-engine spawn-dir parent (issue
 /// 1274) per-harness — both via `FleetConfig` (ADR-0090); the heartbeat
-/// stays disabled (the `Default`).
-fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis<TestChassis>, u16) {
+/// stays disabled (the `Default`). `restart` arms the engines cap's restart
+/// supervision when `Some`, and leaves it off (the `Default`) when `None`.
+fn boot_hub(
+    binary_store_dir: &Path,
+    fleet_store_root: &Path,
+    restart: Option<RestartPolicy>,
+) -> (PassiveChassis<TestChassis>, u16) {
+    let restart_config = restart.map_or_else(FleetConfig::default, |policy| FleetConfig {
+        restart_on_crash: true,
+        restart_backoff_millis: u64::try_from(policy.backoff.as_millis())
+            .expect("test setup: the restart backoff fits u64 milliseconds"),
+        restart_burst_limit: policy.burst_limit,
+        restart_burst_window_secs: policy.burst_window.as_secs(),
+        ..FleetConfig::default()
+    });
     let registry = Arc::new(Registry::new());
     let authority = boot_authority();
     for d in descriptors::all() {
@@ -1031,7 +1198,7 @@ fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis
             FleetConfig {
                 binary_store_dir: Some(binary_store_dir.to_string_lossy().into_owned()),
                 fleet_store_root: Some(fleet_store_root.to_string_lossy().into_owned()),
-                ..FleetConfig::default()
+                ..restart_config
             },
         )
         .with_actor_configured::<RpcServerCapability>(

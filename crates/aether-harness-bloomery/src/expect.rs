@@ -1,7 +1,8 @@
 //! Expect: the actual journal against the values a scenario states.
 //!
-//! Every read here opens a fresh handle on the journal file the chassis
-//! writes, so it sees exactly what the loop committed. Expected values come
+//! Every read here opens a fresh handle on the journal file the engine
+//! writes — the in-process chassis or a forked `aether-bloomery` — so it sees
+//! exactly what the loop committed. Expected values come
 //! from the scenario — literals, or the handles its seed returned — and the
 //! only fold this module runs reduces the actual journal.
 
@@ -11,7 +12,7 @@ use aether_bloomery_journal::{Digest, Entry, Journal, Seq};
 use aether_bloomery_view::View;
 use aether_data::{KindId, Storage};
 
-use crate::BloomeryHarness;
+use crate::SeededJournal;
 
 /// How many entries one journal read returns.
 const READ_PAGE: usize = 256;
@@ -68,7 +69,7 @@ impl Record {
     }
 }
 
-impl BloomeryHarness {
+impl SeededJournal {
     /// Assert the records the loop appended after `after` are exactly
     /// `expected`: the same count, then each record's kind and cause in order,
     /// then each stated value.
@@ -164,9 +165,9 @@ impl BloomeryHarness {
         }
     }
 
-    /// A fresh handle on the journal the chassis writes.
+    /// A fresh handle on the journal the engine writes.
     fn open(&self) -> Journal {
-        Journal::open(&self.journal).expect("open the journal the chassis writes")
+        Journal::open(&self.journal).expect("open the journal the engine writes")
     }
 }
 

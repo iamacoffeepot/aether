@@ -9,9 +9,12 @@
 //! [`BloomeryHarness::move_head`], and [`BloomeryHarness::settle`], which
 //! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather
 //! than sleeping. Its **expectation** is the record sequence the loop
-//! appended ([`BloomeryHarness::assert_appended`] over [`Record`]s), plus any
+//! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
 //! view the scenario folds over the actual journal
-//! ([`BloomeryHarness::fold`]).
+//! ([`SeededJournal::fold`]). The seed owns those reads because it owns the
+//! journal file, so they work the same whether the in-process chassis wrote
+//! it or a forked `aether-bloomery` did; [`BloomeryHarness`] forwards each one
+//! to the seed it booted over.
 //!
 //! Expected values are literals the scenario writes, or seed handles. The
 //! harness folds only the actual journal and never computes an expected value
@@ -29,13 +32,14 @@
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
-use std::path::PathBuf;
 use std::sync::mpsc;
 
 use aether_actor::ActorRef;
+use aether_bloomery_journal::{Digest, Seq};
+use aether_bloomery_view::View;
 use aether_chassis_bloomery::{BloomeryChassis, Mounted};
+use aether_data::Storage;
 use aether_substrate::chassis::builder::BuiltChassis;
-use tempfile::TempDir;
 
 mod boot;
 mod drive;
@@ -59,6 +63,58 @@ pub struct BloomeryHarness {
     arrivals: mpsc::Receiver<drive::Arrival>,
     early: HashMap<u64, drive::Reply>,
     correlations: u64,
-    journal: PathBuf,
-    _scratch: TempDir,
+    /// Declared last, so the chassis drops before the scratch directory the
+    /// seed owns is removed.
+    journal: SeededJournal,
+}
+
+impl BloomeryHarness {
+    /// [`SeededJournal::assert_appended`] over the journal the chassis writes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SeededJournal::assert_appended`].
+    pub fn assert_appended(&self, after: Seq, expected: &[Record]) {
+        self.journal.assert_appended(after, expected);
+    }
+
+    /// [`SeededJournal::record`] over the journal the chassis writes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SeededJournal::record`].
+    #[must_use]
+    pub fn record<K: Storage>(&self, seq: Seq) -> K {
+        self.journal.record(seq)
+    }
+
+    /// [`SeededJournal::head`] over the journal the chassis writes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SeededJournal::head`].
+    #[must_use]
+    pub fn head(&self) -> Seq {
+        self.journal.head()
+    }
+
+    /// [`SeededJournal::stores`] over the journal the chassis writes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SeededJournal::stores`].
+    #[must_use]
+    pub fn stores(&self, digest: &Digest) -> bool {
+        self.journal.stores(digest)
+    }
+
+    /// [`SeededJournal::fold`] over the journal the chassis writes.
+    ///
+    /// # Panics
+    ///
+    /// As [`SeededJournal::fold`].
+    #[must_use]
+    pub fn fold<V: View>(&self) -> V {
+        self.journal.fold()
+    }
 }

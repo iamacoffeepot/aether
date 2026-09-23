@@ -1,5 +1,7 @@
 //! WASM bundle for the program-root `SubstrateHarness` test.
 
+use std::future;
+
 use aether_actor::export;
 use aether_bloomery_kinds::{Mode, OpaqueBytes, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::kinds::Detail;
@@ -139,9 +141,37 @@ impl Program for Exec {
     }
 }
 
-export!(Summarize, Refuse, FetchBody, Exec, generators = [aether_bloomery_bundle::bundle]);
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.stall.input")]
+struct StallInput {
+    marker: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.stall.result")]
+struct StallResult {
+    marker: u32,
+}
+
+struct Stall;
+
+#[program]
+impl Program for Stall {
+    const NAME: &'static str = "test.program.stall";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Never finish, so a test can crash the engine while the call is in flight.";
+    type Input = StallInput;
+    type Result = StallResult;
+
+    async fn run(_input: Self::Input, _env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+        future::pending().await
+    }
+}
+
+export!(Summarize, Refuse, FetchBody, Exec, Stall, generators = [aether_bloomery_bundle::bundle]);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;
 const _: FetchBody = FetchBody;
 const _: Exec = Exec;
+const _: Stall = Stall;
