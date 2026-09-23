@@ -35,7 +35,6 @@
 use aether_data::{Kind, MailboxId};
 
 use super::WasmCtx;
-use crate::mail::mailbox::Mailbox;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
@@ -93,12 +92,6 @@ impl Sends<'_> {
     #[must_use]
     pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
         WasmActorMailbox::__new(target.id().0, self.mailbox, self.inline)
-    }
-
-    /// Send `payload` through a stored [`Mailbox<K>`] addressing token,
-    /// inheriting the handler's causal chain. Identical to [`WasmCtx::send`].
-    pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {
-        self.route::<K>(mailbox.mailbox(), &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
     /// Send `payload` to a proven [`ErasedActorRef`], inheriting the handler's

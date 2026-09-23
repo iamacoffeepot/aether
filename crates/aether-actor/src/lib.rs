@@ -4,8 +4,6 @@
 //!
 //! - [`Mail`], [`PriorState`], [`ReplyHandle`], [`KindId`]: transport-free
 //!   types that decode bytes and carry phantom typing, nothing more.
-//! - [`Mailbox`]: an addressing token (`mailbox_id`, `kind_id`). Sends go
-//!   through a ctx's send methods, never through the mailbox itself.
 //! - [`model::ctx`]: the per-stage capability traits ([`MailSender`],
 //!   [`OutboundReply`], [`Persistence`]), the one abstraction the wasm and
 //!   native targets share. [`wasm::ctx`] and the substrate's `NativeCtx`
@@ -62,14 +60,12 @@ pub use reference::{ActorRef, ErasedActorRef};
 pub use request_context::{
     REQUEST_CONTEXT_CAPACITY, RequestContextTable, compose_state_envelope, split_state_envelope,
 };
-// Issue 665: `Mailbox<K, T>` and `ActorMailbox<'_, R, T>` retired; the
-// surviving [`mail::mailbox::Mailbox<K>`] is a transport-free
-// addressing token. Per-side actor-typed mailboxes live next to their
-// transport: [`wasm::WasmActorMailbox<R>`] for wasm guests and
+// Issue 665: per-side actor-typed handles live next to their transport:
+// [`wasm::WasmActorMailbox<R>`] for wasm guests and
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::facade::MailboxForward;
-pub use mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
+pub use mail::kind_id::{KindId, resolve};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see
