@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-09
+- **Amended:** 2026-09-23 — the panel-side region announcement moved from `WidgetPanel` to a new `EditorRegion` actor, which declares `EditorShell` and relays the shell's input to its child panel (ADR-0232 §6: no optional peers). See _Amendment 2026-09-23_ below.
 
 ## Context
 
@@ -179,3 +180,23 @@ lifecycle and render roles. Editor assembly is therefore shell-first: load one
 `EditorConfig`, then load each region root with its interactive ownership
 disabled and its region name set. Each announces itself as it wires, and no
 input reaches a region that has not.
+
+### Amendment 2026-09-23: `EditorRegion` announces a panel region
+
+A declared dependency holds for every instance of an actor type (ADR-0230), and
+ADR-0232 §6 allows no optional peers, so `WidgetPanel` may no longer mail the
+shell only when its config names a region. The panel-side announcement moves to
+`EditorRegion` (export `aether.kit.widget.editor_region`), which declares
+`EditorShell` with `depends(EditorShell)`. It reads the same `PanelConfig`,
+refuses an empty `editor_region`, and in `wire` sends `RegionAttach { region }`
+and then spawns a `WidgetPanel` from that config as its inline child, with
+`owns_input` false and `editor_region` cleared. The shell routes to the
+announcement's sender, so the region is also the recipient: it relays each of
+the nine input kinds to its child panel, and same-recipient order keeps the
+shell's modifier priming ahead of the event it primes.
+
+`WidgetPanel` declares `child_of(EditorRegion)` and no longer announces. A
+panel loaded with a non-empty `editor_region` refuses to initialize and names
+`EditorRegion`. Editor assembly stays shell-first, and is now enforced: a
+region loaded before the shell is refused, where it used to announce into
+nothing. `PanelConfig.editor_region` is read only by `EditorRegion`.

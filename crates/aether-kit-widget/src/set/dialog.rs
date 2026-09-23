@@ -69,7 +69,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
@@ -268,7 +268,7 @@ impl WidgetDefaults for DialogWidget {
 /// children standing on it and raise them into the overlay lane
 /// (`Composite::set_slot_overlay`), so the plate arrives under its own
 /// contents and over the screen it covers.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DialogWidget {
     type Config = DialogConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.dialog";

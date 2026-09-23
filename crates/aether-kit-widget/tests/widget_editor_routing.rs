@@ -5,12 +5,14 @@
 //! its region name. Nothing routes until that announcement lands, so every
 //! assertion below also proves the attach handshake by construction.
 
+mod support;
+
 use std::fs;
 use std::path::Path;
 
 use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::Kind;
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
@@ -18,12 +20,29 @@ use aether_kinds::{
     TextInput, WindowId,
 };
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
+use aether_render::HeadlessRenderCapability;
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
 use aether_window::SyntheticWindowCapability;
+use support::widget_caps;
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
+
+/// A GPU-free bench with the component host and everything the widget module
+/// declares: the headless render stub, text (its fs from the sandbox roots) and
+/// the in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-editor-routing")))
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
 
 /// Load one in-bundle actor and return its reference. `name`
 /// is the load name, or `None` to load under the actor's own namespace — which
@@ -89,7 +108,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     else {
         return;
     };
-    let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
+    let mut harness = bench(200, 100);
     let mut b_lanes = RegionInputLanes::ALL;
     b_lanes.wheel = false;
     load_shell(
@@ -167,7 +186,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     else {
         return;
     };
-    let mut harness = SubstrateHarness::builder().size(200, 100).with_component_host().build().expect("boot");
+    let mut harness = bench(200, 100);
     let a = region("focus-a", 0.0, RegionInputLanes::ALL);
     let mut b = region("focus-b", 100.0, RegionInputLanes::ALL);
     b.activation_chord =

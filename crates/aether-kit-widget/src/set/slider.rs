@@ -17,6 +17,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
+use aether_text::TextCapability;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{push_control_outlines, quad, reply_if_hidden};
@@ -191,7 +192,7 @@ impl WidgetDefaults for SliderWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `SliderConfig` again to reconfigure the range or theme in place.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SliderWidget {
     type Config = SliderConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.slider";

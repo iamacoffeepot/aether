@@ -144,28 +144,39 @@ post-init with mail allowed — the same site as an [input](input.md) subscribe,
 addressing a different cap. `wire` receives a `WireCtx`, the window-bearing
 context that also serves the assets a component ships in
 `aether.asset.<path>` sections (ADR-0163); it `Deref`s to `WasmCtx`, so every
-send and subscribe verb reads the same as in a handler:
+send and subscribe verb reads the same as in a handler. Declare the lifecycle cap
+as a dependency, spell your actor on the `wire` context, and name the publisher
+and the stage:
 
 ```rust
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let lifecycle = ctx.actor::<LifecycleCapability>();
-    lifecycle.subscribe::<Tick>();
-    lifecycle.subscribe::<Render>();
+#[actor(depends(LifecycleCapability))]
+impl WasmActor for Camera {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+        ctx.subscribe::<LifecycleCapability, Tick>();
+        ctx.subscribe::<LifecycleCapability, Render>();
+    }
 }
 ```
 
-`subscribe::<K>()` subscribes the calling actor — the cap reads the subscriber off
-the inbound's host-stamped `Source`, so you name neither the stage id nor your own
-mailbox. To subscribe a *different* mailbox (the rare cross-mailbox case) use
-`subscribe_for::<K>(other_mailbox)`; the reflexive `unsubscribe::<K>()` and the
-explicit `unsubscribe_for::<K>(mailbox)` are the teardown twins. You don't
-unsubscribe on the way out — the host clears your subscriptions when the component
-drops.
+`ctx.subscribe::<P, K>()` subscribes the calling actor — the cap reads the
+subscriber off the inbound's host-stamped `Source`, so you name neither the stage
+id nor your own mailbox. It is checked at compile time three ways: `P` must
+publish `K` (`LifecycleCapability` publishes the stage kinds), the actor must
+declare `depends(P)`, and the actor's handler for `K` must not declare a reply (a
+`-> ()` handler, or a manual one), because a broadcast stage has no one waiting
+for a reply. Any one of them missing
+is an error at the call. `ctx.unsubscribe::<P, K>()` is the teardown twin, with
+the first two checks. You don't unsubscribe on the way out — the host clears your
+subscriptions when the component drops.
 
-The explicit form names a mailbox the cap proves live at receipt, so an unknown or
-already-dropped one replies `Err` rather than registering a subscription whose
-broadcasts could never land; the reflexive form needs no such check, because the
-host stamped the sender on the envelope.
+The older facade form, `ctx.actor::<LifecycleCapability>().subscribe::<K>()`,
+still compiles until the remaining callers move to the flat verb. Its
+`subscribe_for::<K>(other_mailbox)` and `unsubscribe_for::<K>(mailbox)` subscribe
+a *different* mailbox (the rare cross-mailbox case). That explicit form names a
+mailbox the cap proves live at receipt, so an unknown or already-dropped one
+replies `Err` rather than registering a subscription whose broadcasts could never
+land; the reflexive form needs no such check, because the host stamped the sender
+on the envelope.
 
 Then handle each stage as its kind, like any other mail:
 
@@ -178,7 +189,7 @@ A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it
 ctx typed by that actor; the default `Erased` names no actor. The actor is the
 first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
 
-`aether-kit-commons`'s `camera` export subscribes `Tick` and `Render` this way — it
+`aether-kit-commons`'s `camera` export subscribes `Tick` and `Render` — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on
 `Render`; its `MeshViewer` export (`aether.kit.mesh`) subscribes `Render` to
 replay its mesh each frame.

@@ -54,7 +54,7 @@ impl EditorShell {
 // `WindowSelector::All`, so a second shell in one engine is a double-delivery
 // bug rather than a configuration. It is therefore loaded under its default
 // name, and cannot be composed beneath a wasm parent.
-#[actor]
+#[actor(depends(WindowCapability))]
 impl WasmActor for EditorShell {
     type Config = EditorConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.editor";

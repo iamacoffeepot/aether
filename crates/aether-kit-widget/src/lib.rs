@@ -43,6 +43,7 @@ mod kinds;
 pub use kinds::*;
 pub mod composite;
 mod editor;
+mod editor_region;
 pub mod focus;
 pub mod layout;
 pub mod panel;
@@ -56,6 +57,7 @@ pub mod text_edit;
 pub mod theme;
 
 pub use editor::EditorShell;
+pub use editor_region::EditorRegion;
 pub use panel::{ChildLayout, SpawnedChild, WidgetPanel, content_frame, spawn_widget_child};
 pub use scroll::ScrollWidget;
 pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
@@ -79,7 +81,7 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // spawn by `WidgetKind` is a widget a host can also load on its own by
 // `module@actor` selector, and the seven that were missing from this list were
 // indistinguishable from an oversight. The roots (`Widget`, `ScrollWidget`,
-// `EditorShell`, `WidgetPanel`) are listed on the same rule.
+// `EditorShell`, `EditorRegion`, `WidgetPanel`) are listed on the same rule.
 //
 // The `export!` macro itself gates its emitted entry surface behind the invoking
 // crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
@@ -109,6 +111,7 @@ aether_actor::export!(
     set::TooltipWidget,
     set::SplitterWidget,
     EditorShell,
+    EditorRegion,
     WidgetPanel
 );
 
@@ -135,6 +138,7 @@ aether_actor::export!(
     set::TooltipWidget,
     set::SplitterWidget,
     EditorShell,
+    EditorRegion,
     WidgetPanel,
     aether_behavior::BehaviorHost
 );
@@ -1423,7 +1427,7 @@ mod tests {
 /// render sender: the root emits every widget's solid/textured draws in
 /// structural depth-first order, grouping only adjacent compatible items, so
 /// a background drawn as root chrome sits under the children by construction.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, depends(LifecycleCapability), depends(RenderCapability), depends(TextCapability))]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
     const NAMESPACE: &'static str = "aether.kit.widget";

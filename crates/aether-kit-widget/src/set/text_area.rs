@@ -8,10 +8,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
@@ -372,7 +372,7 @@ impl WidgetDefaults for TextAreaWidget {
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
 /// A re-sent config resizes and restyles it in place, holding the buffer;
 /// [`SetText`] replaces what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_area";

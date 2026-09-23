@@ -63,14 +63,13 @@ use aether_actor::{
 };
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
     AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender,
     SubstrateHarnessObserver, TextInputObserved, TickObserved, UnsubscribeKeys,
 };
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 pub struct Probe {
     tick_count: u64,
@@ -80,7 +79,7 @@ pub struct Probe {
     asset: AssetProbeResult,
 }
 
-#[actor]
+#[actor(depends(LifecycleCapability), depends(WindowCapability))]
 impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
@@ -95,11 +94,10 @@ impl WasmActor for Probe {
     /// `aether.lifecycle` (ADR-0082). `Key` and `TextInput` originate at
     /// windows, so the probe subscribes to every window through
     /// `aether.window` (ADR-0164).
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
-        let window = ctx.actor::<WindowCapability>();
-        window.subscribe::<Key>(WindowSelector::All);
-        window.subscribe::<TextInput>(WindowSelector::All);
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+        ctx.subscribe::<LifecycleCapability, Tick>();
+        ctx.subscribe::<WindowCapability, Key>();
+        ctx.subscribe::<WindowCapability, TextInput>();
         // ADR-0163 §3 (#3984): pull the bundle's asset through the load
         // window (open during `wire`) and stash a content fingerprint —
         // length + a wrapping-sum checksum — so a later `AssetProbe` proves
@@ -158,8 +156,8 @@ impl WasmActor for Probe {
     /// Send `aether.test_fixtures.unsubscribe_keys` to the probe; later key
     /// presses stop producing `key_observed` from it.
     #[handler::single]
-    fn on_unsubscribe_keys(&mut self, ctx: &mut WasmCtx<'_>, _: UnsubscribeKeys) {
-        ctx.actor::<WindowCapability>().unsubscribe::<Key>(WindowSelector::All);
+    fn on_unsubscribe_keys(&mut self, ctx: &mut WasmCtx<'_, Self>, _: UnsubscribeKeys) {
+        ctx.unsubscribe::<WindowCapability, Key>();
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,

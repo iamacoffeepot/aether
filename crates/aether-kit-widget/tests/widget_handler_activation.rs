@@ -10,6 +10,8 @@
 //! Skips when the stem wasm has not been pre-built (`require_wasm`). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
 
+mod support;
+
 use std::fs;
 
 use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
@@ -23,9 +25,26 @@ use aether_kit_widget::{
     ButtonConfig, FocusLost, HoverLost, NumericConfig, PanelConfig, SegmentedConfig, TextAreaConfig, TextFieldConfig,
     Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetKind, WidgetPanel,
 };
+use aether_render::HeadlessRenderCapability;
+use support::widget_caps;
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 const WASM_STEMS: [&str; 2] = ["aether_kit_widget", "aether_kit_widget_behavior"];
+
+/// A GPU-free bench with the component host and everything the widget module
+/// declares: the headless render stub, text (its fs from the sandbox roots) and
+/// the in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
 
 fn trampoline_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
@@ -193,12 +212,7 @@ fn named_load_exported_widget_defaults_adopters_succeeds() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder()
-            .size(64, 48)
-            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
-            .with_component_host()
-            .build()
-            .expect("boot");
+        let mut harness = bench(64, 48);
         for case in exported_adopters() {
             let name = load_named(&mut harness, &wasm, &case);
             assert_eq!(
@@ -221,12 +235,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder()
-            .size(240, 80)
-            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
-            .with_component_host()
-            .build()
-            .expect("boot");
+        let mut harness = bench(240, 80);
         let panel = load_panel_with(
             &mut harness,
             &wasm,
@@ -293,12 +302,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder()
-            .size(240, 120)
-            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
-            .with_component_host()
-            .build()
-            .expect("boot");
+        let mut harness = bench(240, 120);
         let panel = load_panel_with(
             &mut harness,
             &wasm,

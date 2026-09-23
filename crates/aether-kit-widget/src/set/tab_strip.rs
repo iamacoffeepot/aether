@@ -57,7 +57,7 @@ use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, centered_text_x, clamp_option_index, clamp_selection, elide_to_width,
@@ -300,7 +300,7 @@ impl WidgetDefaults for TabStripWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `TabStripConfig` again to replace the labels or the style in place —
 /// that holds the current tab. Send it [`SetSelection`] to move the tab.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TabStripWidget {
     type Config = TabStripConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.tab_strip";

@@ -32,6 +32,8 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
+mod support;
+
 use aether_component::ComponentHostCapability;
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use aether_render::RenderCapability;
@@ -39,7 +41,9 @@ use std::fs;
 
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
+use aether_harness_substrate_capture::test_helpers::{
+    envelope, init_save_sandbox, require_runtime, test_namespace_roots,
+};
 use aether_harness_substrate_capture::visual::{Image, Rect, background_top_left, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
 use aether_kit_widget::{
@@ -51,10 +55,26 @@ use aether_render::{
     CreateTexture, CreateTextureResult, Shape, TextureFormat, TextureSampling, TextureUsage,
     TexturedQuad as RenderTexturedQuad,
 };
+use support::widget_caps;
 
 /// Linear RGBA primaries chosen so each survives the sRGB encode as a
 /// single dominant channel — the compositing order is then read off the
 /// captured pixels by which channel wins, gamma-invariant.
+/// A GPU bench with the component host and everything the widget module
+/// declares: the real render, text (its fs from the sandbox roots) and the
+/// in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-compositing")))
+            .with_render()
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
+
 const BLUE: Rgba = Rgba::new(0.05, 0.05, 0.90, 1.0);
 const RED: Rgba = Rgba::new(0.90, 0.05, 0.05, 1.0);
 const GREEN: Rgba = Rgba::new(0.05, 0.90, 0.05, 1.0);
@@ -262,8 +282,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness =
-        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness = bench(64, 48);
 
     // Root chrome fills the middle (8,8)-(56,40); two leaves sit inside it
     // — child a red at (12,12)-(24,24), child b green at (36,20)-(48,32).
@@ -338,8 +357,7 @@ fn nested_tree_draws_in_depth_first_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness =
-        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness = bench(64, 48);
 
     // Interior node b: green chrome (0,0,20,20), one white leaf b1 inset at
     // local (2,2), sized 6×6.
@@ -472,8 +490,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
         }],
     };
 
-    let mut harness =
-        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness = bench(64, 48);
     load_panel(&mut harness, &wasm, &config);
     let captured = harness
         .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], vec![]))])
@@ -522,8 +539,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness =
-        SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness = bench(64, 48);
     let texture_id = create_four_color_texture(&mut harness);
 
     let root_texture_clip = WidgetClipRect { x: 6.0, y: 6.0, width: 12.0, height: 12.0 };
@@ -710,8 +726,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
         .encode_into_bytes(),
     };
 
-    let mut harness =
-        SubstrateHarness::builder().size(80, 48).with_render().with_component_host().build().expect("boot");
+    let mut harness = bench(80, 48);
     load_scroll_panel(&mut harness, &wasm, scroll);
     let captured = harness
         .execute(vec![("snap", HarnessOp::capture_with_mails(vec![tick_to_root()], Vec::new()))])

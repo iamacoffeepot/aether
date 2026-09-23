@@ -15,9 +15,10 @@
 //! `init`, `wire`, `receive`, `drop` — plus the cross-cutting surfaces the
 //! receive ctx carries that are large enough to name in their own right:
 //! `send` (its outbound mail surface), `sends` (that surface again with the
-//! reply-class marker dropped, for helpers), `relative` (positional
-//! cluster-relative addressing), `child` (its typed counterpart) and `spawn`
-//! (detached and inline child creation).
+//! reply-class marker dropped, for helpers), `subscribe` (the flat subscribe
+//! verbs that name their publisher), `relative` (positional cluster-relative
+//! addressing), `child` (its typed counterpart) and `spawn` (detached and
+//! inline child creation).
 
 mod child;
 mod drop;
@@ -27,6 +28,7 @@ mod relative;
 mod send;
 mod sends;
 mod spawn;
+mod subscribe;
 mod wire;
 
 #[cfg(test)]

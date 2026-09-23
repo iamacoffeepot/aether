@@ -12,7 +12,6 @@ use core::marker::PhantomData;
 use aether_data::{Kind, MailboxId};
 
 use super::{ActorTypeTag, WasmCtx};
-use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, HandlesKind};
 use crate::reference::ErasedActorRef;
@@ -80,7 +79,7 @@ impl<C: Addressable> InlineChild<C> {
     /// Routes exactly as [`WasmCtx::send_to`] does — through the inline
     /// registry's cluster router, in place through the membrane for a resident
     /// child, inheriting the handler's causal chain (ADR-0080 §7).
-    pub fn send<K: Kind, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, Erased, M>, payload: &K)
+    pub fn send<K: Kind, A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, payload: &K)
     where
         C: HandlesKind<K>,
     {

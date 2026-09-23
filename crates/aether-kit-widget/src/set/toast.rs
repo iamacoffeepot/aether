@@ -50,7 +50,7 @@ use core::mem;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
@@ -325,7 +325,7 @@ impl WidgetDefaults for ToastWidget {
 /// Not loaded directly — the root spawns it as an inline child. Its lineage
 /// address takes a `ToastNotice` from any actor, so raising a notice by hand
 /// over MCP is one `send_mail`.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToastWidget {
     type Config = ToastConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.toast";

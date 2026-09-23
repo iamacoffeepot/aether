@@ -25,7 +25,7 @@ pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::validate_namespace_segment;
-use aether_actor::{MailboxForward, Publishes, actor};
+use aether_actor::{MailboxForward, Publisher, Publishes, actor};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -88,6 +88,7 @@ pub struct SyntheticWindowInstance;
 
 // The kinds the `aether.window` mailbox fans out to its selector-keyed
 // subscriber set, one `Publishes` impl each — the compile-time gate on
+// the flat `ctx.subscribe::<WindowCapability, K>()` verb and on
 // `WindowManagerMailboxExt::subscribe`. Device events and window
 // lifecycle both travel that one machinery, so both are listed.
 //
@@ -113,6 +114,27 @@ impl Publishes<Modifiers> for WindowCapability {}
 impl Publishes<WindowOpened> for WindowCapability {}
 impl Publishes<WindowClosed> for WindowCapability {}
 impl Publishes<WindowMenuActivated> for WindowCapability {}
+
+/// The flat subscribe verbs send the same self-addressed requests the
+/// [`WindowManagerMailboxExt`] facade sends, selecting every window.
+impl Publisher for WindowCapability {
+    type Subscribe = SubscribeWindowSelf;
+    type Unsubscribe = UnsubscribeWindowSelf;
+
+    fn subscribe_request<K: Kind>() -> SubscribeWindowSelf
+    where
+        Self: Publishes<K>,
+    {
+        SubscribeWindowSelf { selector: WindowSelector::All, kind: K::ID }
+    }
+
+    fn unsubscribe_request<K: Kind>() -> UnsubscribeWindowSelf
+    where
+        Self: Publishes<K>,
+    {
+        UnsubscribeWindowSelf { selector: WindowSelector::All, kind: K::ID }
+    }
+}
 
 /// Sender-side convenience methods for manager-owned window operations.
 pub trait WindowManagerMailboxExt: MailboxForward<WindowCapability> + Sized {

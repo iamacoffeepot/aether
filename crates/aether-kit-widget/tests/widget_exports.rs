@@ -19,6 +19,8 @@
 //! CI sets `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
 //! The parent builds `aether_kit_widget` and `aether_kit_widget_behavior`.
 
+mod support;
+
 use std::fs;
 
 use aether_actor::ActorRef;
@@ -38,10 +40,27 @@ use aether_kit_widget::{
     TabStripConfig, Theme, ToastConfig, TooltipConfig, TooltipSection, WidgetChildSpec, WidgetControlState,
     WidgetFrame, WidgetKind, WidgetPanel,
 };
+use aether_render::HeadlessRenderCapability;
+use support::widget_caps;
 
 const DEFAULT_STEM: &str = "aether_kit_widget";
 const BEHAVIOR_STEM: &str = "aether_kit_widget_behavior";
 const TEST_WINDOW_ID: WindowId = WindowId(1);
+
+/// A GPU-free bench with the component host and everything the widget module
+/// declares: the headless render stub, text (its fs from the sandbox roots) and
+/// the in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-exports")))
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
 
 /// NAMESPACEs of the seven actors both `export!` lists omitted.
 const SEVEN: [&str; 7] = [
@@ -189,12 +208,7 @@ fn panel_config() -> PanelConfig {
 /// ADR-0138: a bare load of this grab-bag must error and name every omitted
 /// actor, while each of those seven NAMESPACEs must resolve as a named export.
 fn assert_selectors(wasm: &[u8], stem: &str) {
-    let mut harness = SubstrateHarness::builder()
-        .size(64, 48)
-        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-exports")))
-        .with_component_host()
-        .build()
-        .expect("boot");
+    let mut harness = bench(64, 48);
 
     let bare = harness
         .execute(vec![(
@@ -258,12 +272,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
 fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config = panel_config();
     let config_bytes = config.encode_into_bytes();
-    let mut harness = SubstrateHarness::builder()
-        .size(240, 220)
-        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-exports")))
-        .with_component_host()
-        .build()
-        .expect("boot");
+    let mut harness = bench(240, 220);
 
     let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {

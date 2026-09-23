@@ -27,6 +27,8 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
+mod support;
+
 use std::fs;
 
 use aether_actor::{ActorRef, ChildOf, Instanced};
@@ -46,8 +48,25 @@ use aether_kit_widget::{
     BehaviorHostSpec, ButtonConfig, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, TextFieldConfig,
     Theme, VirtualListConfig, VirtualListRow, Widget, WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
+use aether_render::HeadlessRenderCapability;
+use support::widget_caps;
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
+
+/// A GPU-free bench with the component host and everything the widget module
+/// declares: the headless render stub, text (its fs from the sandbox roots) and
+/// the in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-set")))
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
 
 /// The `C` child the panel spawned under `subname`.
 fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
@@ -125,7 +144,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 220);
     let panel = load_panel(&mut harness, &wasm);
 
     // The first tick spawns the widget stack and assigns each child its frame;
@@ -198,7 +217,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 220);
     let panel = load_panel(&mut harness, &wasm);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
@@ -450,7 +469,7 @@ fn panel_stacks_declared_children_in_order() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 220);
     let panel = load_panel_with(&mut harness, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
     harness
@@ -492,7 +511,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 150).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 150);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![virtual_list_spec("inventory", read_only)]);
 
@@ -615,7 +634,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 140).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 140);
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
@@ -661,7 +680,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 100);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", read_only)]);
 
@@ -714,7 +733,7 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 100);
     let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", WidgetControlState::default())]);
 
     let choice_selections = |harness: &mut SubstrateHarness| -> (Vec<u32>, String) {
@@ -828,7 +847,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 90).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 90);
     let panel = load_panel_with(
         &mut harness,
         &wasm,
@@ -872,7 +891,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 80);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
 
@@ -926,7 +945,7 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 80);
     let panel = load_panel_with(
         &mut harness,
         &wasm,
@@ -979,7 +998,7 @@ fn pointer_focus_inherits_already_held_ctrl() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 80);
     let panel =
         load_panel_with(&mut harness, &wasm, vec![text_field_spec("field", "prior", WidgetControlState::default())]);
 
@@ -1023,7 +1042,7 @@ fn availability_focus_move_inherits_already_held_ctrl() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 80);
     let panel = load_panel_with(
         &mut harness,
         &wasm,
@@ -1127,7 +1146,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,
         &wasm,
@@ -1236,7 +1255,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,
         &wasm,
@@ -1338,7 +1357,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 320).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 320);
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
     let panel = load_panel_with(
@@ -1438,7 +1457,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    let mut harness = bench(240, 180);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(
         &mut harness,
@@ -1512,12 +1531,7 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder()
-        .size(240, 180)
-        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-set")))
-        .with_component_host()
-        .build()
-        .expect("boot");
+    let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,
         &wasm,

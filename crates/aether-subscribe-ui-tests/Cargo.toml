@@ -5,8 +5,10 @@ edition.workspace = true
 license.workspace = true
 publish = false
 
-# Compile-time contract for the `Publishes<K>` gate on the two subscribe
-# surfaces (`LifecycleCapability` stages, `WindowCapability` device events).
+# Compile-time contract for the bounds on the flat `ctx.subscribe::<P, K>()`
+# verb: `P: Publishes<K>` over the two publishers (`LifecycleCapability`
+# stages, `WindowCapability` device events), the subscriber's declared
+# dependency on `P`, and its silent handler row for `K`.
 # Deliberately its own package: trybuild promotes its host package's
 # dev-dependencies into each generated fixture project, and both cap crates
 # carry substrate harness dev-dependencies that would otherwise enter the
@@ -15,8 +17,8 @@ publish = false
 trybuild = "1"
 aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
-# Identity halves only (ADR-0122): the facade, its `Publishes` markers, and
-# the bound under test are all always-on, so the fixture never needs the
+# Identity halves only (ADR-0122): the `Publisher` / `Publishes` impls and
+# the bounds under test are all always-on, so the fixture never needs the
 # substrate-typed runtime half of either cap.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 aether-window = { path = "../aether-window", default-features = false }

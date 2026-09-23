@@ -1,0 +1,22 @@
+error[E0277]: a subscriber's handler for a published kind replies `Key`
+  --> tests/ui/rejects_subscribe_with_replying_handler.rs:19:9
+   |
+19 |     ctx.subscribe::<LifecycleCapability, Tick>();
+   |         ^^^^^^^^^ the trait `SilentRow` is not implemented for `Key`
+   |
+   = note: a published event has no one waiting for a reply; the handler must return `()` (ADR-0231 §8)
+help: the following other types implement trait `SilentRow`
+  --> $WORKSPACE/crates/aether-actor/src/model/contract.rs
+   |
+   | impl SilentRow for Silent {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^ `Silent`
+   | impl SilentRow for Undeclared {}
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Undeclared`
+note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/subscribe.rs
+   |
+   |     pub fn subscribe<P, K: Kind>(&mut self)
+   |            --------- required by a bound in this associated function
+...
+   |         <A as Contract<K>>::Reply: SilentRow,
+   |                                    ^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`

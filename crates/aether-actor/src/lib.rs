@@ -51,8 +51,8 @@ pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, DependencyResolver,
     DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
-    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publishes, Reaches, Replies, ReplyShape, Resolve, Root, SendableTo,
-    Silent, Singleton, Subname, Undeclared, root_mailbox, validate_namespace_segment,
+    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publisher, Publishes, Reaches, Replies, ReplyShape, Resolve, Root,
+    SendableTo, Silent, SilentRow, Singleton, Subname, Undeclared, root_mailbox, validate_namespace_segment,
 };
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};

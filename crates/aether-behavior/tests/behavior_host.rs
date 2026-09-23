@@ -14,9 +14,10 @@
 //! broadcast sink `count_observed` watches. Each phase reads the ring with a
 //! `since` cursor so one phase's entries never bleed into another's assertions.
 //!
-//! Minimal composition (issue #3764): the component host on the harness basics —
-//! every assertion reads the log ring, so no render cap (and no wgpu gate) is
-//! composed; the widgets' draw mail warn-drops harmlessly. Skipped when the
+//! Minimal composition (issue #3764): the component host on the harness basics,
+//! plus what the widget module declares wherever it loads — the headless render
+//! stub, text (its fs from the sandbox roots) and the in-memory clipboard. Every
+//! assertion reads the log ring, so there is no wgpu gate. Skipped when the
 //! `behavior`-feature widget wasm / the fixture script wasm has not been pre-built
 //! (the `require_wasm` gate). CI sets `AETHER_REQUIRE_RUNTIME=1` to turn the
 //! skip into a hard failure.
@@ -29,6 +30,7 @@
 use std::fs;
 
 use aether_actor::ActorRef;
+use aether_clipboard::{ClipboardCapability, ClipboardParams};
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -40,6 +42,8 @@ use aether_kit_widget::{
     BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, Widget,
     WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
+use aether_render::HeadlessRenderCapability;
+use aether_text::TextCapability;
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
 /// so the swap steps (S4/S5) drive the host without a dev-dependency on the
@@ -280,6 +284,9 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
 
     let mut harness = SubstrateHarness::builder()
         .namespace_roots(test_namespace_roots(init_save_sandbox("behavior-host")))
+        .with_actor::<HeadlessRenderCapability>(())
+        .with_actor::<TextCapability>(())
+        .with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
         .with_component_host()
         .build()
         .expect("boot");
@@ -372,6 +379,9 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
 
     let mut harness = SubstrateHarness::builder()
         .namespace_roots(test_namespace_roots(init_save_sandbox("behavior-host")))
+        .with_actor::<HeadlessRenderCapability>(())
+        .with_actor::<TextCapability>(())
+        .with_actor::<ClipboardCapability>(ClipboardParams::InMemory)
         .with_component_host()
         .build()
         .expect("boot");

@@ -19,13 +19,13 @@
 //! button under the pointer lights up without ever reading as its own surface.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{
     CachedFontMetrics, ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button,
 };
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 use alloc::format;
 use alloc::string::{String, ToString};
 
@@ -564,7 +564,7 @@ impl WidgetDefaults for NumericWidget {
 
 /// A numeric editor. Spawned inline by a panel root with a [`NumericConfig`];
 /// reports preview and committed [`NumericChanged`] events.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
 impl WasmActor for NumericWidget {
     type Config = NumericConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.numeric";
