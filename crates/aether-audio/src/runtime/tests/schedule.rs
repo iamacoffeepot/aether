@@ -9,7 +9,7 @@ use super::*;
 fn schedule_happy_path_replies_ok_and_queues_one_event() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -41,7 +41,7 @@ fn schedule_happy_path_replies_ok_and_queues_one_event() {
 fn schedule_empty_batch_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(&mut cap, &mut ctx, Schedule { events: vec![] });
     match result {
@@ -55,7 +55,7 @@ fn schedule_empty_batch_replies_err() {
 fn schedule_over_event_cap_rejects_atomically() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let events = (0..=SCHEDULE_MAX_EVENTS)
         .map(|_| ScheduledEvent {
@@ -75,7 +75,7 @@ fn schedule_over_event_cap_rejects_atomically() {
 fn schedule_over_horizon_rejects_atomically() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -108,7 +108,7 @@ fn schedule_over_horizon_rejects_atomically() {
 fn schedule_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_schedule(
         &mut cap,
@@ -135,7 +135,7 @@ fn schedule_on_nop_chassis_replies_err() {
 fn set_master_gain_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 0.5 });
     match result {
@@ -148,7 +148,7 @@ fn set_master_gain_on_nop_chassis_replies_err() {
 fn set_master_gain_clamps_over_range_input() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_set_master_gain(&mut cap, &mut ctx, SetMasterGain { gain: 1.5 });
     match result {
@@ -166,7 +166,7 @@ fn set_master_gain_clamps_over_range_input() {
 fn set_reverb_send_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 0.5 });
     match result {
@@ -179,7 +179,7 @@ fn set_reverb_send_on_nop_chassis_replies_err() {
 fn set_reverb_send_clamps_over_range_input() {
     let (mut cap, queue) = live_cap();
     let (mailer, _rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = load_ctx(&transport);
     let result = AudioCapability::on_set_reverb_send(&mut cap, &mut ctx, SetReverbSend { send: 1.5 });
     match result {

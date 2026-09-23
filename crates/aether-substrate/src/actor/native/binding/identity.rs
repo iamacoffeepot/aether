@@ -9,13 +9,19 @@ use crate::mail::MailboxId;
 /// needed by existing mailbox helpers and cannot spawn.
 pub(super) enum BindingIdentity {
     Typed(ActorRuntimeIdentity),
-    Untyped { mailbox: MailboxId, parent: Option<MailboxId>, carry: u64 },
+    #[cfg(any(test, feature = "test-support"))]
+    Untyped {
+        mailbox: MailboxId,
+        parent: Option<MailboxId>,
+        carry: u64,
+    },
 }
 
 impl BindingIdentity {
     pub(super) fn mailbox(&self) -> MailboxId {
         match self {
             Self::Typed(identity) => identity.mailbox(),
+            #[cfg(any(test, feature = "test-support"))]
             Self::Untyped { mailbox, .. } => *mailbox,
         }
     }
@@ -23,6 +29,7 @@ impl BindingIdentity {
     pub(super) fn carry(&self) -> u64 {
         match self {
             Self::Typed(identity) => identity.carry(),
+            #[cfg(any(test, feature = "test-support"))]
             Self::Untyped { carry, .. } => *carry,
         }
     }
@@ -30,13 +37,16 @@ impl BindingIdentity {
     pub(super) fn parent(&self) -> Option<MailboxId> {
         match self {
             Self::Typed(identity) => identity.parent(),
+            #[cfg(any(test, feature = "test-support"))]
             Self::Untyped { parent, .. } => *parent,
         }
     }
 
+    #[cfg_attr(not(any(test, feature = "test-support")), expect(clippy::unnecessary_wraps))] // aether-suppression-request: without test-support the untyped test identity is compiled out, so every arm answers `Some`
     pub(super) fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
         match self {
             Self::Typed(identity) => Some(identity),
+            #[cfg(any(test, feature = "test-support"))]
             Self::Untyped { .. } => None,
         }
     }

@@ -51,10 +51,10 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// builder shapes flow through the same [`crate::Spawner`].
     ///
     /// # Panics
-    /// Panics if the transport was constructed via
-    /// [`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test) (which doesn't wire a
-    /// spawner) — fail-fast per ADR-0063: production transports always
-    /// carry one, so handler code never reaches the panic.
+    /// Panics if the transport is a test binding such as
+    /// `testing::unrouted_binding` (which doesn't wire a spawner) —
+    /// fail-fast per ADR-0063: production transports always carry one, so
+    /// handler code never reaches the panic.
     pub fn spawn_child<'b, C>(
         &'b self,
         subname: Subname<'b>,

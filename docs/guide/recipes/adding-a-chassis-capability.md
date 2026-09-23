@@ -340,9 +340,12 @@ shims are wasm32-only and belong to *components*, not capabilities; a
 native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 `#[cfg(all(test, feature = "runtime"))] mod tests`:
 
-1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()` —
-   `test_mailer_and_rx()` gives a `Mailer` plus the `Receiver<EgressEvent>`
-   its outbound bubbles to.
+1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()`,
+   which wraps `aether_substrate::testing::unrouted_binding` over
+   `test_mailer_and_rx()`'s mailer — `test_mailer_and_rx()` gives a `Mailer`
+   plus the `Receiver<EgressEvent>` its outbound bubbles to. The test names
+   no mailbox id: the binding's own mailbox is never registered, so its
+   self-addressed mail bubbles to that receiver too.
 2. Construct fresh state (`TextCapabilityState::new()`) and a `NativeCtx`
    over the binding, then call the handler directly:
    `TextCapability::on_load_font(&mut state, &mut ctx, LoadFont { … })`.

@@ -36,7 +36,7 @@ fn settlement_substrate() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>, MailboxI
 fn play_track_deferred_reply_settles_caller_chain() {
     let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let (mut cap, _queue) = live_cap();
     let root = MailId::new(MailboxId(0xC0), 1);
     let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 1);
@@ -88,7 +88,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
 fn load_instrument_deferred_reply_settles_caller_chain() {
     let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let (mut cap, _queue) = live_cap();
     let root = MailId::new(MailboxId(0xC0), 3);
     let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 3);

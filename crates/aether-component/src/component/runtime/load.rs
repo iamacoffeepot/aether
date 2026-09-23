@@ -782,7 +782,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, unrouted_binding};
     use wasmtime::{Engine, Linker};
 
     use super::*;
@@ -814,7 +814,7 @@ mod tests {
     }
 
     fn binding(state: &ComponentHostCapabilityState) -> Arc<NativeBinding> {
-        Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0xC065)))
+        unrouted_binding(&state.mailer)
     }
 
     /// Register a test-local inbox under `name` and prove it the way a drop or

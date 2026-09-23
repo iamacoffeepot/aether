@@ -41,8 +41,8 @@ impl NativeBinding {
     /// item rather than routed per mail, so a fan-out of N costs one
     /// deque push + an inline demux instead of N pushes + up to N
     /// parked-worker wakeups.
-    /// A binding with no `Spawner` (test transports built via
-    /// [`Self::new_for_test`]) keeps the eager per-mail route.
+    /// A binding with no `Spawner` (a test transport such as the
+    /// `testing::unrouted_binding` fixture) keeps the eager per-mail route.
     ///
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per

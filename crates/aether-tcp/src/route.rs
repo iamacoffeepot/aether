@@ -250,9 +250,6 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
 
 #[cfg(test)]
 mod tests {
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use std::sync::Arc;
-
     use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry;
     use aether_actor::{Addressable, Erased, Manual, WasmCtx};
@@ -260,9 +257,9 @@ mod tests {
     use aether_data::{MailId, Source};
     use aether_data::{MailboxId, mailbox_id_from_path};
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::actor::native::{NativeBinding, NativeCtx};
+    use aether_substrate::actor::native::NativeCtx;
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::testing::bare_substrate;
+    use aether_substrate::testing::{bare_substrate, unrouted_binding};
 
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     use super::TcpNativeExt;
@@ -331,7 +328,7 @@ mod tests {
     #[test]
     fn native_facade_resolves_each_canonical_tcp_lineage() {
         let (_, mailer) = bare_substrate();
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x4055)));
+        let binding = unrouted_binding(&mailer);
         let ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let capability = ctx.actor::<TcpCapability>();
 
