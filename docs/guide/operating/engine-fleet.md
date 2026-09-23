@@ -190,9 +190,22 @@ failure's `detail` — the same string on the spawn `Err` and the matching
 `spawn_failed` ring entry — names the stage, the binary content hash, and a
 path-free IO category (`ErrorKind` and an OS error code when the host supplies
 one). It does not include the realized executable path, the store source, the
-fleet scratch root, or the application-name filename. Pre-allocation,
-proxy-connect, and other errors are unchanged; those two `prepare_fork` stages
-are the sanitized surface, not every fleet error.
+fleet scratch root, or the application-name filename.
+
+A substrate that exits during startup — an unknown flag, a boot error —
+reports `the spawned substrate exited during startup (exit code N)` followed by
+`; stderr:` and at most 2 KiB of the end of what the child wrote to stderr, such
+as clap's usage error. A proxy that fails to connect for any other reason keeps
+its proxy error and gains the same stderr suffix when the child wrote anything.
+In that tail the realized executable path and the fleet scratch root are
+redacted to `<substrate>` and `<fleet-store>`, and terminal colors are stripped.
+The tail can still name the application name the caller passed, since clap
+prints it in its usage line, and it can carry any other host path the child
+itself chose to print. Pre-allocation errors are unchanged.
+
+A live engine's stderr still streams to the hub's log as the engine writes it;
+only a failed spawn's detail carries a copy of the end of it. Stdout stays
+inherited by the hub.
 
 ## Restarts and persistence
 
@@ -233,7 +246,10 @@ Fleet operations do not share one universal timeout:
 
 - Proxy startup dialing has a hub configuration budget; a zero configuration
   is explicitly the wait-forever sentinel.
-- A stolen startup port can trigger a bounded refork on a fresh port.
+- Only a startup exit with exit code 1, which is how a chassis reports a
+  failed RPC bind such as a stolen startup port, is reforked on a fresh port,
+  within a bounded number of attempts. A usage error (exit code 2), a clean
+  exit, a panic, or a signal is reported on the first attempt.
 - Boot-component readiness has its own finite polling budget.
 - Ordinary hub RPC calls such as list and terminate do not gain the
   `send_mail` settlement timeout merely because they are MCP tools.

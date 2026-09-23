@@ -44,23 +44,23 @@ pub enum ProxyConnectError {
     /// handshake / frame error). Genuinely unreachable — not
     /// re-forkable.
     Dial(RpcClientError),
-    /// The forked child substrate exited before the proxy could
-    /// connect — the bind-stolen-port death (`free_local_port`'s
-    /// TOCTOU window let another socket take the ephemeral port, so
-    /// the substrate's fatal bind exited it). Distinct from
-    /// [`Self::Dial`] so `on_spawn` re-forks on a fresh port rather
-    /// than dialing a dead port for the full budget. `status` is the
-    /// child's exit status when `try_wait` captured it.
-    ChildExited { status: Option<ExitStatus> },
+    /// The forked child substrate exited before the dial connected, with
+    /// `status` as `try_wait` captured it. Any early exit lands here — a
+    /// usage error at argv parse, a panic, a signal, and the
+    /// bind-stolen-port death (`free_local_port`'s TOCTOU window let
+    /// another socket take the ephemeral port, so the substrate's fatal
+    /// bind exited it). Distinct from [`Self::Dial`] so the dial stops at
+    /// once rather than dialing a dead port for the full budget; which of
+    /// these exits `on_spawn` re-forks is [`is_reforkable_spawn_failure`]'s
+    /// call, made from the exit code.
+    ChildExited { status: ExitStatus },
 }
 
 impl fmt::Display for ProxyConnectError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Dial(e) => write!(f, "{e}"),
-            Self::ChildExited { status } => {
-                write!(f, "substrate exited during startup (status: {status:?})")
-            }
+            Self::ChildExited { status } => write!(f, "substrate exited during startup ({})", describe_exit(*status)),
         }
     }
 }
@@ -86,10 +86,11 @@ impl StdError for ProxyConnectError {
 ///
 /// `child` is the forked substrate's handle (when the cap spawned it).
 /// Each retry iteration `try_wait`s it: a child that has already
-/// exited (the bind-stolen-port death) returns a terminal
-/// [`ProxyConnectError::ChildExited`] immediately rather than dialing
-/// a dead port for the full budget, so the cap can re-fork on a fresh
-/// port. `None` for an adopted substrate (no child to watch).
+/// exited (a usage error, or the bind-stolen-port death) returns a
+/// terminal [`ProxyConnectError::ChildExited`] immediately rather than
+/// dialing a dead port for the full budget, so the cap can report the
+/// exit or re-fork on a fresh port. `None` for an adopted substrate (no
+/// child to watch).
 pub fn connect_proxy(
     addr: &str,
     on_frame: impl Fn() + Clone + Send + 'static,
@@ -144,15 +145,15 @@ pub fn connect_proxy(
             }
             Err(e) => {
                 // If we own the child and it has already exited, the
-                // substrate died during startup (e.g. a stolen RPC
-                // port made its bind fatal). Stop dialing a dead port
-                // and return a terminal child-exited outcome the cap
-                // can re-fork on — this converts a full-budget hang
-                // into a sub-second failure.
+                // substrate died during startup (e.g. a bad flag, or a
+                // stolen RPC port made its bind fatal). Stop dialing a
+                // dead port and return a terminal child-exited outcome
+                // the cap classifies by exit code — this converts a
+                // full-budget hang into a sub-second failure.
                 if let Some(child) = child.as_deref_mut()
                     && let Ok(Some(status)) = child.try_wait()
                 {
-                    return Err(ProxyConnectError::ChildExited { status: Some(status) });
+                    return Err(ProxyConnectError::ChildExited { status });
                 }
                 let within_budget = deadline.is_none_or(|d| Instant::now() < d);
                 if retry && is_transient_connect_error(&e) && within_budget {
@@ -165,18 +166,47 @@ pub fn connect_proxy(
     }
 }
 
-/// `true` when a failed `spawn_child::<FleetProxy>` is the re-forkable
-/// child-exited-during-startup death — a stolen RPC port made the
-/// substrate's bind fatal, surfaced through `SpawnError::InitFailed` →
-/// `BootError::Other` → a boxed `ProxyConnectError::ChildExited`.
-/// The engines cap re-forks on a fresh port for this; any other
-/// failure is terminal.
+/// The exit code a chassis leaves with when its RPC bind fails.
+///
+/// A stolen RPC port leaves the substrate by exactly one route:
+/// `RpcServerCapability::init` (`RpcBind::Boot`), or the Bloomery's
+/// `RpcBindGate::open` in `build_mounted`, returns a `BootError`; that
+/// propagates out of `C::build`, out of `run_chassis_main`, and out of the
+/// binary's `fn main() -> anyhow::Result<()>`, whose `Err` std turns into
+/// `ExitCode::FAILURE` — 1. A clap usage error exits 2, `--help`,
+/// `--describe` and `--print-config` exit 0, a panic exits 101, and a
+/// signal death has no code at all. Other deterministic boot errors (an
+/// unparseable config value, an unreadable boot manifest) share the 1.
+const BIND_FAILURE_EXIT_CODE: i32 = 1;
+
+/// A child's exit status in words: `exit code N`, or the platform's own
+/// rendering for a death that carries no code (a signal).
+pub fn describe_exit(status: ExitStatus) -> String {
+    status.code().map_or_else(|| status.to_string(), |code| format!("exit code {code}"))
+}
+
+/// The child's exit status when a failed `spawn_child::<FleetProxy>` is a
+/// substrate that exited during startup — surfaced through
+/// `SpawnError::InitFailed` → `BootError::Other` → a boxed
+/// [`ProxyConnectError::ChildExited`]. `None` for any other failure.
+pub fn startup_exit_status(err: &SpawnError) -> Option<ExitStatus> {
+    let SpawnError::InitFailed(BootError::Other(boxed)) = err else {
+        return None;
+    };
+    let Some(ProxyConnectError::ChildExited { status }) = boxed.downcast_ref::<ProxyConnectError>() else {
+        return None;
+    };
+    Some(*status)
+}
+
+/// `true` when a failed `spawn_child::<FleetProxy>` is a startup exit with
+/// [`BIND_FAILURE_EXIT_CODE`] — the exit a stolen RPC port produces, which
+/// a re-fork on a fresh port escapes (issue 2422). Any other startup exit
+/// (a usage error, a clean exit, a panic, a signal) dies the same way on
+/// every port, so it is terminal, as is every non-exit failure.
 #[must_use]
 pub fn is_reforkable_spawn_failure(err: &SpawnError) -> bool {
-    let SpawnError::InitFailed(BootError::Other(boxed)) = err else {
-        return false;
-    };
-    matches!(boxed.downcast_ref::<ProxyConnectError>(), Some(ProxyConnectError::ChildExited { .. }))
+    startup_exit_status(err).is_some_and(|status| status.code() == Some(BIND_FAILURE_EXIT_CODE))
 }
 
 /// `true` for the connection-level errors a still-coming-up

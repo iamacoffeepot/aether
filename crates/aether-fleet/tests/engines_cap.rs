@@ -817,6 +817,107 @@ mod tests {
         drop(chassis);
         let _ = fs::remove_dir_all(&dir);
     }
+
+    /// The id-bearing detail of a failed spawn, after checking that the
+    /// ring holds exactly one row — a `SpawnFailed` for that id carrying
+    /// the same detail. The attempts a re-fork abandoned record nothing.
+    fn sole_spawn_failure(spawn: SpawnEngineResult, list: &ListEnginesResult) -> (String, String) {
+        let (engine_id, error) = match spawn {
+            SpawnEngineResult::Err { engine_id: Some(id), error } => (id, error),
+            other => panic!("expected an id-bearing spawn Err, got {other:?}"),
+        };
+        assert!(list.engines.is_empty(), "a failed spawn must not register a live engine: {list:?}");
+        assert_eq!(list.recently_died.len(), 1, "only the terminal attempt leaves a death record: {list:?}");
+        assert_eq!(list.recently_died[0].engine_id, engine_id, "the death record carries the reply's id: {list:?}");
+        match &list.recently_died[0].reason {
+            DeathReason::SpawnFailed { detail } => {
+                assert_eq!(detail, &error, "the ring must carry the same detail as the spawn Err");
+            }
+            other => panic!("a failed spawn must be recorded as SpawnFailed, got {other:?}"),
+        }
+        (engine_id, error)
+    }
+
+    /// A substrate that dies at argv parse is reported on the first
+    /// attempt with clap's own explanation. Before, every startup exit
+    /// read as the stolen-port death: the cap re-forked the bad flag
+    /// through the whole budget (the reply carried the third id), and the
+    /// detail was a bare wait status because the child's stderr went to
+    /// the hub log. A capture whose tail is never collected, or one that
+    /// hands a tail to the wrong attempt, fails the same assertions.
+    #[test]
+    fn a_parse_time_exit_reports_the_usage_error_and_is_not_reforked() {
+        let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = env::temp_dir().join(format!("aether-engcap-badflag-{}-{nanos}", process::id()));
+        let config = FleetConfig {
+            proxy_spawn_attempts: 3,
+            ..bootstrap_store_config(&dir.join("store"), &dir.join("engines"), &headless)
+        };
+        let (_registry, chassis, mailer, cells) = boot(config);
+
+        let spawn = drive(
+            &mailer,
+            &SpawnEngine { selector: default_selector(), args: vec!["--no-such-flag".into()], boot_manifest: None },
+            Duration::from_secs(30),
+            || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
+        );
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        let (engine_id, error) = sole_spawn_failure(spawn, &list);
+
+        assert_eq!(engine_id, Uuid::from_u128(1).to_string(), "a usage error is not re-forked: {error}");
+        assert!(error.contains("exit code 2"), "the detail names clap's usage exit: {error}");
+        assert!(error.contains("--no-such-flag"), "the detail carries clap's own explanation: {error}");
+
+        drop(chassis);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// The exit a failed RPC bind produces — exit code 1 — is still
+    /// re-forked through the whole budget (issue 2422), and the stderr it
+    /// leaves in the detail is free of host paths. The stand-in names its
+    /// own realized path through `$0`, under a root carrying the sentinel
+    /// and a file named for the sentinel app name, so a classification
+    /// that makes every exit terminal, a leaked executable path
+    /// (ADR-0115), or redactions applied root-first all fail here.
+    #[cfg(unix)]
+    #[test]
+    fn a_bind_failure_exit_is_still_reforked_and_its_stderr_is_path_free() {
+        let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir =
+            env::temp_dir().join(format!("aether-engcap-bindexit-{SENTINEL_HOST_PATH}-{}-{nanos}", process::id()));
+        let store_dir = dir.join("store");
+        let hash = write_inert_binary_store(
+            &store_dir,
+            b"#!/bin/sh\necho \"fatal: could not bind the RPC port (running as $0)\" >&2\nexit 1\n",
+        );
+        let config = FleetConfig { proxy_spawn_attempts: 3, ..inert_store_config(&store_dir, &dir.join("engines")) };
+        let (_registry, chassis, mailer, cells) = boot(config);
+
+        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(30), || {
+            cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
+        });
+        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+            cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
+        });
+        let (engine_id, error) = sole_spawn_failure(spawn, &list);
+
+        assert_eq!(engine_id, Uuid::from_u128(3).to_string(), "a bind-failure exit spends the whole budget: {error}");
+        assert!(error.contains("exit code 1"), "the detail names the bind-failure exit: {error}");
+        assert!(
+            error.contains("fatal: could not bind the RPC port (running as <substrate>)"),
+            "the detail carries the child's stderr with its path redacted: {error}",
+        );
+        let dir_text = dir.to_string_lossy();
+        assert!(!error.contains(dir_text.as_ref()), "detail must not leak the temp root: {error}");
+        assert!(!error.contains(SENTINEL_HOST_PATH), "detail must not leak the sentinel path component: {error}");
+        assert!(!error.contains(SENTINEL_BASENAME), "detail must not leak the app-name filename: {error}");
+
+        drop(chassis);
+        let _ = fs::remove_dir_all(&dir);
+    }
 }
 
 /// Live restart-supervision coverage (the `restart_on_crash` path).
