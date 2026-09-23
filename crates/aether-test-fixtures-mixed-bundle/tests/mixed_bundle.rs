@@ -3,18 +3,17 @@
 use std::error::Error;
 use std::fs;
 
-use aether_actor::Addressable;
+use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, CallProgram, ClosureArtifact, Digest, EncodedArtifact, Evaluated, Event, Head, HeadMoved, Invoke,
     Invoked, JournalEntry, OpaqueBytes, PROGRAMS_SECTION, ProgramName, REACTORS_SECTION, Ref, Status, StatusQuery,
     Tree, Utf8Text, Warm, WarmEntries, Warmed, artifact_digest, reactor_declarations,
 };
 use aether_bloomery_program::declarations;
-use aether_component::ComponentHostCapability;
-use aether_data::{Cites, Kind, Storage, StorageData};
+use aether_data::{ActorPath, Cites, Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{MIXED_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 use wasmparser::{Parser, Payload};
 
@@ -50,30 +49,19 @@ fn section_bytes(wasm: &[u8], name: &str) -> Vec<u8> {
     section
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(digest.to_owned()),
-                    config: Vec::new(),
-                    export: Some(BUNDLE_NAMESPACE.to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("load_component({digest}): {error}"),
-    }
+fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> (ErasedActorRef, ActorPath) {
+    let loaded = harness.load_any(&LoadComponent {
+        wasm,
+        name: Some(digest.to_owned()),
+        config: Vec::new(),
+        export: Some(BUNDLE_NAMESPACE.to_owned()),
+    });
+    loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}"))
 }
 
-fn reply<K: Kind>(harness: &mut SubstrateHarness, address: &str, mail: &impl Kind, label: &str) -> K {
+fn reply<K: Kind>(harness: &mut SubstrateHarness, root: ErasedActorRef, mail: &impl Kind, label: &str) -> K {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply(address, mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(root, mail))])
         .unwrap_or_else(|error| panic!("{label}: {error}"))
         .reply::<K>(label)
         .unwrap_or_else(|error| panic!("decode {label}: {error}"))
@@ -96,8 +84,8 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
     assert_eq!(reactors[0].name().as_str(), "test.bloomery.mixed.caller");
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let root = load_root(&mut harness, wasm, &digest);
-    assert_eq!(root, format!("aether.component/aether.embedded:{digest}"));
+    let (root, path) = load_root(&mut harness, wasm, &digest);
+    assert_eq!(path.to_string(), format!("aether.component/aether.embedded:{digest}"));
 
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec());
     let input = SummarizeInput { text: Ref::of_text("hello") };
@@ -108,20 +96,20 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         input_artifact.digest(),
         vec![text_artifact, input_artifact],
     );
-    match reply::<Invoked>(&mut harness, &root, &invoke, "invoke-one") {
+    match reply::<Invoked>(&mut harness, root, &invoke, "invoke-one") {
         Invoked::Completed { seq: 1, .. } => {}
         other => panic!("expected Completed seq 1, got {other:?}"),
     }
 
     let tree = Ref::<Tree>::from_digest(Digest::from_bytes([2; 32]));
     let warmup = Warm::new(WarmEntries::new(vec![moved_to(1, "current", tree)]).expect("dense"));
-    match reply::<Warmed>(&mut harness, &root, &warmup, "warm") {
+    match reply::<Warmed>(&mut harness, root, &warmup, "warm") {
         Warmed::Folded { through: 1 } => {}
         other => panic!("expected Folded through 1, got {other:?}"),
     }
 
     let moved = moved_to(2, "inputs", Ref::<SummarizeInput>::from_digest(Digest::from_bytes([7; 32])));
-    match reply::<Evaluated>(&mut harness, &root, &Event::new(moved), "event") {
+    match reply::<Evaluated>(&mut harness, root, &Event::new(moved), "event") {
         Evaluated::Completed { seq: 2, intents } => {
             assert_eq!(intents.len(), 1);
             let intent = &intents[0];
@@ -138,7 +126,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         other => panic!("{other:?}"),
     }
 
-    assert_eq!(reply::<Status>(&mut harness, &root, &StatusQuery, "status"), Status::new(2, false));
+    assert_eq!(reply::<Status>(&mut harness, root, &StatusQuery, "status"), Status::new(2, false));
 
     let second_artifact = closure_of(&input)?;
     let second = Invoke::new(
@@ -147,7 +135,7 @@ fn one_load_answers_program_and_reactor_mail() -> Result<(), Box<dyn Error>> {
         second_artifact.digest(),
         vec![ClosureArtifact::new(Utf8Text::ID, b"hello".to_vec()), second_artifact],
     );
-    match reply::<Invoked>(&mut harness, &root, &second, "invoke-two") {
+    match reply::<Invoked>(&mut harness, root, &second, "invoke-two") {
         Invoked::Completed { seq: 2, .. } => {}
         other => panic!("expected Completed seq 2, got {other:?}"),
     }

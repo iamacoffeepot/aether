@@ -37,7 +37,7 @@ impl aether_actor::Addressable for TickSource {
 impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl aether_actor::Lifecycle<Self> for TickSource {
-    /// `(entry, burst)`: relay 0's proof — the one
+    /// `(entry, burst)`: relay 0's proof — the first of those
     /// [`spawn_relays`](super::spawn_relays) returns — and the number of
     /// `Ping`s to emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
     type Config = (ActorRef<Relay>, u32);

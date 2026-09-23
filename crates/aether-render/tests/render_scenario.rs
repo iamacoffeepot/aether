@@ -41,6 +41,8 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
+use aether_component::ComponentHostCapability;
+use aether_data::ActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
@@ -57,6 +59,7 @@ use aether_kinds::{
 };
 use aether_math::{Rgb, Rgba};
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawMaterialCoverage, DrawMaterialTextured,
     DrawScreenTriangles, DrawShapes, DrawTexturedQuads, DrawTriangle, MaterialCoverageRect, MaterialRect,
@@ -76,16 +79,6 @@ use aether_test_fixtures_kinds as _;
 
 /// Caller-supplied component name passed to `LoadComponent`.
 const PROBE_NAME: &str = "probe";
-/// Full trampoline address the substrate registers under post-issue-634
-/// Phase 4. Mail destined for the loaded probe goes here, not to the
-/// bare `PROBE_NAME` (which isn't a registered mailbox). Built from
-/// The `/`-rendered lineage a loaded component registers at (ADR-0099
-/// §4): the component host `aether.component` `/`-joined to the
-/// trampoline node — exactly what `LoadResult.path` reports.
-fn probe_address() -> String {
-    use aether_actor::Addressable;
-    format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
-}
 
 /// Mirrors `ArtifactGuard`'s private root resolution (`CARGO_MANIFEST_DIR`
 /// two levels up to the workspace root, `CARGO_TARGET_DIR` override if
@@ -109,22 +102,14 @@ fn artifact_dir(id: &str) -> PathBuf {
 /// issue 638 phase 3) served as a single FIFO point for both load and
 /// advance; Phase 4 split advance onto `aether.substrate_harness`, so load is
 /// no longer naturally ordered ahead of advance — `SendAndAwaitReply`
-/// blocks on `LoadResult` before returning.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
+/// blocks on `LoadResult` before returning. Returns the lineage path the
+/// probe registered at — the path a capture bundle's `NamedMail` carries.
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component: {error}"),
-    }
+    harness
+        .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component: {error}"))
+        .1
 }
 
 /// Load the `cube` fixture into the harness, blocking on `LoadResult`
@@ -137,7 +122,7 @@ fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     name: Some("test.cube".to_owned()),
@@ -207,7 +192,7 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     };
     let mut harness =
         SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path).to_string();
 
     // Capture's frame runs without a dispatched tick, so the probe
     // won't auto-tick during the captured frame. The pre-mail bundle
@@ -216,11 +201,9 @@ fn capture_frame_round_trip_runs_pre_and_after_mails() {
     // to emit a `DrawTriangle` into the frame buffer right before the
     // GPU readback. The after-mail bundle flips render back to
     // invisible after the readback.
-    let pre = vec![
-        envelope(&probe_address(), &SetRender { r: 200, g: 32, b: 32, visible: 1 }),
-        envelope(&probe_address(), &Tick::default()),
-    ];
-    let after = vec![envelope(&probe_address(), &SetRender { r: 0, g: 0, b: 0, visible: 0 })];
+    let pre =
+        vec![envelope(&probe, &SetRender { r: 200, g: 32, b: 32, visible: 1 }), envelope(&probe, &Tick::default())];
+    let after = vec![envelope(&probe, &SetRender { r: 0, g: 0, b: 0, visible: 0 })];
 
     // Priming advance subscribes the probe to ticks; the
     // capture-with-mails op then dispatches the pre bundle, reads
@@ -395,7 +378,7 @@ fn textured_quad_draws_screen_space_rect() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(texture_width, texture_height, TextureFormat::Rgba8, pixels),
             ),
         )])
@@ -479,7 +462,7 @@ fn create_observation_texture(harness: &mut SubstrateHarness) -> u32 {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(1, 1, TextureFormat::Rgba8, vec![255, 255, 255, 255]),
             ),
         )])
@@ -746,7 +729,7 @@ fn target_color_stats_distinguishes_quadrant_colors_on_real_capture() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(texture_size, texture_size, TextureFormat::Rgba8, pixels),
             ),
         )])
@@ -829,7 +812,7 @@ fn destroyed_texture_draw_drops_from_frame() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(texture_width, texture_height, TextureFormat::Rgba8, pixels),
             ),
         )])
@@ -873,7 +856,10 @@ fn destroyed_texture_draw_drops_from_frame() {
 
     let destroyed = harness
         .execute(vec![
-            ("destroy", HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id })),
+            (
+                "destroy",
+                HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &DestroyTexture { texture_id }),
+            ),
             ("advance", HarnessOp::advance(1)),
             ("snap2", HarnessOp::capture_with_mails(vec![draw()], vec![])),
         ])
@@ -911,7 +897,7 @@ fn r8_texture_updates_and_draws_red_channel_only() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(texture_width, texture_height, TextureFormat::R8, pixels.clone()),
             ),
         )])
@@ -996,7 +982,10 @@ fn coverage_material_renders_body_rim_and_outside_bands() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(8, 4, TextureFormat::R8, pixels)),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<RenderCapability>(),
+                &sampled_linear(8, 4, TextureFormat::R8, pixels),
+            ),
         )])
         .expect("create coverage texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1057,7 +1046,10 @@ fn textured_material_depth_tests_against_main_geometry() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(1, 1, TextureFormat::Rgba8, pixels)),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<RenderCapability>(),
+                &sampled_linear(1, 1, TextureFormat::Rgba8, pixels),
+            ),
         )])
         .expect("create textured material texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1126,7 +1118,10 @@ fn textured_material_rect_extends_along_its_basis() {
     let created = harness
         .execute(vec![(
             "create",
-            HarnessOp::send_and_await_reply("aether.render", &sampled_linear(1, 1, TextureFormat::Rgba8, pixels)),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<RenderCapability>(),
+                &sampled_linear(1, 1, TextureFormat::Rgba8, pixels),
+            ),
         )])
         .expect("create oriented material texture");
     let texture_id = match created.reply::<CreateTextureResult>("create").expect("decode CreateTextureResult") {
@@ -1183,7 +1178,7 @@ fn coverage_material_warn_drops_non_r8_texture() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(2, 2, TextureFormat::Rgba8, vec![255u8; 16]),
             ),
         )])
@@ -1293,7 +1288,7 @@ fn textured_quad_clip_bounds_pixels() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(1, 1, TextureFormat::Rgba8, vec![255, 255, 255, 255]),
             ),
         )])
@@ -1494,7 +1489,7 @@ fn capture_frame_checks_return_substrate_verdict() {
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![draw],
@@ -1596,7 +1591,7 @@ fn capture_frame_similarity_resolves_reference_from_configured_assets_root() {
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![],
@@ -1672,7 +1667,7 @@ fn capture_frame_region_scopes_reduction_to_one_widget_rect() {
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![draw],
@@ -1801,7 +1796,7 @@ fn artifact_guard_persists_actual_mask_and_measurements_on_panic() {
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![draw],
@@ -1952,7 +1947,7 @@ fn writable_texture_realizes_cleared_and_samples_transparent() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CreateTexture {
                     width: 8,
                     height: 8,
@@ -2072,7 +2067,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
             (
                 "create_sampled",
                 HarnessOp::send_and_await_reply(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &CreateTexture {
                         width: 2,
                         height: 2,
@@ -2086,7 +2081,7 @@ fn r32float_textures_realize_and_drop_from_color_passes() {
             (
                 "create_writable",
                 HarnessOp::send_and_await_reply(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &CreateTexture {
                         width: 4,
                         height: 4,
@@ -2196,8 +2191,20 @@ fn nearest_sampling_preserves_label_texel_identity() {
     };
     let created = harness
         .execute(vec![
-            ("create_nearest", HarnessOp::send_and_await_reply("aether.render", &create(TextureSampling::Nearest))),
-            ("create_linear", HarnessOp::send_and_await_reply("aether.render", &create(TextureSampling::Linear))),
+            (
+                "create_nearest",
+                HarnessOp::send_and_await_reply(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &create(TextureSampling::Nearest),
+                ),
+            ),
+            (
+                "create_linear",
+                HarnessOp::send_and_await_reply(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &create(TextureSampling::Linear),
+                ),
+            ),
         ])
         .expect("create label textures");
     let texture_id_for = |label: &str, reply: CreateTextureResult| match reply {
@@ -2305,7 +2312,7 @@ fn flat_texture(harness: &mut SubstrateHarness, label: &'static str, texel: [u8;
         .execute(vec![(
             label,
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &sampled_linear(8, 8, TextureFormat::Rgba8, texel.repeat(64)),
             ),
         )])

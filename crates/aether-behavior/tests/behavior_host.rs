@@ -28,18 +28,17 @@
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::ActorRef;
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
-use aether_kinds::{
-    Key, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId,
-};
+use aether_kinds::{Key, LoadComponent, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId};
+use aether_kit_widget::set::RadioGroupWidget;
 use aether_kit_widget::{
-    BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, WidgetChildSpec,
-    WidgetControlState, WidgetKind,
+    BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, Widget,
+    WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
@@ -73,22 +72,26 @@ const CAP: f32 = 20.0;
 const EPS: f32 = 0.5;
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
-/// The full trampoline address the loaded panel registers at (ADR-0099 §4).
-fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+fn key(name: &str) -> LoadName {
+    LoadName::new(name).expect("a valid instance key")
 }
 
-/// The host's registered inline-child lineage address: the panel's address,
-/// then the trampoline scope and the slot subname (the `host_fns` `alias_name`
-/// fold). Sending `SetScript` here swaps the script and gets the reply.
-fn host_address() -> String {
-    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, SLOT)
+/// The behavior host's inline child beneath the panel, keyed by the slot
+/// subname. Sending `SetScript` here swaps the script and gets the reply.
+///
+/// `BehaviorHost` is behind this crate's `host` feature, which the gate
+/// deliberately leaves out of the build, so the slot is looked up as the
+/// composable widget it stands in for: an embedded instanced child keyed
+/// beneath the panel, whose position the key alone determines. Its mail is
+/// sent erased.
+fn behavior_host(harness: &SubstrateHarness, panel: ActorRef<WidgetPanel>) -> ActorRef<Widget> {
+    harness.child::<WidgetPanel, Widget>(&panel, key(SLOT)).expect("the behavior host slot is live")
 }
 
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
 /// over `0..=255`, its initial script inline. The host spawns the wrapped
 /// slider in `wire`, so the first tick brings the whole slot up.
-fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script: Vec<u8>) {
+fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script: Vec<u8>) -> ActorRef<WidgetPanel> {
     let wrapped_config = SliderConfig {
         min: 0.0,
         max: 255.0,
@@ -109,13 +112,13 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
             fuel_per_call: 0,
             disable_after_traps: 0,
         },
-    );
+    )
 }
 
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a
 /// three-option radio, no script, and zero fuel/trap knobs (the host's real
 /// defaults). The host spawns the wrapped radio in `wire`.
-fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
+fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) -> ActorRef<WidgetPanel> {
     let wrapped_config = RadioConfig {
         options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
         initial: 0,
@@ -134,10 +137,14 @@ fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) {
             fuel_per_call: 0,
             disable_after_traps: 0,
         },
-    );
+    )
 }
 
-fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], host_spec: &BehaviorHostSpec) {
+fn load_panel_with_host_spec(
+    harness: &mut SubstrateHarness,
+    kit_wasm: &[u8],
+    host_spec: &BehaviorHostSpec,
+) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -155,26 +162,16 @@ fn load_panel_with_host_spec(harness: &mut SubstrateHarness, kit_wasm: &[u8], ho
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: kit_wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: kit_wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
 /// A left mouse-button press at `(x, y)`.
@@ -192,18 +189,22 @@ fn release(x: f32, y: f32) -> MouseButtonRelease {
 /// `0..=255` slider commits a raw value well above `CAP`, so a working
 /// interpose clamps it. Each drag rides its own `execute` call, so the labels
 /// need only be unique within the batch.
-fn drag(panel: &str) -> Vec<(&'static str, HarnessOp)> {
+fn drag(panel: ActorRef<WidgetPanel>) -> Vec<(&'static str, HarnessOp)> {
     vec![
-        ("press", HarnessOp::send_and_settle(panel, &press(110.0, 22.0))),
-        ("move", HarnessOp::send_and_settle(panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
-        ("release", HarnessOp::send_and_settle(panel, &release(200.0, 22.0))),
+        ("press", HarnessOp::send_and_settle(&panel, &press(110.0, 22.0))),
+        ("move", HarnessOp::send_and_settle(&panel, &MouseMove { window: TEST_WINDOW_ID, x: 200.0, y: 22.0 })),
+        ("release", HarnessOp::send_and_settle(&panel, &release(200.0, 22.0))),
     ]
 }
 
 /// Read the panel's log ring from `since`, returning the new messages plus the
 /// next cursor so a later phase reads only its own entries.
-fn read_panel_log(harness: &mut SubstrateHarness, since: Option<u64>) -> (Vec<String>, u64) {
-    match harness.log_tail(&panel_address(), since, None) {
+fn read_panel_log(
+    harness: &mut SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    since: Option<u64>,
+) -> (Vec<String>, u64) {
+    match harness.log_tail(panel.erase(), since, None) {
         LogTailResult::Ok { entries, next_since, .. } => (entries.into_iter().map(|e| e.message).collect(), next_since),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -240,10 +241,10 @@ fn emitted_counts(messages: &[String]) -> Vec<u32> {
 
 /// Swap the running script for `bytes` via `aether.behavior.set_script`,
 /// asserting the host replies `LoadScriptResult::Ok`.
-fn swap_script(harness: &mut SubstrateHarness, label: &str, bytes: Vec<u8>) {
-    let host = host_address();
+fn swap_script(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>, label: &str, bytes: Vec<u8>) {
+    let host = behavior_host(harness, panel);
     let swapped = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply(&host, &SetScript { bytes }))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(host.erase(), &SetScript { bytes }))])
         .unwrap_or_else(|error| panic!("{label} swap: {error:?}"));
     match swapped.reply::<LoadScriptResult>(label).expect("decode LoadScriptResult") {
         LoadScriptResult::Ok { .. } => {}
@@ -278,15 +279,14 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
     let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
-    load_panel_with_host(&mut harness, &kit_wasm, intercept);
-    let panel = panel_address();
+    let panel = load_panel_with_host(&mut harness, &kit_wasm, intercept);
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
     // Then S1/S2/S3: one drag through the `intercept_slider` script.
     let mut ops = vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))];
-    ops.extend(drag(&panel));
+    ops.extend(drag(panel));
     harness.execute(ops).expect("spawn + S1 drag");
-    let (phase1, cursor) = read_panel_log(&mut harness, None);
+    let (phase1, cursor) = read_panel_log(&mut harness, panel, None);
     let joined1 = phase1.join("\n");
 
     // S1 — the intercept mutates and forwards: the committed value reaching the
@@ -321,9 +321,9 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // drive another change. The carried `count` continues to 2 (not reset to
     // 1), and the carried `cap` (20, not v2's fresh 1000 default) still clamps.
     // Catches the `state_save` → `state_load` carry across the swap seam.
-    swap_script(&mut harness, "swap_v2", v2);
-    harness.execute(drag(&panel)).expect("S4 drag after swap");
-    let (phase2, cursor) = read_panel_log(&mut harness, Some(cursor));
+    swap_script(&mut harness, panel, "swap_v2", v2);
+    harness.execute(drag(panel)).expect("S4 drag after swap");
+    let (phase2, cursor) = read_panel_log(&mut harness, panel, Some(cursor));
     let joined2 = phase2.join("\n");
     assert!(
         emitted_counts(&phase2).contains(&2),
@@ -342,9 +342,9 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // untransformed value (> cap) rather than the lane wedging. Catches
     // integration-level fail-open — a trap wedging the lane, not the filter
     // call #2687's host-unit already drives directly.
-    swap_script(&mut harness, "swap_trap", trap);
-    harness.execute(drag(&panel)).expect("S5 drag after trap swap");
-    let (phase3, _) = read_panel_log(&mut harness, Some(cursor));
+    swap_script(&mut harness, panel, "swap_trap", trap);
+    harness.execute(drag(panel)).expect("S5 drag after trap swap");
+    let (phase3, _) = read_panel_log(&mut harness, panel, Some(cursor));
     let joined3 = phase3.join("\n");
     let committed_trap = committed_values(&phase3);
     assert!(
@@ -367,9 +367,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
 
     let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
-    load_panel_with_radio_host(&mut harness, &kit_wasm);
-    let panel = panel_address();
-    let wrapped = format!("{}/{}:{}_wrapped", host_address(), aether_component::WasmTrampoline::NAMESPACE, SLOT);
+    let panel = load_panel_with_radio_host(&mut harness, &kit_wasm);
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     harness
@@ -379,7 +377,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
             ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
         ])
         .expect("spawn + Tab + Down");
-    let (phase1, cursor) = read_panel_log(&mut harness, None);
+    let (phase1, cursor) = read_panel_log(&mut harness, panel, None);
     let joined1 = phase1.join("\n");
     assert_eq!(
         emitted_counts(&phase1),
@@ -387,13 +385,17 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
         "Tab-then-Down through the host must select index 1 attributed to {SLOT}; log was:\n{joined1}",
     );
 
+    // The host spawned the wrapped radio beneath itself as `{slot}_wrapped`.
+    let wrapped = harness
+        .child::<Widget, RadioGroupWidget>(&behavior_host(&harness, panel), key(&format!("{SLOT}_wrapped")))
+        .expect("the wrapped radio is live");
     harness
         .execute(vec![
             ("disable", HarnessOp::send_and_settle(&wrapped, &SetWidgetState { state: disabled })),
             ("blocked", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
         ])
         .expect("disable wrapped radio + Down");
-    let (phase2, cursor) = read_panel_log(&mut harness, Some(cursor));
+    let (phase2, cursor) = read_panel_log(&mut harness, panel, Some(cursor));
     let joined2 = phase2.join("\n");
     assert!(
         emitted_counts(&phase2).is_empty(),
@@ -409,7 +411,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
             ("down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
         ])
         .expect("re-enable wrapped radio + Down");
-    let (phase3, _) = read_panel_log(&mut harness, Some(cursor));
+    let (phase3, _) = read_panel_log(&mut harness, panel, Some(cursor));
     let joined3 = phase3.join("\n");
     assert_eq!(
         emitted_counts(&phase3),

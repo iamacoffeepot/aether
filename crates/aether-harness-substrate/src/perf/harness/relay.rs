@@ -144,7 +144,9 @@ impl Dispatch<Self> for Relay {
 pub(super) const RELAY_NS: &str = "mlat.relay";
 
 /// Spawn every relay in `topo` onto `tb` (subname = relay index) and return
-/// relay 0's proof — the entry a tick source or an injected root feeds.
+/// every relay's proof in index order — relay 0's is the entry a tick source
+/// or an injected root feeds, and each one is where a harvest queries that
+/// relay's ring or counters.
 ///
 /// Relays spawn from index `n - 1` down to `0`, so every downstream a relay
 /// forwards to is already spawned and its `finish()` proof is in hand when
@@ -164,7 +166,7 @@ pub(super) const RELAY_NS: &str = "mlat.relay";
 ///
 /// If `topo` has no relays, or an edge in `topo.downstreams[i]` names an
 /// index that is not greater than `i` (or is out of range).
-pub fn spawn_relays(tb: &SubstrateHarness, topo: &Topology) -> Result<ActorRef<Relay>, (usize, SpawnError)> {
+pub fn spawn_relays(tb: &SubstrateHarness, topo: &Topology) -> Result<Vec<ActorRef<Relay>>, (usize, SpawnError)> {
     let mut spawned: Vec<Option<ActorRef<Relay>>> = vec![None; topo.downstreams.len()];
     for i in (0..topo.downstreams.len()).rev() {
         let downstreams = topo.downstreams[i]
@@ -184,7 +186,8 @@ pub fn spawn_relays(tb: &SubstrateHarness, topo: &Topology) -> Result<ActorRef<R
         spawned[i] = Some(relay);
     }
 
-    Ok(spawned.first().copied().flatten().expect("a topology has at least its entry relay"))
+    assert!(!spawned.is_empty(), "topology {} has no relays — a topology has at least its entry relay", topo.name);
+    Ok(spawned.into_iter().map(|relay| relay.expect("every relay index spawned above")).collect())
 }
 
 /// Deterministic `MailboxId` for relay instance `i`. Mirrors the
@@ -223,6 +226,7 @@ mod cost_cell_liveness {
     use super::*;
     use crate::perf::harness::{TickSource, fanout, ticksrc_id};
     use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
+    use aether_lifecycle::LifecycleCapability;
 
     #[test]
     fn sweep_relays_own_live_cost_cells_after_a_run() {
@@ -233,20 +237,20 @@ mod cost_cell_liveness {
             return;
         };
 
-        let entry = spawn_relays(&tb, &topo).expect("relays spawn");
-        tb.spawn_actor::<TickSource>(Subname::Named("src"), (entry, 1), ()).finish().expect("source spawns");
+        let relays = spawn_relays(&tb, &topo).expect("relays spawn");
+        tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], 1), ()).finish().expect("source spawns");
 
         let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
-        let reply =
-            tb.send_bytes_and_await("aether.lifecycle", LifecycleSubscribe::ID, sub_req).expect("subscribe sends");
+        let lifecycle = tb.actor_ref::<LifecycleCapability>().erase();
+        let reply = tb.request_bytes(lifecycle, LifecycleSubscribe::ID, sub_req).expect("subscribe sends");
         assert!(matches!(LifecycleSubscribeResult::decode_from_bytes(&reply), Some(LifecycleSubscribeResult::Ok)));
 
         let _ = tb.advance(200, DEFAULT_TICK_DELTA_MICROS);
 
-        for i in 0..topo.downstreams.len() {
+        for (i, relay) in relays.iter().enumerate() {
             let name = format!("mlat.relay:{i}");
             let request = CostTail { kind: Some(Ping::ID) }.encode_into_bytes();
-            let bytes = tb.send_bytes_and_await(&name, CostTail::ID, request).expect("the relay answers cost.tail");
+            let bytes = tb.request_bytes(relay.erase(), CostTail::ID, request).expect("the relay answers cost.tail");
             let Some(CostTailResult::Ok { rows }) = CostTailResult::decode_from_bytes(&bytes) else {
                 panic!("{name}: cost.tail did not answer Ok");
             };

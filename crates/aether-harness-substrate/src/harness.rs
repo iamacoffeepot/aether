@@ -32,7 +32,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind, KindId, SessionToken, Uuid};
+use aether_data::{ActorPath, Kind, KindId, LoadName, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
@@ -43,14 +43,21 @@ use aether_trace::walk::TreeWalk;
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, Root};
+use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root};
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
-    EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget, RingCapacities,
-    SchedulerTuning, Source, SourceAddr, SubstrateBoot,
-    mail::{CapabilityRegistry, CostTable, Mail, MailId, MailboxId},
+    ChildRefused, EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget,
+    RingCapacities, SchedulerTuning, SubstrateBoot,
+    mail::{CapabilityRegistry, CostTable, MailId},
 };
+#[cfg(test)]
+use aether_substrate::{
+    Source, SourceAddr,
+    mail::{Mail, MailboxId},
+};
+
+use crate::SendTarget;
 use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
@@ -146,8 +153,10 @@ pub const DEFAULT_HEIGHT: u32 = 600;
 /// decode failures (rare — implies a kind shape mismatch); `Timeout`
 /// covers replies that never arrive (chassis hung or wrong target);
 /// `Advance` and `Capture` pass through `Err` variants from the
-/// substrate's reply. `SettlementTimeout` surfaces when a
-/// `send_and_settle` / `send_bytes` chain didn't settle before the
+/// substrate's reply. `ChildRefused` surfaces when
+/// [`SubstrateHarness::child`] finds no live child at the key it was asked
+/// for. `SettlementTimeout` surfaces when a
+/// `send_and_settle` chain didn't settle before the
 /// settlement-patience backstop (issue 834: the harness waits on each
 /// pushed chain's `Settled { root }` so the next observation —
 /// `capture()`, the next typed send, an assertion — is causally
@@ -165,13 +174,15 @@ pub enum SubstrateHarnessError {
     },
     Advance(String),
     Capture(String),
-    UnknownMailbox(String),
+    /// [`SubstrateHarness::child`] found no `Live` child at the key it was
+    /// asked for: never spawned, still starting, or already dropped.
+    ChildRefused(ChildRefused),
     /// A component load the harness drove itself ([`SubstrateHarness::load`])
     /// was refused, or its reply could not be adopted as the loaded actor.
     Load(String),
     SettlementTimeout {
-        recipient: String,
-        kind_name: &'static str,
+        /// The sent mail's kind, as the registry labels it.
+        kind: String,
         /// Diagnostic dump of the settlement table's pending roots at the
         /// moment the gate wedged — `root → in_flight=N held_open=M`,
         /// comma-joined (or `<none>`). Names the stuck chain so a genuine
@@ -190,11 +201,11 @@ impl fmt::Display for SubstrateHarnessError {
             }
             Self::Advance(e) => write!(f, "advance failed: {e}"),
             Self::Capture(e) => write!(f, "capture failed: {e}"),
-            Self::UnknownMailbox(name) => write!(f, "unknown mailbox: {name}"),
+            Self::ChildRefused(refused) => write!(f, "child lookup refused: {refused}"),
             Self::Load(e) => write!(f, "component load failed: {e}"),
-            Self::SettlementTimeout { recipient, kind_name, pending } => write!(
+            Self::SettlementTimeout { kind, pending } => write!(
                 f,
-                "send to {recipient:?} ({kind_name}) did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
+                "send of {kind} did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
             ),
         }
     }
@@ -821,9 +832,9 @@ impl SubstrateHarness {
         self.hook.as_deref()
     }
 
-    /// Tail `mailbox_name`'s per-actor log ring (ADR-0081). Mirrors
-    /// `FleetHarness::log_tail` over the existing `send_bytes_and_await`,
-    /// so in-process scenario tests can assert guest-emitted
+    /// Tail the per-actor log ring (ADR-0081) of the actor `to` proves.
+    /// Mirrors `FleetHarness::log_tail` over the harness's reply wait, so
+    /// in-process scenario tests can assert guest-emitted
     /// `tracing::warn!` / `tracing::info!` entries without an RPC session.
     ///
     /// `since: None` reads from the oldest retained entry; `Some(n)` returns
@@ -831,20 +842,56 @@ impl SubstrateHarness {
     /// message substring filter substrate-side. `max: 0` resolves to the
     /// substrate-default cap (currently 100). The framework dispatch loop
     /// answers [`LogTail`] for every native actor and wasm trampoline, so
-    /// `mailbox_name` is any live mailbox path (e.g.
-    /// `"aether.component/aether.embedded:test.probe"`).
+    /// `to` is any reference — erased with `.erase()` when the actor's type
+    /// declares no [`LogTail`] handler of its own.
     ///
     /// # Panics
     /// Panics on a decode failure — implies a kind shape mismatch,
     /// matching the fail-fast disposition of [`Self::count_observed`] /
     /// [`Self::observed_kinds`].
-    pub fn log_tail(&mut self, mailbox_name: &str, since: Option<u64>, contains: Option<String>) -> LogTailResult {
+    pub fn log_tail(
+        &mut self,
+        to: impl SendTarget<LogTail>,
+        since: Option<u64>,
+        contains: Option<String>,
+    ) -> LogTailResult {
         let request = LogTail { max: 0, min_level: None, since, contains };
         let payload = self
-            .send_bytes_and_await(mailbox_name, LogTail::ID, request.encode_into_bytes())
-            .unwrap_or_else(|e| panic!("log_tail send to {mailbox_name:?} failed: {e}"));
+            .request_bytes(to.erased(), LogTail::ID, request.encode_into_bytes())
+            .unwrap_or_else(|e| panic!("log_tail send failed: {e}"));
         LogTailResult::decode_from_bytes(&payload)
-            .unwrap_or_else(|| panic!("log_tail reply from {mailbox_name:?} did not decode as LogTailResult"))
+            .unwrap_or_else(|| panic!("log_tail reply did not decode as LogTailResult"))
+    }
+
+    /// The proven reference of the root actor `R` this harness composed — a
+    /// basic, a capability a builder chain added, or the pumped render actor
+    /// (ADR-0230 §3). Forwards to the chassis handle's `actor_ref`, which
+    /// reads the reference the boot recorded and mints nothing.
+    ///
+    /// # Panics
+    ///
+    /// Panics naming `R::NAMESPACE` when this harness composed no `R`.
+    #[must_use]
+    pub fn actor_ref<R: Root + 'static>(&self) -> ActorRef<R> {
+        self.passive.actor_ref::<R>()
+    }
+
+    /// The proven reference of the `C` instance keyed by `key` directly
+    /// beneath `parent` — a child a loaded component spawned, or a window a
+    /// window capability opened (ADR-0230 §3's `Address<R>` door). The parent
+    /// travels as a reference the harness already handed out, so a child is
+    /// reached by type and key rather than by rendering its address.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::ChildRefused`], naming the key and
+    /// `C::NAMESPACE`, when no `Live` child stands at `key`.
+    pub fn child<P, C>(&self, parent: &ActorRef<P>, key: LoadName) -> Result<ActorRef<C>, SubstrateHarnessError>
+    where
+        P: Addressable,
+        C: ChildOf<P> + Instanced,
+    {
+        self.passive.child::<P, C>(*parent, key).map_err(SubstrateHarnessError::ChildRefused)
     }
 
     /// Borrow the substrate's queryable [`CapabilityRegistry`]
@@ -935,36 +982,19 @@ impl SubstrateHarness {
         }
     }
 
-    /// Bytes-level settlement-gated send: resolve `recipient_name` in
-    /// the registry, push `(kind, bytes)` as a chassis-root mail, and
-    /// block until the dispatched chain settles (ADR-0080 §6). Backs
-    /// the `SendAndSettle` op of [`Self::execute`].
+    /// Bytes-level settlement-gated send: push `(kind, bytes)` to the actor
+    /// `to` proves as a chassis-root mail and block until the dispatched
+    /// chain settles (ADR-0080 §6). Backs the `SendAndSettle` op of
+    /// [`Self::execute`].
     ///
-    /// Issue 834: synchronous-on-settle. The mail is minted as a
-    /// chassis-root via [`Mailer::push_chassis_root_mail`] so the trace
-    /// pipeline tracks the chain; the harness subscribes to
-    /// `Settled { root }` and waits up to `SETTLEMENT_TIMEOUT` for the
-    /// chain (the recipient's handler + every descendant mail it
-    /// spawned) to drain. By the time this returns, any subsequent
-    /// observation is causally after the producer's full chain — no
-    /// nudge_tick-style band-aids needed for render-flush races.
-    pub(crate) fn send_bytes(
-        &mut self,
-        recipient_name: &str,
-        kind: KindId,
-        bytes: Vec<u8>,
-    ) -> Result<(), SubstrateHarnessError> {
-        let mailbox = self
-            .registry
-            .lookup(recipient_name)
-            .ok_or_else(|| SubstrateHarnessError::UnknownMailbox(recipient_name.to_owned()))?;
-        self.push_and_settle(recipient_name, "<bytes>", mailbox, kind, bytes)
-    }
-
-    /// Body of [`Self::send_bytes`]: push as a chassis-root mail (so
-    /// the trace pipeline tracks the chain) and block on
-    /// `Settled { root }`. Returns `SettlementTimeout` if the chain
-    /// doesn't drain within the settlement cap.
+    /// Issue 834: synchronous-on-settle. The mail is pushed as a
+    /// chassis-root through [`PassiveChassis::send_tracked`] so the trace
+    /// pipeline tracks the chain; the harness waits on the returned
+    /// `Settled { root }` receiver for the chain (the recipient's handler +
+    /// every descendant mail it spawned) to drain. By the time this
+    /// returns, any subsequent observation is causally after the producer's
+    /// full chain — no nudge_tick-style band-aids needed for render-flush
+    /// races.
     ///
     /// ADR-0161 slice R4: this is a settlement wait that can include a
     /// render-recipient chain (a `send_and_settle(DrawTriangle / DestroyTexture /
@@ -974,20 +1004,18 @@ impl SubstrateHarness {
     /// settlement receiver, draining the slot each round, rather than
     /// blocking in `await_internal_signal` which never pumps; the drain is
     /// the pumped analogue of `await_settlement_pumped`, on the harness's
-    /// existing receiver-poll wait model.
-    fn push_and_settle(
+    /// existing receiver-poll wait model. Returns `SettlementTimeout` if the
+    /// chain doesn't drain within the settlement cap.
+    pub(crate) fn settle_bytes(
         &mut self,
-        recipient_name: &str,
-        kind_name: &'static str,
-        mailbox: MailboxId,
+        to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<(), SubstrateHarnessError> {
         use crossbeam_channel::RecvTimeoutError;
 
         let cid = self.fresh_correlation_id();
-        let root = self.queue.push_chassis_root_mail(cid, mailbox, kind, payload, 1);
-        let rx = self.passive.settlement_registry().subscribe_settlement(root);
+        let rx = self.passive.send_tracked(to, kind, payload, cid, None);
 
         // A short drain cadence so a render chain gated on the pumped slot
         // (a render mail that emits another render mail) advances every round;
@@ -1003,19 +1031,11 @@ impl SubstrateHarness {
             match rx.recv_timeout(drain_round) {
                 Ok(()) => return Ok(()),
                 Err(RecvTimeoutError::Disconnected) => {
-                    return Err(self.settlement_timeout(
-                        recipient_name.to_owned(),
-                        kind_name,
-                        "substrate_harness.push_and_settle",
-                    ));
+                    return Err(self.settlement_timeout(self.kind_label(kind), "substrate_harness.push_and_settle"));
                 }
                 Err(RecvTimeoutError::Timeout) => {
                     if start.elapsed() >= self.settlement_cap {
-                        return Err(self.settlement_timeout(
-                            recipient_name.to_owned(),
-                            kind_name,
-                            "substrate_harness.push_and_settle",
-                        ));
+                        return Err(self.settlement_timeout(self.kind_label(kind), "substrate_harness.push_and_settle"));
                     }
                     if last_warn.elapsed() >= SETTLEMENT_TIMEOUT {
                         tracing::warn!(
@@ -1032,23 +1052,28 @@ impl SubstrateHarness {
         }
     }
 
+    /// The registry's label for `kind` — its registered name, or a tagged
+    /// id when none is registered. Names a sent kind in a harness failure.
+    pub(crate) fn kind_label(&self, kind: KindId) -> String {
+        self.registry.kind_label(kind)
+    }
+
     /// Build a [`SubstrateHarnessError::SettlementTimeout`] carrying a dump of the
     /// settlement table's currently-pending roots, and log it (issue 2062).
     /// Shared by the settlement gate sites so a wedge — a genuine
     /// deadlock/livelock, since the cap is a generous backstop a healthy
     /// chain never reaches — names the stuck root(s) and their
     /// `(in_flight, held_open)` counts instead of surfacing a bare timeout.
-    fn settlement_timeout(&self, recipient: String, kind_name: &'static str, gate: &str) -> SubstrateHarnessError {
+    fn settlement_timeout(&self, kind: String, gate: &str) -> SubstrateHarnessError {
         let pending = format_pending_roots(&self.queue.trace_handle().settlement_counter().pending_roots());
         tracing::error!(
             target: "aether_substrate::substrate_harness",
             gate,
-            recipient = %recipient,
-            kind = kind_name,
+            kind = %kind,
             pending = %pending,
             "settlement gate wedged: chain did not settle before the patience backstop",
         );
-        SubstrateHarnessError::SettlementTimeout { recipient, kind_name, pending }
+        SubstrateHarnessError::SettlementTimeout { kind, pending }
     }
 
     /// Issue 607 Phase 3: spawn an instanced actor onto the harness's
@@ -1067,7 +1092,7 @@ impl SubstrateHarness {
         params: A::Params,
     ) -> aether_substrate::SpawnBuilder<'a, A>
     where
-        A: Root + aether_actor::Instanced + NativeActor,
+        A: Root + Instanced + NativeActor,
     {
         self.passive.spawn_actor::<A>(subname, config, params)
     }
@@ -1090,7 +1115,7 @@ impl SubstrateHarness {
 
     /// iamacoffeepot/aether#1057: inject a chassis-root mail and return its
     /// `MailId` plus a settlement [`Receiver`] that fires when the whole
-    /// causal tree drains. Unlike [`Self::send_bytes`] this does NOT
+    /// causal tree drains. Unlike [`Self::settle_bytes`] this does NOT
     /// block — the mail-latency harness injects many roots back-to-back
     /// (to build inbox queueing) and waits on the collected receivers
     /// afterward. Subscription is race-safe: `subscribe_settlement`
@@ -1114,7 +1139,7 @@ impl SubstrateHarness {
         self.queue.trace_handle().chassis_host_tail(request)
     }
 
-    /// Like [`Self::send_bytes_and_await`] but addresses the recipient
+    /// Like [`Self::request_bytes`] but addresses the recipient
     /// by [`MailboxId`] directly. The trace-tree guided walk (ADR-0086
     /// Phase 3b) discovers recipients as ids from `Sent` events, never
     /// as names — there's no name to resolve back from a hash.
@@ -1169,29 +1194,23 @@ impl SubstrateHarness {
         walk.finish_with(|tid| thread_name::resolve(tid.0))
     }
 
-    /// Bytes-level request/reply: push `(kind, payload)` to
-    /// `recipient_name` with this harness's session as the reply
-    /// target, pump until the matching reply arrives, and return its
-    /// raw payload bytes. Backs the `SendAndAwaitReply` op of
+    /// Bytes-level request/reply: push `(kind, payload)` to the actor `to`
+    /// proves with this harness's session as the reply target, pump until
+    /// the matching reply arrives, and return its raw payload bytes. Backs the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type isn't known statically
     /// and the caller decodes on demand via
     /// [`super::ExecutionResult::reply`]. Used for the
     /// component load/replace/drop round trips and the `aether.fs`
     /// `Read`/`Write`/`Delete`/`List` replies — every standard
     /// `*Result` kind is structured-encoded.
-    pub(crate) fn send_bytes_and_await(
+    pub(crate) fn request_bytes(
         &mut self,
-        recipient_name: &str,
+        to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<Vec<u8>, SubstrateHarnessError> {
-        let mailbox = self
-            .registry
-            .lookup(recipient_name)
-            .ok_or_else(|| SubstrateHarnessError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
-        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        self.queue.push(Mail::new(mailbox, kind, payload, 1).with_reply_to(reply_to));
+        self.passive.send_for_reply(to, kind, payload, self.session_reply(cid));
         self.pump_until_reply_bytes(cid, "<await-reply bytes>")
     }
 
@@ -1200,18 +1219,14 @@ impl SubstrateHarness {
     ///
     /// This is the asynchronous counterpart to `send_and_await_reply` for tests that
     /// need several requests in flight at once to validate correlation.
-    pub fn send_deferred<K>(&self, recipient_name: &str, mail: &K) -> Result<PendingBenchReply, SubstrateHarnessError>
+    #[must_use]
+    pub fn send_deferred<K>(&self, to: impl SendTarget<K>, mail: &K) -> PendingBenchReply
     where
         K: Kind,
     {
-        let mailbox = self
-            .registry
-            .lookup(recipient_name)
-            .ok_or_else(|| SubstrateHarnessError::UnknownMailbox(recipient_name.to_owned()))?;
         let cid = self.fresh_correlation_id();
-        let reply_to = Source::with_correlation(SourceAddr::Session(self.session), cid);
-        self.queue.push(Mail::new(mailbox, K::ID, mail.encode_into_bytes(), 1).with_reply_to(reply_to));
-        Ok(PendingBenchReply { cid, expected: K::NAME })
+        self.passive.send_for_reply(to.erased(), K::ID, mail.encode_into_bytes(), self.session_reply(cid));
+        PendingBenchReply { cid, expected: K::NAME }
     }
 
     /// Pump until the reply for a request returned by [`Self::send_deferred`]
@@ -1364,7 +1379,7 @@ impl SubstrateHarness {
 
     /// Pump until the reply with `cid` arrives, returning the raw
     /// reply payload bytes instead of decoding. Backs
-    /// [`Self::send_bytes_and_await`] and the `SendAndAwaitReply` op of
+    /// [`Self::request_bytes`] and the `SendAndAwaitReply` op of
     /// [`Self::execute`], where the reply type is decoded on demand.
     fn pump_until_reply_bytes(&mut self, cid: u64, expected: &'static str) -> Result<Vec<u8>, SubstrateHarnessError> {
         let event = self.pump_until_event(cid, expected, None)?;
@@ -1775,7 +1790,7 @@ mod tests {
         let stuck = MailId { sender: MailboxId(0xDEAD), correlation_id: 0xBEEF };
         tb.queue.trace_handle().settlement_counter().record_sent(stuck);
 
-        let err = tb.settlement_timeout("stuck.recipient".to_owned(), "StuckKind", "test.wedge");
+        let err = tb.settlement_timeout("StuckKind".to_owned(), "test.wedge");
         let SubstrateHarnessError::SettlementTimeout { pending, .. } = &err else {
             panic!("expected SettlementTimeout, got {err:?}");
         };
@@ -1850,7 +1865,7 @@ mod tests {
             (
                 "subscribe",
                 HarnessOp::send_and_settle(
-                    "aether.lifecycle",
+                    &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
                     &LifecycleSubscribe { stage: Tick::ID.0, mailbox: subscriber_mbox.0 },
                 ),
             ),
@@ -1941,11 +1956,11 @@ mod tests {
             (
                 "subscribe_shutdown",
                 HarnessOp::send_and_settle(
-                    "aether.lifecycle",
+                    &tb.actor_ref::<aether_lifecycle::LifecycleCapability>(),
                     &LifecycleSubscribe { stage: <Shutdown as DataKind>::ID.0, mailbox: observer_mailbox.0 },
                 ),
             ),
-            ("quit", HarnessOp::send_and_settle("aether.lifecycle", &Quit {})),
+            ("quit", HarnessOp::send_and_settle(&tb.actor_ref::<aether_lifecycle::LifecycleCapability>(), &Quit {})),
             ("advance", HarnessOp::advance(1)),
         ])
         .expect("subscribe + quit + advance");

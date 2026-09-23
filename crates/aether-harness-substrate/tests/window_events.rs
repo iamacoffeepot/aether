@@ -1,28 +1,25 @@
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::{ActorRef, Addressable};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{ExecutionResult, HarnessOp, SubstrateHarness, substrate_harness_observer_mailbox};
 use aether_kinds::{Key, MouseMove};
 use aether_window::{
     CloseWindow, CloseWindowResult, CreateWindow, CreateWindowResult, FocusWindow, FocusWindowResult, ListWindows,
     ListWindowsResult, RequestWindowRedraw, RequestWindowRedrawResult, SetWindowMode, SetWindowModeResult,
-    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SyntheticWindowCapability, UnsubscribeWindow,
-    WindowCapability, WindowId, WindowInstance, WindowMode, WindowSelector, WindowSizeRequest, WindowSpec,
+    SetWindowTitle, SetWindowTitleResult, SubscribeWindow, SyntheticWindowCapability, SyntheticWindowInstance,
+    UnsubscribeWindow, WindowCapability, WindowId, WindowInstance, WindowMode, WindowSelector, WindowSizeRequest,
+    WindowSpec,
 };
-
-fn window_mailbox() -> &'static str {
-    WindowCapability::NAMESPACE
-}
 
 fn window_id(name: &str) -> WindowId {
     WindowId(WindowInstance::resolve(WindowCapability::resolve(0, ()).0, name).0)
 }
 
-fn canonical_window(name: &str) -> String {
-    format!("{}/{}:{name}", WindowCapability::NAMESPACE, WindowInstance::NAMESPACE)
-}
-
-fn short_window(name: &str) -> String {
-    format!("{}/:{name}", WindowCapability::NAMESPACE)
+/// The named window instance the synthetic window capability opened.
+fn window_instance(harness: &SubstrateHarness, name: &str) -> ActorRef<SyntheticWindowInstance> {
+    let window = harness.actor_ref::<SyntheticWindowCapability>();
+    harness
+        .child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, LoadName::new(name).expect("window name"))
+        .unwrap_or_else(|error| panic!("window {name} is live: {error}"))
 }
 
 fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
@@ -34,13 +31,18 @@ fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
     }
 }
 
-fn assert_window_lifecycle(result: &ExecutionResult, first_id: WindowId, second_id: WindowId) {
+fn assert_window_lifecycle(
+    created: &ExecutionResult,
+    result: &ExecutionResult,
+    first_id: WindowId,
+    second_id: WindowId,
+) {
     assert_eq!(
-        result.reply::<ListWindowsResult>("initial").expect("initial list reply"),
+        created.reply::<ListWindowsResult>("initial").expect("initial list reply"),
         ListWindowsResult::Ok { windows: Vec::new() },
     );
     let CreateWindowResult::Ok { window: first } =
-        result.reply::<CreateWindowResult>("create-first").expect("first create reply")
+        created.reply::<CreateWindowResult>("create-first").expect("first create reply")
     else {
         panic!("first create succeeds");
     };
@@ -61,7 +63,7 @@ fn assert_window_lifecycle(result: &ExecutionResult, first_id: WindowId, second_
         RequestWindowRedrawResult::Ok,
     );
     let CreateWindowResult::Ok { window: second } =
-        result.reply::<CreateWindowResult>("create-second").expect("second create reply")
+        created.reply::<CreateWindowResult>("create-second").expect("second create reply")
     else {
         panic!("second create succeeds");
     };
@@ -120,7 +122,7 @@ fn assert_window_lifecycle(result: &ExecutionResult, first_id: WindowId, second_
 /// can never go green having leaked a live window.
 fn assert_closed_subname_retires(harness: &mut SubstrateHarness) {
     let retired = HarnessOp::poll_until(
-        window_mailbox(),
+        &harness.actor_ref::<SyntheticWindowCapability>(),
         &CreateWindow { spec: spec("first", 320, 200) },
         |reply: &CreateWindowResult| match reply {
             CreateWindowResult::Ok { .. } => {
@@ -144,47 +146,43 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
     let first_id = window_id("first");
     let second_id = window_id("second");
     let mut harness = SubstrateHarness::start().expect("boot synthetic window harness");
-    let result = harness
+    let window = harness.actor_ref::<SyntheticWindowCapability>();
+    let created = harness
         .execute(vec![
-            ("initial", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
-            (
-                "create-first",
-                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
-            ),
-            (
-                "title-first",
-                HarnessOp::send_and_await_reply(
-                    canonical_window("first"),
-                    &SetWindowTitle { title: "renamed".to_owned() },
-                ),
-            ),
+            ("initial", HarnessOp::send_and_await_reply(&window, &ListWindows)),
+            ("create-first", HarnessOp::send_and_await_reply(&window, &CreateWindow { spec: spec("first", 320, 200) })),
             (
                 "create-second",
-                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("second", 800, 600) }),
+                HarnessOp::send_and_await_reply(&window, &CreateWindow { spec: spec("second", 800, 600) }),
             ),
+        ])
+        .expect("synthetic windows open");
+
+    let first = window_instance(&harness, "first");
+    let second = window_instance(&harness, "second");
+    let result = harness
+        .execute(vec![
+            ("title-first", HarnessOp::send_and_await_reply(&first, &SetWindowTitle { title: "renamed".to_owned() })),
             (
                 "resize-second",
                 HarnessOp::send_and_await_reply(
-                    short_window("second"),
+                    &second,
                     &SetWindowMode { mode: WindowMode::Windowed, width: Some(640), height: Some(360) },
                 ),
             ),
-            ("focus-first", HarnessOp::send_and_await_reply(canonical_window("first"), &FocusWindow)),
-            ("redraw-second", HarnessOp::send_and_await_reply(short_window("second"), &RequestWindowRedraw)),
-            ("listed", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
-            ("close-first", HarnessOp::send_and_await_reply(canonical_window("first"), &CloseWindow)),
+            ("focus-first", HarnessOp::send_and_await_reply(&first, &FocusWindow)),
+            ("redraw-second", HarnessOp::send_and_await_reply(&second, &RequestWindowRedraw)),
+            ("listed", HarnessOp::send_and_await_reply(&window, &ListWindows)),
+            ("close-first", HarnessOp::send_and_await_reply(&first, &CloseWindow)),
             (
                 "title-second-after-close",
-                HarnessOp::send_and_await_reply(
-                    short_window("second"),
-                    &SetWindowTitle { title: "survivor".to_owned() },
-                ),
+                HarnessOp::send_and_await_reply(&second, &SetWindowTitle { title: "survivor".to_owned() }),
             ),
-            ("remaining", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
+            ("remaining", HarnessOp::send_and_await_reply(&window, &ListWindows)),
         ])
         .expect("synthetic window operations settle");
 
-    assert_window_lifecycle(&result, first_id, second_id);
+    assert_window_lifecycle(&created, &result, first_id, second_id);
     assert_closed_subname_retires(&mut harness);
 }
 
@@ -193,15 +191,16 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
     let first_id = window_id("first");
     let second_id = window_id("second");
     let mut harness = SubstrateHarness::start().expect("boot synthetic window harness");
+    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
     harness
         .execute(vec![
             (
                 "create-first",
-                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("first", 320, 200) }),
+                HarnessOp::send_and_await_reply(&synthetic, &CreateWindow { spec: spec("first", 320, 200) }),
             ),
             (
                 "create-second",
-                HarnessOp::send_and_await_reply(window_mailbox(), &CreateWindow { spec: spec("second", 640, 360) }),
+                HarnessOp::send_and_await_reply(&synthetic, &CreateWindow { spec: spec("second", 640, 360) }),
             ),
         ])
         .expect("create routed windows");
@@ -211,22 +210,20 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         .execute(vec![
             (
                 "key-all",
-                HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
-                    selector: WindowSelector::All,
-                    kind: Key::ID,
-                    mailbox: observer,
-                }),
+                HarnessOp::send_and_settle(
+                    &synthetic,
+                    &SubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                ),
             ),
             (
                 "key-second",
-                HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
-                    selector: WindowSelector::One(second_id),
-                    kind: Key::ID,
-                    mailbox: observer,
-                }),
+                HarnessOp::send_and_settle(
+                    &synthetic,
+                    &SubscribeWindow { selector: WindowSelector::One(second_id), kind: Key::ID, mailbox: observer },
+                ),
             ),
-            ("key-first-event", HarnessOp::window_event(first_id, &Key { window: first_id, code: 11 })),
-            ("key-second-event", HarnessOp::window_event(second_id, &Key { window: second_id, code: 22 })),
+            ("key-first-event", HarnessOp::window_event(&synthetic, first_id, &Key { window: first_id, code: 11 })),
+            ("key-second-event", HarnessOp::window_event(&synthetic, second_id, &Key { window: second_id, code: 22 })),
         ])
         .expect("overlapping key subscriptions settle through observer");
     assert_eq!(harness.count_observed(Key::NAME), 2, "All plus One must deduplicate the second window recipient");
@@ -235,14 +232,23 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         .execute(vec![
             (
                 "move-second",
-                HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
-                    selector: WindowSelector::One(second_id),
-                    kind: MouseMove::ID,
-                    mailbox: observer,
-                }),
+                HarnessOp::send_and_settle(
+                    &synthetic,
+                    &SubscribeWindow {
+                        selector: WindowSelector::One(second_id),
+                        kind: MouseMove::ID,
+                        mailbox: observer,
+                    },
+                ),
             ),
-            ("move-first-event", HarnessOp::window_event(first_id, &MouseMove { window: first_id, x: 1.0, y: 2.0 })),
-            ("move-second-event", HarnessOp::window_event(second_id, &MouseMove { window: second_id, x: 3.0, y: 4.0 })),
+            (
+                "move-first-event",
+                HarnessOp::window_event(&synthetic, first_id, &MouseMove { window: first_id, x: 1.0, y: 2.0 }),
+            ),
+            (
+                "move-second-event",
+                HarnessOp::window_event(&synthetic, second_id, &MouseMove { window: second_id, x: 3.0, y: 4.0 }),
+            ),
         ])
         .expect("specific selector events settle through observer");
     assert_eq!(harness.count_observed(MouseMove::NAME), 1, "One must reject the other window");
@@ -251,23 +257,30 @@ fn synthetic_events_route_by_selector_deduplicate_unsubscribe_and_settle() {
         .execute(vec![
             (
                 "unsubscribe-all-selector",
-                HarnessOp::actor::<SyntheticWindowCapability>().send(&UnsubscribeWindow {
-                    selector: WindowSelector::All,
-                    kind: Key::ID,
-                    mailbox: observer,
-                }),
+                HarnessOp::send_and_settle(
+                    &synthetic,
+                    &UnsubscribeWindow { selector: WindowSelector::All, kind: Key::ID, mailbox: observer },
+                ),
             ),
-            ("key-first-after-unsubscribe", HarnessOp::window_event(first_id, &Key { window: first_id, code: 33 })),
-            ("key-second-still-specific", HarnessOp::window_event(second_id, &Key { window: second_id, code: 44 })),
+            (
+                "key-first-after-unsubscribe",
+                HarnessOp::window_event(&synthetic, first_id, &Key { window: first_id, code: 33 }),
+            ),
+            (
+                "key-second-still-specific",
+                HarnessOp::window_event(&synthetic, second_id, &Key { window: second_id, code: 44 }),
+            ),
             (
                 "unsubscribe-second-selector",
-                HarnessOp::actor::<SyntheticWindowCapability>().send(&UnsubscribeWindow {
-                    selector: WindowSelector::One(second_id),
-                    kind: Key::ID,
-                    mailbox: observer,
-                }),
+                HarnessOp::send_and_settle(
+                    &synthetic,
+                    &UnsubscribeWindow { selector: WindowSelector::One(second_id), kind: Key::ID, mailbox: observer },
+                ),
             ),
-            ("key-second-after-unsubscribe", HarnessOp::window_event(second_id, &Key { window: second_id, code: 55 })),
+            (
+                "key-second-after-unsubscribe",
+                HarnessOp::window_event(&synthetic, second_id, &Key { window: second_id, code: 55 }),
+            ),
         ])
         .expect("unsubscribe operations and descendant observer mail settle");
     assert_eq!(

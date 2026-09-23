@@ -13,16 +13,11 @@ mod tests {
     use std::thread;
     use std::time::Duration;
 
-    use aether_actor::Addressable;
     use aether_harness_substrate::test_helpers::require_wasm;
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-    use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
+    use aether_kinds::{LoadComponent, LogTailResult};
 
     const PROBE_NAME: &str = "probe";
-
-    fn probe_address() -> String {
-        format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
-    }
 
     /// `info` in the `0 = trace .. 4 = error` level mapping shared across
     /// `aether.log.*`.
@@ -34,7 +29,7 @@ mod tests {
     const POLL_ATTEMPTS: usize = 10;
     const POLL_INTERVAL: Duration = Duration::from_millis(50);
 
-    /// Load `probe`, advance one tick, poll its lineage address with
+    /// Load `probe`, advance one tick, poll its reference with
     /// `SubstrateHarness::log_tail` until the `typed_send_alive` info entry appears,
     /// then re-query past the returned cursor and assert it is not
     /// re-yielded — the in-process counterpart to
@@ -47,27 +42,16 @@ mod tests {
         let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
-        let loaded = harness
-            .execute(vec![(
-                "load",
-                HarnessOp::send_and_await_reply(
-                    "aether.component",
-                    &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
-                ),
-            )])
+        let (probe, _) = harness
+            .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
             .expect("load probe");
-        match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-            LoadResult::Ok { .. } => {}
-            LoadResult::Err { error } => panic!("load_component: {error}"),
-        }
 
         harness.execute(vec![("tick", HarnessOp::advance(1))]).expect("advance one tick");
 
-        let addr = probe_address();
         let mut last_reply = None;
         let mut found = None;
         for _ in 0..POLL_ATTEMPTS {
-            let reply = harness.log_tail(&addr, None, None);
+            let reply = harness.log_tail(probe, None, None);
             if let LogTailResult::Ok { ref entries, next_since, .. } = reply
                 && let Some(entry) = entries.iter().find(|e| e.message == "typed_send_alive" && e.level == LEVEL_INFO)
             {
@@ -89,7 +73,7 @@ mod tests {
 
         // Walk the cursor: a re-query past `next_since` must not re-yield
         // the entry we already consumed.
-        match harness.log_tail(&addr, Some(next_since), None) {
+        match harness.log_tail(probe, Some(next_since), None) {
             LogTailResult::Ok { entries, .. } => assert!(
                 entries.iter().all(|e| e.sequence != entry.sequence),
                 "the `since` cursor should not re-yield the already-seen entry \

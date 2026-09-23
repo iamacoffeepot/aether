@@ -8,8 +8,6 @@
 use aether_audio::{HeadlessAudioCapability, LoadInstrument, LoadInstrumentResult, PlayTrack, PlayTrackResult};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
-const AUDIO_MAILBOX: &str = "aether.audio";
-
 /// iamacoffeepot/aether#5705: `play_track` and `load_instrument` are the two
 /// audio requests whose reply is hand-issued from a manual-class handler, so
 /// they are the two a companion can silently swallow — the pre-fix headless
@@ -20,13 +18,14 @@ const AUDIO_MAILBOX: &str = "aether.audio";
 fn headless_audio_err_replies_to_play_track_and_load_instrument() {
     let mut harness =
         SubstrateHarness::builder().with_actor::<HeadlessAudioCapability>(()).build().expect("boot headless audio");
+    let audio = harness.actor_ref::<HeadlessAudioCapability>();
 
     let result = harness
         .execute(vec![
             (
                 "play",
                 HarnessOp::send_and_await_reply(
-                    AUDIO_MAILBOX,
+                    &audio,
                     &PlayTrack {
                         namespace: "assets".to_owned(),
                         path: "music/theme.wav".to_owned(),
@@ -39,7 +38,7 @@ fn headless_audio_err_replies_to_play_track_and_load_instrument() {
             (
                 "load",
                 HarnessOp::send_and_await_reply(
-                    AUDIO_MAILBOX,
+                    &audio,
                     &LoadInstrument { namespace: "assets".to_owned(), path: "banks/piano.sfz".to_owned() },
                 ),
             ),

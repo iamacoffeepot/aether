@@ -4,8 +4,8 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, ErasedActorRef, Root};
-use aether_data::{KindId, SessionToken};
+use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Root, child_address};
+use aether_data::{KindId, LoadName, SessionToken};
 use crossbeam_channel::Receiver;
 
 use super::boot_passives::BootedPassives;
@@ -18,7 +18,7 @@ use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::registry::effect::RegistryEffectError;
-use crate::mail::registry::{AddressResolutionError, AdoptRefused, Registry, ResolvedAddress};
+use crate::mail::registry::{AddressResolutionError, AdoptRefused, ChildRefused, Registry, ResolvedAddress};
 use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
@@ -49,7 +49,7 @@ macro_rules! chassis_accessors {
             params: A::Params,
         ) -> crate::SpawnBuilder<'a, A>
         where
-            A: Root + aether_actor::Instanced + NativeActor,
+            A: Root + Instanced + NativeActor,
         {
             spawn_actor(&self.booted, subname, config, params)
         }
@@ -283,6 +283,31 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.adopt_loaded::<R>(sender)
     }
 
+    /// The proven reference of the `Child` instance keyed by `key` directly
+    /// beneath `parent` (ADR-0230 §3's `Address<R>` door, for an embedder).
+    ///
+    /// The embedder holds the parent's proof — a composed capability's, a
+    /// load's, or another child's — and names the child by type and key, so
+    /// a child a component spawned, or a window a window capability opened,
+    /// is reached without rendering or parsing an address. The child address
+    /// is folded beneath the parent and proven against the published routes;
+    /// only a `Live` child answers.
+    ///
+    /// Its consumer is the substrate harness's `child::<P, C>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ChildRefused`], naming the key and `Child::NAMESPACE`, when no
+    /// `Live` child stands at that key: never spawned, still `Starting`, or
+    /// already dropped.
+    pub fn child<Parent, Child>(&self, parent: ActorRef<Parent>, key: LoadName) -> Result<ActorRef<Child>, ChildRefused>
+    where
+        Parent: Addressable,
+        Child: ChildOf<Parent> + Instanced,
+    {
+        self.booted.spawner.live_child(&child_address::<Parent, Child>(parent, key))
+    }
+
     /// Place an instanced `A` at the chassis root **for a test**, without
     /// asking for the ADR-0166 [`Root`] permission [`Self::spawn_actor`]
     /// requires.
@@ -310,7 +335,7 @@ impl<C: Chassis> PassiveChassis<C> {
         params: A::Params,
     ) -> crate::SpawnBuilder<'a, A>
     where
-        A: aether_actor::Instanced + NativeActor,
+        A: Instanced + NativeActor,
     {
         spawn_actor(&self.booted, subname, config, params)
     }
@@ -347,7 +372,7 @@ fn spawn_actor<'a, A>(
     params: A::Params,
 ) -> crate::SpawnBuilder<'a, A>
 where
-    A: aether_actor::Instanced + NativeActor,
+    A: Instanced + NativeActor,
 {
     // Chassis-level spawn: a top-level instanced actor with no parent actor,
     // so it is the depth-1 root of its own lineage (ADR-0099 §3) and keeps

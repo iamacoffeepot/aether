@@ -20,6 +20,7 @@
 
 use std::time::{Duration, Instant};
 
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_substrate::{Registry, Subname};
 use serde::{Deserialize, Serialize};
@@ -183,13 +184,13 @@ fn empty(drive: &str, commits: u64, elapsed_nanos: u64) -> OwnerCeiling {
 /// birth in it has completed and discharged its hold. That is also the
 /// integrity check: a fixture that dropped a `TaskDone` would hang here rather
 /// than quietly reporting a rate over fewer commits than it claims.
-pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: &str) -> OwnerCeiling {
+pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) -> OwnerCeiling {
     let before = RawCounters::read(harness.mail_registry());
     let start = Instant::now();
     let mut driven = 0_u64;
     for _ in 0..BURSTS {
         let payload = StageBurst { count: BURST }.encode_into_bytes();
-        if let Err(error) = harness.send_bytes(parent, StageBurst::ID, payload) {
+        if let Err(error) = harness.settle_bytes(parent.erase(), StageBurst::ID, payload) {
             tracing::warn!(target: "aether_perf", ?error, "staged burst did not settle");
             break;
         }
@@ -223,17 +224,17 @@ pub fn measure_loaded_ceiling(harness: &mut SubstrateHarness, parent: &str) -> O
 /// would otherwise inflate the table the read sweep walks well past the
 /// `populated_mailboxes` the report states. Closing them keeps the reported
 /// table size honest.
-pub fn close_children(harness: &mut SubstrateHarness, parent: &str) {
+pub fn close_children(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) {
     let payload = CloseBurst::default().encode_into_bytes();
-    if let Err(error) = harness.send_bytes(parent, CloseBurst::ID, payload) {
+    if let Err(error) = harness.settle_bytes(parent.erase(), CloseBurst::ID, payload) {
         tracing::warn!(target: "aether_perf", ?error, "closing the staged children did not settle");
     }
 }
 
 /// Ask the staging parent for its birth tally.
-pub fn query(harness: &mut SubstrateHarness, parent: &str) -> Option<CommitReport> {
+pub fn query(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>) -> Option<CommitReport> {
     let request = CommitQuery::default().encode_into_bytes();
-    match harness.send_bytes_and_await(parent, CommitQuery::ID, request) {
+    match harness.request_bytes(parent.erase(), CommitQuery::ID, request) {
         Ok(reply) => CommitReport::decode_from_bytes(&reply),
         Err(error) => {
             tracing::warn!(target: "aether_perf", ?error, "commit-tally query failed");
@@ -242,12 +243,11 @@ pub fn query(harness: &mut SubstrateHarness, parent: &str) -> Option<CommitRepor
     }
 }
 
-/// Spawn the staging parent and return its canonical address.
-pub fn spawn_parent(harness: &SubstrateHarness) -> Option<String> {
+/// Spawn the staging parent and return its proven reference.
+pub fn spawn_parent(harness: &SubstrateHarness) -> Option<ActorRef<CommitParent>> {
     harness
         .spawn_actor::<CommitParent>(Subname::Named("commit"), (), ())
-        .finish_with_name()
+        .finish()
         .map_err(|error| tracing::warn!(target: "aether_perf", ?error, "staging parent spawn failed"))
         .ok()
-        .map(|(_, name)| name)
 }

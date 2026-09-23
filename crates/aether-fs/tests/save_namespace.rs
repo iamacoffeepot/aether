@@ -9,11 +9,12 @@
 //! `SubstrateHarness::builder().namespace_roots(...)` rather than env-var
 //! mutation (issue 464).
 
-use aether_fs::{Delete, DeleteResult, FsError, List, ListResult, NamespaceAddr, Read, ReadResult, Write, WriteResult};
+use aether_fs::{
+    Delete, DeleteResult, FsCapability, FsError, List, ListResult, NamespaceAddr, Read, ReadResult, Write, WriteResult,
+};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 
-const FS_MAILBOX: &str = "aether.fs";
 const FS_NAMESPACE_SAVE: &str = "save";
 
 fn boot_bench() -> SubstrateHarness {
@@ -28,6 +29,7 @@ fn boot_bench() -> SubstrateHarness {
 #[test]
 fn fs_write_then_read_round_trips_in_save_namespace() {
     let mut harness = boot_bench();
+    let fs = harness.actor_ref::<FsCapability>();
 
     let path = "fs-roundtrip.bin".to_owned();
     let payload = vec![0xDE, 0xAD, 0xBE, 0xEF];
@@ -37,7 +39,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
             (
                 "write",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Write {
                         addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
                         bytes: payload.clone(),
@@ -47,7 +49,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
             (
                 "read",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Read { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()) },
                 ),
             ),
@@ -77,6 +79,7 @@ fn fs_write_then_read_round_trips_in_save_namespace() {
 #[test]
 fn fs_delete_removes_written_file() {
     let mut harness = boot_bench();
+    let fs = harness.actor_ref::<FsCapability>();
 
     let path = "fs-delete.bin".to_owned();
     // A failed write would abort the sequence with `OpFailed`, so
@@ -86,7 +89,7 @@ fn fs_delete_removes_written_file() {
             (
                 "write",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Write {
                         addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()),
                         bytes: vec![1, 2, 3],
@@ -96,14 +99,14 @@ fn fs_delete_removes_written_file() {
             (
                 "delete",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Delete { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()) },
                 ),
             ),
             (
                 "read",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Read { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path) },
                 ),
             ),
@@ -127,6 +130,7 @@ fn fs_delete_removes_written_file() {
 #[test]
 fn fs_list_returns_written_path() {
     let mut harness = boot_bench();
+    let fs = harness.actor_ref::<FsCapability>();
 
     let path = "probe-list.bin".to_owned();
     let result = harness
@@ -134,14 +138,14 @@ fn fs_list_returns_written_path() {
             (
                 "write",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &Write { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), path.clone()), bytes: vec![0] },
                 ),
             ),
             (
                 "list",
                 HarnessOp::send_and_await_reply(
-                    FS_MAILBOX,
+                    &fs,
                     &List { addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), String::new()) },
                 ),
             ),
@@ -161,12 +165,13 @@ fn fs_list_returns_written_path() {
 #[test]
 fn fs_read_unknown_path_returns_not_found() {
     let mut harness = boot_bench();
+    let fs = harness.actor_ref::<FsCapability>();
 
     let result = harness
         .execute(vec![(
             "read",
             HarnessOp::send_and_await_reply(
-                FS_MAILBOX,
+                &fs,
                 &Read {
                     addr: NamespaceAddr::new(FS_NAMESPACE_SAVE.to_owned(), "nonexistent-do-not-create.bin".to_owned()),
                 },

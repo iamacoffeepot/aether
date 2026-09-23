@@ -723,7 +723,7 @@ f 4 5 8
 
     fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, geometry: &CreateGeometry) -> u32 {
         let result = harness
-            .execute(vec![(label, HarnessOp::send_and_await_reply(RENDER, geometry))])
+            .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), geometry))])
             .expect("create geometry sequence")
             .reply::<CreateGeometryResult>(label)
             .expect("decode geometry reply");
@@ -743,7 +743,10 @@ f 4 5 8
             pixels: Vec::new(),
         };
         let result = harness
-            .execute(vec![("texture", HarnessOp::send_and_await_reply(RENDER, &texture))])
+            .execute(vec![(
+                "texture",
+                HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &texture),
+            )])
             .expect("create texture sequence")
             .reply::<CreateTextureResult>("texture")
             .expect("decode texture reply");
@@ -755,7 +758,10 @@ f 4 5 8
 
     fn register(harness: &mut SubstrateHarness, counts: [u32; 3]) -> u32 {
         let result = harness
-            .execute(vec![("register", HarnessOp::send_and_await_reply(RENDER, &program(counts)))])
+            .execute(vec![(
+                "register",
+                HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &program(counts)),
+            )])
             .expect("register sequence")
             .reply::<ProgramRegisterResult>("register")
             .expect("decode register reply");
@@ -867,7 +873,13 @@ f 4 5 8
         for _ in 0..6 {
             harness
                 .execute(vec![
-                    ("timed", HarnessOp::send_and_settle(RENDER, &dispatch(geometry_ids.clone()))),
+                    (
+                        "timed",
+                        HarnessOp::send_and_settle(
+                            &harness.actor_ref::<RenderCapability>(),
+                            &dispatch(geometry_ids.clone()),
+                        ),
+                    ),
                     ("timed_frame", HarnessOp::advance(1)),
                 ])
                 .expect("timed candidate dispatch");
@@ -912,7 +924,13 @@ f 4 5 8
 
         loop {
             let timing = harness
-                .execute(vec![("timings", HarnessOp::send_and_await_reply(RENDER, &ProgramTimings { program_id }))])
+                .execute(vec![(
+                    "timings",
+                    HarnessOp::send_and_await_reply(
+                        &harness.actor_ref::<RenderCapability>(),
+                        &ProgramTimings { program_id },
+                    ),
+                )])
                 .expect("timing query")
                 .reply::<ProgramTimingsResult>("timings")
                 .expect("decode timing reply");

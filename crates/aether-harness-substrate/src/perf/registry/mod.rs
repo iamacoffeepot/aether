@@ -121,7 +121,7 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
     // The staging parent serves both remaining phases: it drives the loaded
     // ceiling, and it is the writer the contended read cells churn against.
     let parent = owner::spawn_parent(&harness);
-    let owner_loaded = parent.as_deref().map(|parent| {
+    let owner_loaded = parent.map(|parent| {
         let ceiling = owner::measure_loaded_ceiling(&mut harness, parent);
         // Retire the burst's children before the read sweep, so the table the
         // readers walk is the size this report claims.
@@ -138,7 +138,7 @@ pub fn run_registry_benchmark() -> Option<RegistryReport> {
     // the arms are read against each other at equal reader counts rather than
     // one being a correction applied to another (iamacoffeepot/aether#4276).
     let mut read_scaling = Vec::new();
-    for churn in [None, parent.as_deref()] {
+    for churn in [None, parent] {
         for mix in [KindMix::Shared, KindMix::PerReader] {
             for spread in [TargetSpread::Overlapping, TargetSpread::Disjoint] {
                 let mut baseline = None;

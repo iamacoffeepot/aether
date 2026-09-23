@@ -8,22 +8,24 @@
 use std::fs;
 use std::path::Path;
 
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_BACKQUOTE, KEY_TAB};
 use aether_kinds::{
-    ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
-    MouseWheel, TextInput, WindowId,
+    ImePreedit, Key, KeyRelease, LoadComponent, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
+    TextInput, WindowId,
 };
 use aether_kit_widget::{EditorConfig, EditorKeyChord, EditorRegionRect, RegionInputLanes, RegionSpec};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
+use aether_window::SyntheticWindowCapability;
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
-/// Load one in-bundle actor and return its registered lineage address. `name`
+/// Load one in-bundle actor and return its reference. `name`
 /// is the load name, or `None` to load under the actor's own namespace — which
 /// is what the shell needs, since a region names it by bare type.
 fn load_actor<K: Kind>(
@@ -32,25 +34,16 @@ fn load_actor<K: Kind>(
     export: &str,
     name: Option<&str>,
     config: &K,
-) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: fs::read(wasm_path).expect("read wasm component"),
-                    name: name.map(str::to_owned),
-                    config: config.encode_into_bytes(),
-                    export: Some(export.to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: address, .. } => address.to_string(),
-        LoadResult::Err { error } => panic!("load {export} as {name:?}: {error}"),
-    }
+) -> ErasedActorRef {
+    harness
+        .load_any(&LoadComponent {
+            wasm: fs::read(wasm_path).expect("read wasm component"),
+            name: name.map(str::to_owned),
+            config: config.encode_into_bytes(),
+            export: Some(export.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load {export} as {name:?}: {error}"))
+        .0
 }
 
 fn region(name: &str, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpec {
@@ -63,7 +56,7 @@ fn region(name: &str, x_pixels: f32, input_lanes: RegionInputLanes) -> RegionSpe
     }
 }
 
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> String {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ErasedActorRef {
     load_actor(
         harness,
         wasm_path,
@@ -77,16 +70,16 @@ fn load_shell(harness: &mut SubstrateHarness, wasm_path: &Path, regions: Vec<Reg
     let _shell = load_actor(harness, wasm_path, "aether.kit.widget.editor", None, &EditorConfig { regions });
 }
 
-fn drain(harness: &mut SubstrateHarness, address: &str, label: &'static str) -> DrainEditorInputsResult {
+fn drain(harness: &mut SubstrateHarness, probe: ErasedActorRef, label: &'static str) -> DrainEditorInputsResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply(address, &DrainEditorInputs))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(probe, &DrainEditorInputs))])
         .expect("drain sequence")
         .reply::<DrainEditorInputsResult>(label)
         .expect("decode DrainEditorInputsResult")
 }
 
-fn input<K: Kind>(mail: &K) -> HarnessOp {
-    HarnessOp::window_event(TEST_WINDOW_ID, mail)
+fn input<K: Kind>(synthetic: ActorRef<SyntheticWindowCapability>, mail: &K) -> HarnessOp {
+    HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, mail)
 }
 
 #[test]
@@ -107,27 +100,37 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
     let region_a = load_probe(&mut harness, &fixtures_wasm, "region-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "region-b");
+    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
 
     harness
         .execute(vec![
-            ("press-a", input(&MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
-            ("drag-b", input(&MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
-            ("release-other-b", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 })),
-            ("release-owner-b", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 })),
-            ("move-b", input(&MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
+            ("press-a", input(synthetic, &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
+            ("drag-b", input(synthetic, &MouseMove { window: TEST_WINDOW_ID, x: 140.0, y: 25.0 })),
+            (
+                "release-other-b",
+                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 1, x: 140.0, y: 25.0 }),
+            ),
+            (
+                "release-owner-b",
+                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 140.0, y: 25.0 }),
+            ),
+            ("move-b", input(synthetic, &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: 30.0 })),
             (
                 "release-without-owner-b",
-                input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 }),
+                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 150.0, y: 30.0 }),
             ),
             (
                 "filtered-wheel-b",
-                input(&MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 }),
+                input(
+                    synthetic,
+                    &MouseWheel { window: TEST_WINDOW_ID, delta_x: 0.0, delta_y: -12.0, x: 150.0, y: 30.0 },
+                ),
             ),
         ])
         .expect("route pointer sequence");
 
     assert_eq!(
-        drain(&mut harness, &region_a, "drain-a"),
+        drain(&mut harness, region_a, "drain-a"),
         DrainEditorInputsResult {
             region_name: "region-a".to_owned(),
             inputs: vec![
@@ -146,7 +149,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
         },
     );
     assert_eq!(
-        drain(&mut harness, &region_b, "drain-b"),
+        drain(&mut harness, region_b, "drain-b"),
         DrainEditorInputsResult {
             region_name: "region-b".to_owned(),
             inputs: vec![
@@ -173,41 +176,54 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
 
     let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");
+    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
 
     harness
         .execute(vec![
-            ("focus-a", input(&MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
-            ("release-a", input(&MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
+            ("focus-a", input(synthetic, &MouseButton { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 })),
+            (
+                "release-a",
+                input(synthetic, &MouseButtonRelease { window: TEST_WINDOW_ID, button: 0, x: 20.0, y: 20.0 }),
+            ),
         ])
         .expect("prime focus");
-    let _initial_a = drain(&mut harness, &region_a, "drain-initial-a");
+    let _initial_a = drain(&mut harness, region_a, "drain-initial-a");
 
     harness
         .execute(vec![
-            ("key-a", input(&Key { window: TEST_WINDOW_ID, code: 65 })),
-            ("text-a", input(&TextInput { window: TEST_WINDOW_ID, text: "a".to_owned() })),
-            ("activate-b", input(&Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
+            ("key-a", input(synthetic, &Key { window: TEST_WINDOW_ID, code: 65 })),
+            ("text-a", input(synthetic, &TextInput { window: TEST_WINDOW_ID, text: "a".to_owned() })),
+            ("activate-b", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_BACKQUOTE })),
             (
                 "ime-b",
-                input(&ImePreedit {
-                    window: TEST_WINDOW_ID,
-                    text: "composition".to_owned(),
-                    cursor_begin: Some(1),
-                    cursor_end: Some(3),
-                }),
+                input(
+                    synthetic,
+                    &ImePreedit {
+                        window: TEST_WINDOW_ID,
+                        text: "composition".to_owned(),
+                        cursor_begin: Some(1),
+                        cursor_end: Some(3),
+                    },
+                ),
             ),
-            ("text-b", input(&TextInput { window: TEST_WINDOW_ID, text: "b".to_owned() })),
-            ("ctrl-b", input(&Modifiers { window: TEST_WINDOW_ID, shift: false, ctrl: true, alt: false, meta: false })),
-            ("cycle-a", input(&Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("cycle-release", input(&KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("clear-modifiers", input(&Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() })),
-            ("plain-tab", input(&Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
-            ("plain-tab-release", input(&KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("text-b", input(synthetic, &TextInput { window: TEST_WINDOW_ID, text: "b".to_owned() })),
+            (
+                "ctrl-b",
+                input(
+                    synthetic,
+                    &Modifiers { window: TEST_WINDOW_ID, shift: false, ctrl: true, alt: false, meta: false },
+                ),
+            ),
+            ("cycle-a", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("cycle-release", input(synthetic, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("clear-modifiers", input(synthetic, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() })),
+            ("plain-tab", input(synthetic, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            ("plain-tab-release", input(synthetic, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_TAB })),
         ])
         .expect("route keyboard sequence");
 
     assert_eq!(
-        drain(&mut harness, &region_a, "drain-focus-a"),
+        drain(&mut harness, region_a, "drain-focus-a"),
         DrainEditorInputsResult {
             region_name: "focus-a".to_owned(),
             inputs: vec![
@@ -221,7 +237,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
         },
     );
     assert_eq!(
-        drain(&mut harness, &region_b, "drain-focus-b"),
+        drain(&mut harness, region_b, "drain-focus-b"),
         DrainEditorInputsResult {
             region_name: "focus-b".to_owned(),
             inputs: vec![

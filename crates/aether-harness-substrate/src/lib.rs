@@ -28,15 +28,15 @@
 //! runs — so the vocabulary in the instructions cannot drift off the API:
 //!
 //! ```
-//! use aether_actor::Addressable;
 //! use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 //! use aether_window::{
-//!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, WindowCapability, WindowMode,
+//!     CreateWindow, CreateWindowResult, ListWindows, ListWindowsResult, SyntheticWindowCapability, WindowMode,
 //!     WindowSizeRequest, WindowSpec,
 //! };
 //!
 //! # fn main() -> Result<(), Box<dyn std::error::Error>> {
 //! let mut harness = SubstrateHarness::builder().size(320, 240).build()?;
+//! let window = harness.actor_ref::<SyntheticWindowCapability>();
 //!
 //! let spec = WindowSpec {
 //!     name: "main".to_owned(),
@@ -46,9 +46,9 @@
 //! };
 //!
 //! let result = harness.execute(vec![
-//!     ("open", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &CreateWindow { spec })),
+//!     ("open", HarnessOp::send_and_await_reply(&window, &CreateWindow { spec })),
 //!     ("warm", HarnessOp::advance(2)),
-//!     ("windows", HarnessOp::send_and_await_reply(WindowCapability::NAMESPACE, &ListWindows)),
+//!     ("windows", HarnessOp::send_and_await_reply(&window, &ListWindows)),
 //! ])?;
 //!
 //! assert!(matches!(result.reply::<CreateWindowResult>("open")?, CreateWindowResult::Ok { .. }));
@@ -60,6 +60,12 @@
 //! # Ok(())
 //! # }
 //! ```
+//!
+//! Every send addresses a proven reference ([`SendTarget`], ADR-0230): a
+//! composed capability's from [`SubstrateHarness::actor_ref`], a loaded
+//! component's from [`SubstrateHarness::load`] / [`SubstrateHarness::load_any`],
+//! and a spawned child's or opened window's from [`SubstrateHarness::child`]
+//! beneath a reference already held.
 //!
 //! The other ops compose the same way: [`HarnessOp::send_and_settle`] waits
 //! for a whole causal chain rather than one reply,
@@ -86,8 +92,8 @@ pub use chassis::{
     SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv, WORKERS, substrate_harness_observer_mailbox,
 };
 pub use execute::{
-    DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, HarnessActor, HarnessOp,
-    HarnessOutput, PollObserver,
+    DEFAULT_POLL_BUDGET, DEFAULT_TICK_DELTA_MICROS, ExecutionError, ExecutionResult, HarnessOp, HarnessOutput,
+    PollObserver, SendTarget,
 };
 pub use harness::{
     DEFAULT_HEIGHT, DEFAULT_WIDTH, HookFactory, SubstrateHarness, SubstrateHarnessBuilder, SubstrateHarnessError,

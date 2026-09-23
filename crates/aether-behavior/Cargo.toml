@@ -69,9 +69,6 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # and its `behavior` feature were extracted from `aether-kit` to
 # `aether-kit-widget` (iamacoffeepot/aether#3950).
 aether-kit-widget = { path = "../aether-kit-widget" }
-# The gate addresses the loaded panel + host by their `/`-rendered lineage
-# built from `WasmTrampoline::NAMESPACE` (ADR-0099 §4).
-aether-component = { path = "../aether-component" }
 aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
 # The script wasms the gate loads by example stem (`intercept_slider`,

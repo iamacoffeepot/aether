@@ -98,7 +98,8 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when a fixture changes, and xtask's
 # wasm-consumer rule fires the dist pre-build. The tests locate the
-# built wasm by stem, so the code never imports these crates.
+# built wasm by stem; only the bundle is also imported, for the actor types
+# its loads and child lookups name.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 aether-test-fixtures-boot = { path = "../aether-test-fixtures-boot" }
 aether-test-fixtures-defaultless = { path = "../aether-test-fixtures-defaultless" }
@@ -120,7 +121,6 @@ wasmtime = { workspace = true }
 # dist-pre-build visibility (iamacoffeepot/aether#3766).
 [package.metadata.cargo-machete]
 ignored = [
-    "aether-test-fixtures-bundle",
     "aether-test-fixtures-boot",
     "aether-test-fixtures-defaultless",
     "aether-test-fixtures-stateful-typed",

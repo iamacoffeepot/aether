@@ -124,6 +124,7 @@ use aether_puppet::extract::Settings;
 use aether_puppet::labels::{self, Labels};
 use aether_puppet::mesh::Mesh;
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot,
     ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage,
@@ -258,7 +259,7 @@ fn probed_program<const CLASS_COUNT: usize>() -> ProgramRegister {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -306,7 +307,10 @@ fn create_geometry<const CLASS_COUNT: usize>(
         indices: bake::indices(mesh),
     };
     let created = harness
-        .execute(vec![("create_geometry", HarnessOp::send_and_await_reply("aether.render", &mail))])
+        .execute(vec![(
+            "create_geometry",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail),
+        )])
         .expect("create_geometry sequence");
     match created.reply::<CreateGeometryResult>("create_geometry").expect("decode CreateGeometryResult") {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
@@ -316,7 +320,7 @@ fn create_geometry<const CLASS_COUNT: usize>(
 
 fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
     let registered = harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![("register", HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("register sequence");
     match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult") {
         ProgramRegisterResult::Ok { program_id } => program_id,
@@ -842,7 +846,7 @@ fn a_re_uploaded_subject_re_bakes_from_its_new_vertices() {
         .execute(vec![(
             "update_geometry",
             HarnessOp::send_and_settle(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &UpdateGeometry {
                     geometry_id: rig.geometry,
                     vertices: bake::vertices::<{ labels::CLASSES }>(&posed, &scores, &settings(), None),

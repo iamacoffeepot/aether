@@ -42,16 +42,16 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::Addressable;
+use aether_actor::{ActorRef, Addressable};
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, init_save_sandbox, require_runtime};
 use aether_kinds::{
     CaptureFrame, CaptureFrameResult, FrameCheck, FrameCheckResult, FrameRect, FrameReduction, LoadComponent,
-    LoadResult, NamedMail, Tick,
+    NamedMail, Tick,
 };
-use aether_kit_widget::{PanelConfig, Theme};
+use aether_kit_widget::{PanelConfig, Theme, WidgetPanel};
 use aether_render::RenderCapability;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 
@@ -109,7 +109,7 @@ fn load_font(harness: &mut SubstrateHarness) -> u32 {
         .execute(vec![(
             "font",
             HarnessOp::send_and_await_reply(
-                "aether.text",
+                &harness.actor_ref::<TextCapability>(),
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
         )])
@@ -124,7 +124,7 @@ fn load_font(harness: &mut SubstrateHarness) -> u32 {
 /// the name `panel`, with its stack at `(PANEL_X, PANEL_Y)` and its theme
 /// pinned to the already-resident `font_id` (empty font path, so the panel
 /// does not kick off its own load) — every widget draws text with that font.
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -136,26 +136,16 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
 /// One synthesized frame tick addressed straight to the panel's mailbox.
@@ -263,9 +253,8 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         .build()
         .expect("boot");
     let font_id = load_font(&mut harness);
-    load_panel(&mut harness, &wasm, font_id);
+    let panel = load_panel(&mut harness, &wasm, font_id);
 
-    let panel = panel_address();
     // Warm the panel: the first tick spawns + lays out the widget stack and
     // draws it. That first glyph draw only *primes* the atlas — the text cap
     // lazily creates its atlas texture and the `create_texture` reply has to
@@ -286,7 +275,7 @@ fn panel_glyphs_sit_inside_their_row_frames() {
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                RenderCapability::NAMESPACE,
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![tick_to_panel()],

@@ -89,7 +89,8 @@ turn retiring an id. Use `poll_until`, which re-sends a probe mail until its
 reply satisfies an observation or a wall-clock budget elapses:
 
 ```rust
-HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |reply: &ListWindowsResult| {
+let window = harness.actor_ref::<SyntheticWindowCapability>();
+HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     matches!(reply, ListWindowsResult::Ok { windows }
         if windows.iter().map(|window| window.id).eq([surviving]))
 });
@@ -140,10 +141,13 @@ the retired YAML scenario runner: the compiler checks kind construction, while
 the harness owns ordering.
 
 Component-composition tests can place a loaded actor beneath any already-live
-logical parent with `HarnessOp::load_component_under`:
+logical parent with `HarnessOp::load_component_under`, sent through the
+component host's reference:
 
 ```rust,ignore
+let host = harness.actor_ref::<ComponentHostCapability>();
 let operation = HarnessOp::load_component_under(
+    &host,
     parent_name,
     LoadComponent {
         wasm,
@@ -239,60 +243,54 @@ submission in flight, so alternating conditions bills one frame's GPU wait to
 the other condition. Capture remains a correctness/evidence operation, never
 part of a timed run.
 
-Root actors also have a typed operation sender. It resolves the recipient from
-the actor identity and lets the event kind infer from `&mail`:
+Every send takes a proven reference (ADR-0230), never an address. A composed
+capability's comes from `SubstrateHarness::actor_ref`, and the event kind infers
+from `&mail`:
 
 ```rust
-HarnessOp::actor::<SyntheticWindowCapability>().send(&SubscribeWindow {
+let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+HarnessOp::send_and_settle(&synthetic, &SubscribeWindow {
     selector: WindowSelector::All,
     kind: Key::ID,
     mailbox: observer,
 });
 ```
 
-The constructor accepts only root identities and `send` compiles only when the
-actor handles that direct kind.
+A typed `&ActorRef<R>` compiles only when `R` handles that direct kind; an
+`ErasedActorRef` is accepted unchecked, for a fixture whose type the test
+cannot name or a query every actor answers, such as `log_tail`'s.
 
-A loaded wasm component gets the same sender from `HarnessOp::loaded`, which
-renders its ADR-0099 lineage address from the component identity and the name
-the scenario loaded it under — `HarnessOp::loaded_default` when the load took
-the actor's own namespace:
+A loaded wasm component's reference comes from the load itself:
+`SubstrateHarness::load::<R>` types the reply's stamped sender as the export
+`R`, and `load_any` returns it erased for a fixture that ships only as wasm.
+Both also return the canonical lineage path the host reported, for an
+assertion against it or a `CaptureWithMails` bundle recipient:
 
 ```rust,ignore
-HarnessOp::loaded::<CameraComponent>("cam").send(&CameraDestroy { name: "main".to_owned() });
+let (camera, _path) = harness.load::<CameraComponent>(load)?;
+HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() });
 ```
 
-The bound there is the `Embedded` resolver, so a root capability is a compile
-error on `loaded` and a component is one on `actor`. That keeps the address a
-scenario sends to derived from the identity instead of rebuilt as
-`format!("aether.component/aether.embedded:{name}")` per test file, where
-writing the bare namespace by mistake costs an unknown-recipient drop at run
-time. For the surfaces that take a name rather than an operation — `log_tail`,
-a `CaptureWithMails` bundle recipient, an assertion against `LoadResult::Ok.path`
-— read the same string off the sender with `address()`.
-
-Once a root `CreateWindow` operation has
-settled, send an id-less control to its addressed child. Derive the boundary
-address from the manager identity rather than copying its namespace literal:
+A child an actor spawned — a widget beneath a panel, a window beneath the
+window capability — is reached by type and key beneath a reference already
+held, with `SubstrateHarness::child`. Once a root `CreateWindow` operation has
+settled, send an id-less control to the child it opened:
 
 ```rust
-use aether_actor::Addressable;
+let window = harness.actor_ref::<SyntheticWindowCapability>();
+let main = harness.child::<SyntheticWindowCapability, SyntheticWindowInstance>(&window, LoadName::new("main")?)?;
 
-let main = format!("{}/:main", WindowCapability::NAMESPACE);
-
-HarnessOp::send_and_await_reply(
-    main,
-    &SetWindowTitle { title: "Inspector".to_owned() },
-);
+HarnessOp::send_and_await_reply(&main, &SetWindowTitle { title: "Inspector".to_owned() });
 ```
 
-The canonical spelling of that recipient is
-`aether.window/aether.window.instance:main`; both forms resolve to the same
-live child mailbox. Synthetic window events deliberately use a separate
-generic convenience constructor:
+The lookup proves only a `Live` child: one never spawned, still starting, or
+already dropped is refused with `SubstrateHarnessError::ChildRefused`, which
+names the key and the child's namespace. Synthetic window events deliberately
+use a separate generic convenience constructor, sent through the synthetic
+window capability's reference:
 
 ```rust
-HarnessOp::window_event(WindowId(2), &Key { window: WindowId(2), code: keycode });
+HarnessOp::window_event(&synthetic, WindowId(2), &Key { window: WindowId(2), code: keycode });
 ```
 
 `window_event` accepts any `K: Kind`, encodes it once, and hands the runtime its

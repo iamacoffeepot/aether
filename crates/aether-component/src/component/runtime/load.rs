@@ -239,7 +239,24 @@ impl ComponentHostCapabilityState {
             });
         }
 
-        let (mut capabilities, dependencies, type_tag, selected_namespace) = if let Some(requested) = &payload.export {
+        // A single-actor module (`export!(A)`) carries no actor boundaries, so
+        // its one implicit group is unnamed; its sole export is still nameable
+        // by the namespace its `aether.namespace` section declares, and it is
+        // instantiated exactly as the unselected default load would be.
+        let sole_export = actors.iter().all(|actor| actor.namespace.is_none())
+            && payload.export.is_some()
+            && kind_manifest::read_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?
+                == payload.export;
+
+        let (mut capabilities, dependencies, type_tag, selected_namespace) = if sole_export {
+            let sole = actors.first();
+            (
+                sole.map(|actor| actor.capabilities.clone()).unwrap_or_default(),
+                sole.map(|actor| actor.dependencies.clone()).unwrap_or_default(),
+                None,
+                payload.export.clone(),
+            )
+        } else if let Some(requested) = &payload.export {
             let Some(group) = actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested.as_str())) else {
                 let available: Vec<&str> = actors.iter().filter_map(|actor| actor.namespace.as_deref()).collect();
                 return Err(LoadResult::Err {

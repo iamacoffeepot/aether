@@ -31,14 +31,15 @@
 use std::fs;
 use std::path::Path;
 
+use aether_actor::ActorRef;
 use aether_data::Kind;
-use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png};
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
     test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots, write_fixture},
 };
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::LoadComponent;
 use aether_puppet::{Look, Puppet, PuppetConfig, TurntableConfig};
 
 /// The demo's subject, and the demo's two configs — the files themselves,
@@ -75,32 +76,19 @@ const TOLERANCE: u8 = 5;
 const FLOOR: f32 = 0.001;
 const CEILING: f32 = 0.60;
 
-fn puppet() -> HarnessActor<Puppet> {
-    HarnessOp::loaded_default::<Puppet>()
-}
-
 /// Load the puppet wasm carrying `config`, blocking on `LoadResult` so the
 /// `wire`-issued subject read is in flight before the frames are advanced.
-fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path, config: &PuppetConfig) {
+fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path, config: &PuppetConfig) -> ActorRef<Puppet> {
     let wasm = fs::read(wasm_path).expect("read the puppet wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    config: config.encode_into_bytes(),
-                    export: Some(PUPPET_EXPORT.to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component(puppet): {error}"),
-    }
+    harness
+        .load::<Puppet>(LoadComponent {
+            wasm,
+            name: None,
+            config: config.encode_into_bytes(),
+            export: Some(PUPPET_EXPORT.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load_component(puppet): {error}"))
+        .0
 }
 
 #[test]
@@ -124,7 +112,7 @@ fn the_demo_config_draws_the_demo_subject_with_no_mail() {
         .with_component_host()
         .build()
         .expect("boot a rendering harness with a component host");
-    load_puppet(&mut harness, &wasm_path, &config);
+    let puppet = load_puppet(&mut harness, &wasm_path, &config);
 
     // The framing the demo's turntable holds while it sweeps. Sent rather
     // than driven, because what is under test is the subject reaching the
@@ -143,7 +131,7 @@ fn the_demo_config_draws_the_demo_subject_with_no_mail() {
         // rather than the same tick. The `wire`-issued subject read settles
         // inside the same window.
         .execute(vec![
-            ("frame", puppet().send(&look)),
+            ("frame", HarnessOp::send_and_settle(&puppet, &look)),
             ("prime", HarnessOp::advance(12)),
             ("demo", HarnessOp::capture()),
         ])

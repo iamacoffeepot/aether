@@ -37,9 +37,9 @@ use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCt
 
 use super::{HarnessOp, SubstrateHarness};
 use crate::perf::harness::{
-    CellResult, Drive, Ping, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain, fanout, fanout_heavy,
-    heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, spawn_relays, summarize, tiers_from_env,
-    two_level_tree, wide_fanout_widths_from_env,
+    CellResult, Drive, Ping, Relay, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain, fanout,
+    fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, spawn_relays, summarize,
+    tiers_from_env, two_level_tree, wide_fanout_widths_from_env,
 };
 
 /// Self-sustaining ring actor for the multi-worker saturation profile.
@@ -231,12 +231,11 @@ fn hold_id() -> MailboxId {
 }
 
 /// Spawn every relay in `topo` onto `tb` (subname = relay index) through
-/// [`spawn_relays`], which hands each relay its downstreams' proofs. Shared
-/// by the settlement guards.
-fn spawn_topology(tb: &SubstrateHarness, topo: &Topology) {
-    if let Err((relay, e)) = spawn_relays(tb, topo) {
-        panic!("spawn relay {relay}: {e:?}");
-    }
+/// [`spawn_relays`], which hands each relay its downstreams' proofs, and
+/// return every relay's proof in index order. Shared by the settlement
+/// guards.
+fn spawn_topology(tb: &SubstrateHarness, topo: &Topology) -> Vec<ActorRef<Relay>> {
+    spawn_relays(tb, topo).unwrap_or_else(|(relay, e)| panic!("spawn relay {relay}: {e:?}"))
 }
 
 /// Per-round settlement patience (the log cadence of the escalating
@@ -307,7 +306,7 @@ fn mail_saturation_profile() {
 
     // Close the ring: the settle returns once relay 0 has kept relay 1 as its
     // successor, so seeding starts on a closed ring.
-    tb.execute(vec![("ring.link", HarnessOp::send_and_settle("mlat.ring:1", &RingLink))]).expect("the ring links");
+    tb.execute(vec![("ring.link", HarnessOp::send_and_settle(&successor, &RingLink))]).expect("the ring links");
 
     let m: usize = env::var("TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
     let ttl = 100_000_000u32;
@@ -439,9 +438,9 @@ fn emit_settlement_settles_with_holds() {
 
 /// Query one actor's per-actor trace ring over the mail wire
 /// (`aether.trace.tail`), filtered to `root`. Returns the ring slice.
-fn trace_tail(tb: &mut SubstrateHarness, mailbox_name: &str, root: MailId) -> Vec<TraceRingEntry> {
+fn trace_tail(tb: &mut SubstrateHarness, actor: ErasedActorRef, root: MailId) -> Vec<TraceRingEntry> {
     let req = TraceTail { max: 0, since: None, root: Some(root) }.encode_into_bytes();
-    let reply = tb.send_bytes_and_await(mailbox_name, TraceTail::ID, req).expect("aether.trace.tail reply");
+    let reply = tb.request_bytes(actor, TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, .. } => entries,
         TraceTailResult::Err { error } => panic!("trace.tail error: {error}"),
@@ -466,12 +465,12 @@ fn trace_ring_dual_write_routes_events_to_owning_rings() {
         return;
     };
 
-    spawn_topology(&tb, &depth_chain(1));
+    let relays = spawn_topology(&tb, &depth_chain(1));
     let (root, rx) = tb.inject_root(relay_id(0), Ping::ID, Ping { seq: 0 }.encode_into_bytes());
     assert_settled(&rx, "mlat.trace_ring_dual_write");
 
     // The recipient relay's own ring holds the mail's Received + Finished.
-    let relay = trace_tail(&mut tb, "mlat.relay:0", root);
+    let relay = trace_tail(&mut tb, relays[0].erase(), root);
     assert!(
         relay.iter().any(|e| matches!(e.event, TraceEvent::Received { .. })),
         "relay ring missing Received; got {relay:?}"
@@ -571,7 +570,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
 
     // Single leaf relay (depth-1 chain) — each inbound mail writes exactly
     // Received + Finished into its own ring and nothing fans out.
-    spawn_topology(&tb, &depth_chain(1));
+    let relays = spawn_topology(&tb, &depth_chain(1));
     for seq in 0..INJECTS {
         let (_root, rx) = tb.inject_root(
             relay_id(0),
@@ -584,7 +583,7 @@ fn settled_chains_reclaim_without_growing_per_actor_ring() {
     }
 
     let req = TraceTail { max: 0, since: None, root: None }.encode_into_bytes();
-    let reply = tb.send_bytes_and_await("mlat.relay:0", TraceTail::ID, req).expect("aether.trace.tail reply");
+    let reply = tb.request_bytes(relays[0].erase(), TraceTail::ID, req).expect("aether.trace.tail reply");
     match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, truncated_before, .. } => {
             assert!(
@@ -622,7 +621,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // Single leaf relay (depth-1 chain: relay 0, no downstream) — each
     // inbound mail writes exactly Received + Finished into its own ring
     // and nothing fans out.
-    spawn_topology(&tb, &depth_chain(1));
+    let relays = spawn_topology(&tb, &depth_chain(1));
     for seq in 0..INJECTS {
         let (_root, rx) = tb.inject_root(
             relay_id(0),
@@ -638,7 +637,7 @@ fn small_trace_ring_cap_laps_per_actor_ring() {
     // also drop the trace-query mail's own Received/Finished, but the gap
     // cursor is computed over the whole ring regardless of the filter).
     let req = TraceTail { max: 0, since: None, root: None }.encode_into_bytes();
-    let reply = tb.send_bytes_and_await("mlat.relay:0", TraceTail::ID, req).expect("aether.trace.tail reply");
+    let reply = tb.request_bytes(relays[0].erase(), TraceTail::ID, req).expect("aether.trace.tail reply");
     let truncated_before = match TraceTailResult::decode_from_bytes(&reply).expect("decode TraceTailResult") {
         TraceTailResult::Ok { entries, truncated_before, .. } => {
             assert!(

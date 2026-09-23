@@ -5,7 +5,7 @@
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::Addressable;
+use aether_actor::ErasedActorRef;
 use aether_data::Kind;
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
@@ -196,8 +196,8 @@ pub fn run_cell(
         return None;
     };
 
-    let entry = match spawn_relays(&tb, topo) {
-        Ok(entry) => entry,
+    let relays = match spawn_relays(&tb, topo) {
+        Ok(relays) => relays,
         Err((relay, e)) => {
             tracing::warn!(target: "aether_perf", topo = %topo.name, relay, error = ?e, "relay spawn failed");
             return None;
@@ -230,15 +230,19 @@ pub fn run_cell(
             backlog.min(ring_cap / fanout_divisor)
         }
     };
-    if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (entry, burst), ()).finish() {
-        tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
-        return None;
-    }
+    let source = match tb.spawn_actor::<TickSource>(Subname::Named("src"), (relays[0], burst), ()).finish() {
+        Ok(source) => source,
+        Err(e) => {
+            tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
+            return None;
+        }
+    };
 
     // Subscribe the source to the `Tick` lifecycle stage so
     // `advance` broadcasts a tick to it each frame (ADR-0082).
     let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
-    match tb.send_bytes_and_await(<LifecycleCapability as Addressable>::NAMESPACE, LifecycleSubscribe::ID, sub_req) {
+    let lifecycle = tb.actor_ref::<LifecycleCapability>().erase();
+    match tb.request_bytes(lifecycle, LifecycleSubscribe::ID, sub_req) {
         Ok(reply) => match LifecycleSubscribeResult::decode_from_bytes(&reply) {
             Some(LifecycleSubscribeResult::Ok) => {}
             other => {
@@ -296,7 +300,7 @@ pub fn run_cell(
 
     // Harvest each participating actor's trace ring directly
     // (ADR-0086 Phase 3, decentralized trace): we built the
-    // topology, so we know the tick source + relays by name — no
+    // topology, so we hold the tick source's + relays' proofs — no
     // central window query, no root enumeration. Fold every ring
     // into one node set; the `Ping`-kind filter below isolates
     // relay hops (the per-actor `aether.trace.tail` query mail
@@ -304,19 +308,18 @@ pub fn run_cell(
     // truncation: a relay ring (cap 4096) laps under a long wide
     // fan-out, leaving stats from the most-recent window — valid
     // percentiles, fewer samples.
-    let n = topo.downstreams.len();
-    let mut names: Vec<String> = Vec::with_capacity(n + 1);
-    names.push(format!("{TICKSRC_NS}:src"));
-    names.extend((0..n).map(|i| format!("{RELAY_NS}:{i}")));
+    let mut participants: Vec<(String, ErasedActorRef)> = Vec::with_capacity(relays.len() + 1);
+    participants.push((format!("{TICKSRC_NS}:src"), source.erase()));
+    participants.extend(relays.iter().enumerate().map(|(i, relay)| (format!("{RELAY_NS}:{i}"), relay.erase())));
 
     let mut entries: Vec<TraceRingEntry> = Vec::new();
     let mut truncated = false;
     let mut harvest_failed = false;
-    for name in &names {
+    for (name, participant) in &participants {
         // `max: u32::MAX` clamps to the ring capacity — pull the
         // whole ring, `root: None` across every tree in the run.
         let req = TraceTail { max: u32::MAX, since: None, root: None }.encode_into_bytes();
-        match tb.send_bytes_and_await(name, TraceTail::ID, req) {
+        match tb.request_bytes(*participant, TraceTail::ID, req) {
             Ok(reply) => match TraceTailResult::decode_from_bytes(&reply) {
                 Some(TraceTailResult::Ok { entries: ring, truncated_before, .. }) => {
                     truncated |= truncated_before.is_some();
@@ -399,13 +402,13 @@ pub fn run_cell(
 
     // iamacoffeepot/aether#1233: the real tier reports keep-up, not
     // span percentiles. Harvest each actor's plain-field `Ping`
-    // counters out-of-band (the same name-addressed `send_and_await_reply`
-    // flow as the trace harvest above) and sum them: `offered =
+    // counters out-of-band (the same proof-addressed request/reply flow as
+    // the trace harvest above) and sum them: `offered =
     // Σ sent`, `completed = Σ received`. Sidesteps the trace ring
     // entirely, which the real tier's fan-out laps. Only the real
     // tier runs paced, so only it has a meaningful elapsed-vs-expected.
     let keepup = if topo.tier == Tier::Real {
-        harvest_keepup(&mut tb, &names, &topo.name, drive, frames, drive_elapsed)
+        harvest_keepup(&mut tb, &participants, &topo.name, drive, frames, drive_elapsed)
     } else {
         None
     };

@@ -46,7 +46,7 @@ pub(crate) use dispatch::{test_dispatch, test_owned_dispatch};
 pub use effect::{PreparedAliasRoute, RegistryInventory, RegistrySubscription};
 pub use errors::{DropError, KindConflict, NameConflict};
 pub use handlers::{InboxHandler, InlineHandler, noop_handler};
-pub use mailbox::{AdoptRefused, MailboxEntry, Registry, ResolveLiveError, RouteResolution};
+pub use mailbox::{AdoptRefused, ChildRefused, MailboxEntry, Registry, ResolveLiveError, RouteResolution};
 pub(crate) use mailbox::{CapturedDisposition, RouteContinuation, RouteEndpoint, SeizeCell};
 pub use metrics::RegistryQueueMetrics;
 pub(crate) use names::canonical_mailbox_id;

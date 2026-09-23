@@ -18,6 +18,7 @@
 
 use std::fs;
 
+use aether_component::ComponentHostCapability;
 use aether_data::ActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -45,7 +46,7 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: Some(export.to_owned()) },
             ),
         )])
@@ -59,7 +60,13 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
 /// Drop one loaded actor, blocking on its `DropResult::Ok`.
 fn drop_actor(harness: &mut SubstrateHarness, path: ActorPath) {
     let dropped = harness
-        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: path }))])
+        .execute(vec![(
+            "drop",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DropComponent { target: path },
+            ),
+        )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -99,7 +106,10 @@ fn module_boot_singleton_spawns_once_across_selector_loads() {
     );
 
     let listed = harness
-        .execute(vec![("list", HarnessOp::send_and_await_reply("aether.component", &ListComponents {}))])
+        .execute(vec![(
+            "list",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &ListComponents {}),
+        )])
         .expect("list sequence");
     let names = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult").names;
     let boot_listed = names.iter().filter(|n| n.ends_with(":aether.test.boot.boot")).count();
@@ -117,28 +127,19 @@ fn concurrent_same_hash_loads_share_the_pending_boot() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let widget_a = harness
-        .send_deferred(
-            "aether.component",
-            &LoadComponent {
-                wasm: wasm.clone(),
-                name: None,
-                config: Vec::new(),
-                export: Some("aether.test.boot.widget_a".to_owned()),
-            },
-        )
-        .expect("queue first load without pumping");
-    let widget_b = harness
-        .send_deferred(
-            "aether.component",
-            &LoadComponent {
-                wasm,
-                name: None,
-                config: Vec::new(),
-                export: Some("aether.test.boot.widget_b".to_owned()),
-            },
-        )
-        .expect("queue second same-hash load before the first boot completion");
+    let widget_a = harness.send_deferred(
+        &harness.actor_ref::<ComponentHostCapability>(),
+        &LoadComponent {
+            wasm: wasm.clone(),
+            name: None,
+            config: Vec::new(),
+            export: Some("aether.test.boot.widget_a".to_owned()),
+        },
+    );
+    let widget_b = harness.send_deferred(
+        &harness.actor_ref::<ComponentHostCapability>(),
+        &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("aether.test.boot.widget_b".to_owned()) },
+    );
 
     assert!(matches!(harness.await_deferred::<LoadResult>(widget_a).expect("first load reply"), LoadResult::Ok { .. }));
     assert!(matches!(
@@ -165,7 +166,7 @@ fn boot_actor_is_not_selectable_by_export() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     name: None,
@@ -243,7 +244,7 @@ fn same_hash_replacement_preserves_the_boot_reference() {
         .execute(vec![(
             "replace",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent {
                     target: widget.clone(),
                     wasm,

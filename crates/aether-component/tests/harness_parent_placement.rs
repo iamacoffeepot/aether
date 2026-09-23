@@ -7,9 +7,9 @@
 
 use std::fs;
 
-use aether_actor::{Addressable, EMBEDDED_SCOPE};
-use aether_component::ComponentHostCapability;
-use aether_data::Kind;
+use aether_actor::{ActorRef, EMBEDDED_SCOPE};
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -33,9 +33,10 @@ fn load(
         config: Vec::new(),
         export: Some(export.to_owned()),
     };
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let operation = match parent {
-        Some(parent) => HarnessOp::load_component_under(parent, component),
-        None => HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &component),
+        Some(parent) => HarnessOp::load_component_under(&host, parent, component),
+        None => HarnessOp::send_and_await_reply(&host, &component),
     };
     let result = harness.execute(vec![(label, operation)]).expect("component load operation");
 
@@ -43,6 +44,18 @@ fn load(
         LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("load {export} beneath {parent:?} failed: {error}"),
     }
+}
+
+/// The loaded trampoline keyed `name` beneath the trampoline `parent` — the
+/// placement a load beneath a component parent produces.
+fn nested_trampoline(
+    harness: &SubstrateHarness,
+    parent: ActorRef<WasmTrampoline>,
+    name: &str,
+) -> ActorRef<WasmTrampoline> {
+    harness
+        .child::<WasmTrampoline, WasmTrampoline>(&parent, LoadName::new(name).expect("a valid load name"))
+        .unwrap_or_else(|error| panic!("the trampoline loaded as {name} is live: {error}"))
 }
 
 fn assert_child_identity(loaded: &str, parent: &str, subname: &str) {
@@ -71,11 +84,18 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
     assert_child_identity(&nested_target, &nested, TARGET_EXPORT);
     assert_child_identity(&nested_caller, &nested, CALLER_EXPORT);
 
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let outer = harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new("outer").expect("a valid load name"))
+        .expect("the outer trampoline is live");
+    let outer_caller = nested_trampoline(&harness, outer, CALLER_EXPORT);
+    let nested_caller = nested_trampoline(&harness, nested_trampoline(&harness, outer, "nested"), CALLER_EXPORT);
+
     let baseline = harness.count_observed(TickObserved::NAME);
     harness
         .execute(vec![
-            ("outer-peer", HarnessOp::send_and_settle(&outer_caller, &Bump)),
-            ("nested-peer", HarnessOp::send_and_settle(&nested_caller, &Bump)),
+            ("outer-peer", HarnessOp::send_and_settle(outer_caller.erase(), &Bump)),
+            ("nested-peer", HarnessOp::send_and_settle(nested_caller.erase(), &Bump)),
         ])
         .expect("both parent-relative peer sends settle");
     assert_eq!(
@@ -89,10 +109,12 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
 #[test]
 fn unresolved_explicit_parent_is_a_clean_load_error() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let result = harness
         .execute(vec![(
             "missing-parent",
             HarnessOp::load_component_under(
+                &host,
                 "aether.component/aether.embedded:missing",
                 LoadComponent { wasm: Vec::new(), name: None, config: Vec::new(), export: None },
             ),

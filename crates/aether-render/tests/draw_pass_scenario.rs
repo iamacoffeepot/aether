@@ -28,6 +28,7 @@ use aether_harness_substrate_capture::visual::{background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawShapes, DrawTexturedQuads,
     GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
@@ -113,7 +114,7 @@ fn draw_pass(geometry: u32, depth: Option<u32>, load: PassLoad, uniform_offset: 
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -152,7 +153,7 @@ fn create_geometry(
         indices: indices.iter().flat_map(|index| index.to_le_bytes()).collect(),
     };
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", &mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail))])
         .expect("create_geometry sequence");
     match created.reply::<CreateGeometryResult>(label).expect("decode CreateGeometryResult") {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
@@ -172,7 +173,7 @@ fn register_reply(
     mail: &ProgramRegister,
 ) -> ProgramRegisterResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>(label)
         .expect("decode ProgramRegisterResult")

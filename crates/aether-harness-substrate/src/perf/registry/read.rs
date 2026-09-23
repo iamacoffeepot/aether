@@ -30,12 +30,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_substrate::mail::registry::RouteResolution;
 use aether_substrate::{MailboxId, Registry};
 use serde::{Deserialize, Serialize};
 
-use super::fixture::{CloseBurst, StageBurst};
+use super::fixture::{CloseBurst, CommitParent, StageBurst};
 use super::kinds::KindMix;
 use super::owner::RawCounters;
 use super::spread::TargetSpread;
@@ -109,7 +110,7 @@ pub fn read_cell(
     harness: &mut SubstrateHarness,
     targets: &[MailboxId],
     threads: usize,
-    churn: Option<&str>,
+    churn: Option<ActorRef<CommitParent>>,
     mix: KindMix,
     spread: TargetSpread,
     baseline: Option<f64>,
@@ -220,16 +221,16 @@ pub fn warm_read_path(registry: &Registry, targets: &[MailboxId]) {
 /// Each send is settle-gated, so a cycle returns only once its births have
 /// landed; the loop re-checks the deadline between cycles rather than
 /// interrupting one, so it overruns by at most one cycle.
-fn drive_churn(harness: &mut SubstrateHarness, parent: &str, window: Duration) {
+fn drive_churn(harness: &mut SubstrateHarness, parent: ActorRef<CommitParent>, window: Duration) {
     let deadline = Instant::now() + window;
     while Instant::now() < deadline {
         let stage = StageBurst { count: CHURN_BURST }.encode_into_bytes();
-        if let Err(error) = harness.send_bytes(parent, StageBurst::ID, stage) {
+        if let Err(error) = harness.settle_bytes(parent.erase(), StageBurst::ID, stage) {
             tracing::warn!(target: "aether_perf", ?error, "churn stage did not settle; ending churn early");
             return;
         }
         let close = CloseBurst::default().encode_into_bytes();
-        if let Err(error) = harness.send_bytes(parent, CloseBurst::ID, close) {
+        if let Err(error) = harness.settle_bytes(parent.erase(), CloseBurst::ID, close) {
             tracing::warn!(target: "aether_perf", ?error, "churn close did not settle; ending churn early");
             return;
         }

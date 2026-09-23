@@ -20,7 +20,6 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 
 [dev-dependencies]
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-aether-component = { path = "../aether-component" }
 aether-kinds = { path = "../aether-kinds" }
 
 [lints]

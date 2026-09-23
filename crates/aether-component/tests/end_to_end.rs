@@ -17,7 +17,6 @@
 
 use std::path::Path;
 
-use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
@@ -34,7 +33,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
         )])

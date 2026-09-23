@@ -32,7 +32,9 @@
 // Pixel-rect layout constants read clearest as float literals inline.
 #![allow(clippy::cast_precision_loss)]
 
+use aether_component::ComponentHostCapability;
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
+use aether_render::RenderCapability;
 use std::fs;
 
 use aether_data::Kind;
@@ -141,7 +143,7 @@ fn create_four_color_texture(harness: &mut SubstrateHarness) -> u32 {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CreateTexture {
                     width: size,
                     height: size,
@@ -179,7 +181,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: Some("panel".to_owned()),
@@ -213,7 +215,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: Some("panel".to_owned()),

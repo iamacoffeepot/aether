@@ -111,7 +111,6 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-behavior-derive",
- "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
@@ -213,6 +212,7 @@ dependencies = [
  "aether-actor",
  "aether-bloomery-kinds",
  "aether-bloomery-program-derive",
+ "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-http",
@@ -243,7 +243,6 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-reactor-derive",
  "aether-bloomery-view",
- "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
@@ -684,6 +683,7 @@ name = "aether-kit-commons"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
@@ -812,6 +812,7 @@ name = "aether-puppet"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-component",
  "aether-data",
  "aether-fs",
  "aether-harness-substrate",
@@ -1026,7 +1027,6 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-bloomery-program",
  "aether-bloomery-reactor",
- "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
@@ -1069,7 +1069,6 @@ dependencies = [
  "aether-bloomery-bundle",
  "aether-bloomery-kinds",
  "aether-bloomery-reactor",
- "aether-component",
  "aether-data",
  "aether-harness-substrate",
  "aether-kinds",
