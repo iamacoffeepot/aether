@@ -33,7 +33,7 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::{
     RevealPlate, accept_font_metrics_result, apply_static_control_state, elide_to_width, overflow_reveal_items,
@@ -181,7 +181,7 @@ fn align_x(align: TextAlign, frame_width: f32, text_width: Option<f32>) -> f32 {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `LabelConfig` again to change the text or theme in place.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, depends(TextCapability))]
 impl WasmActor for LabelWidget {
     type Config = LabelConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.label";

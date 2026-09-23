@@ -8,6 +8,8 @@
 // "skipping: ..." alongside `test ... ok` (issue 891).
 #![allow(clippy::print_stderr)]
 
+mod support;
+
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use aether_render::RenderCapability;
 use std::fs;
@@ -15,7 +17,9 @@ use std::fs;
 use aether_actor::ActorRef;
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
+use aether_harness_substrate_capture::test_helpers::{
+    envelope, init_save_sandbox, require_runtime, test_namespace_roots,
+};
 use aether_harness_substrate_capture::visual::{Image, Rect, decode_png, target_color_stats};
 use aether_kinds::{ClipRect, LoadComponent, NamedMail, QuadSpace, Tick};
 use aether_kit_widget::set::ImageWidget;
@@ -28,6 +32,7 @@ use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, QuadBlend, Shape, ShapeTexture, TextureFormat, TextureSampling,
     TextureUsage,
 };
+use support::widget_caps;
 
 const PANEL_X: f32 = 8.0;
 const PANEL_Y: f32 = 9.0;
@@ -167,8 +172,15 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness =
-        SubstrateHarness::builder().size(48, 40).with_render().with_component_host().build().expect("boot");
+    let mut harness = widget_caps(
+        SubstrateHarness::builder()
+            .size(48, 40)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-image")))
+            .with_render()
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot");
     let first_texture_id = create_texture(&mut harness, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut harness, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;

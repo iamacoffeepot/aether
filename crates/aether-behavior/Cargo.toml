@@ -69,6 +69,11 @@ aether-harness-substrate = { path = "../aether-harness-substrate" }
 # and its `behavior` feature were extracted from `aether-kit` to
 # `aether-kit-widget` (iamacoffeepot/aether#3950).
 aether-kit-widget = { path = "../aether-kit-widget" }
+# The widget module declares render, text and clipboard wherever it loads, so
+# the gate composes the headless render stub, text and the in-memory clipboard.
+aether-render = { path = "../aether-render" }
+aether-text = { path = "../aether-text" }
+aether-clipboard = { path = "../aether-clipboard" }
 aether-actor = { path = "../aether-actor" }
 aether-kinds = { path = "../aether-kinds" }
 # The script wasms the gate loads by example stem (`intercept_slider`,

@@ -46,6 +46,7 @@ use core::mem;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, mouse_button};
+use aether_text::TextCapability;
 
 use crate::set::{WidgetDefaults, quad, reply_draw, widget_chrome};
 use crate::state::{InteractionState, emit_state_changed};
@@ -259,7 +260,7 @@ impl WidgetDefaults for SplitterWidget {
 /// # Agent
 /// Not loaded directly — the root spawns it as an inline child. Re-send
 /// `SplitterConfig` to move the split from the host's side.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SplitterWidget {
     type Config = SplitterConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.splitter";

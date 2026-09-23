@@ -28,6 +28,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease};
+use aether_text::TextCapability;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
@@ -171,7 +172,7 @@ impl WidgetDefaults for RadioGroupWidget {
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `RadioConfig` again to replace the options or theme in place — that
 /// holds the current choice. Send it [`SetSelection`] to move the choice.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for RadioGroupWidget {
     type Config = RadioConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.radio";

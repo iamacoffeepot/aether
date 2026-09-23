@@ -43,7 +43,7 @@ use alloc::vec::Vec;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
@@ -131,7 +131,7 @@ impl WidgetDefaults for ButtonWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send it
 /// its `ButtonConfig` again to relabel or restyle it in place.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ButtonWidget {
     type Config = ButtonConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.button";

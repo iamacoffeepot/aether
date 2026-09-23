@@ -234,7 +234,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_PAGE_DOWN, KEY_PAGE_UP, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove, MouseWheel};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
@@ -451,7 +451,7 @@ impl WidgetDefaults for VirtualListWidget {
 /// for a figure derived from the one above it, `with_space_before` to open a
 /// block, `with_rule_above` for the hairline over that space. Any of them
 /// makes every row of the list as tall as what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for VirtualListWidget {
     type Config = VirtualListConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.virtual_list";

@@ -28,10 +28,10 @@
 //! and are ignored.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_clipboard::{GetClipboardTextResult, SetClipboardTextResult};
+use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::KEY_ENTER;
 use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 use alloc::string::String;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
@@ -127,7 +127,7 @@ impl WidgetDefaults for TextFieldWidget {
 /// its `TextFieldConfig` again to re-cap or restyle it in place — that holds
 /// the buffer, the caret, and the selection. Send it [`SetText`] to replace
 /// what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
 impl WasmActor for TextFieldWidget {
     type Config = TextFieldConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_field";

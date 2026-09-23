@@ -67,9 +67,9 @@ use aether_kinds::{
 };
 use aether_kit_widget::set::{ButtonWidget, SliderWidget, VirtualListWidget, text_baseline_y};
 use aether_kit_widget::{
-    ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
-    RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
-    TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, VirtualListRow,
+    ButtonConfig, EditorConfig, EditorRegion, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig,
+    RegionInputLanes, RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState,
+    SliderConfig, TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, VirtualListRow,
     WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind, WidgetPanel, WidgetValidation,
 };
 use aether_math::Rgba;
@@ -241,26 +241,10 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> Acto
     load_panel_with_children(harness, wasm, font_id, Vec::new())
 }
 
-fn load_panel_with_children(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    font_id: u32,
-    children: Vec<WidgetChildSpec>,
-) -> ActorRef<WidgetPanel> {
-    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "")
-}
-
-/// `editor_region` is the shell-declared region this panel announces itself as
-/// once it has given input ownership away; it is empty for a self-owned panel.
-fn load_panel_with_children_and_ownership(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    font_id: u32,
-    children: Vec<WidgetChildSpec>,
-    owns_input: bool,
-    editor_region: &str,
-) -> ActorRef<WidgetPanel> {
-    let config = PanelConfig {
+/// The self-owned panel config every scenario loads: its stack at
+/// `(PANEL_X, PANEL_Y)` `PANEL_WIDTH` wide, themed with the resident `font_id`.
+fn panel_config(font_id: u32, children: Vec<WidgetChildSpec>) -> PanelConfig {
+    PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
         width: PANEL_WIDTH,
@@ -268,19 +252,53 @@ fn load_panel_with_children_and_ownership(
         font_path: String::new(),
         theme: Theme { font_id, ..Theme::DEFAULT },
         children,
-        owns_input,
-        editor_region: editor_region.to_owned(),
-    };
+        owns_input: true,
+        editor_region: String::new(),
+    }
+}
+
+fn load_panel_with_children(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
     let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
-            config: config.encode_into_bytes(),
+            config: panel_config(font_id, children).encode_into_bytes(),
             export: None,
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
     panel
+}
+
+/// Load an [`EditorRegion`] under the name `panel` for the shell-declared
+/// region `panel`, and return the panel it hosts as its child `panel`. The
+/// region announces itself to the shell and relays the shell's input to that
+/// panel, so the scenario drives the panel through the shell and reads the
+/// panel's own log ring.
+fn load_editor_region(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
+    let config = PanelConfig { editor_region: "panel".to_owned(), ..panel_config(font_id, children) };
+    let (region, path) = harness
+        .load::<EditorRegion>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some(EditorRegion::NAMESPACE.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load EditorRegion: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the editor region should register under :panel; got {path}");
+    harness
+        .child::<EditorRegion, WidgetPanel>(&region, LoadName::new("panel").expect("a valid child subname"))
+        .unwrap_or_else(|error| panic!("the editor region's panel is live: {error}"))
 }
 
 fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
@@ -295,8 +313,8 @@ fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> Erased
         .0
 }
 
-/// Load the shell under its **default** name, so the panel and the probe can
-/// name it by bare type when they announce themselves. Its region table names
+/// Load the shell under its **default** name, so the editor region and the
+/// probe can name it by bare type when they announce themselves. Its region table names
 /// no addresses: each region supplies its own by announcing.
 fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8]) {
     let probe_lanes = RegionInputLanes {
@@ -1274,17 +1292,10 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     let mut harness = build_bench();
     let font_id = load_font(&mut harness);
 
-    // Shell first: a region that announces before the shell exists announces
-    // into nothing, so the shell is what the panel and the probe attach to.
+    // Shell first: the editor region declares the shell, so it is refused
+    // until the shell is live, and the probe announces into nothing before it.
     load_editor_shell(&mut harness, &kit_wasm);
-    let panel = load_panel_with_children_and_ownership(
-        &mut harness,
-        &kit_wasm,
-        font_id,
-        vec![text_field_child("field", "abcd")],
-        false,
-        "panel",
-    );
+    let panel = load_editor_region(&mut harness, &kit_wasm, font_id, vec![text_field_child("field", "abcd")]);
     warm_panel(&mut harness, panel);
     let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
     let synthetic = harness.actor_ref::<SyntheticWindowCapability>();

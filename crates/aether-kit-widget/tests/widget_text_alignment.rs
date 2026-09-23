@@ -37,6 +37,8 @@
 // a pixel region.
 #![allow(clippy::suboptimal_flops)]
 
+mod support;
+
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use std::env;
 use std::fs;
@@ -54,6 +56,7 @@ use aether_kinds::{
 use aether_kit_widget::{PanelConfig, Theme, WidgetPanel};
 use aether_render::RenderCapability;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
+use support::widget_caps;
 
 /// Panel origin and stack width (widget-local `(0, 0)` maps to this window
 /// point). Chosen so the whole stack fits the capture surface with margin.
@@ -244,14 +247,11 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     // namespace roots). All mail is addressed directly, so no input fan-out.
     let sandbox = init_save_sandbox("widget-text-alignment");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut harness = SubstrateHarness::builder()
-        .with_render()
-        .with_component_host()
-        .with_actor::<TextCapability>(())
-        .size(240, 220)
-        .namespace_roots(roots)
-        .build()
-        .expect("boot");
+    let mut harness = widget_caps(
+        SubstrateHarness::builder().with_render().with_component_host().size(240, 220).namespace_roots(roots),
+    )
+    .build()
+    .expect("boot");
     let font_id = load_font(&mut harness);
     let panel = load_panel(&mut harness, &wasm, font_id);
 

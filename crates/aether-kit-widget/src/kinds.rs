@@ -2527,7 +2527,8 @@ pub struct EditorKeyChord {
 /// sits, which lanes it takes, and whether it joins the editor focus cycle.
 ///
 /// The spec carries no address. A region that does not own its own input
-/// announces itself with a [`RegionAttach`] naming this `name`, and the shell
+/// announces itself with a [`RegionAttach`] naming this `name` — for a widget
+/// panel, the [`EditorRegion`](crate::EditorRegion) hosting it — and the shell
 /// keeps that envelope's sender as the proof it routes to (ADR-0230). Until
 /// that announcement lands the entry routes nothing.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -2547,7 +2548,9 @@ pub struct EditorConfig {
 }
 
 /// `aether.kit.widget.editor.region_attach` — a region telling the shell it
-/// is the actor behind the declared region called `region`.
+/// is the actor behind the declared region called `region`. On the panel side
+/// the announcer is [`EditorRegion`](crate::EditorRegion), which declares the
+/// shell and relays what the shell forwards to its child panel.
 ///
 /// The payload names only the region; the address is the envelope's sender,
 /// which the shell reads as an `ErasedActorRef` and stores. That is why the kind
@@ -2584,15 +2587,16 @@ pub struct PanelConfig {
     pub theme: Theme,
     pub children: Vec<WidgetChildSpec>,
     /// Whether this standalone panel subscribes the raw interactive streams.
-    /// Set false when an [`EditorShell`](crate::EditorShell) owns them — and
-    /// then name the shell's [`RegionSpec::name`] in [`Self::editor_region`],
-    /// because that is what the panel announces itself as.
+    /// An [`EditorRegion`](crate::EditorRegion) clears it on the panel it
+    /// hosts, because the [`EditorShell`](crate::EditorShell) owns those
+    /// streams and the region relays them to the panel.
     #[serde(default = "owns_input_by_default")]
     pub owns_input: bool,
-    /// The shell-declared region this panel is the actor behind, announced as
-    /// a [`RegionAttach`] once the panel wires. Empty (the default) means the
-    /// panel is self-owned and announces nothing; leaving it empty under
-    /// `owns_input: false` is a panel that receives no input at all.
+    /// The shell-declared [`RegionSpec::name`] an
+    /// [`EditorRegion`](crate::EditorRegion) announces as a [`RegionAttach`]
+    /// once it wires. Only the region reads it: a
+    /// [`WidgetPanel`](crate::WidgetPanel) loaded with a non-empty value
+    /// refuses to initialize, and the region clears it on the panel it hosts.
     #[serde(default)]
     pub editor_region: String,
 }
