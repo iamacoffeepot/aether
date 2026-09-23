@@ -2,12 +2,11 @@
 //! samples it yields, the percentile collapse of those samples, and the
 //! measurement itself (boot a chassis, wire the topology, drive, harvest).
 
-use std::sync::Arc;
 use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_kinds::trace::{TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{LifecycleSubscribe, LifecycleSubscribeResult, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -21,8 +20,8 @@ use super::relay::RELAY_NS;
 use super::throughput::throughput_from_nodes;
 use super::tick::TICKSRC_NS;
 use super::{
-    Drive, KeepUp, Ping, Relay, RelayConfig, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree,
-    relay_id, scheduler_tuning_from_env, summarize, ticksrc_id,
+    Drive, KeepUp, Ping, Stats, TickSource, Tier, Topology, drive_for_tier, max_out_degree, scheduler_tuning_from_env,
+    spawn_relays, summarize, ticksrc_id,
 };
 use crate::{DEFAULT_TICK_DELTA_MICROS, SubstrateHarness};
 
@@ -197,21 +196,13 @@ pub fn run_cell(
         return None;
     };
 
-    let n = topo.downstreams.len();
-    let mut spawned_ok = true;
-    for i in 0..n {
-        let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-        let sub = i.to_string();
-        let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
-        if let Err(e) = tb.spawn_actor::<Relay>(Subname::Named(&sub), config, ()).finish() {
-            tracing::warn!(target: "aether_perf", topo = %topo.name, relay = i, error = ?e, "relay spawn failed");
-            spawned_ok = false;
-            break;
+    let entry = match spawn_relays(&tb, topo) {
+        Ok(entry) => entry,
+        Err((relay, e)) => {
+            tracing::warn!(target: "aether_perf", topo = %topo.name, relay, error = ?e, "relay spawn failed");
+            return None;
         }
-    }
-    if !spawned_ok {
-        return None;
-    }
+    };
     // The real tier is always driven paced regardless of the sweep's
     // drive (ADR-0085 amendment); light / heavy keep it verbatim.
     let drive = drive_for_tier(drive, topo.tier);
@@ -239,7 +230,7 @@ pub fn run_cell(
             backlog.min(ring_cap / fanout_divisor)
         }
     };
-    if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), burst), ()).finish() {
+    if let Err(e) = tb.spawn_actor::<TickSource>(Subname::Named("src"), (entry, burst), ()).finish() {
         tracing::warn!(target: "aether_perf", topo = %topo.name, error = ?e, "tick source spawn failed");
         return None;
     }
@@ -313,6 +304,7 @@ pub fn run_cell(
     // truncation: a relay ring (cap 4096) laps under a long wide
     // fan-out, leaving stats from the most-recent window — valid
     // percentiles, fewer samples.
+    let n = topo.downstreams.len();
     let mut names: Vec<String> = Vec::with_capacity(n + 1);
     names.push(format!("{TICKSRC_NS}:src"));
     names.extend((0..n).map(|i| format!("{RELAY_NS}:{i}")));

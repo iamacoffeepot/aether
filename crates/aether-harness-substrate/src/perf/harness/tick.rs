@@ -1,12 +1,12 @@
 //! The tick source — the lifecycle bridge that turns the substrate's own
 //! `Tick` fan-out into the sweep's offered load.
 
-use aether_actor::OutboundReply;
+use aether_actor::{ActorRef, OutboundReply};
 use aether_data::{Kind, KindId, MailboxId, ReplyContract, mailbox_id_from_name};
 use aether_kinds::{ComponentCapabilities, HandlerCapability, Tick};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx};
 
-use super::{CountQuery, CountReport, Ping};
+use super::{CountQuery, CountReport, Ping, Relay};
 
 /// Lifecycle bridge for the sweep: subscribed to the `Tick` input
 /// stream, it emits a burst of `burst` `Ping`s into the entry relay per
@@ -21,7 +21,7 @@ use super::{CountQuery, CountReport, Ping};
 /// in one tick, so a single `advance(1)` drains a deep ready queue — the
 /// contention the per-frame `advance` quiescence otherwise prevents.
 pub struct TickSource {
-    entry: MailboxId,
+    entry: ActorRef<Relay>,
     burst: u32,
     seq: u32,
     /// `Ping` mails emitted into the entry, for the run-end keep-up harvest
@@ -37,9 +37,10 @@ impl aether_actor::Addressable for TickSource {
 impl aether_actor::Root for TickSource {}
 impl aether_actor::HandlesKind<Tick> for TickSource {}
 impl aether_actor::Lifecycle<Self> for TickSource {
-    /// `(entry, burst)`: the relay-0 mailbox and the number of `Ping`s to
-    /// emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
-    type Config = (MailboxId, u32);
+    /// `(entry, burst)`: relay 0's proof — the one
+    /// [`spawn_relays`](super::spawn_relays) returns — and the number of
+    /// `Ping`s to emit per `Tick` (`1` in `Latency`, `backlog` in `Saturate`).
+    type Config = (ActorRef<Relay>, u32);
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
@@ -92,9 +93,8 @@ impl Dispatch<Self> for TickSource {
             return None;
         }
         for _ in 0..state.burst {
-            let bytes = Ping { seq: state.seq }.encode_into_bytes();
+            ctx.to(&state.entry).send(&Ping { seq: state.seq });
             state.seq = state.seq.wrapping_add(1);
-            let _ = ctx.send_envelope_tracked(state.entry, Ping::ID, &bytes);
             state.sent += 1;
         }
         Some(())

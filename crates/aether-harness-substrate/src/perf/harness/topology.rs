@@ -63,13 +63,18 @@ impl Tier {
 
 /// A topology is a DAG over relay indices: `downstreams[i]` lists the
 /// relays that relay `i` forwards to. Relay 0 is always the entry. The
-/// number of relays is `downstreams.len()`. `work_iters[i]` is the CPU
+/// number of relays is `downstreams.len()`. Every edge points forward:
+/// each index in `downstreams[i]` is greater than `i`, so reverse index
+/// order is a reverse topological order — [`spawn_relays`] spawns in that
+/// order to hand each relay its downstreams' proofs. `work_iters[i]` is the CPU
 /// spin budget relay `i` burns per inbound `Ping` (see `busy_spin`) —
 /// all-zero for the trivial topologies, non-zero on the heavy ones
 /// (iamacoffeepot/aether#1074). `work_iters.len() == downstreams.len()`.
 /// `tier` carries the workload tier (ADR-0085 amendment) through the sweep
 /// to the report builder, so the renderer can suppress the verdict for a
 /// non-`light` tier.
+///
+/// [`spawn_relays`]: crate::perf::harness::spawn_relays
 #[derive(Clone)]
 pub struct Topology {
     pub name: String,
