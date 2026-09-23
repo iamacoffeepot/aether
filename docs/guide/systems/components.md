@@ -311,6 +311,9 @@ Replacement is phase-aware rather than transactionally rolled back:
   allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
 - a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
   hooks have run;
+- a candidate that does not declare the kind of a request context the old
+  instance carries is refused after those hooks, and the old instance is
+  reinstalled ([ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md) §4);
 - an instantiation error occurs after the old instance was dropped and leaves the
   stable trampoline empty; and
 - a rehydrate error installs the new instance but returns `ReplaceResult::Err`, so

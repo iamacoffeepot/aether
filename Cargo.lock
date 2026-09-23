@@ -456,6 +456,7 @@ dependencies = [
  "aether-substrate",
  "aether-test-fixtures-boot",
  "aether-test-fixtures-bundle",
+ "aether-test-fixtures-carry-reshaped",
  "aether-test-fixtures-defaultless",
  "aether-test-fixtures-kinds",
  "aether-test-fixtures-stateful-reshaped",
@@ -1012,6 +1013,15 @@ dependencies = [
  "aether-window",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "aether-test-fixtures-carry-reshaped"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-test-fixtures-kinds",
 ]
 
 [[package]]
