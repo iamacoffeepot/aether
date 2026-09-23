@@ -13,6 +13,7 @@ mod tests {
     use aether_data::{Kind, MailId};
     use aether_fs::{List, ListResult, NamespaceAddr};
     use aether_kinds::trace::DispatchTraced;
+    use aether_kinds::{Advance, AdvanceResult};
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
@@ -90,6 +91,30 @@ mod tests {
             .expect("the fs List round-trip is recorded as a CallRecord");
         assert_eq!(list_record.engine, Some(engine), "the List call is routed to the forked engine");
         assert_eq!(list_record.reply_kinds, vec![ListResult::ID], "the List call drew exactly one ListResult reply");
+    }
+
+    /// Issue 6419: a headless engine composes the fail-fast
+    /// `aether.substrate_harness` stub, so an `advance` sent over the wire
+    /// must draw exactly one `AdvanceResult::Err` before its `ReplyEnd`. The
+    /// stub used to reply through the hub outbound, which drops a
+    /// `Component` sender — and an rpc `Call` always names the rpc server's
+    /// mailbox as its reply target — so the wire caller got zero replies
+    /// instead of the failure the stub exists to deliver.
+    #[test]
+    fn fleetharness_substrate_harness_advance_fails_fast_on_headless() {
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+
+        let replies = harness.send(engine, "aether.substrate_harness", &Advance { ticks: 1, delta_micros: 16_667 });
+        let reply = match replies.as_slice() {
+            [one] => one,
+            other => panic!("advance expected exactly one reply event, got {}", other.len()),
+        };
+        assert_eq!(reply.kind, AdvanceResult::ID, "the stub reply should be an AdvanceResult");
+        assert!(
+            matches!(AdvanceResult::decode_from_bytes(&reply.payload), Some(AdvanceResult::Err { .. })),
+            "a headless engine should refuse advance with AdvanceResult::Err",
+        );
     }
 
     /// `send_mail_traced` row: dispatch a one-entry traced batch

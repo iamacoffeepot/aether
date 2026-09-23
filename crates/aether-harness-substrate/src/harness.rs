@@ -47,8 +47,8 @@ use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Ro
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
-    ChildRefused, EgressEvent, HubOutbound, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget,
-    RingCapacities, SchedulerTuning, SubstrateBoot,
+    ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget, RingCapacities,
+    SchedulerTuning, SubstrateBoot,
     mail::{CapabilityRegistry, CostTable, MailId},
 };
 #[cfg(test)]
@@ -235,7 +235,6 @@ impl error::Error for SubstrateHarnessError {}
 pub struct SubstrateHarness {
     queue: Arc<Mailer>,
     registry: Arc<aether_substrate::Registry>,
-    outbound: Arc<HubOutbound>,
     loopback_rx: mpsc::Receiver<EgressEvent>,
 
     events_rx: EventReceiver,
@@ -721,14 +720,14 @@ impl SubstrateHarness {
         }
 
         // Attach a `RecordingBackend` to the boot's outbound. Replies
-        // the substrate emits via `outbound.send_reply` arrive here
-        // as `EgressEvent::ToSession`, which `pump_until_reply`
+        // to this harness's session reach the outbound through the
+        // mailer's reply path and arrive here as
+        // `EgressEvent::ToSession`, which `pump_until_reply`
         // correlates by `correlation_id`.
         let (recording, loopback_rx) = RecordingBackend::new();
         boot.outbound.attach_backend(Arc::new(recording));
 
         let queue = Arc::clone(&boot.queue);
-        let outbound = Arc::clone(&boot.outbound);
         let registry = Arc::clone(&boot.registry);
         // The loopback driver's route to the lifecycle cap: the reference the
         // chassis recorded when it composed the cap.
@@ -740,7 +739,6 @@ impl SubstrateHarness {
         Ok(Self {
             queue,
             registry,
-            outbound,
             loopback_rx,
             events_rx,
             hook,
@@ -1553,22 +1551,25 @@ impl SubstrateHarness {
     /// `LifecycleAdvanceComplete` reply (the broadcast subtree leaked an
     /// `in_flight`, or the driver never replied), or a `SettlementTimeout`
     /// from a capture pre-mail chain. In the Advance branch we bail
-    /// mid-loop without sending `AdvanceResult::Ok` so the
-    /// `pump_until_reply` caller surfaces the timeout rather than
+    /// mid-loop without sending `AdvanceResult::Ok`: the carried inbound
+    /// guard drops unreplied, which is ordinary for an `InboundMail`, and
+    /// the `pump_until_reply` caller surfaces the timeout rather than
     /// waiting on a reply that will never arrive — the substrate is
-    /// in a stuck state and the test should fail loudly.
+    /// in a stuck state and the test should fail loudly. On success the
+    /// reply goes through that guard, which answers every sender kind and
+    /// holds the request's chain open until the ticks complete.
     // `event` is owned because the match destructures it; clippy
-    // doesn't track the partial-move via the `Advance { reply_to, .. }`
+    // doesn't track the partial-move via the `Advance { reply, .. }`
     // pattern.
     #[allow(clippy::needless_pass_by_value)]
     fn dispatch_event(&mut self, event: ChassisEvent) -> Result<(), SubstrateHarnessError> {
         match event {
-            ChassisEvent::Advance { reply_to, ticks, delta_micros } => {
+            ChassisEvent::Advance { reply, ticks, delta_micros } => {
                 for _ in 0..ticks {
                     self.frame += 1;
                     self.run_frame(delta_micros)?;
                 }
-                self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
+                reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
             }
             ChassisEvent::RenderMail => {
                 // In-process the pump loop in `pump_until_event` drains the

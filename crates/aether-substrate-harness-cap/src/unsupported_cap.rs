@@ -51,29 +51,28 @@ impl NativeActor for UnsupportedSubstrateHarnessCapability {
     /// ADR-0074 Phase 4 chassis-owned mailbox.
     const NAMESPACE: &'static str = "aether.substrate_harness";
 
-    fn init(_config: (), ctx: &mut NativeInitCtx<'_>) -> Result<UnsupportedSubstrateHarnessCapabilityState, BootError> {
-        let outbound = ctx.mailer().outbound().cloned().ok_or_else(|| {
-            BootError::Other(Box::new(io::Error::other(
-                "HubOutbound must be wired on Mailer before \
-                 UnsupportedSubstrateHarnessCapability::init (chassis main connects the hub before \
-                 the Builder chain)",
-            )))
-        })?;
-        Ok(UnsupportedSubstrateHarnessCapabilityState { outbound })
+    fn init(
+        _config: (),
+        _ctx: &mut NativeInitCtx<'_>,
+    ) -> Result<UnsupportedSubstrateHarnessCapabilityState, BootError> {
+        Ok(UnsupportedSubstrateHarnessCapabilityState)
     }
 
-    /// Reply `Err` so MCP `advance` fails fast on chassis that don't
-    /// drive ticks via the embedder loop.
-    #[handler::single]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: Advance) {
-        state.outbound.send_reply(
-            ctx.reply_target(),
-            &AdvanceResult::Err {
-                error: "unsupported on this chassis — aether.substrate_harness.advance is \
-                    substrate-harness-only (ADR-0067)"
-                    .to_owned(),
-            },
-        );
+    /// Reply `Err` so `advance` fails fast on chassis that don't drive
+    /// ticks via the embedder loop. The reply goes through the handler's own
+    /// inbound, never the hub outbound: an rpc `Call` names the rpc server's
+    /// mailbox as its reply target, and the hub outbound drops that sender,
+    /// so a wire caller got no reply at all (issue 6419; #4341 made the same
+    /// fix for headless render). `#[handler::manual]` mirrors the primary cap's declaration,
+    /// which keeps the two `aether.substrate_harness.advance` inventory rows
+    /// folding to one.
+    #[handler::manual]
+    fn on_advance(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: Advance) {
+        ctx.reply(&AdvanceResult::Err {
+            error: "unsupported on this chassis — aether.substrate_harness.advance is \
+                substrate-harness-only (ADR-0067)"
+                .to_owned(),
+        });
     }
 }
 
@@ -83,20 +82,16 @@ impl NativeActor for UnsupportedSubstrateHarnessCapability {
 // the items the impl names are re-exported with `pub use`.
 #[cfg(feature = "runtime")]
 mod runtime {
-    use std::sync::Arc;
-
+    pub use aether_actor::{Manual, OutboundReply};
     pub use aether_kinds::AdvanceResult;
+    pub use aether_substrate::Erased;
     pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     pub use aether_substrate::chassis::error::BootError;
-    pub use aether_substrate::mail::outbound::HubOutbound;
-    pub use std::io;
 
-    /// Runtime state for `UnsupportedSubstrateHarnessCapability` (ADR-0122
-    /// split). Holds the `HubOutbound` captured at `init`; read in
-    /// `on_advance` to send the fail-fast reply. The dispatcher holds
-    /// this as the cap's state; the addressing identity is the distinct
-    /// ZST `UnsupportedSubstrateHarnessCapability`.
-    pub struct UnsupportedSubstrateHarnessCapabilityState {
-        pub(super) outbound: Arc<HubOutbound>,
-    }
+    /// Stateless runtime for `UnsupportedSubstrateHarnessCapability` (ADR-0122
+    /// split): the fail-fast reply goes through the handler's own inbound, so
+    /// there is nothing to hold between envelopes. The dispatcher holds this
+    /// as the cap's state; the addressing identity is the distinct ZST
+    /// `UnsupportedSubstrateHarnessCapability`.
+    pub struct UnsupportedSubstrateHarnessCapabilityState;
 }
