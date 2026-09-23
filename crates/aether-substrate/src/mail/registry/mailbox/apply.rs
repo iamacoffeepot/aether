@@ -79,7 +79,13 @@ impl Registry {
             match effect {
                 RegistryEffect::PreparedSpawn(mut commit) => {
                     let id = commit.route.id;
-                    if id == MailboxId::NONE || id == MailboxId::CHASSIS_MAILBOX_ID {
+                    // The zero id is every absent-mailbox wasm ABI slot's
+                    // encoding ("no source", "no parent"), so it is never
+                    // registrable: a real actor there would be
+                    // indistinguishable from no actor. The chassis id is
+                    // short-circuited ahead of the registry. Every arm below
+                    // refuses both.
+                    if id.0 == 0 || id == MailboxId::CHASSIS_MAILBOX_ID {
                         let name = commit.route.canonical_name.clone();
                         drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
@@ -145,7 +151,7 @@ impl Registry {
                 }
                 RegistryEffect::PublishAlias(alias) => {
                     let name = alias.rendered_name.to_string();
-                    if alias.alias == MailboxId::NONE || alias.alias == MailboxId::CHASSIS_MAILBOX_ID {
+                    if alias.alias.0 == 0 || alias.alias == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     }
                     let target_live =
@@ -210,7 +216,7 @@ impl Registry {
                     applied.push(RegistryApplied::AliasRetired(true));
                 }
                 RegistryEffect::ReserveStarting { route } => {
-                    if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                    if route.id.0 == 0 || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
                     match staged_route(&staged_routes, inner, route.id) {
@@ -280,7 +286,7 @@ impl Registry {
                     applied.push(RegistryApplied::StartingCancellation(cancellation));
                 }
                 RegistryEffect::PublishLive { route, activation } => {
-                    if route.id == MailboxId::NONE || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                    if route.id.0 == 0 || route.id == MailboxId::CHASSIS_MAILBOX_ID {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                     }
                     let record = RouteRecord {

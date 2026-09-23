@@ -201,7 +201,7 @@ fn by_tag_spawn_rejects_zero_host_alias_before_init() {
 #[test]
 fn inline_child_alias_validator_accepts_nonzero_alias() {
     assert_eq!(
-        __validate_inline_child_alias(MailboxId(0xABCD_0001)).expect("a nonzero host alias is valid"),
+        __validate_inline_child_alias(0xABCD_0001).expect("a nonzero host alias is valid"),
         MailboxId(0xABCD_0001),
     );
 }
@@ -233,7 +233,7 @@ fn zero_alias_resolver(
 ) -> Result<MailboxId, SpawnError> {
     if tag == ActorTypeTag::of::<StubChild>() {
         __validate_inline_child_placement(registry, parent, tag, StubChild::__AETHER_PLACEMENT)?;
-        let alias = __validate_inline_child_alias(MailboxId::NONE)?;
+        let alias = __validate_inline_child_alias(0)?;
         spawn_one_child::<StubChild>(
             registry,
             parent,

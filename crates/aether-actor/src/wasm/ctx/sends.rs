@@ -109,7 +109,7 @@ impl Sends<'_> {
 
     /// The routing seed for `scope`, mirroring `WasmCtx::scope_mailbox`.
     fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        self.inline.scope_mailbox(MailboxId(self.mailbox), scope).0
+        self.inline.scope_mailbox(MailboxId(self.mailbox), scope)
     }
 
     /// The one routing call every verb above funnels through: hand the

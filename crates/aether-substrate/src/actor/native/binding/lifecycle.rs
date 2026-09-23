@@ -41,16 +41,16 @@ impl NativeBinding {
         aborter: Arc<dyn FatalAborter>,
         spawner: Option<Arc<crate::Spawner>>,
     ) -> Self {
-        Self::new_with_parent::<A>(mailer, self_mailbox, MailboxId::NONE, carry, canonical_name, aborter, spawner)
+        Self::new_with_parent(mailer, self_mailbox, None, carry, canonical_name, aborter, spawner)
     }
 
     /// Build a typed transport whose actor was logically spawned by
     /// `parent_mailbox`. Root actors use [`Self::new`], which preserves the
-    /// existing constructor and records [`MailboxId::NONE`].
-    pub fn new_with_parent<A: super::NativeActor>(
+    /// existing constructor and records no parent.
+    pub(crate) fn new_with_parent(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
-        parent_mailbox: MailboxId,
+        parent_mailbox: Option<MailboxId>,
         carry: u64,
         canonical_name: Arc<str>,
         aborter: Arc<dyn FatalAborter>,
@@ -108,13 +108,13 @@ impl NativeBinding {
     /// appropriate for production capabilities, which should go
     /// through [`Self::from_ctx`].
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
-        Self::new_for_test_with_parent(mailer, self_mailbox, MailboxId::NONE)
+        Self::new_for_test_with_parent(mailer, self_mailbox, None)
     }
 
     pub(crate) fn new_for_test_with_parent(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
-        parent_mailbox: MailboxId,
+        parent_mailbox: Option<MailboxId>,
     ) -> Self {
         Self {
             mailer,
@@ -194,15 +194,22 @@ impl NativeBinding {
         self.identity.carry()
     }
 
-    /// The mailbox of this actor's logical parent, or [`MailboxId::NONE`]
-    /// for a chassis root or a legacy/test binding with no parent metadata.
-    pub fn parent_mailbox(&self) -> MailboxId {
+    /// The mailbox of this actor's logical parent, or `None` for a chassis
+    /// root or a legacy/test binding with no parent metadata.
+    pub(crate) fn parent_mailbox(&self) -> Option<MailboxId> {
         self.identity.parent()
     }
 
-    /// Select the lineage seed requested by a caller-scoped resolver.
-    pub fn scope_mailbox(&self, scope: CallerScope) -> MailboxId {
-        scope.select(self.self_mailbox(), self.parent_mailbox())
+    /// Select the caller carry requested by a caller-scoped resolver.
+    pub(crate) fn scope_mailbox(&self, scope: CallerScope) -> u64 {
+        match (scope, self.parent_mailbox()) {
+            // A root-pinned resolver ignores its carry, and no birth folds
+            // beneath the empty lineage, so a parentless `Parent` scope
+            // resolves to an address that is never live.
+            (CallerScope::Root, _) | (CallerScope::Parent, None) => 0,
+            (CallerScope::Current, _) => self.self_mailbox().0,
+            (CallerScope::Parent, Some(parent)) => parent.0,
+        }
     }
 
     pub(in crate::actor::native) fn runtime_identity(&self) -> Option<&ActorRuntimeIdentity> {
@@ -335,15 +342,14 @@ mod tests {
     }
 
     #[test]
-    fn binding_scope_selection_distinguishes_root_current_and_parent() {
+    fn binding_scope_selection_distinguishes_current_and_parent() {
         let (_registry, mailer) = bare_substrate();
         let current = MailboxId(0x4a01);
         let parent = MailboxId(0x4a00);
-        let binding = NativeBinding::new_for_test_with_parent(mailer, current, parent);
+        let binding = NativeBinding::new_for_test_with_parent(mailer, current, Some(parent));
 
-        assert_eq!(binding.scope_mailbox(CallerScope::Root), MailboxId::NONE);
-        assert_eq!(binding.scope_mailbox(CallerScope::Current), current);
-        assert_eq!(binding.scope_mailbox(CallerScope::Parent), parent);
+        assert_eq!(binding.scope_mailbox(CallerScope::Current), current.0);
+        assert_eq!(binding.scope_mailbox(CallerScope::Parent), parent.0);
     }
 
     /// #1716 / step 2: an armed envelope left queued in the dispatcher's

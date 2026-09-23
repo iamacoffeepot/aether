@@ -268,7 +268,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -288,7 +288,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -310,7 +310,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
         // ADR-0080 §7: suppress the in-flight lineage so the recipient
         // starts a fresh causal chain.
         self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,

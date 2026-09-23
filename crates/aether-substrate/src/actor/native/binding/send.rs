@@ -169,7 +169,7 @@ mod tests {
         assert!(transport.runtime_identity().is_none(), "test bindings must remain logically untyped");
         assert!(transport.spawner().is_none(), "untyped test bindings must not be able to spawn");
         assert_eq!(transport.carry(), 99, "untyped relative resolution keeps the depth-1 carry");
-        assert_eq!(transport.parent_mailbox(), MailboxId::NONE, "legacy untyped bindings have no logical parent");
+        assert_eq!(transport.parent_mailbox(), None, "legacy untyped bindings have no logical parent");
 
         assert_eq!(transport.prev_correlation(), 0);
         assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);

@@ -123,7 +123,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -143,7 +143,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -163,7 +163,7 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -209,7 +209,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         // No inherited parent / root — each send mints its own chain
         // rooted at the freshly minted `MailId` (sender = A.mailbox).
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -229,7 +229,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
         #[allow(clippy::cast_possible_truncation)]
         let count = payloads.len() as u32;
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             bytes,
             count,
@@ -249,7 +249,7 @@ impl<A: Addressable> MailSender for RootCtx<A> {
     {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE).0, ()).0,
+            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             K::ID.0,
             &bytes,
             1,
@@ -454,7 +454,7 @@ mod tests {
         let parent = MailboxId(0x4a11);
         let current = MailboxId(0x4a12);
         let captured = register_capture_at(&registry, parent);
-        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, parent));
+        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
         let inherited_root = MailId::new(MailboxId(0x4a13), 1);
         let inherited_mail = MailId::new(MailboxId(0x4a14), 2);
 

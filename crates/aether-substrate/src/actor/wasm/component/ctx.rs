@@ -314,23 +314,6 @@ impl ComponentCtx {
         id
     }
 
-    /// Issue 1987: resolve the dispatch identity outbound mail is stamped
-    /// with from the `from` the guest carried on its send / reply. The
-    /// caller (the `send_mail_p32` / `reply_mail_p32` host fn) has already
-    /// validated `from` is in-cluster; [`MailboxId::NONE`] (a zero / foreign
-    /// `from`, or a substrate-internal call site that bypasses the host fn,
-    /// e.g. a test fixture) falls back to `self.sender` — the component's
-    /// own id. For an inline child `from` is the child's alias, so its sends
-    /// stamp the child's address; for a normally-addressed actor it is the
-    /// component's own id, so the stamp is unchanged.
-    fn dispatch_identity(&self, from: MailboxId) -> MailboxId {
-        if from == MailboxId::NONE {
-            self.sender
-        } else {
-            from
-        }
-    }
-
     /// Return the correlation id used by the most recent
     /// `ComponentCtx::send` call. The `prev_correlation_p32` host fn
     /// surfaces this to the guest so a handler can match an inbound
@@ -363,18 +346,17 @@ impl ComponentCtx {
         // handler can match the reply to this send.
         let correlation = self.mint_correlation();
         // Issue 1987: stamp origin from the dispatch identity the guest
-        // carried on the send (`from`, validated in-cluster by the host fn)
-        // so an inline child's sends carry the child's address; a
-        // zero / foreign `from` falls back to `self.sender`.
-        let identity = self.dispatch_identity(from);
-        let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
+        // carried on the send (`from`, already resolved in-cluster by the
+        // host fn — a zero / foreign claim resolved to `self.sender` there)
+        // so an inline child's sends carry the child's address.
+        let reply_to = Source::with_correlation(SourceAddr::Component(from), correlation);
 
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
         // outbound's MailId from the same correlation that drives
         // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
         // which uses one counter for both.
-        let mail_id = MailId::new(identity, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, identity);
+        let mail_id = MailId::new(from, correlation);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, from);
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: the detached
@@ -384,13 +366,12 @@ impl ComponentCtx {
     /// host fn when the guest sets the detached flag (`WasmActorMailbox::
     /// send_detached`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
-    /// guest-carried dispatch identity, resolved the same way as in `send`.
+    /// dispatch identity the host fn already resolved, used as in `send`.
     pub fn send_detached(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
         let correlation = self.mint_correlation();
-        let identity = self.dispatch_identity(from);
-        let reply_to = Source::with_correlation(SourceAddr::Component(identity), correlation);
-        let mail_id = MailId::new(identity, correlation);
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true, identity);
+        let reply_to = Source::with_correlation(SourceAddr::Component(from), correlation);
+        let mail_id = MailId::new(from, correlation);
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, true, from);
     }
 
     /// Issue iamacoffeepot/aether#1465: correlation-preserving sibling
@@ -424,12 +405,10 @@ impl ComponentCtx {
     ) {
         let reply_to = Source::with_correlation(SourceAddr::None, correlation);
         // Issue 1987: a child's reply stamps the child's identity (the
-        // guest-carried `from`, validated in-cluster by the host fn) on its
-        // lineage `MailId`, like its sends; a zero / foreign `from` falls
-        // back to `self.sender`.
-        let identity = self.dispatch_identity(from);
-        let mail_id = MailId::new(identity, self.next_reply_lineage());
-        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, identity);
+        // guest-carried `from`, already resolved in-cluster by the host fn)
+        // on its lineage `MailId`, like its sends.
+        let mail_id = MailId::new(from, self.next_reply_lineage());
+        self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, from);
     }
 
     /// Shared routing body of [`Self::send`] and [`Self::reply`]: stamp

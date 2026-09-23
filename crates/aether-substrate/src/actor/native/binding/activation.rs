@@ -265,7 +265,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
         binding.hold_outbound_for_activation();
-        ctx.send(recipient, KindId(0x0041_4512), vec![4, 5], 1, MailboxId::NONE);
+        ctx.send(recipient, KindId(0x0041_4512), vec![4, 5], 1, sender);
         assert!(recipient_rx.try_recv().is_err(), "rejected wire mail never escapes before discard");
         assert_eq!(counter.live_roots(), 1, "accepted wire mail records one in-flight send");
 
@@ -290,7 +290,7 @@ mod tests {
         let (ctx, _binding) = component_ctx_with_binding(registry, Arc::clone(&mailer), sender);
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
 
-        ctx.send(recipient, KindId(0x0041_4522), vec![6], 1, MailboxId::NONE);
+        ctx.send(recipient, KindId(0x0041_4522), vec![6], 1, sender);
         let envelope = recipient_rx.try_recv().expect("Live component send remains eager");
         assert_eq!(envelope.payload.bytes(), &[6]);
         assert_eq!(counter.live_roots(), 1);

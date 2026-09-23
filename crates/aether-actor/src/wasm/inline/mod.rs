@@ -43,6 +43,7 @@ use alloc::collections::{BTreeMap, VecDeque};
 use alloc::string::String;
 use alloc::vec::Vec;
 use core::cell::{Cell, UnsafeCell};
+use core::num::NonZeroU64;
 
 use aether_data::MailboxId;
 
@@ -140,8 +141,8 @@ struct QueuedMail {
     /// (the local fast path is fire-and-forget), so the host reply table holds
     /// no immediate-sender for it; [`drain_cluster_queue`] instead threads this
     /// value onto the recipient's [`WasmCtx`] as its inbound source (issue
-    /// 1987), so the recipient's `ctx.sender()` resolves it. `0`
-    /// (`MailboxId::NONE`) when the sender is unknown.
+    /// 1987), so the recipient's `ctx.sender()` resolves it. `0` (the
+    /// no-source encoding) when the sender is unknown.
     sender: u64,
 }
 
@@ -218,9 +219,9 @@ pub struct Registry {
     /// any depth, not the ADR-0099 depth-1 fixed point.
     self_id: Cell<u64>,
     /// The entry actor's logical parent mailbox, supplied by the substrate's
-    /// parent-aware init ABI. Legacy init shims leave this at
-    /// [`MailboxId::NONE`], making their lack of parent metadata explicit.
-    parent_id: Cell<u64>,
+    /// parent-aware init ABI. Legacy init shims leave this `None`, making
+    /// their lack of parent metadata explicit.
+    parent_id: Cell<Option<NonZeroU64>>,
     /// The logical actor type actually constructed in the module's entry
     /// slot. Combined with each [`InlineSlot::type_tag`], this lets a ctx
     /// recover the actor identity for its own mailbox at any cluster depth.
@@ -267,7 +268,7 @@ impl Registry {
         Self {
             inner: UnsafeCell::new(BTreeMap::new()),
             self_id: Cell::new(0),
-            parent_id: Cell::new(MailboxId::NONE.0),
+            parent_id: Cell::new(None),
             entry_actor_tag: Cell::new(None),
             queue: UnsafeCell::new(VecDeque::new()),
             request_contexts: UnsafeCell::new(RequestContextTable::new()),
@@ -311,10 +312,10 @@ impl Registry {
     }
 
     /// Record the entry actor's logical parent mailbox. Parent-aware init
-    /// shims set this beside [`Self::set_self_id`]; legacy shims retain
-    /// [`MailboxId::NONE`].
+    /// shims set this beside [`Self::set_self_id`]; legacy shims leave it
+    /// unset. The init ABI encodes "no parent" as `0`, which records none.
     pub fn set_parent_id(&self, id: u64) {
-        self.parent_id.set(id);
+        self.parent_id.set(NonZeroU64::new(id));
     }
 
     /// The instance's real folded [`MailboxId`] raw value, or `0` if no
@@ -329,21 +330,22 @@ impl Registry {
     /// cluster member. Inline children read their recorded slot parent; the
     /// entry actor reads the substrate-supplied parent.
     #[must_use]
-    pub(crate) fn scope_mailbox(&self, current: MailboxId, scope: CallerScope) -> MailboxId {
-        scope.select(current, self.logical_parent_of(current).unwrap_or(MailboxId::NONE))
+    pub(crate) fn scope_mailbox(&self, current: MailboxId, scope: CallerScope) -> u64 {
+        scope.select(current, self.logical_parent_of(current))
     }
 
-    /// Return a cluster member's logical parent as a raw mailbox id. Macro
+    /// Return a cluster member's logical parent as a raw mailbox id, `0`
+    /// when it has none (the encoding [`crate::WasmDropCtx`] decodes). Macro
     /// expansions use this when constructing a [`crate::WasmDropCtx`].
     #[doc(hidden)]
     #[must_use]
     pub fn parent_id_for(&self, current: u64) -> u64 {
-        self.logical_parent_of(MailboxId(current)).unwrap_or(MailboxId::NONE).0
+        self.logical_parent_of(MailboxId(current)).map_or(0, |parent| parent.0)
     }
 
     fn logical_parent_of(&self, id: MailboxId) -> Option<MailboxId> {
         if id.0 == self.self_id.get() {
-            return Some(MailboxId(self.parent_id.get()));
+            return self.parent_id.get().map(|parent| MailboxId(parent.get()));
         }
         self.parent_of(id)
     }
@@ -640,7 +642,7 @@ impl Registry {
 /// (issues 1987 + 2001): the enqueuing member's id when called off the drain,
 /// the host-resolved inbound source for a top-level dispatch (the `receive_p32`
 /// membrane threads the same value it received over the ABI), or
-/// [`MailboxId::NONE`] (`0`) when there is no peer-component origin. The child's
+/// `NO_INBOUND_SOURCE` (`0`) when there is no peer-component origin. The child's
 /// `ctx.sender()` is a single read of this field. The own-id path's ctx
 /// is built by `dispatch_own`, which the caller has already bound to the same
 /// `source`.
@@ -744,6 +746,7 @@ mod tests {
     use crate::mail::{Mail, PriorState};
     use crate::reference::ErasedActorRef;
     use crate::wasm::ErasedWasmActor;
+    use crate::wasm::ctx::NO_INBOUND_SOURCE;
     use crate::{ActorTypeTag, CallerScope, WasmCtx};
     use aether_data::MailboxId;
     use alloc::boxed::Box;
@@ -931,10 +934,9 @@ mod tests {
             Box::new(RecordingChild::new().0),
         );
 
-        assert_eq!(registry.scope_mailbox(entry, CallerScope::Root), MailboxId::NONE);
-        assert_eq!(registry.scope_mailbox(entry, CallerScope::Current), entry);
-        assert_eq!(registry.scope_mailbox(entry, CallerScope::Parent), entry_parent);
-        assert_eq!(registry.scope_mailbox(child, CallerScope::Parent), entry);
+        assert_eq!(registry.scope_mailbox(entry, CallerScope::Current), entry.0);
+        assert_eq!(registry.scope_mailbox(entry, CallerScope::Parent), entry_parent.0);
+        assert_eq!(registry.scope_mailbox(child, CallerScope::Parent), entry.0);
     }
 
     #[test]
@@ -1012,7 +1014,7 @@ mod tests {
     fn membrane_routes_own_recipient_to_parent() {
         let registry = Registry::new();
         let own = 0x2000_u64;
-        let rc = membrane_dispatch(own, mail_to(own), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
+        let rc = membrane_dispatch(own, mail_to(own), &registry, NO_INBOUND_SOURCE, |_mail| OWN_CODE);
         assert_eq!(rc, OWN_CODE, "own-id recipient runs the parent dispatch");
     }
 
@@ -1027,13 +1029,13 @@ mod tests {
         let (recording, dispatches) = RecordingChild::new();
         registry.insert_child(MailboxId(child), 0, String::from("widget"), false, 0, Vec::new(), Box::new(recording));
 
-        let rc = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
+        let rc = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| {
             panic!("own dispatch must not run for a child recipient")
         });
         assert_eq!(rc, CHILD_CODE, "child recipient runs the child dispatch");
 
         // Reinserted: a second send to the same alias dispatches again.
-        let rc2 = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
+        let rc2 = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| {
             panic!("own dispatch must not run for a reinserted child")
         });
         assert_eq!(rc2, CHILD_CODE, "the child was reinserted after dispatch");
@@ -1047,7 +1049,7 @@ mod tests {
         let registry = Registry::new();
         let own = 0x4000_u64;
         let stray = 0x4999_u64;
-        let rc = membrane_dispatch(own, mail_to(stray), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
+        let rc = membrane_dispatch(own, mail_to(stray), &registry, NO_INBOUND_SOURCE, |_mail| OWN_CODE);
         assert_eq!(rc, OWN_CODE, "an unknown recipient falls back to the parent's unmatched path");
     }
 
@@ -1076,7 +1078,7 @@ mod tests {
         );
 
         // Dispatch the child; it despawns its own slot mid-dispatch.
-        let rc = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
+        let rc = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| {
             panic!("own dispatch must not run while the child is resident")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the despawning dispatch");
@@ -1084,7 +1086,7 @@ mod tests {
 
         // The alias is gone: a second send falls through to the parent's
         // unmatched path rather than re-dispatching a dropped child.
-        let rc2 = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| OWN_CODE);
+        let rc2 = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| OWN_CODE);
         assert_eq!(rc2, OWN_CODE, "the torn-down alias falls through to the parent");
     }
 
@@ -1327,11 +1329,11 @@ mod tests {
         );
     }
 
-    /// A `membrane_dispatch` called with a `NONE` source threads it verbatim,
-    /// so the dispatched child reads `sender() == None`. (In
+    /// A `membrane_dispatch` called with the `NO_INBOUND_SOURCE` source threads
+    /// it verbatim, so the dispatched child reads `sender() == None`. (In
     /// production the `receive_p32` shim threads the host-resolved inbound
-    /// source instead of `NONE`; this exercises the function's `NONE`
-    /// contract directly — there is no host reply-table fallback.)
+    /// source instead; this exercises the function's no-source contract
+    /// directly — there is no host reply-table fallback.)
     #[test]
     fn membrane_dispatch_with_none_source_reads_no_source() {
         let registry = Registry::new();
@@ -1340,13 +1342,13 @@ mod tests {
         registry.set_self_id(own);
         let (dispatches, observed) = install_recording_with_source(&registry, child, own);
 
-        // Dispatch the child directly — not through the drain — with a `NONE`
+        // Dispatch the child directly — not through the drain — with no
         // source, so the ctx carries no in-place sender.
-        let rc = membrane_dispatch(own, mail_to(child), &registry, MailboxId::NONE.0, |_mail| {
+        let rc = membrane_dispatch(own, mail_to(child), &registry, NO_INBOUND_SOURCE, |_mail| {
             panic!("own dispatch must not run for a child recipient")
         });
         assert_eq!(rc, CHILD_CODE, "the child handled the direct dispatch");
         assert_eq!(dispatches.get(), 1, "the child was dispatched once");
-        assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (NONE source on the ctx)");
+        assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (no source on the ctx)");
     }
 }

@@ -14,19 +14,18 @@ use super::support::{ActivationConfig, ActivationProbe, activation_fixture};
 fn spawned_binding_retains_the_logical_parent_mailbox() {
     let (spawner, _registry, _mailer, _pool) = activation_fixture();
     let parent_mailbox = MailboxId(0x4b01);
-    let parent =
-        ActorRuntimeIdentity::new(parent_mailbox, MailboxId::NONE, parent_mailbox.0, Arc::from("test.parent:root"));
+    let parent = ActorRuntimeIdentity::new(parent_mailbox, None, parent_mailbox.0, Arc::from("test.parent:root"));
     let root =
         spawner.prepare_identity::<ActivationProbe>(Subname::Named("root"), None).expect("prepare root identity");
-    assert_eq!(root.parent, MailboxId::NONE);
+    assert_eq!(root.parent, None);
 
     let identity = spawner
         .prepare_identity::<ActivationProbe>(Subname::Named("child"), Some(&parent))
         .expect("prepare child identity");
-    assert_eq!(identity.parent, parent_mailbox);
+    assert_eq!(identity.parent, Some(parent_mailbox));
     let (events, _event_rx) = crossbeam_channel::unbounded();
     let staged =
         spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).expect("build child");
 
-    assert_eq!(staged.transport.parent_mailbox(), parent_mailbox);
+    assert_eq!(staged.transport.parent_mailbox(), Some(parent_mailbox));
 }

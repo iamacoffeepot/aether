@@ -368,12 +368,11 @@ pub fn __validate_inline_child_placement(
 /// Validate the raw alias a host allocated for an inline child. A zero alias
 /// is the host's failure sentinel, not an address that can enter the inline
 /// registry, so validation occurs before configuration decode or child init.
-#[doc(hidden)]
-pub fn __validate_inline_child_alias(alias: aether_data::MailboxId) -> Result<aether_data::MailboxId, SpawnError> {
-    if alias == aether_data::MailboxId::NONE {
-        return Err(SpawnError::AliasAllocationFailed);
-    }
-    Ok(alias)
+#[cfg(any(target_family = "wasm", test))]
+pub(crate) fn __validate_inline_child_alias(alias: u64) -> Result<aether_data::MailboxId, SpawnError> {
+    use core::num::NonZeroU64;
+
+    NonZeroU64::new(alias).map(|alias| aether_data::MailboxId(alias.get())).ok_or(SpawnError::AliasAllocationFailed)
 }
 
 #[cfg(target_family = "wasm")]
@@ -383,9 +382,7 @@ pub fn __alloc_inline_child_alias(
     is_counter: bool,
     subname: &str,
 ) -> Result<aether_data::MailboxId, SpawnError> {
-    __validate_inline_child_alias(aether_data::MailboxId(bridge::mail::spawn_inline_child_scoped(
-        parent, is_counter, subname,
-    )))
+    __validate_inline_child_alias(bridge::mail::spawn_inline_child_scoped(parent, is_counter, subname))
 }
 
 pub mod guest_alloc;

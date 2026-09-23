@@ -9,7 +9,7 @@ use crate::mail::MailboxId;
 /// needed by existing mailbox helpers and cannot spawn.
 pub(super) enum BindingIdentity {
     Typed(ActorRuntimeIdentity),
-    Untyped { mailbox: MailboxId, parent: MailboxId, carry: u64 },
+    Untyped { mailbox: MailboxId, parent: Option<MailboxId>, carry: u64 },
 }
 
 impl BindingIdentity {
@@ -27,7 +27,7 @@ impl BindingIdentity {
         }
     }
 
-    pub(super) fn parent(&self) -> MailboxId {
+    pub(super) fn parent(&self) -> Option<MailboxId> {
         match self {
             Self::Typed(identity) => identity.parent(),
             Self::Untyped { parent, .. } => *parent,

@@ -3,6 +3,7 @@
 //! deposit the ADR-0114 §5 composite dehydrate collects into.
 
 use core::marker::PhantomData;
+use core::num::NonZeroU64;
 
 use aether_data::{Kind, MailboxId};
 
@@ -44,8 +45,9 @@ pub struct WasmDropCtx<'a> {
     /// `send` resolves the receiver through `R::resolve(self.mailbox)`
     /// like every other ctx (ADR-0099 §5).
     mailbox: u64,
-    /// The actor's logical parent mailbox. Legacy guests and cluster roots
-    /// without parent metadata use [`MailboxId::NONE`].
+    /// The actor's logical parent mailbox, in the macro-emitted ABI encoding:
+    /// `0` means no parent (legacy guests and cluster roots without parent
+    /// metadata).
     parent: u64,
     /// ADR-0114 §5: when `Some`, `save_state` records into this buffer
     /// instead of the host import, so the dehydrate compose can collect
@@ -75,7 +77,7 @@ impl<'a> WasmDropCtx<'a> {
     }
 
     fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        scope.select(MailboxId(self.mailbox), MailboxId(self.parent)).0
+        scope.select(MailboxId(self.mailbox), NonZeroU64::new(self.parent).map(|parent| MailboxId(parent.get())))
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
@@ -184,7 +186,6 @@ mod tests {
     fn drop_ctx_preserves_parent_scope() {
         let ctx = WasmDropCtx::__new(0x4d02, 0x4d01);
 
-        assert_eq!(ctx.scope_mailbox(CallerScope::Root), MailboxId::NONE.0);
         assert_eq!(ctx.scope_mailbox(CallerScope::Current), 0x4d02);
         assert_eq!(ctx.scope_mailbox(CallerScope::Parent), 0x4d01);
     }

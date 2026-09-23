@@ -22,7 +22,7 @@ pub(super) fn dependency_refusal(actor: &str, namespace: &str) -> String {
 /// to it.
 pub(super) fn missing_dependency<'a>(
     registry: &Registry,
-    parent: MailboxId,
+    parent: Option<MailboxId>,
     dependencies: &'a [Dependency],
 ) -> Option<&'a str> {
     registry.missing_dependency(parent, dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
@@ -59,12 +59,12 @@ pub(super) fn replacement_refusal(
     // registry like any other address. A parent that no longer resolves —
     // a live route is required, so a dead parent fails here even though the
     // child outlives it — or a root-placed actor with no parent path,
-    // cannot prove an embedded peer live, so it folds from `NONE` and
+    // cannot prove an embedded peer live, so it passes no parent and
     // refuses closed.
     let parent = canonical
         .rsplit_once('/')
         .and_then(|(path, _)| ActorPath::new(path).ok())
         .and_then(|path| registry.resolve_address(&path).ok())
-        .map_or(MailboxId::NONE, |resolved| resolved.mailbox_id);
+        .map(|resolved| resolved.mailbox_id);
     missing_dependency(registry, parent, &group.dependencies).map(|namespace| dependency_refusal(&canonical, namespace))
 }

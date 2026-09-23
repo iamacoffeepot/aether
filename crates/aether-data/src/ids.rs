@@ -11,7 +11,7 @@
 //! The underlying `u64` carries the ADR-0064 tag bits (4-bit type
 //! discriminator in the high nibble + 60-bit FNV-1a hash in the low
 //! 60 bits). `Display` renders the tagged string form, falling back
-//! to hex for the reserved-tag sentinels (e.g. `MailboxId::NONE`).
+//! to hex for reserved-tag values (e.g. the zero id).
 
 use core::fmt;
 
@@ -37,8 +37,8 @@ fn fmt_tagged(id: u64, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 /// (the substrate's wire format) get a raw `u64` varint
 /// while text backends (JSON, the MCP wire) get the ADR-0064
 /// tagged-string form. Falls back to a raw `u64` for reserved-tag
-/// sentinels (e.g. `MailboxId::NONE = 0`) so the encoder doesn't
-/// error on a sentinel payload.
+/// values (e.g. the zero id) so the encoder doesn't error on a
+/// sentinel payload.
 fn serialize_id<S: Serializer>(id: u64, s: S) -> Result<S::Ok, S::Error> {
     if s.is_human_readable() {
         match tagged_id::encode(id) {
@@ -163,17 +163,11 @@ impl MailboxId {
     /// label.
     pub const TYPE_NAME: &'static str = "aether.mailbox_id";
 
-    /// Reserved sentinel for "no origin". Registration rejects any
-    /// name whose hash collides with 0 (practical probability
-    /// ~2⁻⁶⁴, but the guard is cheap) so this id never belongs to a
-    /// real mailbox.
-    pub const NONE: Self = Self(0);
-
     /// ADR-0080 §5 chassis-as-mailbox id. Derived from the reserved
     /// name `"aether.chassis"` so it carries normal `Tag::Mailbox` bits
     /// and round-trips through the tagged-string wire form like every
     /// other addressable mailbox (issue iamacoffeepot/aether#725).
-    /// Pre-issue-725 this aliased [`Self::NONE`] (= 0); the dual-use of
+    /// Pre-issue-725 this aliased the zero id; the dual-use of
     /// the zero sentinel for both "uninit/absent" and "chassis sender"
     /// broke the JSON round-trip for chassis-rooted `MailId`s — the
     /// zero id has reserved tag bits that don't encode.
@@ -437,15 +431,14 @@ mod tests {
 
     /// Issue iamacoffeepot/aether#725: `CHASSIS_MAILBOX_ID` is a real
     /// `Tag::Mailbox`-tagged id derived from `mailbox_id_from_name(
-    /// "aether.chassis")`, distinct from the zero `NONE` sentinel.
-    /// Verifies the const isn't accidentally aliased back to NONE and
+    /// "aether.chassis")`, distinct from the zero id. Verifies the
+    /// const isn't accidentally aliased back to zero and
     /// that it tag-encodes to the standard `mbx-XXXX-XXXX-XXXX` shape
     /// — the serde human-readable branch routes through this same
     /// `tagged_id::encode` path, so round-trip correctness on the JSON
     /// wire follows from this test plus the existing serde tests.
     #[test]
     fn chassis_mailbox_id_is_tagged_and_distinct_from_none() {
-        assert_ne!(MailboxId::CHASSIS_MAILBOX_ID, MailboxId::NONE);
         assert_ne!(MailboxId::CHASSIS_MAILBOX_ID.0, 0);
         assert_eq!(tagged_id::tag_of(MailboxId::CHASSIS_MAILBOX_ID.0), Some(Tag::Mailbox),);
         let encoded = tagged_id::encode(MailboxId::CHASSIS_MAILBOX_ID.0).expect("CHASSIS_MAILBOX_ID must tag-encode");
@@ -453,18 +446,6 @@ mod tests {
         let decoded = tagged_id::decode_with_tag(&encoded, Tag::Mailbox)
             .expect("CHASSIS_MAILBOX_ID must round-trip via decode_with_tag");
         assert_eq!(decoded, MailboxId::CHASSIS_MAILBOX_ID.0);
-    }
-
-    /// `MailboxId::NONE` keeps its zero-sentinel meaning. Its tag bits
-    /// are reserved so `tagged_id::encode` returns `None` — the serde
-    /// `serialize_id` helper then falls back to `serialize_u64` and
-    /// the wire form is a raw `0`. This is the structural difference
-    /// between "no sender / uninit" and "chassis sender".
-    #[test]
-    fn none_remains_untagged_zero_sentinel() {
-        assert_eq!(MailboxId::NONE.0, 0);
-        assert_eq!(tagged_id::tag_of(MailboxId::NONE.0), None);
-        assert!(tagged_id::encode(MailboxId::NONE.0).is_none());
     }
 
     /// ADR-0047: a `DagId` carrying `Tag::Dag` bits encodes to the

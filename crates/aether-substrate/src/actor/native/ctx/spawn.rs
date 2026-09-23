@@ -104,7 +104,7 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         let spawner = self.binding.spawner().expect("NativeCtx::spawn_child_scoped requires a chassis-built binding");
         let sender =
             Source { addr: SourceAddr::Component(self.binding.self_mailbox()), correlation_id: Source::NO_CORRELATION };
-        let parent = ActorRuntimeIdentity::new(parent, MailboxId::NONE, parent.0, parent_name);
+        let parent = ActorRuntimeIdentity::new(parent, None, parent.0, parent_name);
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
     }

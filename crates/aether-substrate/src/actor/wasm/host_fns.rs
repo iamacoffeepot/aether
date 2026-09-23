@@ -913,12 +913,14 @@ fn deliver_bytes_to_guest(caller: &mut Caller<'_, ComponentCtx>, bytes: &[u8]) -
 /// reply (`from`) to a value the host trusts. A guest may claim only an
 /// origin inside its own cluster — the component's own id (`ctx.sender`) or
 /// one of its registered inline-child aliases (`is_own_cluster_alias`). A
-/// zero (`MailboxId::NONE`) or foreign `from` falls back to the component's
-/// own id, so the host stays authoritative on cross-cluster origin and a
-/// guest cannot spoof a foreign id. This is the in-cluster check that the
-/// retired `set_dispatch_source_p32` host fn used to gate the ambient cell.
+/// foreign `from` falls back to the component's own id, so the host stays
+/// authoritative on cross-cluster origin and a guest cannot spoof a foreign
+/// id. A zero `from` falls back the same way: the registry never registers
+/// the zero id, so it can equal neither the component's own id nor an alias.
+/// This is the in-cluster check that the retired `set_dispatch_source_p32`
+/// host fn used to gate the ambient cell.
 fn resolve_dispatch_identity(ctx: &ComponentCtx, from: MailboxId) -> MailboxId {
-    if from != MailboxId::NONE && (from == ctx.sender || is_own_cluster_alias(ctx, from)) {
+    if from == ctx.sender || is_own_cluster_alias(ctx, from) {
         from
     } else {
         ctx.sender

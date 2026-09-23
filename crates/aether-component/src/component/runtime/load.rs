@@ -344,7 +344,7 @@ impl ComponentHostCapabilityState {
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
-        if let Some(namespace) = missing_dependency(&self.registry, ctx.self_id(), &plan.dependencies) {
+        if let Some(namespace) = missing_dependency(&self.registry, Some(ctx.self_id()), &plan.dependencies) {
             let error = dependency_refusal(&plan.namespace, namespace);
             match first {
                 BootSuccessor::Load(_) => {
@@ -390,7 +390,7 @@ impl ComponentHostCapabilityState {
             LoadPlacement::ComponentHost => ctx.self_id(),
             LoadPlacement::Under { parent, .. } => *parent,
         };
-        if let Some(namespace) = missing_dependency(&self.registry, parent, &load.dependencies) {
+        if let Some(namespace) = missing_dependency(&self.registry, Some(parent), &load.dependencies) {
             owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.name, namespace) });
             return;
         }

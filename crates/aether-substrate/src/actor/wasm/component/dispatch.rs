@@ -1,5 +1,7 @@
+use aether_actor::wasm::NO_INBOUND_SOURCE;
+
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
-use crate::mail::{Mail, MailboxId, SourceAddr};
+use crate::mail::{Mail, SourceAddr};
 
 use super::instantiate::Placement;
 use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
@@ -59,13 +61,13 @@ impl Component {
     /// `receive_p32` frame slot (issue 2001). A peer-component origin
     /// (`SourceAddr::Component`) yields that mailbox's raw id; every other
     /// origin — session, remote engine, or no reply target — yields
-    /// `MailboxId::NONE.0` (0). Mirrors what `source_of_p32` resolved from
+    /// `NO_INBOUND_SOURCE` (0). Mirrors what `source_of_p32` resolved from
     /// the reply table, but reads the inbound's `SourceAddr` directly (the
     /// same value the reply entry is built from) without a table lookup.
     fn resolve_inbound_source(addr: &SourceAddr) -> u64 {
         match addr {
             SourceAddr::Component(m) => m.0,
-            _ => MailboxId::NONE.0,
+            _ => NO_INBOUND_SOURCE,
         }
     }
 
@@ -141,7 +143,7 @@ impl Component {
         // ctx-field read on both the in-place and top-level paths and the
         // `source_of_p32` host round-trip can be retired. Resolved exactly
         // as `source_of_p32` did — a peer-component origin yields its
-        // `MailboxId`, every other origin yields `MailboxId::NONE`.
+        // `MailboxId`, every other origin yields `NO_INBOUND_SOURCE` (0).
         let source = Self::resolve_inbound_source(&mail.reply_to.addr);
         let result = self
             .receive
