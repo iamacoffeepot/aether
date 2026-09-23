@@ -8,7 +8,9 @@ pub(super) use crate::args::*;
 pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
 pub(super) use aether_fleet::{FleetConfig, FleetServer};
 pub(super) use aether_kinds::descriptors;
-pub(super) use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
+pub(super) use aether_rpc::{
+    PeerKind, RpcBind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams,
+};
 pub(super) use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 pub(super) use aether_substrate::mail::mailer::Mailer;
 pub(super) use aether_substrate::mail::outbound::HubOutbound;
@@ -379,6 +381,7 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -440,6 +443,7 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -478,6 +482,7 @@ pub(super) fn boot_hub_with_route_loopback(
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -531,6 +536,7 @@ pub(super) fn boot_hub_with_address_route_replies(
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -565,6 +571,7 @@ pub(super) fn try_boot_hub_with_scripted_route_loopback(
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )

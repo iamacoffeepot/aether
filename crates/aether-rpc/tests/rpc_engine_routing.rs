@@ -32,8 +32,8 @@ use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_rpc::RpcServerHandle;
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams,
-    WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcBind, RpcServerCapability, RpcServerConfig,
+    RpcServerParams, WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -68,6 +68,7 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )

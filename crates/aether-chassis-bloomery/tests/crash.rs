@@ -74,24 +74,12 @@ fn write_wrapper(dir: &Path, real: &Path, pids: &Path) -> PathBuf {
     wrapper
 }
 
-/// Wait until the driver on `engine` answers `AwaitProcessed { through }`.
-///
-/// The RPC server binds before the mount spawns the driver, so a connected
-/// engine can still refuse the driver's path; any refusal reads as not ready.
-/// On timeout one last asserting send makes the real refusal the panic. The
-/// first answer is also the recovery barrier: the driver answers only after
-/// its startup recovery has committed and no request at or below `through` is
+/// Ask the driver on `engine` for `AwaitProcessed { through }` and decode its
+/// answer. This is the recovery barrier: the driver answers only after its
+/// startup recovery has committed and no request at or below `through` is
 /// outstanding.
 fn await_driver(fleet: &mut FleetHarness, engine: EngineId, through: u64) -> Processed {
-    let request = AwaitProcessed { through };
-    let mut replies = None;
-    if !poll_until(|| {
-        replies = fleet.try_send(engine, DRIVER, &request).ok();
-        replies.is_some()
-    }) {
-        replies = Some(fleet.send(engine, DRIVER, &request));
-    }
-    single(&replies.expect("a ready driver answered"))
+    single(&fleet.send(engine, DRIVER, &AwaitProcessed { through }))
 }
 
 /// Send `request` to the driver on `engine`, wait for the call to settle, and

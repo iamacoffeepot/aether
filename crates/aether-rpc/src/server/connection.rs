@@ -9,7 +9,7 @@ use crate::{RpcError, WireFrame};
 use aether_codec::frame::{FrameError, read_frame};
 use aether_substrate::actor::native::SelfWake;
 use std::io::{self, BufReader};
-use std::net::{SocketAddr, TcpStream};
+use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -26,6 +26,12 @@ pub type ConnId = u64;
 /// `on_inbound_ready` handler drains the channel and dispatches
 /// per item.
 pub enum InboundEvent {
+    /// A held server's listener, bound by `RpcBindGate::open` on the
+    /// composer's thread (issue #6399). Sent only by that gate; the
+    /// dispatcher starts the accept thread over it.
+    Bound {
+        listener: TcpListener,
+    },
     PeerAccepted {
         stream: TcpStream,
         peer: SocketAddr,

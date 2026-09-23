@@ -12,7 +12,7 @@
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
 use aether_fleet::FleetServer;
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_rpc::{PeerKind, RpcBind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, ComposeBase, composed};
@@ -136,6 +136,7 @@ impl BootableChassis for HubChassis {
                     engine_version: env!("CARGO_PKG_VERSION").into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(rpc_port) },
         ))

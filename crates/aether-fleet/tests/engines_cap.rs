@@ -23,7 +23,7 @@ use aether_kinds::{
     SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
     UploadComponentResult,
 };
-use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
+use aether_rpc::{PeerKind, RpcBind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::ReplyTarget;
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
@@ -149,6 +149,7 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: None },
         )

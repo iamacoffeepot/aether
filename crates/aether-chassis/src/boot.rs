@@ -365,6 +365,10 @@ impl SchedulerTuningConfig {
 // both read it through this re-export.
 pub use aether_substrate::config::{SettlementConfig, SettlementConfigLayer};
 
+// The bind mode [`with_rpc_server`] takes, re-exported so a chassis names it
+// through the composition layer it already depends on.
+pub use aether_rpc::RpcBind;
+
 /// Issue #2509: resolve the instanced-actor teardown close-done gate's
 /// cumulative-patience budget from the shared `AETHER_SETTLEMENT_CAP_SECS`
 /// knob (`SettlementConfig::to_cap`, including its `0 → Duration::MAX`
@@ -1140,14 +1144,22 @@ pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<Pr
 /// member's `None` default (unbound). Only the hub overrides this with its
 /// `DEFAULT_RPC_PORT` fallback, via `with_actor_configured` at its own compose
 /// site.
+///
+/// `bind` decides when a resolved port binds (issue #6399). A chassis whose
+/// callers address actors it spawns after `build` passes [`RpcBind::Held`] and
+/// opens the published [`RpcBindGate`](aether_rpc::RpcBindGate) once those
+/// actors are live, so a dial before then is refused and reachable means
+/// ready; the bloomery does, after mounting its journal owner and driver.
+/// Every other chassis passes [`RpcBind::Boot`] and binds during `build`.
 #[must_use]
-pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
+pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, bind: RpcBind) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(RpcServerParams {
         peer_kind: PeerKind::Substrate {
             engine_name: aether_substrate::engine_name::<C>(),
             engine_version: env!("CARGO_PKG_VERSION").into(),
             kinds: vec![],
         },
+        bind,
     })
 }
 

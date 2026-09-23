@@ -33,7 +33,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -54,7 +54,7 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<DeferredEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -72,7 +72,7 @@ fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<TestEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -153,7 +153,7 @@ fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: None },
         )
         .build_passive()
@@ -167,6 +167,38 @@ fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
         chassis.handle::<RpcServerHandle>().is_none(),
         "a disabled rpc server binds no socket, so it publishes no handle",
     );
+}
+
+/// Issue #6399: a server composed with `RpcBind::Held` and a resolved port
+/// refuses every dial and publishes no `RpcServerHandle` until its composer
+/// opens the published `RpcBindGate`; after `open` it binds that port and
+/// completes a handshake.
+#[test]
+fn held_rpc_server_accepts_nothing_until_its_gate_opens() {
+    use std::io::ErrorKind;
+    use std::net::TcpListener;
+
+    let port =
+        TcpListener::bind("127.0.0.1:0").and_then(|listener| listener.local_addr()).expect("take a free port").port();
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Held },
+            RpcServerConfig { port: Some(port) },
+        )
+        .build_passive()
+        .expect("held rpc server boots");
+
+    let refused = TcpStream::connect(("127.0.0.1", port)).expect_err("a held server binds nothing");
+    assert_eq!(refused.kind(), ErrorKind::ConnectionRefused);
+    assert!(chassis.handle::<RpcServerHandle>().is_none(), "a held server publishes no handle");
+
+    let gate = chassis.handle::<RpcBindGate>().expect("a held server publishes its gate");
+    assert_eq!(gate.open().expect("the gate binds its port"), port);
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the opened server");
+    stream.set_read_timeout(Some(Duration::from_secs(2))).expect("test: set_read_timeout on TcpStream");
+    complete_handshake(&mut stream);
 }
 
 /// `Ping(token)` round-trips as `Pong(token)`.
@@ -331,7 +363,7 @@ fn call_headless_window_list_err_reaches_component_reply() {
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<HeadlessWindowCapability>(())
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -579,7 +611,7 @@ fn call_without_cid_is_fire_and_forget() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TestEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
-            RpcServerParams { peer_kind: test_peer_kind() },
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()

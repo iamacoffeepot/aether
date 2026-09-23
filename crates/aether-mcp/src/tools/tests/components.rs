@@ -94,6 +94,7 @@ fn boot_hub_with_fleet_local_sink(cells: FleetLocalCells) -> (PassiveChassis<Tes
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )

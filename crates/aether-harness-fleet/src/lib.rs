@@ -65,7 +65,7 @@ use aether_kinds::{
     TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcError, RpcServerCapability, RpcServerConfig,
+    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcBind, RpcError, RpcServerCapability, RpcServerConfig,
     RpcServerHandle, RpcServerParams, WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
@@ -773,10 +773,9 @@ impl FleetHarness {
     }
 
     /// [`send`](Self::send) that returns a `ReplyEnd::Err` instead of
-    /// panicking on it. An engine refuses a `Call` whose recipient does not
-    /// prove `Live` (ADR-0230) with `RpcError::UnknownMailbox`, so a poll
-    /// that waits for a spawned child to come up reads the refusal as "not
-    /// live yet" and retries.
+    /// panicking on it, for a call the test expects to fail — one whose
+    /// engine dies while it is in flight, or whose recipient does not prove
+    /// `Live` (ADR-0230) and is refused with `RpcError::UnknownMailbox`.
     pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<MailEnvelope>, RpcError>
     where
         K: Kind,
@@ -1129,6 +1128,7 @@ fn boot_hub(
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
+                bind: RpcBind::Boot,
             },
             RpcServerConfig { port: Some(0) },
         )

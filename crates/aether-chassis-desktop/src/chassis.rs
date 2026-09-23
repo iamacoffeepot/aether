@@ -31,7 +31,7 @@ use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, RpcBind, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
 };
 
 use crate::cli::DesktopCli;
@@ -199,7 +199,7 @@ impl BootableChassis for DesktopChassis {
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
+        Ok(with_rpc_server(builder, RpcBind::Boot).with_actor::<HttpServerCapability>(()))
     }
 }
 
