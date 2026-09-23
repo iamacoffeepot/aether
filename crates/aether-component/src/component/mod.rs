@@ -82,7 +82,7 @@ pub struct ComponentHostCapability;
 
 /// `aether.component.load_delivered` — the component host hands a successful
 /// load to the trampoline it just spawned, which answers the requester with
-/// [`LoadResult::Ok`](aether_kinds::LoadResult::Ok) in its own name.
+/// [`LoadResult::Ok`] in its own name.
 ///
 /// The host's owed reply rides this mail (`TaskDone::hand_off`): its reply
 /// target is the requester and its lineage is the load's chain, so the
