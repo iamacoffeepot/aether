@@ -27,9 +27,9 @@ use crate::{
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-fn route_to_sole_window<K: Kind>(
+fn route_to_sole_window<K: Kind, A>(
     windows: &[WindowId],
-    ctx: &mut NativeCtx<'_, Erased, Manual>,
+    ctx: &mut NativeCtx<'_, A, Manual>,
     mail: &K,
 ) -> Result<(), String> {
     let window = match windows {

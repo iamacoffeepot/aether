@@ -347,7 +347,11 @@ impl DesktopWindowCapabilityState {
     /// publishes; every failure retires the applied child and rolls the create
     /// back. Rollback effects go to the host-effect queue because this runs on
     /// an ordinary mail turn rather than inside a native callback.
-    fn finish_window_child_spawn(&mut self, ctx: &mut NativeCtx<'_>, outcome: &SpawnOutcome<DesktopWindowInstance>) {
+    fn finish_window_child_spawn<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        outcome: &SpawnOutcome<DesktopWindowInstance>,
+    ) {
         // The birth names itself on both arms, so the reservation key comes
         // straight off the outcome rather than a context struct carrying it.
         let id = WindowId(outcome.mailbox_id.0);
@@ -376,9 +380,9 @@ impl DesktopWindowCapabilityState {
         self.pending_host_effects.extend(effects);
     }
 
-    fn promote_attached_window(
+    fn promote_attached_window<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         id: WindowId,
         child: ActorRef<DesktopWindowInstance>,
         monitor: ActorMonitorHandle,
