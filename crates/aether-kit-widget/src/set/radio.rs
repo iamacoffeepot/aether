@@ -73,7 +73,7 @@ impl RadioGroupWidget {
     }
 
     /// Emit the current selection up to the panel root.
-    fn emit(&self, ctx: &WasmCtx<'_>) {
+    fn emit<A>(&self, ctx: &WasmCtx<'_, A>) {
         if let Some(parent) = ctx.parent() {
             #[allow(clippy::cast_possible_truncation)]
             let index = self.selected as u32;
@@ -81,7 +81,7 @@ impl RadioGroupWidget {
         }
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.pressed = false;

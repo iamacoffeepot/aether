@@ -72,13 +72,13 @@ impl ToggleWidget {
         true
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.adopt_control_state(next) {
             emit_state_changed(ctx, &self.state);
         }
     }
 
-    fn emit(ctx: &WasmCtx<'_>, on: bool) {
+    fn emit<A>(ctx: &WasmCtx<'_, A>, on: bool) {
         if let Some(parent) = ctx.parent() {
             parent.send(&ToggleChanged { on });
         }

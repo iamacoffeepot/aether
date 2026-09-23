@@ -181,7 +181,7 @@ impl SplitterWidget {
     }
 
     /// Report a hover edge up so the host can answer it with a cursor.
-    fn report_hover(ctx: &WasmCtx<'_>, entered: bool) {
+    fn report_hover<A>(ctx: &WasmCtx<'_, A>, entered: bool) {
         if let Some(parent) = ctx.parent() {
             parent.send(&SplitterHover { entered });
         }

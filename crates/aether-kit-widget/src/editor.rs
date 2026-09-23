@@ -29,9 +29,9 @@ impl EditorShell {
     ///
     /// Priming recurses exactly once: the nested call carries no focus edge of
     /// its own, so it sends the modifiers and returns.
-    fn forward<K: Kind>(
+    fn forward<A, K: Kind>(
         &self,
-        ctx: &mut WasmCtx<'_>,
+        ctx: &mut WasmCtx<'_, A>,
         focus: Option<RegionFocusTransition>,
         target: Option<ErasedActorRef>,
         payload: &K,

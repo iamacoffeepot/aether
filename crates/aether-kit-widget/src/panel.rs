@@ -50,7 +50,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Sends, Subname,
+    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Reaches, Sends, Subname,
     WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
@@ -208,7 +208,7 @@ impl WidgetPanel {
     /// the spec is ignored — the panel owns layout). Each widget gets its rect
     /// in both the composite layout table and the focus table, and its
     /// `WidgetFrame`. An empty child list falls back to [`reference_stack`].
-    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -252,7 +252,7 @@ impl WidgetPanel {
     }
 
     /// Record one spawned child's rect into the composite (as its draw offset,
-    /// under its `name` subname and the spawned actor type `A`'s namespace) and
+    /// under its `name` subname and the spawned child type's namespace) and
     /// the focus table (as its hit rect), send it its `WidgetFrame`, and
     /// remember it for value-up attribution.
     ///
@@ -264,9 +264,9 @@ impl WidgetPanel {
     /// inside the panel, and the clip — which was already the assigned
     /// rectangle — reaches across it, where a track drawn past the full width
     /// would have been clipped away with a press over it reaching nothing.
-    fn place(
+    fn place<A>(
         &mut self,
-        ctx: &mut WasmCtx<'_, Erased, Manual>,
+        ctx: &mut WasmCtx<'_, A, Manual>,
         child: &SpawnedChild,
         assigned: WidgetFrame,
         name: String,
@@ -307,7 +307,7 @@ impl WidgetPanel {
 
     /// Discharge a closed frame: flatten the composite and emit it from the
     /// panel's single render + text sender.
-    fn finish(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn finish<A: Reaches<RenderCapability> + Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -318,7 +318,7 @@ impl WidgetPanel {
     }
 
     /// Re-fan the live theme to every child (after a font stamp or a restyle).
-    fn fan_theme<M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, Erased, M>) {
+    fn fan_theme<A, M: aether_actor::ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>) {
         for child in &self.children {
             ctx.send_to(child.reference, &SetTheme { theme: self.theme.clone() });
         }
@@ -326,7 +326,7 @@ impl WidgetPanel {
 
     /// Adopt a live style change now, and either fan it immediately or keep it
     /// until the first successful spawn so the FIFO drain applies it before Collect.
-    fn retain_or_fan_theme<M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, Erased, M>) {
+    fn retain_or_fan_theme<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut WasmCtx<'_, A, M>) {
         if self.spawned {
             self.fan_theme(ctx);
             self.pending_style = false;
@@ -375,8 +375,8 @@ fn stack_row<K: Copy>(key: K, width_pixels: Option<f32>, height_pixels: f32) -> 
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-pub fn spawn_widget_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+pub fn spawn_widget_child<A>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
 ) -> Option<SpawnedChild> {
@@ -408,14 +408,10 @@ pub fn spawn_widget_child(
 /// [`spawn_row_control_child`] does: the exhaustive dispatcher above stays a
 /// dispatcher, and a reader looking for one kind's profile finds every
 /// sibling profile beside it.
-fn spawn_content_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_content_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
-            let reference = spawn::<LabelWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<LabelWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -435,7 +431,7 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::Image => decode_child::<ImageConfig>(spec).and_then(|config| {
-            let reference = spawn::<ImageWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<ImageWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -450,7 +446,7 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::Slider => decode_child::<SliderConfig>(spec).and_then(|config| {
-            let reference = spawn::<SliderWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<SliderWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -466,7 +462,7 @@ fn spawn_content_child(
         }),
         WidgetKind::Radio => decode_child::<RadioConfig>(spec).and_then(|config| {
             let height = row * config.options.len() as f32;
-            let reference = spawn::<RadioGroupWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<RadioGroupWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -481,7 +477,7 @@ fn spawn_content_child(
             })
         }),
         WidgetKind::TextField => decode_child::<TextFieldConfig>(spec).and_then(|config| {
-            let reference = spawn::<TextFieldWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<TextFieldWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -497,7 +493,7 @@ fn spawn_content_child(
         }),
         WidgetKind::TextArea => decode_child::<TextAreaConfig>(spec).and_then(|config| {
             let height = row * config.rows.max(1) as f32;
-            let reference = spawn::<TextAreaWidget>(ctx, &spec.subname, &config)?;
+            let reference = spawn::<TextAreaWidget, A>(ctx, &spec.subname, &config)?;
             Some(SpawnedChild {
                 reference,
                 width_pixels: None,
@@ -515,9 +511,9 @@ fn spawn_content_child(
     }
 }
 
-fn spawn_button_child(ctx: &mut WasmCtx<'_, Erased, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_button_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
-    let reference = spawn::<ButtonWidget>(ctx, &spec.subname, &config)?;
+    let reference = spawn::<ButtonWidget, A>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
         reference,
         width_pixels: None,
@@ -532,8 +528,8 @@ fn spawn_button_child(ctx: &mut WasmCtx<'_, Erased, Manual>, spec: &WidgetChildS
     })
 }
 
-fn spawn_virtual_list_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+fn spawn_virtual_list_child<A>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
@@ -541,7 +537,7 @@ fn spawn_virtual_list_child(
     let profile = virtual_list_profile(&spec.subname, row, &config)?;
     let state = config.state.clone();
     let host_scroll_strip_units = host_scroll_strip_units(&config);
-    spawn::<VirtualListWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+    spawn::<VirtualListWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
         reference,
         width_pixels: None,
         height_pixels: profile.height,
@@ -602,8 +598,8 @@ fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
     (height.is_finite() && height >= 0.0).then_some(height)
 }
 
-fn spawn_composite_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+fn spawn_composite_child<A>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
     row_height_pixels: f32,
@@ -618,7 +614,7 @@ fn spawn_composite_child(
     }
     decode_nested_widget_config(spec).and_then(|config| {
         let intrinsic = config.intrinsic;
-        spawn::<Widget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+        spawn::<Widget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
             reference,
             width_pixels: intrinsic.and_then(|extent| (extent[0].is_finite() && extent[0] >= 0.0).then_some(extent[0])),
             height_pixels: intrinsic
@@ -635,8 +631,8 @@ fn spawn_composite_child(
     })
 }
 
-fn spawn_scroll_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+fn spawn_scroll_child<A>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
 ) -> Option<SpawnedChild> {
@@ -654,7 +650,7 @@ fn spawn_scroll_child(
             return None;
         }
         let viewport = config.viewport_extent;
-        spawn::<ScrollWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+        spawn::<ScrollWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
             reference,
             width_pixels: Some(viewport.width_pixels),
             height_pixels: viewport.height_pixels,
@@ -672,14 +668,14 @@ fn spawn_scroll_child(
 /// Spawn the one-row control children. Keeping their mechanical decode/spawn
 /// profiles together prevents the main exhaustive dispatcher from becoming a
 /// second long-form implementation surface.
-fn spawn_row_control_child(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+fn spawn_row_control_child<A>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     row: f32,
 ) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Toggle => decode_child::<ToggleConfig>(spec).and_then(|config| {
-            spawn::<ToggleWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<ToggleWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -693,7 +689,7 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Segmented => decode_child::<SegmentedConfig>(spec).and_then(|config| {
-            spawn::<SegmentedWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<SegmentedWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -707,7 +703,7 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Numeric => decode_child::<NumericConfig>(spec).and_then(|config| {
-            spawn::<NumericWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<NumericWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -721,7 +717,7 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::Dropdown => decode_child::<DropdownConfig>(spec).and_then(|config| {
-            spawn::<DropdownWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<DropdownWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -735,7 +731,7 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::TabStrip => decode_child::<TabStripConfig>(spec).and_then(|config| {
-            spawn::<TabStripWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<TabStripWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -749,7 +745,7 @@ fn spawn_row_control_child(
             })
         }),
         WidgetKind::MenuBar => decode_child::<MenuBarConfig>(spec).and_then(|config| {
-            spawn::<MenuBarWidget>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
+            spawn::<MenuBarWidget, A>(ctx, &spec.subname, &config).map(|reference| SpawnedChild {
                 reference,
                 width_pixels: None,
                 height_pixels: row,
@@ -861,7 +857,7 @@ fn reference_stack(theme: &Theme) -> Vec<WidgetChildSpec> {
 /// then `FocusGained` and the panel's latest [`Modifiers`] to the one that
 /// gained it. Lost still goes first. `keyboard` rides on the gain so the
 /// child knows whether to draw its ring (see [`FocusGained`]).
-fn apply_focus(sends: &mut Sends<'_>, transition: FocusTransition, keyboard: bool, modifiers: Modifiers) {
+fn apply_focus<A>(sends: &mut Sends<'_, A>, transition: FocusTransition, keyboard: bool, modifiers: Modifiers) {
     let FocusTransition { previous, next } = transition;
     if let Some(prev) = previous {
         sends.send_to(prev, &FocusLost);
@@ -874,7 +870,7 @@ fn apply_focus(sends: &mut Sends<'_>, transition: FocusTransition, keyboard: boo
 
 /// Send hover edges lost-before-gained so sibling crossings cannot leave two
 /// controls hovered during the breadth-first drain.
-fn apply_hover(sends: &mut Sends<'_>, transition: HoverTransition) {
+fn apply_hover<A>(sends: &mut Sends<'_, A>, transition: HoverTransition) {
     let HoverTransition { previous, next } = transition;
     if let Some(previous) = previous {
         sends.send_to(previous, &HoverLost);
@@ -884,7 +880,7 @@ fn apply_hover(sends: &mut Sends<'_>, transition: HoverTransition) {
     }
 }
 
-fn apply_availability(sends: &mut Sends<'_>, effects: AvailabilityEffects, modifiers: Modifiers) {
+fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects, modifiers: Modifiers) {
     if let Some(hover) = effects.hover {
         apply_hover(sends, hover);
     }
@@ -895,12 +891,12 @@ fn apply_availability(sends: &mut Sends<'_>, effects: AvailabilityEffects, modif
 
 /// Spawn one inline widget under the caller's actual logical actor type,
 /// logging and dropping the slot on failure.
-fn spawn<A>(ctx: &mut WasmCtx<'_, Erased, Manual>, subname: &str, config: &A::Config) -> Option<ErasedActorRef>
+fn spawn<C, A>(ctx: &mut WasmCtx<'_, A, Manual>, subname: &str, config: &C::Config) -> Option<ErasedActorRef>
 where
-    A: ModuleChild + ErasedWasmActor,
-    <A as WasmActor>::State: ErasedWasmActor,
+    C: ModuleChild + ErasedWasmActor,
+    <C as WasmActor>::State: ErasedWasmActor,
 {
-    match ctx.spawn_inline::<A>(Subname::Named(subname), config) {
+    match ctx.spawn_inline::<C>(Subname::Named(subname), config) {
         Ok(child) => Some(child.erase()),
         Err(error) => {
             tracing::warn!(
@@ -1047,11 +1043,7 @@ fn wrapped_profile(subname: &str, wrapped: WidgetKind, wrapped_config: &[u8], ro
 /// an unsupported wrapped kind, a decode failure, or a spawn error. The
 /// panel's per-frame `Collect` is handed to the host as its FRAME trigger.
 #[cfg(feature = "behavior")]
-fn spawn_behavior_host(
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
-    spec: &WidgetChildSpec,
-    row: f32,
-) -> Option<SpawnedChild> {
+fn spawn_behavior_host<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
     use crate::{BehaviorHostSpec, ScriptRef};
     use aether_actor::ActorTypeTag;
     use aether_behavior::HostConfig;
@@ -1133,8 +1125,8 @@ fn spawn_behavior_host(
 /// The `behavior`-feature-off stub: a `WidgetKind::BehaviorHost` slot needs the
 /// host actor, which is only linked under the kit's `behavior` feature.
 #[cfg(not(feature = "behavior"))]
-fn spawn_behavior_host(
-    _ctx: &mut WasmCtx<'_, Erased, Manual>,
+fn spawn_behavior_host<A>(
+    _ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     _row: f32,
 ) -> Option<SpawnedChild> {

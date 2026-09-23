@@ -52,7 +52,7 @@ impl ActionRect {
 impl VirtualListWidget {
     /// Report one row's verb. Not a selection, and never accompanied by one:
     /// the press that fires this chose nothing.
-    pub(super) fn emit_action(ctx: &WasmCtx<'_>, index: RowActionIndex) {
+    pub(super) fn emit_action<A>(ctx: &WasmCtx<'_, A>, index: RowActionIndex) {
         let (Ok(row_index), Ok(action_index)) = (u32::try_from(index.row_index), u32::try_from(index.action_index))
         else {
             return;

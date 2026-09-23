@@ -376,7 +376,7 @@ impl NumericWidget {
         NumericEmission { value, committed: true }
     }
 
-    fn emit(ctx: &WasmCtx<'_>, emission: NumericEmission) {
+    fn emit<A>(ctx: &WasmCtx<'_, A>, emission: NumericEmission) {
         if let Some(parent) = ctx.parent() {
             parent.send(&NumericChanged { value: emission.value, committed: emission.committed });
         }
@@ -515,7 +515,7 @@ impl NumericWidget {
         }
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.edit.clear_composition();

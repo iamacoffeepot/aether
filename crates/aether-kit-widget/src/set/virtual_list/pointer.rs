@@ -49,7 +49,7 @@ impl VirtualListWidget {
     /// the fact the host is told stays true while the list scrolls under a
     /// still pointer — which is the half a host redoing the geometry itself
     /// could never get right.
-    pub(super) fn settle_hovered_row(&mut self, ctx: &WasmCtx<'_>) {
+    pub(super) fn settle_hovered_row<A>(&mut self, ctx: &WasmCtx<'_, A>) {
         let next = self.pointer_row();
         if self.hovered_row == next {
             return;

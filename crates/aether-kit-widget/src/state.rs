@@ -147,7 +147,7 @@ impl InteractionState {
     }
 }
 
-pub fn emit_state_changed(ctx: &WasmCtx<'_>, state: &InteractionState) {
+pub fn emit_state_changed<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState) {
     if let Some(parent) = ctx.parent() {
         parent.send(&WidgetStateChanged { state: state.control().clone() });
     }

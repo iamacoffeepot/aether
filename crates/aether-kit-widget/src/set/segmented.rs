@@ -112,13 +112,13 @@ impl SegmentedWidget {
         true
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.adopt_control_state(next) {
             emit_state_changed(ctx, &self.state);
         }
     }
 
-    fn emit(ctx: &WasmCtx<'_>, selected: usize) {
+    fn emit<A>(ctx: &WasmCtx<'_, A>, selected: usize) {
         if let Some(parent) = ctx.parent() {
             #[allow(clippy::cast_possible_truncation)]
             let index = selected as u32;

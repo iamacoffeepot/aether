@@ -162,13 +162,13 @@ impl SliderWidget {
 
     /// Emit the current value up to the panel root, `committed` distinguishing
     /// a drag stream from a settled value.
-    fn emit(&self, ctx: &WasmCtx<'_>, committed: bool) {
+    fn emit<A>(&self, ctx: &WasmCtx<'_, A>, committed: bool) {
         if let Some(parent) = ctx.parent() {
             parent.send(&SliderChanged { value: self.value, committed });
         }
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.can_mutate() {
                 self.dragging = false;
