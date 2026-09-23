@@ -23,17 +23,22 @@ use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
     () => {
-        /// Resolve a canonical or ADR-0166 abbreviated actor address to the
-        /// position of one live mailbox. This is the host's boundary parser
-        /// (ADR-0230 §3), the one place text becomes a position; it answers
-        /// with a position and no proof, for an embedder that holds no spawn
-        /// result for the actor it observes.
+        /// Resolve a canonical or ADR-0166 abbreviated
+        /// [`ActorPath`](aether_data::ActorPath) to the position of one live
+        /// mailbox. This is the host's boundary parser (ADR-0230 §3), the one
+        /// place an address becomes a position; it answers with a position
+        /// and no proof, for an embedder that holds no spawn result for the
+        /// actor it observes.
         ///
         /// # Errors
         ///
         /// Returns the parser's [`AddressResolutionError`] when the address
-        /// is malformed, expands ambiguously, or names no live mailbox.
-        pub fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
+        /// names an unknown root, expands ambiguously, or names no live
+        /// mailbox.
+        pub fn resolve_address(
+            &self,
+            address: &aether_data::ActorPath,
+        ) -> Result<ResolvedAddress, AddressResolutionError> {
             self.booted.spawner.resolve_address(address)
         }
 

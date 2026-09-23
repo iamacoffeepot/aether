@@ -14,6 +14,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_actor::AnyActorRef;
+use aether_data::ActorPath;
 use crossbeam_channel::Receiver;
 
 use crate::actor::registry::ActorRegistry;
@@ -208,11 +209,11 @@ impl Spawner {
         &self.registry
     }
 
-    /// Resolve a canonical or ADR-0166 abbreviated actor address to one live
+    /// Resolve a canonical or ADR-0166 abbreviated [`ActorPath`] to one live
     /// mailbox through the registry's boundary parser, keeping the registry
     /// itself behind the spawner. The chassis handle's embedder lookup
     /// forwards here.
-    pub(crate) fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
+    pub(crate) fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         self.registry.resolve_address(address)
     }
 

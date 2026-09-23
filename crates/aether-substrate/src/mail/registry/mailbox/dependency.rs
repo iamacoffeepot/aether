@@ -33,7 +33,7 @@ impl Registry {
                 _ => return Some(namespace),
             };
             match candidate {
-                Some(id) if self.is_live(id) => None,
+                Some(id) if self.is_live_at(id) => None,
                 _ => Some(namespace),
             }
         })

@@ -1,8 +1,9 @@
 //! Mail-side helpers shared by chassis dispatchers and capabilities.
 //!
 //! `resolve_bundle` resolves a list of envelopes against the registry into
-//! fully-typed `Mail`s. The chassis-side decode helper lives in
-//! `chassis/helpers.rs`.
+//! fully-typed `Mail`s. Each `NamedMail` carries its recipient as a validated
+//! `ActorPath`, so the only failures left are the registry's. The chassis-side
+//! decode helper lives in `chassis/helpers.rs`.
 
 use aether_kinds::NamedMail;
 
@@ -26,8 +27,8 @@ pub fn resolve_bundle(registry: &Registry, bundle: &[NamedMail], label: &str) ->
     let mut out = Vec::with_capacity(bundle.len());
     for env in bundle {
         let mailbox = registry
-            .resolve_address(&env.recipient_name)
-            .map_err(|error| format!("recipient {:?} in {label}: {error}", env.recipient_name))?
+            .resolve_address(&env.recipient)
+            .map_err(|error| format!("recipient `{}` in {label}: {error}", env.recipient))?
             .mailbox_id;
         let kind_id =
             registry.kind_id(&env.kind_name).ok_or_else(|| format!("unknown kind {:?} in {label}", env.kind_name))?;

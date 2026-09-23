@@ -15,7 +15,7 @@
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::mailbox_id_from_path;
+use aether_data::{ActorPath, mailbox_id_from_path};
 use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::testing::boot_authority;
 use aether_substrate::{AddressResolutionError, Registry};
@@ -36,6 +36,7 @@ fn the_component_host_abbreviation_expands_through_the_linked_inventory() {
     // inventory submissions link into this test binary — the linker drops
     // unreferenced statics out of an rlib, and without that reference the
     // host's facts never reach `AddressIndex`.
+    let path = |text: &str| ActorPath::new(text).expect("fixture is a well-formed actor path");
     let short = format!("{}://camera", ComponentHostCapability::NAMESPACE);
     let registry = Registry::new();
     let id = mailbox_id_from_path(CANONICAL);
@@ -45,18 +46,18 @@ fn the_component_host_abbreviation_expands_through_the_linked_inventory() {
 
     // The bare discriminator elides the child namespace: exactly one instanced
     // child namespace is declared beneath the host.
-    let elided = registry.resolve_address(&short).expect("abbreviation resolves");
+    let elided = registry.resolve_address(&path(&short)).expect("abbreviation resolves");
     assert_eq!(elided.mailbox_id, id);
     assert_eq!(elided.canonical_path, CANONICAL);
 
     // The explicit child segment names the same node.
     let explicit =
-        registry.resolve_address("aether.component://aether.embedded:camera").expect("canonical child segment");
+        registry.resolve_address(&path("aether.component://aether.embedded:camera")).expect("canonical child segment");
     assert_eq!(explicit, elided);
 
     // A child namespace is not itself a declared root, so it cannot anchor.
     assert_eq!(
-        registry.resolve_address("aether.embedded://camera"),
+        registry.resolve_address(&path("aether.embedded://camera")),
         Err(AddressResolutionError::UnknownRoot { root: "aether.embedded".to_owned() })
     );
 }

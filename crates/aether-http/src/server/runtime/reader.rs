@@ -261,7 +261,7 @@ const MAX_CHUNK_TRAILERS: usize = MAX_HEADER_COUNT;
 enum ReaderResolution {
     /// A live handler: the dispatch target, its dispatch kind, and
     /// whether it takes the streamed body path.
-    Live { handler: MailboxId, kind: KindId, streaming: bool },
+    Live { handler: AnyActorRef, kind: KindId, streaming: bool },
     /// A route matched but no member of its set is live — `503`, never
     /// silently rerouted (that would reroute a claimed family).
     Dead,
@@ -281,7 +281,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
                 let mut live = None;
                 for offset in 0..len {
                     let member = route.members[(start + offset) % len];
-                    if validate_route_mailbox(registry, route.kind, member).is_ok() {
+                    if registry.is_live(member) {
                         live = Some((member, route.kind));
                         break;
                     }
@@ -298,7 +298,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
         Some((handler, kind)) => ReaderResolution::Live {
             handler,
             kind,
-            streaming: shared.capabilities.accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
+            streaming: shared.capabilities.accepts_actor(handler, <HttpRequestStreamOpen as Kind>::ID),
         },
         None => ReaderResolution::NoHandler,
     }

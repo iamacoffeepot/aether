@@ -32,6 +32,7 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
+use aether_data::ActorPath;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::{HttpConfig, HttpServerConfig};
 use aether_lifecycle::LifecycleConfig;
@@ -104,10 +105,10 @@ mod tests {
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis");
-        let address = "aether.component://aether.embedded:probe";
+        let address = ActorPath::new("aether.component://aether.embedded:probe").expect("a well-formed actor path");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
-            let resolved = built.resolve_address(address);
+            let resolved = built.resolve_address(&address);
             if resolved.is_ok() {
                 break;
             }

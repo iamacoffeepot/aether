@@ -105,7 +105,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// *immediate* sender (one hop, the addressing layer's `Source`), not
     /// the chain origin — the origin lives in the tracing layer (`root` /
     /// `parent_mail`, ADR-0080). `None` for mail with no local sender
-    /// (broadcast, substrate-generated, hub-bubbled). Needs no actor type,
+    /// (broadcast, substrate-generated, hub-bubbled). One piece of
+    /// host-generated mail does carry a sender: an
+    /// [`aether_kinds::MonitorNotice`] is stamped with the departed actor, so
+    /// a watcher reads which actor it lost from here. Needs no actor type,
     /// so it exists on the erased ctx too.
     #[must_use]
     pub fn sender(&self) -> Option<AnyActorRef> {

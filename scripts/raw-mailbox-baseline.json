@@ -4,7 +4,7 @@
     "actor_at::<": 5,
     "send_envelope_tracked(": 6,
     "send_envelope_tracked_with_reply_to(": 3,
-    "send_envelope_detached(": 15,
+    "send_envelope_detached(": 8,
     "mailer()": 46,
     "registry()": 33,
     "mailbox_id_from_name(": 109,

@@ -54,7 +54,7 @@ pub struct Connect {
 /// Typed native and wasm callers resolve by `session_name` through the
 /// `connect_session*` helpers. To *address* the session in a subsequent
 /// mail, use the full ADR-0099 lineage path
-/// `aether.tcp/aether.tcp.session:<session_name>` as `recipient_name` —
+/// `aether.tcp/aether.tcp.session:<session_name>` as a mail recipient address —
 /// the bare subname is not a mailbox address. `session_id` is the same
 /// mailbox as a wire id, usable wherever a `MailboxId` is taken (a
 /// `consumer` field, say); it renders as a tagged `mbx-…` string over
@@ -77,7 +77,7 @@ pub enum ConnectResult {
 /// a tagged `mbx-…` string over JSON and round-trips exactly
 /// (ADR-0064). Agents addressing the listener as a mail *recipient*
 /// still use `listener_name` (the deterministic full name), since
-/// `recipient_name` is a name surface.
+/// a mail recipient address is a name surface.
 #[aether_data::kind(name = "aether.tcp.bind_listener_result")]
 pub enum BindListenerResult {
     Ok { listener_name: String, listener_id: aether_data::MailboxId, local_port: u16 },

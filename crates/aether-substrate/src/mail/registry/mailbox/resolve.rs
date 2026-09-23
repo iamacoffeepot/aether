@@ -2,7 +2,9 @@
 //! lookup shares, and the point-in-time answers it hands back.
 
 use aether_actor::AnyActorRef;
-use aether_data::{ScopePathError, mailbox_id_from_path, validate_scope_path};
+use aether_data::{
+    ActorPath, ActorPathError, ActorPathForm, ScopePathError, mailbox_id_from_path, validate_scope_path,
+};
 
 use crate::mail::registry::{AddressResolutionError, ResolvedAddress};
 use crate::mail::{KindId, MailboxId};
@@ -119,7 +121,15 @@ impl Registry {
     /// ADR-0063: a poisoned lock means a prior holder panicked under
     /// the guard.
     pub fn lookup(&self, name: &str) -> Option<MailboxId> {
-        match self.resolve_address(name) {
+        let address = match ActorPath::new(name) {
+            Ok(address) => address,
+            Err(error @ ActorPathError::Scope(_)) => {
+                tracing::warn!(name, ?error, "scope path over cap; resolution miss");
+                return None;
+            }
+            Err(ActorPathError::Segment { .. }) => return None,
+        };
+        match self.resolve_address(&address) {
             Ok(resolved) => Some(resolved.mailbox_id),
             Err(error @ (AddressResolutionError::PathTooDeep { .. } | AddressResolutionError::PathTooLong { .. })) => {
                 tracing::warn!(name, ?error, "scope path over cap; resolution miss");
@@ -129,15 +139,18 @@ impl Registry {
         }
     }
 
-    /// Resolve a canonical or ADR-0166 abbreviated actor address to one
-    /// live mailbox. Canonical inputs preserve the existing
-    /// validate/fold/exact-name lookup. An abbreviated input expands
-    /// through the generated root/child inventory before that canonical
-    /// lookup, so aliases are never hashed, stored, or reverse-reported.
-    pub fn resolve_address(&self, address: &str) -> Result<ResolvedAddress, AddressResolutionError> {
-        let canonical_path = match address.split_once("://") {
-            None => address.to_owned(),
-            Some((root, relative)) => self.addresses.as_ref().map_err(Clone::clone)?.expand(root, relative)?,
+    /// Resolve a canonical or ADR-0166 abbreviated [`ActorPath`] to one live
+    /// mailbox: the one place an address becomes a position (ADR-0230 §3).
+    /// Canonical inputs preserve the existing fold/exact-name lookup. An
+    /// abbreviated input expands its parsed segments through the generated
+    /// root/child inventory before that canonical lookup, so aliases are
+    /// never hashed, stored, or reverse-reported.
+    pub fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
+        let canonical_path = match address.form() {
+            ActorPathForm::Canonical(path) => path.to_owned(),
+            ActorPathForm::Abbreviated { root, relative } => {
+                self.addresses.as_ref().map_err(Clone::clone)?.expand(root, &relative)?
+            }
         };
         let mailbox_id = self
             .lookup_canonical(&canonical_path)?
@@ -146,10 +159,11 @@ impl Registry {
     }
 
     fn lookup_canonical(&self, name: &str) -> Result<Option<MailboxId>, ScopePathError> {
-        // ADR-0098 wire boundary: `name` is user-controlled (the MCP
-        // `recipient_name` surface resolves here), so cap its scope depth
-        // / byte size before it folds to a registry key. An over-cap name
-        // is a resolution miss, not a key-space bloat.
+        // ADR-0098 wire boundary: `name` is user-controlled text that arrived
+        // as an `ActorPath` (or is an abbreviation's expansion, which can
+        // outgrow what was written), so cap its scope depth / byte size
+        // before it folds to a registry key. An over-cap name is a
+        // resolution miss, not a key-space bloat.
         let segments: Vec<&str> = name.split('/').collect();
         validate_scope_path(&segments)?;
         // ADR-0099 §4: resolve a written name by the parse → fold (the

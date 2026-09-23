@@ -1,6 +1,8 @@
 //! Tests for [`super::super::mailbox::resolve`] — the name lookup walk
 //! and the structured misses it reports.
 
+use aether_data::ActorPath;
+
 use crate::mail::MailboxId;
 use crate::mail::registry::{AddressResolutionError, Registry, noop_handler};
 use crate::testing::boot_authority as auth;
@@ -39,19 +41,13 @@ fn canonical_resolution_reports_the_registered_path_and_structured_misses() {
     let id = aether_data::mailbox_id_from_path(canonical);
     r.try_register_inbox_with_id(&auth(), id, canonical, noop_handler()).unwrap();
 
-    let resolved = r.resolve_address(canonical).expect("canonical mailbox is live");
+    let path = |text| ActorPath::new(text).expect("fixture is a well-formed actor path");
+    let resolved = r.resolve_address(&path(canonical)).expect("canonical mailbox is live");
     assert_eq!(resolved.mailbox_id, id);
     assert_eq!(resolved.canonical_path, canonical);
     assert_eq!(
-        r.resolve_address("root/worker:missing"),
+        r.resolve_address(&path("root/worker:missing")),
         Err(AddressResolutionError::NoLiveMailbox { canonical_path: "root/worker:missing".to_owned() })
-    );
-
-    let too_deep =
-        (0..=aether_data::MAX_SCOPE_PATH_DEPTH).map(|index| format!("seg{index}")).collect::<Vec<_>>().join("/");
-    assert_eq!(
-        r.resolve_address(&too_deep),
-        Err(AddressResolutionError::PathTooDeep { limit: aether_data::MAX_SCOPE_PATH_DEPTH })
     );
 }
 

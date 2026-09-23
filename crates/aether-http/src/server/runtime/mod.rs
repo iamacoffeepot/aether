@@ -40,7 +40,7 @@ pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::registry::{Registry, RouteResolution};
+pub use aether_substrate::mail::registry::Registry;
 pub use aether_substrate::mail::{CapabilityRegistry, MailId};
 
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind
@@ -188,7 +188,7 @@ impl NativeActor for HttpServerCapability {
 
         Ok(HttpSupervisorState {
             config,
-            routes: Arc::new(RwLock::new(Vec::new())),
+            routes: Arc::new(RwLock::new(RouteTable::default())),
             live_connections: Arc::new(AtomicUsize::new(0)),
             mailer,
             listener_port: port,
@@ -325,8 +325,7 @@ impl NativeActor for HttpServerCapability {
             Ok(handler) => handler,
             Err(error) => return RegisterRouteResult::Err { error: error.to_string() },
         };
-        let result =
-            state.register_route(&payload.prefix, payload.method, payload.kind, payload.mailbox, payload.shared);
+        let result = state.register_route(&payload.prefix, payload.method, payload.kind, handler, payload.shared);
         if matches!(result, RegisterRouteResult::Ok) {
             state.watch(ctx, handler);
         }
@@ -355,7 +354,7 @@ impl NativeActor for HttpServerCapability {
         match ctx.sender() {
             Some(sender) => {
                 let result =
-                    state.register_route(&payload.prefix, payload.method, payload.kind, sender.id(), payload.shared);
+                    state.register_route(&payload.prefix, payload.method, payload.kind, sender, payload.shared);
                 if matches!(result, RegisterRouteResult::Ok) {
                     state.watch(ctx, sender);
                 }
@@ -371,20 +370,26 @@ impl NativeActor for HttpServerCapability {
     }
 
     /// Release an explicitly named mailbox's route (ADR-0130).
-    /// Idempotent.
+    /// Idempotent. The mailbox is proven at receipt (ADR-0230); one that
+    /// no longer proves holds nothing to release — a monitored holder's
+    /// routes already went with its `MonitorNotice` — so the refusal is
+    /// the same `Ok` an unheld route gets.
     ///
     /// # Agent
     /// `UnregisterRoute { prefix, method, mailbox }`.
     #[handler::single]
     fn on_unregister_route(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         payload: UnregisterRoute,
     ) -> RegisterRouteResult {
         if !state.config.enabled {
             return disabled_route_result();
         }
-        state.unregister_route(&payload.prefix, payload.method, payload.mailbox)
+        match ctx.resolve_live(payload.mailbox) {
+            Ok(holder) => state.unregister_route(&payload.prefix, payload.method, holder),
+            Err(_) => RegisterRouteResult::Ok,
+        }
     }
 
     /// Release the *sending* actor's route (ADR-0130), resolved from
@@ -403,7 +408,7 @@ impl NativeActor for HttpServerCapability {
             return disabled_route_result();
         }
         match ctx.sender() {
-            Some(sender) => state.unregister_route(&payload.prefix, payload.method, sender.id()),
+            Some(sender) => state.unregister_route(&payload.prefix, payload.method, sender),
             None => RegisterRouteResult::Err {
                 error: "aether.http.server.unregister_route_self requires a local sender; an \
                         external session or remote engine must use \
@@ -417,13 +422,17 @@ impl NativeActor for HttpServerCapability {
     /// The externally sendable bulk form — drop-time cleanup happens
     /// through [`Self::on_monitor_notice`] instead, so nothing mails
     /// this on the component path anymore. Idempotent;
-    /// fire-and-forget.
+    /// fire-and-forget. The mailbox is proven at receipt (ADR-0230); one
+    /// that no longer proves is a no-op, its monitored routes having
+    /// already gone with its `MonitorNotice`.
     ///
     /// # Agent
     /// `UnregisterRoutesAll { mailbox }`.
     #[handler::single]
-    fn on_unregister_routes_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, payload: UnregisterRoutesAll) {
-        state.unregister_routes_all(payload.mailbox);
+    fn on_unregister_routes_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, payload: UnregisterRoutesAll) {
+        if let Ok(holder) = ctx.resolve_live(payload.mailbox) {
+            state.unregister_routes_all(holder);
+        }
     }
 
     /// Purge a departed mailbox's routes (ADR-0079 §8 amended). The
@@ -434,9 +443,17 @@ impl NativeActor for HttpServerCapability {
     /// fan-out from the component host. Releasing the handle keeps the
     /// monitor map bounded by live route holders; a later occupant of
     /// the same mailbox re-registers through its own route claim.
+    ///
+    /// The host stamps the departed holder as the notice's sender, so
+    /// `ctx.sender()` is the same proven reference the monitor map and the
+    /// route table's reverse index are keyed by (ADR-0230): both removals
+    /// are keyed lookups, and only the holder's own routes are touched.
     #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        state.monitors.retain(|reference, _| reference.id() != notice.target);
-        state.unregister_routes_all(notice.target);
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        state.monitors.remove(&departed);
+        state.unregister_routes_all(departed);
     }
 }

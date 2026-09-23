@@ -1,12 +1,36 @@
 use super::{
-    Arc, HttpResponseStreamOpen, KindId, MailboxId, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
-    RegisterRouteResult, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
+    Arc, HttpResponseStreamOpen, KindId, MailboxId, Mailer, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
+    RegisterRouteResult, Registry, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
     parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive,
     route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
     validate_ws_handshake,
 };
 use crate::kinds::{HttpHeader, HttpMethod};
+use aether_actor::AnyActorRef;
+use aether_substrate::actor::native::binding::NativeBinding;
+use aether_substrate::mail::registry::MailDispatch;
+use aether_substrate::mail::{MailId, Source};
+use aether_substrate::testing::{boot_authority, fresh_substrate};
 use std::time::{Duration, UNIX_EPOCH};
+
+/// Run `body` against a fresh substrate — its registry and mailer — and a
+/// spawner-less test ctx over it: the shape every fixture here that needs a
+/// ctx shares.
+fn with_test_ctx<T>(body: impl FnOnce(&Registry, &Arc<Mailer>, &mut NativeCtx<'_>) -> T) -> T {
+    let (registry, mailer) = fresh_substrate();
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAA)));
+    let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+    body(&registry, &mailer, &mut ctx)
+}
+
+/// Register a named inline mailbox and prove it through the ctx verb — this
+/// crate cannot construct a reference any other way.
+fn proven(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> AnyActorRef {
+    let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
+
+    ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
+}
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
     vec![HttpHeader { name: "Connection".to_string(), value: value.to_string() }]
@@ -19,22 +43,24 @@ fn conn_header(value: &str) -> Vec<HttpHeader> {
 /// returns before touching the registry, so a bare ctx suffices.
 #[test]
 fn disabled_http_server_err_replies_to_register_route() {
-    use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState, NativeCtx};
+    use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState};
     use crate::kinds::RegisterRoute;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::fresh_substrate;
 
-    let (_registry, mailer) = fresh_substrate();
-    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
-    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
-    let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+    let result = with_test_ctx(|_, mailer, ctx| {
+        let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(mailer));
 
-    let result = HttpServerCapability::on_register_route(
-        &mut state,
-        &mut ctx,
-        RegisterRoute { prefix: "/".to_string(), method: None, kind: KindId(0), mailbox: MailboxId(1), shared: false },
-    );
+        HttpServerCapability::on_register_route(
+            &mut state,
+            ctx,
+            RegisterRoute {
+                prefix: "/".to_string(),
+                method: None,
+                kind: KindId(0),
+                mailbox: MailboxId(1),
+                shared: false,
+            },
+        )
+    });
     assert!(
         matches!(result, RegisterRouteResult::Err { .. }),
         "a disabled http server must fail fast on register_route, got {result:?}",
@@ -328,14 +354,22 @@ fn config_layer_defaults_match_the_named_consts() {
 /// pinned deterministically, with no dependence on the order two
 /// independent actors' registration mail happens to reach the table.
 mod route_registration {
+    use super::super::RouteTable;
     use super::{
-        Arc, KindId, MailboxId, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
-        unregister_routes_all,
+        AnyActorRef, Arc, KindId, RegisterRouteResult, RwLock, SharedRoutes, proven, register_route, unregister_route,
+        unregister_routes_all, with_test_ctx,
     };
     use crate::kinds::HttpMethod;
 
     fn fresh_routes() -> SharedRoutes {
-        Arc::new(RwLock::new(Vec::new()))
+        Arc::new(RwLock::new(RouteTable::default()))
+    }
+
+    /// Two proven route holders.
+    fn holders() -> (AnyActorRef, AnyActorRef) {
+        with_test_ctx(|registry, _, ctx| {
+            (proven(registry, ctx, "test.http.route.a"), proven(registry, ctx, "test.http.route.b"))
+        })
     }
 
     #[track_caller]
@@ -355,10 +389,10 @@ mod route_registration {
 
     /// Snapshot the sole route's `(members, kind, shared)`, asserting the
     /// table holds exactly one route — the shape every case below checks.
-    fn only_route(routes: &SharedRoutes) -> (Vec<MailboxId>, KindId, bool) {
+    fn only_route(routes: &SharedRoutes) -> (Vec<AnyActorRef>, KindId, bool) {
         let table = routes.read().expect("route table lock");
-        assert_eq!(table.len(), 1, "expected exactly one route, got {}", table.len());
-        let route = &table[0];
+        assert_eq!(table.routes.len(), 1, "expected exactly one route, got {}", table.routes.len());
+        let route = table.routes.values().next().expect("one route");
         let snapshot = (route.members.clone(), route.kind, route.shared);
         drop(table);
         snapshot
@@ -374,14 +408,11 @@ mod route_registration {
     #[test]
     fn exclusive_conflict_first_claimant_keeps_route() {
         let routes = fresh_routes();
-        let (first, second) = (MailboxId(1), MailboxId(2));
+        let (first, second) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/dup", None, kind_a, first, false));
-        expect_err_containing(
-            register_route(&routes, "/dup", None, kind_b, second, false),
-            "already claimed by mailbox",
-        );
+        expect_err_containing(register_route(&routes, "/dup", None, kind_b, second, false), "already claimed by");
 
         assert_eq!(only_route(&routes), (vec![first], kind_a, false));
     }
@@ -393,7 +424,7 @@ mod route_registration {
     #[test]
     fn exclusive_reclaim_by_holder_updates_kind() {
         let routes = fresh_routes();
-        let holder = MailboxId(1);
+        let (holder, _) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/dup", None, kind_a, holder, false));
@@ -408,13 +439,13 @@ mod route_registration {
     #[test]
     fn distinct_method_same_prefix_is_not_a_conflict() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
 
         expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), kind, a, false));
         expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), kind, b, false));
 
-        assert_eq!(routes.read().expect("route table lock").len(), 2);
+        assert_eq!(routes.read().expect("route table lock").routes.len(), 2);
     }
 
     /// Tripwire: the shared/exclusive mismatch branch, both directions —
@@ -425,7 +456,7 @@ mod route_registration {
     fn shared_and_exclusive_claims_do_not_mix() {
         // Shared claim onto an exclusive key: rejected, stays exclusive.
         let excl = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
         expect_ok(register_route(&excl, "/k", None, kind, a, false));
         expect_err_containing(register_route(&excl, "/k", None, kind, b, true), "exclusively claimed");
@@ -444,7 +475,7 @@ mod route_registration {
     #[test]
     fn shared_join_with_mismatched_kind_is_rejected() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/pool", None, kind_a, a, true));
@@ -460,7 +491,7 @@ mod route_registration {
     #[test]
     fn matching_shared_claims_accumulate_members() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
 
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
@@ -469,6 +500,11 @@ mod route_registration {
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
 
         assert_eq!(only_route(&routes), (vec![a, b], kind, true));
+
+        // A shared join is recorded in the reverse index: releasing every
+        // route `a` holds leaves `b` as the set's sole member.
+        unregister_routes_all(&routes, a);
+        assert_eq!(only_route(&routes), (vec![b], kind, true));
     }
 
     /// Tripwire: unregistration release + drop-when-empty — releasing one
@@ -478,7 +514,7 @@ mod route_registration {
     #[test]
     fn unregister_releases_members_and_drops_empty_routes() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
         expect_ok(register_route(&routes, "/pool", None, kind, b, true));
@@ -489,13 +525,13 @@ mod route_registration {
 
         // The last member leaves; the route is dropped.
         expect_ok(unregister_route(&routes, "/pool", None, b));
-        assert!(routes.read().expect("route table lock").is_empty());
+        assert!(routes.read().expect("route table lock").routes.is_empty());
 
-        // unregister_routes_all clears every route the mailbox holds.
+        // unregister_routes_all clears every route the holder holds.
         expect_ok(register_route(&routes, "/x", None, kind, a, false));
         expect_ok(register_route(&routes, "/y", None, kind, a, false));
         unregister_routes_all(&routes, a);
-        assert!(routes.read().expect("route table lock").is_empty());
+        assert!(routes.read().expect("route table lock").routes.is_empty());
     }
 }
 
@@ -775,12 +811,7 @@ mod wake_coalescing {
 
 mod monitor_collapse {
     use super::super::{HttpServerConfig, HttpSupervisorState};
-    use aether_data::MailboxId;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::mail::registry::MailDispatch;
-    use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::{boot_authority, fresh_substrate};
+    use super::{proven, with_test_ctx};
     use std::sync::Arc;
 
     /// The `route holder is not monitorable` warn must fire once per
@@ -789,31 +820,25 @@ mod monitor_collapse {
     /// `watch` for the same mailbox is a no-op.
     #[test]
     fn watch_remembers_unmonitorable_mailbox() {
-        let (registry, mailer) = fresh_substrate();
-        let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAA)));
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let proven = |ctx: &NativeCtx<'_>, name: &str| {
-            let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
+        with_test_ctx(|registry, mailer, ctx| {
+            let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(mailer));
+            let target = proven(registry, ctx, "test.http.watch.target");
 
-            ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
-        };
-        let target = proven(&ctx, "test.http.watch.target");
+            assert!(!state.monitors.contains_key(&target));
+            assert!(!state.unmonitorable.contains(&target));
 
-        assert!(!state.monitors.contains_key(&target));
-        assert!(!state.unmonitorable.contains(&target));
+            state.watch(ctx, target);
+            assert!(state.unmonitorable.contains(&target), "first failed monitor inserts into unmonitorable");
+            assert!(!state.monitors.contains_key(&target));
+            let after_first = state.unmonitorable.len();
 
-        state.watch(&mut ctx, target);
-        assert!(state.unmonitorable.contains(&target), "first failed monitor inserts into unmonitorable");
-        assert!(!state.monitors.contains_key(&target));
-        let after_first = state.unmonitorable.len();
+            state.watch(ctx, target);
+            assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
 
-        state.watch(&mut ctx, target);
-        assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
-
-        let other = proven(&ctx, "test.http.watch.other");
-        state.watch(&mut ctx, other);
-        assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
-        assert_eq!(state.unmonitorable.len(), after_first + 1);
+            let other = proven(registry, ctx, "test.http.watch.other");
+            state.watch(ctx, other);
+            assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
+            assert_eq!(state.unmonitorable.len(), after_first + 1);
+        });
     }
 }

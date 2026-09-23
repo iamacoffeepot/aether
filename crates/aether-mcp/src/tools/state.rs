@@ -8,8 +8,9 @@ use super::{
     ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
     max_frame_size, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
-    validate_recipient_scope, wire,
+    wire,
 };
+use aether_data::ActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{DescribeComponent, DescribeComponentResult, ListEngines, ListEnginesResult};
 use std::collections::HashMap;
@@ -134,7 +135,7 @@ impl Mcp {
             return Ok((mailbox_id, address.to_owned()));
         }
 
-        validate_recipient_scope(address)?;
+        ActorPath::new(address)?;
         let reply = self
             .session
             .call_one(engine_envelope(engine, INVENTORY_CAP, &ResolveAddress { address: address.to_owned() }))
@@ -393,9 +394,8 @@ impl Mcp {
                 .await
                 .map_err(|e| anyhow::anyhow!("{e} (kind {})", spec.kind_name))?;
             out.push(NamedMail {
-                // The wire kind still spells this `recipient_name`; the
-                // tool boundary spells it `address` (issue 5715).
-                recipient_name: spec.address.clone(),
+                recipient: ActorPath::new(&spec.address)
+                    .map_err(|error| anyhow::anyhow!("{error} (address {:?})", spec.address))?,
                 kind_name: spec.kind_name.clone(),
                 payload,
                 count: 1,

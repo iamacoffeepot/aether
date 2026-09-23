@@ -1,21 +1,4 @@
-use super::{
-    EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, ScopePathError, mailbox_id_from_name, validate_scope_path,
-};
-
-/// ADR-0098/0099 input hygiene: reject a `recipient_name` whose
-/// `/`-rendered scope path exceeds the depth or byte caps before it reaches
-/// the selected engine's registry.
-pub(super) fn validate_recipient_scope(recipient_name: &str) -> anyhow::Result<()> {
-    let segments: Vec<&str> = recipient_name.split('/').collect();
-    validate_scope_path(&segments).map_err(|e| match e {
-        ScopePathError::TooDeep { limit } => {
-            anyhow::anyhow!("recipient_name has more than {limit} scope segments")
-        }
-        ScopePathError::TooLong { limit } => {
-            anyhow::anyhow!("recipient_name exceeds the {limit}-byte scope-path cap")
-        }
-    })
-}
+use super::{EngineId, Kind, MailEnvelope, MailboxAddress, MailboxId, mailbox_id_from_name};
 
 /// Build a `MailEnvelope` addressed at a hub-local mailbox
 /// (`engine = None`) carrying a typed kind. Callers pass only trusted

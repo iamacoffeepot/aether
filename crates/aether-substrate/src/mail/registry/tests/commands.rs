@@ -541,9 +541,11 @@ fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
     assert_eq!(registry.owner_queue_metrics().unwrap().depth, 2, "ordinary parked mail reaches the bound");
 
     // The departed target's notice is admitted past it rather than refused.
-    let notice = aether_kinds::MonitorNotice { target: canonical_mailbox_id("monitor-notice-departed-target") };
-    let notice_payload = notice.encode_into_bytes();
-    mailer.push(Mail::new(watcher_id, aether_kinds::MonitorNotice::ID, notice_payload.clone(), 1));
+    // The notice itself has no fields, and the fake activation records each
+    // delivery's first byte, so a one-byte marker under the notice's kind
+    // stands in for it: admission keys on the kind, never the payload.
+    let notice_marker = 4u8;
+    mailer.push(Mail::new(watcher_id, aether_kinds::MonitorNotice::ID, vec![notice_marker], 1));
     let metrics = registry.owner_queue_metrics().unwrap();
     assert_eq!(metrics.shed, 0, "a departure notice is never shed");
     assert_eq!(metrics.over_capacity, 1, "it is admitted past the bound and counted as pressure");
@@ -554,7 +556,7 @@ fn owner_admits_a_departure_notice_to_a_starting_watcher_past_capacity() {
     owner.run_once();
     assert_eq!(
         *deliveries.lock().unwrap(),
-        [1, 2, 3, notice_payload[0]],
+        [1, 2, 3, notice_marker],
         "the notice rides the parked tail into the promoted watcher, behind the mail that preceded it"
     );
 }

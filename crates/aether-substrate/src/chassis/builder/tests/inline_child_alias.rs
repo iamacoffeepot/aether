@@ -11,7 +11,7 @@ use crate::mail::MailboxId;
 use crate::mail::registry;
 use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
-use aether_actor::Addressable;
+use aether_actor::{Addressable, AnyActorRef};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -83,11 +83,12 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     }
 
     // Watcher — monitors whatever address a `WatchOrder` names, records
-    // each registration's outcome, and records every `MonitorNotice.target`
-    // it is handed.
+    // each registration's outcome and the reference it monitored, and
+    // records the sender of every `MonitorNotice` it is handed.
     struct Watcher {
         monitored: Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-        notices: Arc<Mutex<Vec<u64>>>,
+        watched: Arc<Mutex<Vec<AnyActorRef>>>,
+        notices: Arc<Mutex<Vec<Option<AnyActorRef>>>>,
         handles: Mutex<Vec<MonitorHandle>>,
     }
     impl Addressable for Watcher {
@@ -99,12 +100,16 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
-        type Params = (Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>, Arc<Mutex<Vec<u64>>>);
+        type Params = (
+            Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
+            Arc<Mutex<Vec<AnyActorRef>>>,
+            Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+        );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { monitored: params.0, notices: params.1, handles: Mutex::new(Vec::new()) })
+            Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }
     }
     impl NativeActor for Watcher {
@@ -125,13 +130,14 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
                 };
                 state.monitored.lock().unwrap().push(ctx.monitor(target).map(|handle| {
                     state.handles.lock().unwrap().push(handle);
+                    state.watched.lock().unwrap().push(target);
                     position
                 }));
                 return Some(());
             }
             if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
-                let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                state.notices.lock().unwrap().push(notice.target.0);
+                <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
+                state.notices.lock().unwrap().push(ctx.sender());
                 return Some(());
             }
             None
@@ -165,9 +171,14 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     assert_eq!(registry.lookup(&alias_name), Some(alias_id), "the alias resolves as its own address");
 
     let monitored = Arc::new(Mutex::new(Vec::new()));
+    let watched = Arc::new(Mutex::new(Vec::new()));
     let notices = Arc::new(Mutex::new(Vec::new()));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&monitored), Arc::clone(&notices)))
+        .spawn_actor::<Watcher>(
+            Subname::Counter,
+            (),
+            (Arc::clone(&monitored), Arc::clone(&watched), Arc::clone(&notices)),
+        )
         .finish_commit()
         .expect("spawn watcher");
 
@@ -212,11 +223,11 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
     }
     let mut observed = notices.lock().unwrap().clone();
     observed.sort_unstable();
-    let mut expected = vec![host_id.0, alias_id.0];
+    let mut expected: Vec<Option<AnyActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
     expected.sort_unstable();
     assert_eq!(
         observed, expected,
-        "a vacate must name every departing address, so state keyed on an inline child's alias is reclaimable",
+        "a vacate must notify from every departing address, so state keyed on an inline child's alias is reclaimable",
     );
     assert_eq!(chassis.actor_registry().monitor_count(alias_id), 0, "monitors_of[alias] must drain after fan-out");
     assert!(chassis.actor_registry().is_live_at(host_id), "vacate leaves the host mailbox live and refillable");
@@ -292,10 +303,12 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     }
 
     // Watcher — monitors whatever address a `WatchOrder` names and records
-    // every `MonitorNotice.target` it is handed.
+    // the reference it monitored and the sender of every `MonitorNotice` it
+    // is handed.
     struct Watcher {
         monitored: Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
-        notices: Arc<Mutex<Vec<u64>>>,
+        watched: Arc<Mutex<Vec<AnyActorRef>>>,
+        notices: Arc<Mutex<Vec<Option<AnyActorRef>>>>,
         handles: Mutex<Vec<MonitorHandle>>,
     }
     impl Addressable for Watcher {
@@ -307,12 +320,16 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
-        type Params = (Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>, Arc<Mutex<Vec<u64>>>);
+        type Params = (
+            Arc<Mutex<Vec<Result<MailboxId, MonitorError>>>>,
+            Arc<Mutex<Vec<AnyActorRef>>>,
+            Arc<Mutex<Vec<Option<AnyActorRef>>>>,
+        );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { monitored: params.0, notices: params.1, handles: Mutex::new(Vec::new()) })
+            Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }
     }
     impl NativeActor for Watcher {
@@ -333,13 +350,14 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
                 };
                 state.monitored.lock().unwrap().push(ctx.monitor(target).map(|handle| {
                     state.handles.lock().unwrap().push(handle);
+                    state.watched.lock().unwrap().push(target);
                     position
                 }));
                 return Some(());
             }
             if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
-                let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                state.notices.lock().unwrap().push(notice.target.0);
+                <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
+                state.notices.lock().unwrap().push(ctx.sender());
                 return Some(());
             }
             None
@@ -371,9 +389,14 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     );
 
     let monitored = Arc::new(Mutex::new(Vec::new()));
+    let watched = Arc::new(Mutex::new(Vec::new()));
     let notices = Arc::new(Mutex::new(Vec::new()));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&monitored), Arc::clone(&notices)))
+        .spawn_actor::<Watcher>(
+            Subname::Counter,
+            (),
+            (Arc::clone(&monitored), Arc::clone(&watched), Arc::clone(&notices)),
+        )
         .finish_commit()
         .expect("spawn watcher");
 
@@ -427,10 +450,11 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     while notices.lock().unwrap().is_empty() && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
+    let expected: Vec<Option<AnyActorRef>> = watched.lock().unwrap().iter().copied().map(Some).collect();
     assert_eq!(
         *notices.lock().unwrap(),
-        vec![alias_id.0],
-        "despawning an inline child must fire a departure notice naming its alias",
+        expected,
+        "despawning an inline child must fire a departure notice sent from its alias",
     );
     assert_eq!(chassis.actor_registry().monitor_count(alias_id), 0, "monitors_of[alias] must drain after fan-out");
 

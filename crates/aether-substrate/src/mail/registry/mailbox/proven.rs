@@ -1,5 +1,6 @@
-//! The registry's liveness read, [`Registry::is_live`], and the four mints
-//! beside it.
+//! The registry's liveness reads, [`Registry::is_live`] over a reference and
+//! the crate-private position form beside it, and the four mints beside
+//! them.
 //!
 //! The callers of the gated mint outside the SDK itself. Three mint with no
 //! read: the `Registry::declared_dependency` caller proved the dependency
@@ -47,6 +48,18 @@ impl fmt::Display for ResolveLiveError {
 }
 
 impl Registry {
+    /// Whether the actor `target` proves is still `Live` in the published
+    /// route view. A reference proves only that its actor reached `Live`
+    /// (ADR-0230), which stays true after it departs; this answers the other
+    /// question, "is it `Live` now".
+    ///
+    /// The http server's request reader is the consumer: it holds route
+    /// members as references and skips one whose actor has departed but
+    /// whose `MonitorNotice` has not yet purged it.
+    pub fn is_live(&self, target: AnyActorRef) -> bool {
+        self.is_live_at(target.id())
+    }
+
     /// Whether the published route view holds a `Live` endpoint at
     /// `candidate` — `Starting`, `Dropped`, and `Unknown` alike mean
     /// "not live".
@@ -54,7 +67,7 @@ impl Registry {
     /// Reads the lock-free published snapshot through the hot-path
     /// `route_lookup`, exactly what the mailer's route step reads — no
     /// mail, no allocation, no lock the send path does not take.
-    pub fn is_live(&self, candidate: MailboxId) -> bool {
+    pub(crate) fn is_live_at(&self, candidate: MailboxId) -> bool {
         // `route_lookup` ignores its kind on this path (the mailer's route
         // step passes the live kind); the zero kind carries that.
         matches!(self.route_lookup(KindId(0), candidate).into_captured(), CapturedDisposition::Live { .. })
@@ -69,7 +82,7 @@ impl Registry {
     /// refused unless `R` was `Live`, checked before `init`, so the answer is
     /// already known. It performs no read because the claim an [`ActorRef`]
     /// carries is "reached `Live`", not "is `Live` now" — a `Dropped`
-    /// dependency still reached `Live`, and [`Self::is_live`] would answer
+    /// dependency still reached `Live`, and [`Self::is_live_at`] would answer
     /// `false` for it.
     pub(crate) fn declared_dependency<R>(position: MailboxId) -> ActorRef<R> {
         __mint_actor_ref(position)
@@ -171,9 +184,9 @@ mod tests {
         let dropped = registry.register_inbox(&authority, "test.proven.dropped", noop_handler());
         assert!(registry.drop_mailbox(&authority, dropped).is_ok());
 
-        assert!(registry.is_live(live));
-        assert!(!registry.is_live(dropped), "a Dropped route is not live");
-        assert!(!registry.is_live(MailboxId(0xdead_beef)), "an unknown id is not live");
+        assert!(registry.is_live_at(live));
+        assert!(!registry.is_live_at(dropped), "a Dropped route is not live");
+        assert!(!registry.is_live_at(MailboxId(0xdead_beef)), "an unknown id is not live");
     }
 
     // Tripwire: the accept set `resolve_live` mints over includes inline
