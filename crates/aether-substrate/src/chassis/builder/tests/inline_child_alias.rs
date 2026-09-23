@@ -149,7 +149,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let host_id = chassis.spawn_actor::<Host>(Subname::Counter, (), ()).finish().expect("spawn host");
+    let host_id = chassis.spawn_actor::<Host>(Subname::Counter, (), ()).finish_commit().expect("spawn host");
 
     // Publish the inline child's alias route onto the live host, exactly as
     // the `spawn_inline_child` host fn stages it: the child's rendered
@@ -179,11 +179,11 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
             (),
             (Arc::clone(&monitored), Arc::clone(&watched), Arc::clone(&notices)),
         )
-        .finish()
+        .finish_commit()
         .expect("spawn watcher");
 
     let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry(watcher_id).expect("watcher sink registered")
+        registry.entry_at(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
@@ -207,7 +207,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
 
     // Vacate the host: its occupant, and with it every inline child the
     // occupant hosted, is gone.
-    let MailboxEntry::Inbox { handler: host_handler, .. } = registry.entry(host_id).expect("host sink registered")
+    let MailboxEntry::Inbox { handler: host_handler, .. } = registry.entry_at(host_id).expect("host sink registered")
     else {
         panic!("expected mailbox entry for host");
     };
@@ -230,7 +230,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         "a vacate must notify from every departing address, so state keyed on an inline child's alias is reclaimable",
     );
     assert_eq!(chassis.actor_registry().monitor_count(alias_id), 0, "monitors_of[alias] must drain after fan-out");
-    assert!(chassis.actor_registry().is_live(host_id), "vacate leaves the host mailbox live and refillable");
+    assert!(chassis.actor_registry().is_live_at(host_id), "vacate leaves the host mailbox live and refillable");
 
     drop(chassis);
 }
@@ -370,7 +370,8 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         .expect("empty chassis boots");
 
     let vacated = Arc::new(Mutex::new(Vec::new()));
-    let host_id = chassis.spawn_actor::<Host>(Subname::Counter, (), Arc::clone(&vacated)).finish().expect("spawn host");
+    let host_id =
+        chassis.spawn_actor::<Host>(Subname::Counter, (), Arc::clone(&vacated)).finish_commit().expect("spawn host");
 
     // Publish the inline child's alias route onto the live host, exactly as
     // the `spawn_inline_child` host fn stages it.
@@ -396,11 +397,11 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
             (),
             (Arc::clone(&monitored), Arc::clone(&watched), Arc::clone(&notices)),
         )
-        .finish()
+        .finish_commit()
         .expect("spawn watcher");
 
     let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry(watcher_id).expect("watcher sink registered")
+        registry.entry_at(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
@@ -423,7 +424,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
     // Order the host to vacate the watcher's own address first — a live
     // mailbox that is not an alias folded onto this host. It must refuse, or a
     // despawn could drain any actor's watchers.
-    let MailboxEntry::Inbox { handler: host_handler, .. } = registry.entry(host_id).expect("host sink registered")
+    let MailboxEntry::Inbox { handler: host_handler, .. } = registry.entry_at(host_id).expect("host sink registered")
     else {
         panic!("expected mailbox entry for host");
     };
@@ -474,7 +475,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         RouteResolution::Dropped,
         "mail to a despawned alias must report the address as retired, not as never-registered",
     );
-    assert!(chassis.actor_registry().is_live(host_id), "retiring one alias leaves its host live and addressable");
+    assert!(chassis.actor_registry().is_live_at(host_id), "retiring one alias leaves its host live and addressable");
 
     // Idempotent, so a re-despawn of an already-gone alias is a clean no-op —
     // the guest contract `despawn_inline_child` promises.

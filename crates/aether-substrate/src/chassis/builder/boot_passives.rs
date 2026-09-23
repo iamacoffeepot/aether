@@ -4,6 +4,7 @@ use std::time::Duration;
 use aether_kinds::trace::Settled;
 
 use super::passive_boot::{DynShutdown, PassiveBoot};
+use super::references::ComposedReferences;
 use crate::actor::native::ExportedHandles;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
@@ -53,6 +54,12 @@ pub(super) struct BootedPassives {
     /// whose driver claims nothing (the default no-op hook) and for the
     /// no-driver `build_passive` path.
     pub(super) reserved_driver_mailboxes: Vec<(String, MailboxClaim)>,
+    /// ADR-0230: the proven reference of every root actor this chassis
+    /// composed, recorded by the boot that published its `Live` route —
+    /// each singleton capability's `spawn` pass here, and each pumped actor
+    /// its driver or embedder boots later. Read back by type through the
+    /// chassis handle's `actor_ref`.
+    pub(super) references: ComposedReferences,
     /// Issue 607 Phase 2 / Phase 3 (ADR-0079): per-chassis actor
     /// lifecycle registry, plus the spawn machinery that writes into
     /// it. Both built once at boot; `Spawner` carries `Arc` clones of
@@ -216,6 +223,7 @@ pub(super) fn boot_passives(
     // moved onto `BootedPassives` at return so the driver's Start-stage boot
     // recovers them.
     let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+    let references = ComposedReferences::default();
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
     // The pool's wake sink is cloned into the Spawner (for instanced
@@ -327,6 +335,7 @@ pub(super) fn boot_passives(
                 &mut claimed_actor_mailboxes,
                 &spawner,
                 &mut reserved_driver_mailboxes,
+                &references,
             )
         };
     }
@@ -345,6 +354,7 @@ pub(super) fn boot_passives(
         aborter: &Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &mut Vec<MailboxId>,
         spawner: &Arc<crate::Spawner>,
+        references: &ComposedReferences,
         booted: Vec<Box<dyn PassiveBoot>>,
         already_spawned: Vec<Box<dyn DynShutdown>>,
     ) {
@@ -364,6 +374,7 @@ pub(super) fn boot_passives(
                 claimed_actor_mailboxes,
                 spawner,
                 &mut reserved_driver_mailboxes,
+                references,
             );
             boot.cleanup_after_failure(&mut ctx);
         }
@@ -403,6 +414,7 @@ pub(super) fn boot_passives(
                     aborter,
                     &mut claimed_actor_mailboxes,
                     &spawner,
+                    &references,
                     booted,
                     Vec::new(),
                 );
@@ -427,6 +439,7 @@ pub(super) fn boot_passives(
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
+                &references,
                 booted,
                 Vec::new(),
             );
@@ -445,6 +458,7 @@ pub(super) fn boot_passives(
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
+                &references,
                 booted,
                 Vec::new(),
             );
@@ -462,6 +476,7 @@ pub(super) fn boot_passives(
                 aborter,
                 &mut claimed_actor_mailboxes,
                 &spawner,
+                &references,
                 booted,
                 Vec::new(),
             );
@@ -488,6 +503,7 @@ pub(super) fn boot_passives(
                     aborter,
                     &mut claimed_actor_mailboxes,
                     &spawner,
+                    &references,
                     remaining,
                     shutdowns,
                 );
@@ -503,6 +519,7 @@ pub(super) fn boot_passives(
         abort_record,
         claimed_actor_mailboxes,
         reserved_driver_mailboxes,
+        references,
         actor_registry,
         spawner,
         registry_owner: Some(registry_owner),

@@ -13,19 +13,33 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aether_actor::AnyActorRef;
 use aether_data::ActorPath;
+use crossbeam_channel::Receiver;
 
 use crate::actor::registry::ActorRegistry;
+use crate::chassis::builder::ReplyTarget;
 use crate::config::RingCapacities;
-use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{AddressResolutionError, BootAuthority, Registry, ResolvedAddress};
+use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
 
 pub(super) mod commit;
 pub(super) mod prepare;
 mod teardown;
+
+/// The dispatch `Source` an embedder's [`ReplyTarget`] names: the push's
+/// `reply_to`, read at the push and nowhere else.
+fn reply_source(reply: ReplyTarget) -> Source {
+    match reply {
+        ReplyTarget::Session { session, correlation } => {
+            Source::with_correlation(SourceAddr::Session(session), correlation)
+        }
+        ReplyTarget::Actor { to, correlation } => Source::with_correlation(SourceAddr::Component(to.id()), correlation),
+    }
+}
 
 /// Chassis-level spawn machinery (Phase 3). One per chassis; cloned as
 /// `Arc<Spawner>` into every [`NativeBinding`](crate::actor::native::binding::NativeBinding) so per-handler
@@ -201,6 +215,51 @@ impl Spawner {
     /// forwards here.
     pub(crate) fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         self.registry.resolve_address(address)
+    }
+
+    /// Body of the chassis handle's `send_tracked`: push `payload` to the
+    /// actor `to` proves as a chassis-root mail, optionally carrying a reply
+    /// target, and return the receiver that fires once its causal chain
+    /// settles (ADR-0080 §6).
+    ///
+    /// The three chassis-root steps — mint the root id, record its `Sent`,
+    /// push with lineage — are `Mailer::push_chassis_root_mail`'s, open-coded
+    /// here so the push can also carry a reply target. The subscription lands
+    /// between the record and the push, so the settlement cannot fire before
+    /// the caller holds the receiver.
+    ///
+    /// # Panics
+    /// Panics if the chassis boot did not install its settlement registry on
+    /// the mailer — every built chassis does, before any cap boots.
+    pub(crate) fn push_tracked(
+        &self,
+        to: AnyActorRef,
+        kind: KindId,
+        payload: Vec<u8>,
+        correlation: u64,
+        reply: Option<ReplyTarget>,
+    ) -> Receiver<()> {
+        let recipient = to.id();
+        let root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation);
+        self.mailer.record_sent(root, root, None, MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
+        let settlement = self
+            .mailer
+            .settlement_registry()
+            .expect("the chassis boot installs its settlement registry on the mailer")
+            .subscribe_settlement(root);
+
+        let mail = Mail::new(recipient, kind, payload, 1).with_lineage(root, root, None);
+        self.mailer.push(match reply {
+            Some(reply) => mail.with_reply_to(reply_source(reply)),
+            None => mail,
+        });
+        settlement
+    }
+
+    /// Body of the chassis handle's `send_for_reply`: push `payload` to the
+    /// actor `to` proves, untracked, with its reply routed to `reply`.
+    pub(crate) fn push_for_reply(&self, to: AnyActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+        self.mailer.push(Mail::new(to.id(), kind, payload, 1).with_reply_to(reply_source(reply)));
     }
 
     /// The chassis fatal-abort handle, cloned into each booted

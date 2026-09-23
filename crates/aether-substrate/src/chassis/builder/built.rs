@@ -4,7 +4,9 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aether_actor::Root;
+use aether_actor::{ActorRef, AnyActorRef, Root};
+use aether_data::{KindId, SessionToken};
+use crossbeam_channel::Receiver;
 
 use super::boot_passives::BootedPassives;
 use super::driver::{DriverRunning, RunError, assemble_pumped_slot};
@@ -16,7 +18,7 @@ use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::registry::effect::RegistryEffectError;
-use crate::mail::registry::{AddressResolutionError, ResolvedAddress};
+use crate::mail::registry::{AddressResolutionError, Registry, ResolvedAddress};
 use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
@@ -55,6 +57,24 @@ macro_rules! chassis_accessors {
         #[must_use]
         pub fn actor_registry(&self) -> &Arc<crate::ActorRegistry> {
             actor_registry(&self.booted)
+        }
+
+        /// The proven reference of the root actor `R` this chassis composed —
+        /// a singleton capability or a pumped actor (ADR-0230 section 3).
+        ///
+        /// The boot that published `R`'s `Live` route recorded it; this reads
+        /// the record by type and mints nothing. An instanced actor is never
+        /// recorded, since its type can have many instances: its proof is the
+        /// one its spawn's `finish` returned.
+        ///
+        /// # Panics
+        ///
+        /// Panics naming `R::NAMESPACE` when this chassis composed no `R`.
+        /// Composition is a static fact of the chassis build, so asking for an
+        /// uncomposed actor is a wiring bug in the caller, not a runtime state.
+        #[must_use]
+        pub fn actor_ref<R: Root + 'static>(&self) -> ActorRef<R> {
+            actor_ref::<R>(&self.booted)
         }
 
         #[must_use]
@@ -199,7 +219,11 @@ impl<C: Chassis> PassiveChassis<C> {
             match assemble_pumped_slot::<A>(mailbox_id, inbox, spawner, config, params, Uncaused::EmbedderCall) {
                 Ok(slot) => registry
                     .promote_starting_through_owner(mailbox_id, token, handler)
-                    .map(|()| (slot, wake_slot))
+                    .map(|()| {
+                        // ADR-0230: the owner has published the route `Live`.
+                        self.booted.references.record(Registry::activated::<A>(mailbox_id));
+                        (slot, wake_slot)
+                    })
                     .map_err(|error| owner_boot_error(&error)),
                 Err(e) => {
                     registry.cancel_starting_through_owner(mailbox_id, token);
@@ -214,6 +238,33 @@ impl<C: Chassis> PassiveChassis<C> {
                 Err(e)
             }
         }
+    }
+
+    /// Push `payload` to the actor `to` proves as a chassis-root mail and
+    /// return the receiver that fires once its whole causal chain settles
+    /// (ADR-0080 §6).
+    ///
+    /// The embedder's tracked send: the push is recorded as a root, so the
+    /// trace pipeline follows every descendant mail. `correlation` names the
+    /// root; `reply`, when present, routes the recipient's reply to a hub
+    /// session or another proven actor. The embedder holds a proof, never a
+    /// position.
+    #[must_use]
+    pub fn send_tracked(
+        &self,
+        to: AnyActorRef,
+        kind: KindId,
+        payload: Vec<u8>,
+        correlation: u64,
+        reply: Option<ReplyTarget>,
+    ) -> Receiver<()> {
+        self.booted.spawner.push_tracked(to, kind, payload, correlation, reply)
+    }
+
+    /// Push `payload` to the actor `to` proves, untracked, with its reply
+    /// routed to `reply` — a hub session or another proven actor.
+    pub fn send_for_reply(&self, to: AnyActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+        self.booted.spawner.push_for_reply(to, kind, payload, reply);
     }
 
     /// Place an instanced `A` at the chassis root **for a test**, without
@@ -234,7 +285,7 @@ impl<C: Chassis> PassiveChassis<C> {
     ///
     /// The placement is the same parentless depth-1 one `spawn_actor`
     /// produces — a flat `{NAMESPACE}:{subname}` id — and the builder's
-    /// `finish()` answers the spawned actor's position.
+    /// `finish()` answers the spawned actor's proven reference.
     #[cfg(any(test, feature = "test-support"))]
     pub fn spawn_actor_for_test<'a, A>(
         &'a self,
@@ -249,6 +300,18 @@ impl<C: Chassis> PassiveChassis<C> {
     }
 
     chassis_accessors!();
+}
+
+/// Where an embedder push ([`PassiveChassis::send_tracked`] or
+/// [`PassiveChassis::send_for_reply`]) routes the reply its recipient sends.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReplyTarget {
+    /// A hub session, correlated by `correlation` — the shape a harness
+    /// driving the chassis over a loopback outbound awaits.
+    Session { session: SessionToken, correlation: u64 },
+    /// Another proven actor, which receives the reply as mail correlated by
+    /// `correlation`.
+    Actor { to: AnyActorRef, correlation: u64 },
 }
 
 /// Surface an owner refusal as the chassis boot error the pumped boot path
@@ -276,6 +339,12 @@ where
     // parentless constructor; a birth under a parent goes through
     // `NativeCtx::spawn_child`.
     crate::SpawnBuilder::new(Arc::clone(&booted.spawner), subname, config, params, crate::Source::NONE)
+}
+
+fn actor_ref<R: Root + 'static>(booted: &BootedPassives) -> ActorRef<R> {
+    booted.references.get::<R>().unwrap_or_else(|| {
+        panic!("this chassis composed no {:?} actor; compose it before asking for its reference", R::NAMESPACE)
+    })
 }
 
 fn actor_registry(booted: &BootedPassives) -> &Arc<crate::ActorRegistry> {

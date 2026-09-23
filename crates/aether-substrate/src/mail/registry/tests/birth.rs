@@ -79,11 +79,11 @@ fn prepared_births_publish_together_then_promote_independently_with_exact_cost_c
 
     mailer.push(activation_barrier(second_id, *second_token, 1));
     owner.run_once();
-    assert!(registry.entry(second_id).is_some(), "fast activation promotes independently");
-    assert!(registry.entry(first_id).is_none(), "slow activation remains Starting");
+    assert!(registry.entry_at(second_id).is_some(), "fast activation promotes independently");
+    assert!(registry.entry_at(first_id).is_none(), "slow activation remains Starting");
     mailer.push(activation_barrier(first_id, *first_token, 1));
     owner.run_once();
-    assert!(registry.entry(first_id).is_some());
+    assert!(registry.entry_at(first_id).is_some());
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn rejected_batch_does_not_cancel_an_existing_prepared_birth() {
     assert_eq!(cancelled.load(Ordering::SeqCst), 0, "rejected transaction invokes no cancellation side effect");
     mailer.push(activation_barrier(id, token, 1));
     owner.run_once();
-    assert!(registry.entry(id).is_some(), "the original prepared birth can still promote");
+    assert!(registry.entry_at(id).is_some(), "the original prepared birth can still promote");
 }
 
 #[test]
@@ -157,7 +157,7 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
     mailer.record_sent(forged.mail_id, forged.root, None, id, id, forged.kind);
     mailer.push(forged);
     owner.run_once();
-    assert!(registry.entry(id).is_none(), "forged same-token barrier cannot promote");
+    assert!(registry.entry_at(id).is_none(), "forged same-token barrier cannot promote");
     assert_eq!(counter.live_roots(), 0, "forged barrier is consumed and balanced");
     // A later Starting mail in the same owner drain must join the prefix
     // even when readiness appeared first.
@@ -234,7 +234,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
 
     assert_eq!(registry.lookup(name), Some(id), "exact-name keyed lookup sees Starting");
     assert_eq!(registry.mailbox_name(id).as_deref(), Some(name), "keyed reverse lookup sees Starting");
-    assert!(registry.entry(id).is_none(), "compatibility entry does not project Starting as live");
+    assert!(registry.entry_at(id).is_none(), "compatibility entry does not project Starting as live");
     assert!(registry.route_lookup(KindId(1), id).is_starting(), "dispatch lookup identifies Starting privately");
     assert!(registry.route_lookup(KindId(1), id).seize_handle().is_none(), "Starting has no seize handle");
     assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id));
@@ -373,7 +373,7 @@ fn promoting_a_reservation_publishes_the_endpoint_and_releases_parked_mail() {
     let kind = registry.register_kind(&auth(), "test.registry.promote_starting");
     let name = "test.registry.promote_starting.actor";
     let (id, token) = registry.reserve_starting_through_owner(name).expect("owner accepts the reservation");
-    assert!(registry.entry(id).is_none(), "the reservation is not live while its caller wires");
+    assert!(registry.entry_at(id).is_none(), "the reservation is not live while its caller wires");
 
     // Two envelopes arrive while the caller thread is still wiring.
     for value in [1_u32, 2] {
@@ -392,7 +392,7 @@ fn promoting_a_reservation_publishes_the_endpoint_and_releases_parked_mail() {
     });
 
     registry.promote_starting_through_owner(id, token, handler).expect("owner accepts the second ack");
-    assert!(registry.entry(id).is_some(), "the second ack published the caller's endpoint as Live");
+    assert!(registry.entry_at(id).is_some(), "the second ack published the caller's endpoint as Live");
     for _ in 0..2 {
         delivered_rx.recv_timeout(Duration::from_secs(5)).expect("parked mail reaches the promoted endpoint");
     }

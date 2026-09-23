@@ -7,7 +7,9 @@ use std::fs;
 use std::path::Path;
 use std::sync::mpsc;
 
-use aether_bloomery_journal::{Batch, Entry, Journal, Seq};
+use aether_actor::ActorRef;
+use aether_bloomery_driver::BundleDriver;
+use aether_bloomery_journal::{Batch, Entry, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{
     Activated, ActivationRejected, AwaitProcessed, Digest, Fault, Head, MoveHead, MoveHeadResult, OpaqueBytes,
     Processed, ReactionFailed, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, Requested,
@@ -116,7 +118,7 @@ fn seed_barrier_journal(path: &Path) -> Result<Digest, Box<dyn Error>> {
 /// Drive the barrier at `through` to quiescence, following the `Processed` protocol.
 fn settle(
     registry: &Registry,
-    driver: MailboxId,
+    driver: ActorRef<BundleDriver>,
     inbox: MailboxId,
     rx: &mpsc::Receiver<OwnedDispatch>,
     correlations: &mut u64,
@@ -139,7 +141,7 @@ fn settle(
 /// Send one fenced head move, returning the committed seq.
 fn move_head(
     registry: &Registry,
-    journal: MailboxId,
+    journal: ActorRef<JournalActor>,
     inbox: MailboxId,
     rx: &mpsc::Receiver<OwnedDispatch>,
     correlations: &mut u64,

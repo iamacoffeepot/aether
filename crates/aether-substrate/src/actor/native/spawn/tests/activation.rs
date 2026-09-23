@@ -104,7 +104,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
     let dropped = events_rx.recv_timeout(Duration::from_secs(1)).unwrap();
     assert!(matches!(dropped, ActivationEvent::Drop(home) if home != caller));
     assert!(events_rx.try_recv().is_err(), "pre-apply rejection drops without running unwire");
-    assert!(registry.entry(child_id).is_none(), "owner-close rejection publishes no route");
+    assert!(registry.entry_at(child_id).is_none(), "owner-close rejection publishes no route");
 
     let done = parent
         .dispatch_take::<SpawnOutcome<ActivationProbe>, ()>(dispatch_id)
@@ -161,9 +161,9 @@ fn rejected_multi_birth_batch_marks_unvisited_native_finalizer_as_activation_rej
         assert!(matches!(dropped, ActivationEvent::Drop(home) if home != caller));
         assert!(events.try_recv().is_err(), "rejected pre-wire state drops without unwire");
     }
-    assert!(registry.entry(first_id).is_none());
-    assert!(registry.entry(middle_id).is_some(), "the pre-existing middle conflict remains unchanged");
-    assert!(registry.entry(later_id).is_none());
+    assert!(registry.entry_at(first_id).is_none());
+    assert!(registry.entry_at(middle_id).is_some(), "the pre-existing middle conflict remains unchanged");
+    assert!(registry.entry_at(later_id).is_none());
 
     let first_done = await_spawn_done(&parent, first_dispatch);
     assert_eq!(first_done.output().mailbox_id, first_id, "each rejection names its own birth");
@@ -202,13 +202,13 @@ fn successful_prepared_activation_enters_ordinary_dispatch_once() {
     let completion = registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).unwrap();
     owner.apply_once_then_observe_before_next_apply_for_test(|| {
         assert!(lifecycle_mail.try_recv().is_err(), "wire effects remain quarantined while the route is Starting");
-        assert!(registry.entry(id).is_none(), "the owner has not yet promoted the Starting route");
+        assert!(registry.entry_at(id).is_none(), "the owner has not yet promoted the Starting route");
     });
     let _ = completion.wait_timeout(Duration::from_secs(1)).unwrap().unwrap();
     let ActivationEvent::Wire(home) = events_rx.recv_timeout(Duration::from_secs(1)).unwrap() else {
         panic!("wire runs before live dispatch")
     };
-    assert!(registry.entry(id).is_some(), "barrier promotes the actor to Live");
+    assert!(registry.entry_at(id).is_some(), "barrier promotes the actor to Live");
     assert_eq!(
         lifecycle_mail.recv_timeout(Duration::from_secs(1)).unwrap(),
         ActivationPoke::ID,
@@ -340,7 +340,7 @@ fn owner_close_after_wire_cleans_starting_activation_at_home() {
         "neither wire nor rejection-time unwire effects escape a never-Live actor"
     );
     assert!(registry.lookup(&canonical_name).is_none(), "Starting route is rolled back without Live publication");
-    assert!(registry.entry(id).is_none());
+    assert!(registry.entry_at(id).is_none());
     assert!(mailer.cost_table().cells_for(id).is_empty(), "token-owned cost rows are rolled back");
     let fresh = ActivationToken::from_value(token.value() + 1).unwrap();
     assert!(spawner.actor_registry().reserve_starting(id, fresh), "actor lifecycle reservation was removed");

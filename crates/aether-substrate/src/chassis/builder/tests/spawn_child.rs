@@ -133,7 +133,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     .stage()
                     .expect("spawn_child local preparation must succeed");
                 assert!(
-                    ctx.mailer().registry().entry(receipt.mailbox_id).is_none(),
+                    ctx.mailer().registry().entry_at(receipt.mailbox_id).is_none(),
                     "staging performs no global route write before handler flush"
                 );
                 let duplicate = ctx
@@ -178,7 +178,7 @@ fn ctx_spawn_child_routes_through_handler() {
     // calls `ctx.spawn_child::<ChildCap>` which in turn pushes a
     // Ping at the new child via the after_init bootstrap.
     let parent_id = registry.lookup(<ParentCap as Addressable>::NAMESPACE).expect("ParentCap claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("sink") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("sink") else {
         panic!("expected mailbox entry");
     };
     let conflict_id = MailboxId(aether_data::with_tag(
@@ -238,7 +238,7 @@ fn ctx_spawn_child_routes_through_handler() {
         aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced("test.spawn_child.child", "0")),
     ));
     assert!(
-        chassis.actor_registry().is_live(child_id),
+        chassis.actor_registry().is_live_at(child_id),
         "spawned child should be Live in the actor registry under the lineage-folded id"
     );
 
@@ -341,7 +341,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         .build_passive()
         .expect("ParentCap boots");
     let parent_id = registry.lookup(ParentCap::NAMESPACE).expect("ParentCap claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("parent sink") else {
         panic!("expected parent inbox")
     };
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();
@@ -357,7 +357,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         aether_data::Tag::Mailbox,
         aether_data::fold_lineage(parent_id.0, aether_data::ActorId::instanced(FailingChild::NAMESPACE, "retry")),
     ));
-    assert!(registry.entry(child_id).is_none(), "failed initialization performs no registry write");
+    assert!(registry.entry_at(child_id).is_none(), "failed initialization performs no registry write");
 
     drop(chassis);
 }
@@ -462,7 +462,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         .expect("ActualParent boots");
 
     let parent_id = registry.lookup(ActualParent::NAMESPACE).expect("ActualParent claimed");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(parent_id).expect("parent sink") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(parent_id).expect("parent sink") else {
         panic!("expected parent inbox");
     };
     let bytes = (Hatch { tag: 1 }).encode_into_bytes();

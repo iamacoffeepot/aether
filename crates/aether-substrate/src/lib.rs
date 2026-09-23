@@ -81,7 +81,7 @@ pub use aether_derive::{Config, StageArgv};
 pub use boot::SubstrateBoot;
 pub use chassis::builder::{
     Builder, BuilderState, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, HasDriver, NeverDriver,
-    NeverDriverRunning, NoDriver, PassiveChassis, RunError,
+    NeverDriverRunning, NoDriver, PassiveChassis, ReplyTarget, RunError,
 };
 pub use chassis::ctx::{
     ChassisCtx, DropOnShutdownClaim, FallbackRouter, MailboxClaim, MailboxSender, MailboxWakeSlot, SharedActorSlots,

@@ -11,7 +11,7 @@ use crate::testing::boot_authority as auth;
 fn lookup_missing_returns_none() {
     let r = Registry::new();
     assert!(r.lookup("nope").is_none());
-    assert!(r.entry(MailboxId(42)).is_none());
+    assert!(r.entry_at(MailboxId(42)).is_none());
 }
 
 #[test]

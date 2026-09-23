@@ -63,5 +63,5 @@ fn cancel_and_rereserve_in_one_batch_read_through_the_staged_tombstone() {
     assert_ne!(*second_token, first_token, "the re-reservation stands on its own activation token");
 
     assert_eq!(registry.lookup(name), Some(id), "the committed table carries the batch's last write");
-    assert!(registry.entry(id).is_none(), "the surviving reservation is still Starting, not live");
+    assert!(registry.entry_at(id).is_none(), "the surviving reservation is still Starting, not live");
 }

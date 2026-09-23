@@ -16,7 +16,7 @@ fn register_and_lookup_closure_mailbox() {
     let r = Registry::new();
     let id = r.register_inbox(&auth(), "physics", noop_handler());
     assert_eq!(r.lookup("physics"), Some(id));
-    assert!(matches!(r.entry(id), Some(MailboxEntry::Inbox { .. })));
+    assert!(matches!(r.entry_at(id), Some(MailboxEntry::Inbox { .. })));
 }
 
 /// iamacoffeepot/aether#1135: a `Pooled` actor's `Inbox` entry exposes
@@ -144,7 +144,7 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     let name = r.drop_mailbox(&auth(), id).expect("drop");
     assert_eq!(name, "loaded");
     assert!(r.lookup("loaded").is_none(), "name should be reusable");
-    assert!(matches!(r.entry(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
+    assert!(matches!(r.entry_at(id), Some(MailboxEntry::Dropped)), "entry must mark id as dropped");
     assert!(
         r.list_mailbox_descriptors().iter().all(|descriptor| descriptor.id != id),
         "a retained Dropped route is absent from public live inventory"
@@ -155,7 +155,7 @@ fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     let reloaded = r.try_register_inbox(&auth(), "loaded", noop_handler()).unwrap();
     assert_eq!(reloaded, id);
     assert_eq!(r.lookup("loaded"), Some(reloaded));
-    assert!(matches!(r.entry(reloaded), Some(MailboxEntry::Inbox { .. })));
+    assert!(matches!(r.entry_at(reloaded), Some(MailboxEntry::Inbox { .. })));
     assert!(
         r.list_mailbox_descriptors().iter().any(|descriptor| descriptor.id == id),
         "re-registration restores the route to public live inventory"

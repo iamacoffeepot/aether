@@ -109,7 +109,7 @@ mod tests {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let resolved = built.resolve_address(&address);
-            if resolved.as_ref().is_ok_and(|live| built.actor_registry().is_live(live.mailbox_id)) {
+            if resolved.is_ok() {
                 break;
             }
             assert!(

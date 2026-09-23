@@ -1,7 +1,6 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::ReplyMode;
-use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, StatusQuery};
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadComponent;
@@ -13,7 +12,7 @@ use crate::{CallerId, Command};
 impl BundleDriver {
     /// Perform each [`Command`] in order, then return.
     ///
-    /// Journal reads and appends go to the handed-over journal id, loads go
+    /// Journal reads and appends go to the handed-over journal reference, loads go
     /// to the component host under the bundle's digest name, invokes go to
     /// the loaded root's handed-over id, and answers release the parked
     /// reply. Every send carries its ticket as the request context, so the
@@ -22,16 +21,16 @@ impl BundleDriver {
         for command in commands {
             match command {
                 Command::ReadEvents { ticket, request } => {
-                    let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::ReadArtifact { ticket, request } => {
-                    let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::ReadClosure { ticket, request } => {
-                    let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::Append { ticket, request } => {
-                    let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::Load { ticket, bundle, wasm } => {
                     let _ = ctx.erase().actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
@@ -45,7 +44,7 @@ impl BundleDriver {
                     let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&request);
                 }
                 Command::WatchHead { ticket, request } => {
-                    let _ = ctx.actor_at::<JournalActor>(self.journal).with_context(&ticket).send(&request);
+                    let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::Warm { ticket, root, request } => {
                     let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&request);

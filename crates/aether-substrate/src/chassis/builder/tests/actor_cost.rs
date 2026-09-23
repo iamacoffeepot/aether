@@ -106,7 +106,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
         .expect("empty chassis boots");
     let id = chassis
         .spawn_actor::<PreSeedProbe>(Subname::Named("preseeded"), (), ())
-        .finish()
+        .finish_commit()
         .expect("spawn pre-seeding probe");
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(DeclaredPing::ID) }) else {
@@ -226,7 +226,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         .expect("empty chassis boots");
     let id = chassis
         .spawn_actor::<SpawnCostProbe>(Subname::Named("measured"), (), Arc::clone(&ping_count))
-        .finish()
+        .finish_commit()
         .expect("spawn cost probe");
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(CostPing::ID) }) else {
@@ -235,7 +235,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     assert_eq!(rows.len(), 1, "declared handler has one construction-time neutral row");
     assert_eq!(rows[0].samples, 0, "declared handler starts at the neutral seed");
 
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("spawned actor inbox registered") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("spawned actor inbox registered") else {
         panic!("expected spawned actor inbox");
     };
     let framework = CostTail { kind: None }.encode_into_bytes();
@@ -270,10 +270,10 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     let quit = CostQuit { tag: 1 }.encode_into_bytes();
     handler.enqueue(registry::test_owned_dispatch(CostQuit::ID, &quit, 1));
     let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
+    while chassis.actor_registry().is_live_at(id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(!chassis.actor_registry().is_live(id), "quit finalizes the spawned mailbox");
+    assert!(!chassis.actor_registry().is_live_at(id), "quit finalizes the spawned mailbox");
 
     let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: None }) else {
         panic!("finalized actor cost tail succeeds");

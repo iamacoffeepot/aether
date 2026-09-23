@@ -42,14 +42,14 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
 
     let id = chassis
         .spawn_actor::<Closer>(Subname::Counter, (), Arc::clone(&close_observed))
-        .finish()
+        .finish_commit()
         .expect("spawn instanced actor");
 
     // Push a Quit envelope at the spawned mailbox via the
     // registered sink handler. The handler's `ctx.shutdown()`
     // flips the dispatcher's flag; after the handler returns the
     // trampoline drains, runs `unwire`, marks Dead, tombstones.
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("sink registered") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("sink registered") else {
         panic!("expected mailbox entry for instanced actor");
     };
     let bytes = (Quit { tag: 1 }).encode_into_bytes();
@@ -70,10 +70,10 @@ fn ctx_shutdown_marks_dead_runs_unwire_tombstones_id() {
     // small window between the close-observed bump above and the
     // registry update.
     let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live(id) && Instant::now() < deadline {
+    while chassis.actor_registry().is_live_at(id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
-    assert!(!chassis.actor_registry().is_live(id), "registry slot should transition Live → Dead after unwire runs");
+    assert!(!chassis.actor_registry().is_live_at(id), "registry slot should transition Live → Dead after unwire runs");
     assert!(chassis.actor_registry().is_tombstoned(id), "tombstone insertion forbids reuse of the retired full name");
 
     // Spawning again under the same `Subname::Counter` would
@@ -113,7 +113,7 @@ fn chassis_teardown_runs_unwire_for_pooled_spawned_actors() {
 
     let id = chassis
         .spawn_actor::<Quiet>(Subname::Counter, (), Arc::clone(&close_observed))
-        .finish()
+        .finish_commit()
         .expect("spawn instanced actor");
 
     // No mail at all — the actor sits idle from the moment it
@@ -258,8 +258,8 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let id = chassis.spawn_actor::<Exploder>(Subname::Named("boom"), (), ()).finish().expect("spawn exploder");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("exploder inbox registered") else {
+    let id = chassis.spawn_actor::<Exploder>(Subname::Named("boom"), (), ()).finish_commit().expect("spawn exploder");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(id).expect("exploder inbox registered") else {
         panic!("expected spawned actor inbox");
     };
     let boom = Boom { tag: 1 }.encode_into_bytes();

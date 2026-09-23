@@ -22,6 +22,7 @@ use crate::config::ConfigMemberRecord;
 use crate::mail::MailboxId;
 use crate::mail::cost::CostCells;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::Registry;
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
 
 #[derive(Debug)]
@@ -274,7 +275,13 @@ impl<'a> DriverCtx<'a> {
             params,
             Uncaused::ChassisBoot,
         ) {
-            Ok(slot) => slot,
+            Ok(slot) => {
+                // ADR-0230: the Claim-stage reservation published the route
+                // before the seal and the actor is now wired, so record its
+                // reference for the chassis handle's `actor_ref`.
+                self.inner.record_reference(Registry::activated::<A>(mailbox_id));
+                slot
+            }
             Err(e) => {
                 self.inner.unclaim_mailbox(mailbox_id);
                 self.inner.spawner_arc().actor_registry().release_namespace(A::NAMESPACE, TypeId::of::<A>());

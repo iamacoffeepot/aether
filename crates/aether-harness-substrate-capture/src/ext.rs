@@ -12,7 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, AnyActorRef};
 use aether_data::{Kind, MailId};
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
@@ -38,6 +38,9 @@ pub struct GpuFrameHook {
     mailer: Arc<Mailer>,
     /// The pumped render actor's mailbox — where `frame` mail routes.
     render_mailbox: MailboxId,
+    /// The pumped render actor's proven reference, recorded by its boot —
+    /// where the harness routes `capture_frame`.
+    render: AnyActorRef,
 }
 
 impl GpuFrameHook {
@@ -104,8 +107,8 @@ impl FrameHook for GpuFrameHook {
         self.slot.read_state(|state| state.capture_ready()).unwrap_or(false)
     }
 
-    fn render_mailbox(&self) -> MailboxId {
-        self.render_mailbox
+    fn render(&self) -> AnyActorRef {
+        self.render
     }
 
     fn shutdown(&mut self) {
@@ -192,7 +195,8 @@ fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color
         // the same id `send_and_await_reply("aether.render", CaptureFrame)`
         // resolves.
         let render_mailbox = aether_actor::root_mailbox::<RenderCapability>();
-        Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox }) as Box<dyn FrameHook>)
+        let render = passive.actor_ref::<RenderCapability>().erase();
+        Ok(Box::new(GpuFrameHook { slot, mailer, render_mailbox, render }) as Box<dyn FrameHook>)
     }))
 }
 

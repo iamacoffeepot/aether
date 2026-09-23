@@ -11,6 +11,7 @@ use crate::testing::{TestChassis, bare_substrate};
 use crate::{BootError, NativeActor, NativeInitCtx};
 use aether_actor::{Addressable, HandlesKind};
 use std::sync::Arc;
+use std::sync::atomic::AtomicU32;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
@@ -95,7 +96,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
     // sink handler. The dispatcher thread pulls from its inbox
     // and routes through __aether_dispatch_envelope → on_ping.
     let mailbox_id = registry.lookup(<ProbeCap as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(mailbox_id).expect("sink registered") else {
         panic!("ProbeCap claim must be a sink entry");
     };
 
@@ -200,7 +201,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
         .expect("LocalProbe boots");
 
     let mailbox_id = registry.lookup(<LocalProbe as Addressable>::NAMESPACE).expect("with_actor claimed the mailbox");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(mailbox_id).expect("sink registered") else {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry_at(mailbox_id).expect("sink registered") else {
         panic!("LocalProbe claim must be a sink entry");
     };
 
@@ -226,4 +227,103 @@ fn with_actor_stamps_local_for_init_and_handler() {
     );
 
     drop(chassis);
+}
+
+/// A two-cap fixture for the composed-reference record: each cap counts the
+/// `Ping`s it receives into its own counter.
+macro_rules! counting_cap {
+    ($type:ident, $namespace:literal, $ping:ty) => {
+        struct $type {
+            received: Arc<AtomicU32>,
+        }
+        impl Addressable for $type {
+            const NAMESPACE: &'static str = $namespace;
+            type Resolver = aether_actor::One;
+        }
+        impl aether_actor::Root for $type {}
+        impl HandlesKind<$ping> for $type {}
+        impl aether_actor::Lifecycle<Self> for $type {
+            type Config = ();
+            type Params = Arc<AtomicU32>;
+            type InitError = BootError;
+            type InitCtx<'a> = NativeInitCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a>;
+            fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self { received: params })
+            }
+        }
+        impl NativeActor for $type {
+            type State = Self;
+        }
+        impl Dispatch<Self> for $type {
+            fn dispatch(
+                state: &mut Self,
+                _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
+                kind: KindId,
+                _payload: &[u8],
+            ) -> Option<()> {
+                if kind != <$ping as aether_data::Kind>::ID {
+                    return None;
+                }
+                state.received.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Some(())
+            }
+        }
+    };
+}
+
+pod_kind!(ComposedPing { tag: u32 }, "test.composed.ping", 0xA1B2_C3D4_E5F6_0003);
+counting_cap!(ComposedLeft, "test.composed.left", ComposedPing);
+counting_cap!(ComposedRight, "test.composed.right", ComposedPing);
+
+/// ADR-0230: the chassis records one proof per composed singleton, keyed by
+/// type, once its route is `Live`. A record keyed by the wrong `TypeId`, or
+/// written before the slot is live, hands out a proof that reaches the wrong
+/// actor or nothing — so each cap must receive exactly the mail sent through
+/// its own `actor_ref`.
+#[test]
+fn actor_ref_reaches_each_composed_cap_and_only_it() {
+    use aether_data::Kind;
+    use std::sync::atomic::Ordering as AtomicOrdering;
+
+    let (registry, mailer) = bare_substrate();
+    let left = Arc::new(AtomicU32::new(0));
+    let right = Arc::new(AtomicU32::new(0));
+    let chassis = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<ComposedLeft>(Arc::clone(&left))
+        .with_actor::<ComposedRight>(Arc::clone(&right))
+        .build_passive()
+        .expect("both caps boot");
+
+    let ping = ComposedPing { tag: 7 }.encode_into_bytes();
+    let _left_settled =
+        chassis.send_tracked(chassis.actor_ref::<ComposedLeft>().erase(), ComposedPing::ID, ping.clone(), 1, None);
+    let _right_settled =
+        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping.clone(), 2, None);
+    let _right_again =
+        chassis.send_tracked(chassis.actor_ref::<ComposedRight>().erase(), ComposedPing::ID, ping, 3, None);
+
+    let deadline = Instant::now() + Duration::from_millis(500);
+    while (left.load(AtomicOrdering::SeqCst), right.load(AtomicOrdering::SeqCst)) != (1, 2) && Instant::now() < deadline
+    {
+        thread::sleep(Duration::from_millis(5));
+    }
+    assert_eq!(left.load(AtomicOrdering::SeqCst), 1, "the left cap receives only the mail sent to its reference");
+    assert_eq!(right.load(AtomicOrdering::SeqCst), 2, "the right cap receives only the mail sent to its reference");
+
+    drop(chassis);
+}
+
+/// Asking for a reference the chassis never composed is a wiring bug, and the
+/// panic names the missing actor so the caller can find it.
+#[test]
+#[should_panic(expected = "test.composed.right")]
+fn actor_ref_panics_naming_an_uncomposed_actor() {
+    let (registry, mailer) = bare_substrate();
+    let chassis = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<ComposedLeft>(Arc::new(AtomicU32::new(0)))
+        .build_passive()
+        .expect("the left cap boots");
+
+    let _ = chassis.actor_ref::<ComposedRight>();
 }

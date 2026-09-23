@@ -117,9 +117,9 @@ fn passive_chassis_seals_before_it_is_returned_and_still_spawns() {
 
     let id = chassis
         .spawn_actor::<Spawned>(crate::Subname::Named("post-seal"), (), ())
-        .finish()
+        .finish_commit()
         .expect("a post-seal root birth still lands");
-    assert!(registry.entry(id).is_some(), "the owner-routed root birth reached Live before finish() returned");
+    assert!(registry.entry_at(id).is_some(), "the owner-routed root birth reached Live before finish() returned");
 }
 
 /// A post-seal external birth the owner refuses comes back as a typed
@@ -212,7 +212,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
         chassis.boot_pumped_actor::<Pumped>((), Arc::clone(&seen)).expect("post-seal pumped boot succeeds");
 
     let id = registry.lookup(Pumped::NAMESPACE).expect("the owner published the pumped route");
-    assert!(registry.entry(id).is_some(), "the second ack promoted the reservation to Live");
+    assert!(registry.entry_at(id).is_some(), "the second ack promoted the reservation to Live");
 
     mailer.push(Mail::new(
         id,
