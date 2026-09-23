@@ -135,12 +135,14 @@ cargo xtask affected --run
 The command computes the same conservative selection as PR CI, prints that
 selection, and then runs it. An empty selection succeeds without spawning a
 test command. A narrowed selection runs xtask's affected-selection invariants,
-then the selected packages with the CI nextest profile. A narrowed selection
-always includes the packages whose tests scan every crate's source
+then the selected packages' tests with the CI nextest profile, then their
+doctests with `cargo test --doc`, because nextest does not run doctests and the
+gate's `verify.test` runs them as a second pass. A narrowed selection always
+includes the packages whose tests scan every crate's source
 (`WORKSPACE_SCANNING_PACKAGES` in `xtask/src/affected/select.rs`, currently
 `aether-kinds`). Selections that need runtime artifacts pre-build them with
-`cargo xtask dist`; a `run_all` result pre-builds artifacts and runs the
-one-shard workspace nextest equivalent.
+`cargo xtask dist`; a `run_all` result pre-builds artifacts, runs the one-shard
+workspace nextest equivalent, and then runs the workspace doctests.
 
 `--run` requires `cargo-nextest`; selections that pre-build artifacts also
 require the `wasm32-unknown-unknown` Rust target. The test suite runs with the
