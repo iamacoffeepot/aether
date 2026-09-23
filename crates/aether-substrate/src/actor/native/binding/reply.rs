@@ -23,7 +23,7 @@ impl NativeBinding {
     /// `SettlementHold`'s root. Issue 665 retired the FFI-shaped
     /// `reply_mail` stub the prior `MailTransport` impl carried; this
     /// typed entry is the only reply API native actors reach for.
-    pub fn send_reply_for_handler<K>(&self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>)
+    pub(crate) fn send_reply_for_handler<K>(&self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>)
     where
         K: Kind,
     {

@@ -107,7 +107,7 @@ impl NativeBinding {
     /// # Panics
     /// Panics if the outbound-buffer mutex is poisoned — fail-fast per
     /// ADR-0063.
-    pub fn push_envelope_buffered(
+    pub(crate) fn push_envelope_buffered(
         &self,
         recipient: u64,
         kind: u64,
@@ -145,7 +145,7 @@ impl NativeBinding {
         reason = "re-dispatch variant adds reply_to_override to the existing 6-arg shape; \
                   splitting would force callers through two separate code paths"
     )]
-    pub fn push_envelope_buffered_with_reply_to(
+    pub(crate) fn push_envelope_buffered_with_reply_to(
         &self,
         recipient: u64,
         kind: u64,

@@ -5,7 +5,7 @@
 //! into per-side types so the `MailTransport` trait can retire. The
 //! native variant borrows the actor's [`NativeBinding`] reference
 //! (via the `'a` lifetime) and dispatches through the inherent
-//! `NativeBinding::send_mail` — no trait-method round-trip, no
+//! `NativeBinding::push_envelope_buffered` — no trait-method round-trip, no
 //! FFI-shaped wrapper.
 //!
 //! Built via [`NativeCtx::actor`](crate::actor::native::ctx::NativeCtx) /

@@ -83,7 +83,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// handler is running in. Read by outbound `send` paths to inherit
     /// `root` on child mail so descendants share the chain. The
     /// chassis-root case (no inbound) leaves this `MailId::NONE` and
-    /// `NativeBinding::send_mail` mints a fresh root.
+    /// `NativeBinding::send_mail_with_lineage` mints a fresh root.
     #[must_use]
     pub fn in_flight_root(&self) -> MailId {
         self.in_flight_root
