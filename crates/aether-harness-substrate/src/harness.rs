@@ -47,8 +47,8 @@ use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced, Ro
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
-    ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget, RingCapacities,
-    SchedulerTuning, SubstrateBoot,
+    Builder, ChildRefused, EgressEvent, Mailer, NativeActor, PassiveChassis, RecordingBackend, ReplyTarget,
+    RingCapacities, SchedulerTuning, SubstrateBoot,
     mail::{CapabilityRegistry, CostTable, MailId},
 };
 #[cfg(test)]
@@ -62,7 +62,7 @@ use aether_substrate_harness_cap::SubstrateHarnessCapability;
 
 use super::chassis::{
     ComposeFn, FrameHook, RenderHookWiring, SubstrateHarnessBuild, SubstrateHarnessChassis, SubstrateHarnessEnv,
-    WORKERS, substrate_harness_observer_mailbox,
+    WORKERS,
 };
 use aether_substrate_harness_cap::events::{ChassisEvent, EventReceiver, channel as event_channel};
 use std::error;
@@ -128,8 +128,8 @@ fn tracked_chain_outstanding(settlement: &mut Option<Receiver<()>>) -> bool {
 }
 
 /// Boxed [`FrameHook`] constructor the render extension registers on the
-/// builder: runs after the chassis boots, against the live passive (to boot
-/// the pumped render slot via `PassiveChassis::boot_pumped_actor`), the
+/// builder: runs in the build's start, against the live passive (to boot the
+/// reserved pumped render slot via `PassiveChassis::boot_pumped_actor`), the
 /// render wiring, and the builder's offscreen size (ADR-0161 slice R4). Not
 /// `Send`: it constructs the `!Send` pumped slot on the harness thread.
 pub type HookFactory = Box<
@@ -570,16 +570,18 @@ impl SubstrateHarnessBuilder {
         self
     }
 
-    /// Register the render seam (ADR-0161 R5): `hook_factory` boots the
-    /// pumped `aether.render` slot against the booted chassis (via
-    /// `PassiveChassis::boot_pumped_actor`) at the builder's offscreen size
-    /// and builds the frame-pump [`FrameHook`] that drains it. The capture
-    /// crate's `RenderHarnessBuilderExt::with_render` is the intended caller;
-    /// without a registration, captures reply `Err` and the advance path
-    /// skips the per-frame draw.
+    /// Register the render seam (ADR-0161 R5) for the pumped actor `A`: the
+    /// chassis reserves `A`'s slot at the Claim stage, so a composed passive
+    /// may depend on it, and `hook_factory` boots `A` from that reservation
+    /// (via `PassiveChassis::boot_pumped_actor`) in the build's start, at the
+    /// builder's offscreen size, and builds the frame-pump [`FrameHook`] that
+    /// drains it. The capture crate's `RenderHarnessBuilderExt::with_render`
+    /// is the intended caller; without a registration, captures reply `Err`
+    /// and the advance path skips the per-frame draw.
     #[must_use]
-    pub fn render_hook(mut self, hook_factory: HookFactory) -> Self {
+    pub fn render_hook<A: Root + NativeActor>(mut self, hook_factory: HookFactory) -> Self {
         self.render_hook = Some(hook_factory);
+        self.compose.push(Box::new(Builder::reserve_pumped::<A>));
         self
     }
 
@@ -639,7 +641,6 @@ impl SubstrateHarness {
             compose,
             scheduler_tuning,
         } = builder;
-        let hook_factory = render_hook;
 
         // Lower the per-field `Option` overrides onto the `Copy`
         // `RingCapacities`, defaulting each unset field to the
@@ -663,11 +664,12 @@ impl SubstrateHarness {
         let (events_tx, events_rx) = event_channel();
         let observed_kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
 
-        // ADR-0161 slice R4: the pumped render slot is booted post-`build_passive`
-        // by the hook factory, so the non-knob render wiring (observer inbox,
-        // similarity assets root) is handed to the factory rather than composed
-        // through `RenderParams`. Resolve the assets root before `namespace_roots`
-        // moves into the env, mirroring the chassis's own capture-similarity wiring.
+        // ADR-0161 slice R4: the pumped render slot is booted in the build's
+        // start by the hook factory, so the non-knob render wiring (observer
+        // inbox, similarity assets root) is handed to the factory rather than
+        // composed through `RenderParams`. Resolve the assets root before
+        // `namespace_roots` moves into the env, mirroring the chassis's own
+        // capture-similarity wiring.
         let render_assets_dir = namespace_roots.as_ref().map(|roots| roots.assets.clone());
 
         // ADR-0071 phase 6: substrate boot + every cap goes through
@@ -691,26 +693,12 @@ impl SubstrateHarness {
             // (env knob or programmatic override) as the settlement-await
             // loops the harness stores this value for.
             teardown_budget: settlement_cap,
+            render_hook,
+            render_size: (width, height),
+            render_assets_dir,
         };
-        let SubstrateHarnessBuild { passive, boot, kind_tick } =
+        let SubstrateHarnessBuild { passive, boot, kind_tick, mut hook } =
             SubstrateHarnessChassis::build_passive(env).map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
-
-        // ADR-0161 slice R4: the render extension's frame hook boots the
-        // pumped `aether.render` slot against the booted chassis (via
-        // `PassiveChassis::boot_pumped_actor`) at the builder's offscreen
-        // size, threading the render wiring the pumped path no longer
-        // composes at build time.
-        let mut hook = hook_factory
-            .map(|factory| {
-                let wiring = RenderHookWiring {
-                    mailer: Arc::clone(&boot.queue),
-                    observed_kinds: Some(substrate_harness_observer_mailbox()),
-                    assets_dir: render_assets_dir,
-                };
-                factory(&passive, wiring, width, height)
-            })
-            .transpose()
-            .map_err(|e| SubstrateHarnessError::Boot(e.to_string()))?;
 
         // ADR-0160 / ADR-0161: the drain-at-pump-start rule — a pumped
         // driver whose loop starts parked drains once before its first real

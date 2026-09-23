@@ -24,6 +24,7 @@ use aether_bloomery_kinds::{
     AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifactResult,
     ReadClosureResult, ReadEventsResult, Status, Warmed, WatchHeadResult,
 };
+use aether_component::ComponentHostCapability;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -67,7 +68,7 @@ pub struct BundleDriver {
     roots: HashMap<Digest, ErasedActorRef>,
 }
 
-#[actor(instanced, root)]
+#[actor(instanced, root, depends(ComponentHostCapability))]
 impl NativeActor for BundleDriver {
     type Config = ClosureLimit;
     type Params = DriverParams;

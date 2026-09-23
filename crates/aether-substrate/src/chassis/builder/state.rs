@@ -1,17 +1,18 @@
 use std::any::TypeId;
 use std::collections::{BTreeSet, HashSet};
 use std::marker::PhantomData;
-use std::sync::Arc;
+use std::mem;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use aether_actor::Root;
 
 use super::boot_passives::boot_passives;
-use super::built::{BuiltChassis, PassiveChassis};
+use super::built::{BuiltChassis, PassiveChassis, check_reservations_booted};
 use super::claim::claim_only;
 use super::driver::{DriverCapability, DriverCtx, DriverRunning};
 use super::native_actor_boot::NativeActorBoot;
-use super::passive_boot::{FallbackRouterBoot, PassiveBoot};
+use super::passive_boot::{FallbackRouterBoot, PassiveBoot, ReservedPumpBoot};
 use crate::actor::native::NativeActor;
 use crate::chassis::Chassis;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter};
@@ -216,7 +217,38 @@ impl<C: Chassis> Builder<C, NoDriver> {
     /// No-driver build path. Boots every passive in declaration order
     /// and returns a [`PassiveChassis`] whose embedder is responsible
     /// for driving the loop manually (`SubstrateHarness`).
+    ///
+    /// This is [`Self::build_passive_with_start`] with an empty start, so a
+    /// builder that [reserved](Self::reserve_pumped) a pumped slot fails here:
+    /// nothing boots the slot.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when a passive fails to boot, or when a pumped
+    /// slot reserved at the Claim stage is never booted.
     pub fn build_passive(self) -> Result<PassiveChassis<C>, BootError> {
+        self.build_passive_with_start(|_| Ok(())).map(|(passive, ())| passive)
+    }
+
+    /// No-driver build path with a Start stage: boot every passive in
+    /// declaration order, seal, then run `start` against the built chassis on
+    /// the calling thread and return its output beside the chassis.
+    ///
+    /// `start` is where the embedder boots the pumped actors it pumps itself,
+    /// with [`PassiveChassis::boot_pumped_actor`], on the thread that will
+    /// drain them (ADR-0161 R4). When it returns, every slot
+    /// [reserved](Self::reserve_pumped) at the Claim stage must have been
+    /// booted, or the build fails naming the unbooted slots: once a boot
+    /// completes, every declared dependency is live (ADR-0230 §3).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when a passive fails to boot, when `start`
+    /// returns `Err`, or when a reserved pumped slot is never booted.
+    pub fn build_passive_with_start<T>(
+        self,
+        start: impl FnOnce(&PassiveChassis<C>) -> Result<T, BootError>,
+    ) -> Result<(PassiveChassis<C>, T), BootError> {
         // The passive (manually-driven) path has no production callers —
         // every chassis main goes through `.driver(_).build()`. It is the
         // build path for `SubstrateHarness` and the hundreds of substrate-booting
@@ -237,7 +269,7 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // ADR-0155 §4: the no-driver path still runs the Claim stage over
         // `C::Driver`'s value-free hook — for a passive chassis that is
         // `NeverDriver`, whose default hook reserves nothing.
-        let booted = boot_passives(
+        let mut booted = boot_passives(
             &self.registry,
             &self.mailer,
             &self.aborter,
@@ -254,11 +286,19 @@ impl<C: Chassis> Builder<C, NoDriver> {
         // — each actor owns its own `ActorLogRing` and there is no
         // drain target to configure.
         //
-        // ADR-0165: a passive chassis seals immediately before it is returned.
-        // Everything the embedder does from here — `spawn_actor`,
-        // `boot_pumped_actor` — is post-seal and goes through the owner.
+        // ADR-0165: a passive chassis seals immediately before it is handed
+        // out. Everything the embedder does from here — `spawn_actor`,
+        // `boot_pumped_actor` — is post-seal: a fresh pumped claim goes through
+        // the owner, and a reserved one recovers the route Claim published.
         booted.seal_registry_authority();
-        Ok(PassiveChassis { booted, _chassis: PhantomData })
+        let reserved = mem::take(&mut booted.reserved_driver_mailboxes)
+            .into_iter()
+            .map(|(name, claim)| (name, Some(claim)))
+            .collect();
+        let passive = PassiveChassis { booted, reserved: Mutex::new(reserved), _chassis: PhantomData };
+        let started = start(&passive)?;
+        passive.check_reservations_booted()?;
+        Ok((passive, started))
     }
 }
 
@@ -275,6 +315,23 @@ impl<C: Chassis, S: BuilderState> Builder<C, S> {
     #[must_use]
     pub fn with_fallback_router(mut self, handler: FallbackRouter) -> Self {
         self.passives.push(Box::new(FallbackRouterBoot::new(handler)));
+        self
+    }
+
+    /// Reserve the slot of the pumped actor `A` at the Claim stage
+    /// (ADR-0230 §3). The slot is published as a registered inbox before any
+    /// passive's `init`, so a passive may declare `depends(A)`, and mail sent
+    /// to `A` waits in the inbox until its pump boots.
+    ///
+    /// The build fails unless the slot is booted during Start: a driver's
+    /// `boot` recovers it with
+    /// [`DriverCtx::boot_pumped_actor`](super::DriverCtx::boot_pumped_actor),
+    /// and a passive embedder boots it with
+    /// [`PassiveChassis::boot_pumped_actor`] inside
+    /// [`Builder::build_passive_with_start`].
+    #[must_use]
+    pub fn reserve_pumped<A: Root + NativeActor>(mut self) -> Self {
+        self.passives.push(Box::new(ReservedPumpBoot::new(A::NAMESPACE)));
         self
     }
 
@@ -519,7 +576,8 @@ impl<C: Chassis> Builder<C, HasDriver> {
     /// against a [`DriverCtx`]. Any failure aborts the build and
     /// shuts down the passives that already booted (via the
     /// crate-internal `BootedPassives` Drop) before propagating the
-    /// error.
+    /// error. A mailbox reserved at the Claim stage that the driver's `boot`
+    /// never recovered is such a failure, naming the unbooted slot.
     ///
     /// # Panics
     /// Panics if the `HasDriver` typestate is reached without a driver
@@ -577,6 +635,9 @@ impl<C: Chassis> Builder<C, HasDriver> {
             let mut driver_ctx = DriverCtx::new(chassis_ctx, &booted.handles);
             driver_boot(&mut driver_ctx)?
         };
+        // ADR-0230 §3: every mailbox reserved at the Claim stage must have
+        // been booted by the driver's Start before the chassis is sealed.
+        check_reservations_booted(booted.reserved_driver_mailboxes.iter().map(|(name, _)| name.as_str()))?;
 
         // ADR-0165: a built chassis seals after a *successful* driver `Start`.
         // The `?` above is what enforces the "successful" half — a driver that

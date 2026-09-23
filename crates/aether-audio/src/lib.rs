@@ -82,7 +82,9 @@ pub use runtime::{AudioConfig, AudioConfigLayer, AudioOverlay};
 /// owns the cpal worker thread + the deferred-load bookkeeping) lives behind
 /// the one `feature = "runtime"` gate, so a marker-only build never names
 /// `AudioCapabilityState` nor pulls the native audio stack through this cap.
-#[actor(singleton, root)]
+/// Its `aether.fs` reads are declared, and the headless companion inherits the
+/// declaration through the shared `aether.audio` namespace.
+#[actor(singleton, root, depends(FsCapability))]
 pub struct AudioCapability;
 
 // The fail-fast companion's identity lives in `headless.rs` (always-on, like

@@ -44,9 +44,10 @@ use std::collections::HashMap;
 
 use aether_actor::{DependencyResolver, Embedded, One};
 use aether_data::{
-    EnumVariant, INPUTS_SECTION, INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor,
-    KindLabels, KindShape, LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType,
-    VariantLabel, canonical::kind_id_from_shape, wire,
+    ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, EnumVariant, INPUTS_SECTION,
+    INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
+    LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
+    canonical::kind_id_from_shape, wire,
 };
 use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability};
 use serde::de::DeserializeOwned;
@@ -417,6 +418,27 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
         }
     }
     Ok(groups)
+}
+
+/// Decode the module's `aether.actor.lineage` section (ADR-0166) into its
+/// placement records, in section order. `export!` emits the section for
+/// the module's exported types; the host reads it to select the
+/// inline-spawnable groups — a `ModuleChild` record, or a `Child` whose
+/// parent is exported by the same module — whose declared dependencies it
+/// checks when the module loads (ADR-0230 §3). A module without the
+/// section returns an empty vec; an unknown record version is an error.
+pub fn read_actor_lineage_from_bytes(wasm: &[u8]) -> Result<Vec<ActorLineageRecord>, String> {
+    let mut out = Vec::new();
+    for payload in Parser::new(0).parse_all(wasm) {
+        let payload = payload.map_err(|e| format!("wasmparser: {e}"))?;
+        let Payload::CustomSection(reader) = payload else {
+            continue;
+        };
+        if reader.name() == ACTOR_LINEAGE_SECTION {
+            decode_records(ACTOR_LINEAGE_SECTION, &[ACTOR_LINEAGE_SECTION_VERSION], reader.data(), &mut out)?;
+        }
+    }
+    Ok(out)
 }
 
 /// The open (last) group, creating an implicit `namespace: None` group

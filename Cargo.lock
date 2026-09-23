@@ -447,6 +447,7 @@ name = "aether-component"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-clipboard",
  "aether-data",
  "aether-harness-fleet",
  "aether-harness-substrate",
@@ -458,6 +459,7 @@ dependencies = [
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-carry-reshaped",
  "aether-test-fixtures-defaultless",
+ "aether-test-fixtures-inline-dependency",
  "aether-test-fixtures-kinds",
  "aether-test-fixtures-stateful-reshaped",
  "aether-test-fixtures-stateful-typed",
@@ -1029,6 +1031,15 @@ name = "aether-test-fixtures-defaultless"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
+ "aether-kinds",
+]
+
+[[package]]
+name = "aether-test-fixtures-inline-dependency"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-clipboard",
  "aether-kinds",
 ]
 

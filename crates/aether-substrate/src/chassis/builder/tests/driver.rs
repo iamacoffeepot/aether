@@ -1,6 +1,6 @@
 //! The driver build path: passives boot, the driver runs and tears them down,
 //! the claim-only terminal stops before Init, and a Claim-stage mailbox
-//! reservation is recovered at Start.
+//! reservation is recovered at Start or fails the build.
 
 use super::support::{DrivenTestChassis, RanDriver, StubLog};
 use crate::actor::native::Dispatch;
@@ -217,4 +217,37 @@ fn driver_claim_reserved_at_claim_is_recovered_at_start() {
     assert_eq!(recovered_id, expected_id, "the recovered claim addresses the reserved mailbox");
 
     chassis.run().expect("driver run succeeds");
+}
+
+/// Test driver whose `claim` hook reserves a driver-as-actor mailbox and
+/// whose `boot` never recovers it.
+struct ReserveUnrecoveredDriver;
+
+impl DriverCapability for ReserveUnrecoveredDriver {
+    type Running = ReserveRecoverDriverRunning;
+
+    fn claim(ctx: &mut ChassisCtx<'_>) -> Result<(), BootError> {
+        ctx.claim_driver_mailbox("test.reserve_unrecovered.window")
+    }
+
+    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        Ok(ReserveRecoverDriverRunning)
+    }
+}
+
+/// A Claim-stage reservation the driver's Start never recovers fails the
+/// build naming the slot, rather than sealing a route nothing drains.
+#[test]
+fn driver_reservation_never_recovered_fails_the_build() {
+    let (registry, mailer) = bare_substrate();
+
+    let err = Builder::<DrivenTestChassis<ReserveUnrecoveredDriver>>::new(registry, mailer)
+        .driver(ReserveUnrecoveredDriver)
+        .build()
+        .expect_err("a reservation the driver never recovers must fail the build");
+
+    assert_eq!(
+        err.to_string(),
+        "capability boot failed: pumped slot \"test.reserve_unrecovered.window\" was reserved at the Claim stage but never booted",
+    );
 }

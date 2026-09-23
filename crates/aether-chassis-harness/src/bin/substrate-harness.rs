@@ -3,12 +3,13 @@
 //!
 //! It cannot use the shared `chassis_main!` body: the harness is a **passive**
 //! chassis, so there is no driver for the framework to run and `main` is the
-//! driver — it composes through `composed`, terminates in `build_passive`,
-//! claims the pumped `aether.render` slot (ADR-0161), and then owns the loop on
-//! this thread. Everything ahead of that divergence is the shared ceremony:
-//! the ADR-0162 `--describe` / `--print-config` prelude, env resolution off the
-//! source stack, the resolved log filter, and the unknown-`AETHER_*` sweep over
-//! the composed known-key set.
+//! driver — it composes through `composed`, terminates in
+//! `build_passive_with_start`, whose start boots the reserved pumped
+//! `aether.render` slot (ADR-0161), and then owns the loop on this thread.
+//! Everything ahead of that divergence is the shared ceremony: the ADR-0162
+//! `--describe` / `--print-config` prelude, env resolution off the source
+//! stack, the resolved log filter, and the unknown-`AETHER_*` sweep over the
+//! composed known-key set.
 
 #![forbid(unsafe_code)]
 
@@ -43,10 +44,10 @@ fn main() -> anyhow::Result<()> {
     // fully-resolved `AETHER_LOG_FILTER` directive now.
     apply_filter(&env.runtime.log_filter);
 
-    // ADR-0161: the pumped render actor is claimed post-build, so its wiring is
-    // read off the env before composition consumes it. The `assets` root feeds
-    // `capture_frame` similarity references; the event sender feeds the slot's
-    // wake.
+    // ADR-0161: the pumped render actor boots in the build's start, after
+    // composition has consumed the env, so its wiring is read off the env
+    // first. The `assets` root feeds `capture_frame` similarity references; the
+    // event sender feeds the slot's wake.
     let (width, height) = env.render_size.to_size();
     let render_config = env.render.clone();
     let assets_dir = env.namespace_roots.assets.clone();
@@ -57,24 +58,24 @@ fn main() -> anyhow::Result<()> {
     // ADR-0156 §4: warn on any unknown `AETHER_*` env var, swept against the
     // composition-derived known-key set plus the residual hand records.
     validate_env(&builder.config_manifest().known_keys(&HarnessChassis::residual_knobs()))?;
-    let passive = builder.build_passive()?;
-
-    // ADR-0161: boot the pumped `aether.render` actor offscreen. It claims the
-    // `aether.render` slot post-build (a no-driver chassis reserved none at
-    // Claim), owning the surfaceless GPU, accumulators, and pending capture as
+    // ADR-0161: boot the pumped `aether.render` actor offscreen on this thread.
+    // It recovers the `aether.render` slot `compose` reserved at the Claim
+    // stage, owning the surfaceless GPU, accumulators, and pending capture as
     // plain state; the GPU boots lazily on the first frame from
     // `offscreen_size`. `..Default::default()` fills `wireframe` and — under a
     // feature-unified build that enables aether-render/desktop — the
     // desktop-only `window: None`, so this literal is robust to unification.
-    let (render_slot, render_wake_slot) = passive.boot_pumped_actor::<RenderCapability>(
-        render_config,
-        RenderParams {
-            observed_kinds: None,
-            assets_dir: Some(assets_dir),
-            offscreen_size: Some((width, height)),
-            ..Default::default()
-        },
-    )?;
+    let (passive, (render_slot, render_wake_slot)) = builder.build_passive_with_start(|passive| {
+        passive.boot_pumped_actor::<RenderCapability>(
+            render_config,
+            RenderParams {
+                observed_kinds: None,
+                assets_dir: Some(assets_dir),
+                offscreen_size: Some((width, height)),
+                ..Default::default()
+            },
+        )
+    })?;
 
     let mut driver = HarnessDriver::new(&boot, Arc::clone(passive.settlement_registry()), render_slot);
     // ADR-0161 §Decision 2: the unified `PumpWake` channel. The render slot's

@@ -79,6 +79,7 @@ members = [
     "crates/aether-test-fixtures-reactor",
     "crates/aether-test-fixtures-reactor-call",
     "crates/aether-test-fixtures-mixed-bundle",
+    "crates/aether-test-fixtures-inline-dependency",
     "xtask",
 ]
 # What a bare `cargo build` / `cargo test` / `cargo clippy` at the root selects:
