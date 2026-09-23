@@ -6,7 +6,6 @@ use super::*;
 
 use crate::server::shard::HttpDispatchShard;
 use aether_actor::{ErasedActorRef, Single};
-use aether_substrate::Erased;
 use aether_substrate::Subname;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -529,7 +528,7 @@ impl HttpSupervisorState {
     /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
-    pub fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: ErasedActorRef) {
+    pub fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
         // A monitor that already failed for this mailbox will fail again — the
         // condition is a property of the target, not of the attempt — so the
         // second route it registers must not re-report it.
@@ -715,9 +714,9 @@ impl HttpShardState {
     /// check is caught by the settlement `502` net — the same net that
     /// covers the dispatch-to-delivery gap.
     #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_prepared(
+    pub fn dispatch_prepared<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
         payload: &[u8],
         handler: ErasedActorRef,
@@ -747,9 +746,9 @@ impl HttpShardState {
     /// the head's raw string; the reader already rejected
     /// non-enumerated verbs, so the defensive arm only fires on a
     /// torn-down race.
-    pub fn open_requested_stream(
+    pub fn open_requested_stream<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
         head: ParsedHead,
         handler: ErasedActorRef,

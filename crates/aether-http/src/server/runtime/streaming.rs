@@ -9,9 +9,9 @@ impl HttpShardState {
     /// the stream, send the handler an `HttpRequestStreamOpen`, and seed the
     /// reader's send window. The handler learns its `stream_id` here and paces
     /// the cap by mailing `HttpRequestCredit`.
-    pub fn start_request_stream(
+    pub fn start_request_stream<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
         handler: ErasedActorRef,
         method: HttpMethod,
@@ -41,7 +41,7 @@ impl HttpShardState {
     /// Forward one inbound body piece to the handler as an `HttpRequestChunk`
     /// on the connection's active stream (ADR-0128). A missing stream (the
     /// connection closed, or the stream already ended) drops the chunk.
-    pub fn forward_request_chunk(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, body: Vec<u8>) {
+    pub fn forward_request_chunk<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, body: Vec<u8>) {
         let Some(stream_id) = self.connections.get(&conn_id).and_then(|c| c.active_stream) else {
             return;
         };
@@ -58,7 +58,7 @@ impl HttpShardState {
     /// correlation, the reply-interception path writes back — so a streamed
     /// upload answers with one ordinary response and the settlement safety net
     /// still `502`s a handler that drops without replying.
-    pub fn end_request_stream(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId) {
+    pub fn end_request_stream<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId) {
         let Some(stream_id) = self.connections.get_mut(&conn_id).and_then(|c| c.active_stream.take()) else {
             return;
         };
@@ -95,9 +95,9 @@ impl HttpShardState {
     /// sender (`MailId` is the pair `{sender, correlation_id}`), so the bare
     /// value is unique only within one sender and cannot identify a stream
     /// (ADR-0128 §2 as amended 2026-07-20; issue 3730).
-    pub fn open_stream(
+    pub fn open_stream<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         correlation: u64,
         conn_id: ConnId,
         open: &HttpResponseStreamOpen,
@@ -235,7 +235,7 @@ impl HttpShardState {
     /// after that hand-off would arrive at a handler that has moved on —
     /// under a back-to-back request it hijacks or overruns the *next*
     /// stream's window (issue 3797).
-    pub fn replenish_credit(&mut self, ctx: &mut NativeCtx<'_>, stream_id: u64) {
+    pub fn replenish_credit<A>(&mut self, ctx: &mut NativeCtx<'_, A>, stream_id: u64) {
         let grant = match self.streams.get_mut(&stream_id) {
             Some(stream) if !stream.ended => {
                 stream.credit_outstanding += 1;
@@ -287,7 +287,7 @@ impl HttpShardState {
     /// resolved and stored at stream open (a response stream's matched route
     /// registrant, or a websocket's handshake handler, ADR-0129); a stream
     /// opened with no handler grants nothing.
-    pub fn send_stream_credit(&self, ctx: &mut NativeCtx<'_>, stream_id: u64, credit: u32) {
+    pub fn send_stream_credit<A>(&self, ctx: &mut NativeCtx<'_, A>, stream_id: u64, credit: u32) {
         let Some(handler) = self.streams.get(&stream_id).and_then(|stream| stream.handler) else {
             return;
         };

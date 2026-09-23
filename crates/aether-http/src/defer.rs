@@ -24,9 +24,9 @@
 //! `502` net; one that never settles, its request timeout. Neither needs
 //! anything here.
 
-use aether_actor::{HandlesKind, Manual, OutboundReply, Singleton};
+use aether_actor::{HandlesKind, Manual, OutboundReply, Reaches, Singleton};
 use aether_data::{Kind, Source};
-use aether_substrate::actor::native::{Erased, NativeActorMailbox, NativeCtx};
+use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
 
 use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
@@ -43,7 +43,7 @@ pub struct DeferredSource {
     pub source: Source,
 }
 
-impl Ctx<'_, NativeCtx<'_, Erased, Manual>> {
+impl<A: Reaches<ComponentHostCapability>> Ctx<'_, NativeCtx<'_, A, Manual>> {
     /// Capture `request` and the requester's reply target for deferred
     /// forwarding; [`DeferredRequest::to`] names the singleton recipient and
     /// holds the route open until its reply lands (ADR-0154 §2). Reads
@@ -98,7 +98,7 @@ impl<K: Kind> DeferredRequest<'_, '_, K> {
 /// it. A miss (no stored context — an unmatched reply) is a no-op. Public for
 /// the macro-generated `#[http::reply]` glue only.
 #[doc(hidden)]
-pub fn answer_deferred(ctx: &mut NativeCtx<'_, Erased, Manual>, response: &HttpServerResponse) {
+pub fn answer_deferred<A>(ctx: &mut NativeCtx<'_, A, Manual>, response: &HttpServerResponse) {
     if let Some(deferred) = ctx.take_context::<DeferredSource>() {
         ctx.reply_to(deferred.source, response);
     }
@@ -109,6 +109,6 @@ pub fn answer_deferred(ctx: &mut NativeCtx<'_, Erased, Manual>, response: &HttpS
 /// forwarding (e.g. a validation `400`). Replies to the current inbound.
 /// Public for the macro-generated `#[http::route]` glue only.
 #[doc(hidden)]
-pub fn answer_now(ctx: &mut NativeCtx<'_, Erased, Manual>, response: &HttpServerResponse) {
+pub fn answer_now<A>(ctx: &mut NativeCtx<'_, A, Manual>, response: &HttpServerResponse) {
     ctx.reply(response);
 }
