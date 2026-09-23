@@ -82,7 +82,7 @@ impl WasmTrampolineState {
     /// trampoline itself stays alive as an empty slot a `ReplaceComponent`
     /// can refill. Both a `DropComponent` and the host's module-boot
     /// `BootTeardown` end here.
-    pub fn unload(&mut self, ctx: &mut NativeCtx<'_>) {
+    pub fn unload<A>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         if let Some(mut component) = self.component.take() {
             // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
             // single pre-shutdown hook — the legacy `on_drop`
