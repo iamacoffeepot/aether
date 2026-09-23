@@ -54,7 +54,7 @@ impl RunPlan {
         if selection.run_all.is_some() {
             return Self {
                 prerequisites: vec![Prerequisite::Nextest, Prerequisite::WasmTarget],
-                commands: vec![dist(), workspace_tests()],
+                commands: vec![dist(), workspace_tests(), workspace_doc_tests()],
             };
         }
         if selection.packages.is_empty() {
@@ -66,6 +66,7 @@ impl RunPlan {
             commands.push(dist());
         }
         commands.push(affected_tests(selection));
+        commands.push(affected_doc_tests(selection));
         let mut prerequisites = vec![Prerequisite::Nextest];
         if selection.wasm_needed {
             prerequisites.push(Prerequisite::WasmTarget);
@@ -101,12 +102,30 @@ fn workspace_tests() -> CommandPlan {
     }
 }
 
+/// The workspace doctests, after the one-shard nextest run. nextest does not
+/// run doctests, so the gate's `verify.test` runs them as a second pass on its
+/// first shard (#6494), and this plan follows it.
+fn workspace_doc_tests() -> CommandPlan {
+    CommandPlan { args: strings(&["test", "--doc", "--workspace", "--all-features"]), env: REQUIRED_ENV.to_vec() }
+}
+
 fn affected_tests(selection: &Selection) -> CommandPlan {
     let mut args = strings(&["nextest", "run"]);
     for package in &selection.packages {
         args.extend(["-p".to_string(), package.clone()]);
     }
     args.extend(strings(&["--all-features", "--profile", "ci"]));
+    CommandPlan { args, env: REQUIRED_ENV.to_vec() }
+}
+
+/// The selected packages' doctests, the second pass the gate's `verify.test`
+/// runs over the same package selection.
+fn affected_doc_tests(selection: &Selection) -> CommandPlan {
+    let mut args = strings(&["test", "--doc"]);
+    for package in &selection.packages {
+        args.extend(["-p".to_string(), package.clone()]);
+    }
+    args.push("--all-features".to_string());
     CommandPlan { args, env: REQUIRED_ENV.to_vec() }
 }
 
@@ -182,13 +201,15 @@ mod tests {
     fn narrowed_selection_runs_invariants_then_sorted_packages() {
         let plan = RunPlan::for_selection(&selection(None, &["zeta", "alpha"], false));
         assert_eq!(plan.prerequisites, vec![Prerequisite::Nextest]);
-        assert_eq!(plan.commands.len(), 2);
+        assert_eq!(plan.commands.len(), 3);
         assert_eq!(plan.commands[0].args, strings(&["nextest", "run", "-p", "xtask", "--profile", "ci"]));
         assert_eq!(
             plan.commands[1].args,
             strings(&["nextest", "run", "-p", "alpha", "-p", "zeta", "--all-features", "--profile", "ci"])
         );
         assert_eq!(plan.commands[1].env, REQUIRED_ENV);
+        assert_eq!(plan.commands[2].args, strings(&["test", "--doc", "-p", "alpha", "-p", "zeta", "--all-features"]));
+        assert_eq!(plan.commands[2].env, REQUIRED_ENV);
     }
 
     #[test]
@@ -218,6 +239,8 @@ mod tests {
             ])
         );
         assert_eq!(plan.commands[1].env, REQUIRED_ENV);
+        assert_eq!(plan.commands[2].args, strings(&["test", "--doc", "--workspace", "--all-features"]));
+        assert_eq!(plan.commands[2].env, REQUIRED_ENV);
     }
 
     #[test]

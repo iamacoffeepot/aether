@@ -138,6 +138,14 @@ struct VerifyInvocation {
     /// How much of the workspace this member looks at when the run computed a
     /// closure to narrow to (#4890).
     breadth: Breadth,
+    /// A second invocation this member runs after its own, over the same
+    /// package selection and never partitioned, or `None` when it has none.
+    ///
+    /// Only `verify.test` states one: [`DOCTESTS`], because nextest does not
+    /// run doctests and no other gate does either (#6494). Its verdict folds
+    /// into the member's through [`MemberRun::followed_by`], so a failing
+    /// doctest is a `verify.test` failure rather than a new identity.
+    doctests: Option<&'static Self>,
 }
 
 /// Whether a member's work narrows to the candidate diff's reverse-dependency
@@ -319,6 +327,21 @@ impl<'a> TestSchedule<'a> {
     }
 }
 
+/// The schedule a member's [`VerifyInvocation::doctests`] pass runs under, or
+/// `None` when `schedule` names a shard other than the first.
+///
+/// The packages are kept, so an affected selection narrows the doctests exactly
+/// as it narrows nextest. The partition is dropped, because `cargo test`
+/// refuses nextest's `--partition` — and because a doctest pass split across
+/// shards would either run on every shard or on none. The first shard of
+/// `kind:M/N` owns it, and an unpartitioned run always does.
+fn doctest_schedule(schedule: TestSchedule<'_>) -> Option<TestSchedule<'_>> {
+    let first = schedule.partition.is_none_or(|partition| {
+        partition.split_once(':').and_then(|(_, shard)| shard.split_once('/')).is_some_and(|(index, _)| index == "1")
+    });
+    first.then_some(TestSchedule { partition: None, ..schedule })
+}
+
 /// Maps a typed `verify.*` command id to the invocation that answers it, in
 /// CI-parity terms.
 ///
@@ -372,6 +395,7 @@ fn compiled_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
+            doctests: None,
         }),
         "verify.docs" => Some(VerifyInvocation {
             program: "cargo",
@@ -391,6 +415,7 @@ fn compiled_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
+            doctests: None,
         }),
         "verify.test" => Some(VerifyInvocation {
             program: "cargo",
@@ -434,10 +459,39 @@ fn compiled_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Closure,
+            doctests: Some(&DOCTESTS),
         }),
         _ => None,
     }
 }
+
+/// The doctest pass `verify.test` runs after nextest (#6494): nextest does
+/// not run doctests, so without it the `compile_fail` pins and runnable doc
+/// examples are never gated.
+///
+/// The test arm's env, so an example that boots a harness runs under the same
+/// runtime requirement and in-memory store the nextest half does. No prepare:
+/// the member's own prepare already ran, and a doctest reads no dist artifact.
+/// Cargo reports a failed doctest, and a library that would not compile, with
+/// 101.
+///
+/// Its argv carries no partition. `--partition` is a nextest flag that `cargo
+/// test` refuses, so [`doctest_schedule`] drops it and runs this pass on the
+/// first shard only.
+const DOCTESTS: VerifyInvocation = VerifyInvocation {
+    program: "cargo",
+    args: &["test", "--doc", "--workspace", "--all-features", "--no-fail-fast"],
+    env: &[("AETHER_REQUIRE_RUNTIME", "1"), ("AETHER_STORE_PATH", ":memory:")],
+    requires: &["cargo"],
+    requires_targets: &[],
+    prepare: None,
+    finding_exit_codes: &[101],
+    environment_exit_codes: &[],
+    requested_exit_codes: &[],
+    diff_base_flag: None,
+    breadth: Breadth::Closure,
+    doctests: None,
+};
 
 /// The members that read the tree without building it: formatting, the two
 /// duplication scanners, the manifest walks, and the suppression scan.
@@ -458,6 +512,7 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
+            doctests: None,
         }),
         "verify.dup" => Some(VerifyInvocation {
             // The settings ride the argv rather than a `.jscpd.json` (#4856).
@@ -484,6 +539,7 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
+            doctests: None,
         }),
         "verify.deps" => Some(VerifyInvocation {
             // Invoked as the binary rather than through `cargo machete`, which
@@ -514,6 +570,7 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
+            doctests: None,
         }),
         "verify.lock" => Some(VerifyInvocation {
             // The `lock-freshness` gate's own check (#5309). `--locked`
@@ -542,6 +599,7 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[],
             diff_base_flag: None,
             breadth: Breadth::Workspace,
+            doctests: None,
         }),
         "verify.suppress" => Some(VerifyInvocation {
             program: "python3",
@@ -566,6 +624,7 @@ fn tree_member(id: &str) -> Option<VerifyInvocation> {
             requested_exit_codes: &[SUPPRESSION_REQUESTED_EXIT],
             diff_base_flag: Some("--base"),
             breadth: Breadth::Workspace,
+            doctests: None,
         }),
         _ => None,
     }
@@ -1087,6 +1146,18 @@ impl MemberOutcome {
     /// reporting an unperformed check as a pass is the false-green direction.
     fn passed(self) -> bool {
         matches!(self, Self::Passed)
+    }
+
+    /// How bad this outcome is when two runs answer for one member: a finding
+    /// outranks a fault that stopped a verdict, which outranks a host-side
+    /// report, which outranks a pass.
+    fn severity(self) -> u8 {
+        match self {
+            Self::Passed => 0,
+            Self::Environment => 1,
+            Self::Operational => 2,
+            Self::Failed => 3,
+        }
     }
 
     /// The ADR-0178 identity this outcome contributes to `failed_verifiers`.
@@ -1828,6 +1899,36 @@ impl MemberRun {
         self.channels.set(channel);
     }
 
+    /// This run with `next` — the member's [`VerifyInvocation::doctests`] pass
+    /// — folded in, so the member reports one verdict for both.
+    ///
+    /// The worse outcome wins, by [`MemberOutcome::severity`], and brings its
+    /// exit code with it (this run's on a tie, `0` when both passed). `next`'s
+    /// findings are appended to this run's, and its log follows this one under
+    /// a header line. Flakes, inherited failures, and environment observations
+    /// stay this run's alone: the fold happens after nextest triage, so no
+    /// `cargo test` output is ever read by the nextest classifier, and a
+    /// failing doctest can never be excused as a nextest flake.
+    fn followed_by(mut self, next: &Self) -> Self {
+        let next_is_worse = next.outcome.severity() > self.outcome.severity();
+        if next_is_worse {
+            self.outcome = next.outcome;
+            self.exit_code = next.exit_code;
+        }
+        if self.outcome.passed() {
+            self.exit_code = 0;
+        }
+
+        if let Some(found) = next.findings() {
+            let findings = self.findings().map_or_else(|| found.to_owned(), |first| format!("{first}\n\n{found}"));
+            self.set(EvidenceChannel::findings(findings));
+        }
+
+        self.log.extend_from_slice(b"\n== doctests ==\n");
+        self.log.extend_from_slice(&next.log);
+        self
+    }
+
     fn findings(&self) -> Option<&str> {
         self.channels.text(ChannelKind::Findings)
     }
@@ -2558,6 +2659,31 @@ fn dispatch_single(
         return Ok(MemberRun::plain(&args.command, outcome, log.into_bytes(), code));
     }
 
+    let mut run = spawn_single(args, invocation, scope, cache, peak, schedule)?;
+    let Some(doctests) = invocation.doctests else {
+        return Ok(run);
+    };
+
+    // The doctests follow on the first shard only, over the same packages and
+    // with no partition — see `doctest_schedule`.
+    if let Some(doctest_schedule) = doctest_schedule(schedule) {
+        return Ok(run.followed_by(&spawn_single(args, doctests, scope, cache, peak, doctest_schedule)?));
+    }
+    run.log.extend_from_slice("note: doctests did not run — they run on the first partition only\n".as_bytes());
+    Ok(run)
+}
+
+/// Spawn `invocation` for the lone gate `args` names under `schedule`, and
+/// frame its captured output as the gate's run: scope and operational notices
+/// first, then stdout, then stderr with the peak-memory report taken off it.
+fn spawn_single(
+    args: &TransformArgs,
+    invocation: &VerifyInvocation,
+    scope: &Scope,
+    cache: Option<&CompilerCache>,
+    peak: &PeakMemory,
+    schedule: TestSchedule<'_>,
+) -> Result<MemberRun> {
     let mut command = invocation.command(scope, args.diff_base.as_deref(), cache, peak, schedule);
     // A lone gate answers the same directory it holds inside the umbrella, so a
     // hand run warms the same tree the lane builds.
@@ -3042,16 +3168,26 @@ fn run_gate(id: &'static str, pass: &GatePass<'_>) -> Result<(MemberRun, GateTim
         // deciding against what earlier steps recorded rather than against the
         // file this run is in the middle of writing.
         let memo = Memo::open(logs, id, input);
-        let run = match prepare_failure {
-            Some((log, code, outcome)) => MemberRun::plain(id, outcome, log.into_bytes(), code),
-            None => run_member_discriminated(
+        let run = if let Some((log, code, outcome)) = prepare_failure {
+            MemberRun::plain(id, outcome, log.into_bytes(), code)
+        } else {
+            let run = run_member_discriminated(
                 id,
                 &invocation,
                 scope,
                 closure,
                 TriageInputs { base: member_diff_base(id, args.diff_base.as_deref(), full), memo: &memo },
                 &mut observations::ObservingRunner::new(&mut runner, id, args.nonce.as_deref(), logs, input),
-            )?,
+            )?;
+            // The umbrella never partitions, so a member's doctest pass always
+            // follows it — after triage, so nextest's classifier never reads
+            // `cargo test` output.
+            if let Some(doctests) = invocation.doctests {
+                let (outcome, log, code) = run_member(id, doctests, scope, None, &mut runner)?;
+                run.followed_by(&MemberRun::plain(id, outcome, log, code))
+            } else {
+                run
+            }
         };
         runner.close_base();
         (run, prepare_millis, bundle_cache)
@@ -3198,12 +3334,12 @@ mod tests {
         BASE_SET_SUBJECT, BUILD_LANE_MEMBERS, Captured, EvidenceChannel, MAX_FINDING_LINES, MemberOutcome, MemberRun,
         MemberRunner, Memo, Position, SUPPRESS_MEMBER, Scope, SpawnRunner, TestSchedule, TriageInputs, VERIFY_BASE,
         VERIFY_CHECK, VERIFY_MEMBER, VerifyInvocation, builds_artifacts, clippy_verdict, closure, distil_diagnostics,
-        effective_exit_code, empty_closure_run, environment_observations, failed_verifiers, failed_verifiers_of,
-        fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base, member_outcome,
-        member_scope_notice, operational_failure_notice, package_name, preflight_tools, prepare_failure_log,
-        render_diagnostics, replay_args, required_targets, required_tools, run_member, run_member_discriminated,
-        run_timed_prepare, selected_members, spawnable_runs, stated_selection, umbrella_status, unjudged_notice,
-        verify_check_members, verify_command, verify_findings, workflow,
+        doctest_schedule, effective_exit_code, empty_closure_run, environment_observations, failed_verifiers,
+        failed_verifiers_of, fan_out, gate_target_dir, gate_target_suffix, host_fault_in, member_diff_base,
+        member_outcome, member_scope_notice, operational_failure_notice, package_name, preflight_tools,
+        prepare_failure_log, render_diagnostics, replay_args, required_targets, required_tools, run_member,
+        run_member_discriminated, run_timed_prepare, selected_members, spawnable_runs, stated_selection,
+        umbrella_status, unjudged_notice, verify_check_members, verify_command, verify_findings, workflow,
     };
     use super::{VerifyFailure, VerifyFailureSet};
     use std::path::{Path, PathBuf};
@@ -3884,6 +4020,50 @@ mod tests {
             [selected, owned(&["-p", "aether-math", "-p", "xtask", "--partition", "slice:1/1"])].concat(),
         );
         assert_eq!(test.should_prepare(&workspace, both.prepared), None);
+    }
+
+    #[test]
+    fn doctests_take_the_member_packages_and_never_the_partition() {
+        // Catches `--partition` leaking onto `cargo test`, which refuses it and
+        // would make every test job operational; doctests running on every
+        // main shard or on none; and `--workspace` surviving next to `-p`.
+        let doctests = verify_command("verify.test").and_then(|test| test.doctests).expect("verify.test runs doctests");
+        let packages = owned(&["aether-kinds", "aether-mcp"]);
+        let scope = Scope::resolve(None);
+        let expected =
+            owned(&["test", "--doc", "--all-features", "--no-fail-fast", "-p", "aether-kinds", "-p", "aether-mcp"]);
+
+        for partition in [None, Some("slice:1/1"), Some("slice:1/3")] {
+            let schedule = doctest_schedule(TestSchedule { packages: &packages, partition, prepared: true })
+                .unwrap_or_else(|| panic!("{partition:?} owns the doctests"));
+            assert_eq!(doctests.scheduled_args(&scope, None, schedule), expected, "under {partition:?}");
+        }
+
+        for partition in ["slice:2/3", "slice:3/3"] {
+            let schedule = TestSchedule { packages: &packages, partition: Some(partition), prepared: true };
+            assert!(doctest_schedule(schedule).is_none(), "{partition} leaves the doctests to the first shard");
+        }
+    }
+
+    #[test]
+    fn a_failing_doctest_pass_fails_a_passing_member() {
+        // Catches a doctest verdict dropped from the member, and a passing
+        // doctest pass masking a nextest failure.
+        let run = |outcome, code, log: &str| MemberRun::plain("verify.test", outcome, log.as_bytes().to_vec(), code);
+        let failing_doctest = "test crates/example/src/lib.rs - (line 12) ... FAILED\n\
+                               error: doctest failed, to rerun pass `-p example --doc`\n";
+
+        let folded = run(MemberOutcome::Passed, 0, "").followed_by(&run(MemberOutcome::Failed, 101, failing_doctest));
+        assert_eq!((folded.outcome, folded.exit_code), (MemberOutcome::Failed, 101));
+        assert!(folded.findings().is_some_and(|findings| findings.contains("doctest failed")));
+
+        let folded =
+            run(MemberOutcome::Failed, 100, "error: test run failed\n").followed_by(&run(MemberOutcome::Passed, 0, ""));
+        assert_eq!((folded.outcome, folded.exit_code), (MemberOutcome::Failed, 100));
+
+        let folded =
+            run(MemberOutcome::Passed, 0, "").followed_by(&run(MemberOutcome::Operational, 2, "error: no such flag\n"));
+        assert_eq!((folded.outcome, folded.exit_code), (MemberOutcome::Operational, 2));
     }
 
     #[test]
