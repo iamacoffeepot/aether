@@ -50,6 +50,14 @@ ctrlc = "3"
 
 [dev-dependencies]
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
+# The crash scenario forks the `aether-bloomery` binary through the hub, SIGKILLs it, and reads the restarted engine over the wire.
+aether-harness-fleet = { path = "../aether-harness-fleet" }
+# `require_wasm`, which locates the program fixture bundle the crash scenario seeds.
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+# `RestartPolicy`, the supervision the crash scenario arms on the hub.
+aether-fleet = { path = "../aether-fleet" }
+# `derive` for the crash scenario's local mirrors of the fixture's program inputs.
+aether-data = { path = "../aether-data", features = ["derive"] }
 
 # `confique` is reached only through the
 # `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,

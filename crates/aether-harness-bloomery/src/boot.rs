@@ -32,24 +32,14 @@ impl SeededJournal {
     /// spawn.
     #[must_use]
     pub fn boot(self) -> BloomeryHarness {
-        let Self { scratch, journal } = self;
-        let (chassis, mounted) = BloomeryChassis::build_mounted(env(&journal))
-            .unwrap_or_else(|error| panic!("boot the bloomery chassis over {}: {error}", journal.display()));
+        let (chassis, mounted) = BloomeryChassis::build_mounted(env(&self.journal))
+            .unwrap_or_else(|error| panic!("boot the bloomery chassis over {}: {error}", self.journal.display()));
         let (sender, arrivals) = mpsc::channel();
         let sink = chassis
             .spawn_actor::<ReplySink>(Subname::Named("harness"), (), sender)
             .finish()
             .unwrap_or_else(|error| panic!("spawn the harness reply sink: {error:?}"));
-        BloomeryHarness {
-            chassis,
-            mounted,
-            sink,
-            arrivals,
-            early: HashMap::new(),
-            correlations: 0,
-            journal,
-            _scratch: scratch,
-        }
+        BloomeryHarness { chassis, mounted, sink, arrivals, early: HashMap::new(), correlations: 0, journal: self }
     }
 }
 
@@ -68,7 +58,7 @@ impl BloomeryHarness {
     /// The journal file the chassis opened.
     #[must_use]
     pub fn journal_path(&self) -> &Path {
-        &self.journal
+        self.journal.journal_path()
     }
 }
 

@@ -5,14 +5,21 @@ use std::path::{Path, PathBuf};
 use aether_bloomery_journal::{Batch, Journal};
 use tempfile::TempDir;
 
-/// A scratch journal the harness owns, seeded and not yet booted.
+/// A scratch journal the harness owns: seeded before boot, and read back
+/// after it.
 ///
 /// [`BloomeryHarness::start`](crate::BloomeryHarness::start) seeds and boots
 /// in one step; this split exists for a scenario that must observe the
-/// journal file between the two.
+/// journal file between the two, or that hands the file to an engine outside
+/// this process, such as a forked `aether-bloomery`. Either way the
+/// expectation reads ([`assert_appended`](Self::assert_appended),
+/// [`record`](Self::record), [`head`](Self::head), [`stores`](Self::stores),
+/// [`fold`](Self::fold)) open the file afresh, so they see what the engine
+/// committed.
 pub struct SeededJournal {
-    pub(crate) scratch: TempDir,
     pub(crate) journal: PathBuf,
+    /// The scratch directory holding `journal`, removed on drop.
+    _scratch: TempDir,
 }
 
 impl SeededJournal {
@@ -38,10 +45,10 @@ impl SeededJournal {
                 seed.append(head, &batch).unwrap_or_else(|error| panic!("append seed batch {index}: {error}"));
             }
         }
-        Self { scratch, journal }
+        Self { journal, _scratch: scratch }
     }
 
-    /// The journal file the chassis will open.
+    /// The journal file the engine opens.
     #[must_use]
     pub fn journal_path(&self) -> &Path {
         &self.journal
