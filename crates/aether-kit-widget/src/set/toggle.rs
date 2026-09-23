@@ -15,6 +15,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease};
 use aether_math::Rgba;
+use aether_text::TextCapability;
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{ActivationArms, disc, push_control_outlines, reply_draw, stadium, text_origin_y};
@@ -179,7 +180,7 @@ impl WidgetDefaults for ToggleWidget {
 
 /// A toggle widget. Spawned inline by a panel root with a [`ToggleConfig`];
 /// reports [`ToggleChanged`] after each completed activation.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for ToggleWidget {
     type Config = ToggleConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.toggle";

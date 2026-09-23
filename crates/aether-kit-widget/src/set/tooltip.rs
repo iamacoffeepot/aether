@@ -92,7 +92,7 @@ use alloc::vec::Vec;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::placement::{PlacementBounds, PlacementSide, place_plate_avoiding};
 use crate::set::{
@@ -466,7 +466,7 @@ impl WidgetDefaults for TooltipWidget {
 /// Hide it with `aether.kit.widget.set_state`. A line's `icon` is a texture id
 /// the host got from `aether.render.create_texture`; register the image first
 /// and pass the texture's own pixel size, not the size you want it drawn at.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for TooltipWidget {
     type Config = TooltipConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.tooltip";

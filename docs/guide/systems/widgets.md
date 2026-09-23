@@ -19,6 +19,16 @@ export namespaces themselves are unchanged. **Every stock widget is exported**,
 not a chosen subset, so any of them can be loaded by selector as well as spawned
 inline by a root.
 
+Wherever the module loads, whichever export is selected, it needs the window,
+lifecycle, render, text and clipboard capabilities live. Its actors declare
+each capability they mail (ADR-0230), and a load checks the declarations of
+every actor the module can spawn inline, so a composition missing one of the
+five refuses the load and names the first widget whose dependency is not live.
+Every shipping chassis composes all five. A `SubstrateHarness` scenario gets
+the window and lifecycle from the harness basics and composes a render (the
+real one, or the `HeadlessRenderCapability` stub when it reads no pixels),
+text with namespace roots for its fs, and the in-memory clipboard.
+
 Every widget kind — configs, events, and the schema types nested in them — is
 declared in one place and reaches the crate root, so a consumer writes
 `use aether_kit_widget::{ButtonConfig, DialogConfig};` and never has to know
@@ -1925,13 +1935,11 @@ Assemble an editor shell-first. Load one `EditorShell` under its **default**
 name — it is a singleton, and a region has to be able to name it by bare type —
 with an ordered `EditorConfig { regions }`. Each `RegionSpec` contains a name, a
 pixel rectangle, keyboard eligibility, `RegionInputLanes`, and an optional exact
-`EditorKeyChord`; it carries no address. Then load each region actor with its
-config's `owns_input` set to `false` and its `editor_region` set to the matching
-`RegionSpec.name`. As it wires, the region mails `RegionAttach { region }` to
-the shell, and the shell keeps that mail's sender as the address it forwards to
-— so nothing the shell sends to is a position anyone computed. Input to a region
-that has not announced is dropped, which is also what a region loaded before the
-shell gets: its announcement had nowhere to land. Later entries are topmost. A
+`EditorKeyChord`; it carries no address. Then load each region actor. As it
+wires, the region mails `RegionAttach { region }` to the shell, and the shell
+keeps that mail's sender as the address it forwards to — so nothing the shell
+sends to is a position anyone computed. Input to a region that has not
+announced is dropped. Later entries are topmost. A
 topmost region that rejects a lane blocks that event; routing does not fall
 through to a covered region.
 
@@ -1953,13 +1961,25 @@ Ctrl+Shift+Tab cycles backward, and both the reserved press and matching
 release are consumed. Plain Tab is forwarded unchanged so the focused panel's
 own widget traversal remains intact.
 
+A widget panel stands behind a region through `EditorRegion` (export
+`aether.kit.widget.editor_region`). Load it with the panel's `PanelConfig` and
+its `editor_region` set to the matching `RegionSpec.name`. It declares the
+shell, so a region loaded before the shell is refused rather than announcing
+into nothing. As it wires it announces itself, then spawns a `WidgetPanel` from
+the same config as its child `panel`, with `owns_input` false and
+`editor_region` cleared, and relays each input kind the shell forwards to that
+panel. The panel runs its own focus, capture, frame and value-up handling
+unchanged; its children sit beneath it, one level further down than a
+standalone panel's. A `WidgetPanel` loaded with a non-empty `editor_region`
+refuses to initialize and points at `EditorRegion`: a panel does not mail the
+shell itself.
+
 `owns_input` defaults to `true`, preserving standalone behavior. It gates only
 interactive subscriptions: each region actor's lifecycle and render roles are
 unchanged, and those that need it continue subscribing to `WindowSize` directly.
-`editor_region` defaults to empty, which under `owns_input: false` is a panel
-that announces nothing and therefore receives nothing — the panel warns when it
-finds itself in that state. The shell itself owns no lifecycle, render, or
-window-size work.
+A standalone panel with `owns_input: false` subscribes no input and receives
+none; that is the state `EditorRegion` puts its child panel in. The shell itself
+owns no lifecycle, render, or window-size work.
 
 The assembly this model is built for is shell-first: one `EditorShell` routing
 non-overlapping regions, then a tool panel, a camera-owning viewport, and a
@@ -2094,7 +2114,8 @@ request the built-in stack above. `children: []` selects that fallback inside
 an otherwise complete `PanelConfig`; the MCP schema encoder does not fill the
 other fields from Rust's `Default`, so provide `x`, `y`, `width`,
 `font_namespace`, `font_path`, `owns_input`, `editor_region`, and the complete
-`theme` object.
+`theme` object. `editor_region` is empty for a `WidgetPanel`; only an
+`EditorRegion` load sets it.
 
 That built-in stack is limited to `label`, `slider`, `radio`, `text_field`, and
 `button`; it does not demonstrate the other stock kinds, including `Toggle`,

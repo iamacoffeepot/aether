@@ -13,6 +13,8 @@
 //! has not been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 
+mod support;
+
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use std::env;
 use std::fs;
@@ -22,7 +24,9 @@ use aether_actor::{ActorRef, Addressable};
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_harness_substrate_capture::test_helpers::{envelope, init_save_sandbox, require_runtime};
+use aether_harness_substrate_capture::test_helpers::{
+    envelope, init_save_sandbox, require_runtime, test_namespace_roots,
+};
 use aether_kinds::{ClipRect, LoadComponent, NamedMail, Tick};
 use aether_kit_widget::{
     ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, Theme, WidgetChildSpec,
@@ -31,6 +35,7 @@ use aether_kit_widget::{
 use aether_math::Rgba;
 use aether_render::{DrawShapes, WHITE_TEXTURE_ID};
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
+use support::widget_caps;
 
 const PANEL_X: f32 = 10.0;
 const PANEL_Y: f32 = 10.0;
@@ -140,7 +145,15 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetC
 }
 
 fn color_bench() -> SubstrateHarness {
-    SubstrateHarness::builder().size(240, 80).with_render().with_component_host().build().expect("boot")
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(240, 80)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("widget-lazy-theme")))
+            .with_render()
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
 }
 
 fn capture_first_collect(harness: &mut SubstrateHarness) {
@@ -334,14 +347,11 @@ fn early_load_font_result_survives_lazy_spawn_and_renders_glyphs_after_priming()
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let sandbox = init_save_sandbox("widget-lazy-theme");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
-    let mut harness = SubstrateHarness::builder()
-        .size(240, 80)
-        .with_render()
-        .with_component_host()
-        .with_actor::<TextCapability>(())
-        .namespace_roots(roots)
-        .build()
-        .expect("boot");
+    let mut harness = widget_caps(
+        SubstrateHarness::builder().size(240, 80).with_render().with_component_host().namespace_roots(roots),
+    )
+    .build()
+    .expect("boot");
 
     let font_id = load_font(&mut harness);
     let label = WidgetChildSpec {

@@ -29,7 +29,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_ESCAPE, KEY_LEFT, KEY_RIGHT, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::{
     WidgetDefaults, accept_font_metrics_result, approx_text_width, even_split_widths, measured_text_width,
@@ -487,7 +487,7 @@ impl WidgetDefaults for MenuBarWidget {
 /// # Agent
 /// Not loaded directly — the panel root spawns it as an inline child. Send
 /// it its `MenuBarConfig` again to replace the menus in place.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for MenuBarWidget {
     type Config = MenuBarConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.menu_bar";

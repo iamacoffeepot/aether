@@ -15,7 +15,7 @@ use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::defaults::{WidgetDefaults, widget_chrome};
 use crate::set::{
@@ -257,7 +257,7 @@ impl WidgetDefaults for SegmentedWidget {
 
 /// A segmented widget. Spawned inline by a panel root with a
 /// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for SegmentedWidget {
     type Config = SegmentedConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.segmented";

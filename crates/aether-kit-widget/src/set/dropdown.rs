@@ -42,7 +42,7 @@ use aether_kinds::keycode::{KEY_DOWN, KEY_ESCAPE, KEY_UP};
 use aether_kinds::mouse_button;
 use aether_kinds::{Key, KeyRelease, MouseButton, MouseButtonRelease, MouseMove};
 use aether_math::Rgba;
-use aether_text::FontMetricsResult;
+use aether_text::{FontMetricsResult, TextCapability};
 
 use crate::set::placement::PlacementBounds;
 use crate::set::{
@@ -582,7 +582,7 @@ impl WidgetDefaults for DropdownWidget {
 /// closes an open list. Send it [`SetSelection`] to move the choice. It reports the width its widest option needs on its draw list's
 /// `intrinsic` once the theme font's metrics resolve, so a host can size the
 /// cell it sits in to the control rather than to a share of the row.
-#[actor(instanced, composable, handler_set(WidgetDefaults))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
 impl WasmActor for DropdownWidget {
     type Config = DropdownConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.dropdown";

@@ -62,6 +62,7 @@ use aether_kinds::{
 use aether_lifecycle::LifecycleCapability;
 use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
+use aether_render::RenderCapability;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
@@ -77,14 +78,14 @@ use crate::set::{
 };
 use crate::theme::{SetTheme, TextRole, Theme};
 use crate::{
-    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, EditorShell, FocusGained,
+    ButtonActivated, ButtonConfig, Collect, DropdownConfig, DropdownHover, DropdownSelected, EditorRegion, FocusGained,
     FocusLost, HoverGained, HoverLost, ImageConfig, LabelConfig, MenuBarActivated, MenuBarConfig, NumericChanged,
-    NumericConfig, PanelConfig, RadioConfig, RadioSelected, RegionAttach, ScrollConfig, ScrollExtent, ScrollOutcome,
-    ScrollResidual, ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig,
-    TabStripSelected, TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig,
-    VirtualListActivated, VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec,
-    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind,
-    WidgetOpenChanged, WidgetStateChanged,
+    NumericConfig, PanelConfig, RadioConfig, RadioSelected, ScrollConfig, ScrollExtent, ScrollOutcome, ScrollResidual,
+    ScrollWidget, SegmentedConfig, SegmentedSelected, SliderChanged, SliderConfig, TabStripConfig, TabStripSelected,
+    TextAlign, TextAreaConfig, TextCommitted, TextFieldConfig, ToggleChanged, ToggleConfig, VirtualListActivated,
+    VirtualListConfig, VirtualListHover, VirtualListSelected, Widget, WidgetChildSpec, WidgetClipRect,
+    WidgetControlState, WidgetDrawList, WidgetEligibilityChanged, WidgetFrame, WidgetKind, WidgetOpenChanged,
+    WidgetStateChanged,
 };
 use crate::{FrameDischarge, decode_nested_widget_config};
 use crate::{accept_open_child_list, emit, flush_membership};
@@ -1158,12 +1159,29 @@ fn spawn_behavior_host(
 /// real input through the focus model and logs each value-up event. Fork it
 /// into a real editor panel by handing it your own `children` and translating
 /// the value-up handlers into your own world-knob driver mail.
-#[actor(instanced)]
+///
+/// A panel behind an editor-shell region (ADR-0141) is not loaded directly:
+/// load [`EditorRegion`] (export `aether.kit.widget.editor_region`) with this
+/// config, and it hosts the panel as its child. A panel refuses a non-empty
+/// `editor_region`.
+#[actor(
+    instanced,
+    child_of(EditorRegion),
+    depends(WindowCapability),
+    depends(LifecycleCapability),
+    depends(RenderCapability),
+    depends(TextCapability)
+)]
 impl WasmActor for WidgetPanel {
     type Config = PanelConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.panel";
 
     fn init(config: PanelConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        if !config.editor_region.is_empty() {
+            return Err(ActorInitError::from(
+                "editor_region is announced by aether.kit.widget.editor_region; load that export instead",
+            ));
+        }
         Ok(WidgetPanel {
             theme: config.theme.clone(),
             config,
@@ -1183,11 +1201,8 @@ impl WasmActor for WidgetPanel {
     /// stage once, then kick off the font load. Widgets never subscribe — the
     /// root forwards everything.
     ///
-    /// A panel that has given input ownership away instead announces itself to
-    /// the [`EditorShell`] as its configured region, so the shell keeps this
-    /// panel's envelope sender as the address it forwards to (ADR-0141,
-    /// ADR-0230). A panel that owns no input and names no region receives
-    /// nothing at all, which is worth saying out loud.
+    /// A panel that owns no input subscribes none: it is the child of an
+    /// [`EditorRegion`], which relays the editor shell's input to it.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.owns_input {
             let window = ctx.actor::<WindowCapability>();
@@ -1200,13 +1215,6 @@ impl WasmActor for WidgetPanel {
             window.subscribe::<TextInput>(WindowSelector::All);
             window.subscribe::<ImePreedit>(WindowSelector::All);
             window.subscribe::<Modifiers>(WindowSelector::All);
-        } else if self.config.editor_region.is_empty() {
-            tracing::warn!(
-                target: "aether_kit_widget_panel",
-                "panel owns no input and names no editor region; it will receive none",
-            );
-        } else {
-            ctx.actor::<EditorShell>().send(&RegionAttach { region: self.config.editor_region.clone() });
         }
         ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
         if !self.config.font_path.is_empty() {
