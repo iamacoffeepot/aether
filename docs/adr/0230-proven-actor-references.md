@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-21
+- **Amended:** 2026-09-23 — §5's deleted `ctx.actor::<R>()` handle is replaced at the call site by flat ctx verbs (`ctx.send::<R>(&k)`, `ctx.subscribe::<K>()`, `ctx.send_to(&r, &k)`) proven by `#[actor(depends(R))]`, with no optional peers ([ADR-0232](0232-flat-ctx-send-verbs.md)).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
