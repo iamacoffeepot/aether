@@ -146,15 +146,47 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// probe's `AwaitProcessed`.
     #[must_use]
     pub fn send_with_context<K: Kind, C: Kind>(&self, target: &ErasedActorRef, payload: &K, context: &C) -> MailId {
-        let bytes = payload.encode_into_bytes();
-        let mail_id = self.binding.push_envelope_buffered(
-            target.id().0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
+        self.push_with_context(*target, payload, context, self.outbound_parent(), self.outbound_root())
+    }
+
+    /// Send `payload` to the actor `target` proves on a fresh causal chain
+    /// and store `context` under the minted correlation, for the reply
+    /// handler to take back with
+    /// [`Self::take_context`](super::NativeCtx::take_context). The returned
+    /// [`MailId`] is the root of the new chain.
+    ///
+    /// The detached sibling of [`Self::send_with_context`], for a request the
+    /// running chain did not cause and whose recipient may park the reply
+    /// (ADR-0080 §7): inheriting would hold the running chain open for as
+    /// long as the recipient waits. The reply roots in the recipient's tree
+    /// and still correlates home through the stored context.
+    ///
+    /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
+    /// journal owner parks until the head moves.
+    #[must_use]
+    pub fn send_detached_with_context<K: Kind, C: Kind>(
+        &self,
+        target: &ErasedActorRef,
+        payload: &K,
+        context: &C,
+    ) -> MailId {
+        self.push_with_context(*target, payload, context, None, None)
+    }
+
+    /// The push behind [`Self::send_with_context`] and
+    /// [`Self::send_detached_with_context`]: encode `payload`, push it to
+    /// `target` under the `(parent, root)` lineage, and store `context` under
+    /// the minted correlation.
+    fn push_with_context<K: Kind, C: Kind>(
+        &self,
+        target: ErasedActorRef,
+        payload: &K,
+        context: &C,
+        parent: Option<MailId>,
+        root: Option<MailId>,
+    ) -> MailId {
+        let mail_id =
+            self.binding.push_envelope_buffered(target.id().0, K::ID.0, &payload.encode_into_bytes(), 1, parent, root);
         self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
         mail_id
     }

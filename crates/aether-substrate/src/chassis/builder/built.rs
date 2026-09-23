@@ -134,6 +134,27 @@ impl<C: Chassis> BuiltChassis<C> {
     pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
         self.booted.spawner.push_for_reply(to, kind, payload, reply);
     }
+
+    /// Push `payload` to the actor `to` proves as a chassis-root mail and
+    /// return the receiver that fires once its whole causal chain settles
+    /// (ADR-0080 §6) — the tracked sibling of [`Self::send_for_reply`], gated
+    /// on the `test-support` feature the same way.
+    ///
+    /// [`PassiveChassis::send_tracked`] is the same push for a chassis with
+    /// no driver. The bloomery harness's `call` is the consumer: it asserts
+    /// that a `Call`'s chain settles once its outcome is out.
+    #[cfg(any(test, feature = "test-support"))]
+    #[must_use]
+    pub fn send_tracked(
+        &self,
+        to: ErasedActorRef,
+        kind: KindId,
+        payload: Vec<u8>,
+        correlation: u64,
+        reply: Option<ReplyTarget>,
+    ) -> Receiver<()> {
+        self.booted.spawner.push_tracked(to, kind, payload, correlation, reply)
+    }
 }
 
 /// A chassis built without a driver. The embedder (`SubstrateHarness`, future
