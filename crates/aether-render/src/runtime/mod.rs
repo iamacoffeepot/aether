@@ -41,7 +41,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use aether_actor::{ReplyMode, runtime};
+use aether_actor::{ErasedActorRef, ReplyMode, runtime};
 use aether_data::MailboxId;
 pub use aether_data::{Kind, KindId};
 
@@ -208,10 +208,14 @@ pub struct RenderCapabilityState {
 
     mailer: Arc<Mailer>,
     assets_dir: Option<PathBuf>,
-    /// Harness observer inbox for dispatch witnesses (issue 5965). `Some`
-    /// in the substrate harness, `None` in production chassis. A plain id —
-    /// no shared state rides the params.
-    observer: Option<MailboxId>,
+    /// The observer position `RenderParams::observed_kinds` handed over,
+    /// held from `init` until `wire` proves it (ADR-0230 §3's receipt door)
+    /// and takes it. `None` after `wire`, and always in production chassis.
+    observer_position: Option<MailboxId>,
+    /// Proof of the harness observer inbox for dispatch witnesses (issue
+    /// 5965), proven once from `observer_position` in `wire`. `Some` in the
+    /// substrate harness, `None` in production chassis.
+    observer: Option<ErasedActorRef>,
 }
 
 struct BuiltReplacement {
@@ -313,7 +317,7 @@ impl RenderCapabilityState {
     /// nothing downstream decodes a witness.
     fn observe<M: ReplyMode, A>(&self, ctx: &NativeCtx<'_, A, M>, kind: KindId) {
         if let Some(observer) = self.observer {
-            let _ = ctx.send_envelope_tracked(observer, kind, &[]);
+            let _ = ctx.send_envelope_tracked_to(observer, kind, &[]);
         }
     }
 
@@ -810,8 +814,30 @@ impl NativeActor for RenderCapability {
             pending_capture: None,
             mailer,
             assets_dir: params.assets_dir,
-            observer: params.observed_kinds,
+            observer_position: params.observed_kinds,
+            observer: None,
         })
+    }
+
+    /// Prove the observer position the params handed over, once, and keep
+    /// only the proof (ADR-0230 §3). The observer is a raw inline inbox the
+    /// harness registers by name before the cap boots, so no spawn or
+    /// dependency door proves it; a position that arrived in config is the
+    /// receipt door's case. `wire` runs before the route goes `Live`, so no
+    /// handler witnesses before the proof. A position that does not prove
+    /// leaves the witness off.
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        let Some(position) = state.observer_position.take() else {
+            return;
+        };
+        match ctx.resolve_live(position) {
+            Ok(observer) => state.observer = Some(observer),
+            Err(error) => tracing::warn!(
+                target: "aether_substrate::render",
+                %error,
+                "render cap observer position did not prove; dispatch witnesses are off",
+            ),
+        }
     }
 
     /// `DrawTriangle` accumulator, on the owned `frame_vertices` buffer.
@@ -1397,6 +1423,7 @@ mod tests {
             pending_capture: None,
             mailer: Arc::clone(mailer),
             assets_dir: None,
+            observer_position: None,
             observer: None,
         }
     }
@@ -1420,10 +1447,13 @@ mod tests {
     }
 
     /// Point the state's witness channel at a fresh inline observer inbox,
+    /// proven through a test ctx the way `wire` proves the params position,
     /// returning the kinds the inbox has recorded.
     fn observe_via_mail(mailer: &Arc<Mailer>, state: &mut RenderCapabilityState) -> Arc<Mutex<Vec<KindId>>> {
         let (inbox, kinds) = test_observer(mailer);
-        state.observer = Some(inbox);
+        let binding = ctx_binding(mailer);
+        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        state.observer = Some(ctx.resolve_live(inbox).expect("a freshly registered inline observer proves"));
         kinds
     }
 

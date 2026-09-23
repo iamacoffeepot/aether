@@ -1,16 +1,18 @@
 //! The relay — the sweep's synthetic forwarding actor — with the bounded CPU
-//! spin a heavy relay burns per inbound `Ping` and the deterministic id the
-//! topology is wired from before any actor spawns.
+//! spin a heavy relay burns per inbound `Ping`, the reverse-order spawn that
+//! hands each relay its downstreams' proofs, and the deterministic id a
+//! harness injects a root at.
 
 use std::hint::black_box;
 use std::sync::Arc;
 
-use aether_actor::OutboundReply;
+use aether_actor::{ActorRef, OutboundReply};
 use aether_data::{Kind, KindId, MailboxId, ReplyContract, mailbox_id_from_name};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
-use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, SpawnError, Subname};
 
-use super::{CountQuery, CountReport, Ping};
+use super::{CountQuery, CountReport, Ping, Topology};
+use crate::SubstrateHarness;
 
 /// Bounded, deterministic CPU spin: an FNV-1a-style integer mix run
 /// `iters` times. Real compute that occupies the worker thread for the
@@ -30,23 +32,24 @@ fn busy_spin(iters: u64) {
     black_box(acc);
 }
 
-/// Spawn config for a [`Relay`]: who to forward to, and how much CPU
+/// Spawn config for a [`Relay`]: the proofs of the relays it forwards to
+/// (already spawned — see [`spawn_relays`]), and how much CPU
 /// work to burn per inbound `Ping` before forwarding. `work_iters == 0`
 /// is the trivial relay; a non-zero count makes a leaf contend for a
 /// core (the parallel-heavy regime, iamacoffeepot/aether#1074).
 pub struct RelayConfig {
-    pub downstreams: Arc<[MailboxId]>,
+    pub downstreams: Arc<[ActorRef<Relay>]>,
     pub work_iters: u64,
 }
 
 /// A relay forwards each inbound `Ping` to every configured downstream
-/// mailbox, inheriting the trace lineage so the whole topology is one
+/// relay, inheriting the trace lineage so the whole topology is one
 /// causal tree. A leaf relay (empty `downstreams`) just receives and
 /// returns. Before forwarding it burns `work_iters` of `busy_spin`
 /// CPU — zero by default, so trivial topologies are unchanged. Pooled
 /// (the `Addressable` default).
 pub struct Relay {
-    downstreams: Arc<[MailboxId]>,
+    downstreams: Arc<[ActorRef<Self>]>,
     work_iters: u64,
     /// `Ping` mails handled, for the run-end keep-up harvest
     /// (iamacoffeepot/aether#1233). A plain field — the actor is
@@ -130,8 +133,8 @@ impl Dispatch<Self> for Relay {
         // Forward the bytes verbatim to each downstream. Each push
         // stamps its own `t_sent`, so later children in a fan-out reveal
         // any per-child enqueue skew.
-        for &down in state.downstreams.iter() {
-            let _ = ctx.send_envelope_tracked(down, Ping::ID, payload);
+        for down in state.downstreams.iter() {
+            let _ = ctx.send_envelope_tracked_to(down.erase(), Ping::ID, payload);
             state.sent += 1;
         }
         Some(())
@@ -140,13 +143,58 @@ impl Dispatch<Self> for Relay {
 
 pub(super) const RELAY_NS: &str = "mlat.relay";
 
+/// Spawn every relay in `topo` onto `tb` (subname = relay index) and return
+/// relay 0's proof — the entry a tick source or an injected root feeds.
+///
+/// Relays spawn from index `n - 1` down to `0`, so every downstream a relay
+/// forwards to is already spawned and its `finish()` proof is in hand when
+/// the relay's config is built. That holds because every [`Topology`] edge
+/// points to a higher index; a factory that breaks the invariant panics here,
+/// naming the relay and the edge. A spawn failure returns the failing relay's
+/// index with its error, leaving the relays spawned before it live.
+///
+/// Callers: the sweep cell (`run_cell`), the mail-latency settlement guards,
+/// and the cost-cell tripwire below.
+///
+/// # Errors
+///
+/// `(index, error)` for the first relay whose spawn fails.
+///
+/// # Panics
+///
+/// If `topo` has no relays, or an edge in `topo.downstreams[i]` names an
+/// index that is not greater than `i` (or is out of range).
+pub fn spawn_relays(tb: &SubstrateHarness, topo: &Topology) -> Result<ActorRef<Relay>, (usize, SpawnError)> {
+    let mut spawned: Vec<Option<ActorRef<Relay>>> = vec![None; topo.downstreams.len()];
+    for i in (0..topo.downstreams.len()).rev() {
+        let downstreams = topo.downstreams[i]
+            .iter()
+            .map(|&j| {
+                spawned.get(j).copied().flatten().unwrap_or_else(|| {
+                    panic!(
+                        "topology {}: relay {i} forwards to relay {j}, which is not spawned before it — every edge \
+                         must point to a higher index",
+                        topo.name
+                    )
+                })
+            })
+            .collect();
+        let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
+        let relay = tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().map_err(|e| (i, e))?;
+        spawned[i] = Some(relay);
+    }
+
+    Ok(spawned.first().copied().flatten().expect("a topology has at least its entry relay"))
+}
+
 /// Deterministic `MailboxId` for relay instance `i`. Mirrors the
-/// substrate's `mailbox_id_from_name("{NAMESPACE}:{subname}")` so the
-/// whole topology can be wired from precomputed ids before any actor is
-/// spawned (sidesteps spawn-ordering between a relay and its
-/// downstreams).
-// Harness wires its synthetic relay topology from precomputed name-hashed ids
-// before any actor spawns — id derivation, not sibling-cap addressing.
+/// substrate's `mailbox_id_from_name("{NAMESPACE}:{subname}")`, so a harness
+/// can inject a root at a spawned relay by position
+/// (`SubstrateHarness::inject_root` takes a `MailboxId`) and the registry
+/// probe can name its read targets. Downstream wiring does not read it —
+/// [`spawn_relays`] hands each relay proofs.
+// Harness derives a spawned relay's name-hashed id to inject roots at it —
+// id derivation, not sibling-cap addressing.
 #[must_use]
 #[allow(clippy::disallowed_methods)]
 pub fn relay_id(i: usize) -> MailboxId {
@@ -171,7 +219,6 @@ pub fn relay_id(i: usize) -> MailboxId {
 #[cfg(test)]
 mod cost_cell_liveness {
     use aether_kinds::{CostTail, CostTailResult, LifecycleSubscribe, LifecycleSubscribeResult, Tick};
-    use aether_substrate::Subname;
 
     use super::*;
     use crate::perf::harness::{TickSource, fanout, ticksrc_id};
@@ -186,12 +233,8 @@ mod cost_cell_liveness {
             return;
         };
 
-        for i in 0..topo.downstreams.len() {
-            let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-            let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
-            tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().expect("relay spawns");
-        }
-        tb.spawn_actor::<TickSource>(Subname::Named("src"), (relay_id(0), 1), ()).finish().expect("source spawns");
+        let entry = spawn_relays(&tb, &topo).expect("relays spawn");
+        tb.spawn_actor::<TickSource>(Subname::Named("src"), (entry, 1), ()).finish().expect("source spawns");
 
         let sub_req = LifecycleSubscribe { stage: Tick::ID.0, mailbox: ticksrc_id().0 }.encode_into_bytes();
         let reply =

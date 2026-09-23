@@ -139,13 +139,17 @@ pub fn apply_manifest_clear_color(sources: &mut ConfigSources, clear_color: Opti
 /// assert what kinds the cap has seen. The witness is mail, not shared
 /// state: each handler sends an empty same-kind envelope to this mailbox
 /// (issue 5965), which the harness's inline observer records as the
-/// dispatched kind id. Production chassis leave it `None` (zero
-/// overhead). Decode failures and unknown kinds don't witness (the
+/// dispatched kind id. The inbox is a raw inline registration, so the
+/// params carry its position; the capability proves it once, in its
+/// `wire` hook (ADR-0230 §3), and keeps only the proof — a position that
+/// does not prove leaves the witness off. Production chassis leave it
+/// `None` (zero overhead). Decode failures and unknown kinds don't witness (the
 /// macro miss path warn-logs at the chassis-side dispatcher and
 /// short-circuits before any handler runs).
 #[derive(Clone, Default)]
 pub struct RenderParams {
-    /// `SubstrateHarness` observer inbox for dispatch witnesses.
+    /// `SubstrateHarness` observer inbox for dispatch witnesses, proven
+    /// once at `wire`.
     pub observed_kinds: Option<MailboxId>,
     /// Resolved path for the `"assets"` namespace, used by the
     /// `capture_frame` handler to read reference images for similarity

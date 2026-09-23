@@ -42,7 +42,7 @@ pub use knobs::{
     parse_workers, saturate_backlog_from_env, scheduler_tuning_from_env, tiers_from_env, wide_fanout_widths_from_env,
 };
 pub use percentiles::{Stats, TAIL_MASS_MULTIPLE, summarize};
-pub use relay::{Relay, RelayConfig, relay_id};
+pub use relay::{Relay, RelayConfig, relay_id, spawn_relays};
 pub use sweep::{Drive, SweepConfig, run_sweep, run_sweep_samples};
 pub use tick::{TickSource, ticksrc_id};
 pub use topology::{
