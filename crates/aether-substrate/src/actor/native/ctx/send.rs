@@ -8,7 +8,10 @@
 //! multicasts one encoding to a runtime recipient set of proofs. A
 //! boundary bundle item, proven by
 //! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle), leaves
-//! only through `deliver_detached` or `deliver_forwarded`. The
+//! only through `deliver_detached` or `deliver_forwarded`. The call a
+//! handler is serving is forwarded, reply target and chain intact, by
+//! `deliver_forwarded` for a bundle item and by `forward_to` for a typed
+//! payload to a proof. The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
 //! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
 //! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
@@ -136,46 +139,6 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         )
     }
 
-    /// Re-dispatch variant of [`Self::send_envelope_tracked`] that pins the
-    /// child mail's `reply_to` to the supplied [`Source`] instead of
-    /// stamping the default `(Component(self_mailbox), auto_correlation)`.
-    /// The minted [`MailId`] and the chain's `in_flight` accounting are
-    /// unchanged — only the recipient's
-    /// [`OutboundReply::reply_target`]
-    /// view changes.
-    ///
-    /// Use this when a cap is **forwarding** another actor's call rather
-    /// than originating one: the trace cap servicing `DispatchTraced`
-    /// (issue 1265 — the `send_mail_traced` batched-dispatch path)
-    /// re-dispatches each child envelope but wants the child's deferred
-    /// reply to land at the **original** caller's `reply_to` (the RPC
-    /// server holding the wire `cid`'s in-flight entry), not stranded at
-    /// the trace cap's own mailbox where no handler exists for it.
-    ///
-    /// Pass `ctx.reply_target()` as `reply_to` to forward to whoever
-    /// invoked this cap. Single-Call paths (the RPC server's
-    /// [`Self::send_envelope_detached_to`] dispatching directly at the
-    /// receiver) never reach this method — the default `reply_to` lands
-    /// at the dispatcher which is also the call-correlation owner.
-    #[must_use]
-    pub fn send_envelope_tracked_with_reply_to(
-        &self,
-        recipient: MailboxId,
-        kind: KindId,
-        bytes: &[u8],
-        reply_to: Source,
-    ) -> MailId {
-        self.binding.push_envelope_buffered_with_reply_to(
-            recipient.0,
-            kind.0,
-            bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-            Some(reply_to),
-        )
-    }
-
     /// Like [`Self::send_envelope_tracked`] but always starts a fresh
     /// causal chain — ignores the ctx's in-flight lineage and passes
     /// `parent_mail = None, inherited_root = None` to the dispatch
@@ -296,6 +259,31 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             recipient.id().0,
             kind.0,
             &payload,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+            Some(self.source),
+        );
+    }
+
+    /// Forward the call this handler is serving to the actor `target` proves:
+    /// `payload` inherits this handler's chain, so the call stays open until
+    /// the target replies, and its reply target is pinned to the inbound one,
+    /// so the target's reply goes to whoever sent the inbound mail.
+    ///
+    /// No `HandlesKind` bound checks `payload` against the target, which
+    /// ADR-0230 §2 allows for an erased reference, as for any send to an
+    /// [`ErasedActorRef`].
+    ///
+    /// Its consumers are the component host's `DropComponent` forward to the
+    /// addressed trampoline and the `aether.window` root's forward of a
+    /// per-window command to the sole live window.
+    pub fn forward_to<K: Kind>(&self, target: &ErasedActorRef, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.binding.push_envelope_buffered_with_reply_to(
+            target.id().0,
+            K::ID.0,
+            &bytes,
             1,
             self.outbound_parent(),
             self.outbound_root(),

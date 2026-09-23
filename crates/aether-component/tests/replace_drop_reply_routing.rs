@@ -19,10 +19,10 @@ mod tests {
     /// Load the `probe` component, then drive a `ReplaceComponent`
     /// and a `DropComponent` to its cap over the real wire and assert
     /// each draws its `*Result::Ok` as a streamed reply event ahead
-    /// of `ReplyEnd`. Both ops route through the component cap's
-    /// `forward_to_trampoline`; before the issue-1466 fix the forward
-    /// let the call settle before the trampoline replied, so the
-    /// reply set came back empty.
+    /// of `ReplyEnd`. The drop routes through the component host's
+    /// `forward_to` and the replace through its tracked forward; before
+    /// the issue-1466 fix the forward let the call settle before the
+    /// trampoline replied, so the reply set came back empty.
     #[test]
     fn forwarded_replace_and_drop_route_their_reply() {
         if !dist_component_available("aether_test_fixtures_bundle") {

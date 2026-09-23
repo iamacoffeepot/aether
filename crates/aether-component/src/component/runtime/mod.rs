@@ -4,9 +4,8 @@
 //! `ComponentHostCapability` identity never names these types nor pulls
 //! `aether_substrate` / `wasmtime`. The substrate-typed imports are gated once
 //! by this module rather than line-by-line; the `#[actor] impl` reaches the
-//! state and the `forward_to_trampoline` helper through the single
-//! `use runtime::*` glob in the parent, and the `load` sibling reaches the
-//! state fields through their `pub` visibility.
+//! state through the single `use runtime::*` glob in the parent, and the
+//! `load` sibling reaches the state fields through their `pub` visibility.
 
 // The moved `#[runtime] impl NativeActor for ComponentHostCapability` body
 // names the `#[runtime]` attribute, the cap struct, the cap kinds (input +
@@ -39,14 +38,13 @@ use aether_kinds::{
 pub use aether_actor::Manual;
 
 // Crate-local wiring the `#[runtime] impl` handler bodies name (the
-// `Kind` / `MailboxCategory` vocabulary), the state struct, and
-// `forward_to_trampoline` — all used within this module. No sibling-cap
-// imports: drop-time cleanup rides the ADR-0079 vacate/close
-// `MonitorNotice` (each cap monitors its registrants and purges its own
-// rows), so the host names no peer cap's type or kinds.
-use aether_actor::{ErasedActorRef, OutboundReply, ReplyMode, Single};
+// `MailboxCategory` vocabulary) and the state struct — all used within this
+// module. No sibling-cap imports: drop-time cleanup rides the ADR-0079
+// vacate/close `MonitorNotice` (each cap monitors its registrants and purges
+// its own rows), so the host names no peer cap's type or kinds.
+use aether_actor::{ErasedActorRef, OutboundReply, Single};
 use aether_data::ActorPath;
-use aether_data::{Kind, MailboxCategory, Source};
+use aether_data::{MailboxCategory, Source};
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -61,7 +59,6 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{Registry, RegistrySubscription};
-use aether_substrate::mail::{KindId, MailboxId};
 
 /// `aether.component` runtime state (ADR-0122 split). Holds the wasmtime
 /// `engine` + `linker` every load instantiates against, the mail `registry`,
@@ -171,34 +168,6 @@ pub struct BootEntry {
     pub path: ActorPath,
     pub refcount: u32,
     pub pending_requests: u32,
-}
-
-/// Forward an arbitrary kind to a trampoline's mailbox, preserving the
-/// original `reply_to` so the trampoline's reply lands at the agent (not the
-/// cap). Used for [`DropComponent`] and [`ReplaceComponent`].
-///
-/// The forward threads the child mail under the cap's current in-flight root
-/// and bumps that root's `in_flight` count before the calling handler returns
-/// (`send_envelope_tracked_with_reply_to`), so the originating call stays open
-/// across the boundary: the trampoline's deferred `ctx.reply` streams back
-/// under a still-open root and settlement fires `ReplyEnd` only after it. A
-/// bare enqueue would let the cap handler's return settle the call before the
-/// trampoline replied, dropping the reply (the deferred-reply hold-open
-/// contract).
-///
-/// A free fn (no `self`) under the ADR-0122 split: the state-bearing struct
-/// holds no field this helper reads, so it stays stateless and the handlers
-/// reach it through the parent's `use runtime::*` glob.
-fn forward_to_trampoline<M: ReplyMode, P>(
-    ctx: &mut NativeCtx<'_, Erased, M>,
-    recipient: MailboxId,
-    kind: KindId,
-    payload: &P,
-) where
-    P: Kind,
-{
-    let bytes = payload.encode_into_bytes();
-    let _ = ctx.send_envelope_tracked_with_reply_to(recipient, kind, &bytes, ctx.reply_target());
 }
 
 #[runtime]
@@ -327,13 +296,12 @@ impl NativeActor for ComponentHostCapability {
         // prove the answer at once. An address with no live route has no
         // trampoline to drop, so it answers `Err` now rather than forwarding
         // into nothing; the position is never kept.
-        let proven =
-            state.registry.resolve_address(&payload.target).map_err(|error| error.to_string()).and_then(|resolved| {
-                ctx.resolve_live(resolved.mailbox_id)
-                    .map(|actor| (actor, resolved.mailbox_id))
-                    .map_err(|error| error.to_string())
-            });
-        let (actor, position) = match proven {
+        let proven = state
+            .registry
+            .resolve_address(&payload.target)
+            .map_err(|error| error.to_string())
+            .and_then(|resolved| ctx.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string()));
+        let actor = match proven {
             Ok(proven) => proven,
             Err(error) => {
                 ctx.reply(&DropResult::Err { error: format!("no component to drop at {}: {error}", payload.target) });
@@ -365,7 +333,9 @@ impl NativeActor for ComponentHostCapability {
         // own `DropComponent` handler vacates its registrations).
         state.invalidate_replacement_boot_operation(actor);
         state.release_boot_ref(ctx, actor);
-        forward_to_trampoline(ctx, position, DropComponent::ID, &payload);
+        // The forward inherits this call's chain, so the call stays open until
+        // the trampoline's deferred reply lands at the original caller.
+        ctx.forward_to(&actor, &payload);
     }
 
     /// Replace the component at `target` with a fresh wasm

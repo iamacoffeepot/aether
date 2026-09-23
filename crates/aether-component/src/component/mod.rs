@@ -36,8 +36,8 @@
 //! - `mod.rs` — this file: the identity ZST, the `#[actor(singleton)] impl
 //!   NativeActor` with `init` + the four lifecycle handlers over
 //!   `state: &mut Self::State`.
-//! - `runtime.rs` — the `feature = "runtime"` half: the state struct, the
-//!   substrate / wasmtime imports, and the free `forward_to_trampoline`.
+//! - `runtime.rs` — the `feature = "runtime"` half: the state struct and the
+//!   substrate / wasmtime imports.
 //! - `load.rs` — the `handle_load` sequence as a method on the state; the
 //!   state fields carry `pub` so this sibling reaches
 //!   them.
@@ -65,8 +65,8 @@ use aether_kinds::LoadResult;
 // carrying that module's own imports so the handler and reply kinds resolve
 // without being restated at this file's root. Everything that names an
 // `aether_substrate` / `wasmtime` type — the `#[runtime] impl NativeActor`, the
-// handler/init ctx, the runtime state, the `forward_to_trampoline` helper —
-// lives in the `runtime` module below, gated once by `feature = "runtime"`.
+// handler/init ctx, and the runtime state — lives in the `runtime` module below,
+// gated once by `feature = "runtime"`.
 use aether_actor::actor;
 
 /// `aether.component` cap **identity** (ADR-0122 identity/runtime split). A
@@ -99,8 +99,8 @@ pub struct LoadDelivered {
 }
 
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
-// (imports, `ComponentHostCapabilityState`, `forward_to_trampoline`, and the
-// `#[runtime] impl NativeActor`) — lives in `runtime.rs`, gated once here. The
+// (imports, `ComponentHostCapabilityState`, and the `#[runtime] impl
+// NativeActor`) — lives in `runtime.rs`, gated once here. The
 // struct-hosted `#[actor]` above reads that module off disk to emit the
 // identity markers; the runtime body is self-contained there.
 #[cfg(feature = "runtime")]

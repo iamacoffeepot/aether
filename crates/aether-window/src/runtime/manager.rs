@@ -16,15 +16,17 @@ use crate::{
 /// answering the *original* requester rather than this manager.
 ///
 /// The seven command kinds are the window endpoint's (`runtime::instance`), so
-/// the root owns no copy of their semantics: it forwards the request verbatim
-/// with the requester's own `reply_to` pinned, and the endpoint's existing
+/// the root owns no copy of their semantics: it proves the sole window live
+/// (ADR-0230) and forwards the request verbatim through that proof with the
+/// requester's own `reply_to` pinned, and the endpoint's existing
 /// retain-and-answer plumbing replies straight to the caller under the
 /// caller's correlation. Every per-window consequence the endpoint owns — a
 /// close retiring its own actor — still happens, and the manager keeps no
 /// correlation state.
 ///
-/// `Err` carries the refusal text for the two ambiguous cases, which the
-/// caller receives as the command's own `Err` variant rather than as silence.
+/// `Err` carries the refusal text for the two ambiguous cases and for a sole
+/// window that is no longer live, which the caller receives as the command's
+/// own `Err` variant rather than as silence or a forward into a dead mailbox.
 fn route_to_sole_window<K: Kind>(
     windows: &[WindowId],
     ctx: &mut NativeCtx<'_, Erased, Manual>,
@@ -42,12 +44,10 @@ fn route_to_sole_window<K: Kind>(
             ));
         }
     };
-    let _ = ctx.send_envelope_tracked_with_reply_to(
-        MailboxId(window.0),
-        K::ID,
-        &mail.encode_into_bytes(),
-        ctx.reply_target(),
-    );
+    let target = ctx.resolve_live(MailboxId(window.0)).map_err(|error| {
+        format!("{} reached the aether.window root, but window {} is not live: {error}", K::NAME, window.0)
+    })?;
+    ctx.forward_to(&target, mail);
     Ok(())
 }
 
