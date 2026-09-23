@@ -94,13 +94,10 @@ fn await_driver(fleet: &mut FleetHarness, engine: EngineId, through: u64) -> Pro
     single(&replies.expect("a ready driver answered"))
 }
 
-/// Send `request` to the driver on `engine` and decode its outcome.
-///
-/// The outcome is the first reply, not the call's settlement: the journal
-/// watch the driver re-arms can inherit the call's chain and hold it open.
+/// Send `request` to the driver on `engine`, wait for the call to settle, and
+/// decode its one outcome.
 fn call(fleet: &mut FleetHarness, engine: EngineId, request: &Call) -> CallOutcome {
-    let reply = fleet.send_for_reply(engine, DRIVER, request);
-    CallOutcome::decode_from_bytes(&reply.payload).expect("the driver answers a Call with a CallOutcome")
+    single(&fleet.send(engine, DRIVER, request))
 }
 
 /// The one reply in `replies`, decoded as `K`.

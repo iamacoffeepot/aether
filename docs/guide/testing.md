@@ -151,10 +151,8 @@ seed staging returned; `fold` runs a view only over the actual journal, never to
 an expected value, so a bug in a fold cannot move both sides together. A crash needs a
 real process to die, so crash scenarios live in `aether-chassis-bloomery`'s tests, where
 `CARGO_BIN_EXE_aether-bloomery` resolves: they fork the binary through FleetHarness with
-restart supervision armed (`start_restarting`, `spawn_binary`, `await_restart`), take each
-driver `Call`'s outcome from its first reply (`send_for_reply`, since the driver's journal
-watch can hold the call's chain open past the answer), and read the journal back through
-the same expectations on the `SeededJournal` the engine opened.
+restart supervision armed (`start_restarting`, `spawn_binary`, `await_restart`), and read
+the journal back through the same expectations on the `SeededJournal` the engine opened.
 
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection

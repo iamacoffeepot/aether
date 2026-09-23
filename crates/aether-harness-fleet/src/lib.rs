@@ -37,7 +37,7 @@
 // sanctioned wire-`Call`-forwarding use.
 #![allow(clippy::disallowed_methods)]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::env;
 use std::fs;
 use std::io::ErrorKind;
@@ -246,13 +246,6 @@ enum DistComponentRequirement {
     StemMissing,
 }
 
-/// One reply frame for the call being read: a `ReplyEvent`'s envelope, or
-/// the `ReplyEnd` result that closes the call.
-enum CallFrame {
-    Event(MailEnvelope),
-    End(Result<(), RpcError>),
-}
-
 /// The two `LoadResult::Ok` fields a loaded component exposes: the rendered
 /// ADR-0099 lineage `addr` (the [`replace`](FleetHarness::replace) target and
 /// every later recipient), and the advertised receive-side `capabilities`.
@@ -275,10 +268,6 @@ pub struct FleetHarness {
     next_cid: u64,
     spawned: Vec<EngineId>,
     calls: Vec<CallRecord>,
-    /// Calls [`send_for_reply`](Self::send_for_reply) returned from before
-    /// their `ReplyEnd`. Their late frames are discarded, and each leaves
-    /// the set when its `ReplyEnd` arrives.
-    left_open: BTreeSet<u64>,
     /// Per-harness scratch root the forked substrates materialize their
     /// per-engine executables under (ADR-0115), so they can't collide with
     /// another concurrent fork+exec test on the shared default root.
@@ -322,15 +311,8 @@ impl FleetHarness {
             .set_read_timeout(Some(READ_REARM))
             .expect("test setup: setting a read timeout on a connected stream succeeds");
 
-        let mut harness = Self {
-            _chassis: chassis,
-            stream,
-            next_cid: 1,
-            spawned: Vec::new(),
-            calls: Vec::new(),
-            left_open: BTreeSet::new(),
-            store_root,
-        };
+        let mut harness =
+            Self { _chassis: chassis, stream, next_cid: 1, spawned: Vec::new(), calls: Vec::new(), store_root };
         harness.handshake();
         harness
     }
@@ -802,43 +784,6 @@ impl FleetHarness {
         self.try_call_with_budget(Some(engine), recipient, mail, reply_cap(), "reply")
     }
 
-    /// Route a mail like [`send`](Self::send), but return its first reply
-    /// envelope rather than waiting for the call's `ReplyEnd`.
-    ///
-    /// The hub writes `ReplyEnd` when the dispatched chain settles, and a
-    /// recipient can answer long before that: the bloomery driver answers a
-    /// native `Call` once its outcome is recorded, while the journal watch it
-    /// re-arms may hold the call's chain open indefinitely. The call stays
-    /// open on the wire, and the next read discards any frame that later
-    /// arrives for it, such as the `ReplyEnd` `Err` the hub writes when the
-    /// engine leaves.
-    ///
-    /// # Panics
-    ///
-    /// Panics when the call ends before any reply, or no reply arrives
-    /// within the steady-state reply backstop
-    /// (`AETHER_HARNESS_FLEET_REPLY_CAP_SECS`).
-    pub fn send_for_reply<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> MailEnvelope
-    where
-        K: Kind,
-    {
-        let cid = self.write_request(Some(engine), recipient, mail);
-        match self.next_call_frame(cid, recipient, reply_cap(), "reply", Instant::now()) {
-            CallFrame::Event(envelope) => {
-                self.left_open.insert(cid);
-                self.calls.push(CallRecord {
-                    cid,
-                    engine: Some(engine),
-                    mailbox: recipient.to_owned(),
-                    request_kind: K::ID,
-                    reply_kinds: vec![envelope.kind],
-                });
-                envelope
-            }
-            CallFrame::End(result) => panic!("call {cid} to {recipient:?} ended before any reply: {result:?}"),
-        }
-    }
-
     /// Write one `Call` frame and read until its `ReplyEnd`, returning
     /// the `ReplyEvent` envelopes seen in between and recording the call
     /// into [`calls`](Self::calls). Panics on a `ReplyEnd::Err` or a
@@ -892,13 +837,22 @@ impl FleetHarness {
     where
         K: Kind,
     {
-        let cid = self.write_request(engine, mailbox, request);
+        let cid = self.next_cid;
+        self.next_cid += 1;
+
+        self.write_call(cid, engine, mailbox, K::ID, request.encode_into_bytes())
+            .expect("test setup: writing a Call frame to the hub succeeds");
+
         let mut events: Vec<MailEnvelope> = Vec::new();
         let start = Instant::now();
         loop {
-            match self.next_call_frame(cid, mailbox, budget, gate, start) {
-                CallFrame::Event(envelope) => events.push(envelope),
-                CallFrame::End(result) => {
+            match read_frame(&mut self.stream) {
+                Ok(WireFrame::ReplyEvent { cid: got_cid, envelope }) => {
+                    assert_eq!(got_cid, cid, "ReplyEvent cid mismatch");
+                    events.push(envelope);
+                }
+                Ok(WireFrame::ReplyEnd { cid: got_cid, result }) => {
+                    assert_eq!(got_cid, cid, "ReplyEnd cid mismatch");
                     result?;
                     self.calls.push(CallRecord {
                         cid,
@@ -908,39 +862,6 @@ impl FleetHarness {
                         reply_kinds: events.iter().map(|e| e.kind).collect(),
                     });
                     return Ok(events);
-                }
-            }
-        }
-    }
-
-    /// Assign the next wire correlation id and write `request` as one `Call`
-    /// frame under it.
-    fn write_request<K: Kind>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> u64 {
-        let cid = self.next_cid;
-        self.next_cid += 1;
-        self.write_call(cid, engine, mailbox, K::ID, request.encode_into_bytes())
-            .expect("test setup: writing a Call frame to the hub succeeds");
-        cid
-    }
-
-    /// Read the next `ReplyEvent` or `ReplyEnd` for call `cid`, discarding
-    /// the late frames of calls [`send_for_reply`](Self::send_for_reply) left
-    /// open. Re-arms on each `READ_REARM` socket timeout until `budget`
-    /// measured from `start` is exhausted — a genuine wedge, panicked with
-    /// `gate` naming the latency class (cold-start vs reply), the cid, the
-    /// mailbox, and the budget (issue 2064). A frame for any other call, or a
-    /// non-timeout read error (the connection genuinely failed), panics
-    /// immediately, distinct from a wedge.
-    fn next_call_frame(&mut self, cid: u64, mailbox: &str, budget: Duration, gate: &str, start: Instant) -> CallFrame {
-        loop {
-            match read_frame(&mut self.stream) {
-                Ok(WireFrame::ReplyEvent { cid: got_cid, envelope }) if got_cid == cid => {
-                    return CallFrame::Event(envelope);
-                }
-                Ok(WireFrame::ReplyEnd { cid: got_cid, result }) if got_cid == cid => return CallFrame::End(result),
-                Ok(WireFrame::ReplyEvent { cid: got_cid, .. }) if self.left_open.contains(&got_cid) => {}
-                Ok(WireFrame::ReplyEnd { cid: got_cid, .. }) if self.left_open.contains(&got_cid) => {
-                    self.left_open.remove(&got_cid);
                 }
                 Ok(other) => panic!("unexpected frame for call {cid}: {other:?}"),
                 // Socket read-timeout: no frame yet. Re-arm until the
