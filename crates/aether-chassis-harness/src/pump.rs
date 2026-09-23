@@ -136,11 +136,13 @@ impl HarnessDriver {
                 },
             };
             match event {
-                ChassisEvent::Advance { reply_to, ticks, delta_micros } => {
+                ChassisEvent::Advance { reply, ticks, delta_micros } => {
                     for _ in 0..ticks {
                         self.advance_frame(delta_micros);
                     }
-                    self.outbound.send_reply(reply_to, &AdvanceResult::Ok { ticks_completed: ticks });
+                    // Through the request's own inbound: it answers every
+                    // sender kind and holds the chain open until it drops.
+                    reply.reply(&AdvanceResult::Ok { ticks_completed: ticks });
                     // A capture can become ready during an advance (its
                     // pre-mails settled while the slot drained mid-wait).
                     self.capture_if_ready();

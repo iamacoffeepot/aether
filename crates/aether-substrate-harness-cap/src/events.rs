@@ -4,8 +4,10 @@
 //! scheduler worker; the loop runs on the main thread — this channel carries
 //! the wake.
 //!
-//! `Advance` carries the reply target so the loop can reply once all ticks
-//! complete. `RenderMail` is the pumped render slot's wake — "mail landed on
+//! `Advance` carries the request's retained inbound guard so the loop can
+//! reply through it once all ticks complete; the request's causal chain stays
+//! open until then, because the guard records its `Finished` on drop, after
+//! the reply's `Sent`. `RenderMail` is the pumped render slot's wake — "mail landed on
 //! the render slot, drain it" — installed on the slot's `MailboxWakeSlot`
 //! (mirroring desktop's `UserEvent::WindowMail`); the in-process harness never
 //! installs that wake, so the variant is the binary's alone.
@@ -13,7 +15,7 @@
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_substrate::Source;
+use aether_substrate::InboundMail;
 
 /// Events the event loop consumes. Single-consumer (the loop); the producers
 /// are the `aether.substrate_harness.advance` handler (`Advance`) and the
@@ -23,8 +25,12 @@ pub enum ChassisEvent {
     /// `aether.substrate_harness.advance { ticks, delta_micros }`. The event
     /// loop runs `ticks` full cycles (advance → frame mail → drain), each
     /// representing `delta_micros` elapsed time, then replies with
-    /// `AdvanceResult::Ok { ticks_completed }`.
-    Advance { reply_to: Source, ticks: u32, delta_micros: u32 },
+    /// `AdvanceResult::Ok { ticks_completed }` through `reply`, the handler's
+    /// retained inbound. The guard answers every sender kind (a wire `Call`
+    /// names the rpc server's mailbox) and holds the request's chain open
+    /// until it drops after the reply, so a caller awaiting settlement sees
+    /// the reply first. Boxed to keep the enum small beside `RenderMail`.
+    Advance { reply: Box<InboundMail>, ticks: u32, delta_micros: u32 },
     /// The pumped `aether.render` slot took mail — drain it (ADR-0161). A
     /// wake-only signal, mirroring desktop's `UserEvent::WindowMail`: the
     /// slot's wake sends it so a render mail landing while the loop is parked
