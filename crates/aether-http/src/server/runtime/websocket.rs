@@ -433,9 +433,9 @@ impl HttpShardState {
     /// outbound frames, grant the handler its initial outbound credit window,
     /// and flip the reader into the RFC 6455 frame loop. `correlation` is the
     /// handshake request's in-flight key.
-    pub fn accept_websocket(
+    pub fn accept_websocket<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         correlation: u64,
         conn_id: ConnId,
         handler: ErasedActorRef,
@@ -542,7 +542,7 @@ impl HttpShardState {
     /// stamped with the connection's `stream_id` (ADR-0132) so the handler
     /// knows which socket it arrived on and can answer — or push later — by
     /// naming that id.
-    pub fn dispatch_ws_message(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, binary: bool, data: Vec<u8>) {
+    pub fn dispatch_ws_message<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, binary: bool, data: Vec<u8>) {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };
@@ -553,7 +553,7 @@ impl HttpShardState {
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
     /// a `WebSocketClose` on its own fresh root — the inbound-close analog of
     /// [`Self::dispatch_ws_message`], so the handler observes the disconnect.
-    pub fn report_ws_close(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, code: u16, reason: &str) {
+    pub fn report_ws_close<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, code: u16, reason: &str) {
         let Some((handler, stream_id)) = self.ws_target(conn_id) else {
             return;
         };

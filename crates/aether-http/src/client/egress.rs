@@ -31,14 +31,16 @@ use std::collections::{HashMap, VecDeque};
 
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::Kind;
-use aether_substrate::actor::native::{DispatchId, Erased, NativeCtx, Pending};
+use aether_substrate::actor::native::{DispatchId, NativeCtx, Pending};
 
 /// A buffered fetch: replays an over-bound request via
 /// `dispatch_blocking_resumed_with` when a slot frees. Built and run on the
 /// actor thread (the actor IS the mutual exclusion), but `Send` so the
 /// embedding cap can hold it in its `NativeActor` state. Everything it closes
 /// over (the work closure, the captured `SettlementHold`, the reply `Source`,
-/// the sender key) is already `Send`.
+/// the sender key) is already `Send`. Stored over the erased ctx because it
+/// only re-dispatches — it never sends a typed request or spawns — so a typed
+/// caller's ctx erases on the way in, as `TaskQueue`'s buffered thunks do.
 type PendingFetch = Box<dyn FnOnce(&mut NativeCtx<'_>) + Send>;
 
 /// One sender's egress state: how many of its fetches are running, and the
@@ -94,9 +96,9 @@ impl PerSenderEgress {
     /// [`NativeCtx::dispatch_blocking_resumed_with`] when a slot frees, so the
     /// queued fetch keeps *its own* chain held from accept through its
     /// eventual re-reply and replies to *its own* caller (ADR-0158 §2).
-    pub fn submit<O, F, M>(
+    pub fn submit<O, F, M, A>(
         &mut self,
-        ctx: &mut NativeCtx<'_, Erased, M>,
+        ctx: &mut NativeCtx<'_, A, M>,
         sender: Option<ErasedActorRef>,
         work: F,
     ) -> Pending<O>
@@ -133,7 +135,7 @@ impl PerSenderEgress {
     /// sender's slot and one global slot, admits the next waiting request
     /// (rotating fairly across senders), then reclaims the completing sender's
     /// entry if it drained fully idle.
-    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>, sender: Option<ErasedActorRef>) {
+    pub fn on_complete<A>(&mut self, ctx: &mut NativeCtx<'_, A>, sender: Option<ErasedActorRef>) {
         if let Some(entry) = self.senders.get_mut(&sender) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
         }
@@ -156,7 +158,9 @@ impl PerSenderEgress {
     /// waiting senders to find the first that is under its per-sender budget,
     /// so a freed global slot is shared rather than recaptured by the busiest
     /// sender (ADR-0158 §3).
-    fn admit_next(&mut self, ctx: &mut NativeCtx<'_>) {
+    // The buffered thunks are stored erased (they only re-dispatch, never send
+    // a typed request or spawn), so a typed caller's ctx erases on the way in.
+    fn admit_next<A>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         if self.global_in_flight >= self.global_max {
             return;
         }
@@ -179,7 +183,7 @@ impl PerSenderEgress {
                 if still_pending {
                     self.waiting.push_back(key);
                 }
-                thunk(ctx);
+                thunk(ctx.erase());
                 return;
             }
 
