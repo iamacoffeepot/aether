@@ -275,6 +275,12 @@ path. Unknown roots, illegal segments, ambiguous children, path-limit
 violations, and a valid expansion with no live mailbox remain distinct
 resolution errors.
 
+At the boundary the text becomes an `aether_data::ActorPath`. Its grammar is
+checked when it is built or decoded, so a malformed address fails there rather
+than in the engine; it is stored as written, abbreviation included; and it
+becomes a position only in the engine's `resolve_address`, which expands
+abbreviations and checks liveness.
+
 ## Reply classes
 
 A handler declares how it answers through its class marker
@@ -548,8 +554,9 @@ bare-type spelling reaches it when the base is the type's own namespace; a
 component loaded under any other name is reached through the reference its load
 proved, never by folding the name at the send site.
 
-`LoadResult.name` is a boundary string: the host's `resolve_address` parser, at
-the MCP, RPC, and harness boundary, is the one place text becomes a position
+`LoadResult.name` is a boundary string an `ActorPath` can be built from: the
+host's `resolve_address` parser, at the MCP, RPC, and harness boundary, is the
+one place an `ActorPath` becomes a position
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 `LoadResult.mailbox_id` is the position beside it; a native receiver proves it
 once at receipt through `ctx.resolve_live` and sends through the resulting

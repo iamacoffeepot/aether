@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
-use aether_data::{Kind, KindDescriptor};
+use aether_data::{ActorPath, Kind, KindDescriptor};
 use aether_kinds::{
     ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
 };
@@ -172,7 +172,10 @@ impl ComponentHostCapabilityState {
     }
 
     pub fn begin_load_under(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponentUnder) {
-        let parent = match self.registry.resolve_address(&payload.parent) {
+        let resolved = ActorPath::new(&payload.parent)
+            .map_err(|error| error.to_string())
+            .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()));
+        let parent = match resolved {
             Ok(parent) => parent,
             Err(error) => {
                 ctx.reply(&LoadResult::Err {

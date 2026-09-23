@@ -181,7 +181,8 @@ mod tests {
             .expect("register canonical trampoline mailbox");
 
         for address in [canonical.as_str(), "aether.component://camera", "aether.component://aether.embedded:camera"] {
-            let resolved = registry.resolve_address(address).expect("address resolves to the live trampoline");
+            let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
+            let resolved = registry.resolve_address(&address).expect("address resolves to the live trampoline");
             assert_eq!(resolved.mailbox_id, typed);
             assert_eq!(resolved.canonical_path, canonical);
         }

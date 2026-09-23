@@ -865,8 +865,8 @@ mod control_plane {
     /// `aether.component/<name>`). `names` only — no mailbox id: the id is a
     /// deterministic hash-chain over the lineage the `name` already renders
     /// (ADR-0099), and routing is the substrate's job (a caller addresses by
-    /// `recipient_name` and the substrate resolves it), so the handle has no
-    /// use at the caller.
+    /// its lineage address and the substrate resolves it), so the handle has
+    /// no use at the caller.
     #[aether_data::kind(name = "aether.component.list_result")]
     pub struct ListComponentsResult {
         pub names: Vec<String>,
@@ -968,14 +968,18 @@ mod control_plane {
 
     /// One mail in a `CaptureFrame.mails` bundle. Structurally mirrors
     /// `aether_data::MailFrame` — a pre-encoded payload plus
-    /// the name-level addressing the substrate uses to resolve it.
+    /// the address the substrate resolves it by.
     /// The hub encodes each entry's `payload` via the kind's
     /// descriptor before wrapping it into the bundle, so the
     /// substrate side just pushes `Mail::new(mailbox, kind_id,
     /// payload, count)` directly.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct NamedMail {
-        pub recipient_name: String,
+        /// The recipient: a validated but unresolved ADR-0166 address,
+        /// canonical or abbreviated. The receiving capability resolves it
+        /// through `Registry::resolve_address`, which expands an
+        /// abbreviation and checks liveness.
+        pub recipient: aether_data::ActorPath,
         pub kind_name: String,
         #[serde(with = "aether_data::bytes")]
         pub payload: Vec<u8>,

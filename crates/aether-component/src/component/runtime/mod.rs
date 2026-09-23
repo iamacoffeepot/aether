@@ -45,6 +45,7 @@ pub use aether_actor::Manual;
 // `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
 use aether_actor::{OutboundReply, ReplyMode, Single};
+use aether_data::ActorPath;
 use aether_data::{Kind, MailboxCategory, Source};
 
 use std::collections::HashMap;
@@ -438,7 +439,10 @@ impl NativeActor for ComponentHostCapability {
         // `resolve_address`, not `lookup`: an abbreviated name that is
         // ambiguous rather than absent reports its candidate spellings instead
         // of collapsing to "nothing registered" (ADR-0166 §5, issue 4125).
-        let mailbox = match state.registry.resolve_address(&payload.name) {
+        let resolved = ActorPath::new(&payload.name)
+            .map_err(|error| error.to_string())
+            .and_then(|name| state.registry.resolve_address(&name).map_err(|error| error.to_string()));
+        let mailbox = match resolved {
             Ok(resolved) => resolved.mailbox_id,
             Err(error) => {
                 return DescribeComponentResult::Err {

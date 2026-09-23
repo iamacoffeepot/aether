@@ -4,7 +4,6 @@ mod components;
 mod contracts;
 mod describe;
 mod engine;
-mod envelope;
 mod failure_evidence;
 mod ids;
 mod logs_cost;

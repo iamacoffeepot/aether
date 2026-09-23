@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-24
 - **Accepted:** 2026-07-24
-- **Last amended:** 2026-07-31
+- **Last amended:** 2026-09-22
 
 ## Context
 
@@ -314,6 +314,9 @@ abbreviated-path := root-namespace "://" relative-path?
 relative-path    := relative-segment ( "/" relative-segment )*
 relative-segment := discriminator | canonical-segment
 ```
+
+`aether_data::ActorPath` owns this grammar: its constructor and decode accept
+exactly `address`, and the engine's resolver expands only an `ActorPath`.
 
 `root-namespace` is the exact `NAMESPACE` of a declared `Root`. The `://`
 delimiter says that the remaining segments are relative to that canonical

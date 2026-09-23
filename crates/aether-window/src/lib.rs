@@ -296,7 +296,8 @@ mod tests {
             .expect("register canonical live window mailbox");
 
         for address in [canonical, "aether.window://main", "aether.window://aether.window.instance:main"] {
-            let resolved = registry.resolve_address(address).expect("resolve live window address");
+            let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
+            let resolved = registry.resolve_address(&address).expect("resolve live window address");
             assert_eq!(resolved.mailbox_id, typed);
             assert_eq!(resolved.canonical_path, canonical);
         }

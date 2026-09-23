@@ -20,7 +20,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::{Addressable, actor};
-use aether_data::{Kind, mailbox_id_from_path};
+use aether_data::{ActorPath, Kind, mailbox_id_from_path};
 use aether_kinds::NamedMail;
 use aether_substrate::Registry;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -97,7 +97,7 @@ fn register(registry: &Registry, canonical: &str) {
 
 fn bundle(recipient: &str) -> Vec<NamedMail> {
     vec![NamedMail {
-        recipient_name: recipient.to_owned(),
+        recipient: ActorPath::new(recipient).expect("fixture recipient is a well-formed actor path"),
         kind_name: <Poke as Kind>::NAME.to_owned(),
         payload: Poke { value: 1 }.encode_into_bytes(),
         count: 1,

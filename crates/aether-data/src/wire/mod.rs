@@ -77,6 +77,8 @@ pub enum Error {
     InvalidLoadName,
     /// An address form selector that does not name a declared form.
     InvalidAddressForm(u32),
+    /// A decoded actor path that breaks the ADR-0166 address grammar.
+    InvalidActorPath,
 }
 
 impl fmt::Display for Error {
@@ -93,6 +95,7 @@ impl fmt::Display for Error {
             Self::InvalidEnum(selector) => write!(f, "aether wire: invalid enum selector {selector}"),
             Self::InvalidLoadName => f.write_str("aether wire: invalid load name"),
             Self::InvalidAddressForm(form) => write!(f, "aether wire: invalid address form {form}"),
+            Self::InvalidActorPath => f.write_str("aether wire: invalid actor path"),
         }
     }
 }

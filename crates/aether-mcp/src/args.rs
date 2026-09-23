@@ -350,8 +350,8 @@ pub struct EngineMailSpec {
     /// The pre-0.4 spelling `recipient_name` is still accepted as a
     /// deserialize alias for one release so existing bundles keep working;
     /// it is not advertised in the tool schema and is removed after
-    /// 0.4-alpha. The wire `NamedMail.recipient_name` field is unchanged —
-    /// the rename is a tool-boundary one.
+    /// 0.4-alpha. A bundle item's text is checked as an `ActorPath` when the
+    /// bundle is encoded.
     #[serde(alias = "recipient_name")]
     pub address: String,
     /// Kind name (e.g. `"aether.fs.list"`), resolved against the target

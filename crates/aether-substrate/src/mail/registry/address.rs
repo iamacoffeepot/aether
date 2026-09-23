@@ -7,7 +7,7 @@ use aether_data::name_inventory::{
     ChildEntry, NameEntry, ParamKind, RootEntry, TemplateEntry, child_entries, name_entries, root_entries,
     template_entries,
 };
-use aether_data::{ActorId, MAILBOX_DOMAIN, MAX_SCOPE_PATH_DEPTH, MailboxId, ScopePathError, validate_scope_path};
+use aether_data::{ActorId, MAILBOX_DOMAIN, MailboxId, PathSegment, ScopePathError, validate_scope_path};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ResolvedAddress {
@@ -389,25 +389,19 @@ impl AddressIndex {
         points
     }
 
-    pub(super) fn expand(&self, root: &str, relative: &str) -> Result<String, AddressResolutionError> {
-        validate_address_part(root).map_err(|_| AddressResolutionError::UnknownRoot { root: root.to_owned() })?;
+    /// Expand an abbreviation's parsed root and relative segments to its
+    /// canonical path. The segments come from an `ActorPath`, so their
+    /// grammar and the written caps already hold; the caps are rechecked as
+    /// the path grows, because a bare segment expands into
+    /// `namespace:discriminator`.
+    pub(super) fn expand(&self, root: &str, relative: &[PathSegment<'_>]) -> Result<String, AddressResolutionError> {
         let mut current = *self.roots.get(root).ok_or_else(|| self.unanchored_root(root))?;
         let mut canonical_segments = vec![root.to_owned()];
 
-        if !relative.is_empty() {
-            let relative_segments = relative.split('/').collect::<Vec<_>>();
-            if relative_segments.len() + 1 > MAX_SCOPE_PATH_DEPTH {
-                return Err(AddressResolutionError::PathTooDeep { limit: MAX_SCOPE_PATH_DEPTH });
-            }
-            if root.len() + 1 + relative.len() > aether_data::MAX_SCOPE_PATH_BYTES {
-                return Err(AddressResolutionError::PathTooLong { limit: aether_data::MAX_SCOPE_PATH_BYTES });
-            }
-
-            for segment in relative_segments {
-                let parent = canonical_segments.join("/");
-                current = self.expand_segment(current, &parent, segment, &mut canonical_segments)?;
-                validate_owned_scope_path(&canonical_segments)?;
-            }
+        for segment in relative {
+            let parent = canonical_segments.join("/");
+            current = self.expand_segment(current, &parent, segment, &mut canonical_segments)?;
+            validate_owned_scope_path(&canonical_segments)?;
         }
 
         validate_owned_scope_path(&canonical_segments)?;
@@ -431,36 +425,27 @@ impl AddressIndex {
         &self,
         current: ActorId,
         parent: &str,
-        segment: &str,
+        segment: &PathSegment<'_>,
         canonical_segments: &mut Vec<String>,
     ) -> Result<ActorId, AddressResolutionError> {
         let children = self.children.get(&current).map(Vec::as_slice).unwrap_or_default();
-        if let Some((namespace, discriminator)) = segment.split_once(':') {
-            if validate_address_part(namespace).is_err() || validate_address_part(discriminator).is_err() {
-                return Err(AddressResolutionError::IllegalSegment {
-                    parent: parent.to_owned(),
-                    segment: segment.to_owned(),
-                });
+        let segment = match *segment {
+            PathSegment::Qualified { namespace, discriminator } => {
+                let Some(child) = children
+                    .iter()
+                    .find(|child| child.namespace == namespace && child.cardinality == Cardinality::Instanced)
+                else {
+                    return Err(AddressResolutionError::IllegalSegment {
+                        parent: parent.to_owned(),
+                        segment: segment.to_string(),
+                    });
+                };
+                canonical_segments.push(format!("{}:{discriminator}", child.namespace));
+                return Ok(child.actor);
             }
-            let Some(child) = children
-                .iter()
-                .find(|child| child.namespace == namespace && child.cardinality == Cardinality::Instanced)
-            else {
-                return Err(AddressResolutionError::IllegalSegment {
-                    parent: parent.to_owned(),
-                    segment: segment.to_owned(),
-                });
-            };
-            canonical_segments.push(format!("{}:{discriminator}", child.namespace));
-            return Ok(child.actor);
-        }
+            PathSegment::Bare(segment) => segment,
+        };
 
-        if validate_address_part(segment).is_err() {
-            return Err(AddressResolutionError::IllegalSegment {
-                parent: parent.to_owned(),
-                segment: segment.to_owned(),
-            });
-        }
         if let Some(child) =
             children.iter().find(|child| child.namespace == segment && child.cardinality == Cardinality::Singleton)
         {
@@ -514,9 +499,19 @@ fn validate_owned_scope_path(segments: &[String]) -> Result<(), AddressResolutio
 
 #[cfg(test)]
 mod tests {
-    use std::iter::repeat_n;
+    use aether_data::{ActorPath, ActorPathForm};
 
     use super::*;
+
+    /// Parse `text` as an abbreviated `ActorPath` and expand it, as
+    /// `Registry::resolve_address` does.
+    fn expand(index: &AddressIndex, text: &str) -> Result<String, AddressResolutionError> {
+        let path = ActorPath::new(text).expect("fixture is a well-formed actor path");
+        let ActorPathForm::Abbreviated { root, relative } = path.form() else {
+            panic!("fixture `{text}` is not abbreviated");
+        };
+        index.expand(root, &relative)
+    }
 
     fn root(namespace: &str) -> RootFact<'_> {
         RootFact { actor: ActorId::singleton(namespace), namespace }
@@ -548,8 +543,8 @@ mod tests {
         )
         .expect("valid topology");
 
-        assert_eq!(index.expand("root", "manager/camera"), Ok("root/manager/worker:camera".to_owned()));
-        assert_eq!(index.expand("root", "manager/worker:camera"), Ok("root/manager/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://manager/camera"), Ok("root/manager/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://manager/worker:camera"), Ok("root/manager/worker:camera".to_owned()));
     }
 
     #[test]
@@ -562,14 +557,14 @@ mod tests {
         .expect("valid topology");
 
         assert_eq!(
-            index.expand("root", "main"),
+            expand(&index, "root://main"),
             Err(AddressResolutionError::AmbiguousSegment {
                 parent: "root".to_owned(),
                 segment: "main".to_owned(),
                 candidates: vec!["camera:main".to_owned(), "microphone:main".to_owned()],
             })
         );
-        assert_eq!(index.expand("root", "camera:main"), Ok("root/camera:main".to_owned()));
+        assert_eq!(expand(&index, "root://camera:main"), Ok("root/camera:main".to_owned()));
     }
 
     #[test]
@@ -581,7 +576,7 @@ mod tests {
         )
         .expect("duplicate logical records deduplicate");
 
-        assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
     }
 
     #[test]
@@ -593,8 +588,8 @@ mod tests {
         )
         .expect("valid diamond");
 
-        assert_eq!(index.expand("root", "left/one"), Ok("root/left/leaf:one".to_owned()));
-        assert_eq!(index.expand("root", "right/one"), Ok("root/right/leaf:one".to_owned()));
+        assert_eq!(expand(&index, "root://left/one"), Ok("root/left/leaf:one".to_owned()));
+        assert_eq!(expand(&index, "root://right/one"), Ok("root/right/leaf:one".to_owned()));
     }
 
     #[test]
@@ -606,30 +601,19 @@ mod tests {
         )
         .expect("valid topology");
 
-        assert_eq!(index.expand("root", "status"), Ok("root/status".to_owned()));
-        assert_eq!(index.expand("root", "worker:status"), Ok("root/worker:status".to_owned()));
+        assert_eq!(expand(&index, "root://status"), Ok("root/status".to_owned()));
+        assert_eq!(expand(&index, "root://worker:status"), Ok("root/worker:status".to_owned()));
     }
 
     #[test]
-    fn malformed_unknown_and_bounded_paths_are_distinct() {
+    fn an_unknown_root_is_reported_as_unknown() {
         let index =
             AddressIndex::build([root("root")], [child("root", "worker")], [singleton("root"), instanced("worker")])
                 .expect("valid topology");
 
         assert_eq!(
-            index.expand("missing", "one"),
+            expand(&index, "missing://one"),
             Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
-        );
-        assert!(matches!(index.expand("root", "worker:bad:key"), Err(AddressResolutionError::IllegalSegment { .. })));
-        let too_deep = repeat_n("one", MAX_SCOPE_PATH_DEPTH).collect::<Vec<_>>().join("/");
-        assert_eq!(
-            index.expand("root", &too_deep),
-            Err(AddressResolutionError::PathTooDeep { limit: MAX_SCOPE_PATH_DEPTH })
-        );
-        let too_long = "x".repeat(aether_data::MAX_SCOPE_PATH_BYTES);
-        assert_eq!(
-            index.expand("root", &too_long),
-            Err(AddressResolutionError::PathTooLong { limit: aether_data::MAX_SCOPE_PATH_BYTES })
         );
     }
 
@@ -642,14 +626,14 @@ mod tests {
         )
         .expect("an instanced root excludes itself rather than failing the index");
 
-        assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
-        assert_eq!(index.expand("root", ""), Ok("root".to_owned()));
+        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://"), Ok("root".to_owned()));
         assert_eq!(
-            index.expand("swarm", "camera"),
+            expand(&index, "swarm://camera"),
             Err(AddressResolutionError::InstancedRoot { root: "swarm".to_owned() })
         );
         assert_eq!(
-            index.expand("missing", "camera"),
+            expand(&index, "missing://camera"),
             Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
         );
     }
@@ -683,13 +667,13 @@ mod tests {
                 AddressIndex::build([root("root"), root("swarm")], [child("root", "worker")], cardinality_facts)
                     .expect("a half-declared namespace excludes itself rather than failing the index");
 
-            assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
+            assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
             assert_eq!(
-                index.expand("swarm", "camera"),
+                expand(&index, "swarm://camera"),
                 Err(AddressResolutionError::HalfDeclaredRoot { root: "swarm".to_owned(), defect })
             );
             assert_eq!(
-                index.expand("missing", "camera"),
+                expand(&index, "missing://camera"),
                 Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
             );
         }
@@ -707,10 +691,10 @@ mod tests {
         )
         .expect("a half-declared child excludes its own edge");
 
-        assert_eq!(index.expand("root", "camera"), Ok("root/worker:camera".to_owned()));
-        assert_eq!(index.expand("root", "worker:camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root://worker:camera"), Ok("root/worker:camera".to_owned()));
         assert_eq!(
-            index.expand("root", "status"),
+            expand(&index, "root://status"),
             Ok("root/worker:status".to_owned()),
             "with `status` excluded, a bare segment elides through the one remaining instanced child"
         );
