@@ -17,7 +17,7 @@ use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
-use super::dependencies::{dependency_refusal, missing_dependency, replacement_refusal};
+use super::dependencies::{dependency_refusal, inline_dependency_refusal, missing_dependency, replacement_refusal};
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
@@ -230,6 +230,17 @@ impl ComponentHostCapabilityState {
             kind_manifest::read_actor_inputs_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
         let boot_namespace =
             kind_manifest::read_boot_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let lineage =
+            kind_manifest::read_actor_lineage_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let module_namespace =
+            kind_manifest::read_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+
+        // ADR-0230 §3: an actor the module can spawn inline runs before the
+        // host sees it, so its declared dependencies are checked here, before
+        // kind registration, the module boot actor, or the requested actor.
+        if let Some(error) = inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref()) {
+            return Err(LoadResult::Err { error });
+        }
 
         if let Some(boot_ns) = &boot_namespace
             && payload.export.as_deref() == Some(boot_ns.as_str())
@@ -245,8 +256,7 @@ impl ComponentHostCapabilityState {
         // instantiated exactly as the unselected default load would be.
         let sole_export = actors.iter().all(|actor| actor.namespace.is_none())
             && payload.export.is_some()
-            && kind_manifest::read_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?
-                == payload.export;
+            && module_namespace == payload.export;
 
         let (mut capabilities, dependencies, type_tag, selected_namespace) = if sole_export {
             let sole = actors.first();
@@ -297,18 +307,11 @@ impl ComponentHostCapabilityState {
             .module_cache
             .compile(&self.engine, &hash, &payload.wasm)
             .map_err(|error| LoadResult::Err { error: format!("invalid wasm module: {error}") })?;
-        let name = match payload.name.or(selected_namespace) {
-            Some(name) => name,
-            None => match kind_manifest::read_namespace_from_bytes(&payload.wasm) {
-                Ok(Some(declared)) => declared,
-                Ok(None) => {
-                    let counter = self.default_name_counter;
-                    self.default_name_counter += 1;
-                    format!("component_{counter}")
-                }
-                Err(error) => return Err(LoadResult::Err { error }),
-            },
-        };
+        let name = payload.name.or(selected_namespace).or(module_namespace).unwrap_or_else(|| {
+            let counter = self.default_name_counter;
+            self.default_name_counter += 1;
+            format!("component_{counter}")
+        });
 
         Ok((
             descriptors,
@@ -653,10 +656,17 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
+        // A replacement installs a module whose inline children are rebuilt
+        // on rehydrate, so it is a module load for the ADR-0230 §3 check too.
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
             && let Ok(boot) = kind_manifest::read_boot_namespace_from_bytes(&payload.wasm)
+            && let Ok(lineage) = kind_manifest::read_actor_lineage_from_bytes(&payload.wasm)
+            && let Ok(module_namespace) = kind_manifest::read_namespace_from_bytes(&payload.wasm)
             && let Some(error) =
                 replacement_refusal(&self.registry, position, &actors, payload.export.as_deref(), boot.as_deref())
+                    .or_else(|| {
+                        inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref())
+                    })
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
