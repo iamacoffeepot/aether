@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Manual, OutboundReply, Single};
+use aether_actor::{Addressable, DependsOn, Manual, One, OutboundReply, Single};
 use aether_data::{MailId, MailboxId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -146,6 +146,57 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
         Some(detached_context),
         "the detached context is stored under the routed mail's correlation",
     );
+}
+
+/// The actor the flat-send test's ctx is typed by: it declares the stub actor
+/// as a dependency, as `#[actor(depends(StubActor))]` would.
+struct Dependent;
+
+impl Addressable for Dependent {
+    const NAMESPACE: &'static str = "test.flat_send.dependent";
+    type Resolver = One;
+}
+
+impl DependsOn<StubActor> for Dependent {}
+
+/// ADR-0232 §1–§2: the flat `send_detached::<R>` on a ctx typed by an actor
+/// that declares `R` lands at the position the dependency's proof points to,
+/// and roots a fresh chain despite the handler's in-flight lineage
+/// (ADR-0080 §7). The sink is registered at the stub actor's own namespace,
+/// so a verb that resolved any other position, or inherited the running
+/// chain, fails here rather than only in the fleet proxy's reports.
+#[test]
+fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
+    use crate::mail::registry::OwnedDispatch;
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        StubActor::NAMESPACE,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // Terminal test sink (ADR-0094): discharge before observing.
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF04)));
+    let in_flight_root = MailId::new(MailboxId(0xC2), 9);
+    let in_flight_mail = MailId::new(MailboxId(0x9B), 44);
+    let source = Source::with_correlation(SourceAddr::None, 0);
+
+    {
+        let mut ctx: NativeCtx<'_, Dependent, Single> =
+            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+        ctx.send_detached::<StubActor>(&CastOnly { code: 5 });
+    }
+    let detached = rx.try_recv().expect("flat send_detached routed at flush");
+    assert_eq!(detached.recipient, recipient, "flat send_detached addresses the declared dependency");
+    assert!(detached.parent_mail.is_none(), "flat send_detached carries no parent edge");
+    assert_eq!(detached.root, detached.mail_id, "flat send_detached is its own root");
 }
 
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple

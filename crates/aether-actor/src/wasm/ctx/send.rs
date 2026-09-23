@@ -1,14 +1,17 @@
-//! The receive ctx's outbound surface — the inherent by-reference send
-//! and the [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
+//! The receive ctx's outbound surface — the inherent flat sends (to a
+//! declared dependency, and through a held reference) and the
+//! [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
-use aether_data::Kind;
+use aether_data::{Kind, RequestId};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
-use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
+use crate::model::{
+    Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, HandlesKind, SendableTo, Singleton,
+};
 use crate::reference::{ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::ChainMode;
@@ -28,6 +31,75 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.erased().id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+    }
+
+    /// Send `payload` to the declared dependency `R` (ADR-0232 §1–§2),
+    /// inheriting the handler's causal chain (ADR-0080 §7).
+    ///
+    /// Compiles only on a ctx typed by an actor that declares `R` with
+    /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
+    /// names only `R`, the kind is inferred from the payload. The erased ctx
+    /// has no flat send. Routes exactly as `ctx.actor::<R>().send(..)` does.
+    ///
+    /// Its consumers are the puppet motors' pose sends (`aether.puppet-idle`,
+    /// `aether.puppet-turntable`) and the cube fixture's camera send.
+    pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        self.singleton_handle::<R>().push(payload);
+    }
+
+    /// Send a slice of cast payloads to the declared dependency `R` as one
+    /// contiguous batch, inheriting the handler's causal chain like
+    /// [`Self::send`]. Cast-only — see
+    /// [`MailSender::send_many`] for the wire-shape rationale.
+    ///
+    /// Its consumer is the cube fixture, which emits its twelve triangles as
+    /// one batch.
+    pub fn send_many<R: Singleton + CallerAddressable>(&mut self, payloads: &[impl SendableTo<R> + bytemuck::NoUninit])
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        self.singleton_handle::<R>().push_many(payloads);
+    }
+
+    /// Send a request to the declared dependency `R` and return the
+    /// correlation id the host minted for it, inheriting the handler's causal
+    /// chain like [`Self::send`]. An inline-cluster local route has no host
+    /// correlation, so it warn-logs and returns the no-correlation sentinel.
+    ///
+    /// Its consumer is the fs demux fixture, which matches two
+    /// indistinguishable `aether.fs.read` replies by these ids.
+    #[must_use]
+    pub fn send_tracked<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>) -> RequestId
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        self.singleton_handle::<R>().push_tracked(payload)
+    }
+
+    /// Send a request to the declared dependency `R` and store `context`
+    /// under the minted correlation id, for the reply handler to take back
+    /// with [`Self::take_context`]. Inherits the handler's causal chain like
+    /// [`Self::send`] and returns the minted id.
+    ///
+    /// Its consumer is the fs demux fixture's context flow, whose two reads
+    /// carry distinct typed contexts.
+    #[must_use]
+    pub fn send_with_context<R: Singleton + CallerAddressable>(
+        &mut self,
+        payload: &impl SendableTo<R>,
+        context: &impl Kind,
+    ) -> RequestId
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        self.singleton_handle::<R>().push_with_context(payload, context)
     }
 }
 

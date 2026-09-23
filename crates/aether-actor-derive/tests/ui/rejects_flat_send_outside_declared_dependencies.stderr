@@ -1,0 +1,47 @@
+error[E0277]: `Peer` has no handler for `Unhandled`
+  --> tests/ui/rejects_flat_send_outside_declared_dependencies.rs:71:26
+   |
+71 |         ctx.send::<Peer>(&Unhandled { seq: trigger.seq });
+   |             ----         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Peer` does not handle `Unhandled`
+   |             |
+   |             required by a bound introduced by this call
+   |
+   = note: a `#[fallback]` does not count as handling a kind
+help: the trait `HandlesKind<Unhandled>` is not implemented for `Peer`
+      but trait `HandlesKind<Handled>` is implemented for it
+  --> tests/ui/rejects_flat_send_outside_declared_dependencies.rs:32:1
+   |
+32 | #[actor]
+   | ^^^^^^^^
+   = help: for that trait implementation, expected `Handled`, found `Unhandled`
+   = note: required for `Unhandled` to implement `SendableTo<Peer>`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
+   |
+   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+   |                                                                             ^^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+error[E0277]: `Sender` does not declare a dependency on `Stranger`
+  --> tests/ui/rejects_flat_send_outside_declared_dependencies.rs:72:13
+   |
+72 |         ctx.send::<Stranger>(&Handled { seq: trigger.seq });
+   |             ^^^^ unsatisfied trait bound
+   |
+   = note: add `depends(Stranger)` to the actor's `#[actor(...)]` attribute
+help: the trait `DependsOn<Stranger>` is not implemented for `Sender`
+      but trait `DependsOn<Peer>` is implemented for it
+  --> tests/ui/rejects_flat_send_outside_declared_dependencies.rs:60:1
+   |
+60 | #[actor(depends(Peer))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^
+   = help: for that trait implementation, expected `Peer`, found `Stranger`
+note: required by a bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/send.rs
+   |
+   |     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+   |            ---- required by a bound in this associated function
+   |     where
+   |         A: DependsOn<R>,
+   |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::send::<impl WasmCtx<'_, A, M>>::send`
+   = note: this error originates in the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

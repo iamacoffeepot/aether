@@ -186,11 +186,17 @@ kind's schema. For a batch that must settle as one traced unit, use
 `send_mail_traced`. The active MCP tool schema is authoritative for arguments;
 [the harness](../mcp-harness.md) explains the operating model.
 
-**From inside a component.** Address another actor *by type* —
-`ctx.actor::<RenderCapability>().send(&kind)` — or send through a proven
-reference it holds (`ctx.send_to(reference, &kind)`).
-`Kind::ID` and the typed resolver are compile-time constants, so there's no
-host round-trip to resolve an address. You receive mail with a
+**From inside a component.** Declare the peer with
+`#[actor(depends(RenderCapability))]`, then send to it *by type* on a ctx typed
+by the actor (`WasmCtx<'_, Self>`): `ctx.send::<RenderCapability>(&kind)`. The
+turbofish names only the recipient; the kind is inferred from the payload, and
+the send compiles only when the actor declares that recipient and the recipient
+handles the kind. The siblings are `send_many` (one cast batch),
+`send_tracked` (returns the request id), and `send_with_context` (stores a
+typed context for the reply handler). A proven reference the actor holds sends
+with `ctx.send_to(reference, &kind)`. `ctx.actor::<R>()` is the older typed
+handle the tree is migrating away from. `Kind::ID` and the typed resolver are
+compile-time constants, so there's no host round-trip to resolve an address. You receive mail with a
 `#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
 third parameter (see [Components & lifecycle](components.md) and the *Writing a component*
 recipe).

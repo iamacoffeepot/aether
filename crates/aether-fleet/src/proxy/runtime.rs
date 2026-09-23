@@ -111,12 +111,11 @@ impl Drop for FleetProxyState {
 impl FleetProxyState {
     /// Report a confirmed liveness signal to the engines cap so it
     /// refreshes this engine's last-heartbeat timestamp (issue
-    /// 1339). Sent through the declared dependency's proof as a fresh
-    /// root: the `Pong` that triggered it is an external event causally
-    /// unrelated to whatever inbound mail woke the handler.
-    pub fn report_alive(&self, ctx: &NativeCtx<'_, FleetProxy, Single>) {
-        let alive = EngineAlive { engine_id: self.engine_id.0.to_string() };
-        ctx.to(&ctx.actor_ref::<FleetServer>()).send_detached(&alive);
+    /// 1339). Sent to the declared dependency as a fresh root: the `Pong`
+    /// that triggered it is an external event causally unrelated to
+    /// whatever inbound mail woke the handler.
+    pub fn report_alive(&self, ctx: &mut NativeCtx<'_, FleetProxy, Single>) {
+        ctx.send_detached::<FleetServer>(&EngineAlive { engine_id: self.engine_id.0.to_string() });
     }
 
     /// Report this engine's death to the engines cap so it drops the
@@ -125,11 +124,10 @@ impl FleetProxyState {
     /// (`Crashed`, connection-close) from a heartbeat eviction
     /// (`Evicted`); a deliberate terminate never reaches here.
     /// Idempotent on the cap side — a `died` for an already-evicted
-    /// engine is a no-op. Sent through the declared dependency's proof
-    /// as a fresh root, for the same reason as [`Self::report_alive`].
-    pub fn report_died(&self, ctx: &NativeCtx<'_, FleetProxy, Single>, reason: DeathReason) {
-        let died = EngineDied { engine_id: self.engine_id.0.to_string(), reason };
-        ctx.to(&ctx.actor_ref::<FleetServer>()).send_detached(&died);
+    /// engine is a no-op. Sent to the declared dependency as a fresh root,
+    /// for the same reason as [`Self::report_alive`].
+    pub fn report_died(&self, ctx: &mut NativeCtx<'_, FleetProxy, Single>, reason: DeathReason) {
+        ctx.send_detached::<FleetServer>(&EngineDied { engine_id: self.engine_id.0.to_string(), reason });
     }
 
     /// Route a `ReplyEvent`'s envelope back to whoever sent the

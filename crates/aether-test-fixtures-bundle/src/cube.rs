@@ -22,8 +22,8 @@
 //!   mirroring the reference camera and the probe.
 //! - On each tick the fixture publishes the stored `ViewProjection` to the
 //!   chassis render mailbox, then emits the cube's twelve
-//!   `DrawTriangle`s — six faces, each a distinct flat color so the
-//!   silhouette reads as one solid blob. Vertices carry world `z`, so
+//!   `DrawTriangle`s as one batch — six faces, each a distinct flat color
+//!   so the silhouette reads as one solid blob. Vertices carry world `z`, so
 //!   the `Depth32Float` / `LessEqual` test draws nearer faces over
 //!   farther ones.
 
@@ -113,7 +113,7 @@ impl Cube {
     }
 }
 
-#[actor]
+#[actor(depends(RenderCapability))]
 impl WasmActor for Cube {
     const NAMESPACE: &'static str = "test.cube";
 
@@ -138,10 +138,8 @@ impl WasmActor for Cube {
     /// `capture_frame` taken after one tick shows the centered cube
     /// silhouette.
     #[handler::single]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
-        ctx.actor::<RenderCapability>().send(&ViewProjection { view_proj: self.view_proj });
-        for triangle in Cube::triangles() {
-            ctx.actor::<RenderCapability>().send(&triangle);
-        }
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, _: Tick) {
+        ctx.send::<RenderCapability>(&ViewProjection { view_proj: self.view_proj });
+        ctx.send_many::<RenderCapability>(&Cube::triangles());
     }
 }

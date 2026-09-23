@@ -17,8 +17,8 @@
 //! than lying in its manifest.
 
 use aether_actor::{
-    Addressable, CallerAddressable, CallerScoped, ErasedActorRef, HandlesKind, MailSender, Manual, OutboundReply,
-    ReplyMode, Singleton, Target,
+    Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, HandlesKind,
+    MailSender, Manual, OutboundReply, ReplyMode, SendableTo, Singleton, Target,
 };
 use aether_data::{Kind, KindId, MailId, RequestId};
 
@@ -193,6 +193,26 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         let mail_id = self.push_to(target.erased(), payload, None, None);
         self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
         mail_id
+    }
+
+    /// Send `payload` to the declared dependency `R` on a fresh causal chain,
+    /// ignoring this handler's in-flight lineage (ADR-0080 §7, ADR-0232 §1–§2).
+    ///
+    /// Compiles only on a ctx typed by an actor that declares `R` with
+    /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
+    /// names only `R`. It sends through the proof [`Self::actor_ref`] mints,
+    /// so it lands exactly where the dependency's proof points.
+    ///
+    /// Its consumers are the fleet proxy's liveness and death reports to the
+    /// fleet server: the `Pong` or connection close behind each is an
+    /// external event, causally unrelated to whatever inbound woke the
+    /// handler.
+    pub fn send_detached<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
+    where
+        A: DependsOn<R>,
+        R::Resolver: DependencyResolver,
+    {
+        let _ = self.push_to(self.actor_ref::<R>().erase(), payload, None, None);
     }
 
     /// The push behind the `send_to` family: encode `payload` and push it to

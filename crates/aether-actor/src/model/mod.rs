@@ -23,12 +23,14 @@
 pub mod address;
 mod contract;
 pub mod ctx;
+mod sendable;
 pub mod slot;
 
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, Undeclared};
 use self::ctx::Erased;
+pub use self::sendable::SendableTo;
 
 /// A resolution strategy (ADR-0119): given a caller's lineage carry, the
 /// actor's own `NAMESPACE`, and whatever args the strategy needs, produce
@@ -417,6 +419,10 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 ///
 /// impl DependsOn<Custom> for Dependent {}
 /// ```
+#[diagnostic::on_unimplemented(
+    message = "`{Self}` does not declare a dependency on `{R}`",
+    note = "add `depends({R})` to the actor's `#[actor(...)]` attribute"
+)]
 pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
 where
     R::Resolver: DependencyResolver,
