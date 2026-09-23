@@ -400,7 +400,7 @@ mod tests {
             .try_register_inbox_with_id(&boot_authority(), self_id, "test.pumped.probe", handler)
             .expect("register the pumped mailbox");
 
-        let binding = Arc::new(NativeBinding::new::<PumpProbe>(
+        let binding = Arc::new(NativeBinding::new(
             Arc::clone(&fx.mailer),
             self_id,
             self_id.0,

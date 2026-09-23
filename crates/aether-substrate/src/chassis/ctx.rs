@@ -657,8 +657,8 @@ impl<'a> ChassisCtx<'a> {
         self.mailer
     }
 
-    /// Clone the chassis's [`FatalAborter`]. Read by
-    /// [`crate::NativeBinding::from_ctx`] so the wasm-trap abort
+    /// Clone the chassis's [`FatalAborter`]. Read by the crate-private
+    /// `NativeBinding::from_ctx` so the wasm-trap abort
     /// path has somewhere to abort to without each
     /// transport plumbing [`crate::HubOutbound`] itself.
     #[must_use]
@@ -666,8 +666,8 @@ impl<'a> ChassisCtx<'a> {
         Arc::clone(self.aborter)
     }
 
-    /// Borrow the chassis's [`crate::Spawner`]. Used by
-    /// [`crate::NativeBinding::from_ctx`] to clone an `Arc<Spawner>`
+    /// Borrow the chassis's [`crate::Spawner`]. Used by the crate-private
+    /// `NativeBinding::from_ctx` to clone an `Arc<Spawner>`
     /// into every booted actor's transport so per-handler
     /// `NativeCtx::spawn_child` can reach the spawn machinery.
     #[must_use]

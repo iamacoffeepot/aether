@@ -65,8 +65,8 @@ pub use init::NativeInitCtx;
 /// inbound's reply target so the `OutboundReply::reply::<K>(&payload)` API
 /// can route back to the originator without rethreading the handle.
 ///
-/// Stage 1 ships the wiring; the actual reply routing through
-/// [`NativeBinding::send_reply_for_handler`] / `Mailer::send_reply` is
+/// Stage 1 ships the wiring; the actual reply routing through the
+/// binding's crate-private `send_reply_for_handler` / `Mailer::send_reply` is
 /// the stage-2 migration's responsibility (today's caps reply via
 /// `mailer.send_reply(...)` directly; stage 2 routes those onto
 /// `ctx.reply(...)`).
@@ -83,7 +83,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// Outbound `send` paths read this to stamp `root` on child mail
     /// so descendants share the chain. `MailId::NONE` for ctxs without
     /// an inbound — those sends mint a fresh root from their own
-    /// `mail_id` in `NativeBinding::send_mail`.
+    /// `mail_id` in `NativeBinding::send_mail_with_lineage`.
     in_flight_root: MailId,
     /// ADR-0168 §1: the chain of the work that *caused* this context to
     /// exist, for a context that dispatches no inbound of its own. A

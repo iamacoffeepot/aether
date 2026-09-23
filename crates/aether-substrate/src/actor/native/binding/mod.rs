@@ -61,25 +61,25 @@ mod reply;
 mod reservation;
 mod send;
 
-/// Per-actor binding state every native capability owns. Each
-/// capability constructs one at boot via [`NativeBinding::new`] and
-/// holds it for the lifetime of its dispatcher thread; SDK helpers
-/// receive `&self.transport` references.
+/// Per-actor binding state every native capability owns. The chassis
+/// constructs one for each actor at boot, and the actor holds it for the
+/// lifetime of its dispatcher thread; SDK helpers receive
+/// `&self.transport` references.
 ///
 /// The three inherent dispatch methods read/mutate the struct's
 /// fields directly:
 ///
-/// - [`Self::send_mail`] — mints a fresh correlation id (atomic
-///   monotonic counter), wraps the bytes in a [`Mail`](crate::mail::Mail) with
+/// - The crate-private eager send, `send_mail_with_lineage`, mints a
+///   fresh correlation id (atomic monotonic counter), wraps the bytes
+///   in a [`Mail`](crate::mail::Mail) with
 ///   `SourceAddr::Component(self.self_mailbox)` so any reply
 ///   routes back here, and pushes through the shared
 ///   `Arc<Mailer>`.
 /// - [`Self::prev_correlation`] — reads the atomic counter.
 ///
-/// Reply (the typed `K` shape) goes through
-/// [`Self::send_reply_for_handler`] below; persistence
-/// (`save_state`) is wasm-component-only (ADR-0016) and never lands
-/// here.
+/// Reply (the typed `K` shape) goes through the crate-private
+/// `send_reply_for_handler`; persistence (`save_state`) is
+/// wasm-component-only (ADR-0016) and never lands here.
 pub struct NativeBinding {
     mailer: Arc<Mailer>,
     /// ADR-0165: exactly one typed production identity or one explicitly
@@ -138,7 +138,7 @@ pub struct NativeBinding {
     /// requirements — the buffer has a single logical producer (this
     /// actor's dispatcher thread, only during its own handler dispatch),
     /// so the lock is uncontended. Spawned-worker sends
-    /// ([`super::offload::thread`]) stay on the eager [`Self::send_mail`] route.
+    /// ([`super::offload::thread`]) stay on the eager [`Self::send_mail_with_lineage`] route.
     /// Wasm-guest sends are also eager while Live; staged activation retains
     /// their owned payload here without writing the native ring, preserving
     /// its single-writer discipline.

@@ -33,7 +33,7 @@ impl NativeBinding {
     /// for harnesses that don't go through a chassis (`SubstrateHarness`
     /// internals) or for tests that want to substitute a custom
     /// aborter.
-    pub fn new<A: super::NativeActor>(
+    pub(crate) fn new(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,
         carry: u64,
@@ -89,8 +89,8 @@ impl NativeBinding {
     /// let transport = NativeBinding::from_ctx::<MyActor>(ctx, claim.id);
     /// ```
     #[must_use]
-    pub fn from_ctx<A: super::NativeActor>(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId) -> Self {
-        Self::new::<A>(
+    pub(crate) fn from_ctx<A: super::NativeActor>(ctx: &ChassisCtx<'_>, self_mailbox: MailboxId) -> Self {
+        Self::new(
             ctx.mail_send_handle(),
             self_mailbox,
             // A cap built under a `ChassisCtx` is a root-pinned chassis
@@ -105,8 +105,8 @@ impl NativeBinding {
 
     /// Test-only constructor with a [`PanicAborter`] and no spawner.
     /// Lets unit tests build a transport without a chassis; not
-    /// appropriate for production capabilities, which should go
-    /// through [`Self::from_ctx`].
+    /// appropriate for production capabilities, whose bindings the
+    /// chassis builds at boot.
     pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
         Self::new_for_test_with_parent(mailer, self_mailbox, None)
     }
@@ -182,7 +182,7 @@ impl NativeBinding {
     /// reach this actor. Exposed for capabilities that need to
     /// publish their address to peers without going through the
     /// transport's send path.
-    pub fn self_mailbox(&self) -> MailboxId {
+    pub(crate) fn self_mailbox(&self) -> MailboxId {
         self.identity.mailbox()
     }
 
@@ -190,7 +190,7 @@ impl NativeBinding {
     /// state `spawn_child` extends to derive a child's id. Surfaced so
     /// [`super::ctx::NativeCtx::spawn_child`](crate::actor::native::ctx::NativeCtx::spawn_child) can pass it as the parent
     /// carry the spawn machinery folds the new node's `ActorId` onto.
-    pub fn carry(&self) -> u64 {
+    pub(crate) fn carry(&self) -> u64 {
         self.identity.carry()
     }
 
@@ -221,7 +221,7 @@ impl NativeBinding {
     /// reach the trace handle via `binding.mailer().record_*(...)`
     /// without the field having to be `pub(crate)`. Filed under
     /// iamacoffeepot/aether#953 (per-chassis trace state).
-    pub fn mailer(&self) -> &Arc<Mailer> {
+    pub(crate) fn mailer(&self) -> &Arc<Mailer> {
         &self.mailer
     }
 
@@ -243,7 +243,7 @@ impl NativeBinding {
     /// (those tests don't exercise spawn). Used by
     /// `NativeCtx::spawn_child` to reach the spawn machinery without
     /// separate per-handler plumbing.
-    pub fn spawner(&self) -> Option<&Arc<crate::Spawner>> {
+    pub(crate) fn spawner(&self) -> Option<&Arc<crate::Spawner>> {
         self.spawner.as_ref()
     }
 

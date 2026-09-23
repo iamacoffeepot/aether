@@ -37,8 +37,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// mail, which has no caller behind it). Passing the hold's root keeps
     /// the deferred reply's `Sent` in the chain the hold is gating, so the
     /// chain settles only after the reply lands (#1695). Routes through
-    /// the same [`NativeBinding::send_reply_for_handler`](crate::actor::native::binding::NativeBinding::send_reply_for_handler) path as
-    /// [`OutboundReply::reply`].
+    /// the same binding reply path (the crate-private
+    /// `NativeBinding::send_reply_for_handler`) as [`OutboundReply::reply`].
     pub fn reply_to_target<K: Kind>(&mut self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>) {
         self.binding.send_reply_for_handler(sender, payload, root, parent);
     }

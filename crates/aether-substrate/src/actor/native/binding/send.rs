@@ -15,35 +15,19 @@ use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 /// [`aether_actor::model::ctx`] are the only cross-target trait surface
 /// post-665.
 impl NativeBinding {
-    /// Push a typed payload at `recipient`. Mints a fresh correlation
-    /// id (atomic monotonic counter), wraps the bytes in a [`Mail`]
-    /// with `SourceAddr::Component(self.self_mailbox)` so any reply
-    /// routes back here, and pushes through the shared
-    /// `Arc<Mailer>`. Returns `0` (channel-send failures collapse to
-    /// the same scalar — there is no FFI surface here to differentiate).
+    /// Push a typed payload at `recipient` straight through the shared
+    /// `Arc<Mailer>`. Mints a fresh correlation id (atomic monotonic
+    /// counter) and wraps the bytes in a [`Mail`] with
+    /// `SourceAddr::Component(self.self_mailbox)` so any reply routes back
+    /// here. Returns `0` (channel-send failures collapse to the same
+    /// scalar — there is no FFI surface here to differentiate).
     ///
-    /// Stamps `MailId`/`root`/`parent_mail` as a chassis-root send
-    /// (no inheritance). Per-handler ctxs that have an in-flight mail
-    /// to inherit from go through [`Self::send_mail_with_lineage`]
-    /// instead — the four-arg shape preserves wire stability for the
-    /// FFI bridge and chassis-side log push paths that do not carry
-    /// a per-handler context.
-    pub fn send_mail(&self, recipient: u64, kind: u64, bytes: &[u8], count: u32) -> u32 {
-        self.send_mail_with_lineage(recipient, kind, bytes, count, None, None)
-    }
-
-    /// ADR-0080 §1 / §5: variant of [`Self::send_mail`] that accepts
-    /// the in-flight handler's lineage so the outgoing [`Mail`] picks
-    /// up the correct `parent_mail` and inherited `root`. The
-    /// per-handler [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)'s
-    /// [`aether_actor::model::ctx::MailSender`] impl reads from its
-    /// `in_flight_mail_id()` / `in_flight_root()` accessors and threads
-    /// them in.
-    ///
-    /// `parent_mail = None` and `inherited_root = None` mean
-    /// chassis-root: the outgoing mail's `MailId` becomes its own
+    /// ADR-0080 §1 / §5: `parent_mail` and `inherited_root` carry the
+    /// in-flight handler's lineage so the outgoing [`Mail`] picks up the
+    /// correct `parent_mail` and inherited `root`. `None` / `None` is the
+    /// chassis-root send: the outgoing mail's `MailId` becomes its own
     /// `root`, marking the start of a new causal chain.
-    pub fn send_mail_with_lineage(
+    pub(crate) fn send_mail_with_lineage(
         &self,
         recipient: u64,
         kind: u64,
@@ -70,7 +54,7 @@ impl NativeBinding {
     /// per ADR-0063: a poisoned mutex means a prior holder panicked
     /// inside the guard, which is itself a substrate-level invariant
     /// violation.
-    pub fn push_envelope_returning_root(
+    pub(crate) fn push_envelope_returning_root(
         &self,
         recipient: u64,
         kind: u64,
@@ -128,7 +112,7 @@ impl NativeBinding {
     }
 
     /// Correlation id the substrate minted for this actor's most
-    /// recent `send_mail` (ADR-0042). `0` before any send. Universal
+    /// recent send (ADR-0042). `0` before any send. Universal
     /// — every send mints a correlation; a handler stashes it and
     /// matches it against the inbound reply's correlation to pair a
     /// reply with the request it sent.
@@ -151,9 +135,9 @@ mod tests {
     use std::time::Duration;
 
     /// `prev_correlation` returns 0 before any send and tracks the
-    /// monotonic counter as `send_mail` mints new ids.
+    /// monotonic counter as the eager send mints new ids.
     #[test]
-    fn prev_correlation_tracks_send_mail_minting() {
+    fn prev_correlation_tracks_eager_send_minting() {
         let (registry, mailer) = bare_substrate();
         let (tx, _rx) = mpsc::channel::<Envelope>();
         // Register a sink so push routes somewhere instead of
@@ -172,9 +156,9 @@ mod tests {
         assert_eq!(transport.parent_mailbox(), None, "legacy untyped bindings have no logical parent");
 
         assert_eq!(transport.prev_correlation(), 0);
-        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        assert_eq!(transport.send_mail_with_lineage(recipient.0, 1, &[], 1, None, None), 0);
         assert_eq!(transport.prev_correlation(), 1);
-        assert_eq!(transport.send_mail(recipient.0, 1, &[], 1), 0);
+        assert_eq!(transport.send_mail_with_lineage(recipient.0, 1, &[], 1, None, None), 0);
         assert_eq!(transport.prev_correlation(), 2);
     }
 

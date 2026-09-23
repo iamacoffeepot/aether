@@ -401,9 +401,8 @@ impl Mailer {
     /// window — the bug class #1701 fixed for handler replies.
     ///
     /// Equivalent to [`Self::send_reply`] with a `NONE`
-    /// triple — the bare-vs-lineage split mirrors
-    /// [`NativeBinding::send_mail`](crate::actor::native::NativeBinding)'s
-    /// `send_mail` / `send_mail_with_lineage` pair.
+    /// triple — the bare form is the lineage form's chassis-root case,
+    /// as `NativeBinding::send_mail_with_lineage` is with `None` / `None`.
     pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,
