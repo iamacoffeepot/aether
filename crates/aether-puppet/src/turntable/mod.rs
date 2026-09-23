@@ -93,7 +93,7 @@ impl WasmActor for Turntable {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, tick: Tick) {
         if let Some(look) = self.advance(tick.delta_seconds()) {
-            ctx.actor::<Puppet>().send(&look);
+            ctx.send::<Puppet>(&look);
         }
         self.sample();
     }

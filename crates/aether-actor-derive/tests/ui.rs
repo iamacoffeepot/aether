@@ -378,6 +378,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_duplicate_handler_kind_native",
     "rejects_duplicate_handler_kind_wasm",
     "rejects_duplicate_native_init",
+    "rejects_flat_send_outside_declared_dependencies",
     "rejects_foreign_actor_ctx_wasm",
     "rejects_generic_native_depends",
     "rejects_generic_native_lineage_impl",

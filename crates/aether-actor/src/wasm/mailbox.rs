@@ -128,6 +128,59 @@ impl<'a, R> WasmActorMailbox<'a, R> {
     {
         WasmActorMailbox::new(Child::resolve(self.mailbox, name).0, self.sender, self.inline)
     }
+
+    /// The body of [`Self::send`] with no `R: HandlesKind<K>` bound, shared
+    /// with the flat `WasmCtx::send` verb, whose payload bound
+    /// ([`SendableTo`](crate::SendableTo)) carries the check instead: a verb
+    /// body cannot restate `HandlesKind` for its anonymous payload type.
+    pub(crate) fn push<K: Kind>(&self, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
+    }
+
+    /// The unbounded body of [`Self::send_tracked`], shared with the flat
+    /// `WasmCtx::send_tracked` verb.
+    pub(crate) fn push_tracked<K: Kind>(&self, payload: &K) -> RequestId {
+        match self.inline.route_decision(self.mailbox) {
+            RouteDecision::Local => {
+                self.push(payload);
+                tracing::warn!(
+                    kind = <K as Kind>::NAME,
+                    recipient = self.mailbox,
+                    "send_tracked on an inline-cluster local route has no host correlation",
+                );
+                RequestId(Source::NO_CORRELATION)
+            }
+            RouteDecision::Remote => {
+                self.push(payload);
+                RequestId(mail::prev_correlation())
+            }
+        }
+    }
+
+    /// The unbounded body of [`Self::send_with_context`], shared with the
+    /// flat `WasmCtx::send_with_context` verb.
+    pub(crate) fn push_with_context<K: Kind, C: Kind>(&self, payload: &K, context: &C) -> RequestId {
+        let request = self.push_tracked(payload);
+        if request.0 != Source::NO_CORRELATION {
+            self.inline.insert_request_context(request, context);
+        }
+        request
+    }
+
+    /// The unbounded body of [`Self::send_many`], shared with the flat
+    /// `WasmCtx::send_many` verb.
+    pub(crate) fn push_many<K: Kind + bytemuck::NoUninit>(&self, payloads: &[K]) {
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.inline.route_or_enqueue(
+            self.mailbox,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+            ChainMode::Inherit,
+            self.sender,
+        );
+    }
 }
 
 impl<R: Addressable, C: Kind> WasmActorMailboxWithContext<'_, '_, R, C> {
@@ -165,8 +218,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         R: HandlesKind<K>,
         K: Kind,
     {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
+        self.push(payload);
     }
 
     /// Send a request and return the correlation id the host minted for it.
@@ -180,21 +232,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         R: HandlesKind<K>,
         K: Kind,
     {
-        match self.inline.route_decision(self.mailbox) {
-            RouteDecision::Local => {
-                self.send(payload);
-                tracing::warn!(
-                    kind = <K as Kind>::NAME,
-                    recipient = self.mailbox,
-                    "send_tracked on an inline-cluster local route has no host correlation",
-                );
-                RequestId(Source::NO_CORRELATION)
-            }
-            RouteDecision::Remote => {
-                self.send(payload);
-                RequestId(mail::prev_correlation())
-            }
-        }
+        self.push_tracked(payload)
     }
 
     /// Send a request and store a typed context under the minted correlation
@@ -207,11 +245,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         K: Kind,
         C: Kind,
     {
-        let request = self.send_tracked(payload);
-        if request.0 != Source::NO_CORRELATION {
-            self.inline.insert_request_context(request, context);
-        }
-        request
+        self.push_with_context(payload, context)
     }
 
     /// Send a slice of payloads as a contiguous batch. Cast-only —
@@ -223,15 +257,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         R: HandlesKind<K>,
         K: Kind + bytemuck::NoUninit,
     {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.inline.route_or_enqueue(
-            self.mailbox,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-            ChainMode::Inherit,
-            self.sender,
-        );
+        self.push_many(payloads);
     }
 
     /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`

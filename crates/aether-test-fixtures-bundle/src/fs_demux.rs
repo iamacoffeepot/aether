@@ -39,7 +39,7 @@ pub struct FsDemux {
     context_second_payload: Option<u32>,
 }
 
-#[actor]
+#[actor(depends(FsCapability))]
 impl WasmActor for FsDemux {
     const NAMESPACE: &'static str = "test.fs_demux";
 
@@ -48,23 +48,21 @@ impl WasmActor for FsDemux {
     }
 
     #[handler::single]
-    fn on_run(&mut self, ctx: &mut WasmCtx<'_>, msg: RunFsDemux) {
+    fn on_run(&mut self, ctx: &mut WasmCtx<'_, Self>, msg: RunFsDemux) {
         *self = Self::default();
 
-        let fs = ctx.actor::<FsCapability>();
         let read = Read { addr: NamespaceAddr::new(msg.namespace, msg.path) };
-        self.first = Some(fs.send_tracked(&read));
-        self.second = Some(fs.send_tracked(&read));
+        self.first = Some(ctx.send_tracked::<FsCapability>(&read));
+        self.second = Some(ctx.send_tracked::<FsCapability>(&read));
     }
 
     #[handler::single]
-    fn on_run_context(&mut self, ctx: &mut WasmCtx<'_>, msg: RunFsContextDemux) {
+    fn on_run_context(&mut self, ctx: &mut WasmCtx<'_, Self>, msg: RunFsContextDemux) {
         *self = Self::default();
 
-        let fs = ctx.actor::<FsCapability>();
         let read = Read { addr: NamespaceAddr::new(msg.namespace, msg.path) };
-        let _ = fs.send_with_context(&read, &FsDemuxContextA { payload: CONTEXT_A_PAYLOAD });
-        let _ = fs.send_with_context(&read, &FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
+        let _ = ctx.send_with_context::<FsCapability>(&read, &FsDemuxContextA { payload: CONTEXT_A_PAYLOAD });
+        let _ = ctx.send_with_context::<FsCapability>(&read, &FsDemuxContextB { payload: CONTEXT_B_PAYLOAD });
     }
 
     #[handler::manual]

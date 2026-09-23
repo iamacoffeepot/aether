@@ -96,7 +96,7 @@ impl WasmActor for Idle {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, tick: Tick) {
         if let Some(pose) = self.advance(tick.delta_seconds()) {
-            ctx.actor::<Puppet>().send(&pose);
+            ctx.send::<Puppet>(&pose);
         }
         self.sample();
     }
