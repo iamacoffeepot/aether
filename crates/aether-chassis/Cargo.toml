@@ -57,5 +57,13 @@ serde_json = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
+# `signal_driver` blocks on SIGINT/SIGTERM; signal-hook is Unix-only, the
+# Windows fallback rides `ctrlc` for Ctrl-C only.
+[target.'cfg(unix)'.dependencies]
+signal-hook = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+ctrlc = "3"
+
 [lints]
 workspace = true

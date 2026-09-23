@@ -19,11 +19,9 @@
 pub mod chassis;
 pub mod cli;
 pub mod config;
-mod driver;
 mod mount;
 
 pub use chassis::BloomeryChassis;
 pub use cli::BloomeryCli;
 pub use config::BloomeryConfig;
-pub use driver::{BloomeryDriverCapability, BloomeryDriverRunning};
 pub use mount::Mounted;
