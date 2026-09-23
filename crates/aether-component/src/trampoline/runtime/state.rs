@@ -14,7 +14,7 @@ use crate::trampoline::WasmTrampoline;
 
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
-/// [`WasmTrampoline`](crate::trampoline::WasmTrampoline)). Holds the wasm
+/// [`WasmTrampoline`]). Holds the wasm
 /// `Component` optionally — `None` means the wasm has been unloaded by
 /// `DropComponent` but the trampoline (and its mailbox name) is
 /// still alive, ready to be refilled by `ReplaceComponent` or
