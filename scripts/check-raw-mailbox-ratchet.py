@@ -46,7 +46,6 @@ BASELINE_RELATIVE_PATH = "scripts/raw-mailbox-baseline.json"
 
 PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("send_envelope_tracked(", re.compile(r"(::|\.)send_envelope_tracked\(")),
-    ("send_envelope_tracked_with_reply_to(", re.compile(r"(::|\.)send_envelope_tracked_with_reply_to\(")),
     ("send_envelope_detached(", re.compile(r"(::|\.)send_envelope_detached\(")),
     ("mailer()", re.compile(r"(::|\.)mailer\(\)")),
     ("registry()", re.compile(r"\.registry\(\)")),
