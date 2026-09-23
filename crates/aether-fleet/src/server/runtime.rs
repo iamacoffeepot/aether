@@ -9,11 +9,13 @@ use super::config::RestartPolicy;
 use super::restart::schedule_restart;
 use super::{FleetConfig, FleetServer};
 use crate::child_env::isolate_child_environment;
+use crate::child_stderr::{StderrRedactions, StderrTail, tee_child_stderr};
 use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
+use crate::proxy::{describe_exit, startup_exit_status, terminate_child_group};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
-use aether_actor::runtime;
 pub use aether_actor::{ActorRef, Manual, Single};
+use aether_actor::{ReplyMode, runtime};
 pub use aether_data::{EngineId, Uuid};
 use aether_kinds::{
     BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned,
@@ -25,6 +27,7 @@ pub use aether_kinds::{
     UploadBinaryResult, UploadComponentResult,
 };
 pub use aether_substrate::Subname;
+use aether_substrate::actor::native::SpawnError;
 pub use aether_substrate::actor::native::{
     DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
 };
@@ -210,6 +213,22 @@ fn prepare_fork_io_detail(stage: &str, hash: &str, err: &io::Error) -> String {
     )
 }
 
+/// Outward detail for a proxy that did not come up over a forked substrate,
+/// shared by the spawn `Err` and its `spawn_failed` ring entry.
+///
+/// A substrate that exited during startup is named by its exit
+/// (`exit code 2`); any other failure keeps the proxy error it hit. Either
+/// way the end of the child's stderr follows when there is any — clap's
+/// usage error, a boot error — already redacted of the realized executable
+/// path and the fleet scratch root (ADR-0115) by [`StderrTail`].
+fn spawn_failure_detail(role: &str, err: &SpawnError, stderr: StderrTail) -> String {
+    let base = startup_exit_status(err).map_or_else(
+        || format!("proxy failed to connect to the {role} substrate: {err:?}"),
+        |status| format!("the {role} substrate exited during startup ({})", describe_exit(status)),
+    );
+    format!("{base}{}", stderr.collect().map(|tail| format!("; stderr: {tail}")).unwrap_or_default())
+}
+
 /// One supervised engine in [`FleetServerState`]'s table.
 ///
 /// `P` is the proxy handle: the [`ActorRef<FleetProxy>`] the proxy's
@@ -296,6 +315,9 @@ pub struct PreparedFork {
     pub rpc_port: u16,
     pub rpc_addr: String,
     pub child: Child,
+    /// The end of the child's stderr, for a failure detail. Dropping it
+    /// leaves the capture teeing to the hub log for the child's lifetime.
+    pub stderr: StderrTail,
 }
 
 /// Why a [`FleetServerState::prepare_fork`] did not produce a child.
@@ -585,7 +607,17 @@ impl<P> FleetServerState<P> {
     /// both through here is what keeps a restarted engine's argv,
     /// environment, and process group identical to the spawn it is
     /// recovering rather than a second implementation that drifts.
-    fn prepare_fork(&mut self, exec_source: &Path, recipe: &SpawnRecipe) -> Result<PreparedFork, PrepareFailure> {
+    ///
+    /// Stdout stays inherited. Stderr is piped and teed by a detached
+    /// reader on `ctx`: every chunk reaches the hub log as it would have
+    /// inherited, and the redacted end of it rides out as
+    /// [`PreparedFork::stderr`] for a failure detail.
+    fn prepare_fork<A, M: ReplyMode>(
+        &mut self,
+        ctx: &NativeCtx<'_, A, M>,
+        exec_source: &Path,
+        recipe: &SpawnRecipe,
+    ) -> Result<PreparedFork, PrepareFailure> {
         let rpc_port = free_local_port()
             .map_err(|e| PrepareFailure::PreAllocation(format!("could not allocate an RPC port: {e}")))?;
 
@@ -607,7 +639,7 @@ impl<P> FleetServerState<P> {
             .map_err(|e| post(prepare_fork_io_detail("materializing", &recipe.hash, &e)))?;
 
         let mut command = Command::new(&exec_path);
-        command.stdin(Stdio::null());
+        command.stdin(Stdio::null()).stderr(Stdio::piped());
         // ADR-0162: a spawned engine's environment is constructed, never
         // inherited. Clear it and copy only the platform/third-party
         // allowlist (locale, proxy, driver vars, `PATH` / `HOME`, …); no
@@ -619,9 +651,26 @@ impl<P> FleetServerState<P> {
         command.args(spawn_args(recipe, rpc_port));
         set_own_process_group(&mut command);
 
-        let child = command.spawn().map_err(|e| post(prepare_fork_io_detail("spawning", &recipe.hash, &e)))?;
+        let mut child = command.spawn().map_err(|e| post(prepare_fork_io_detail("spawning", &recipe.hash, &e)))?;
 
-        Ok(PreparedFork { engine_id, rpc_port, rpc_addr: format!("127.0.0.1:{rpc_port}"), child })
+        // A child whose piped stderr nobody reads blocks once the pipe
+        // fills, so one that cannot be teed does not survive.
+        let (tee, stderr) =
+            match tee_child_stderr(&mut child, StderrRedactions::for_fork(&exec_path, &self.fleet_store_root)) {
+                Ok(capture) => capture,
+                Err(e) => {
+                    terminate_child_group(&mut child);
+                    return Err(post(prepare_fork_io_detail("capturing stderr of", &recipe.hash, &e)));
+                }
+            };
+        // The reader answers to the child's pipe, not to any mail chain,
+        // and sends nothing, so it lets its root ctx go at once.
+        ctx.spawn_detached::<FleetServer, _>(move |root| {
+            drop(root);
+            tee.run();
+        });
+
+        Ok(PreparedFork { engine_id, rpc_port, rpc_addr: format!("127.0.0.1:{rpc_port}"), child, stderr })
     }
 
     /// Re-fork a dead engine from the recipe it was spawned with, and
@@ -654,7 +703,7 @@ impl<P> FleetServerState<P> {
             return;
         };
 
-        let prepared = match self.prepare_fork(&artifact.path, &supervision.recipe) {
+        let prepared = match self.prepare_fork(ctx, &artifact.path, &supervision.recipe) {
             Ok(prepared) => prepared,
             Err(failure) => {
                 let (engine_id, rpc_port, error) = match failure {
@@ -683,7 +732,7 @@ impl<P> FleetServerState<P> {
             }
         };
 
-        let PreparedFork { engine_id, rpc_port, rpc_addr, child } = prepared;
+        let PreparedFork { engine_id, rpc_port, rpc_addr, child, stderr } = prepared;
         let subname = engine_id.0.simple().to_string();
         let staged = ctx
             .spawn_child::<FleetProxy>(
@@ -715,7 +764,7 @@ impl<P> FleetServerState<P> {
                 // the child — except on the init-failure path, which
                 // already terminated its group. Record the failed
                 // recovery against the id it burned.
-                let error = format!("proxy failed to connect to the restarted substrate: {e:?}");
+                let error = spawn_failure_detail("restarted", &e, stderr);
                 tracing::error!(
                     target: "aether_substrate::fleet_server",
                     engine_id = %engine_id.0,
@@ -950,10 +999,9 @@ impl NativeActor for FleetServer {
             args: mail.args.clone(),
             boot_manifest: mail.boot_manifest.clone(),
         };
-        let mut last_error = String::new();
 
         for attempt in 0..attempts {
-            let prepared = match state.prepare_fork(&artifact.path, &recipe) {
+            let prepared = match state.prepare_fork(ctx, &artifact.path, &recipe) {
                 Ok(prepared) => prepared,
                 // No engine id was minted, so there is nothing to
                 // correlate or reap and no death to record.
@@ -970,7 +1018,7 @@ impl NativeActor for FleetServer {
                 }
             };
 
-            let PreparedFork { engine_id, rpc_port, rpc_addr, child } = prepared;
+            let PreparedFork { engine_id, rpc_port, rpc_addr, child, stderr } = prepared;
             let subname = engine_id.0.simple().to_string();
 
             // `continue_from` still runs `FleetProxy::init` on this thread:
@@ -1007,19 +1055,22 @@ impl NativeActor for FleetServer {
                 }
                 Err((e, returned)) => {
                     owed = returned;
-                    last_error = format!("proxy failed to connect to the spawned substrate: {e:?}");
-                    // Re-fork only the bind-stolen-port child-exited
-                    // death, and only if attempts remain. Any other
-                    // failure is terminal — re-forking it would just
+                    // Re-fork only the startup exit a failed RPC bind
+                    // produces, and only if attempts remain. Any other
+                    // failure is terminal — a bad flag or a panic dies the
+                    // same way on every port, so re-forking it would just
                     // burn the budget again.
                     if is_reforkable_spawn_failure(&e) && attempt + 1 < attempts {
+                        // The abandoned attempt's stderr already reached
+                        // the hub log; its tail belongs to no reply.
+                        drop(stderr);
                         tracing::warn!(
                             target: "aether_substrate::fleet_server",
                             engine_id = %engine_id.0,
                             rpc_port,
                             attempt = attempt + 1,
                             attempts,
-                            "engine spawn: substrate exited during startup (likely a stolen RPC port); re-forking on a fresh port",
+                            "engine spawn: substrate exited during startup with the bind-failure exit code (likely a stolen RPC port); re-forking on a fresh port",
                         );
                         // The abandoned attempt burned an id, a port, and a
                         // materialized copy of the binary. The next attempt
@@ -1029,7 +1080,8 @@ impl NativeActor for FleetServer {
                         state.reap_engine_dir(engine_id);
                         continue;
                     }
-                    owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, last_error));
+                    let error = spawn_failure_detail("spawned", &e, stderr);
+                    owed.reply(ctx, &state.fail_spawn(engine_id, rpc_port, error));
                     return;
                 }
             }
@@ -1038,7 +1090,10 @@ impl NativeActor for FleetServer {
         // Only reached if `attempts` is 0, which `spawn_attempts()`
         // clamps away — keep an honest terminal `Err` rather than an
         // unreachable panic.
-        owed.reply(ctx, &SpawnEngineResult::Err { engine_id: None, error: last_error });
+        owed.reply(
+            ctx,
+            &SpawnEngineResult::Err { engine_id: None, error: "the fleet made no spawn attempt".to_owned() },
+        );
     }
 
     /// Settle one staged proxy birth. Only an authoritative apply with no

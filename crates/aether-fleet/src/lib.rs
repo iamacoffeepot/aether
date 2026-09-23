@@ -15,6 +15,8 @@
 //! See issue 763 for the full design.
 
 pub mod child_env;
+#[cfg(not(target_family = "wasm"))]
+mod child_stderr;
 pub mod kinds;
 mod proxy;
 mod server;

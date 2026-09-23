@@ -77,6 +77,14 @@ pub use config::HeartbeatParams;
 // `SpawnError` / `BootError`.
 #[cfg(not(target_family = "wasm"))]
 pub use connect::is_reforkable_spawn_failure;
+// A failed spawn's detail names the startup exit it saw, and a fork whose
+// stderr capture cannot start is torn down the way a failed proxy init
+// tears down its child. Only the engines cap reads them; `proxy` is a
+// private module, so they reach no further than this crate.
+#[cfg(not(target_family = "wasm"))]
+pub use connect::{describe_exit, startup_exit_status};
+#[cfg(not(target_family = "wasm"))]
+pub use reap::terminate_child_group;
 
 /// `aether.fleet.proxy:<id>` cap **identity** (ADR-0122 identity/runtime
 /// split). A ZST carrying only the addressing — `Addressable` (`NAMESPACE`,
