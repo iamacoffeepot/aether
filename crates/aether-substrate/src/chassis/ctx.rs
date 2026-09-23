@@ -431,10 +431,7 @@ pub struct ChassisCtx<'a> {
 impl<'a> ChassisCtx<'a> {
     /// Internal constructor used by the ADR-0071
     /// [`crate::chassis::builder::Builder`].
-    #[allow(
-        clippy::too_many_arguments,
-        reason = "each argument is one of the boot's borrowed accumulators, threaded in the order the builder holds them"
-    )]
+    #[allow(clippy::too_many_arguments)] // aether-suppression-request: one borrowed boot accumulator per argument
     pub(in crate::chassis) fn new(
         registry: &'a Arc<Registry>,
         mailer: &'a Arc<Mailer>,
