@@ -13,7 +13,7 @@ use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
 
-use aether_actor::{Addressable, CallerAddressable, Replies, Sends, Singleton};
+use aether_actor::{Addressable, CallerAddressable, Replies, ReplyMode, Sends, Singleton, WasmCtx};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
@@ -95,8 +95,18 @@ impl PendingCall {
     }
 
     /// Send the captured request to the binding's target through a typed send.
-    pub fn dispatch(&self, sends: &mut Sends<'_>) {
-        self.body.send(sends);
+    ///
+    /// The program chose the target at run time, when its binding captured
+    /// the call, and the captured body hides the target and kind behind a
+    /// trait object. A trait object cannot carry a method generic over the
+    /// sending actor, so this erases the sender's view once, here. The
+    /// target still answers the kind: `T: Replies<K>` was checked when the
+    /// call was captured. The bundle's allowlist, built from its declared
+    /// APIs, refuses any undeclared target before this call. #6469 replaces
+    /// the erased view with a send that the invocation's declared
+    /// dependencies prove.
+    pub fn dispatch<A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>) {
+        self.body.send(&mut ctx.erase().sends());
     }
 }
 
