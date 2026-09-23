@@ -85,7 +85,7 @@ impl DropdownEffects {
 
     /// The choice first, the open edge second: a consumer sees the value it
     /// asked for before the list reports itself gone.
-    fn emit(self, ctx: &WasmCtx<'_>) {
+    fn emit<A>(self, ctx: &WasmCtx<'_, A>) {
         let Some(parent) = ctx.parent() else {
             return;
         };
@@ -205,7 +205,7 @@ impl DropdownWidget {
     /// pointer — the pointer itself, an arrow key scrolling the realized
     /// window, and every close — so what the host is told stays true while the
     /// list moves under a pointer that has not.
-    fn settle_hovered_option(&mut self, ctx: &WasmCtx<'_>) {
+    fn settle_hovered_option<A>(&mut self, ctx: &WasmCtx<'_, A>) {
         let next = self.pointer_option();
         if self.hovered_option == next {
             return;

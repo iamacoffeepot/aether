@@ -69,7 +69,7 @@ impl MenuBarEffects {
 
     /// The activation first, the open edge second: a consumer sees the command
     /// it invoked before the menu reports itself gone.
-    fn emit(self, ctx: &WasmCtx<'_>) {
+    fn emit<A>(self, ctx: &WasmCtx<'_, A>) {
         let Some(parent) = ctx.parent() else {
             return;
         };

@@ -101,7 +101,7 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 
-use aether_actor::WasmCtx;
+use aether_actor::{Reaches, WasmCtx};
 use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DELETE, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_V, KEY_X,
@@ -335,8 +335,8 @@ pub(super) fn apply_edit_command(edit: &mut TextEditState, command: EditCommand,
 ///
 /// `paste_pending` is the control's own single-flight guard: a second Paste
 /// while a clipboard read is outstanding is dropped rather than queued.
-pub(super) fn run_edit_key(
-    ctx: &mut WasmCtx<'_>,
+pub(super) fn run_edit_key<A: Reaches<ClipboardCapability>>(
+    ctx: &mut WasmCtx<'_, A>,
     edit: &mut TextEditState,
     paste_pending: &mut bool,
     command: EditCommand,
@@ -411,8 +411,8 @@ fn text_control_theme_state(state: &InteractionState, dragging: bool) -> ThemeSt
     }
 }
 
-fn apply_text_control_state(
-    ctx: &WasmCtx<'_>,
+fn apply_text_control_state<A>(
+    ctx: &WasmCtx<'_, A>,
     state: &mut InteractionState,
     edit: &mut TextEditState,
     dragging: &mut bool,
@@ -429,13 +429,18 @@ fn apply_text_control_state(
     }
 }
 
-fn pump_text_font_metrics(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter) {
+fn pump_text_font_metrics<A: Reaches<TextCapability>>(ctx: &mut WasmCtx<'_, A>, font_metrics: &mut FontMetricsAdapter) {
     if let Some(id) = font_metrics.take_pending_request() {
         ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
     }
 }
 
-fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter, theme: &mut Theme, next: Theme) {
+fn apply_text_theme<A: Reaches<TextCapability>>(
+    ctx: &mut WasmCtx<'_, A>,
+    font_metrics: &mut FontMetricsAdapter,
+    theme: &mut Theme,
+    next: Theme,
+) {
     font_metrics.set_desired(next.font_id);
     *theme = next;
     pump_text_font_metrics(ctx, font_metrics);
@@ -444,7 +449,11 @@ fn apply_text_theme(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter
 /// Install a font-metrics reply and pump whatever newer request the settled
 /// flight deferred. A stale reply — its font is no longer the desired one —
 /// is dropped by the adapter.
-fn accept_font_metrics_result(ctx: &mut WasmCtx<'_>, font_metrics: &mut FontMetricsAdapter, result: FontMetricsResult) {
+fn accept_font_metrics_result<A: Reaches<TextCapability>>(
+    ctx: &mut WasmCtx<'_, A>,
+    font_metrics: &mut FontMetricsAdapter,
+    result: FontMetricsResult,
+) {
     let pump_deferred = match result {
         FontMetricsResult::Ok { metrics } => font_metrics.accept_reply(Some(CachedFontMetrics::new(&metrics))),
         FontMetricsResult::Err { error } => {
@@ -509,7 +518,7 @@ fn update_text_modifiers(state: &InteractionState, modifiers: &mut Modifiers, ne
     }
 }
 
-fn apply_static_control_state(ctx: &WasmCtx<'_>, state: &mut InteractionState, next: WidgetControlState) {
+fn apply_static_control_state<A>(ctx: &WasmCtx<'_, A>, state: &mut InteractionState, next: WidgetControlState) {
     if state.replace(next) {
         emit_state_changed(ctx, state);
     }
@@ -548,7 +557,7 @@ fn clamp_optional_selection(selected: Option<usize>, len: usize) -> Option<usize
 /// Discharge the hidden-widget branch of the always-reply compositing
 /// protocol. Hidden controls retain their slot, so every `Collect` must still
 /// produce one empty draw-list reply.
-pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bool {
+pub(super) fn reply_if_hidden<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState) -> bool {
     if state.is_visible() {
         return false;
     }
@@ -563,7 +572,7 @@ pub(super) fn reply_if_hidden(ctx: &WasmCtx<'_>, state: &InteractionState) -> bo
 /// widget is visible, so a hidden widget builds no geometry, and the list it
 /// returns states only the lanes that widget actually fills
 /// ([`WidgetDrawList::items`] and friends).
-pub(super) fn reply_draw(ctx: &WasmCtx<'_>, state: &InteractionState, draw: impl FnOnce() -> WidgetDrawList) {
+pub(super) fn reply_draw<A>(ctx: &WasmCtx<'_, A>, state: &InteractionState, draw: impl FnOnce() -> WidgetDrawList) {
     if reply_if_hidden(ctx, state) {
         return;
     }
@@ -1240,7 +1249,7 @@ pub(super) fn single_line_edit_overlay(edit: &SingleLineEdit<'_>) -> Vec<WidgetD
 /// Reply one single-line editor's frame: its ordinary draw, plus the hover
 /// overflow plate when the contents are too wide for the box. Shared by the
 /// text field and the numeric editor, which draw the same box.
-pub(super) fn reply_single_line_edit(ctx: &WasmCtx<'_>, edit: SingleLineEdit<'_>) {
+pub(super) fn reply_single_line_edit<A>(ctx: &WasmCtx<'_, A>, edit: SingleLineEdit<'_>) {
     if reply_if_hidden(ctx, edit.state) {
         return;
     }

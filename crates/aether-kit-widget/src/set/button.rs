@@ -91,7 +91,7 @@ impl ButtonWidget {
         self.arms.clear();
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.state.replace(next) {
             if !self.state.is_available() {
                 self.clear_arms();
@@ -100,7 +100,7 @@ impl ButtonWidget {
         }
     }
 
-    fn emit_click(ctx: &WasmCtx<'_>) {
+    fn emit_click<A>(ctx: &WasmCtx<'_, A>) {
         if let Some(parent) = ctx.parent() {
             parent.send(&ButtonActivated);
         }

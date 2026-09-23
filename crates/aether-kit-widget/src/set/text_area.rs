@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button};
@@ -107,11 +107,11 @@ impl TextAreaWidget {
         text_control_theme_state(&self.state, self.dragging)
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         apply_text_control_state(ctx, &mut self.state, &mut self.edit, &mut self.dragging, next);
     }
 
-    fn pump_font_metrics(&mut self, ctx: &mut WasmCtx<'_>) {
+    fn pump_font_metrics<A: Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 

@@ -301,7 +301,7 @@ impl ToastWidget {
 const BAR_UNIT_RATIO: f32 = 0.75;
 
 /// Emit the region's placement when a mutation actually changed the stack.
-fn report(ctx: &WasmCtx<'_>, changed: bool, placed: WidgetPlaced) {
+fn report<A>(ctx: &WasmCtx<'_, A>, changed: bool, placed: WidgetPlaced) {
     if !changed {
         return;
     }

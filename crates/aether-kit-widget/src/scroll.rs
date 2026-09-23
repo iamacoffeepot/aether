@@ -194,7 +194,7 @@ fn clipped_focus_rect(viewport: &WidgetFrame, child: &WidgetFrame) -> Option<Foc
 }
 
 impl ScrollWidget {
-    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -235,7 +235,7 @@ impl ScrollWidget {
         }
     }
 
-    fn sync_layout(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn sync_layout<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         let Some(content) = &self.content else {
             return;
         };
@@ -269,7 +269,7 @@ impl ScrollWidget {
         }
     }
 
-    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn drive_frame<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -282,7 +282,7 @@ impl ScrollWidget {
         }
     }
 
-    fn finish(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn finish<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -297,7 +297,7 @@ impl ScrollWidget {
         debug_assert!(closed, "an open scroll frame closes exactly once");
     }
 
-    fn apply_delta(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, delta: ScrollDelta) {
+    fn apply_delta<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>, delta: ScrollDelta) {
         let outcome = apply_scroll(ctx.mailbox_id(), self.viewport_extent, self.content_extent, self.offset, delta);
         self.offset = outcome.offset;
         self.sync_layout(ctx);

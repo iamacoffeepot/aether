@@ -143,7 +143,9 @@ aether_actor::export!(
     aether_behavior::BehaviorHost
 );
 
-use aether_actor::{ActorInitError, Addressable, Erased, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Addressable, Erased, Manual, Reaches, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -233,7 +235,7 @@ impl Widget {
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
-    fn ensure_spawned(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -264,7 +266,10 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn drive_frame<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+        &mut self,
+        ctx: &mut WasmCtx<'_, A, Manual>,
+    ) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -282,7 +287,7 @@ impl Widget {
 
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
-    fn finish(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+    fn finish<A: Reaches<RenderCapability> + Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -305,7 +310,7 @@ impl Widget {
 /// has no up-lane consumer, so the drain is a harmless no-send there (kept
 /// mechanical for uniformity and future re-parenting). Shared by the
 /// compositing node and the reference panel, which both own a `Composite`.
-pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, Erased, Manual>) {
+pub(crate) fn flush_membership<A>(composite: &mut Composite, ctx: &mut WasmCtx<'_, A, Manual>) {
     if let Some(changed) = composite.take_membership_changes()
         && let Some(parent) = ctx.parent()
     {
@@ -317,9 +322,9 @@ pub(crate) fn flush_membership(composite: &mut Composite, ctx: &mut WasmCtx<'_, 
 /// report whether the frame's slots have now all filled. The caller
 /// discharges the completed composite its own way (the node replies up or
 /// emits; the panel emits), so only the fill + completeness check is shared.
-pub(crate) fn accept_child_list(
+pub(crate) fn accept_child_list<A>(
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+    ctx: &mut WasmCtx<'_, A, Manual>,
     list: WidgetDrawList,
 ) -> bool {
     if let Some(source) = ctx.sender() {
@@ -328,10 +333,10 @@ pub(crate) fn accept_child_list(
     composite.is_complete()
 }
 
-fn accept_open_child_list(
+fn accept_open_child_list<A>(
     discharge: &FrameDischarge,
     composite: &mut Composite,
-    ctx: &mut WasmCtx<'_, Erased, Manual>,
+    ctx: &mut WasmCtx<'_, A, Manual>,
     list: WidgetDrawList,
 ) -> bool {
     !discharge.is_closed() && accept_child_list(composite, ctx, list)
@@ -642,7 +647,10 @@ fn text_items(items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) -> Vec
 /// text cap. Text's extra hop keeps the established later lane. Public so a
 /// peer compositor in another crate (the terrain workbench panel) reuses the
 /// same single-sender flush for its own composite.
-pub fn emit(ctx: &mut WasmCtx<'_, Erased, Manual>, list: &WidgetDrawList) {
+pub fn emit<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
+    list: &WidgetDrawList,
+) {
     emit_layer(ctx, &list.items, &list.overlay);
     if !list.overlay.is_empty() {
         emit_layer(ctx, &list.overlay, &[]);
@@ -654,7 +662,11 @@ pub fn emit(ctx: &mut WasmCtx<'_, Erased, Manual>, list: &WidgetDrawList) {
 /// cluster overlay for the ordinary lane, empty for the overlay lane. Called
 /// for the ordinary items and again for the overlay, so an overlay's quads
 /// and glyphs are submitted after every ordinary quad and glyph respectively.
-fn emit_layer(ctx: &mut WasmCtx<'_, Erased, Manual>, items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) {
+fn emit_layer<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
+    items: &[WidgetDrawItem],
+    later_overlay: &[WidgetDrawItem],
+) {
     for run in direct_runs(items) {
         match run {
             DirectRun::Textured { texture_id, clip, quads } => {

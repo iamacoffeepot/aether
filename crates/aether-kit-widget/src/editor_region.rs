@@ -37,7 +37,7 @@ pub struct EditorRegion {
 impl EditorRegion {
     /// Hand one relayed input event to the hosted panel. A region whose panel
     /// failed to spawn has nowhere to send it, and says so once, in `wire`.
-    fn relay<K: Kind>(&self, ctx: &mut WasmCtx<'_>, payload: &K) {
+    fn relay<A, K: Kind>(&self, ctx: &mut WasmCtx<'_, A>, payload: &K) {
         if let Some(panel) = self.panel {
             ctx.send_to(panel, payload);
         }

@@ -390,7 +390,7 @@ impl VirtualListWidget {
         changed
     }
 
-    fn apply_control_state(&mut self, ctx: &WasmCtx<'_>, next: WidgetControlState) {
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
         if self.replace_control_state(next) {
             emit_state_changed(ctx, &self.state);
             self.settle_hovered_row(ctx);
