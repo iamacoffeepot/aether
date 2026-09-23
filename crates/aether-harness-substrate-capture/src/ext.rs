@@ -4,10 +4,11 @@
 //! [`GpuFrameHook`] owns the [`PumpedSlot`] for the pumped `aether.render`
 //! actor, draining it at the harness's step / capture pump points so draw
 //! dispatch, capture readback, and present all run on the harness thread that
-//! owns the offscreen GPU. The `with_render` builder extension boots that slot
-//! post-`build_passive` via `PassiveChassis::boot_pumped_actor`; the
-//! surfaceless GPU boots lazily inside the pumped runtime on the first frame
-//! from the `offscreen_size` params.
+//! owns the offscreen GPU. The `with_render` builder extension reserves that
+//! slot at the Claim stage and boots it in the build's start via
+//! `PassiveChassis::boot_pumped_actor`; the surfaceless GPU boots lazily
+//! inside the pumped runtime on the first frame from the `offscreen_size`
+//! params.
 
 use std::any::Any;
 use std::sync::Arc;
@@ -169,7 +170,7 @@ impl RenderHarnessBuilderExt for SubstrateHarnessBuilder {
 /// it clears to.
 fn render_hook(builder: SubstrateHarnessBuilder, pass_timings: bool, clear_color: &str) -> SubstrateHarnessBuilder {
     let clear_color = clear_color.to_owned();
-    builder.render_hook(Box::new(move |passive, wiring, width, height| {
+    builder.render_hook::<RenderCapability>(Box::new(move |passive, wiring, width, height| {
         let RenderHookWiring { mailer, observed_kinds, assets_dir } = wiring;
         // The `FrameCheck` / similarity scorer lives in
         // `aether_substrate::render::visual` (below aether-render), so the
