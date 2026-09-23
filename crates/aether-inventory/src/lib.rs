@@ -33,7 +33,7 @@
 //!   `aether-kinds`.
 //! - [`ListHandlers`] → [`HandlersResult`] (ADR-0109 §5): the native
 //!   handler manifest — every `#[handler]`'s `{ namespace, input kind,
-//!   reply kind }` across every native actor linked into the substrate,
+//!   reply contract }` across every native actor linked into the substrate,
 //!   read from the link-time
 //!   [`HandlerEntry`](aether_data::name_inventory::HandlerEntry)
 //!   inventory the `#[actor]` macro populates. The native analogue of

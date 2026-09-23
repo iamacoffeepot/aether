@@ -687,7 +687,7 @@ pub struct KindLabels {
 /// `Schema`, which is behind the optional `derive` feature). The shape
 /// mirrors what the derive would emit for this enum so `describe_kinds`
 /// renders it the same as any derived enum.
-#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum ReplyContract {
     /// `-> ()` — a single-class handler that replies nothing.
     None,

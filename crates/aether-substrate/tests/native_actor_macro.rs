@@ -914,17 +914,33 @@ impl NativeActor for InstancedChildCap {
     fn on_greet(&self, _ctx: &mut NativeCtx<'_>, _mail: Greet) {}
 }
 
-/// ADR-0109 §5: the macro emits a link-time `HandlerEntry` for each
-/// native `#[handler]`, carrying the owning `NAMESPACE`, the input kind
-/// (id + name), and the reply kind read off the return type. A `-> Pong`
-/// handler surfaces `Greet -> Pong`; the round-trip reads the same entry
-/// back out of the process-global inventory.
+/// ADR-0109 §5 / ADR-0231 §4: the macro emits a link-time `HandlerEntry`
+/// for each native `#[handler]`, carrying the owning `NAMESPACE`, the input
+/// kind (id + name), and the handler's `ReplyContract`. A `-> Pong` handler
+/// reads `One(Pong)`, a `#[handler::manual]` handler reads `Manual` (decided
+/// by its class, not its `()` return), and a silent handler reads `None`. The
+/// actor's `capabilities()` row for the same kind carries the same contract,
+/// so the two native surfaces cannot drift apart.
 #[test]
 fn macro_emits_native_handler_reply_manifest() {
+    use aether_data::ReplyContract;
     use aether_data::name_inventory::handler_entries;
-    // Reference the cap so its `#[actor]` HandlerEntry submission links
-    // into this test binary.
-    assert_eq!(ReplyMacroCap::NAMESPACE, "test.macro_native_actor.reply");
+
+    fn manifest_reply(namespace: &str, kind: aether_data::KindId) -> ReplyContract {
+        handler_entries()
+            .find(|e| e.namespace == namespace && e.id == kind)
+            .unwrap_or_else(|| panic!("the macro should submit a HandlerEntry for {namespace}"))
+            .reply
+    }
+
+    fn capability_reply<A: Dispatch<A>>(kind: aether_data::KindId) -> ReplyContract {
+        A::capabilities()
+            .handlers
+            .into_iter()
+            .find(|h| h.id == kind)
+            .expect("capabilities() should carry a row for the handled kind")
+            .reply
+    }
 
     let entry = handler_entries()
         .find(|e| e.namespace == ReplyMacroCap::NAMESPACE && e.id == <Greet as Kind>::ID)
@@ -932,9 +948,19 @@ fn macro_emits_native_handler_reply_manifest() {
     assert_eq!(entry.name, <Greet as Kind>::NAME, "input kind name round-trips");
     assert_eq!(
         entry.reply,
-        Some(<Pong as Kind>::ID),
+        ReplyContract::One(<Pong as Kind>::ID),
         "the `-> Pong` return type is captured as the reply contract (In -> Out)",
     );
+
+    let manual = manifest_reply(ManualReplyCap::NAMESPACE, <ManualPing as Kind>::ID);
+    assert_eq!(manual, ReplyContract::Manual, "a manual handler reads Manual, not the silent None");
+
+    let silent = manifest_reply(InstancedChildCap::NAMESPACE, <Greet as Kind>::ID);
+    assert_eq!(silent, ReplyContract::None, "a `-> ()` handler reads None");
+
+    assert_eq!(capability_reply::<ReplyMacroCap>(<Greet as Kind>::ID), entry.reply);
+    assert_eq!(capability_reply::<ManualReplyCap>(<ManualPing as Kind>::ID), manual);
+    assert_eq!(capability_reply::<InstancedChildCap>(<Greet as Kind>::ID), silent);
 }
 
 #[test]

@@ -57,6 +57,7 @@ use alloc::string::{String, ToString};
 use crate::__inventory::DescriptorEntry;
 use crate::hash::{KIND_DOMAIN, fnv1a_64_prefixed};
 use crate::ids::{ActorId, KindId};
+use crate::schema::ReplyContract;
 use crate::tagged_id::{Tag, with_tag};
 use crate::transform::TransformEntry;
 
@@ -176,15 +177,17 @@ pub fn template_entries() -> impl Iterator<Item = &'static TemplateEntry> {
 /// custom section's handler record. The `#[actor]` macro submits one
 /// entry per `#[handler]` on a native actor: the owning actor's
 /// `NAMESPACE` (the mailbox the handler is reached at), the handler's
-/// input kind (id + name), and the reply kind id read off the return
-/// type (`None` for a `-> ()` fire-and-forget handler, `Some` for a
-/// `-> R` synchronous or `-> Pending<R>` deferred reply). The
+/// input kind (id + name), and the handler's [`ReplyContract`] (ADR-0231
+/// §4): `None` for a `-> ()` silent handler, `One(R)` for a `-> R`
+/// synchronous or `-> Pending<R>` deferred reply, and `Manual` for a
+/// `#[handler::manual]` handler that answers through `ctx.reply`. The
 /// `aether.inventory` cap folds these into the
 /// `aether.inventory.handlers` reply so a driver reads a native cap's
 /// `In -> Out` the way `describe_component` reads a wasm component's.
 ///
-/// Owns nothing but `'static` data (`KindId` is a `Copy` `u64` newtype),
-/// so it is const-constructible from `inventory::submit!`.
+/// Owns nothing but `'static` data (`KindId` is a `Copy` `u64` newtype and
+/// `ReplyContract` a `Copy` enum over it), so it is const-constructible from
+/// `inventory::submit!`.
 pub struct HandlerEntry {
     /// The owning actor's `NAMESPACE` const (e.g. `"aether.fs"`).
     pub namespace: &'static str,
@@ -192,9 +195,10 @@ pub struct HandlerEntry {
     pub id: KindId,
     /// The handler's input kind name (`<K as Kind>::NAME`).
     pub name: &'static str,
-    /// The handler's declared reply kind id — the `R` of `-> R` /
-    /// `-> Pending<R>` — or `None` for a `-> ()` fire-and-forget handler.
-    pub reply: Option<KindId>,
+    /// The handler's reply contract — `One(R::ID)` for `-> R` /
+    /// `-> Pending<R>`, `Manual` for a manual handler (decided by its
+    /// class, not its return type), `None` for a `-> ()` silent handler.
+    pub reply: ReplyContract,
 }
 
 inventory::collect!(HandlerEntry);

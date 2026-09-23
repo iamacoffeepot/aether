@@ -15,7 +15,7 @@ use crate::handler_parse::{
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
-use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
+use crate::reply_markers::{ReplyMarkerSite, native_reply_contract, reply_marker_impl};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum NativeEmit {
@@ -628,17 +628,14 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     let capability_handler_entries = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let cfgs = &h.cfgs;
-        // ADR-0109 §5 / ADR-0112: native chassis caps don't yet surface a
-        // per-handler reply contract — that needs a native handler
-        // manifest (a follow-on). Report `ReplyContract::None` until then;
-        // the wasm `describe_component` path carries the real class today.
+        let reply = native_reply_contract(h.class, &h.reply);
         quote! {
             #(#cfgs)*
             __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
-                reply: ::aether_data::ReplyContract::None,
+                reply: #reply,
             });
         }
     });
@@ -1164,11 +1161,7 @@ fn emit_native_identity_markers(
         let submissions = handler_kinds.iter().map(|marker| {
             let kind_ty = &marker.kind;
             let cfgs = &marker.cfgs;
-            let reply_expr = if let Some(reply_ty) = marker.reply.manifest_kind() {
-                quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
-            } else {
-                quote! { ::core::option::Option::None }
-            };
+            let reply_expr = native_reply_contract(marker.class, &marker.reply);
             quote! {
                 #(#cfgs)*
                 #[cfg(not(target_family = "wasm"))]

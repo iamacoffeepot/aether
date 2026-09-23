@@ -208,9 +208,10 @@ pub struct ListKindsResult {
 /// §5) and the native analogue of the wasm
 /// [`HandlerCapability`](aether_kinds::HandlerCapability).
 /// `namespace` is the owning cap's mailbox; `id` / `name` are the
-/// handler's input kind; `reply` is its declared reply kind id
-/// (`None` for a `-> ()` fire-and-forget handler, `Some` for a
-/// `-> R` synchronous or `-> Pending<R>` deferred reply). Carries no
+/// handler's input kind; `reply` is its reply contract (ADR-0231 §4):
+/// `None` for a `-> ()` silent handler, `One(R)` for a `-> R`
+/// synchronous or `-> Pending<R>` deferred reply, and `Manual` for a
+/// manual handler that replies at run time with no declared kind. Carries no
 /// `doc` — the native link-time inventory holds ids + names, so a
 /// native cap's per-handler docs are out of scope here (the wasm
 /// `HandlerCapability` carries them from the custom section instead).
@@ -219,12 +220,12 @@ pub struct HandlerEntryWire {
     pub namespace: String,
     pub id: aether_data::KindId,
     pub name: String,
-    pub reply: Option<aether_data::KindId>,
+    pub reply: aether_data::ReplyContract,
 }
 
 /// `aether.inventory.handlers` — request the running substrate's
 /// native handler manifest (ADR-0109 §5): every native chassis cap's
-/// per-handler `{ namespace, input kind, reply kind }`, collected at
+/// per-handler `{ namespace, input kind, reply contract }`, collected at
 /// link time. Empty payload; the request *is* the signal. Mailed to
 /// the `"aether.inventory"` mailbox; reply: [`HandlersResult`].
 ///

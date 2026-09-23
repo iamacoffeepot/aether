@@ -35,3 +35,19 @@ pub fn reply_marker_impl(
         (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Manual, _) => quote! {},
     }
 }
+
+/// The `::aether_data::ReplyContract` expression one native handler reports
+/// in its `HandlerEntry` inventory row and its `HandlerCapability` row
+/// (ADR-0231 §4). The class decides `Manual` from the attribute, never from the
+/// return type; a single handler reads `One(R::ID)` for `-> R` /
+/// `-> Pending<R>` and `None` for `-> ()`. All four native emitters read this
+/// one mapping, so the manifest and the capability rows cannot drift apart.
+pub fn native_reply_contract(class: HandlerClass, reply: &HandlerReply) -> TokenStream2 {
+    match (class, reply.manifest_kind()) {
+        (HandlerClass::Manual, _) => quote! { ::aether_data::ReplyContract::Manual },
+        (HandlerClass::Single, Some(reply_ty)) => {
+            quote! { ::aether_data::ReplyContract::One(<#reply_ty as ::aether_data::Kind>::ID) }
+        }
+        (HandlerClass::Single, None) => quote! { ::aether_data::ReplyContract::None },
+    }
+}

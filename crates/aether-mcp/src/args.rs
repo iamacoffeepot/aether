@@ -1003,13 +1003,18 @@ pub struct DescribeHandlersArgs {
 /// One native `#[handler]`'s reply contract as `describe_handlers`
 /// renders it (ADR-0109 §5). `input_id` / `reply_id` are tagged-id
 /// strings (`knd-XXXX-XXXX-XXXX`). `reply_id` / `reply_name` are `null`
-/// for a fire-and-forget `-> ()` handler; `reply_name` is `null` for a
+/// unless `reply_class` is `"one"`; `reply_name` is also `null` for a
 /// component-defined reply kind the static substrate vocabulary can't
 /// name.
 #[derive(Debug, Serialize, JsonSchema)]
 pub struct NativeHandlerJson {
     pub input_id: String,
     pub input_name: String,
+    /// The handler's reply class (ADR-0231 §4): `"none"` for a silent
+    /// `-> ()` handler, `"one"` for a `-> R` / `-> Pending<R>` handler,
+    /// `"manual"` for a manual handler that replies at run time with no
+    /// declared kind.
+    pub reply_class: &'static str,
     pub reply_id: Option<String>,
     pub reply_name: Option<String>,
 }

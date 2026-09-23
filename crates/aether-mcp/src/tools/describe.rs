@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 
-use aether_data::{Kind, KindDescriptor, tagged_id};
+use aether_data::{Kind, KindDescriptor, ReplyContract, tagged_id};
 use aether_inventory::kinds::{HandlersResult, ListHandlers};
 use aether_kinds::{DescribeComponent, DescribeComponentResult};
 use rmcp::ErrorData as McpError;
@@ -158,17 +158,24 @@ pub(super) async fn describe_handlers(mcp: &Mcp, args: DescribeHandlersArgs) -> 
     // BTreeMap keeps the caps (and their handlers) in a stable order.
     let mut folded: BTreeMap<String, Vec<NativeHandlerJson>> = BTreeMap::new();
     for entry in handlers {
+        // The reply kind id is the contract; resolve its name
+        // best-effort from the static substrate vocabulary so the
+        // In -> Out reads without a second lookup. A component-defined
+        // reply kind stays `None`. Only a `One` row names a kind: a
+        // manual handler replies at run time with no declared kind.
+        let (reply_class, reply_id) = match entry.reply {
+            ReplyContract::None => ("none", None),
+            ReplyContract::One(id) => ("one", Some(id)),
+            ReplyContract::Manual => ("manual", None),
+        };
         folded.entry(entry.namespace).or_default().push(NativeHandlerJson {
             // Input kind id rendered as the ADR-0064 tagged string,
             // falling back to a hex literal on an unencodable id.
             input_id: tagged_id::encode(entry.id.0).unwrap_or_else(|| format!("{:#x}", entry.id.0)),
             input_name: entry.name,
-            // The reply kind id is the contract; resolve its name
-            // best-effort from the static substrate vocabulary so
-            // the In -> Out reads without a second lookup. A
-            // component-defined reply kind stays `None`.
-            reply_id: entry.reply.map(|id| tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))),
-            reply_name: entry.reply.and_then(static_kind_name),
+            reply_class,
+            reply_id: reply_id.map(|id| tagged_id::encode(id.0).unwrap_or_else(|| format!("{:#x}", id.0))),
+            reply_name: reply_id.and_then(static_kind_name),
         });
     }
     let caps = folded.into_iter().map(|(namespace, handlers)| NativeCapHandlers { namespace, handlers }).collect();
