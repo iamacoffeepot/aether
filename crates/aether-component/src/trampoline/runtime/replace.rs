@@ -254,6 +254,10 @@ impl WasmTrampolineState {
             // `on_dehydrate`, which may still send, so the replacement —
             // or a later refill, if its instantiate fails — resumes past it.
             self.retired_correlations = Some(old.correlation_cursor());
+            // #6409: likewise move out its reply table, after both hooks
+            // (which may still answer handles), so the replacement answers
+            // the rest to their own requesters.
+            self.retired_replies = Some(old.take_pending_replies());
             // Old component drops at end of scope — the `Component`'s
             // own `Drop` releases the wasm store.
             drop(old);
@@ -263,10 +267,12 @@ impl WasmTrampolineState {
         };
 
         // Build a fresh `ComponentCtx` for the new instance — same
-        // mailer + registry/outbound/input references and a fresh
-        // reply-handle table. Mailbox id is preserved across replace per
-        // ADR-0022 §4, and so is its correlation sequence (ADR-0139 §3):
-        // the new instance resumes from the guest that last left the slot.
+        // mailer + registry/outbound/input references. Mailbox id is
+        // preserved across replace per ADR-0022 §4, and so is its
+        // correlation sequence (ADR-0139 §3): the new instance resumes
+        // from the guest that last left the slot. Its reply table starts
+        // empty and is replaced by the carried one once instantiate
+        // succeeds (#6409).
         let mut substrate_ctx = ComponentCtx::new(
             self.mailbox,
             Arc::clone(&self.registry),
@@ -299,6 +305,15 @@ impl WasmTrampolineState {
                 return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
             }
         };
+        // #6409: resume the carried reply table only now that instantiate
+        // succeeded — it consumes the ctx, so a table installed before it
+        // would die with a failed start; left in the slot, the next refill
+        // resumes it. Nothing was delivered during instantiate, so the new
+        // table is still empty, and this precedes `on_rehydrate` and every
+        // delivery.
+        if let Some(replies) = self.retired_replies.take() {
+            new_component.resume_replies(replies);
+        }
         // ADR-0163 §3 (#3984): replace re-runs `init` but not `wire`, so the
         // load window's job ends once the replacement instantiated — close
         // it, retaining the catalog metadata for the instance's life.

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use aether_actor::Local as _;
 use aether_substrate::actor::native::{Dispatch, NativeCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor, PendingReplies};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -66,6 +66,12 @@ pub struct WasmTrampolineState {
     /// request ids stay monotonic across replace and refill. `None` until
     /// a guest first leaves; a fresh slot starts its counter at 1.
     pub retired_correlations: Option<CorrelationCursor>,
+    /// #6409: the reply table of the last guest to leave this slot, which
+    /// the next occupant to start resumes, so a handle issued before the
+    /// swap still answers its own requester and no number is reissued.
+    /// Left in place when a replacement fails to start, for the next
+    /// refill. `None` until a guest first leaves, or once resumed.
+    pub retired_replies: Option<PendingReplies>,
 }
 
 impl WasmTrampolineState {
@@ -85,6 +91,9 @@ impl WasmTrampolineState {
             // #6400: after `unwire`, which may still send, so a later
             // refill resumes past every id this guest minted.
             self.retired_correlations = Some(component.correlation_cursor());
+            // #6409: after `unwire`, which may still answer handles, so a
+            // later refill answers the rest to their own requesters.
+            self.retired_replies = Some(component.take_pending_replies());
         }
         // iamacoffeepot/aether#1037: clear the trampoline's
         // capabilities — the wasm is unloaded, so the mailbox now

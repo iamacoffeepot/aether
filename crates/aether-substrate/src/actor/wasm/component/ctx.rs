@@ -23,6 +23,17 @@ use super::StateBundle;
 #[derive(Clone, Copy, Debug)]
 pub struct CorrelationCursor(u64);
 
+/// A mailbox's pending reply handles and the next handle its guest issues.
+/// Taken from a guest leaving its slot with
+/// [`super::Component::take_pending_replies`] and installed on the slot's next
+/// occupant with [`super::Component::resume_replies`], so a handle stays
+/// answerable to its own requester across replace, refill and a failed start,
+/// and a replacement never reissues a number still pending (#6409). Opaque: it
+/// has no public constructor, accessor or codec, so it can only come from a
+/// live component. Neither `Clone` nor `Copy`: two tables holding the same
+/// handle would answer one request twice.
+pub struct PendingReplies(ReplyTable);
+
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, a handle to the shared mail queue, and a
 /// handle to the registry so the `send_mail` host function can route
@@ -51,7 +62,9 @@ pub struct ComponentCtx {
     /// receives an opaque `u32` handle as the 4th param on its
     /// `receive` shim and passes it back to `reply_mail`; the
     /// substrate routes either over `HubOutbound` or back through
-    /// `Mailer` based on the variant.
+    /// `Mailer` based on the variant. One table per mailbox slot, not
+    /// per instance: the component trampoline carries it to the slot's
+    /// next occupant as [`PendingReplies`] (#6409).
     pub reply_table: ReplyTable,
     /// Set by the `save_state` host fn during `on_dehydrate`. The
     /// substrate extracts it after hooks return via
@@ -318,6 +331,19 @@ impl ComponentCtx {
     /// consumer is the component trampoline's replace.
     pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
         self.correlation_counter.set(cursor.0.max(self.correlation_counter.get()));
+    }
+
+    /// Move this guest's reply table out for the slot's next occupant.
+    /// Read through [`super::Component::take_pending_replies`].
+    pub(super) fn take_pending_replies(&mut self) -> PendingReplies {
+        PendingReplies(mem::take(&mut self.reply_table))
+    }
+
+    /// Install the reply table a guest that left this slot carried, over
+    /// this instance's still-empty one. Read through
+    /// [`super::Component::resume_replies`].
+    pub(super) fn resume_replies(&mut self, replies: PendingReplies) {
+        self.reply_table = replies.0;
     }
 
     /// Mint the next correlation id and bump the counter. Private —

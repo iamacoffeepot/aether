@@ -10,11 +10,19 @@
 //! reports [`CarriedReplyMatched`] only when it recovers its own request's
 //! context, which holds only when the replacement's request id continues past
 //! its predecessor's.
+//!
+//! Issue 6409: a reply handle stays answerable across a `replace_component`
+//! of the guest that holds it. `ReplyHolder` carries its parked handles
+//! through `on_dehydrate` / `on_rehydrate`, so a second scenario replaces the
+//! holder instead, with the tag-1 handle parked, and sends tag 2 to the
+//! replacement: both replies match only when the replacement answers the
+//! carried handle to its own requester and numbers the tag-2 handle past it.
 
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and `CarryRequester` is stateless so its first request takes the mailbox's first id — the same allow `source_forwarder` carries
 
 use aether_actor::{
-    ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Erased, Manual, OutboundReply, PriorState, ReplyHandle, WasmActor, WasmCtx, WasmDropCtx,
+    WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
     CarriedReplyMatched, CarriedRequest, CarriedRequestResult, ReleaseCarried, RunCarriedRequest,
@@ -24,6 +32,14 @@ use aether_test_fixtures_kinds::{
 #[aether_data::kind(name = "aether.test_fixtures.carried_context", no_serde)]
 struct CarriedContext {
     tag: u32,
+}
+
+/// The reply handles `ReplyHolder` has parked, with their tags, carried
+/// across a replace of the holder.
+#[aether_data::kind(name = "aether.test_fixtures.parked_replies")]
+struct ParkedReplies {
+    handles: Vec<ReplyHandle>,
+    tags: Vec<u32>,
 }
 
 /// Sends nothing from `init` or `wire`, so its first request takes the first
@@ -86,6 +102,17 @@ impl WasmActor for ReplyHolder {
     fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _release: ReleaseCarried) {
         for (handle, tag) in self.parked.drain(..) {
             ctx.reply_to(handle, &CarriedRequestResult { tag });
+        }
+    }
+
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+        let (handles, tags) = self.parked.drain(..).unzip();
+        ctx.save_state_kind::<ParkedReplies>(0, &ParkedReplies { handles, tags });
+    }
+
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+        if let Some(saved) = prior.decode_kind::<ParkedReplies>() {
+            self.parked = saved.handles.into_iter().zip(saved.tags).collect();
         }
     }
 }

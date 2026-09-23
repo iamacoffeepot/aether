@@ -129,6 +129,7 @@ impl NativeActor for WasmTrampoline {
             actor_caps: config.actor_caps,
             wasm_bytes: config.wasm_bytes,
             retired_correlations: None,
+            retired_replies: None,
         })
     }
 
