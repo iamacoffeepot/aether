@@ -66,6 +66,7 @@ compares these with native capabilities.
 | `aether-harness-substrate` | composable in-process substrate harness with deterministic mail, lifecycle, and settlement control |
 | `aether-harness-substrate-capture` | opt-in render/GPU capture and visual comparison support layered onto the core substrate harness |
 | `aether-harness-fleet` | real-process hub/RPC/headless fleet scenarios over raw framed calls |
+| `aether-harness-bloomery` | in-process journal-content scenarios over the shipped bloomery chassis: a seeded journal in, the appended records asserted against literals |
 | `aether-harness-perf` | the `aether-perf-trial` / `-compare` / `-plot` / `-registry` binaries |
 | `aether-mcp` | MCP tools, JSON/schema adaptation, hub RPC session, live-name caches; also carries the `aether-tunnel` binary |
 
@@ -146,7 +147,7 @@ uses the nightly fuzzing toolchain.
 | Change delivery or settlement | `aether-substrate/src/mail` or `scheduler` | actor contexts, trace/lifecycle tests, ADRs |
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
-| Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, or `aether-harness-fleet` | the consuming scenario's chassis and artifact requirements |
+| Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, `aether-harness-fleet`, or `aether-harness-bloomery` | the consuming scenario's chassis and artifact requirements |
 | Add a reusable guest actor | an `aether-kit-*` crate or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |

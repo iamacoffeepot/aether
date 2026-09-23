@@ -20,6 +20,8 @@ default = ["runtime"]
 runtime = []
 
 [dependencies]
+# `ActorRef` for the `Mounted` references the mount seam hands back.
+aether-actor = { path = "../aether-actor" }
 aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate" }
 # The bloomery cap set: the component host the driver's `Command::Load`
@@ -47,9 +49,7 @@ signal-hook = "0.4"
 ctrlc = "3"
 
 [dev-dependencies]
-aether-actor = { path = "../aether-actor" }
-aether-data = { path = "../aether-data" }
-tempfile = "3"
+aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 
 # `confique` is reached only through the
 # `#[derive(aether_substrate::Config)]`-emitted paths on `BloomeryConfig`,

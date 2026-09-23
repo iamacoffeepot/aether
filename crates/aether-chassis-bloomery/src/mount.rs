@@ -10,6 +10,7 @@ use std::fmt::Debug;
 use std::io;
 use std::path::Path;
 
+use aether_actor::ActorRef;
 use aether_bloomery_driver::{BundleDriver, DriverParams};
 use aether_bloomery_journal::JournalActor;
 use aether_bloomery_kinds::ClosureLimit;
@@ -19,19 +20,32 @@ use aether_substrate::chassis::error::BootError;
 
 use crate::chassis::BloomeryChassis;
 
+/// The proven references `mount` took back from its two spawns: the journal
+/// owner and the bundle driver it wired to that journal. An embedder that
+/// drives the mounted engine in process addresses both through these rather
+/// than resolving either by path.
+#[derive(Debug, Clone, Copy)]
+pub struct Mounted {
+    /// The journal owner, `aether.bloomery.journal:journal`.
+    pub journal: ActorRef<JournalActor>,
+    /// The bundle driver, `aether.bloomery.driver:driver`.
+    pub driver: ActorRef<BundleDriver>,
+}
+
 /// Spawn the journal owner under `Subname::Named("journal")` and the bundle
 /// driver under `Subname::Named("driver")` over the journal's born reference, so the
 /// engine answers as `aether.bloomery.journal:journal` and
-/// `aether.bloomery.driver:driver`.
+/// `aether.bloomery.driver:driver`, and hand both references back as
+/// [`Mounted`].
 ///
-/// Takes the already-lowered pair rather than the config: `BloomeryChassis::build`
+/// Takes the already-lowered pair rather than the config: `BloomeryChassis::build_mounted`
 /// lowers the knobs before it stands up the substrate, so a bad journal path
 /// never reaches this seam.
 ///
 /// # Errors
 ///
 /// Returns [`BootError`] when either spawn fails.
-pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureLimit) -> Result<(), BootError> {
+pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureLimit) -> Result<Mounted, BootError> {
     let journal = built
         .spawn_actor::<JournalActor>(Subname::Named("journal"), path.to_path_buf(), ())
         .finish()
@@ -46,7 +60,7 @@ pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureL
         ?driver,
         "bloomery chassis mounted the journal owner and the bundle driver",
     );
-    Ok(())
+    Ok(Mounted { journal, driver })
 }
 
 /// Wrap a spawn failure the way `impl From<wasmtime::Error> for BootError`

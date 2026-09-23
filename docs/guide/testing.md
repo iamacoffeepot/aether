@@ -141,6 +141,15 @@ headless, so any rendered-output assertion has to use SubstrateHarness plus its 
 extension, and any
 externally-addressable-over-the-wire assertion has to be FleetHarness.
 
+Journal content goes to **BloomeryHarness** (the `aether-harness-bloomery` crate): it
+seeds a scratch journal from `Batch`es, boots the shipped bloomery chassis over it in
+process, drives the mounted journal owner and bundle driver by proven reference —
+`call`, `move_head`, and `settle`, which follows `AwaitProcessed` → `Processed` to
+quiescence rather than sleeping — and asserts the records the loop appended with
+`assert_appended`. Expected values are literals the scenario writes, or the handles its
+seed staging returned; `fold` runs a view only over the actual journal, never to compute
+an expected value, so a bug in a fold cannot move both sides together.
+
 For overlay rendering, split structural and raster proof deliberately. Assert exact
 rectangle geometry, clips, texture coordinates, tint, texture identity, projection
 space, and submission order through `committed_overlay_snapshot` (on

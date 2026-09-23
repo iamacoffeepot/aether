@@ -174,11 +174,11 @@ dependencies = [
  "aether-bloomery-view",
  "aether-component",
  "aether-data",
+ "aether-harness-bloomery",
  "aether-harness-substrate",
  "aether-kinds",
  "aether-substrate",
  "aether-test-fixtures-kinds",
- "tempfile",
  "wasmparser 0.246.2",
 ]
 
@@ -314,14 +314,13 @@ dependencies = [
  "aether-bloomery-kinds",
  "aether-chassis",
  "aether-component",
- "aether-data",
+ "aether-harness-bloomery",
  "aether-rpc",
  "aether-substrate",
  "clap",
  "confique",
  "ctrlc",
  "signal-hook",
- "tempfile",
  "tracing",
 ]
 
@@ -543,6 +542,21 @@ dependencies = [
  "inventory",
  "serde",
  "tracing",
+]
+
+[[package]]
+name = "aether-harness-bloomery"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-journal",
+ "aether-bloomery-kinds",
+ "aether-bloomery-view",
+ "aether-chassis",
+ "aether-chassis-bloomery",
+ "aether-data",
+ "aether-substrate",
+ "tempfile",
 ]
 
 [[package]]

@@ -28,7 +28,7 @@ use aether_substrate::{Chassis, SubstrateBoot};
 use crate::cli::BloomeryCli;
 use crate::config::BloomeryConfig;
 use crate::driver::BloomeryDriverCapability;
-use crate::mount;
+use crate::mount::{self, Mounted};
 
 /// Marker type for the bloomery chassis. Carries no fields — the
 /// chassis instance is the [`BuiltChassis<BloomeryChassis>`] returned
@@ -41,13 +41,29 @@ impl Chassis for BloomeryChassis {
     type Driver = BloomeryDriverCapability;
     type Env = BloomeryEnv;
 
+    /// Build the bloomery chassis through [`BloomeryChassis::build_mounted`],
+    /// dropping the mounted references: the shipped binary drives the engine
+    /// over RPC and never addresses the journal or the driver in process.
+    fn build(env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+        Self::build_mounted(env).map(|(built, _)| built)
+    }
+}
+
+impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
     /// lower the bloomery knobs, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
     /// plus the component host and the RPC server, sweep for unknown env keys,
     /// install the signal-blocking driver, and mount the journal owner and the
-    /// bundle driver before returning.
-    fn build(mut env: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
+    /// bundle driver before returning. The [`Mounted`] references come back
+    /// beside the chassis for an embedder that drives it in process.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`BootError`] when the bloomery knobs do not lower, the
+    /// substrate or the composed chain fails to boot, or either mount spawn
+    /// fails.
+    pub fn build_mounted(mut env: BloomeryEnv) -> Result<(BuiltChassis<Self>, Mounted), BootError> {
         // Lower the bloomery knobs first, before anything with a side effect:
         // an unset journal or an out-of-range closure limit is a typo in the
         // operator's own argv, and refusing it here costs nothing, where
@@ -62,8 +78,8 @@ impl Chassis for BloomeryChassis {
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
         let built = builder.driver(BloomeryDriverCapability { boot }).build()?;
-        mount::mount(&built, &journal, limit)?;
-        Ok(built)
+        let mounted = mount::mount(&built, &journal, limit)?;
+        Ok((built, mounted))
     }
 }
 
@@ -78,11 +94,11 @@ pub struct BloomeryEnv {
     pub base: ChassisBase,
     /// The substrate runtime knobs. Only `log_filter` is consumed
     /// chassis-side (re-applied after the subscriber installs, in
-    /// [`BloomeryChassis::build`]); the field carries the whole resolved
+    /// [`BloomeryChassis::build_mounted`]); the field carries the whole resolved
     /// member so its values resolve once.
     pub runtime: RuntimeConfig,
     /// The bloomery knobs. Lowered to the journal path and the driver's
-    /// closure limit at the top of [`BloomeryChassis::build`], then applied off
+    /// closure limit at the top of [`BloomeryChassis::build_mounted`], then applied off
     /// the builder at the mount seam.
     pub bloomery: BloomeryConfig,
 }
