@@ -148,7 +148,8 @@ impl Registry {
     /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender),
     /// discharges the obligation the stamped dispatch source already
     /// answers: the host stamped this position at dispatch, so the answer is
-    /// already known.
+    /// already known. For a reply it mints the replier, the sender half of
+    /// the mail id the replying actor minted in its own id space.
     ///
     /// Its second is the `host_turn` self-mail test in
     /// `crate::actor::native::slot::pumped`, which names the position it
