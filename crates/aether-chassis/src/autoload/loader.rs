@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 
-use aether_actor::actor;
+use aether_actor::{Reaches, actor};
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -78,7 +78,7 @@ impl NativeActor for Autoloader {
 
 impl Autoloader {
     /// Send the next component's load, or report success once none remain.
-    fn send_next(&mut self, ctx: &mut NativeCtx<'_>) {
+    fn send_next<A: Reaches<ComponentHostCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         let Some(component) = self.remaining.pop_front() else {
             self.finish(Ok(self.loaded));
             return;

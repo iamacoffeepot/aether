@@ -284,9 +284,9 @@ impl MeshViewer {
     /// requester carried in the fs request context. No-op when no reply
     /// target was carried (the load was fire-and-forget).
     #[allow(clippy::unused_self)]
-    fn reply_load_result(
+    fn reply_load_result<A>(
         &self,
-        ctx: &mut WasmCtx<'_, Erased, Manual>,
+        ctx: &mut WasmCtx<'_, A, Manual>,
         sender: Option<ReplyHandle>,
         namespace: String,
         path: String,

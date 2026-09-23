@@ -10,7 +10,7 @@
 //! `ReadResult` handler recovers them by trying each context type in turn, A
 //! first, so the reply carrying context B crosses a wrong-kind take of A.
 
-use aether_actor::{ActorInitError, Erased, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, Reaches, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
     FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SubstrateHarnessObserver,
@@ -103,7 +103,7 @@ impl FsDemux {
     /// context type in turn, A first: a wrong-kind take leaves the context
     /// stored, so the reply carrying context B still recovers it. Returns
     /// whether this reply carried either context.
-    fn handle_typed_context(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) -> bool {
+    fn handle_typed_context<A: Reaches<SubstrateHarnessObserver>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) -> bool {
         if let Some(context) = ctx.take_context::<FsDemuxContextA>() {
             if context.payload != CONTEXT_A_PAYLOAD {
                 tracing::warn!(
