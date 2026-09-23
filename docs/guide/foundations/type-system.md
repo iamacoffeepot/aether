@@ -196,7 +196,7 @@ every process that holds the same names and the same lineage computes the same
 ids — and a component hot-swap, which changes neither, keeps the address
 valid. In a component you rarely touch either id directly: you address a peer
 by type (`ctx.actor::<RenderCapability>()`) or send through a proven reference
-it holds (`ctx.to(&reference)`). The mailbox-vs-kind distinction — why an address and a payload shape are different
+it holds (`ctx.send_to(reference, &kind)`). The mailbox-vs-kind distinction — why an address and a payload shape are different
 things even when they share a name prefix — is the
 [Mail, kinds & scheduling](../systems/mail-and-kinds.md) page's subject.
 

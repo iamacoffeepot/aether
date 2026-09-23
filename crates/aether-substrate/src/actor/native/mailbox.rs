@@ -194,7 +194,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     /// *recipient's* tree rather than the sender's. Reply-correlated
     /// requests go through [`Self::send`], except a request the running
     /// chain did not cause, which goes through
-    /// [`NativeCtx::send_detached_with_context`](crate::actor::native::NativeCtx::send_detached_with_context).
+    /// [`NativeCtx::send_detached_to_with_context`](crate::actor::native::NativeCtx::send_detached_to_with_context).
     ///
     /// [`Self::send_detached_tracked`] with the minted id dropped — the two
     /// differ only in whether the caller keeps that id.

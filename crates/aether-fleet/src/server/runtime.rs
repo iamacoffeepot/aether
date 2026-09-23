@@ -1185,7 +1185,7 @@ impl NativeActor for FleetServer {
         // terminates its substrate's group and self-shuts-down.
         // Fire-and-forget — the proxy doesn't reply, and the table entry
         // is already gone.
-        ctx.to(&entry.proxy).send(&mail);
+        ctx.send_to(entry.proxy, &mail);
         TerminateEngineResult::Ok
     }
 

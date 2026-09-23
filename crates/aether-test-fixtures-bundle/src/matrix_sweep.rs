@@ -258,7 +258,7 @@ impl WasmActor for MatrixChild {
         // `sender()` reads child[a]'s id — the host stamps the
         // guest-carried, in-cluster-validated origin (issue 1987).
         if let Some(observer) = observer() {
-            ctx.to(&observer).send(&SourceQuery);
+            ctx.send_to(observer, &SourceQuery);
         }
     }
 }

@@ -9,23 +9,25 @@ use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
-use crate::reference::ErasedActorRef;
+use crate::reference::{ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::ChainMode;
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
-    /// Issue 1987: send `payload` to a proven [`ErasedActorRef`], threading this
-    /// actor's own id as the send's `from`. The untyped cell for a recipient
-    /// known only at runtime takes the proof a spawn
-    /// ([`InlineChild::erase`](super::InlineChild::erase),
+    /// Issue 1987: send `payload` through a held reference, threading this
+    /// actor's own id as the send's `from` (ADR-0232 §1). The target is a
+    /// [`Target`]: an [`ActorRef<R>`](crate::ActorRef) is kind-checked, so the
+    /// send compiles only when `R` handles `K`, and an [`ErasedActorRef`] is
+    /// not. The erased proof for a recipient known only at runtime is one a
+    /// spawn ([`InlineChild::erase`](super::InlineChild::erase),
     /// [`Self::spawn_inline_child_by_tag`]), a `child_as` / `sibling_as`
     /// lookup, or [`Self::sender`] produced — never a computed position
     /// (ADR-0230). There is no by-name counterpart, because text is not a
     /// proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
-    pub fn send_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+        self.inline.route_or_enqueue(target.erased().id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
 }
 

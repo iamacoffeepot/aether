@@ -129,7 +129,7 @@ subscription-style wait) holds the sender's chain open for as long as it waits
 when it inherits that chain. The outcome still arrives, so nothing looks wrong
 except that the chain never settles. If the running chain did not cause the
 wait, send the request detached with its reply context
-(`NativeCtx::send_detached_with_context`): it roots a fresh chain, and its reply
+(`NativeCtx::send_detached_to_with_context`): it roots a fresh chain, and its reply
 still correlates home through the stored context. The bundle driver's
 `WatchHead` is the worked case: the journal owner parks the watch until the head
 moves, and the driver re-arms it on whichever chain goes idle, which kept every
