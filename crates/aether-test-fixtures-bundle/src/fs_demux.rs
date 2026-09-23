@@ -39,7 +39,7 @@ pub struct FsDemux {
     context_second_payload: Option<u32>,
 }
 
-#[actor(depends(FsCapability))]
+#[actor(depends(FsCapability), depends(SubstrateHarnessObserver))]
 impl WasmActor for FsDemux {
     const NAMESPACE: &'static str = "test.fs_demux";
 

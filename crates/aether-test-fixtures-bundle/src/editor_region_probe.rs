@@ -22,7 +22,7 @@ pub struct EditorRegionProbe {
     inputs: Vec<ObservedEditorInput>,
 }
 
-#[actor(instanced)]
+#[actor(instanced, depends(EditorShell))]
 impl WasmActor for EditorRegionProbe {
     type Config = EditorRegionProbeConfig;
     const NAMESPACE: &'static str = "test.editor_region_probe";

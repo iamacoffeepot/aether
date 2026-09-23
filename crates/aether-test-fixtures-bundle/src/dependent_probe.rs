@@ -14,7 +14,7 @@ pub struct DependentProbe {
     bumps: u64,
 }
 
-#[actor(depends(ParentPeerTarget))]
+#[actor(depends(ParentPeerTarget), depends(SubstrateHarnessObserver))]
 impl WasmActor for DependentProbe {
     const NAMESPACE: &'static str = "test.parent_peer.dependent";
 

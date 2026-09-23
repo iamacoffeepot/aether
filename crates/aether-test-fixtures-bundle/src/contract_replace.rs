@@ -13,7 +13,7 @@ use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport, InlineProbe, Sub
 
 pub struct ContractBase;
 
-#[actor]
+#[actor(depends(SubstrateHarnessObserver))]
 impl WasmActor for ContractBase {
     const NAMESPACE: &'static str = "test.contract.base";
 

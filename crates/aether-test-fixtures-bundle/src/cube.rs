@@ -113,7 +113,7 @@ impl Cube {
     }
 }
 
-#[actor(depends(RenderCapability))]
+#[actor(depends(RenderCapability), depends(LifecycleCapability))]
 impl WasmActor for Cube {
     const NAMESPACE: &'static str = "test.cube";
 

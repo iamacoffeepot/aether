@@ -13,7 +13,7 @@ use aether_test_fixtures_kinds::{Bump, SubstrateHarnessObserver, TickObserved};
 
 pub struct ParentPeerCaller;
 
-#[actor]
+#[actor(depends(ParentPeerTarget))]
 impl WasmActor for ParentPeerCaller {
     const NAMESPACE: &'static str = "test.parent_peer.caller";
 
@@ -29,7 +29,7 @@ impl WasmActor for ParentPeerCaller {
 
 pub struct ParentPeerTarget;
 
-#[actor]
+#[actor(depends(SubstrateHarnessObserver))]
 impl WasmActor for ParentPeerTarget {
     const NAMESPACE: &'static str = "test.parent_peer.target";
 
