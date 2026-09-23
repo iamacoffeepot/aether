@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use aether_actor::OutboundReply;
+use aether_actor::{OutboundReply, Reaches};
 
 use super::sample::SampleBank;
 use super::{
@@ -18,10 +18,9 @@ use crate::kinds::{
     StopTrack,
 };
 use aether_fs::{FsMailboxExt, NamespaceAddr};
-use aether_substrate::Erased;
 
 impl AudioCapabilityState {
-    pub fn handle_note_on(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOn) {
+    pub fn handle_note_on<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: NoteOn) {
         let Some(s) = self.sender.as_ref() else {
             return;
         };
@@ -40,7 +39,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_note_off(&mut self, ctx: &mut NativeCtx<'_>, mail: NoteOff) {
+    pub fn handle_note_off<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: NoteOff) {
         let Some(s) = self.sender.as_ref() else {
             return;
         };
@@ -57,7 +56,11 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_set_master_gain(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetMasterGain) -> SetMasterGainResult {
+    pub fn handle_set_master_gain<A>(
+        &mut self,
+        _ctx: &mut NativeCtx<'_, A>,
+        mail: SetMasterGain,
+    ) -> SetMasterGainResult {
         let applied = mail.gain.clamp(0.0, 1.0);
         let Some(s) = self.sender.as_ref() else {
             return SetMasterGainResult::Err {
@@ -74,7 +77,11 @@ impl AudioCapabilityState {
         SetMasterGainResult::Ok { applied_gain: applied }
     }
 
-    pub fn handle_set_reverb_send(&mut self, _ctx: &mut NativeCtx<'_>, mail: SetReverbSend) -> SetReverbSendResult {
+    pub fn handle_set_reverb_send<A>(
+        &mut self,
+        _ctx: &mut NativeCtx<'_, A>,
+        mail: SetReverbSend,
+    ) -> SetReverbSendResult {
         let applied = mail.send.clamp(0.0, 1.0);
         let Some(s) = self.sender.as_ref() else {
             return SetReverbSendResult::Err {
@@ -91,7 +98,11 @@ impl AudioCapabilityState {
         SetReverbSendResult::Ok { applied_send: applied }
     }
 
-    pub fn handle_set_sender_gain(&mut self, ctx: &mut NativeCtx<'_>, mail: SetSenderGain) -> SetSenderGainResult {
+    pub fn handle_set_sender_gain<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        mail: SetSenderGain,
+    ) -> SetSenderGainResult {
         let applied = mail.gain.clamp(0.0, 4.0);
         let Some(s) = self.sender.as_ref() else {
             return SetSenderGainResult::Err {
@@ -109,7 +120,7 @@ impl AudioCapabilityState {
         SetSenderGainResult::Ok { applied_gain: applied }
     }
 
-    pub fn handle_schedule(&mut self, ctx: &mut NativeCtx<'_>, mail: Schedule) -> ScheduleResult {
+    pub fn handle_schedule<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: Schedule) -> ScheduleResult {
         let Some(sender) = self.sender.as_ref() else {
             return ScheduleResult::Err {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
@@ -145,7 +156,7 @@ impl AudioCapabilityState {
         ScheduleResult::Ok { accepted }
     }
 
-    pub fn handle_play_track(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: PlayTrack) {
+    pub fn handle_play_track<A: Reaches<FsCapability>>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, mail: PlayTrack) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
@@ -171,7 +182,11 @@ impl AudioCapabilityState {
         ctx.actor::<FsCapability>().with_context(&context).read(mail.namespace, mail.path);
     }
 
-    pub fn handle_read_result(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ReadResult) {
+    pub fn handle_read_result<A: Reaches<FsCapability>>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, Manual>,
+        mail: ReadResult,
+    ) {
         let Some(context) = ctx.take_context::<AudioLoadContext>() else {
             return;
         };
@@ -205,7 +220,11 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_track_decoded(&mut self, ctx: &mut NativeCtx<'_>, done: TaskDone<DecodeOutput, TrackDecodeContext>) {
+    pub fn handle_track_decoded<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        done: TaskDone<DecodeOutput, TrackDecodeContext>,
+    ) {
         // Build the lane event while the output/context borrows are
         // live, then end them before `resolve_with` consumes `done`.
         let decode_err = match done.output() {
@@ -248,7 +267,7 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_stop_track(&mut self, ctx: &mut NativeCtx<'_>, mail: StopTrack) {
+    pub fn handle_stop_track<A>(&mut self, ctx: &mut NativeCtx<'_, A>, mail: StopTrack) {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
@@ -266,7 +285,11 @@ impl AudioCapabilityState {
         }
     }
 
-    pub fn handle_load_instrument(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: LoadInstrument) {
+    pub fn handle_load_instrument<A: Reaches<FsCapability>>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, Manual>,
+        mail: LoadInstrument,
+    ) {
         // Nop chassis (headless / hub / disabled / no device): fail
         // fast with a loud Err (ADR-0103 §7).
         if self.sender.is_none() || self.sample_rate.is_none() {
@@ -321,9 +344,9 @@ impl AudioCapabilityState {
         Ok(LoadInstrumentResult::Ok { instrument_id, name, resident_bytes })
     }
 
-    pub fn handle_instrument_assembled(
+    pub fn handle_instrument_assembled<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         done: TaskDone<BankAssemblyOutput, BankAssemblyContext>,
     ) {
         // The assembled-or-failed reply value, built while the
