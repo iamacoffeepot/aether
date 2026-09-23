@@ -46,7 +46,7 @@ use aether_actor::{ErasedActorRef, OutboundReply, Single};
 use aether_data::ActorPath;
 use aether_data::{MailboxCategory, Source};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker};
@@ -103,8 +103,14 @@ pub struct ComponentHostCapabilityState {
     /// this table is the per-engine half of that pairing (the state itself is
     /// the per-substrate-process singleton every load runs through). Refcounted
     /// against the module's non-boot actors and empty for every bootless module,
-    /// so the common case costs nothing.
-    pub boot_registry: HashMap<String, BootEntry>,
+    /// so the common case costs nothing. Changed only through
+    /// `register_boot` / `unregister_boot`, which keep [`Self::boot_actors`]
+    /// in lockstep.
+    boot_registry: HashMap<String, BootEntry>,
+    /// ADR-0147: every live module boot's reference — the reverse index of
+    /// [`Self::boot_registry`], so the drop guard refusing a drop addressed at
+    /// a boot actor is one lookup rather than a scan over every module.
+    boot_actors: HashSet<ErasedActorRef>,
     /// Actor-local reservations for module boots that have been staged but are
     /// not authoritative `Live` yet. Same-hash loads and replacements retain
     /// their own move-only deferred replies here and join the first boot result.
@@ -153,10 +159,11 @@ pub struct PendingReplace {
     pub boot_operation: u64,
 }
 
-/// ADR-0147: one module's boot singleton. `actor` is the boot trampoline's
+/// ADR-0147: one module's boot singleton. `boot` is the boot trampoline's
 /// proven reference, taken from its spawn outcome (spawned through the same
-/// `WasmTrampoline` path as any export), and `path` its canonical lineage,
-/// which the orphan drop names as its target; `refcount` counts the module's live **non-boot** actors — boot never counts
+/// `WasmTrampoline` path as any export), which the teardown sends
+/// [`BootTeardown`](crate::kinds::BootTeardown) through;
+/// `refcount` counts the module's live **non-boot** actors — boot never counts
 /// itself, so its own drop could never be the one that zeroes the count. The
 /// `pending_requests` counts requested actors whose trampoline birth has been
 /// accepted but has not yet promoted or rejected. The boot is torn down only
@@ -164,8 +171,7 @@ pub struct PendingReplace {
 /// zero-refcount boot alive, and its later rejection performs the final
 /// orphan check.
 pub struct BootEntry {
-    pub actor: ErasedActorRef,
-    pub path: ActorPath,
+    pub boot: ErasedActorRef,
     pub refcount: u32,
     pub pending_requests: u32,
 }
@@ -199,6 +205,7 @@ impl NativeActor for ComponentHostCapability {
             default_name_counter: 0,
             module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
@@ -315,8 +322,10 @@ impl NativeActor for ComponentHostCapability {
         // a dangling `boot_registry` entry. The boot is torn down automatically
         // (internally, through `release_boot_ref`) when its last non-boot actor
         // unloads; that internal path is not routed through this handler, so the
-        // guard never blocks it.
-        if state.boot_registry.values().any(|entry| entry.actor == actor) {
+        // guard never blocks it. The guard runs after the receipt proof because
+        // a boot entry's actor is live for as long as the entry exists, so the
+        // proof succeeds for it and the comparison is by reference.
+        if state.boot_actors.contains(&actor) {
             ctx.reply(&DropResult::Err {
                 error: format!(
                     "{} is a module boot actor (ADR-0147): the boot singleton is unconditional \
@@ -330,7 +339,8 @@ impl NativeActor for ComponentHostCapability {
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
-        // own `DropComponent` handler vacates its registrations).
+        // `BootTeardown` handler unloads its guest and vacates its
+        // registrations).
         state.invalidate_replacement_boot_operation(actor);
         state.release_boot_ref(ctx, actor);
         // The forward inherits this call's chain, so the call stays open until
@@ -503,6 +513,7 @@ mod tests {
             default_name_counter: 0,
             module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),

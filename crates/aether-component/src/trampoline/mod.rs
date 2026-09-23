@@ -8,7 +8,7 @@
 //! state-bearing **runtime**. [`WasmTrampoline`] is a ZST identity carrying
 //! only the addressing surface — `Addressable` (`NAMESPACE` / `Resolver`),
 //! the per-handler `HandlesKind<DropComponent>` / `HandlesKind<ReplaceComponent>`
-//! markers, and the `OnePer("component")` name-inventory entry — all emitted
+//! / `HandlesKind<BootTeardown>` markers, and the `OnePer("component")` name-inventory entry — all emitted
 //! always-on by `#[actor]`. The state-bearing runtime
 //! (`WasmTrampolineState`, which owns the wasmtime `Component` plus the
 //! `Engine` / `Linker` / `Registry` / `Mailer` / `HubOutbound` handles) and
@@ -37,7 +37,7 @@
 //!
 //! Instanced. Anything the trampoline doesn't handle
 //! natively (today: `DropComponent`, `ReplaceComponent`, and the host's
-//! `LoadDelivered` hand-off) falls through the
+//! `LoadDelivered` hand-off and `BootTeardown`) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's `send_mail_p32` /
@@ -57,6 +57,10 @@
 //!   lands on `on_drop_component`, which drops the `Component` and clears the
 //!   mailbox's accept-set. The trampoline (and its mailbox name) survives as an
 //!   empty slot, refillable by `ReplaceComponent`.
+//! - **Boot teardown** (ADR-0147): when a module's last non-boot actor
+//!   unloads, the host sends `BootTeardown` through the module boot
+//!   trampoline's reference, and `on_boot_teardown` unloads the guest the way
+//!   a drop does, with no reply.
 //! - **Replace**: `ReplaceComponent` mail lands on `on_replace_component`,
 //!   which instantiates a new `Component` against the same binding and swaps
 //!   `state.component`. ADR-0022 + ADR-0038 invariants hold because the inbox

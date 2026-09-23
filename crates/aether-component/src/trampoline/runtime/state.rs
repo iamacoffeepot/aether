@@ -1,16 +1,20 @@
 use std::sync::Arc;
 
+use aether_actor::Local as _;
+use aether_substrate::actor::native::{Dispatch, NativeCtx};
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
-use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::Registry;
+use aether_substrate::mail::{CostCells, MailboxId};
 use wasmtime::{Engine, Linker, Module};
+
+use crate::trampoline::WasmTrampoline;
 
 /// Per-component trampoline **runtime state** (ADR-0122 identity/runtime
 /// split — the addressing identity is the distinct ZST
-/// [`WasmTrampoline`](crate::trampoline::WasmTrampoline)). Holds the wasm
+/// [`WasmTrampoline`]). Holds the wasm
 /// `Component` optionally — `None` means the wasm has been unloaded by
 /// `DropComponent` but the trampoline (and its mailbox name) is
 /// still alive, ready to be refilled by `ReplaceComponent` or
@@ -57,4 +61,53 @@ pub struct WasmTrampolineState {
     /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
     /// never mutated.
     pub wasm_bytes: Arc<[u8]>,
+}
+
+impl WasmTrampolineState {
+    /// Unload the **wasm component**: run the guest's `unwire` pre-shutdown
+    /// hook, drop the `Component`, clear the mailbox's accept-set, re-seed the
+    /// trampoline's own framework cost cells, and vacate the mailbox. The
+    /// trampoline itself stays alive as an empty slot a `ReplaceComponent`
+    /// can refill. Both a `DropComponent` and the host's module-boot
+    /// `BootTeardown` end here.
+    pub fn unload(&mut self, ctx: &mut NativeCtx<'_>) {
+        if let Some(mut component) = self.component.take() {
+            // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
+            // single pre-shutdown hook — the legacy `on_drop`
+            // retired alongside `WasmActor::on_drop`. Component
+            // drops at end of scope, tearing down linear memory.
+            component.unwire();
+        }
+        // iamacoffeepot/aether#1037: clear the trampoline's
+        // capabilities — the wasm is unloaded, so the mailbox now
+        // accepts nothing until a `replace` refills it. The
+        // trampoline (and its mailbox name) survives as an empty
+        // slot, but it has no accept-set while empty.
+        self.mailer.capability_registry().remove(self.mailbox);
+        // iamacoffeepot/aether#1128: drop the unloaded guest's per-handler
+        // cost cells from the global table and the per-actor cache.
+        // `unload` runs on the trampoline's own thread inside
+        // `with_stamped`, so both indexes clear together.
+        //
+        // The trampoline's own framework arms are re-seeded rather than
+        // dropped with them (iamacoffeepot/aether#4269): the mailbox survives
+        // this as an empty refillable slot and goes on dispatching
+        // `ReplaceComponent`, `DropComponent` and its task wakes, so retiring
+        // their cells left the arms that outlive the guest unmeasured — the
+        // unloading handler among them, which folds into its cell just after
+        // it returns. The re-seed is neutral, which is the honest reading of
+        // an estimate whose occupant just changed.
+        self.mailer.cost_table().drop_mailbox(self.mailbox);
+        let framework_kinds = <WasmTrampoline as Dispatch<Self>>::measured_kinds();
+        let seeded = self.mailer.cost_table().seed(self.mailbox, &framework_kinds);
+        CostCells::try_with_mut(|cells| cells.seed(seeded));
+        // ADR-0079 §8 (amended, issue 3741): declare the mailbox
+        // vacated — drain this trampoline's watchers and fire one
+        // `MonitorNotice` each, so every cap holding state keyed by
+        // this mailbox (input subscriptions, lifecycle stages, http
+        // routes) purges its own rows. The slot stays live for a
+        // `replace` refill; the next occupant's watchers register
+        // fresh.
+        ctx.vacate();
+    }
 }
