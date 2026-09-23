@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-09-23
 - **Amended (#6440):** 2026-09-23 — with the multi class removed (ADR-0134 amendment), a contract row's reply is `Silent` or a kind `O` (`One(O)` on the manifest). `Multi<O>` leaves `Contract`, `ReplyHandledBy` and `#[protocol]` signatures; the multi rows of the scenario sweep (A: multi `Multi<O>`; D: `emit` on the reply path; E: a multi request passed on by a relay) and the multi sentence of §9 no longer apply; the §4 reason for widening `HandlerEntry.reply` (telling a multi row from a single one) is gone, and whether the widening stays is left to the ADR-0231 implementation.
+- **Amended (#6486 closed):** 2026-09-24 — a manual handler replies with any kind, so `Manual<O>` is dropped and §6 no longer applies. The manual reply mode stays unparameterized: its manifest row stays `ReplyContract::Manual`, its `Contract` row is `Undeclared` for good (no migration waves, and `Undeclared` and the bare `Manual` spelling are not deleted), it gets no `Replies` marker, and reply handles stay untyped. Consequences: §1 checks single and deferred rows only, and a send to a manual row compiles with no sender bound, because the replier picks the kind at run time; §5 casts match a protocol's manual row against `ReplyContract::Manual` (a manual row no longer matches nothing); §8 lets a manual row pass the silent-handler bound, as it did during the old migration; §9's `forward`, `forward_to` and `hand_off` sit on the manual ctx with no reply-equality bound; the scenario rows for `Manual<O>` and `Manual<Silent>`, the migration bullet under Negative, the Positive bullet on manual reply kinds, and the `Manual<O>` parts of the ADR-0109, ADR-0134 and ADR-0227 amendments no longer apply. §5's replace rule is unchanged: a manual row may become `One(O)` or `None`, and a declared row may not become manual.
 
 References are proofs of what is handled. [ADR-0230](0230-proven-actor-references.md)
 made a reference a proof of identity: an actor of this type reached `Live` at
@@ -329,6 +330,8 @@ replace is sound only if it cannot degrade state others rely on. Native
 capabilities are not replaced at run time; their rows are fixed at link time.
 
 ### 6. Manual handlers declare their reply kind
+
+*No longer applies (2026-09-24 amendment): a manual handler replies with any kind. See the amendment line at the top.*
 
 ```rust
 #[handler::manual]
