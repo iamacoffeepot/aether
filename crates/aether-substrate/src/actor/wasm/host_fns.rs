@@ -11,7 +11,7 @@ use aether_data::wire;
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
-use crate::mail::registry::PreparedAliasRoute;
+use crate::mail::registry::{PreparedAliasRoute, Registry};
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
@@ -626,7 +626,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                         return REPLY_KIND_NOT_FOUND;
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
-                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation);
+                    // The guest replies in its own name: stamp its own
+                    // position, which the host bound it to (ADR-0230 §3).
+                    let stamp = Some(Registry::structural_erased(ctx.sender));
+                    ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation, stamp);
                 }
                 SourceAddr::Component(mbox) => {
                     // Validate the kind id cheaply — the guest might

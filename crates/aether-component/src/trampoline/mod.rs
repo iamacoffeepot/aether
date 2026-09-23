@@ -36,7 +36,8 @@
 //! ## Shape
 //!
 //! Instanced. Anything the trampoline doesn't handle
-//! natively (today: `DropComponent`, `ReplaceComponent`) falls through the
+//! natively (today: `DropComponent`, `ReplaceComponent`, and the host's
+//! `LoadDelivered` hand-off) falls through the
 //! `#[fallback]` (`forward_to_wasm`) to the wasm guest via `Component::deliver`.
 //! The framework dispatcher reads from the trampoline's `NativeBinding`;
 //! un-handled kinds reach `forward_to_wasm`; the guest's `send_mail_p32` /
@@ -48,6 +49,10 @@
 //!   spawns a trampoline via the runtime spawn machinery (subname = the
 //!   agent-supplied component name); the spawn path runs `init` which
 //!   instantiates the wasm `Component` against the trampoline's binding.
+//!   Once the birth completes the host hands its owed reply to the
+//!   trampoline as `LoadDelivered`, and the trampoline replies
+//!   `LoadResult::Ok` to the requester in its own name, so the requester
+//!   keeps the reply's stamped sender as its reference (ADR-0230 §3).
 //! - **Drop**: `DropComponent` mail addressed to the trampoline's mailbox
 //!   lands on `on_drop_component`, which drops the `Component` and clears the
 //!   mailbox's accept-set. The trampoline (and its mailbox name) survives as an

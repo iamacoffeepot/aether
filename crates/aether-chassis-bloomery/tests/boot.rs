@@ -9,7 +9,6 @@ use std::path::Path;
 use std::sync::mpsc;
 use std::time::Duration;
 
-use aether_bloomery_driver::BundleDriver;
 use aether_bloomery_journal::{Batch, Journal};
 use aether_bloomery_kinds::{
     AwaitProcessed, ClosureLimit, Head, Processed, RecordedHead, RecordedHeadMove, Seq, Utf8Text,
@@ -27,7 +26,8 @@ use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigSources;
 
 /// Await `Processed` through the mounted driver: resolve the driver's born id,
-/// spawn a probe that sends one `AwaitProcessed`, and wait thirty seconds.
+/// spawn a probe that sends one `AwaitProcessed`, and wait thirty seconds. The
+/// reply must carry back the request it answers as its context.
 fn await_processed(built: &BuiltChassis<BloomeryChassis>, through: u64) -> Processed {
     let address = ActorPath::new("aether.bloomery.driver:driver").expect("a well-formed actor path");
     let driver = built.resolve_address(&address).expect("the driver is spawned at mount").mailbox_id;
@@ -36,7 +36,9 @@ fn await_processed(built: &BuiltChassis<BloomeryChassis>, through: u64) -> Proce
         .spawn_actor::<Probe>(Subname::Named("probe"), (), ProbeParams { driver, through, sink })
         .finish()
         .expect("probe birth");
-    rx.recv_timeout(Duration::from_secs(30)).expect("Processed within thirty seconds")
+    let (processed, context) = rx.recv_timeout(Duration::from_secs(30)).expect("Processed within thirty seconds");
+    assert_eq!(context, Some(AwaitProcessed { through }), "the reply takes back the request it answers");
+    processed
 }
 
 /// A chassis env with default base members and the bloomery knobs pointing at
@@ -62,18 +64,19 @@ fn seed_single_entry_journal(path: &Path) {
     journal.append(Seq(0), &batch).expect("append the seed batch");
 }
 
-/// Test-local probe: sends one `AwaitProcessed` at `wire` and forwards the
-/// `Processed` reply to the observer sink.
+/// Test-local probe: proves the driver at `wire`, sends it one
+/// `AwaitProcessed` with the request as its context, and forwards the
+/// `Processed` reply with the context it took back to the observer sink.
 struct Probe {
     driver: MailboxId,
     through: u64,
-    sink: mpsc::Sender<Processed>,
+    sink: mpsc::Sender<(Processed, Option<AwaitProcessed>)>,
 }
 
 struct ProbeParams {
     driver: MailboxId,
     through: u64,
-    sink: mpsc::Sender<Processed>,
+    sink: mpsc::Sender<(Processed, Option<AwaitProcessed>)>,
 }
 
 #[aether_actor::actor(instanced, root)]
@@ -87,12 +90,15 @@ impl NativeActor for Probe {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor_at::<BundleDriver>(self.driver).send(&AwaitProcessed { through: self.through });
+        let driver = ctx.resolve_live(self.driver).expect("the driver is live once the chassis is built");
+        let request = AwaitProcessed { through: self.through };
+        let _ = ctx.send_with_context(&driver, &request, &request);
     }
 
     #[aether_actor::handler::single]
-    fn on_processed(&mut self, _ctx: &mut NativeCtx<'_>, processed: Processed) {
-        let _ = self.sink.send(processed);
+    fn on_processed(&mut self, ctx: &mut NativeCtx<'_>, processed: Processed) {
+        let context = ctx.take_context::<AwaitProcessed>();
+        let _ = self.sink.send((processed, context));
     }
 }
 

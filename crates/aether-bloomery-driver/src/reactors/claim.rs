@@ -5,7 +5,6 @@
 //! undeclared role, and a past-start root all refuse through one path.
 
 use aether_bloomery_kinds::{Detail, Digest};
-use aether_data::MailboxId;
 
 use super::instance::{Health, Instance};
 use crate::bundles::{DeclaredRoles, LoadState};
@@ -58,13 +57,9 @@ impl ProgramCore {
         }
     }
 
-    /// The digest's loaded root, when its instance is live.
-    pub(crate) fn live_root(&self, digest: Digest) -> Option<MailboxId> {
-        if self.routing.instances.get(&digest).is_some_and(Instance::is_live) {
-            self.bundles.root(&digest)
-        } else {
-            None
-        }
+    /// Whether the digest's root is loaded and its instance is live.
+    pub(crate) fn live_ready(&self, digest: Digest) -> bool {
+        self.routing.instances.get(&digest).is_some_and(Instance::is_live) && self.bundles.ready(&digest)
     }
 
     /// Mark `digest` failed with `health` and reject what waited on it: the

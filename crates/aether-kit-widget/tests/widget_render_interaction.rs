@@ -46,7 +46,7 @@ use std::path::{Path, PathBuf};
 
 use aether_actor::Addressable;
 use aether_clipboard::{ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult};
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::{
@@ -69,7 +69,7 @@ use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
     RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
     TextAreaConfig, TextFieldConfig, Theme, ThemeState, ToggleConfig, VirtualListConfig, VirtualListRow,
-    WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind, WidgetValidation,
+    WidgetChildSpec, WidgetConfig, WidgetControlState, WidgetDrawItem, WidgetKind, WidgetPanel, WidgetValidation,
 };
 use aether_math::Rgba;
 use aether_render::RenderCapability;
@@ -219,17 +219,12 @@ fn load_metrics(harness: &mut SubstrateHarness, font_id: u32) -> CachedFontMetri
 /// theme pinned to the already-resident `font_id` (empty font path, so the
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> MailboxId {
-    load_panel_with_children(harness, wasm, font_id, Vec::new())
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
+    load_panel_with_children(harness, wasm, font_id, Vec::new());
 }
 
-fn load_panel_with_children(
-    harness: &mut SubstrateHarness,
-    wasm: &[u8],
-    font_id: u32,
-    children: Vec<WidgetChildSpec>,
-) -> MailboxId {
-    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "")
+fn load_panel_with_children(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32, children: Vec<WidgetChildSpec>) {
+    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "");
 }
 
 /// `editor_region` is the shell-declared region this panel announces itself as
@@ -241,7 +236,7 @@ fn load_panel_with_children_and_ownership(
     children: Vec<WidgetChildSpec>,
     owns_input: bool,
     editor_region: &str,
-) -> MailboxId {
+) {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -253,27 +248,15 @@ fn load_panel_with_children_and_ownership(
         owns_input,
         editor_region: editor_region.to_owned(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
-            mailbox_id
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+    let (_, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
 }
 
 fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> String {
@@ -292,7 +275,7 @@ fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> String
         )])
         .expect("load editor region probe");
     match loaded.reply::<LoadResult>("load-region-probe").expect("decode probe LoadResult") {
-        LoadResult::Ok { name: address, .. } => address,
+        LoadResult::Ok { path: address, .. } => address.to_string(),
         LoadResult::Err { error } => panic!("load editor region probe: {error}"),
     }
 }

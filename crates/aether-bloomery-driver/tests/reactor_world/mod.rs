@@ -10,7 +10,7 @@ use aether_bloomery_kinds::{
     Activated, ActivationRejected, Digest, DriverRecord, Head, OpaqueBytes, ReactionFailed, ReactorSet, RecordedHead,
     RecordedHeadMove, Requested,
 };
-use aether_data::{Kind, MailboxId, Storage, StorageData};
+use aether_data::{Kind, Storage, StorageData};
 
 use crate::support::{World, bundle_wasm};
 
@@ -110,18 +110,13 @@ impl World {
         self.seed(None, &moved);
     }
 
-    /// Store one reactor-only wasm bundle, labelled for a distinct digest, and answer its loads with `root`.
+    /// Store one reactor-only wasm bundle, labelled for a distinct digest, and answer its loads.
     #[must_use]
-    pub fn store_reactor(&mut self, label: &[u8], root: MailboxId) -> Digest {
+    pub fn store_reactor(&mut self, label: &[u8]) -> Digest {
         let wasm = bundle_wasm(&[], &["test.reactor"], label);
         let digest = self.store(OpaqueBytes::ID, &wasm);
-        self.script_load(digest, root);
+        self.loads.insert(digest, Ok(()));
         digest
-    }
-
-    /// Script one bundle's load outcome, overriding any stored default.
-    pub fn script_load(&mut self, bundle: Digest, root: MailboxId) {
-        self.loads.insert(bundle, Ok(root));
     }
 
     /// Append one typed record as another writer, waking parked watches.
@@ -137,32 +132,12 @@ impl World {
     /// Warm ranges the core sent for `bundle`, in order.
     #[must_use]
     pub fn warm_ranges_for(&self, bundle: Digest) -> Vec<(u64, u64)> {
-        let mut ranges = Vec::new();
-        for root in self.roots_for(bundle) {
-            if let Some(reactor) = self.reactors.get(&root) {
-                ranges.extend(reactor.warms.iter().copied());
-            }
-        }
-        ranges
+        self.reactors.get(&bundle).map(|reactor| reactor.warms.clone()).unwrap_or_default()
     }
 
     /// Event seqs the core sent for `bundle`, in order.
     #[must_use]
     pub fn events_for(&self, bundle: Digest) -> Vec<u64> {
-        let mut seqs = Vec::new();
-        for root in self.roots_for(bundle) {
-            if let Some(reactor) = self.reactors.get(&root) {
-                seqs.extend(reactor.events.iter().copied());
-            }
-        }
-        seqs
-    }
-
-    /// Roots whose scripted load hands out `bundle`, usually one.
-    fn roots_for(&self, bundle: Digest) -> Vec<MailboxId> {
-        match self.loads.get(&bundle) {
-            Some(Ok(root)) => vec![*root],
-            _ => Vec::new(),
-        }
+        self.reactors.get(&bundle).map(|reactor| reactor.events.clone()).unwrap_or_default()
     }
 }

@@ -222,7 +222,7 @@ pub fn dispatch_cost_tail_if_matching(
     // Read the global cost table filtered to this actor's mailbox (cold
     // path, read lock fine) so the dump surfaces the load-time
     // neutral-seed rows even before any dispatch has folded a sample.
-    let reply = binding.mailer().cost_table().tail(binding.self_mailbox(), &request);
+    let reply = binding.mailer().cost_table().tail_at(binding.self_mailbox(), &request);
     ctx.reply(&reply);
     true
 }
@@ -338,7 +338,7 @@ mod cost_tests {
             assert!(fold_handler_cost(handled, Nanos(1_000), Nanos(6_000)), "a seeded kind folds");
         });
 
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(self_mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         let row = rows.iter().find(|r| r.kind_id == handled).expect("handled kind's row present");
@@ -370,7 +370,7 @@ mod cost_tests {
             );
         });
 
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(self_mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         assert!(rows.iter().all(|r| r.kind_id != stranger), "an unseeded kind folds into no cell");
@@ -412,14 +412,14 @@ mod cost_tests {
     /// returns the actor's rows (filtered to `CostTail::kind` when set)
     /// from the global table. Exercised directly through the table the
     /// arm reads — `dispatch_cost_tail_if_matching` is a thin wrapper
-    /// over `cost_table().tail(self_mailbox, &request)`.
+    /// over `cost_table().tail_at(self_mailbox, &request)`.
     #[test]
     fn cost_tail_arm_reports_seeded_rows() {
         let (_registry, mailer) = bare_substrate();
         let self_mbx = MailboxId(0x1128);
         mailer.cost_table().seed(self_mbx, &[KindId(10), KindId(20)]);
 
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail(self_mbx, &CostTail { kind: Some(KindId(20)) })
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(self_mbx, &CostTail { kind: Some(KindId(20)) })
         else {
             panic!("expected Ok");
         };

@@ -329,7 +329,7 @@ frame.
   request/reply read-back, not a subscription stream; the camera still
   publishes only `view_proj` to `aether.render`. Loaded by the
   `aether_kit_commons@aether.kit.camera` selector, the camera answers at
-  `aether.component/aether.embedded:aether.kit.camera` — the address `LoadResult.name` hands
+  `aether.component/aether.embedded:aether.kit.camera` — the address `LoadResult.path` hands
   back.
 - **Driving a camera from the keyboard** is a peer component's job, not the
   camera's. `aether-kit-commons`'s `camera-controller` export subscribes `Key` /

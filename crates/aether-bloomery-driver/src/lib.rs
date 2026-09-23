@@ -23,11 +23,12 @@
 //! is ever in flight.
 //!
 //! The [`BundleDriver`] actor is the native shell around the core. Native code
-//! spawns it over a born journal owner, passing the journal's id in
+//! spawns it over a born journal owner, passing the journal's reference in
 //! [`DriverParams`]; it performs journal reads, appends, and the watch as mail
 //! to the journal owner, bundle loads for both roles to the component host,
 //! `Invoke` to loaded program roots, and `Warm` / `Event` / `StatusQuery` to
-//! loaded reactor roots, and feeds each reply back through its ticketed
+//! loaded reactor roots — each root the stamped sender of its bundle's load
+//! reply, kept by digest — and feeds each reply back through its ticketed
 //! continuation. A native `Call` is answered with exactly one `CallOutcome`
 //! once its outcome is recorded, and `AwaitProcessed` is answered with
 //! `Processed` once its bound is quiescent.
@@ -41,7 +42,7 @@ mod programs;
 mod reactors;
 mod recovery;
 
-pub use actor::{BundleDriver, BundleRoot, DriverParams};
+pub use actor::{BundleDriver, DriverParams};
 pub use core::{
     AppendTicket, ArtifactTicket, CallerId, ClosureTicket, Command, EVENTS_PAGE, EvaluateTicket, EventsTicket,
     InvokeTicket, LoadOutcome, LoadTicket, ProgramCore, StatusTicket, WarmTicket, WatchTicket,

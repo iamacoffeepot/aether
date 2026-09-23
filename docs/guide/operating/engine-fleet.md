@@ -219,7 +219,7 @@ After any hub restart:
 
 Restarting `aether-mcp` itself invalidates the MCP session and clears its local
 description caches. Name-addressed `describe_component` remains able to ask a
-live substrate directly after reconnect; an uncached bare `mbx-…` id does not.
+live substrate directly after reconnect; it refuses a bare `mbx-…` id.
 
 A hub-only restart intentionally leaves `aether-mcp` running, so its caches are
 not cleared. They are keyed by `engine_id`, and a fresh hub can reuse the same

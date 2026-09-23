@@ -519,7 +519,7 @@ mod tests {
 
         slot.drain_available();
 
-        let CostTailResult::Ok { rows } = fx.mailer.cost_table().tail(self_id, &CostTail { kind: Some(Ping::ID) })
+        let CostTailResult::Ok { rows } = fx.mailer.cost_table().tail_at(self_id, &CostTail { kind: Some(Ping::ID) })
         else {
             panic!("expected Ok");
         };
@@ -557,7 +557,7 @@ mod tests {
 
         assert!(unwired.load(Ordering::SeqCst), "shutdown ran the unwire hook");
         settle.recv().expect("shutdown's residual drain settled the queued root");
-        let CostTailResult::Ok { rows } = fx.mailer.cost_table().tail(self_id, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = fx.mailer.cost_table().tail_at(self_id, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         assert!(rows.is_empty(), "shutdown dropped the finalized mailbox's cost rows");

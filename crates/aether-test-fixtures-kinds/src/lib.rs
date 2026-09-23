@@ -336,8 +336,16 @@ pub struct FsContextDemuxReport {
     pub second_payload: u32,
 }
 
+/// Ask the probe fixture to unsubscribe itself from `Key` on every window, so
+/// a scenario drives a subscriber's own unsubscribe without naming its
+/// position. Fieldless: the window cap reads the subscriber off the sender.
+#[aether_data::kind(name = "aether.test_fixtures.unsubscribe_keys", default)]
+pub struct UnsubscribeKeys;
+
 /// Configure the listener lineage used by the TCP load probe when it echoes
-/// frames received from accepted sessions.
+/// frames received from accepted sessions. The probe binds that listener on
+/// `127.0.0.1:0` with itself as the consumer (`aether.tcp.bind_listener_self`)
+/// and reports the bound port in its snapshot.
 #[aether_data::kind(name = "aether.test_fixtures.configure_tcp_load_probe")]
 pub struct ConfigureTcpLoadProbe {
     pub listener_name: String,
@@ -378,10 +386,13 @@ pub struct TcpLoadSessionSnapshot {
 
 /// Reply to [`CollectTcpLoadSnapshot`]. Connect failures are explicit data so
 /// the host never has to infer them from missing sessions or scrape logs.
+/// `local_port` is the port the probe's own listener bound, `None` until the
+/// bind reply arrives.
 #[aether_data::kind(name = "aether.test_fixtures.tcp_load_snapshot", eq)]
 pub struct TcpLoadSnapshot {
     pub sessions: Vec<TcpLoadSessionSnapshot>,
     pub connect_failures: Vec<String>,
+    pub local_port: Option<u16>,
 }
 
 /// Issue 1977 (ADR-0114 amendment) cluster-addressing matrix driver. Sent to

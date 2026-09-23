@@ -80,6 +80,24 @@ use aether_actor::actor;
 #[actor(singleton, root)]
 pub struct ComponentHostCapability;
 
+/// `aether.component.load_delivered` — the component host hands a successful
+/// load to the trampoline it just spawned, which answers the requester with
+/// [`LoadResult::Ok`](aether_kinds::LoadResult::Ok) in its own name.
+///
+/// The host's owed reply rides this mail (`TaskDone::hand_off`): its reply
+/// target is the requester and its lineage is the load's chain, so the
+/// trampoline's reply settles the requester's call and arrives stamped with
+/// the trampoline as sender — the reference the requester keeps (ADR-0230
+/// §3). The trampoline answers only the mail's reply target, so a delivery
+/// from any other actor reaches only that actor.
+#[aether_data::kind(name = "aether.component.load_delivered", no_serde)]
+pub struct LoadDelivered {
+    /// The loaded component's canonical lineage path.
+    pub path: aether_data::ActorPath,
+    /// The component's receive-side capabilities (ADR-0033).
+    pub capabilities: aether_kinds::ComponentCapabilities,
+}
+
 // The runtime half — the whole `aether_substrate` / `wasmtime`-typed surface
 // (imports, `ComponentHostCapabilityState`, `forward_to_trampoline`, and the
 // `#[runtime] impl NativeActor`) — lives in `runtime.rs`, gated once here. The

@@ -45,7 +45,7 @@ use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::{Mutex, Weak};
 
-use aether_actor::{ReplyMode, Single};
+use aether_actor::{ActorRef, HandlesKind, ReplyMode, Single};
 use aether_data::{Kind, KindId, MailId};
 
 use crate::mail::Source;
@@ -465,6 +465,30 @@ impl<O, C> TaskDone<O, C> {
         R: Kind,
     {
         ctx.reply_to_target(self.reply_to, reply, self.hold_root(), None);
+        self.release();
+    }
+
+    /// Hand the owed reply to `target`, a proven actor that then replies in
+    /// its own name: push `payload` to it with the carried reply target
+    /// pinned and the held root as its lineage, then release the hold. The
+    /// push takes its settlement count before the release, so the chain the
+    /// hold kept open stays open until `target` answers.
+    ///
+    /// The owed reply leaves this actor, so the waiting caller hears from
+    /// `target` — stamped as the reply's sender — rather than from the actor
+    /// that took the request. No verb lets one actor reply *as* another; this
+    /// one moves the obligation to an actor that genuinely sends.
+    ///
+    /// Its consumer is the component host, which hands a successful load to
+    /// the trampoline it just spawned, so the requester takes its reference
+    /// to the loaded actor from the reply's stamped sender (ADR-0230 §3).
+    pub fn hand_off<R, K, A, M>(mut self, ctx: &mut NativeCtx<'_, A, M>, target: &ActorRef<R>, payload: &K)
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+        M: ReplyMode,
+    {
+        ctx.push_handed_off(target.erase(), payload, self.hold_root(), self.reply_to);
         self.release();
     }
 

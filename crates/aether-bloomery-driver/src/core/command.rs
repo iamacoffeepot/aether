@@ -4,7 +4,6 @@ use aether_bloomery_kinds::{
     AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadClosure, ReadEvents, Warm,
     WatchHead,
 };
-use aether_data::MailboxId;
 
 use super::ticket::{
     AppendTicket, ArtifactTicket, CallerId, ClosureTicket, EvaluateTicket, EventsTicket, InvokeTicket, LoadTicket,
@@ -65,8 +64,8 @@ pub enum Command {
     Invoke {
         /// Ticket the matching [`Invoked`](aether_bloomery_kinds::Invoked) reply arrives under.
         ticket: InvokeTicket,
-        /// Mailbox of the digest's loaded root.
-        root: MailboxId,
+        /// Digest of the loaded bundle whose root runs the program.
+        bundle: Digest,
         /// The invocation.
         request: Invoke,
     },
@@ -81,8 +80,8 @@ pub enum Command {
     Warm {
         /// Ticket the matching [`Warmed`](aether_bloomery_kinds::Warmed) reply arrives under.
         ticket: WarmTicket,
-        /// Mailbox of the digest's loaded reactor root.
-        root: MailboxId,
+        /// Digest of the loaded bundle whose reactor root warms.
+        bundle: Digest,
         /// The warmup batch.
         request: Warm,
     },
@@ -90,8 +89,8 @@ pub enum Command {
     Evaluate {
         /// Ticket the matching [`Evaluated`](aether_bloomery_kinds::Evaluated) reply arrives under.
         ticket: EvaluateTicket,
-        /// Mailbox of the digest's loaded reactor root.
-        root: MailboxId,
+        /// Digest of the loaded bundle whose reactor root evaluates.
+        bundle: Digest,
         /// The live entry.
         request: Event,
     },
@@ -99,8 +98,8 @@ pub enum Command {
     QueryStatus {
         /// Ticket the matching [`Status`](aether_bloomery_kinds::Status) reply arrives under.
         ticket: StatusTicket,
-        /// Mailbox of the digest's loaded reactor root.
-        root: MailboxId,
+        /// Digest of the loaded bundle whose reactor root answers.
+        bundle: Digest,
     },
     /// Deliver one caller's exactly-once outcome.
     Answer {
@@ -126,14 +125,13 @@ pub enum Command {
 /// Shell-mapped outcome of [`Command::Load`].
 ///
 /// The shell maps the substrate's `LoadResult` onto this type so the core
-/// does not depend on `aether-kinds`.
+/// does not depend on `aether-kinds`. The core names a loaded bundle by its
+/// digest alone; the shell keeps the loaded root's proven reference, taken
+/// from the load reply's stamped sender, keyed by that digest.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LoadOutcome {
-    /// The bundle loaded; `root` is its digest-named mailbox.
-    Loaded {
-        /// Mailbox of the loaded root.
-        root: MailboxId,
-    },
+    /// The bundle loaded; the shell holds its root.
+    Loaded,
     /// The load failed; the digest becomes permanently unavailable.
     Failed {
         /// Human-readable failure.

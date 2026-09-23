@@ -13,7 +13,7 @@ use aether_bloomery_kinds::{
     OpaqueBytes, ReadEventsResult, Ref, Utf8Text, artifact_digest,
 };
 use aether_data::Kind;
-use program_world::{ROOT, call, fault, requested, transition};
+use program_world::{call, fault, requested, transition};
 use support::{LIMIT_BYTES, World, bundle_wasm, digest};
 
 const PROGRAM: &str = "test.program";
@@ -255,8 +255,8 @@ fn one_invoke_in_flight_per_root() {
     assert_eq!(world.reads_seen.len(), 1, "the bundle is never re-read");
     assert_eq!(world.loads_seen.len(), 1, "the bundle is never reloaded");
     assert_eq!(world.invokes_seen.len(), 2);
-    assert_eq!(world.invokes_seen[0].0, ROOT);
-    assert_eq!(world.invokes_seen[1].0, ROOT);
+    assert_eq!(world.invokes_seen[0].0, fixed.bundle);
+    assert_eq!(world.invokes_seen[1].0, fixed.bundle);
     let other_result = artifact_digest(OpaqueBytes::ID, b"other-result");
     let reply = world.core.on_invoked(
         second_ticket,
@@ -614,8 +614,8 @@ fn completed_invocation_appends_staged_artifacts_with_a_caused_transition() {
     assert_eq!(world.appends[1].records(), [DriverRecord::Transition { cause: 2, record: expected.clone() }]);
     assert_eq!(world.answers.as_slice(), [(caller, CallOutcome::Transition { key: 1, seq: 3, transition: expected })]);
     assert_eq!(world.invokes_seen.len(), 1);
-    let (root, invoke) = &world.invokes_seen[0];
-    assert_eq!(*root, ROOT);
+    let (bundle, invoke) = &world.invokes_seen[0];
+    assert_eq!(*bundle, fixed.bundle);
     assert_eq!(invoke.seq(), 2);
     assert_eq!(invoke.program().as_str(), PROGRAM);
     assert_eq!(invoke.input(), fixed.input);

@@ -194,13 +194,13 @@ impl ProgramCore {
                 return;
             }
         };
-        let Some(root) = self.live_root(digest) else {
+        if !self.live_ready(digest) {
             self.abort(format!("warm for digest {digest}, which has no ready root"), out);
             return;
-        };
+        }
         let ticket = self.mint(WarmTicket::mint);
         self.routing.warms.insert(ticket, WarmBatch { digest, first: batch.first(), last: batch.last() });
-        out.push(Command::Warm { ticket, root, request: Warm::new(batch) });
+        out.push(Command::Warm { ticket, bundle: digest, request: Warm::new(batch) });
     }
 
     /// Buffer one catch-up page, trimmed to `N`, and deliver the next owed seq.

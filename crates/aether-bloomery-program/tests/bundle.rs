@@ -114,7 +114,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
         )])
         .expect("load sequence");
     let root = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("program fixture load failed: {error}"),
     };
     assert_eq!(root, expected_name, "root is named by the OpaqueBytes artifact digest");

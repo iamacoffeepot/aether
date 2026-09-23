@@ -125,7 +125,7 @@ fn load_named(harness: &mut SubstrateHarness, wasm: &[u8], case: &NamedLoad) -> 
         )])
         .expect("named load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("named load {} ({}) failed: {error}", case.name, case.export),
     }
 }
@@ -157,8 +157,8 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
         )])
         .expect("load panel sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
+        LoadResult::Ok { path: name, .. } => {
+            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }

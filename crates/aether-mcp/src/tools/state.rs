@@ -22,7 +22,6 @@ use tokio::fs;
 pub(super) struct PreparedDirectMail {
     pub(super) envelope: MailEnvelope,
     pub(super) engine: EngineId,
-    pub(super) resolved_mailbox_id: MailboxId,
     pub(super) canonical_recipient: String,
     pub(super) kind_name: String,
 }
@@ -31,7 +30,9 @@ pub(super) struct DeliveredDirectMail {
     pub(super) events: Vec<MailEnvelope>,
     pub(super) timed_out: bool,
     pub(super) engine: EngineId,
-    pub(super) resolved_mailbox_id: MailboxId,
+    /// The canonical lineage the engine resolved the recipient to — the
+    /// component-capability cache's key.
+    pub(super) canonical_recipient: String,
     pub(super) kind_name: String,
 }
 
@@ -62,7 +63,7 @@ impl Mcp {
             events,
             timed_out,
             engine: prepared.engine,
-            resolved_mailbox_id: prepared.resolved_mailbox_id,
+            canonical_recipient: prepared.canonical_recipient,
             kind_name: prepared.kind_name,
         })
     }
@@ -145,6 +146,32 @@ impl Mcp {
             Some(ResolveAddressResult::Err { error }) => Err(anyhow::anyhow!("{error}")),
             None => Err(anyhow::anyhow!("undecodable ResolveAddressResult")),
         }
+    }
+
+    /// Resolve a textual component address in the selected engine to the
+    /// canonical lineage the component cache is keyed by. A tagged `mbx-…` id
+    /// is refused: `tool` keys components by lineage, and a position names no
+    /// lineage the operator can reuse.
+    pub(super) async fn resolve_component_path(
+        &self,
+        engine: EngineId,
+        address: &str,
+        tool: &str,
+    ) -> Result<ActorPath, McpError> {
+        if address.starts_with("mbx-") {
+            return Err(McpError::invalid_params(
+                format!(
+                    "{tool} addresses a component by its lineage, not a tagged mailbox id ({address}): pass the \
+                     canonical address load_component returned (aether.component/aether.embedded:NAME) or its \
+                     short path (aether.component/:NAME)"
+                ),
+                None,
+            ));
+        }
+        let (_, canonical) = self.resolve_engine_address(engine, address).await.map_err(super::render::internal)?;
+        ActorPath::new(&canonical).map_err(|error| {
+            internal_msg(&format!("engine answered {address:?} with a non-path lineage {canonical:?}: {error}"))
+        })
     }
 
     /// Observe one component and its kind vocabulary for compatibility work.
@@ -368,7 +395,6 @@ impl Mcp {
                 payload,
             },
             engine,
-            resolved_mailbox_id,
             canonical_recipient,
             kind_name: spec.mail.kind_name,
         })

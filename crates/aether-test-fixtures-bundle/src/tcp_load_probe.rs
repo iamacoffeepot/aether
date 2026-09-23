@@ -5,7 +5,9 @@
 #![allow(clippy::needless_pass_by_value)]
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_tcp::{ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt};
+use aether_tcp::{
+    BindListenerResult, BindListenerSelf, ConnectResult, SessionClosed, SessionData, TcpCapability, TcpWasmExt,
+};
 use aether_test_fixtures_kinds::{
     CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
     TcpLoadTopology,
@@ -14,6 +16,7 @@ use aether_test_fixtures_kinds::{
 #[derive(Default)]
 pub struct TcpLoadProbe {
     listener_name: Option<String>,
+    local_port: Option<u16>,
     sessions: Vec<TcpLoadSessionSnapshot>,
     connect_failures: Vec<String>,
 }
@@ -55,9 +58,22 @@ impl WasmActor for TcpLoadProbe {
         Ok(Self::default())
     }
 
+    /// Record the listener lineage and bind it with this probe as the
+    /// consumer; the bind reply lands in [`Self::on_bind_result`] inside the
+    /// same chain, so the configure call settles with the port known.
     #[handler::single]
-    fn on_configure(&mut self, _ctx: &mut WasmCtx<'_>, configure: ConfigureTcpLoadProbe) {
+    fn on_configure(&mut self, ctx: &mut WasmCtx<'_>, configure: ConfigureTcpLoadProbe) {
+        ctx.actor::<TcpCapability>()
+            .send(&BindListenerSelf { addr: "127.0.0.1:0".to_owned(), name: Some(configure.listener_name.clone()) });
         self.listener_name = Some(configure.listener_name);
+    }
+
+    #[handler::single]
+    fn on_bind_result(&mut self, _ctx: &mut WasmCtx<'_>, result: BindListenerResult) {
+        match result {
+            BindListenerResult::Ok { local_port, .. } => self.local_port = Some(local_port),
+            BindListenerResult::Err { addr, error } => self.connect_failures.push(format!("bind {addr}: {error}")),
+        }
     }
 
     #[handler::single]
@@ -119,6 +135,7 @@ impl WasmActor for TcpLoadProbe {
             ctx.reply(&TcpLoadSnapshot {
                 sessions: self.sessions.clone(),
                 connect_failures: self.connect_failures.clone(),
+                local_port: self.local_port,
             });
         }
     }

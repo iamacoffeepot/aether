@@ -17,7 +17,6 @@ use aether_bloomery_kinds::{
     ReadClosureResult, Transition,
 };
 use aether_bloomery_program::unreachable_staged;
-use aether_data::MailboxId;
 
 use super::queue::{Active, Step};
 use crate::bundles::{LoadState, Programs};
@@ -159,8 +158,7 @@ impl ProgramCore {
     /// Wake a request that waited on the digest's shared load.
     fn resume_loading(&mut self, bundle: Digest, seq: u64, out: &mut Vec<Command>) {
         match self.bundles.state(&bundle) {
-            Some(LoadState::Ready { root, .. }) => {
-                let root = *root;
+            Some(LoadState::Ready { .. }) => {
                 let taken = self
                     .queues
                     .get_mut(&bundle)
@@ -170,7 +168,7 @@ impl ProgramCore {
                     self.abort(format!("request {seq} resumed its load with no loading step"), out);
                     return;
                 };
-                self.emit_invoke(bundle, seq, root, declaration, closure, out);
+                self.emit_invoke(bundle, seq, declaration, closure, out);
             }
             Some(LoadState::Unavailable(reason)) => {
                 let reason = reason.clone();
@@ -288,9 +286,8 @@ impl ProgramCore {
             return;
         }
         match self.bundles.state(&bundle) {
-            Some(LoadState::Ready { root, .. }) => {
-                let root = *root;
-                self.emit_invoke(bundle, seq, root, declaration, artifacts, out);
+            Some(LoadState::Ready { .. }) => {
+                self.emit_invoke(bundle, seq, declaration, artifacts, out);
             }
             Some(LoadState::Declared { .. }) => {
                 self.issue_load(bundle, out);
@@ -330,7 +327,6 @@ impl ProgramCore {
         &mut self,
         bundle: Digest,
         seq: u64,
-        root: MailboxId,
         declaration: Program,
         closure: Vec<ClosureArtifact>,
         out: &mut Vec<Command>,
@@ -346,7 +342,7 @@ impl ProgramCore {
         *step = Step::Invoking { declaration };
         let ticket = self.mint(InvokeTicket::mint);
         self.invokes.insert(ticket, (bundle, seq));
-        out.push(Command::Invoke { ticket, root, request: Invoke::new(seq, program.name().clone(), input, closure) });
+        out.push(Command::Invoke { ticket, bundle, request: Invoke::new(seq, program.name().clone(), input, closure) });
     }
 
     /// Check a completed invocation's staged set against ADR-0224 §3, then

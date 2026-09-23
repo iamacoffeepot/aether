@@ -632,7 +632,7 @@ pub struct LoadComponentArgs {
     /// so a co-hosted peer's bare-type `ctx.actor::<R>()` reaches replica 0.
     /// Pairs with `#[router(shared)]` (ADR-0136) to scale an HTTP handler
     /// to N instances in one call. Returns one shared `capabilities` block plus
-    /// `instances: [{mailbox_id, name}, …]` (issue 3006) instead of the
+    /// `instances: [{address}, …]` (issue 3006) instead of the
     /// single-load shape. A mid-loop failure reports which replica failed
     /// and how many loaded before it — already-loaded replicas stay live,
     /// the same as N manual `load_component` calls. Omit (or `null`) for
@@ -659,11 +659,10 @@ pub struct ReplaceComponentArgs {
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Address of the live component to replace: its canonical ADR-0099
-    /// lineage (or an unambiguous ADR-0166 short path) or the tagged
-    /// `mbx-…` id `load_component` returned. Textual addresses resolve
-    /// against the selected engine through the same resolver
-    /// `describe_component` / `actor_logs` / `send_mail` use, so the
-    /// component no longer has to be addressed by raw id here.
+    /// lineage (the `address` `load_component` returned) or an unambiguous
+    /// ADR-0166 short path. The selected engine resolves it to the canonical
+    /// lineage through the same resolver `describe_component` /
+    /// `actor_logs` / `send_mail` use; a tagged `mbx-…` id is refused.
     pub address: String,
     /// Registry selector for the replacement component, resolved against
     /// the hub's content-addressed store (ADR-0116) — hash-primary, so a
@@ -707,11 +706,11 @@ pub struct DescribeComponentArgs {
     pub engine_id: Option<String>,
     /// Address of the component to describe: its full ADR-0099 lineage
     /// (returned by `load_component`, or retained/derived from an explicit
-    /// boot spec), an unambiguous ADR-0166 short path, OR its tagged
-    /// mailbox id (`mbx-…`). `spawn_substrate` returns engine information
-    /// only and `list_components` reports stored artifacts. A name-addressed
-    /// cache miss resolves against the substrate; a cache hit and a `mbx-` id
-    /// are local fast paths and do not prove current liveness.
+    /// boot spec) or an unambiguous ADR-0166 short path; a tagged `mbx-…`
+    /// id is refused. `spawn_substrate` returns engine information only and
+    /// `list_components` reports stored artifacts. The engine resolves the
+    /// address to its canonical lineage, the cache key; a cache miss asks
+    /// the substrate live, while a cache hit does not prove current liveness.
     pub address: String,
     /// When `true`, each capabilities doc field carries the full rustdoc
     /// string. When `false` (default), each doc is projected to its first

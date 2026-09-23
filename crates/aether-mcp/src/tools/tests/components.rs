@@ -425,7 +425,7 @@ async fn load_component_replicas_zero_is_tool_error() {
 }
 
 /// Tripwire: a `replicas: N` reply is one shared capabilities block plus
-/// N `{mailbox_id, name}` instances — no per-instance capabilities echo
+/// N `{address}` instances — no per-instance capabilities echo
 /// (issue 3006). The tripwire exercises the same reply builder used by the
 /// successful production fan-out path.
 #[test]
@@ -447,9 +447,9 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
             "00000000-0000-0000-0000-000000000001",
             &caps,
             &[
-                serde_json::json!({ "mailbox_id": "mbx-a", "name": "svc-0" }),
-                serde_json::json!({ "mailbox_id": "mbx-b", "name": "svc-1" }),
-                serde_json::json!({ "mailbox_id": "mbx-c", "name": "svc-2" }),
+                serde_json::json!({ "address": "aether.component/aether.embedded:svc" }),
+                serde_json::json!({ "address": "aether.component/aether.embedded:svc-1" }),
+                serde_json::json!({ "address": "aether.component/aether.embedded:svc-2" }),
             ],
             false,
         )
@@ -463,11 +463,11 @@ fn replicas_reply_shape_is_shared_caps_plus_instances() {
     assert_eq!(reply["capabilities"]["handlers"][0]["doc"], "One line.");
 }
 
-/// `replace_component` with a malformed tagged mailbox address is
-/// rejected before any RPC — the `mbx-` fast path still parses locally
-/// now that `address` also accepts a lineage name.
+/// `replace_component` refuses a tagged mailbox address before any RPC:
+/// the replace target is the component's lineage, which a position does
+/// not name.
 #[tokio::test]
-async fn replace_component_bad_mailbox_address_is_tool_error() {
+async fn replace_component_tagged_mailbox_address_is_tool_error() {
     let (_chassis, port) = boot_hub();
     let mcp = connect_mcp(port);
     let result = mcp
@@ -481,7 +481,7 @@ async fn replace_component_bad_mailbox_address_is_tool_error() {
             full: false,
         }))
         .await;
-    assert!(result.is_err(), "a malformed mbx- address should be a tool error");
+    assert!(result.is_err(), "an mbx- address should be a tool error");
 }
 
 #[test]

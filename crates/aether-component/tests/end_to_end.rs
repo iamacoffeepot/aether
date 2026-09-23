@@ -19,7 +19,7 @@ use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -28,7 +28,7 @@ use std::fs;
 
 const PROBE_NAME: &str = "probe";
 
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(
@@ -40,7 +40,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
 }
@@ -57,7 +57,7 @@ fn tick_roundtrip_component_to_sink() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let _mbox = load_probe(&mut harness, &wasm_path);
+    load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(TickObserved::NAME);
 
     harness.execute(vec![("advance", HarnessOp::advance(3))]).expect("advance 3");
@@ -85,7 +85,7 @@ fn batched_ticks_preserve_per_mailbox_count() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let _mbox = load_probe(&mut harness, &wasm_path);
+    load_probe(&mut harness, &wasm_path);
     let baseline = harness.count_observed(TickObserved::NAME);
 
     harness.execute(vec![("advance", HarnessOp::advance(N))]).expect("advance N");

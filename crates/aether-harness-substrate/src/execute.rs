@@ -192,7 +192,7 @@ impl<R> HarnessActor<R> {
     /// [`HarnessOp`]: `SubstrateHarness::log_tail`, a
     /// [`NamedMail`] recipient inside a
     /// [`HarnessOp::capture_with_mails`] bundle, or an assertion against
-    /// the `LoadResult.name` a load reported.
+    /// the `LoadResult.path` a load reported.
     #[must_use]
     pub fn address(&self) -> &str {
         &self.recipient
@@ -342,7 +342,7 @@ impl HarnessOp {
     /// nested-component scenarios. The component host canonicalizes `parent`
     /// through the live registry before staging the same loader path used by
     /// [`LoadComponent`]. Decode the stored reply as a `LoadResult` with
-    /// [`ExecutionResult::reply`]; its `Ok.name` is the child's canonical
+    /// [`ExecutionResult::reply`]; its `Ok.path` is the child's canonical
     /// lineage address.
     ///
     /// Ordinary [`HarnessOp::send_and_await_reply`] with `LoadComponent`

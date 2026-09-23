@@ -41,7 +41,6 @@ use std::fs;
 use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 
-use aether_data::MailboxId;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{
     Image, Rect, background_top_left, bounding_box, centroid, coverage, decode_png, target_color_stats,
@@ -82,7 +81,7 @@ const PROBE_NAME: &str = "probe";
 /// bare `PROBE_NAME` (which isn't a registered mailbox). Built from
 /// The `/`-rendered lineage a loaded component registers at (ADR-0099
 /// §4): the component host `aether.component` `/`-joined to the
-/// trampoline node — exactly what `LoadResult.name` reports.
+/// trampoline node — exactly what `LoadResult.path` reports.
 fn probe_address() -> String {
     use aether_actor::Addressable;
     format!("aether.component/{}:{}", aether_component::WasmTrampoline::NAMESPACE, PROBE_NAME)
@@ -105,15 +104,13 @@ fn artifact_dir(id: &str) -> PathBuf {
 
 /// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
-/// fully-instantiated and tick-subscribed component. Returns the
-/// loaded component's `MailboxId` (the trampoline address), which
-/// the drop / replace scenarios target. Pre-Phase-4 of issue 603 the
+/// fully-instantiated and tick-subscribed component. Pre-Phase-4 of issue 603 the
 /// harness's `aether.control` mailbox (renamed to `aether.component` in
 /// issue 638 phase 3) served as a single FIFO point for both load and
 /// advance; Phase 4 split advance onto `aether.substrate_harness`, so load is
 /// no longer naturally ordered ahead of advance — `SendAndAwaitReply`
 /// blocks on `LoadResult` before returning.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(
@@ -125,7 +122,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
 }
@@ -133,8 +130,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
 /// Load the `cube` fixture into the harness, blocking on `LoadResult`
 /// so the subsequent advance sees a tick-subscribed component. Mirrors
 /// `load_probe`; the cube scenario only needs the load to succeed (it
-/// captures rather than mailing the component), so the returned
-/// `MailboxId` is discarded.
+/// captures rather than mailing the component).
 fn load_cube(harness: &mut SubstrateHarness, wasm_path: &Path) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness

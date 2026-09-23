@@ -117,7 +117,7 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
         )])
         .expect("load image panel");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("load image panel: {error}"),
     }
 }

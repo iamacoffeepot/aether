@@ -107,8 +107,8 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("inline_child_stateful load failed: {error}"),
     };
 
@@ -139,7 +139,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
@@ -202,8 +202,8 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
             ),
         )])
         .expect("load nested lineage fixture");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("nested lineage fixture load failed: {error}"),
     };
 
@@ -239,7 +239,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace nested lineage fixture");
@@ -333,8 +333,8 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("inline_child_tag load failed: {error}"),
     };
 
@@ -376,7 +376,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");

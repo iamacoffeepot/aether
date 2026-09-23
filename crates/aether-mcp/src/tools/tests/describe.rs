@@ -398,34 +398,37 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
     );
 }
 
-/// `describe_component` reads the component cache: an empty cache
-/// errors, a seeded entry round-trips.
+/// `describe_component` refuses a tagged mailbox id and reads the component
+/// cache under the engine's canonical path: a seeded entry round-trips with
+/// no describe RPC.
 #[tokio::test]
 async fn describe_component_reads_the_cache() {
-    let (_chassis, port) = boot_hub();
-    let mcp = connect_mcp(port);
     let engine_id = "00000000-0000-0000-0000-000000000001";
+    let canonical = "aether.component/aether.embedded:fake_component";
     // A real, taggable mailbox id (arbitrary u64s don't carry the
     // mailbox-domain bits `tagged_id::encode` needs).
     let mailbox = mailbox_id_from_name("aether.test.fake_component");
     let tagged = tagged_id::encode(mailbox.0).expect("mailbox id is taggable");
+    let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, mailbox, canonical, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
 
-    // Empty cache, addressed by `mbx-` id → error (no name to forward
-    // live, so the cache is the only source).
-    let miss = mcp
+    // A tagged id names no lineage to key the cache by, so it is refused
+    // before any RPC.
+    let refused = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
-            address: tagged.clone(),
+            address: tagged,
             full: false,
         }))
         .await;
-    assert!(miss.is_err(), "an uncached component addressed by id should be a tool error");
+    assert!(refused.is_err(), "a component addressed by tagged id should be a tool error");
 
     // Seed the cache with a handler that declares a `-> R` reply
     // contract (ADR-0109). `describe_component` surfaces the `reply`
     // kind id verbatim through serde, so a caller reads `In -> Out`
     // before issuing the call.
-    let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
     let multi_doc = "Summary line.\n\nFull body the default projection must drop.";
     let seeded = ComponentCapabilities {
         handlers: vec![HandlerCapability {
@@ -439,18 +442,18 @@ async fn describe_component_reads_the_cache() {
     mcp.components
         .lock()
         .expect("test setup: component cache mutex is never poisoned")
-        .insert((engine, mailbox), seeded);
+        .insert((engine, ActorPath::new(canonical).expect("fixture is an actor path")), seeded);
     let hit = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
-            address: tagged.clone(),
+            address: canonical.to_owned(),
             full: false,
         }))
         .await
         .expect("cached component describes");
     let reply: serde_json::Value = serde_json::from_str(&hit).expect("json");
     assert_eq!(reply["engine_id"], engine_id, "the reply names the engine it answered from: {hit}");
-    assert_eq!(reply["address"], tagged, "the reply echoes the address asked for: {hit}");
+    assert_eq!(reply["address"], canonical, "the reply echoes the address asked for: {hit}");
     let caps = &reply["capabilities"];
     assert!(caps.get("handlers").is_some(), "capabilities shape: {hit}");
     assert!(!caps["handlers"][0]["reply"].is_null(), "the handler's ADR-0109 reply contract is surfaced: {hit}");
@@ -461,7 +464,7 @@ async fn describe_component_reads_the_cache() {
     let hit_full = mcp
         .describe_component(Parameters(DescribeComponentArgs {
             engine_id: Some(engine_id.to_owned()),
-            address: tagged,
+            address: canonical.to_owned(),
             full: true,
         }))
         .await
@@ -471,10 +474,18 @@ async fn describe_component_reads_the_cache() {
         reply_full["capabilities"]["handlers"][0]["doc"], multi_doc,
         "full=true keeps the wire doc string: {hit_full}"
     );
+    assert!(
+        calls
+            .lock()
+            .expect("address-route calls mutex is never poisoned")
+            .iter()
+            .all(|call| call.kind == ResolveAddress::ID),
+        "a cache hit resolves the address but sends no describe"
+    );
 }
 
 #[tokio::test]
-async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplied_alias() {
+async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_supplied_alias() {
     let supplied = "aether.component/:camera";
     let canonical = "aether.component/aether.embedded:camera";
     let engine_answer = MailboxId(0x4057_0000_0000_0100);
@@ -513,8 +524,11 @@ async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplie
     let output: serde_json::Value = serde_json::from_str(&output).expect("json");
     assert_eq!(output["capabilities"]["handlers"][0]["name"], "test.by_name");
     assert!(
-        mcp.components.lock().expect("component cache mutex is never poisoned").contains_key(&(engine, engine_answer)),
-        "capabilities cache uses the engine-returned id"
+        mcp.components
+            .lock()
+            .expect("component cache mutex is never poisoned")
+            .contains_key(&(engine, ActorPath::new(canonical).expect("fixture is an actor path"))),
+        "capabilities cache uses the engine-returned canonical path"
     );
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls.len(), 2);

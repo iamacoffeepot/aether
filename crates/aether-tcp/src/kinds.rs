@@ -29,6 +29,18 @@ pub struct BindListener {
     pub consumer: Option<aether_data::MailboxId>,
 }
 
+/// `aether.tcp.bind_listener_self` — [`BindListener`] with the sender as
+/// the consumer: every accepted session delivers its inbound frames and
+/// close notices to the actor that sent this mail. The host-stamped sender
+/// is already proven, so a component binds itself without naming its own
+/// position. `addr` and `name` mean what they mean on [`BindListener`].
+/// Reply: `BindListenerResult`.
+#[aether_data::kind(name = "aether.tcp.bind_listener_self")]
+pub struct BindListenerSelf {
+    pub addr: String,
+    pub name: Option<String>,
+}
+
 /// `aether.tcp.connect` — request the singleton `TcpCapability`
 /// to dial `addr` and spawn a fresh `TcpSessionActor` over the
 /// connected stream. Mirrors [`BindListener`]: `addr` is resolved

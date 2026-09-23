@@ -48,7 +48,7 @@ fn load_actor<K: Kind>(
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name: address, .. } => address,
+        LoadResult::Ok { path: address, .. } => address.to_string(),
         LoadResult::Err { error } => panic!("load {export} as {name:?}: {error}"),
     }
 }

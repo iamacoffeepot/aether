@@ -11,7 +11,7 @@ use std::fs;
 
 use aether_actor::{Addressable, EMBEDDED_SCOPE};
 use aether_component::ComponentHostCapability;
-use aether_data::MailboxId;
+use aether_data::ActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{ExecutionError, HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
@@ -51,9 +51,9 @@ fn load_named(
     parent: Option<&str>,
     name: Option<&str>,
     export: &str,
-) -> (MailboxId, String) {
+) -> String {
     match load_result(harness, wasm, label, parent, name, export) {
-        LoadResult::Ok { mailbox_id, name, .. } => (mailbox_id, name),
+        LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("{label} must load: {error}"),
     }
 }
@@ -71,7 +71,7 @@ fn missing_declared_dependency_refuses_the_load() {
         return;
     };
 
-    let (_, outer) = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
+    let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
 
     let refused = load_result(&mut harness, &wasm, "dependent-alone", Some(&outer), None, DEPENDENT_EXPORT);
     let LoadResult::Err { error } = refused else {
@@ -100,7 +100,7 @@ fn missing_declared_dependency_refuses_the_load() {
 
     load_named(&mut harness, &wasm, "target", Some(&outer), None, TARGET_EXPORT);
 
-    let (_, dependent) = load_named(&mut harness, &wasm, "dependent", Some(&outer), None, DEPENDENT_EXPORT);
+    let dependent = load_named(&mut harness, &wasm, "dependent", Some(&outer), None, DEPENDENT_EXPORT);
 
     // The satisfied load really spawns: the probe answers `Bump` with
     // exactly one `TickObserved`.
@@ -114,15 +114,15 @@ fn replace_with_unmet_dependency_keeps_running_module() {
         return;
     };
 
-    let (_, outer) = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
-    let (victim_mailbox, victim) =
-        load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), PROBE_EXPORT);
+    let outer = load_named(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
+    let victim = load_named(&mut harness, &wasm, "victim", Some(&outer), Some("victim"), PROBE_EXPORT);
+    let victim_path = ActorPath::new(&victim).expect("a loaded component's address is an actor path");
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
         let operation = HarnessOp::send_and_await_reply(
             "aether.component",
             &ReplaceComponent {
-                mailbox_id: victim_mailbox,
+                target: victim_path.clone(),
                 wasm: wasm.clone(),
                 drain_timeout_ms: None,
                 config: Vec::new(),

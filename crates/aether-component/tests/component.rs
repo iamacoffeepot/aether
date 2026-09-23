@@ -14,9 +14,8 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::Addressable;
-use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::MailboxId;
+use aether_component::WasmTrampoline;
+use aether_data::ActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
@@ -37,7 +36,7 @@ const PROBE_NAME: &str = "probe";
 
 /// Full trampoline address the substrate registers the loaded probe
 /// under: the component host `aether.component` `/`-joined to the
-/// trampoline node (ADR-0099 §4) — exactly what `LoadResult.name`
+/// trampoline node (ADR-0099 §4) — exactly what `LoadResult.path`
 /// reports. Mail destined for the probe goes here, not to the bare
 /// `PROBE_NAME` (which isn't a registered mailbox).
 fn probe_address() -> String {
@@ -51,9 +50,9 @@ const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 /// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
 /// fully-instantiated and tick-subscribed component. Returns the
-/// loaded component's `MailboxId` (the trampoline address), which
+/// loaded component's actor path (the trampoline address), which
 /// the drop / replace scenarios target.
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(
@@ -65,7 +64,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
 }
@@ -92,16 +91,11 @@ fn list_components_reports_loaded_probe_lineage() {
             ),
         )])
         .expect("load sequence");
-    let (mailbox_id, name) = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name, .. } => (mailbox_id, name),
+    let name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("load_component: {error}"),
     };
     assert_eq!(name, probe_address(), "LoadResult must return the registered nested trampoline route");
-    assert_eq!(
-        mailbox_id,
-        WasmTrampoline::resolve(ComponentHostCapability::resolve(0, ()).0, PROBE_NAME),
-        "LoadResult id must be the returned nested route's typed resolution",
-    );
     assert_ne!(name, format!("aether.embedded:{PROBE_NAME}"));
 
     let listed = harness
@@ -168,9 +162,9 @@ fn multi_actor_module_loads_entry_export() {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, capabilities, .. } => {
+        LoadResult::Ok { path: name, capabilities, .. } => {
             assert!(
-                name.ends_with(":test.probe"),
+                name.to_string().ends_with(":test.probe"),
                 "entry export should resolve to the first type's NAMESPACE \
                  (test.probe); got {name}",
             );
@@ -214,9 +208,9 @@ fn multi_actor_module_loads_selected_export() {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, capabilities, .. } => {
+        LoadResult::Ok { path: name, capabilities, .. } => {
             assert!(
-                name.ends_with(":test.ui.panel"),
+                name.to_string().ends_with(":test.ui.panel"),
                 "selected export should resolve to Panel's NAMESPACE (test.ui.panel); got {name}",
             );
             assert!(
@@ -255,7 +249,7 @@ fn multi_actor_unknown_export_errors() {
                 "unknown-export error should name the requested export; got {error}",
             );
         }
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { path: name, .. } => {
             panic!("unknown export should fail the load, not fall through; loaded {name}")
         }
     }
@@ -293,7 +287,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
                 "a defaultless bare load must name the module's exports; got {error}",
             );
         }
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { path: name, .. } => {
             panic!("a bare load of a defaultless module must error, not instantiate {name}")
         }
     }
@@ -314,9 +308,9 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
         )])
         .expect("named load sequence");
     match named.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { path: name, .. } => {
             assert!(
-                name.ends_with(":test.defaultless.alpha"),
+                name.to_string().ends_with(":test.defaultless.alpha"),
                 "a named load of a defaultless module resolves to the selected \
                  export's NAMESPACE (test.defaultless.alpha); got {name}",
             );
@@ -360,7 +354,7 @@ fn multi_actor_sibling_spawn() {
         )])
         .expect("load sequence");
     let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
     assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}");
@@ -415,7 +409,7 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
         )])
         .expect("load sequence");
     let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
     };
 
@@ -453,7 +447,7 @@ fn drop_component_silences_tick_echoes() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe_mbox = load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path);
 
     harness.execute(vec![("warm", HarnessOp::advance(3))]).expect("pre-drop advance");
     assert_eq!(
@@ -468,10 +462,7 @@ fn drop_component_silences_tick_echoes() {
     // ahead of the next advance. `SendAndAwaitReply` blocks on `DropResult`
     // so the probe's mailbox is fully gone before the next advance.
     let dropped = harness
-        .execute(vec![(
-            "drop",
-            HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id: probe_mbox }),
-        )])
+        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: probe }))])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -502,7 +493,7 @@ fn replace_component_preserves_mailbox_identity() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let probe_mbox = load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path);
 
     harness.execute(vec![("warm", HarnessOp::advance(3))]).expect("pre-replace advance");
     assert_eq!(
@@ -521,13 +512,7 @@ fn replace_component_preserves_mailbox_identity() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent {
-                    mailbox_id: probe_mbox,
-                    wasm,
-                    drain_timeout_ms: None,
-                    config: Vec::new(),
-                    export: None,
-                },
+                &ReplaceComponent { target: probe, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
@@ -588,8 +573,8 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
 
@@ -615,7 +600,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
@@ -669,8 +654,8 @@ fn replace_preserves_state_via_typed_state_kind() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
     };
 
@@ -696,7 +681,7 @@ fn replace_preserves_state_via_typed_state_kind() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");
@@ -758,8 +743,8 @@ fn typed_state_decode_miss_boots_fresh() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
     };
 
@@ -786,7 +771,7 @@ fn typed_state_decode_miss_boots_fresh() {
             HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
-                    mailbox_id,
+                    target: path,
                     wasm: reshaped_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
@@ -848,8 +833,8 @@ fn childless_component_hot_reloads_unchanged() {
             ),
         )])
         .expect("load sequence");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
     };
 
@@ -872,7 +857,7 @@ fn childless_component_hot_reloads_unchanged() {
             "swap",
             HarnessOp::send_and_await_reply(
                 "aether.component",
-                &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
         .expect("replace sequence");

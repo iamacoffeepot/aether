@@ -590,13 +590,12 @@ pub trait Lifecycle<S> {
 /// are `base-1`, `base-2`, …, so the bare type reaches the first; any other
 /// replica is reached through the reference its load proved.
 ///
-/// The rendered address itself — `LoadResult.name`, e.g.
+/// The rendered address itself — `LoadResult.path`, e.g.
 /// `aether.component/aether.embedded:NAME` — is a boundary string: the host's
 /// `resolve_address` parser at the MCP, RPC, and harness boundary is the one
-/// place text becomes a position (ADR-0230). The id beside a rendered name
-/// (`LoadResult.mailbox_id`) skips resolution entirely: a native receiver
-/// proves it once at receipt through `ctx.resolve_live`, then sends through
-/// the resulting reference.
+/// place text becomes a position (ADR-0230). A load requester needs no
+/// resolution at all: the load reply arrives from the loaded actor, so the
+/// requester keeps the reply's stamped sender as its reference.
 ///
 /// Mutually exclusive with [`Instanced`] at the type level: an actor is
 /// either one-of-a-kind within a scope (singleton) or N-instances under

@@ -18,7 +18,7 @@
 
 use std::fs;
 
-use aether_data::MailboxId;
+use aether_data::ActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
@@ -39,8 +39,8 @@ const BOOT_OBSERVED: &str = "aether.test_fixture.boot_observed";
 const BOOT_TORN_DOWN: &str = "aether.test_fixture.boot_torn_down";
 
 /// Load one named export of the boot fixture, blocking on `LoadResult::Ok`, and
-/// return its trampoline `MailboxId`.
-fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -> MailboxId {
+/// return its trampoline's actor path.
+fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -> ActorPath {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -51,15 +51,15 @@ fn load_boot_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str) -
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("boot fixture load({export}): {error}"),
     }
 }
 
 /// Drop one loaded actor, blocking on its `DropResult::Ok`.
-fn drop_actor(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
+fn drop_actor(harness: &mut SubstrateHarness, path: ActorPath) {
     let dropped = harness
-        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id }))])
+        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: path }))])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -182,7 +182,7 @@ fn boot_actor_is_not_selectable_by_export() {
                 "selecting the boot actor must fail naming ADR-0147 and the boot namespace; got {error}",
             );
         }
-        LoadResult::Ok { name, .. } => panic!("the boot actor must not be selectable by export; loaded {name}"),
+        LoadResult::Ok { path: name, .. } => panic!("the boot actor must not be selectable by export; loaded {name}"),
     }
 }
 
@@ -245,7 +245,7 @@ fn same_hash_replacement_preserves_the_boot_reference() {
             HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
-                    mailbox_id: widget,
+                    target: widget.clone(),
                     wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),

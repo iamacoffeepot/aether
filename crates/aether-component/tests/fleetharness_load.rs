@@ -11,7 +11,7 @@ mod tests {
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
-    /// Load the `probe` component and assert `LoadResult.name` is the
+    /// Load the `probe` component and assert `LoadResult.path` is the
     /// `/`-rendered lineage
     /// `aether.component/aether.embedded:<NAMESPACE>` (ADR-0099
     /// §3/§4). The probe example's `Addressable::NAMESPACE` is
@@ -30,7 +30,7 @@ mod tests {
         let addr = harness.load(engine, "aether_test_fixtures_bundle");
 
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
-        assert_eq!(addr, expected, "LoadResult.name should be the ADR-0099 lineage address");
+        assert_eq!(addr, expected, "LoadResult.path should be the ADR-0099 lineage address");
 
         // The recorded trace captures the load as a first-class
         // CallRecord: a LoadComponent call to a forked engine that

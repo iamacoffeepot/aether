@@ -65,7 +65,7 @@ const TEXTURE_YELLOW: [u8; 3] = [255, 255, 0];
 
 /// The full trampoline address a loaded component registers at (ADR-0099
 /// §4) — `aether.component` `/`-joined to the trampoline node named
-/// `panel`, matching what `LoadResult.name` reports.
+/// `panel`, matching what `LoadResult.path` reports.
 fn panel_address() -> String {
     use aether_actor::Addressable;
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
@@ -190,8 +190,8 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the Widget root should register under :panel; got {name}");
+        LoadResult::Ok { path: name, .. } => {
+            assert!(name.to_string().ends_with(":panel"), "the Widget root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load Widget root: {error}"),
     }
@@ -224,7 +224,7 @@ fn load_scroll_panel(harness: &mut SubstrateHarness, wasm: &[u8], child: WidgetC
         )])
         .expect("load scroll panel sequence");
     match loaded.reply::<LoadResult>("load").expect("decode scroll-panel LoadResult") {
-        LoadResult::Ok { name, .. } => assert!(name.ends_with(":panel")),
+        LoadResult::Ok { path: name, .. } => assert!(name.to_string().ends_with(":panel")),
         LoadResult::Err { error } => panic!("load scroll WidgetPanel: {error}"),
     }
 }

@@ -10,7 +10,6 @@
 use std::collections::BTreeMap;
 
 use aether_bloomery_kinds::{Detail, Digest};
-use aether_data::MailboxId;
 
 use super::{DeclaredRoles, LoadState};
 use crate::core::LoadOutcome;
@@ -31,12 +30,9 @@ impl BundleTable {
         self.states.get(bundle)
     }
 
-    /// The digest's loaded root, role-agnostic; `Some` only when `Ready`. #6222's adoption seam.
-    pub fn root(&self, bundle: &Digest) -> Option<MailboxId> {
-        match self.states.get(bundle) {
-            Some(LoadState::Ready { root, .. }) => Some(*root),
-            _ => None,
-        }
+    /// Whether the digest's root is loaded, role-agnostic: `true` only when `Ready`. #6222's adoption seam.
+    pub fn ready(&self, bundle: &Digest) -> bool {
+        matches!(self.states.get(bundle), Some(LoadState::Ready { .. }))
     }
 
     /// Whether the digest's read or load is in flight (`Reading` or `Loading`).
@@ -93,12 +89,12 @@ impl BundleTable {
         }
     }
 
-    /// The one load transition: `Loading` -> `Ready { root }` or `Unavailable(error)`.
+    /// The one load transition: `Loading` -> `Ready` or `Unavailable(error)`.
     pub fn finish_load(&mut self, bundle: &Digest, outcome: LoadOutcome) -> Result<(), OutOfStep> {
         match self.states.remove(bundle) {
             Some(LoadState::Loading { roles }) => {
                 let state = match outcome {
-                    LoadOutcome::Loaded { root } => LoadState::Ready { root, roles },
+                    LoadOutcome::Loaded => LoadState::Ready { roles },
                     LoadOutcome::Failed { error } => LoadState::Unavailable(Detail::new(error)),
                 };
                 self.states.insert(*bundle, state);

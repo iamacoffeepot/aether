@@ -18,12 +18,11 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::Addressable;
-use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_actor::ErasedActorRef;
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
+use aether_kinds::{CostTail, CostTailResult, LoadComponent, Tick};
 use aether_test_fixtures_kinds::SetRender;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -31,21 +30,11 @@ use aether_test_fixtures_kinds::SetRender;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("load_component: {error}"),
-    }
+    harness
+        .load_any(&LoadComponent { wasm, name: Some("cost-probe".to_owned()), config: Vec::new(), export: None })
+        .map_or_else(|error| panic!("load_component: {error}"), |(probe, _)| probe)
 }
 
 /// `WasmTrampoline::init` seeds a neutral cost cell for every kind the
@@ -60,14 +49,14 @@ fn init_seeds_cells_and_dispatch_folds() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_probe(&mut harness, &wasm_path);
+    let probe = load_probe(&mut harness, &wasm_path);
 
     // At construction, before any dispatch: both declared handlers
     // (`Tick`, `SetRender`) are seeded at the neutral seed (`samples =
     // 0`) — the known-but-unrun state. If `init`'s seed had not run, the
     // table would hold no rows for this mailbox.
     {
-        let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = harness.cost_table().tail(probe, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
@@ -82,7 +71,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     // neutral seed.
     harness.execute(vec![("advance", HarnessOp::advance(3))]).expect("advance 3");
 
-    let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = harness.cost_table().tail(probe, &CostTail { kind: None }) else {
         panic!("expected Ok");
     };
     let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");

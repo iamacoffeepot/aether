@@ -37,6 +37,47 @@ use aether_kinds::MonitorNotice;
 use super::kinds::*;
 use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor, TcpSessionConfig};
 
+/// The shared body of `on_bind` and `on_bind_self`: bind the socket on the
+/// dispatcher thread (so a bind failure replies `Err` synchronously), then
+/// stage the bound listener over the already-proven `consumer`. Its task
+/// completion registers the monitor, commits the supervisor entry, and
+/// replies only after authoritative activation.
+fn bind_listener(
+    ctx: &mut NativeCtx<'_, TcpCapability, Manual>,
+    addr: String,
+    name: Option<String>,
+    consumer: Option<ErasedActorRef>,
+) {
+    let listener = match TcpListener::bind(&addr) {
+        Ok(l) => l,
+        Err(e) => {
+            ctx.reply(&BindListenerResult::Err { addr, error: format!("bind failed: {e}") });
+            return;
+        }
+    };
+    let local_port = match listener.local_addr() {
+        Ok(local) => local.port(),
+        Err(e) => {
+            drop(listener);
+            ctx.reply(&BindListenerResult::Err { addr, error: format!("local_addr failed: {e}") });
+            return;
+        }
+    };
+    let subname_str = name.unwrap_or_else(|| format!("{local_port}"));
+    let owed = ctx.defer_reply_to(ctx.reply_target());
+
+    if let Err((error, owed)) = ctx
+        .spawn_child::<TcpListenerActor>(
+            Subname::Named(&subname_str),
+            TcpListenerConfig { listener: Some(listener), addr: addr.clone(), port: local_port, consumer },
+            (),
+        )
+        .continue_from(owed, ListenerSpawn { addr: addr.clone(), listener_name: subname_str.clone(), local_port })
+    {
+        owed.reply(ctx, &BindListenerResult::Err { addr, error: format!("spawn failed: {error:?}") });
+    }
+}
+
 /// `aether.tcp` runtime state (issue 607 Phase 6a, ADR-0079). The singleton
 /// control-plane cap owns its listener fleet directly — it is the supervisor,
 /// not a thin shim over the chassis registry. Each `on_bind` registers a
@@ -293,37 +334,26 @@ impl NativeActor for TcpCapability {
                 return;
             }
         };
-        let listener = match TcpListener::bind(&mail.addr) {
-            Ok(l) => l,
-            Err(e) => {
-                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("bind failed: {e}") });
-                return;
-            }
-        };
-        let local_port = match listener.local_addr() {
-            Ok(addr) => addr.port(),
-            Err(e) => {
-                drop(listener);
-                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("local_addr failed: {e}") });
-                return;
-            }
-        };
-        let subname_str = mail.name.clone().unwrap_or_else(|| format!("{local_port}"));
-        let owed = ctx.defer_reply_to(ctx.reply_target());
+        bind_listener(ctx, mail.addr, mail.name, consumer);
+    }
 
-        if let Err((error, owed)) = ctx
-            .spawn_child::<TcpListenerActor>(
-                Subname::Named(&subname_str),
-                TcpListenerConfig { listener: Some(listener), addr: mail.addr.clone(), port: local_port, consumer },
-                (),
-            )
-            .continue_from(
-                owed,
-                ListenerSpawn { addr: mail.addr.clone(), listener_name: subname_str.clone(), local_port },
-            )
-        {
-            owed.reply(ctx, &BindListenerResult::Err { addr: mail.addr, error: format!("spawn failed: {error:?}") });
-        }
+    /// Spawn a fresh `TcpListenerActor` bound to `mail.addr` whose consumer
+    /// is the sender, as [`Self::on_bind`] does with an explicit consumer.
+    ///
+    /// # Agent
+    /// Reply: `BindListenerResult`. `Err` when the mail carries no actor
+    /// sender (a session has no inbox to deliver frames to), or on the
+    /// errors `BindListener` reports.
+    #[handler::manual]
+    fn on_bind_self(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListenerSelf) {
+        let Some(consumer) = ctx.sender() else {
+            ctx.reply(&BindListenerResult::Err {
+                addr: mail.addr,
+                error: "bind_listener_self needs an actor sender to deliver frames to".to_owned(),
+            });
+            return;
+        };
+        bind_listener(ctx, mail.addr, mail.name, Some(consumer));
     }
 
     #[handler(task)]

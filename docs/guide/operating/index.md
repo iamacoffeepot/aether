@@ -23,7 +23,7 @@ common source of bad recovery decisions.
 | MCP client session | tool calls and returned evidence | the tunnel normally does; an `aether-mcp` restart does not | MCP connection |
 | Hub | supervised engine table, engine proxies, artifact store | fleet: no; stored artifacts: yes | hub-local tools |
 | Substrate | one live engine, native caps, live kind and mailbox registries | no | `engine_id` |
-| Loaded component | one wasm actor behind a substrate mailbox | no | lineage `name` and `mailbox_id` |
+| Loaded component | one wasm actor behind a substrate mailbox | no | lineage `address` |
 
 Keep three nouns separate:
 
@@ -46,7 +46,7 @@ Use this loop even for a short probe:
 - [ ] Before using any selector, prove the artifact is stored with
       `list_binaries` or registry `list_components`; otherwise upload it first.
 - [ ] Record the exact `engine_id` returned by `spawn_substrate`.
-- [ ] Record each explicit load's returned lineage `name` and `mailbox_id`;
+- [ ] Record each explicit load's returned lineage `address`;
       for boot loads, record the configured name used to derive its lineage.
 - [ ] Inspect the live surface before guessing mail: `describe_kinds`,
       `describe_handlers`, or `describe_component`.

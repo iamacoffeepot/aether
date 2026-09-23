@@ -7,7 +7,7 @@ mod support;
 
 use aether_bloomery_driver::{Command, EvaluateTicket};
 use aether_bloomery_kinds::{Detail, Digest, Evaluated, OpaqueBytes, RecordedHead, RecordedHeadMove, Utf8Text, Warmed};
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, bundle_wasm, digest, program_head};
 
@@ -38,14 +38,14 @@ fn a_move_at_n_lets_the_predecessor_evaluate_n_and_the_successor_start_at_n_plus
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
+    let bundle_a = world.store_reactor(b"reactor-a");
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: Vec::new() });
     let manual = world.drive(commands);
     assert!(manual.is_empty());
 
-    let bundle_b = world.store_reactor(b"reactor-b", MailboxId(102));
+    let bundle_b = world.store_reactor(b"reactor-b");
     for seq in [4, 5] {
         world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
     }
@@ -70,7 +70,7 @@ fn shared_digest_sees_the_earlier_heads_warm() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a", "b"]);
     let set_digest = world.store_set(&set);
-    let shared = world.store_reactor(b"shared", MailboxId(101));
+    let shared = world.store_reactor(b"shared");
     world.seed_set_root(set_digest);
     world.seed_move("a", shared);
     world.seed_move("b", shared);
@@ -90,8 +90,8 @@ fn a_b_a_reuses_the_dormant_instance() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let first = world.store_reactor(b"first", MailboxId(101));
-    let second = world.store_reactor(b"second", MailboxId(102));
+    let first = world.store_reactor(b"first");
+    let second = world.store_reactor(b"second");
     world.seed_set_root(set_digest);
     world.seed_move("a", first);
     for seq in [3, 4, 5, 6, 7] {
@@ -129,7 +129,7 @@ fn rejected_interval_is_delivered_to_the_next_activation() {
     let manual = world.drive(commands);
     assert!(manual.is_empty());
 
-    let next = world.store_reactor(b"next", MailboxId(101));
+    let next = world.store_reactor(b"next");
     for seq in [3, 4, 5] {
         world.evaluates.insert(seq, Evaluated::Completed { seq, intents: Vec::new() });
     }
@@ -151,7 +151,7 @@ fn poisoned_warm_records_rejection_and_marks_the_instance() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a", "b"]);
     let set_digest = world.store_set(&set);
-    let shared = world.store_reactor(b"shared", MailboxId(101));
+    let shared = world.store_reactor(b"shared");
     world.seed_set_root(set_digest);
     world.seed_move("a", shared);
     world.seed_move("b", shared);
@@ -171,7 +171,7 @@ fn shared_instance_past_the_owed_start_is_rejected() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a", "b"]);
     let set_digest = world.store_set(&set);
-    let shared = world.store_reactor(b"shared", MailboxId(101));
+    let shared = world.store_reactor(b"shared");
     let missing = digest(3);
     world.seed_set_root(set_digest);
     world.seed_move("a", shared);
@@ -200,7 +200,7 @@ fn activation_on_a_program_only_digest_is_rejected_before_any_load() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let reactor = world.store_reactor(b"reactor", MailboxId(101));
+    let reactor = world.store_reactor(b"reactor");
     let program = world
         .store(OpaqueBytes::ID, &bundle_wasm(&[("run", Utf8Text::ID, OpaqueBytes::ID, "run it")], &[], b"program"));
     world.seed_set_root(set_digest);
@@ -232,7 +232,7 @@ fn poisoned_digest_rejects_every_head_it_served() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a", "b"]);
     let set_digest = world.store_set(&set);
-    let shared = world.store_reactor(b"shared", MailboxId(101));
+    let shared = world.store_reactor(b"shared");
     world.seed_set_root(set_digest);
     world.seed_move("a", shared);
     world.seed_move("b", shared);
@@ -260,7 +260,7 @@ fn poisoned_digest_rejects_every_head_it_served() {
     assert!(rejected.iter().all(|(cause, _)| *cause == 4));
     assert_eq!(world.events_for(shared), vec![3, 4]);
 
-    let next = world.store_reactor(b"next", MailboxId(102));
+    let next = world.store_reactor(b"next");
     let moved = RecordedHeadMove::new(RecordedHead::from(&program_head("a")), next);
     let wake = world.append_external(None, &moved);
     let manual = world.drive(wake);

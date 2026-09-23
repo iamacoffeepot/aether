@@ -34,7 +34,7 @@ use aether_kinds::{
 use aether_kit_widget::{
     DialogConfig, DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, SplitterAxis, SplitterConfig,
     TabStripConfig, Theme, ToastConfig, TooltipConfig, TooltipSection, WidgetChildSpec, WidgetControlState,
-    WidgetFrame, WidgetKind,
+    WidgetFrame, WidgetKind, WidgetPanel,
 };
 
 const DEFAULT_STEM: &str = "aether_kit_widget";
@@ -215,7 +215,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
                 );
             }
         }
-        LoadResult::Ok { name, .. } => {
+        LoadResult::Ok { path: name, .. } => {
             panic!("{stem}: a bare load of the widget module must error, not instantiate {name}")
         }
     }
@@ -236,9 +236,9 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
             )])
             .unwrap_or_else(|error| panic!("{stem}: named load of {export}: {error}"));
         match loaded.reply::<LoadResult>("named").expect("decode named LoadResult") {
-            LoadResult::Ok { name, .. } => {
+            LoadResult::Ok { path: name, .. } => {
                 assert!(
-                    name.ends_with(&format!(":{export}")),
+                    name.to_string().ends_with(&format!(":{export}")),
                     "{stem}: named load of {export} must instantiate that NAMESPACE; got {name}"
                 );
             }
@@ -257,24 +257,14 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config_bytes = config.encode_into_bytes();
     let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
 
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config_bytes.clone(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load panel");
-    let mailbox_id = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("{stem}: load WidgetPanel: {error}"),
-    };
+    let (_, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config_bytes.clone(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("{stem}: load WidgetPanel: {error}"));
 
     let panel = panel_address();
     harness
@@ -287,7 +277,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
             HarnessOp::send_and_await_reply(
                 "aether.component",
                 &ReplaceComponent {
-                    mailbox_id,
+                    target: path,
                     wasm: wasm.to_vec(),
                     drain_timeout_ms: None,
                     config: config_bytes,

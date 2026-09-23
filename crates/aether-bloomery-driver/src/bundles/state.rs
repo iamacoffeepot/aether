@@ -1,7 +1,6 @@
 //! One bundle digest's shared load lifecycle (ADR-0226 decision 2).
 
 use aether_bloomery_kinds::Detail;
-use aether_data::MailboxId;
 
 use super::DeclaredRoles;
 
@@ -22,10 +21,8 @@ pub enum LoadState {
         /// The roles the bundle declares.
         roles: DeclaredRoles,
     },
-    /// Loaded for the engine's life.
+    /// Loaded for the engine's life; the shell holds the root's reference.
     Ready {
-        /// Mailbox of the digest-named root.
-        root: MailboxId,
         /// The roles the bundle declares.
         roles: DeclaredRoles,
     },

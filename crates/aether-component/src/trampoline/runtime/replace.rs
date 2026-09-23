@@ -191,11 +191,9 @@ impl WasmTrampolineState {
     }
 
     pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
-        // `payload.wasm` is the new module bytes; `mailbox_id` is
-        // the trampoline's own id (the agent already addressed
-        // this mail to us, so the field is informational).
-        let _ = payload.mailbox_id;
-
+        // `payload.wasm` is the new module bytes; `target` named this
+        // trampoline and the host proved it before forwarding, so the field
+        // is informational here.
         let module = match Module::new(&self.engine, &payload.wasm) {
             Ok(m) => m,
             Err(e) => {

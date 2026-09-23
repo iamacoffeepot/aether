@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::time::Duration;
 
-use aether_data::{Tag, tagged_id};
+use aether_data::ActorPath;
 use anyhow::{Context, Result, anyhow, bail};
 use cargo_metadata::{Metadata, MetadataCommand};
 use clap::Args;
@@ -36,30 +36,23 @@ pub struct DevComponentArgs {
     /// Component artifact stem. Required when the package exposes more than one component.
     #[arg(long)]
     target: Option<String>,
-    /// Existing component mailbox id (`mbx-...`) to replace on the first pass.
-    #[arg(long, value_parser = parse_mailbox_id)]
-    mailbox_id: Option<String>,
-    /// Actor namespace to select on the first load. Conflicts with `--mailbox-id`.
-    #[arg(long, conflicts_with = "mailbox_id")]
+    /// Existing component address (`aether.component/:NAME` or its canonical lineage) to replace on the first pass.
+    #[arg(long, value_parser = parse_address)]
+    address: Option<String>,
+    /// Actor namespace to select on the first load. Conflicts with `--address`.
+    #[arg(long, conflicts_with = "address")]
     export: Option<String>,
     /// Streamable-HTTP MCP endpoint on a host that can read the built artifact at the same absolute path.
     #[arg(long, default_value = DEFAULT_MCP_ENDPOINT)]
     mcp_endpoint: String,
 }
 
+/// The live component the loop replaces: the canonical lineage the load
+/// handed back, or the address `--address` supplied. `replace_component`
+/// resolves either through its address resolver.
 #[derive(Clone, Debug, PartialEq, Eq)]
 struct LiveBinding {
-    mailbox_id: String,
-    canonical_name: Option<String>,
-}
-
-impl LiveBinding {
-    /// What `replace_component` resolves through its address resolver: the
-    /// canonical lineage the load handed back when there is one, else the
-    /// tagged mailbox id `--mailbox-id` supplied. The tool takes either.
-    fn address(&self) -> &str {
-        self.canonical_name.as_deref().unwrap_or(&self.mailbox_id)
-    }
+    address: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -69,8 +62,7 @@ struct UploadReply {
 
 #[derive(Debug, Deserialize)]
 struct LoadReply {
-    mailbox_id: String,
-    name: String,
+    address: String,
 }
 
 trait ArtifactBuilder {
@@ -151,8 +143,7 @@ pub fn run(args: &DevComponentArgs) -> Result<()> {
         examples: component.from_example,
         features: component.features.clone(),
     };
-    let mut binding =
-        args.mailbox_id.as_ref().map(|mailbox_id| LiveBinding { mailbox_id: mailbox_id.clone(), canonical_name: None });
+    let mut binding = args.address.as_ref().map(|address| LiveBinding { address: address.clone() });
     let runtime = RuntimeBuilder::new_multi_thread().enable_all().build().context("start async runtime")?;
 
     runtime.block_on(watch(
@@ -192,10 +183,13 @@ fn select_component(metadata: &Metadata, package: &str, target: Option<&str>) ->
     bail!("package {package:?} exposes multiple component targets ({}); pass --target <stem>", targets.join(", "))
 }
 
-fn parse_mailbox_id(value: &str) -> Result<String, String> {
-    tagged_id::decode_with_tag(value, Tag::Mailbox)
-        .map(|_| value.to_string())
-        .map_err(|error| format!("mailbox id: {error}"))
+/// Accept a component actor path. A tagged `mbx-…` id is refused: the MCP
+/// tools address a component by its lineage address.
+fn parse_address(value: &str) -> Result<String, String> {
+    if value.starts_with("mbx-") {
+        return Err("pass the component's lineage address (aether.component/:NAME), not a mailbox id".to_string());
+    }
+    ActorPath::new(value).map(|_| value.to_string()).map_err(|error| format!("address: {error}"))
 }
 
 async fn watch<B: ArtifactBuilder, C: ToolCaller>(
@@ -273,16 +267,13 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
                 "replace_component",
                 json!({
                     "engine_id": engine_id,
-                    "address": current.address(),
+                    "address": current.address,
                     "selector": uploaded.hash,
                 }),
             )
             .await
             .context("replace live component")?;
-        return Ok(current.canonical_name.as_ref().map_or_else(
-            || format!("replaced {}", current.mailbox_id),
-            |name| format!("replaced {name} ({})", current.mailbox_id),
-        ));
+        return Ok(format!("replaced {}", current.address));
     }
 
     let mut load_arguments = json!({ "engine_id": engine_id, "selector": uploaded.hash });
@@ -296,9 +287,9 @@ async fn run_pass<B: ArtifactBuilder, C: ToolCaller>(
         caller.call("load_component", load_arguments).await.context("load component into engine")?,
     )
     .context("decode load_component response")?;
-    parse_mailbox_id(&loaded.mailbox_id).map_err(anyhow::Error::msg)?;
-    let message = format!("loaded {} ({})", loaded.name, loaded.mailbox_id);
-    *binding = Some(LiveBinding { mailbox_id: loaded.mailbox_id, canonical_name: Some(loaded.name) });
+    parse_address(&loaded.address).map_err(anyhow::Error::msg)?;
+    let message = format!("loaded {}", loaded.address);
+    *binding = Some(LiveBinding { address: loaded.address });
     Ok(message)
 }
 
@@ -391,14 +382,6 @@ mod tests {
         }
     }
 
-    /// A tag-correct mailbox id in the `mbx-…` spelling the CLI parses and
-    /// the fake caller echoes back. The tests thread it as an opaque token —
-    /// nothing recomputes it from a name — so it carries the tag bits and
-    /// nothing else.
-    fn mailbox_id() -> String {
-        aether_data::MailboxId(aether_data::with_tag(Tag::Mailbox, 0x0eca_de00_001d)).to_string()
-    }
-
     #[derive(Debug, Parser)]
     struct ArgsHarness {
         #[command(flatten)]
@@ -471,10 +454,11 @@ mod tests {
     }
 
     #[test]
-    fn mailbox_selector_rejects_missing_or_malformed_values() {
-        assert!(parse_mailbox_id("").is_err());
-        assert!(parse_mailbox_id("aether.component/example").is_err());
-        assert!(parse_mailbox_id("mbx-not-base32").is_err());
+    fn address_selector_rejects_missing_malformed_and_mailbox_id_values() {
+        assert!(parse_address("").is_err());
+        assert!(parse_address("aether.component//echo").is_err());
+        assert!(parse_address("mbx-2aaaaaaaaaaa").is_err());
+        assert_eq!(parse_address("aether.component/:echo").as_deref(), Ok("aether.component/:echo"));
     }
 
     #[test]
@@ -489,8 +473,8 @@ mod tests {
             "chosen",
             "--engine-id",
             "engine",
-            "--mailbox-id",
-            &mailbox_id(),
+            "--address",
+            "aether.component/:echo",
             "--export",
             "example.alpha",
         ])
@@ -514,13 +498,12 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn first_load_retains_canonical_name_and_mailbox_for_replace() {
+    async fn first_load_retains_the_address_for_replace() {
         let artifact = PathBuf::from("/tmp/component.wasm");
-        let mailbox_id = mailbox_id();
         let mut builder = builder([Ok(artifact.clone()), Ok(artifact)]);
         let mut caller = caller([
             Ok(json!({ "hash": "hash-1" })),
-            Ok(json!({ "mailbox_id": mailbox_id, "name": "aether.component/example:echo" })),
+            Ok(json!({ "engine_id": "engine", "address": "aether.component/example:echo", "capabilities": {} })),
             Ok(json!({ "hash": "hash-2" })),
             Ok(json!({ "capabilities": [] })),
         ]);
@@ -530,13 +513,7 @@ mod tests {
         run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("load pass");
         run_pass(&mut builder, &mut caller, "engine", Some("example.echo"), &mut binding).await.expect("replace pass");
 
-        assert_eq!(
-            binding,
-            Some(LiveBinding {
-                mailbox_id: mailbox_id.clone(),
-                canonical_name: Some("aether.component/example:echo".to_string()),
-            })
-        );
+        assert_eq!(binding, Some(LiveBinding { address: "aether.component/example:echo".to_string() }));
         let calls = calls.lock().expect("calls mutex").clone();
         assert_eq!(
             calls.iter().map(|(tool, _)| *tool).collect::<Vec<_>>(),
@@ -560,10 +537,7 @@ mod tests {
         let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
         let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({ "capabilities": [] }))]);
         let calls = caller.calls.clone();
-        let mut binding = Some(LiveBinding {
-            mailbox_id: mailbox_id(),
-            canonical_name: Some("aether.component/aether.embedded:echo".to_string()),
-        });
+        let mut binding = Some(LiveBinding { address: "aether.component/aether.embedded:echo".to_string() });
 
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
@@ -612,24 +586,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn existing_mailbox_replaces_on_first_pass() {
+    async fn existing_address_replaces_on_first_pass() {
         let mut builder = builder([Ok(PathBuf::from("/tmp/component.wasm"))]);
         let mut caller = caller([Ok(json!({ "hash": "hash-1" })), Ok(json!({}))]);
         let calls = caller.calls.clone();
-        let original = LiveBinding { mailbox_id: mailbox_id(), canonical_name: None };
+        let original = LiveBinding { address: "aether.component/:echo".to_string() };
         let mut binding = Some(original.clone());
 
         run_pass(&mut builder, &mut caller, "engine", None, &mut binding).await.expect("replace pass");
 
         let calls = calls.lock().expect("calls mutex").clone();
         assert_eq!(calls[1].0, "replace_component");
-        assert_eq!(calls[1].1["address"], original.mailbox_id, "a nameless binding addresses by its mailbox id");
+        assert_eq!(calls[1].1["address"], original.address, "a supplied address is what the replace names");
         assert_eq!(binding, Some(original));
     }
 
     #[tokio::test]
     async fn every_failure_keeps_the_prior_binding() {
-        let original = LiveBinding { mailbox_id: mailbox_id(), canonical_name: Some("canonical".to_string()) };
+        let original = LiveBinding { address: "aether.component/:canonical".to_string() };
 
         let mut binding = Some(original.clone());
         assert!(run_pass(&mut builder([Err("build")]), &mut caller([]), "engine", None, &mut binding).await.is_err());

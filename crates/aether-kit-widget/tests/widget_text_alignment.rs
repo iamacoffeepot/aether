@@ -151,8 +151,8 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
+        LoadResult::Ok { path: name, .. } => {
+            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }

@@ -26,7 +26,7 @@ use std::collections::btree_map::Entry;
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorPath, Kind};
 use aether_http as http;
 use aether_http::HttpServerCapability;
 use aether_http::kinds::{
@@ -336,8 +336,8 @@ impl WasmActor for WebSocketHandler {
 /// It replies a fixed tag for `/routed`, and `/routed/drop` is a second
 /// exact route (#3697 — routes match their own path, no prefix-swallow)
 /// that doubles as the test's mail bridge into the chassis: the request
-/// body carries a decimal trampoline mailbox id, and the handler forwards
-/// a [`DropComponent`] for it to `aether.component` (detached: the drop
+/// body carries a component's actor path, and the handler forwards a
+/// [`DropComponent`] targeting it to `aether.component` (detached: the drop
 /// teardown is not part of the request's causal chain), so the test can
 /// drop this component from outside without a chassis-level mail surface.
 pub struct RoutedHttpHandler;
@@ -363,8 +363,8 @@ impl WasmActor for RoutedHttpHandler {
     }
 
     /// `/routed/drop` doubles as the test's mail bridge: the request body
-    /// names a decimal mailbox id, and the handler forwards a detached
-    /// [`DropComponent`] for it to `aether.component`. `ctx` derefs to
+    /// names a component's actor path, and the handler forwards a detached
+    /// [`DropComponent`] targeting it to `aether.component`. `ctx` derefs to
     /// `WasmCtx`, so the detached send reads exactly as an ordinary
     /// handler's.
     ///
@@ -373,14 +373,14 @@ impl WasmActor for RoutedHttpHandler {
     /// `/routed/drop` route this actor claims.
     #[http::route(any, "/routed/drop")]
     fn on_routed_drop(&mut self, ctx: http::Ctx<'_, WasmCtx<'_>>, req: HttpServerRequest) -> HttpServerResponse {
-        let Ok(raw_id) = String::from_utf8_lossy(&req.body).trim().parse::<u64>() else {
+        let Ok(target) = ActorPath::new(String::from_utf8_lossy(&req.body).trim()) else {
             return HttpServerResponse {
                 status: 400,
                 headers: Vec::new(),
-                body: b"body must be a decimal mailbox id".to_vec(),
+                body: b"body must be a component actor path".to_vec(),
             };
         };
-        ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { mailbox_id: MailboxId(raw_id) });
+        ctx.actor::<ComponentHostCapability>().send_detached(&DropComponent { target });
         HttpServerResponse { status: 200, headers: Vec::new(), body: b"dropping".to_vec() }
     }
 }

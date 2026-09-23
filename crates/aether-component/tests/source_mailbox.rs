@@ -2,8 +2,8 @@
 //! correctly surfaces the inbound mail's component origin.
 //!
 //! Uses the `source_observer` test-fixture component, whose `on_source_query`
-//! manual handler reads `ctx.sender()`, logs the raw id, and broadcasts
-//! `SourceReport { mailbox_id }` to the observer.
+//! manual handler reads `ctx.sender()` and answers `SourceReport` through it
+//! (or by reply, when there is no component sender).
 //!
 //! Two invariants are checked:
 //!
@@ -11,14 +11,15 @@
 //!    directly (as a Session origin) via `send_and_await_reply`; the decoded reply
 //!    must carry `mailbox_id: 0`.
 //!
-//! 2. **Component source returns the sender's `MailboxId`**: the observer is
-//!    loaded under its default name and a `source_forwarder` — which declares
-//!    the observer as a dependency, so the load order is load-bearing — beside
-//!    it. The harness triggers the forwarder with the fieldless
-//!    `SendSourceQuery`; the forwarder sends `SourceQuery` through the
-//!    reference it minted from that declaration (component-origin mail). The
-//!    observer logs `"source_mailbox={id}"`. After the chain settles, `log_tail`
-//!    on the observer confirms the id equals the forwarder's `MailboxId`.
+//! 2. **Component source returns the sender**: the observer is loaded under
+//!    its default name and a `source_forwarder` — which declares the observer
+//!    as a dependency, so the load order is load-bearing — beside it. The
+//!    harness triggers the forwarder with the fieldless `SendSourceQuery`; the
+//!    forwarder sends `SourceQuery` through the reference it minted from that
+//!    declaration (component-origin mail). The observer sends its report back
+//!    through `ctx.sender()`, and the forwarder logs its arrival. After the
+//!    chain settles, `log_tail` on the forwarder confirms the report reached
+//!    it — so the observer's sender was the forwarder.
 //!
 //! This file is an integration test that requires a pre-built
 //! `source_observer.wasm` fixture. CI builds component wasm before invoking
@@ -34,7 +35,6 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::MailboxId;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
@@ -45,12 +45,7 @@ const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 /// Load one non-entry actor out of the fixture bundle, under `name` or — with
 /// `None` — under the actor's own namespace, which is where a declared
 /// dependency looks for it.
-fn load_fixture(
-    harness: &mut SubstrateHarness,
-    wasm: Vec<u8>,
-    export: &str,
-    name: Option<&str>,
-) -> (MailboxId, String) {
+fn load_fixture(harness: &mut SubstrateHarness, wasm: Vec<u8>, export: &str, name: Option<&str>) -> String {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -66,12 +61,12 @@ fn load_fixture(
         )])
         .expect("load fixture actor");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name: full_name, .. } => (mailbox_id, full_name),
+        LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("load_component {export} as {name:?}: {error}"),
     }
 }
 
-fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> String {
     load_fixture(harness, wasm, "test.source_observer", Some(name))
 }
 
@@ -85,7 +80,7 @@ fn session_source_returns_none() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (_, reader_addr) = load_source_observer(&mut harness, wasm, "reader");
+    let reader_addr = load_source_observer(&mut harness, wasm, "reader");
 
     let result = harness
         .execute(vec![("query", HarnessOp::send_and_await_reply(&reader_addr, &SourceQuery))])
@@ -102,8 +97,8 @@ fn session_source_returns_none() {
 
 /// Component-source case: a forwarder component sends `SourceQuery` to the
 /// observer through the reference its declared dependency minted.
-/// `sender()` must return `Some(forwarder_mailbox)`. Verified by
-/// checking the value the observer logged via `log_tail`.
+/// `sender()` must return the forwarder, so the report the observer sends
+/// through it arrives at the forwarder. Verified by the forwarder's log.
 #[test]
 fn component_source_returns_sender_mailbox() {
     let Some(wasm_path) = require_wasm(SOURCE_OBSERVER) else {
@@ -114,32 +109,26 @@ fn component_source_returns_sender_mailbox() {
     // The reader loads under its own namespace and first: the forwarder
     // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let (reader_mailbox, reader_addr) = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
-    let (sender_mailbox, sender_addr) = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
+    let reader_addr = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
+    let sender_addr = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
 
-    // `send_and_settle`: the whole chain (forwarder → reader handler) settles
-    // before `execute` returns, so the log entry is already in the ring.
+    // `send_and_settle`: the whole chain (forwarder → reader → forwarder)
+    // settles before `execute` returns, so the log entry is already in the ring.
     harness
         .execute(vec![("trigger", HarnessOp::send_and_settle(&sender_addr, &SendSourceQuery))])
         .expect("SendSourceQuery to the forwarder");
 
-    // Read the reader's log ring — the handler logs
-    // "source_mailbox={id}" on every `SourceQuery` dispatch.
-    let expected_msg = format!("source_mailbox={}", sender_mailbox.0);
-    let logs = harness.log_tail(&reader_addr, None, None);
+    let logs = harness.log_tail(&sender_addr, None, None);
     let found = match &logs {
-        LogTailResult::Ok { entries, .. } => entries.iter().any(|e| e.message == expected_msg),
-        LogTailResult::Err { error } => panic!("log_tail on reader failed: {error}"),
+        LogTailResult::Ok { entries, .. } => entries.iter().any(|e| e.message == "source_report_received"),
+        LogTailResult::Err { error } => panic!("log_tail on forwarder failed: {error}"),
     };
 
     assert!(
         found,
-        "reader did not log the expected source_mailbox id;\n\
-         expected message: {expected_msg:?}\n\
-         sender_mailbox:   {sender_mailbox:?}\n\
-         reader_mailbox:   {reader_mailbox:?}\n\
-         reader_addr:      {reader_addr:?}\n\
-         sender_addr:      {sender_addr:?}\n\
-         log entries: {logs:?}",
+        "the reader's report did not reach the forwarder through its sender;\n\
+         reader_addr: {reader_addr:?}\n\
+         sender_addr: {sender_addr:?}\n\
+         forwarder log entries: {logs:?}",
     );
 }

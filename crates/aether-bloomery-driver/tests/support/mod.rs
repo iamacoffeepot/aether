@@ -21,7 +21,7 @@ use aether_bloomery_kinds::{
     ReactionFailed, ReadArtifact, ReadArtifactResult, ReadClosure, ReadClosureResult, ReadEvents, ReadEventsResult,
     RecordedHead, RecordedHeadMove, Status, Warmed, WatchHeadResult, artifact_digest,
 };
-use aether_data::{Kind, KindId, MailboxId, Storage, StorageData};
+use aether_data::{Kind, KindId, Storage, StorageData};
 use reactor::Reactor;
 
 /// Byte budget every test core starts under: 1 MiB.
@@ -47,7 +47,7 @@ pub struct World {
     /// Roots whose closure read answers `TooLarge`.
     pub oversized: HashSet<Digest>,
     /// Scripted load outcomes by bundle digest.
-    pub loads: HashMap<Digest, Result<MailboxId, String>>,
+    pub loads: HashMap<Digest, Result<(), String>>,
     /// Scripted invoke replies by request seq.
     pub invokes: HashMap<u64, Invoked>,
     /// Closure budget the core started with, echoed in `TooLarge` replies.
@@ -66,8 +66,8 @@ pub struct World {
     pub closures_seen: Vec<Digest>,
     /// Bundle digests the core asked to load, in order.
     pub loads_seen: Vec<Digest>,
-    /// Invokes the core emitted, in order.
-    pub invokes_seen: Vec<(MailboxId, Invoke)>,
+    /// Invokes the core emitted, with the bundle they address, in order.
+    pub invokes_seen: Vec<(Digest, Invoke)>,
     /// When set, the next append answers `Conflict` instead of committing.
     pub conflict_next: Option<u64>,
     /// When set, the next append answers `Err` instead of committing.
@@ -78,10 +78,10 @@ pub struct World {
     pub parked: Vec<(WatchTicket, u64)>,
     /// Every `WatchHead` boundary the core emitted, in order.
     pub watches_seen: Vec<u64>,
-    /// Scripted reactor roots by mailbox, holding cursors and recordings.
-    pub reactors: HashMap<MailboxId, Reactor>,
-    /// Roots behind held `Evaluate` commands, so hand-fed replies sequence.
-    pub eval_roots: BTreeMap<EvaluateTicket, MailboxId>,
+    /// Scripted reactor roots by bundle digest, holding cursors and recordings.
+    pub reactors: HashMap<Digest, Reactor>,
+    /// Bundles behind held `Evaluate` commands, so hand-fed replies sequence.
+    pub eval_roots: BTreeMap<EvaluateTicket, Digest>,
     /// Barrier replies collected from the core, in arrival order.
     pub processed: Vec<(CallerId, Processed)>,
     /// Scripted warm replies by batch first seq.
@@ -212,16 +212,16 @@ impl World {
             Command::Load { ticket, bundle, wasm } => {
                 self.loads_seen.push(bundle);
                 match self.loads.get(&bundle).cloned() {
-                    Some(Ok(root)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded { root })),
+                    Some(Ok(())) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Loaded)),
                     Some(Err(error)) => Step::More(self.core.on_loaded(ticket, LoadOutcome::Failed { error })),
                     None => Step::Manual(Command::Load { ticket, bundle, wasm }),
                 }
             }
-            Command::Invoke { ticket, root, request } => {
-                self.invokes_seen.push((root, request.clone()));
+            Command::Invoke { ticket, bundle, request } => {
+                self.invokes_seen.push((bundle, request.clone()));
                 match self.invokes.remove(&request.seq()) {
                     Some(invoked) => Step::More(self.core.on_invoked(ticket, invoked)),
-                    None => Step::Manual(Command::Invoke { ticket, root, request }),
+                    None => Step::Manual(Command::Invoke { ticket, bundle, request }),
                 }
             }
             Command::WatchHead { ticket, request } => {
@@ -234,31 +234,31 @@ impl World {
                     Step::More(Vec::new())
                 }
             }
-            Command::Warm { ticket, root, request } => {
+            Command::Warm { ticket, bundle, request } => {
                 let first = request.entries().first();
                 let last = request.entries().last();
                 let scripted = self.warm_pages.get(&first).cloned();
                 let default = self.warm_default.clone();
-                let warmed = self.reactors.entry(root).or_default().warm(first, last, scripted, default.as_ref());
+                let warmed = self.reactors.entry(bundle).or_default().warm(first, last, scripted, default.as_ref());
                 Step::More(self.core.on_warmed(ticket, warmed))
             }
-            Command::Evaluate { ticket, root, request } => {
+            Command::Evaluate { ticket, bundle, request } => {
                 let seq = request.entry().seq;
                 let scripted = self.evaluates.get(&seq).cloned();
-                let reactor = self.reactors.entry(root).or_default();
+                let reactor = self.reactors.entry(bundle).or_default();
                 if let Some(auto) = reactor.check_event(seq) {
                     Step::More(self.core.on_evaluated(ticket, auto))
                 } else if let Some(scripted) = scripted {
                     reactor.note_evaluated(&scripted);
                     Step::More(self.core.on_evaluated(ticket, scripted))
                 } else {
-                    self.eval_roots.insert(ticket, root);
-                    Step::Manual(Command::Evaluate { ticket, root, request })
+                    self.eval_roots.insert(ticket, bundle);
+                    Step::Manual(Command::Evaluate { ticket, bundle, request })
                 }
             }
-            Command::QueryStatus { ticket, root } => match self.status {
+            Command::QueryStatus { ticket, bundle } => match self.status {
                 Some(status) => Step::More(self.core.on_status(ticket, &status)),
-                None => Step::Manual(Command::QueryStatus { ticket, root }),
+                None => Step::Manual(Command::QueryStatus { ticket, bundle }),
             },
             Command::Answer { caller, outcome } => {
                 self.answers.push((caller, outcome));

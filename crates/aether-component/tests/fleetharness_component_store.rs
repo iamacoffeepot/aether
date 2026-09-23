@@ -289,7 +289,7 @@ mod tests {
 
         // Replace the loaded component by hash (ADR-0022 in-place swap,
         // ADR-0116 selector). The trampoline keeps its lineage address.
-        let caps = harness.replace_by_selector(engine, loaded.mailbox_id, &hash);
+        let caps = harness.replace_by_selector(engine, &loaded.addr, &hash);
         assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
     }
 
