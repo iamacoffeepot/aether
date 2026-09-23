@@ -1,0 +1,22 @@
+[package]
+name = "aether-test-fixtures-carry-reshaped"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# Issue 6429 replace TARGET: the bundle's `test.carry.requester` with its
+# `aether.test_fixtures.carried_context` kind reshaped (an added `generation`
+# field changes `Kind::ID`). Replacing the bundle's requester with this one,
+# while a context is carried, must be refused. Standalone because a changed
+# context schema needs a separately compiled module.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
+
+[lints]
+workspace = true

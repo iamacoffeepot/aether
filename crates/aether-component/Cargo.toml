@@ -105,6 +105,7 @@ aether-test-fixtures-boot = { path = "../aether-test-fixtures-boot" }
 aether-test-fixtures-defaultless = { path = "../aether-test-fixtures-defaultless" }
 aether-test-fixtures-stateful-typed = { path = "../aether-test-fixtures-stateful-typed" }
 aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-stateful-reshaped" }
+aether-test-fixtures-carry-reshaped = { path = "../aether-test-fixtures-carry-reshaped" }
 # `dispatch_decode_failure` drives the `Probe` fixture directly through
 # the pub `Component::instantiate` / `deliver` API, which needs the
 # substrate types and `wasmtime::{Engine, Linker, Module}` in test scope
@@ -125,6 +126,7 @@ ignored = [
     "aether-test-fixtures-defaultless",
     "aether-test-fixtures-stateful-typed",
     "aether-test-fixtures-stateful-reshaped",
+    "aether-test-fixtures-carry-reshaped",
 ]
 
 [lints]
