@@ -5,9 +5,8 @@ use core::hash::{Hash, Hasher};
 use core::marker::PhantomData;
 
 use aether_data::{Address, MailboxId};
-use aether_kinds::MonitorNotice;
 
-use super::{AnyActorRef, Tombstone};
+use super::AnyActorRef;
 
 /// Proof that an actor of type `R` reached `Live` at an id, in this engine
 /// session (ADR-0230).
@@ -77,17 +76,6 @@ impl<R> ActorRef<R> {
     pub const fn address(self) -> Address<R> {
         Address::exact(self.id)
     }
-
-    /// Exchange this reference for a [`Tombstone`] when `notice` names its
-    /// id, or get the reference back unchanged on a mismatch. Reads only the
-    /// notice's target.
-    pub fn entomb(self, notice: &MonitorNotice) -> Result<Tombstone<R>, Self> {
-        if notice.target == self.id {
-            Ok(Tombstone::new(self.id))
-        } else {
-            Err(self)
-        }
-    }
 }
 
 impl<R> Clone for ActorRef<R> {
@@ -115,27 +103,5 @@ impl<R> Hash for ActorRef<R> {
 impl<R> fmt::Debug for ActorRef<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ActorRef").field("id", &self.id).finish()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn entomb_trades_a_matching_reference_for_its_tombstone() {
-        let id = MailboxId(7);
-
-        let matching = ActorRef::<()>::new(id).entomb(&MonitorNotice { target: id });
-        let Ok(tombstone) = matching else {
-            panic!("a notice for the reference's id must exchange it");
-        };
-        assert_eq!(tombstone.id(), id);
-
-        let mismatched = ActorRef::<()>::new(id).entomb(&MonitorNotice { target: MailboxId(8) });
-        let Err(returned) = mismatched else {
-            panic!("a notice for another id must return the reference");
-        };
-        assert_eq!(returned.id(), id);
     }
 }

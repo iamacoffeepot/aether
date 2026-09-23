@@ -328,14 +328,36 @@ fn config_layer_defaults_match_the_named_consts() {
 /// pinned deterministically, with no dependence on the order two
 /// independent actors' registration mail happens to reach the table.
 mod route_registration {
+    use super::super::{NativeCtx, RouteTable};
     use super::{
         Arc, KindId, MailboxId, RegisterRouteResult, RwLock, SharedRoutes, register_route, unregister_route,
         unregister_routes_all,
     };
     use crate::kinds::HttpMethod;
+    use aether_actor::AnyActorRef;
+    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::registry::MailDispatch;
+    use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::{boot_authority, fresh_substrate};
 
     fn fresh_routes() -> SharedRoutes {
-        Arc::new(RwLock::new(Vec::new()))
+        Arc::new(RwLock::new(RouteTable::default()))
+    }
+
+    /// Two proven route holders, minted through `ctx.resolve_live` over
+    /// freshly registered inline mailboxes — this crate cannot construct a
+    /// reference any other way.
+    fn holders() -> (AnyActorRef, AnyActorRef) {
+        let (registry, mailer) = fresh_substrate();
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let proven = |name: &str| {
+            let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
+
+            ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
+        };
+
+        (proven("test.http.route.a"), proven("test.http.route.b"))
     }
 
     #[track_caller]
@@ -355,10 +377,10 @@ mod route_registration {
 
     /// Snapshot the sole route's `(members, kind, shared)`, asserting the
     /// table holds exactly one route — the shape every case below checks.
-    fn only_route(routes: &SharedRoutes) -> (Vec<MailboxId>, KindId, bool) {
+    fn only_route(routes: &SharedRoutes) -> (Vec<AnyActorRef>, KindId, bool) {
         let table = routes.read().expect("route table lock");
-        assert_eq!(table.len(), 1, "expected exactly one route, got {}", table.len());
-        let route = &table[0];
+        assert_eq!(table.routes.len(), 1, "expected exactly one route, got {}", table.routes.len());
+        let route = table.routes.values().next().expect("one route");
         let snapshot = (route.members.clone(), route.kind, route.shared);
         drop(table);
         snapshot
@@ -374,14 +396,11 @@ mod route_registration {
     #[test]
     fn exclusive_conflict_first_claimant_keeps_route() {
         let routes = fresh_routes();
-        let (first, second) = (MailboxId(1), MailboxId(2));
+        let (first, second) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/dup", None, kind_a, first, false));
-        expect_err_containing(
-            register_route(&routes, "/dup", None, kind_b, second, false),
-            "already claimed by mailbox",
-        );
+        expect_err_containing(register_route(&routes, "/dup", None, kind_b, second, false), "already claimed by");
 
         assert_eq!(only_route(&routes), (vec![first], kind_a, false));
     }
@@ -393,7 +412,7 @@ mod route_registration {
     #[test]
     fn exclusive_reclaim_by_holder_updates_kind() {
         let routes = fresh_routes();
-        let holder = MailboxId(1);
+        let (holder, _) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/dup", None, kind_a, holder, false));
@@ -408,13 +427,13 @@ mod route_registration {
     #[test]
     fn distinct_method_same_prefix_is_not_a_conflict() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
 
         expect_ok(register_route(&routes, "/m", Some(HttpMethod::Get), kind, a, false));
         expect_ok(register_route(&routes, "/m", Some(HttpMethod::Post), kind, b, false));
 
-        assert_eq!(routes.read().expect("route table lock").len(), 2);
+        assert_eq!(routes.read().expect("route table lock").routes.len(), 2);
     }
 
     /// Tripwire: the shared/exclusive mismatch branch, both directions —
@@ -425,7 +444,7 @@ mod route_registration {
     fn shared_and_exclusive_claims_do_not_mix() {
         // Shared claim onto an exclusive key: rejected, stays exclusive.
         let excl = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
         expect_ok(register_route(&excl, "/k", None, kind, a, false));
         expect_err_containing(register_route(&excl, "/k", None, kind, b, true), "exclusively claimed");
@@ -444,7 +463,7 @@ mod route_registration {
     #[test]
     fn shared_join_with_mismatched_kind_is_rejected() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let (kind_a, kind_b) = (KindId(100), KindId(200));
 
         expect_ok(register_route(&routes, "/pool", None, kind_a, a, true));
@@ -460,7 +479,7 @@ mod route_registration {
     #[test]
     fn matching_shared_claims_accumulate_members() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
 
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
@@ -469,6 +488,11 @@ mod route_registration {
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
 
         assert_eq!(only_route(&routes), (vec![a, b], kind, true));
+
+        // A shared join is recorded in the reverse index: releasing every
+        // route `a` holds leaves `b` as the set's sole member.
+        unregister_routes_all(&routes, a);
+        assert_eq!(only_route(&routes), (vec![b], kind, true));
     }
 
     /// Tripwire: unregistration release + drop-when-empty — releasing one
@@ -478,7 +502,7 @@ mod route_registration {
     #[test]
     fn unregister_releases_members_and_drops_empty_routes() {
         let routes = fresh_routes();
-        let (a, b) = (MailboxId(1), MailboxId(2));
+        let (a, b) = holders();
         let kind = KindId(100);
         expect_ok(register_route(&routes, "/pool", None, kind, a, true));
         expect_ok(register_route(&routes, "/pool", None, kind, b, true));
@@ -489,13 +513,13 @@ mod route_registration {
 
         // The last member leaves; the route is dropped.
         expect_ok(unregister_route(&routes, "/pool", None, b));
-        assert!(routes.read().expect("route table lock").is_empty());
+        assert!(routes.read().expect("route table lock").routes.is_empty());
 
-        // unregister_routes_all clears every route the mailbox holds.
+        // unregister_routes_all clears every route the holder holds.
         expect_ok(register_route(&routes, "/x", None, kind, a, false));
         expect_ok(register_route(&routes, "/y", None, kind, a, false));
         unregister_routes_all(&routes, a);
-        assert!(routes.read().expect("route table lock").is_empty());
+        assert!(routes.read().expect("route table lock").routes.is_empty());
     }
 }
 

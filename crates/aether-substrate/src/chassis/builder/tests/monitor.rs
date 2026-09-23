@@ -22,16 +22,17 @@ use std::time::Instant;
 /// holds a `MonitorHandle` against Target (instanced) and counts
 /// the notices it receives; Target self-shuts on `Quit`. After
 /// the close fan-out we assert (1) the watcher saw the notice
-/// once with the right target id, (2) the target's slot is Dead +
+/// once, sent from the reference it monitored, (2) the target's slot is Dead +
 /// tombstoned, and (3) the registry's forward index drained.
 #[test]
 fn ctx_monitor_fires_notice_at_target_close() {
     use crate::actor::native::spawn::Subname;
     use crate::mail::registry::MailboxEntry;
+    use aether_actor::AnyActorRef;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::Mutex;
-    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering as AtomicOrdering};
 
     // Self-shutdown trigger for the target.
     pod_kind!(Quit { tag: u32 }, "test.monitor.quit", 0xC0DE_C0DE_4B4B_4B4B);
@@ -44,11 +45,12 @@ fn ctx_monitor_fires_notice_at_target_close() {
     unit_shutdown_actor!(Target, "test.monitor.target", Quit);
 
     // Watcher — handles WatchOrder by registering a monitor;
-    // handles MonitorNotice by recording the target id and
-    // bumping a counter.
+    // handles MonitorNotice by recording whether the notice's
+    // sender is the reference it monitored and bumping a counter.
     struct Watcher {
         notice_count: Arc<AtomicU32>,
-        last_target: Arc<AtomicU64>,
+        sender_matched: Arc<AtomicBool>,
+        monitored: Option<AnyActorRef>,
         handle: Mutex<Option<MonitorHandle>>,
     }
     impl Addressable for Watcher {
@@ -60,12 +62,12 @@ fn ctx_monitor_fires_notice_at_target_close() {
     impl HandlesKind<aether_kinds::MonitorNotice> for Watcher {}
     impl aether_actor::Lifecycle<Self> for Watcher {
         type Config = ();
-        type Params = (Arc<AtomicU32>, Arc<AtomicU64>);
+        type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
         type Ctx<'a> = NativeCtx<'a>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-            Ok(Self { notice_count: params.0, last_target: params.1, handle: Mutex::new(None) })
+            Ok(Self { notice_count: params.0, sender_matched: params.1, monitored: None, handle: Mutex::new(None) })
         }
     }
     impl NativeActor for Watcher {
@@ -84,12 +86,13 @@ fn ctx_monitor_fires_notice_at_target_close() {
                     panic!("target must be Live at order time");
                 };
                 let h = ctx.monitor(target).expect("target must be Live at order time");
+                state.monitored = Some(target);
                 *state.handle.lock().unwrap() = Some(h);
                 return Some(());
             }
             if kind.0 == <aether_kinds::MonitorNotice as Kind>::ID.0 {
-                let notice = <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
-                state.last_target.store(notice.target.0, AtomicOrdering::SeqCst);
+                <aether_kinds::MonitorNotice as Kind>::decode_from_bytes(payload)?;
+                state.sender_matched.store(ctx.sender() == state.monitored, AtomicOrdering::SeqCst);
                 state.notice_count.fetch_add(1, AtomicOrdering::SeqCst);
                 return Some(());
             }
@@ -107,9 +110,9 @@ fn ctx_monitor_fires_notice_at_target_close() {
     let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
 
     let notice_count = Arc::new(AtomicU32::new(0));
-    let last_target = Arc::new(AtomicU64::new(0));
+    let sender_matched = Arc::new(AtomicBool::new(false));
     let watcher_id = chassis
-        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&notice_count), Arc::clone(&last_target)))
+        .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&notice_count), Arc::clone(&sender_matched)))
         .finish()
         .expect("spawn watcher");
 
@@ -156,10 +159,9 @@ fn ctx_monitor_fires_notice_at_target_close() {
         thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(notice_count.load(AtomicOrdering::SeqCst), 1, "watcher should have received exactly one MonitorNotice");
-    assert_eq!(
-        last_target.load(AtomicOrdering::SeqCst),
-        target_id.0,
-        "MonitorNotice.target should match the closed actor's id",
+    assert!(
+        sender_matched.load(AtomicOrdering::SeqCst),
+        "the MonitorNotice's sender should be the reference the watcher monitored",
     );
 
     // Wait for target slot to flip Dead (the close path runs

@@ -4,7 +4,7 @@ mod instance;
 
 use std::collections::{BTreeMap, HashMap};
 
-use aether_actor::{ActorRef, Manual, runtime};
+use aether_actor::{ActorRef, AnyActorRef, Manual, runtime};
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
@@ -42,7 +42,9 @@ struct PendingWindowCreate {
 pub struct SyntheticWindowCapabilityState {
     windows: BTreeMap<WindowId, WindowInfo>,
     pending_creates: HashMap<WindowId, PendingWindowCreate>,
-    child_monitors: HashMap<WindowId, MonitorHandle>,
+    /// Each live child's window and monitor, keyed by the child's reference:
+    /// the `MonitorNotice` sender a departing child is found by (ADR-0230).
+    child_monitors: HashMap<AnyActorRef, (WindowId, MonitorHandle)>,
     subscribers: WindowSubscribers,
 }
 
@@ -103,7 +105,7 @@ impl SyntheticWindowCapabilityState {
             }
         };
         let id = window.id;
-        self.child_monitors.insert(id, monitor);
+        self.child_monitors.insert(child.erase(), (id, monitor));
         self.windows.insert(id, window.clone());
         self.publish(ctx, id, &WindowOpened { window: window.clone() });
         answer(&mut reply, &CreateWindowResult::Ok { window });
@@ -298,12 +300,16 @@ impl NativeActor for SyntheticWindowCapability {
     }
 
     #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        let id = WindowId(notice.target.0);
-        if state.child_monitors.remove(&id).is_some() && state.windows.remove(&id).is_some() {
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        if let Some((id, _monitor)) = state.child_monitors.remove(&departed)
+            && state.windows.remove(&id).is_some()
+        {
             state.publish(ctx, id, &WindowClosed { window: id });
         }
-        state.subscribers.purge_departed(notice);
+        state.subscribers.purge_departed(departed);
     }
 }
 

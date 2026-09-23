@@ -40,8 +40,9 @@ use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor,
 /// `aether.tcp` runtime state (issue 607 Phase 6a, ADR-0079). The singleton
 /// control-plane cap owns its listener fleet directly — it is the supervisor,
 /// not a thin shim over the chassis registry. Each `on_bind` registers a
-/// monitor on the new listener and pushes a [`ListenerEntry`] onto
-/// `listeners`; `on_monitor_notice` removes the entry on listener close.
+/// monitor on the new listener and inserts a [`ListenerEntry`] into
+/// `listeners` under the listener's reference; `on_monitor_notice` removes
+/// the entry on listener close.
 /// The addressing identity is the distinct ZST
 /// [`TcpCapability`]. Living in this private module keeps
 /// it `pub`-enough to satisfy the `NativeActor::State` interface without
@@ -54,9 +55,10 @@ pub struct TcpCapabilityState {
     /// Live listeners spawned by this cap. Each entry holds the proof the
     /// listener's spawn returned, the bind metadata surfaced via
     /// `ListListeners`, any parked unbind reply, and the monitor handle that
-    /// pins the cap's monitor on the listener until close. A close notice
-    /// finds its entry through `ActorRef::entomb`.
-    pub listeners: Vec<ListenerEntry>,
+    /// pins the cap's monitor on the listener until close. Keyed by the
+    /// listener's reference, which is the sender of its close notice, so
+    /// the notice finds its entry by keyed lookup (ADR-0230).
+    pub listeners: HashMap<AnyActorRef, ListenerEntry>,
     /// Monotonic id assigned to the next outbound connect attempt.
     pub next_connect_id: u64,
     /// Outstanding connect replies parked until the dial sidecar
@@ -80,7 +82,7 @@ pub struct ListenerEntry {
     pub port: u16,
     pub name: String,
     /// The reference the listener's spawn outcome proved; `on_unbind` mails
-    /// `Close` through it, and `on_monitor_notice` entombs it.
+    /// `Close` through it. Its erased form keys this entry in `listeners`.
     pub listener: ActorRef<TcpListenerActor>,
     /// The unbind reply parked until this listener's close notice arrives.
     /// One unbind at a time: a second request while this is `Some` is
@@ -144,7 +146,7 @@ impl NativeActor for TcpCapability {
     fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
         let (connect_tx, connect_rx) = mpsc::channel::<(u64, Result<TcpStream, String>)>();
         Ok(TcpCapabilityState {
-            listeners: Vec::new(),
+            listeners: HashMap::new(),
             next_connect_id: 0,
             pending_connects: HashMap::new(),
             connect_rx,
@@ -363,14 +365,17 @@ impl NativeActor for TcpCapability {
         };
 
         let listener_mailbox = done.output().mailbox_id;
-        state.listeners.push(ListenerEntry {
-            addr,
-            port: local_port,
-            name: listener_name.clone(),
-            listener,
-            pending_unbind: None,
-            _monitor_handle: monitor_handle,
-        });
+        state.listeners.insert(
+            listener.erase(),
+            ListenerEntry {
+                addr,
+                port: local_port,
+                name: listener_name.clone(),
+                listener,
+                pending_unbind: None,
+                _monitor_handle: monitor_handle,
+            },
+        );
         done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
             listener_name,
             listener_id: listener_mailbox,
@@ -391,7 +396,7 @@ impl NativeActor for TcpCapability {
         // Resolve listener_id from the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
-        let Some(entry) = state.listeners.iter_mut().find(|entry| entry.name == mail.listener_name) else {
+        let Some(entry) = state.listeners.values_mut().find(|entry| entry.name == mail.listener_name) else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
                 error: "no such listener (or already closed)".into(),
@@ -433,7 +438,7 @@ impl NativeActor for TcpCapability {
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListListeners) -> ListListenersResult {
         let listeners: Vec<ListenerInfo> = state
             .listeners
-            .iter()
+            .values()
             .map(|entry| ListenerInfo { name: entry.name.clone(), addr: entry.addr.clone(), port: entry.port })
             .collect();
         ListListenersResult { listeners }
@@ -442,20 +447,19 @@ impl NativeActor for TcpCapability {
     /// Listener tombstoned — remove from the supervisor map and
     /// fire the parked unbind reply if one is waiting.
     ///
-    /// The entry whose listener proof entombs against the notice is the
-    /// listener that closed. The cap's monitor on every spawned listener
-    /// (registered in `on_bind`) fires this notice; if the close came from
-    /// an unbind request, the entry's `pending_unbind` holds the originator
-    /// to reply to.
+    /// The host stamps the closed listener as the notice's sender, so its
+    /// entry is the one keyed by `ctx.sender()`. The cap's monitor on every
+    /// spawned listener (registered in `on_bind`) fires this notice; if the
+    /// close came from an unbind request, the entry's `pending_unbind` holds
+    /// the originator to reply to.
     #[handler::manual]
-    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, notice: MonitorNotice) {
-        let Some(index) = state.listeners.iter().position(|entry| entry.listener.entomb(&notice).is_ok()) else {
-            return;
-        };
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, _notice: MonitorNotice) {
         // Drop the supervisor entry. The held MonitorHandle drops
         // here; deregister is idempotent with the close path's
         // forward-index drain.
-        let entry = state.listeners.remove(index);
+        let Some(entry) = ctx.sender().and_then(|departed| state.listeners.remove(&departed)) else {
+            return;
+        };
         // Fire the parked unbind reply if one was waiting.
         if let Some(PendingUnbind { sender, hold, listener_name }) = entry.pending_unbind {
             let root = hold.as_ref().map_or(aether_data::MailId::NONE, SettlementHold::root);

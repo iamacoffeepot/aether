@@ -4,16 +4,34 @@
 #[allow(clippy::wildcard_imports)]
 use super::*;
 
-/// One registered route (ADR-0130 / ADR-0136): requests whose path
-/// matches `prefix` on a segment boundary (and whose method passes
-/// `method`) dispatch as kind `kind` to one of `members`. An exclusive
-/// registration is the one-member set; a shared set (ADR-0136) holds
-/// every instance that opted in, picked round-robin per request. The
-/// table keys targets by stable `MailboxId`, so a route survives
-/// `replace_component` and dispatch skips name resolution.
-pub struct Route {
+/// The route table (ADR-0130 / ADR-0136): the registered routes under
+/// their `(prefix, method)` key, plus the reverse index `held` naming
+/// every key each holder is a member of. A departing holder's routes are
+/// found through `held` alone, so a departure touches only its own routes
+/// and never scans the table (ADR-0230).
+#[derive(Default)]
+pub struct RouteTable {
+    pub routes: HashMap<RouteKey, Route>,
+    pub held: HashMap<AnyActorRef, HashSet<RouteKey>>,
+}
+
+/// A route's identity: a normalized path prefix and an optional method
+/// filter. At most one route stands under each key.
+#[derive(Clone, PartialEq, Eq, Hash)]
+pub struct RouteKey {
     pub prefix: String,
     pub method: Option<HttpMethod>,
+}
+
+/// One registered route (ADR-0130 / ADR-0136): requests whose path
+/// matches its key's `prefix` on a segment boundary (and whose method
+/// passes the key's `method`) dispatch as kind `kind` to one of
+/// `members`. An exclusive registration is the one-member set; a shared
+/// set (ADR-0136) holds every instance that opted in, picked round-robin
+/// per request. Members are proven references (ADR-0230) whose ids are
+/// stable, so a route survives `replace_component` and dispatch skips
+/// name resolution.
+pub struct Route {
     pub kind: KindId,
     /// Whether this key was registered `shared` (ADR-0136). An
     /// exclusive route never grows a second member; a shared route
@@ -21,7 +39,7 @@ pub struct Route {
     pub shared: bool,
     /// The target set, in registration order. Never empty — the last
     /// member's unregistration drops the whole route.
-    pub members: Vec<MailboxId>,
+    pub members: Vec<AnyActorRef>,
 }
 
 /// The winning route for `(path, method)` (ADR-0130): the longest
@@ -29,12 +47,16 @@ pub struct Route {
 /// method-specific route beating a method-agnostic one at equal
 /// prefix. Shared by the shard's streaming-path resolution and the
 /// reader's fast-path decision (ADR-0135 §2), so the two sides cannot
-/// drift.
-pub fn best_route<'a>(routes: &'a [Route], path: &str, method: HttpMethod) -> Option<&'a Route> {
-    routes
+/// drift. No two keys tie — two distinct equal-length prefixes cannot
+/// both match one path — so the map's iteration order never picks the
+/// winner.
+pub fn best_route<'a>(table: &'a RouteTable, path: &str, method: HttpMethod) -> Option<&'a Route> {
+    table
+        .routes
         .iter()
-        .filter(|r| r.method.is_none_or(|m| m == method) && route_matches(&r.prefix, path))
-        .max_by_key(|r| (r.prefix.len(), r.method.is_some()))
+        .filter(|(key, _)| key.method.is_none_or(|m| m == method) && route_matches(&key.prefix, path))
+        .max_by_key(|(key, _)| (key.prefix.len(), key.method.is_some()))
+        .map(|(_, route)| route)
 }
 
 /// Segment-boundary prefix match (ADR-0130): `/api` matches `/api` and
@@ -64,32 +86,17 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
     })
 }
 
-/// Route-member liveness for the shard reader's per-request pick
-/// (`reader.rs`), which walks a route's members from its round-robin
-/// cursor and hands the request to the first one still live. The
-/// registration forms no longer call it — `register_route` proves its
-/// mailbox at receipt through `ctx.resolve_live` — so this remains only
-/// because the route table holds positions rather than proven
-/// references; it goes when the table does.
-pub fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
-    match registry.entry(id) {
-        Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
-        Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
-        None => Err(format!("unknown mailbox id {id:?}")),
-    }
-}
-
-/// Claim `(prefix, method)` for `mailbox` in `routes`, dispatching as
+/// Claim `(prefix, method)` for `holder` in `routes`, dispatching as
 /// `kind` (ADR-0130), or join its shared member set (ADR-0136).
 /// Exclusive (`shared: false`): a key held by anyone else is answered
-/// `Err`; the same sole mailbox re-claiming its own key is an
-/// idempotent `Ok` that updates `kind` — so a component re-running
-/// `wire` after `replace_component` re-registers cleanly (its
-/// `MailboxId` is stable). Shared (`shared: true`): joins the key's
-/// member set when the set is shared and the `kind` matches;
-/// re-registering an existing membership is an idempotent `Ok`. Mixing
-/// exclusive and shared on one key, or joining with a different `kind`,
-/// is a conflict `Err` either way.
+/// `Err`; the same sole holder re-claiming its own key is an idempotent
+/// `Ok` that updates `kind` — so a component re-running `wire` after
+/// `replace_component` re-registers cleanly (its reference is stable).
+/// Shared (`shared: true`): joins the key's member set when the set is
+/// shared and the `kind` matches; re-registering an existing membership
+/// is an idempotent `Ok`. Mixing exclusive and shared on one key, or
+/// joining with a different `kind`, is a conflict `Err` either way.
+/// Every `Ok` records the key under `holder` in the reverse index.
 ///
 /// The winner of two conflicting claims is whichever reaches the table
 /// first; this is a pure function of the table's contents, so a caller
@@ -104,67 +111,21 @@ pub fn register_route(
     prefix: &str,
     method: Option<HttpMethod>,
     kind: KindId,
-    mailbox: MailboxId,
+    holder: AnyActorRef,
     shared: bool,
 ) -> RegisterRouteResult {
-    let prefix = match normalize_prefix(prefix) {
-        Ok(prefix) => prefix,
-        Err(error) => return RegisterRouteResult::Err { error },
-    };
-    let mut routes = routes.write().expect("route table lock poisoned");
-    if let Some(existing) = routes.iter_mut().find(|r| r.prefix == prefix && r.method == method) {
-        // Exclusive re-claim by the sole holder stays the idempotent
-        // kind-updating Ok it always was.
-        if !shared && !existing.shared && existing.members == [mailbox] {
-            existing.kind = kind;
-            return RegisterRouteResult::Ok;
+    match normalize_prefix(prefix) {
+        Ok(prefix) => {
+            routes.write().expect("route table lock poisoned").claim(RouteKey { prefix, method }, kind, holder, shared)
         }
-        if shared != existing.shared {
-            return RegisterRouteResult::Err {
-                error: format!(
-                    "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
-                     join it (ADR-0136: spreading is a joint opt-in)",
-                    if existing.shared {
-                        "a shared member set"
-                    } else {
-                        "exclusively claimed"
-                    },
-                    if shared {
-                        "shared"
-                    } else {
-                        "exclusive"
-                    },
-                ),
-            };
-        }
-        if !shared {
-            return RegisterRouteResult::Err {
-                error: format!("route ({prefix:?}, {method:?}) already claimed by mailbox {:?}", existing.members[0]),
-            };
-        }
-        if existing.kind != kind {
-            return RegisterRouteResult::Err {
-                error: format!(
-                    "route ({prefix:?}, {method:?}) member set dispatches kind {:?}; a \
-                     member registering kind {kind:?} cannot join (ADR-0136)",
-                    existing.kind,
-                ),
-            };
-        }
-        if !existing.members.contains(&mailbox) {
-            existing.members.push(mailbox);
-        }
-        return RegisterRouteResult::Ok;
+        Err(error) => RegisterRouteResult::Err { error },
     }
-    routes.push(Route { prefix, method, kind, shared, members: vec![mailbox] });
-    RegisterRouteResult::Ok
 }
 
-/// Release `mailbox`'s membership in the `(prefix, method)` route
+/// Release `holder`'s membership in the `(prefix, method)` route
 /// (ADR-0136); the last member's release drops the route. Idempotent —
-/// releasing a route that isn't held (or a set the mailbox never
-/// joined) is still `Ok`, mirroring the window cap's unsubscribe
-/// semantics.
+/// releasing a route that isn't held (or a set the holder never joined)
+/// is still `Ok`, mirroring the window cap's unsubscribe semantics.
 ///
 /// # Panics
 /// Panics if the route-table `RwLock` is poisoned — fail-fast per
@@ -173,33 +134,109 @@ pub fn unregister_route(
     routes: &SharedRoutes,
     prefix: &str,
     method: Option<HttpMethod>,
-    mailbox: MailboxId,
+    holder: AnyActorRef,
 ) -> RegisterRouteResult {
-    let prefix = match normalize_prefix(prefix) {
-        Ok(prefix) => prefix,
-        Err(error) => return RegisterRouteResult::Err { error },
-    };
-    let mut routes = routes.write().expect("route table lock poisoned");
-    for route in routes.iter_mut() {
-        if route.prefix == prefix && route.method == method {
-            route.members.retain(|m| *m != mailbox);
+    match normalize_prefix(prefix) {
+        Ok(prefix) => {
+            routes.write().expect("route table lock poisoned").release(&RouteKey { prefix, method }, holder);
+            RegisterRouteResult::Ok
         }
+        Err(error) => RegisterRouteResult::Err { error },
     }
-    routes.retain(|r| !r.members.is_empty());
-    RegisterRouteResult::Ok
 }
 
-/// Release every route membership held by `mailbox` (ADR-0130's
+/// Release every route membership held by `holder` (ADR-0130's
 /// `UnregisterRoutesAll`, ADR-0136 set semantics); sets it empties drop
-/// entirely.
+/// entirely. The reverse index names exactly the routes `holder` is in,
+/// so no other route is visited.
 ///
 /// # Panics
 /// Panics if the route-table `RwLock` is poisoned — fail-fast per
 /// ADR-0063.
-pub fn unregister_routes_all(routes: &SharedRoutes, mailbox: MailboxId) {
-    let mut routes = routes.write().expect("route table lock poisoned");
-    for route in routes.iter_mut() {
-        route.members.retain(|m| *m != mailbox);
+pub fn unregister_routes_all(routes: &SharedRoutes, holder: AnyActorRef) {
+    routes.write().expect("route table lock poisoned").release_all(holder);
+}
+
+impl RouteTable {
+    /// [`register_route`]'s body over the locked table.
+    fn claim(&mut self, key: RouteKey, kind: KindId, holder: AnyActorRef, shared: bool) -> RegisterRouteResult {
+        if let Some(existing) = self.routes.get_mut(&key) {
+            let RouteKey { prefix, method } = &key;
+            // Exclusive re-claim by the sole holder stays the idempotent
+            // kind-updating Ok it always was.
+            if !shared && !existing.shared && existing.members == [holder] {
+                existing.kind = kind;
+                return RegisterRouteResult::Ok;
+            }
+            if shared != existing.shared {
+                return RegisterRouteResult::Err {
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) is {}; a {} registration cannot \
+                         join it (ADR-0136: spreading is a joint opt-in)",
+                        if existing.shared {
+                            "a shared member set"
+                        } else {
+                            "exclusively claimed"
+                        },
+                        if shared {
+                            "shared"
+                        } else {
+                            "exclusive"
+                        },
+                    ),
+                };
+            }
+            if !shared {
+                return RegisterRouteResult::Err {
+                    error: format!("route ({prefix:?}, {method:?}) already claimed by {:?}", existing.members[0]),
+                };
+            }
+            if existing.kind != kind {
+                return RegisterRouteResult::Err {
+                    error: format!(
+                        "route ({prefix:?}, {method:?}) member set dispatches kind {:?}; a \
+                         member registering kind {kind:?} cannot join (ADR-0136)",
+                        existing.kind,
+                    ),
+                };
+            }
+            if !existing.members.contains(&holder) {
+                existing.members.push(holder);
+            }
+        } else {
+            self.routes.insert(key.clone(), Route { kind, shared, members: vec![holder] });
+        }
+        self.held.entry(holder).or_default().insert(key);
+        RegisterRouteResult::Ok
     }
-    routes.retain(|r| !r.members.is_empty());
+
+    /// [`unregister_route`]'s body over the locked table.
+    fn release(&mut self, key: &RouteKey, holder: AnyActorRef) {
+        if let Some(keys) = self.held.get_mut(&holder) {
+            keys.remove(key);
+            if keys.is_empty() {
+                self.held.remove(&holder);
+            }
+        }
+        self.release_member(key, holder);
+    }
+
+    /// [`unregister_routes_all`]'s body over the locked table.
+    fn release_all(&mut self, holder: AnyActorRef) {
+        for key in self.held.remove(&holder).unwrap_or_default() {
+            self.release_member(&key, holder);
+        }
+    }
+
+    /// Remove `holder` from the route under `key`, dropping the route once
+    /// its member set is empty. Linear only in that route's members, which
+    /// its replica count bounds.
+    fn release_member(&mut self, key: &RouteKey, holder: AnyActorRef) {
+        if let Some(route) = self.routes.get_mut(key) {
+            route.members.retain(|member| *member != holder);
+            if route.members.is_empty() {
+                self.routes.remove(key);
+            }
+        }
+    }
 }

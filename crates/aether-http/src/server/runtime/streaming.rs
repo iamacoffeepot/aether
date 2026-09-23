@@ -13,7 +13,7 @@ impl HttpShardState {
         &mut self,
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
-        handler: MailboxId,
+        handler: AnyActorRef,
         method: HttpMethod,
         head: ParsedHead,
     ) {
@@ -27,7 +27,7 @@ impl HttpShardState {
         let payload =
             HttpRequestStreamOpen { stream_id, method, path: head.path, query: head.query, headers: head.headers }
                 .encode_into_bytes();
-        let _ = ctx.send_envelope_detached(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached_to(handler, <HttpRequestStreamOpen as Kind>::ID, &payload);
         self.signal_reader(conn_id, ReaderControl::Stream { credit: window });
         tracing::debug!(
             target: "aether_http::server",
@@ -49,7 +49,7 @@ impl HttpShardState {
             return;
         };
         let payload = HttpRequestChunk { stream_id, body }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached(handler, <HttpRequestChunk as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached_to(handler, <HttpRequestChunk as Kind>::ID, &payload);
     }
 
     /// Finish an inbound request stream (ADR-0128): send the handler an
@@ -66,7 +66,7 @@ impl HttpShardState {
             return;
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
-        let mail_id = ctx.send_envelope_detached(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
+        let mail_id = ctx.send_envelope_detached_to(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
         self.subscribe_settlement(mail_id);
         self.in_flight.insert(
             mail_id.correlation_id,
@@ -108,12 +108,11 @@ impl HttpShardState {
         // replied, be it the registrant of the matched `/` catch-all route or a
         // more specific registered route (ADR-0131) — so credit grants reach the
         // real replier regardless of dispatch path. A missing in-flight entry
-        // leaves the sentinel and credit sends drop harmlessly, the pre-store
-        // no-op behavior.
+        // leaves no handler, and the stream grants no credit.
         let (keep_alive, handler) = self
             .in_flight
             .remove(&correlation)
-            .map_or((false, MailboxId(0)), |pending| (pending.keep_alive, pending.handler));
+            .map_or((false, None), |pending| (pending.keep_alive, Some(pending.handler)));
         let stream_id = self.next_stream_id.fetch_add(1, Ordering::Relaxed);
         let head = render_stream_head(open, keep_alive);
         self.write_raw_to(conn_id, &head);
@@ -286,13 +285,14 @@ impl HttpShardState {
     /// root per grant keeps credit mails settling per-chunk, never holding one
     /// chain open across the stream (ADR-0128 §4). The handler is the one
     /// resolved and stored at stream open (a response stream's matched route
-    /// registrant, or a websocket's handshake handler, ADR-0129).
+    /// registrant, or a websocket's handshake handler, ADR-0129); a stream
+    /// opened with no handler grants nothing.
     pub fn send_stream_credit(&self, ctx: &mut NativeCtx<'_>, stream_id: u64, credit: u32) {
-        let Some(handler) = self.streams.get(&stream_id).map(|stream| stream.handler) else {
+        let Some(handler) = self.streams.get(&stream_id).and_then(|stream| stream.handler) else {
             return;
         };
         let payload = HttpStreamCredit { stream_id, credit }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached(handler, <HttpStreamCredit as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached_to(handler, <HttpStreamCredit as Kind>::ID, &payload);
     }
 
     /// Remove a stream and detach its writer thread without joining inline —
