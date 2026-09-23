@@ -7,13 +7,13 @@
 //! listener, hub-side sessions, `ProcessCapability`, loopback drainers,
 //! and embedded MCP server all retired with P5e/P5f.
 //!
-//! Signal handling is sync: there is no async runtime to host. On Unix
-//! `signal-hook`'s iterator API blocks the driver thread until SIGINT
-//! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
+//! The blocking driver is the shared
+//! `aether_chassis::signal_driver::SignalDriverCapability`, which the
+//! Bloomery chassis composes too.
 
 use aether_fleet::FleetServer;
 use aether_rpc::{PeerKind, RpcBind, RpcServerCapability, RpcServerConfig, RpcServerParams};
-use aether_substrate::chassis::builder::{Builder, BuiltChassis, DriverCapability, DriverCtx, DriverRunning, RunError};
+use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::chassis::{BootableChassis, ComposeBase, composed};
 use aether_substrate::config::{ConfigError, ConfigSources, KnobRecord, validate_env};
@@ -26,7 +26,7 @@ use aether_chassis::boot::{
     hub_residual_knobs, install_frame_size,
 };
 use aether_chassis::cli::ChassisCli;
-use std::thread;
+use aether_chassis::signal_driver::SignalDriverCapability;
 
 use crate::cli::HubCli;
 
@@ -37,7 +37,7 @@ pub struct HubChassis;
 
 impl Chassis for HubChassis {
     const PROFILE: &'static str = "hub";
-    type Driver = HubServerDriverCapability;
+    type Driver = SignalDriverCapability<Self>;
     type Env = ConfigSources;
 
     fn build(mut sources: Self::Env) -> Result<BuiltChassis<Self>, BootError> {
@@ -64,8 +64,7 @@ impl Chassis for HubChassis {
         // scrubs `AETHER_*` and injects addressed config via argv), so the
         // known-key set is purely composition-derived like every other chassis.
         validate_env(&builder.config_manifest().known_keys(&Self::residual_knobs()))?;
-        let driver = HubServerDriverCapability { boot };
-        builder.driver(driver).build()
+        builder.driver(SignalDriverCapability::new(boot)).build()
     }
 }
 
@@ -141,95 +140,6 @@ impl BootableChassis for HubChassis {
             RpcServerConfig { port: Some(rpc_port) },
         ))
     }
-}
-
-/// ADR-0071 driver capability for the hub chassis. Owns the
-/// `SubstrateBoot` whose registry hosts the chassis actors. `run`
-/// blocks the calling thread on a SIGINT/SIGTERM signal, then drops
-/// the boot so the actor registry tears down.
-pub struct HubServerDriverCapability {
-    boot: SubstrateBoot,
-}
-
-/// Post-boot handle for [`HubServerDriverCapability`].
-pub struct HubServerDriverRunning {
-    boot: SubstrateBoot,
-}
-
-impl DriverCapability for HubServerDriverCapability {
-    type Running = HubServerDriverRunning;
-
-    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { boot } = self;
-        Ok(HubServerDriverRunning { boot })
-    }
-}
-
-impl DriverRunning for HubServerDriverRunning {
-    fn run(self: Box<Self>) -> Result<(), RunError> {
-        let Self { boot } = *self;
-        let sig = shutdown_signal();
-        tracing::info!("aether-hub: {sig} received, shutting down");
-        // `boot` drops here — actor registries shut down, dispatcher
-        // threads see their inbox senders drop and exit.
-        drop(boot);
-        Ok(())
-    }
-}
-
-/// Blocks the calling thread until SIGINT or SIGTERM arrives on Unix;
-/// on Windows falls back to Ctrl-C only via `ctrlc`. Returns a short
-/// label for the log line.
-///
-/// Why both signals on Unix: interactive shells deliver SIGINT, but
-/// process supervisors (systemd, supervisord), shell utilities
-/// (`pkill`, `kill` without `-9`), and CI cancellation all send
-/// SIGTERM. Ignoring SIGTERM means `pkill -f aether-hub`
-/// kills the hub without running drops.
-#[cfg(unix)]
-fn shutdown_signal() -> &'static str {
-    use signal_hook::consts::{SIGINT, SIGTERM};
-    use signal_hook::iterator::Signals;
-
-    let mut signals = match Signals::new([SIGINT, SIGTERM]) {
-        Ok(s) => s,
-        Err(e) => {
-            tracing::error!(
-                "aether-hub: signal handler install failed: {e}; \
-                 parking thread — SIGKILL is the only exit"
-            );
-            thread::park();
-            return "park";
-        }
-    };
-    // The iterator only returns `None` if the underlying file
-    // descriptor closes — can't happen for the lifetime of `signals`,
-    // but the explicit branch keeps coverage total.
-    match signals.forever().next() {
-        Some(SIGINT) => "SIGINT",
-        Some(SIGTERM) => "SIGTERM",
-        Some(_) => "unknown signal",
-        None => "signal stream ended",
-    }
-}
-
-#[cfg(not(unix))]
-fn shutdown_signal() -> &'static str {
-    use std::sync::mpsc;
-
-    let (tx, rx) = mpsc::channel::<()>();
-    if let Err(e) = ctrlc::set_handler(move || {
-        let _ = tx.send(());
-    }) {
-        tracing::error!(
-            "aether-hub: ctrl-c handler install failed: {e}; \
-             parking thread — SIGKILL is the only exit"
-        );
-        std::thread::park();
-        return "park";
-    }
-    let _ = rx.recv();
-    "Ctrl-C"
 }
 
 #[cfg(test)]
