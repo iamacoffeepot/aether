@@ -16,7 +16,7 @@
 //! this seam is unrepresentable in consumer code rather than detected
 //! after the fact (the recurring #846 / #1325 / #1704 class).
 //!
-//! The **dispatcher face** (`recv_blocking` / `try_recv`) yields the raw
+//! The **dispatcher face** (`try_recv`) yields the raw
 //! [`Envelope`] so the native actor dispatcher
 //! ([`NativeBinding`](crate::actor::native::NativeBinding)) keeps its
 //! existing explicit `record_finished` + `discharge` tail unchanged.
@@ -92,8 +92,8 @@ impl ReplyLineage {
 ///
 /// **Dispatcher face** (`pub(crate)`) — for the native actor dispatcher
 /// ([`NativeBinding`](crate::actor::native::NativeBinding)):
-/// `recv_blocking` / `try_recv`. Each yields a raw [`Envelope`] so the
-/// dispatcher keeps its explicit `record_finished` + `discharge` tail.
+/// `try_recv`, which yields a raw [`Envelope`] so the dispatcher keeps
+/// its explicit `record_finished` + `discharge` tail.
 ///
 /// Dropping a `SettlingInbox` drains whatever is still queued and lets
 /// each guard settle, so a teardown that abandons mail (the #1704 shape:
@@ -201,14 +201,6 @@ impl SettlingInbox {
         while let Ok(env) = self.receiver.try_recv() {
             on_mail(self.wrap(env));
         }
-    }
-
-    /// Dispatcher face: block until the next envelope arrives, yielding
-    /// the raw [`Envelope`]. Returns `None` on channel disconnect. The
-    /// native actor dispatcher uses this to keep its explicit
-    /// `record_finished` + `discharge` tail unchanged.
-    pub(crate) fn recv_blocking(&self) -> Option<Envelope> {
-        self.receiver.recv().ok()
     }
 
     /// Dispatcher face: take the next queued envelope without blocking,

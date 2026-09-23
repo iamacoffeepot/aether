@@ -250,6 +250,10 @@ impl WasmTrampolineState {
                 return ReplaceResult::Err { error: err };
             }
             let saved = old.take_saved_state();
+            // #6400: record the leaving guest's cursor after `unwire` and
+            // `on_dehydrate`, which may still send, so the replacement —
+            // or a later refill, if its instantiate fails — resumes past it.
+            self.retired_correlations = Some(old.correlation_cursor());
             // Old component drops at end of scope — the `Component`'s
             // own `Drop` releases the wasm store.
             drop(old);
@@ -259,15 +263,19 @@ impl WasmTrampolineState {
         };
 
         // Build a fresh `ComponentCtx` for the new instance — same
-        // mailer + registry/outbound/input references, new
-        // ReplyTable since wasm-side state resets. Mailbox id is
-        // preserved across replace per ADR-0022 §4.
+        // mailer + registry/outbound/input references and a fresh
+        // reply-handle table. Mailbox id is preserved across replace per
+        // ADR-0022 §4, and so is its correlation sequence (ADR-0139 §3):
+        // the new instance resumes from the guest that last left the slot.
         let mut substrate_ctx = ComponentCtx::new(
             self.mailbox,
             Arc::clone(&self.registry),
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
         );
+        if let Some(cursor) = self.retired_correlations {
+            substrate_ctx.resume_correlations(cursor);
+        }
         substrate_ctx.install_binding(ctx.transport_arc());
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate

@@ -19,7 +19,7 @@ mod lifecycle;
 mod sections;
 mod state;
 
-pub use ctx::{ComponentCtx, PendingSpawn, TRAMPOLINE_NAMESPACE};
+pub use ctx::{ComponentCtx, CorrelationCursor, PendingSpawn, TRAMPOLINE_NAMESPACE};
 pub use dispatch::{DISPATCH_DROPPED_OVERSIZE, DISPATCH_UNKNOWN_KIND};
 pub use instantiate::Component;
 pub use state::StateBundle;

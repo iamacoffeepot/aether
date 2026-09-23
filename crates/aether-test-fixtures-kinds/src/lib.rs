@@ -530,3 +530,35 @@ pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
 pub const MIXED_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.mixed.bundle");
 
 const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));
+
+/// Issue 6400: trigger that makes the correlation-carry requester send one
+/// [`CarriedRequest`] carrying `tag`, with the same `tag` bound as the
+/// request's context.
+#[aether_data::kind(name = "aether.test_fixtures.run_carried_request", copy, default)]
+pub struct RunCarriedRequest {
+    pub tag: u32,
+}
+
+/// Issue 6400: request the correlation-carry requester sends to the reply
+/// holder, which parks its reply handle until [`ReleaseCarried`].
+#[aether_data::kind(name = "aether.test_fixtures.carried_request", copy)]
+pub struct CarriedRequest {
+    pub tag: u32,
+}
+
+/// Issue 6400: tells the reply holder to answer every parked request, in
+/// arrival order.
+#[aether_data::kind(name = "aether.test_fixtures.release_carried", default)]
+pub struct ReleaseCarried;
+
+/// Issue 6400: the reply holder's answer to a [`CarriedRequest`], echoing its
+/// `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.carried_reply", copy)]
+pub struct CarriedReply {
+    pub tag: u32,
+}
+
+/// Issue 6400: report the requester emits when a [`CarriedReply`] recovered
+/// the context of the request it answers.
+#[aether_data::kind(name = "aether.test_fixtures.carried_reply_matched", default)]
+pub struct CarriedReplyMatched;

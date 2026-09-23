@@ -5,6 +5,7 @@
 - **Amended:** 2026-09-19 — decision 9's reactor restart point is the higher of the reaction and activation watermarks; decision 11's `Processed` also waits for requests at or below `through` (issue #6208).
 - **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
 - **Amended:** 2026-09-21 — chassis mounting lands in `aether-chassis-bloomery`: base stratum + component host + RPC server, with the journal owner and the driver spawned post-build as `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`, which widens the unauthenticated-writes consequence to any local process reaching a bound RPC port (issue #6244).
+- **Amended:** 2026-09-23 — decision 10: the driver sends `WatchHead` on a fresh chain (issue #6401).
 
 ## Context
 
@@ -238,7 +239,9 @@ Nothing on main can carry any of this yet:
       plus staged artifacts, fenced on `expected_seq`. Each cause must be
       within `1..=expected_seq`. It is all-or-nothing, like every append.
     - `WatchHead { after }`, answered by `HeadAdvanced { head }` once the
-      head passes `after`. This is a long poll.
+      head passes `after`. This is a long poll. The driver sends the watch
+      on a fresh chain (`send_detached_with_context`, ADR-0080 §7), because a parked watch holds its chain open and the
+      chain that re-arms it did not cause it.
     - `ReadClosure { root, limit_bytes }`. It walks a stored table of
       citation edges and answers with the artifacts, a missing digest, or
       "too large". The walk never truncates. The table is created if it

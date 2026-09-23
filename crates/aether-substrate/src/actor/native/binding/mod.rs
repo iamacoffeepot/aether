@@ -85,8 +85,8 @@ pub struct NativeBinding {
     /// ADR-0165: exactly one typed production identity or one explicitly
     /// untyped test identity.
     identity: BindingIdentity,
-    /// The actor's inbox, drained by the dispatcher via
-    /// [`Self::recv_blocking`] / [`Self::try_recv`]. [`SettlingInbox`]'s
+    /// The actor's inbox, drained by the scheduler slots via
+    /// [`Self::try_recv`]. [`SettlingInbox`]'s
     /// drop settles any residue queued at teardown, closing the #1716
     /// leak. Held in a `Mutex` so the `&self` dispatcher can take
     /// exclusive access. Wrapped in `OnceLock` so the inbox can be

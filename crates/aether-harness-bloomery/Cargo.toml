@@ -22,8 +22,9 @@ aether-bloomery-view = { path = "../aether-bloomery-view" }
 aether-chassis = { path = "../aether-chassis" }
 aether-chassis-bloomery = { path = "../aether-chassis-bloomery" }
 aether-data = { path = "../aether-data" }
-# `test-support` for `BuiltChassis::send_for_reply`, the test-scoped push the
-# harness drives the built-but-never-run chassis through.
+# `test-support` for `BuiltChassis::send_for_reply` and
+# `BuiltChassis::send_tracked`, the test-scoped pushes the harness drives the
+# built-but-never-run chassis through.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 tempfile = "3"
 
