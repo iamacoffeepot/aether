@@ -82,9 +82,11 @@ fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
     assert_eq!(through_view, through_ctx, "the view resolves the parent-scoped peer the ctx resolves");
 }
 
-/// `to` on the ctx and on its `sends()` view both send through a
+/// `to` and `send_to` on the ctx and on its `sends()` view all send through a
 /// proven reference — each routes to the reference's id stamped with the
-/// sending actor's own id. The two `u64` arguments of
+/// sending actor's own id. The `send_to` legs go through the `Target` impls
+/// for `ActorRef<R>` and for a borrow of one, so an impl that forwarded the
+/// wrong proof misses the target here. The two `u64` arguments of
 /// `WasmActorMailbox::new` are the recipient and the sender in that order,
 /// so a transposition routes to the sender's own id (no dispatch here) and
 /// stamps the target as the source; either half fails this test. Synthetic
@@ -112,5 +114,16 @@ fn to_sends_through_a_proven_reference_on_ctx_and_view() {
     ctx.sends().to(&reference).send(&());
     drain_to_members(&registry, "the view to send");
     assert_eq!(probe.dispatches.get(), 2, "the view's to send reaches the same id");
+    assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
+
+    ctx.send_to(reference, &());
+    drain_to_members(&registry, "the ctx send_to through a typed reference");
+    assert_eq!(probe.dispatches.get(), 3, "the ctx's send_to through the reference reaches its id");
+    assert_eq!(probe.source.get(), Some(root), "and stamps the sending actor as the source");
+
+    let borrowed = &reference;
+    ctx.sends().send_to(borrowed, &());
+    drain_to_members(&registry, "the view send_to through a borrowed reference");
+    assert_eq!(probe.dispatches.get(), 4, "the view's send_to through the reference reaches the same id");
     assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
 }

@@ -18,7 +18,7 @@
 
 use aether_actor::{
     Addressable, CallerAddressable, CallerScoped, ErasedActorRef, HandlesKind, MailSender, Manual, OutboundReply,
-    ReplyMode, Singleton,
+    ReplyMode, Singleton, Target,
 };
 use aether_data::{Kind, KindId, MailId, RequestId};
 
@@ -130,33 +130,53 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
     }
 
-    /// Send `payload` to the actor `target` proves and store `context` under
-    /// the minted correlation, for the reply handler to take back with
-    /// [`Self::take_context`](super::NativeCtx::take_context).
+    /// Send `payload` through the held reference `target`, inheriting this
+    /// handler's causal chain (ADR-0080 §7, ADR-0232 §1).
     ///
-    /// The erased form of `ctx.to(&actor_ref).with_context(&context).send(&payload)`:
-    /// it inherits this handler's causal chain the same way and returns the
-    /// minted [`MailId`]. No `HandlesKind` bound checks `payload` against the
-    /// target, which ADR-0230 §2 allows for an erased reference — the caller
-    /// holds a proof of a live actor whose type it cannot name.
+    /// An [`ActorRef<R>`](aether_actor::ActorRef) target is kind-checked, so
+    /// the send compiles only when `R` handles `K`. An [`ErasedActorRef`] is
+    /// not, which ADR-0230 §2 allows for a proof whose actor type the caller
+    /// cannot name.
     ///
-    /// Its consumers are the bloomery driver's four bundle-root sends
-    /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the root it kept
-    /// from its load reply's stamped sender) and the chassis-bloomery boot
-    /// probe's `AwaitProcessed`.
-    #[must_use]
-    pub fn send_with_context<K: Kind, C: Kind>(&self, target: &ErasedActorRef, payload: &K, context: &C) -> MailId {
-        self.push_with_context(*target, payload, context, self.outbound_parent(), self.outbound_root())
+    /// Its consumer is the fleet server's `TerminateEngine` forward to the
+    /// proxy its spawn proved.
+    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
+        let _ = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
     }
 
-    /// Send `payload` to the actor `target` proves on a fresh causal chain
-    /// and store `context` under the minted correlation, for the reply
+    /// Send `payload` through the held reference `target` and store `context`
+    /// under the minted correlation, for the reply handler to take back with
+    /// [`Self::take_context`](super::NativeCtx::take_context).
+    ///
+    /// It inherits this handler's causal chain as [`Self::send_to`] does and
+    /// returns the minted [`MailId`]. The target is kind-checked the same way:
+    /// an [`ActorRef<R>`](aether_actor::ActorRef) only for the kinds `R`
+    /// handles, an [`ErasedActorRef`] unchecked.
+    ///
+    /// Its consumers are the bloomery driver's journal reads and appends,
+    /// through its typed journal reference, and its four bundle-root sends
+    /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the erased root it
+    /// kept from its load reply's stamped sender).
+    #[must_use]
+    pub fn send_to_with_context<K: Kind, C: Kind>(
+        &mut self,
+        target: impl Target<K>,
+        payload: &K,
+        context: &C,
+    ) -> MailId {
+        let mail_id = self.push_to(target.erased(), payload, self.outbound_parent(), self.outbound_root());
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
+    }
+
+    /// Send `payload` through the held reference `target` on a fresh causal
+    /// chain and store `context` under the minted correlation, for the reply
     /// handler to take back with
     /// [`Self::take_context`](super::NativeCtx::take_context). The returned
     /// [`MailId`] is the root of the new chain.
     ///
-    /// The detached sibling of [`Self::send_with_context`], for a request the
-    /// running chain did not cause and whose recipient may park the reply
+    /// The detached sibling of [`Self::send_to_with_context`], for a request
+    /// the running chain did not cause and whose recipient may park the reply
     /// (ADR-0080 §7): inheriting would hold the running chain open for as
     /// long as the recipient waits. The reply roots in the recipient's tree
     /// and still correlates home through the stored context.
@@ -164,31 +184,28 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Its consumer is the bloomery driver's `WatchHead`, the long poll the
     /// journal owner parks until the head moves.
     #[must_use]
-    pub fn send_detached_with_context<K: Kind, C: Kind>(
-        &self,
-        target: &ErasedActorRef,
+    pub fn send_detached_to_with_context<K: Kind, C: Kind>(
+        &mut self,
+        target: impl Target<K>,
         payload: &K,
         context: &C,
     ) -> MailId {
-        self.push_with_context(*target, payload, context, None, None)
+        let mail_id = self.push_to(target.erased(), payload, None, None);
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
     }
 
-    /// The push behind [`Self::send_with_context`] and
-    /// [`Self::send_detached_with_context`]: encode `payload`, push it to
-    /// `target` under the `(parent, root)` lineage, and store `context` under
-    /// the minted correlation.
-    fn push_with_context<K: Kind, C: Kind>(
+    /// The push behind the `send_to` family: encode `payload` and push it to
+    /// `target` under the `(parent, root)` lineage, returning the minted
+    /// [`MailId`].
+    fn push_to<K: Kind>(
         &self,
         target: ErasedActorRef,
         payload: &K,
-        context: &C,
         parent: Option<MailId>,
         root: Option<MailId>,
     ) -> MailId {
-        let mail_id =
-            self.binding.push_envelope_buffered(target.id().0, K::ID.0, &payload.encode_into_bytes(), 1, parent, root);
-        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
-        mail_id
+        self.binding.push_envelope_buffered(target.id().0, K::ID.0, &payload.encode_into_bytes(), 1, parent, root)
     }
 
     /// Push `payload` to `target` on behalf of an owed reply: the mail's

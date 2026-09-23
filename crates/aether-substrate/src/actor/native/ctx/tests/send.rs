@@ -1,18 +1,19 @@
-//! What leaves a ctx and under whose chain: a handle send inherits the
-//! handler's causal chain while a detached one mints a fresh root, and every
-//! reply entry point accepts a `Pod`-without-`Serialize` cast kind (ADR-0100).
+//! What leaves a ctx and under whose chain: a handle or `send_to` send
+//! inherits the handler's causal chain while a detached one mints a fresh
+//! root, and every reply entry point accepts a `Pod`-without-`Serialize` cast
+//! kind (ADR-0100).
 
 use std::sync::Arc;
 
 use aether_actor::{Manual, OutboundReply, Single};
-use aether_data::{MailId, MailboxId};
+use aether_data::{MailId, MailboxId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{DeferredReply, Erased, NativeCtx, TaskDone};
 use crate::mail::{Source, SourceAddr};
 
-use super::support::{CastOnly, StubActor};
+use super::support::{CastOnly, NativeRequestContext, StubActor};
 
 /// ADR-0080 §7 (issue 1802): a handler's send through a proven reference
 /// (`ctx.to(&reference).send()`) lands at the reference's id and inherits
@@ -70,6 +71,81 @@ fn handle_send_inherits_chain_detached_mints_fresh() {
     let detached = rx.try_recv().expect("detached send routed at flush");
     assert!(detached.parent_mail.is_none(), "detached send carries no parent edge");
     assert_eq!(detached.root, detached.mail_id, "detached send is its own root");
+}
+
+/// ADR-0232 §1: the flat `send_to` family sends through a held reference.
+/// `send_to` and `send_to_with_context` land at the reference's id under the
+/// in-flight root with the handled mail as parent, while
+/// `send_detached_to_with_context` roots its own chain. Both context variants
+/// store the context under the correlation of the mail they routed, which is
+/// how the bloomery driver's replies find their way back to the continuation
+/// that sent them. The legs cover all three `Target` impls: a typed reference
+/// by value, a borrow of one, and an erased proof.
+#[test]
+fn send_to_family_inherits_or_detaches_and_stores_context() {
+    use crate::mail::registry::{OwnedDispatch, Registry};
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        "test.send_to_family.sink",
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // Terminal test sink (ADR-0094): discharge before observing.
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+    let reference = Registry::declared_dependency::<StubActor>(recipient);
+
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF03)));
+    let in_flight_root = MailId::new(MailboxId(0xC1), 8);
+    let in_flight_mail = MailId::new(MailboxId(0x9A), 43);
+    let source = Source::with_correlation(SourceAddr::None, 0);
+
+    {
+        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        ctx.send_to(reference, &CastOnly { code: 1 });
+    }
+    let sent = rx.try_recv().expect("send_to routed at flush");
+    assert_eq!(sent.recipient, recipient, "send_to addresses the reference's id");
+    assert_eq!(sent.root, in_flight_root, "send_to inherits the caller's root");
+    assert_eq!(sent.parent_mail, Some(in_flight_mail), "send_to's parent is the in-flight mail");
+
+    let inherited_context = NativeRequestContext { value: 21 };
+    let inherited_id = {
+        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let borrowed = &reference;
+        ctx.send_to_with_context(borrowed, &CastOnly { code: 2 }, &inherited_context)
+    };
+    let inherited = rx.try_recv().expect("send_to_with_context routed at flush");
+    assert_eq!(inherited.mail_id, inherited_id, "the returned id is the routed mail's");
+    assert_eq!(inherited.recipient, recipient, "send_to_with_context addresses the reference's id");
+    assert_eq!(inherited.root, in_flight_root, "send_to_with_context inherits the caller's root");
+    assert_eq!(inherited.parent_mail, Some(in_flight_mail), "send_to_with_context's parent is the in-flight mail");
+    assert_eq!(
+        binding.take_request_context::<NativeRequestContext>(RequestId(inherited_id.correlation_id)),
+        Some(inherited_context),
+        "the context is stored under the routed mail's correlation",
+    );
+
+    let detached_context = NativeRequestContext { value: 34 };
+    let detached_id = {
+        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        ctx.send_detached_to_with_context(reference.erase(), &CastOnly { code: 3 }, &detached_context)
+    };
+    let detached = rx.try_recv().expect("send_detached_to_with_context routed at flush");
+    assert_eq!(detached.mail_id, detached_id, "the returned id is the routed mail's");
+    assert_eq!(detached.recipient, recipient, "send_detached_to_with_context addresses the proof's id");
+    assert!(detached.parent_mail.is_none(), "send_detached_to_with_context carries no parent edge");
+    assert_eq!(detached.root, detached.mail_id, "send_detached_to_with_context is its own root");
+    assert_eq!(
+        binding.take_request_context::<NativeRequestContext>(RequestId(detached_id.correlation_id)),
+        Some(detached_context),
+        "the detached context is stored under the routed mail's correlation",
+    );
 }
 
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple

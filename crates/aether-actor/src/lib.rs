@@ -56,7 +56,7 @@ pub use model::{
 };
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
-pub use reference::{ActorRef, ErasedActorRef};
+pub use reference::{ActorRef, ErasedActorRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
 // Issue 665: per-side actor-typed handles live next to their transport:
 // [`wasm::WasmActorMailbox<R>`] for wasm guests and

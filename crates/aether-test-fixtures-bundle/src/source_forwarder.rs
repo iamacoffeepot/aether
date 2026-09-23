@@ -41,7 +41,7 @@ impl WasmActor for SourceForwarder {
     #[handler::single]
     fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_, SourceForwarder>, _msg: SendSourceQuery) {
         let observer = ctx.actor_ref::<SourceObserver>();
-        ctx.to(&observer).send(&SourceQuery);
+        ctx.send_to(observer, &SourceQuery);
     }
 
     /// Log the observer's report, which it sent through the reference its

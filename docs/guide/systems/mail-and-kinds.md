@@ -188,7 +188,7 @@ kind's schema. For a batch that must settle as one traced unit, use
 
 **From inside a component.** Address another actor *by type* —
 `ctx.actor::<RenderCapability>().send(&kind)` — or send through a proven
-reference it holds (`ctx.to(&reference)`).
+reference it holds (`ctx.send_to(reference, &kind)`).
 `Kind::ID` and the typed resolver are compile-time constants, so there's no
 host round-trip to resolve an address. You receive mail with a
 `#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the

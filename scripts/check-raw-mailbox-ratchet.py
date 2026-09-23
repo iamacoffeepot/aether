@@ -6,7 +6,9 @@ mailbox addressing, unproven references, and the `#[allow(clippy::
 disallowed_methods)]` suppressions that stand in for them) one call site at a
 time. This scanner enforces the one rule that makes that retirement durable:
 during expand and migrate, a change that raises an old-door count, or that
-raises the checked-in baseline to match new call sites, does not land.
+raises the checked-in baseline to match new call sites, does not land. The
+`.actor::<` and `.to(&` rows track ADR-0232's typed-handle doors
+(`ctx.actor::<R>()` and `ctx.to(&reference)`) the same way, down to zero.
 
 Base/head split. CI materializes this file from the pull request's *base*
 commit (`git show "${BASE_SHA}:scripts/check-raw-mailbox-ratchet.py"`), the
@@ -55,6 +57,8 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
         re.compile(r"\b(send_to|send_detached_to|monitor|despawn_inline_child)\(&?[A-Za-z_][A-Za-z0-9_]*\.id\(\)"),
     ),
     ("clippy::disallowed_methods", re.compile(r"clippy::disallowed_methods")),
+    (".actor::<", re.compile(r"\.actor::<")),
+    (".to(&", re.compile(r"\.to\(&")),
 )
 PATTERN_NAMES: tuple[str, ...] = tuple(name for name, _ in PATTERNS)
 _PATTERN_NAME_SET = frozenset(PATTERN_NAMES)

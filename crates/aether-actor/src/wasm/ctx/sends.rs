@@ -38,7 +38,7 @@ use super::WasmCtx;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
-use crate::reference::{ActorRef, ErasedActorRef};
+use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry};
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -94,10 +94,11 @@ impl Sends<'_> {
         WasmActorMailbox::new(target.id().0, self.mailbox, self.inline)
     }
 
-    /// Send `payload` to a proven [`ErasedActorRef`], inheriting the handler's
-    /// causal chain. Identical to [`WasmCtx::send_to`].
-    pub fn send_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
-        self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
+    /// Send `payload` through a held reference, inheriting the handler's
+    /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`] is
+    /// kind-checked against `K` and an [`ErasedActorRef`] is not.
+    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
+        self.route::<K>(target.erased().id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
     /// The routing seed for `scope`, mirroring `WasmCtx::scope_mailbox`.

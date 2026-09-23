@@ -204,6 +204,23 @@ class ScannerTests(unittest.TestCase):
         self.assertEqual(counts["mailer()"], 1)
         self.assertEqual(counts["clippy::disallowed_methods"], 1)
 
+    def test_handle_doors_count_the_handle_and_not_the_proof_door(self) -> None:
+        self.repo.write(
+            "crates/example/src/lib.rs",
+            "fn f(ctx: Ctx, r: ActorRef<R>) {\n"
+            "    ctx.actor::<R>().send(&k);\n"
+            "    ctx.to(&r).send(&k);\n"
+            "    let proof = ctx.actor_ref::<R>();\n"
+            "    // ctx.actor::<R>() commented out, must not count\n"
+            "}\n",
+        )
+        self.repo.commit("handle doors beside the proof door")
+
+        counts = self.repo.count()
+
+        self.assertEqual(counts[".actor::<"], 1)
+        self.assertEqual(counts[".to(&"], 1)
+
     def test_malformed_or_non_integer_baseline_is_an_operational_error(self) -> None:
         self.repo.write("crates/example/src/lib.rs", "fn f() {}\n")
         self.repo.write(scanner.BASELINE_RELATIVE_PATH, "{not valid json")
