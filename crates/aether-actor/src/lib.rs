@@ -2,8 +2,8 @@
 //! components and native capabilities. Components and capabilities are one
 //! actor primitive: one mpsc inbox, one OS thread, one `MailboxId` (ADR-0074).
 //!
-//! - [`Mail`], [`PriorState`], [`ReplyHandle`], [`KindId`]: transport-free
-//!   types that decode bytes and carry phantom typing, nothing more.
+//! - [`Mail`], [`PriorState`], [`ReplyHandle`]: transport-free types that
+//!   decode bytes, nothing more.
 //! - [`model::ctx`]: the per-stage capability traits ([`MailSender`],
 //!   [`OutboundReply`], [`Persistence`]), the one abstraction the wasm and
 //!   native targets share. [`wasm::ctx`] and the substrate's `NativeCtx`
@@ -65,7 +65,6 @@ pub use request_context::{
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
 pub use mail::facade::MailboxForward;
-pub use mail::kind_id::{KindId, resolve};
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see

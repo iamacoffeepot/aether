@@ -5,10 +5,9 @@
 use core::cell::OnceCell;
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
-use crate::mail::kind_id::{KindId, resolve};
 use crate::wasm::bridge::asset;
 use alloc::vec::Vec;
 
@@ -39,13 +38,6 @@ impl WasmInitCtx<'_> {
     #[must_use]
     pub fn mailbox_id(&self) -> MailboxId {
         MailboxId(self.mailbox)
-    }
-
-    /// Resolve a kind by its `const ID`. Pure compile-time construction
-    /// under ADR-0030 Phase 2 — no host-fn round trip, never fails.
-    #[must_use]
-    pub const fn resolve<K: Kind>(&self) -> KindId<K> {
-        resolve::<K>()
     }
 
     // Issue 1987: the init ctx exposes no `actor()` sender shortcut. A
