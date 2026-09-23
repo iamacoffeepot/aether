@@ -240,7 +240,7 @@ mod tests {
     };
     use aether_data::tagged_id;
     use aether_data::{
-        ActorId, MAILBOX_DOMAIN, MailboxId, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
+        ActorId, MAILBOX_DOMAIN, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
     };
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
@@ -248,7 +248,7 @@ mod tests {
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, unrouted_binding};
     use std::sync::Arc;
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
@@ -347,7 +347,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x1117)));
+        let transport = unrouted_binding(&mailer);
         Fixture { transport, state: InventoryCapabilityState, registry }
     }
 

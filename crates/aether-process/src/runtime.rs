@@ -204,14 +204,14 @@ fn resolve_allowlist(tokens: &HashSet<String>) -> HashMap<String, PathBuf> {
 mod tests {
     use super::{ProcessCapability, ProcessCapabilityState, RunOutcome, outcome_to_result, resolve_allowlist};
     use crate::kinds::{ProcessError, Run, RunResult};
-    use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
-    use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::ctx::NativeCtx;
-    use aether_substrate::testing::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
+    use aether_substrate::testing::{
+        decode_session_reply, drive_task_completion, test_mailer_and_rx, unrouted_binding,
+    };
     use std::collections::{HashMap, HashSet};
     use std::env;
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn session_sender() -> Source {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
@@ -254,7 +254,7 @@ mod tests {
     fn unlisted_binary_replies_not_permitted_without_dispatch() {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = ProcessCapabilityState::from_parts(HashMap::new(), env::temp_dir(), 4);
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b""));
@@ -278,7 +278,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let allowlist = HashMap::from([("cat".to_owned(), PathBuf::from("/bin/cat"))]);
         let mut state = ProcessCapabilityState::from_parts(allowlist, env::temp_dir(), 4);
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether"));

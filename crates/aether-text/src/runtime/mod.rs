@@ -665,15 +665,14 @@ mod tests {
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::testing::{
         assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-        fs_reply_source, session_sender, test_mailer_and_rx,
+        fs_reply_source, session_sender, test_mailer_and_rx, unrouted_binding,
     };
     use std::sync::mpsc::Receiver;
     use std::time::Duration;
 
     fn ctx_binding() -> (Arc<NativeBinding>, Receiver<EgressEvent>) {
         let (mailer, rx) = test_mailer_and_rx();
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, aether_data::MailboxId(0)));
-        (binding, rx)
+        (unrouted_binding(&mailer), rx)
     }
 
     /// Run `on_draw_text` for a `Screen`-space white string over a fresh

@@ -37,24 +37,28 @@ pub struct SpawnSubstrateArgs {
     /// `aether-mcp` stages a temporary boot-manifest JSON of these specs
     /// and hands its path to the hub, which injects it as
     /// `AETHER_BOOT_MANIFEST` at the fork — so the spawned engine comes
-    /// up with these components already loading, in one call, with no
-    /// follow-up `load_component`. Spawn is single-host, so the substrate
-    /// reads each staged wasm and schema-encoded config path itself. Empty
+    /// up with these components already live, in one call, with no
+    /// follow-up `load_component`. The engine binds its RPC port only once
+    /// every boot instance has loaded, and a boot component that fails to
+    /// load (a name collision included) fails the spawn with a
+    /// `spawn_failed` entry. Spawn is single-host, so the substrate reads
+    /// each staged wasm and schema-encoded config path itself. Empty
     /// (default) boots a bare engine.
     #[serde(default)]
     pub components: Vec<ComponentSpec>,
-    /// Init mail to dispatch once the engine — and every `components`
-    /// entry — is ready (issue 3580): the world-becoming half of a
-    /// bring-up in the same call, e.g. create a camera, load a mesh,
-    /// seed state. Each item is settled like a `send_mail` item
-    /// (dispatched, chain awaited, terminal replies collected) and
-    /// reported per-item in the response's `mails`, so a failed init
-    /// surfaces in the spawn reply rather than at first observation.
-    /// Items encode after boot against the live engine's merged kind
-    /// view (ADR-0091), so a boot component's own kinds resolve; a bad
-    /// entry becomes that item's `"error: …"` status and aborts neither
-    /// the spawn nor its sibling items. Keep `capture_frame.mails` for
-    /// frame-scoped placement only. Empty (default) dispatches nothing.
+    /// Init mail to dispatch straight after the spawn reply, when the
+    /// engine and every `components` entry are live (issue 3580): the
+    /// world-becoming half of a bring-up in the same call, e.g. create a
+    /// camera, load a mesh, seed state. Each item is settled like a
+    /// `send_mail` item (dispatched, chain awaited, terminal replies
+    /// collected) and reported per-item in the response's `mails`, so a
+    /// failed init surfaces in the spawn reply rather than at first
+    /// observation. Items encode after boot against the live engine's
+    /// merged kind view (ADR-0091), so a boot component's own kinds
+    /// resolve; a bad entry becomes that item's `"error: …"` status and
+    /// aborts neither the spawn nor its sibling items. Keep
+    /// `capture_frame.mails` for frame-scoped placement only. Empty
+    /// (default) dispatches nothing.
     #[serde(default)]
     pub mails: Vec<EngineMailSpec>,
 }
@@ -64,10 +68,10 @@ pub struct SpawnSubstrateArgs {
 /// selector). aether-mcp pre-resolves each selector against the hub's
 /// component registry (ADR-0116) and stages the resolved bytes for the
 /// substrate to read at boot — the substrate boot path stays path-based,
-/// now fed by the registry rather than host build paths. Spawn readiness
-/// observes expected lineage-string presence only: specs must derive unique
-/// names, and callers must describe or probe each resulting lineage when
-/// component identity matters.
+/// now fed by the registry rather than host build paths. The engine binds
+/// its RPC port only after every boot instance has answered its load, so a
+/// spec that fails to load, or two specs that derive one name, fail the
+/// spawn.
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct ComponentSpec {
     /// Registry selector for the component, resolved against the hub's
@@ -78,9 +82,8 @@ pub struct ComponentSpec {
     /// survives only as the `upload_component` input.
     pub selector: String,
     /// Optional human-readable load name. The substrate defaults one
-    /// from the wasm if omitted. It must not collide with another boot spec's
-    /// name or a replica-derived name: readiness does not deduplicate or
-    /// correlate equal expected names with their selectors.
+    /// from the wasm if omitted. A name that collides with another boot
+    /// spec's name or a replica-derived name fails the spawn.
     #[serde(default)]
     pub name: Option<String>,
     /// Optional inline init-config JSON (ADR-0090), schema-encoded to the

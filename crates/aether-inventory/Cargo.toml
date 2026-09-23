@@ -62,9 +62,9 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 inventory = { workspace = true }
 
 [dev-dependencies]
-# The runtime handler tests boot the `aether_substrate`
-# `NativeBinding::new_for_test` / `HubOutbound` loopback fixtures, enabled by
-# the substrate `test-support` feature.
+# The runtime handler tests boot the `aether_substrate::testing` binding
+# fixtures (`unrouted_binding`) over a `HubOutbound` loopback, enabled by the
+# substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 # The manifest test touches `aether_fs::FsCapability` (identity only) to force
 # its link-time `NameEntry` into the test binary.

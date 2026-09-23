@@ -188,14 +188,10 @@ impl NativeActor for HeadlessRenderCapability {
 
 #[cfg(all(test, feature = "runtime"))]
 mod headless_tests {
-    use std::sync::Arc;
-
     use super::*;
     use crate::{TextureFormat, TextureSampling, TextureUsage, VertexAttribute, VertexFormat};
-    use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
-    use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::testing::test_mailer_and_rx;
+    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
 
     /// ADR-0105: `create_texture` against a headless chassis replies
     /// `Err` (fail-fast, no GPU) rather than hanging on a reply that
@@ -207,7 +203,7 @@ mod headless_tests {
     fn headless_create_texture_replies_err() {
         let (mailer, _rx) = test_mailer_and_rx();
         let mut state = HeadlessRenderCapabilityState;
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx =
             NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
         let result = HeadlessRenderCapability::on_create_texture(
@@ -243,7 +239,7 @@ mod headless_tests {
     fn headless_create_geometry_replies_err() {
         let (mailer, _rx) = test_mailer_and_rx();
         let mut state = HeadlessRenderCapabilityState;
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx =
             NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
         let result = HeadlessRenderCapability::on_create_geometry(

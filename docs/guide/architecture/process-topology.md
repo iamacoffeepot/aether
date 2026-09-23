@@ -109,7 +109,8 @@ the [recovery runbook](../operating/recovery.md) is organized that way.
 
 The hub can stage stored component bytes and a JSON-derived config into a boot
 manifest for a new substrate. The child loads those components during startup
-and readiness waits for the requested instances. Alternatively, operator tools
+and binds its RPC port only once every requested instance is live, so it is
+reachable only when ready. Alternatively, operator tools
 can load or replace components after the engine is live.
 
 Both paths resolve registry selectors. Neither treats an arbitrary local wasm

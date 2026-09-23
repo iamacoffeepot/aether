@@ -22,7 +22,7 @@ mod tests {
     use aether_test_fixtures_kinds::ProbeConfig;
 
     use aether_harness_fleet::{
-        FleetHarness, allocate_store_root_for_test, component_wasm_path, dist_component_available, poll_until,
+        FleetHarness, allocate_store_root_for_test, component_wasm_path, dist_component_available,
     };
 
     /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
@@ -342,15 +342,14 @@ mod tests {
         // Spawn with the boot manifest; the substrate reads it at boot.
         let engine = harness.spawn_headless_with_boot_manifest(&manifest_path);
 
-        // The boot autoload is async, so poll the engine's loaded-components
-        // query (issue 2020) until the probe's lineage address appears. This
-        // is the deterministic registration edge: `aether.component.list`
-        // reflects the live trampoline set, so the probe's name is present
-        // exactly when it is loaded and registered — no log-ring side channel
-        // and no racing a fixed liveness budget.
+        // The engine binds its RPC port only after every boot component has
+        // answered its load `Ok` (issue #6413), so the probe is registered
+        // and addressable on the first call after the spawn, with no wait.
         let expected = probe_lineage_addr();
-        let registered = poll_until(|| harness.list_components(engine).iter().any(|n| n == &expected));
-        assert!(registered, "the boot-manifest probe should come up and register at {expected}");
+        let names = harness.list_components(engine);
+        assert!(names.contains(&expected), "the boot-manifest probe must be registered at {expected}: {names:?}");
+        let delivered = harness.try_send(engine, &expected, &Tick { delta_micros: 16_000 });
+        assert!(delivered.is_ok(), "a call to the boot-manifest probe right after spawn must deliver: {delivered:?}");
 
         // Best-effort: clean up the staged temp files.
         let _ = fs::remove_file(&staged_wasm);

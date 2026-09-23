@@ -33,16 +33,6 @@ aether-rpc = { path = "../aether-rpc" }
 aether-kinds = { path = "../aether-kinds" }
 # The bin parses `HubCli` (ADR-0090 unit d) and bridges boot faults.
 clap = { workspace = true }
-tracing = { workspace = true, features = ["std", "attributes"] }
-
-# The hub blocks on a SIGINT/SIGTERM signal in
-# `HubServerDriverRunning::run`; signal-hook is Unix-only, the Windows
-# fallback rides `ctrlc` for Ctrl-C only.
-[target.'cfg(unix)'.dependencies]
-signal-hook = "0.4"
-
-[target.'cfg(windows)'.dependencies]
-ctrlc = "3"
 
 [dev-dependencies]
 # The binary-store proof (relocated from the bundle, #3812) drives the

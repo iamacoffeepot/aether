@@ -86,7 +86,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{MailDispatch, Registry};
     use aether_substrate::mail::{Source, SourceAddr};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, unrouted_binding};
 
     /// Shared scaffolding for the `on_dispatch_traced` tests:
     /// fresh registry + mailer + outbound + transport wired together.
@@ -101,7 +101,7 @@ mod tests {
         let registry = Arc::new(Registry::new());
         let (outbound, _rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
-        let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x7ACE)));
+        let transport = unrouted_binding(&mailer);
         DispatchTracedFixture { registry, transport }
     }
 

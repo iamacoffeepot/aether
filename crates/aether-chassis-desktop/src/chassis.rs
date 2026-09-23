@@ -31,7 +31,7 @@ use aether_chassis::{WindowConfig, apply_manifest_window_settings};
 
 use super::driver::DesktopDriverCapability;
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, RpcBind, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, with_full_stack_caps, with_rpc_server,
 };
 
 use crate::cli::DesktopCli;
@@ -157,8 +157,10 @@ impl BootableChassis for DesktopChassis {
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Composes the
     /// common caps plus the audio / clipboard / render / substrate-harness /
-    /// lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3).
-    /// Returns the composed builder before the driver is installed:
+    /// lifecycle caps and the always-claim RPC + HTTP servers (ADR-0155 §3). The
+    /// RPC server is composed held: `boot_standard` binds it only after every
+    /// boot component has loaded (issue #6413). Returns the composed builder
+    /// before the driver is installed:
     /// [`Chassis::build`] adds the desktop driver and starts (the driver's
     /// `aether.window` claim rides its Claim-stage hook either way), while the
     /// describe / config helpers read the claim / config terminals off it.
@@ -199,7 +201,7 @@ impl BootableChassis for DesktopChassis {
             .with_actor::<ClipboardCapability>(ClipboardParams::System)
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(frame_lifecycle_params());
-        Ok(with_rpc_server(builder, RpcBind::Boot).with_actor::<HttpServerCapability>(()))
+        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
     }
 }
 

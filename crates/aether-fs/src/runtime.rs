@@ -267,7 +267,6 @@ mod tests {
     };
     use super::FsCapabilityState;
     use aether_actor::Addressable;
-    use aether_data::MailboxId;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::chassis::builder::Builder;
@@ -289,7 +288,7 @@ mod tests {
     impl TestFixture {
         fn new(reg: Arc<AdapterRegistry>) -> Self {
             let (mailer, _rx) = test_mailer_and_rx();
-            let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+            let transport = unrouted_binding(&mailer);
             Self { state: FsCapabilityState::from_registry(reg), transport }
         }
     }
@@ -474,7 +473,7 @@ mod tests {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
     }
 
-    use aether_substrate::testing::test_mailer_and_rx;
+    use aether_substrate::testing::{test_mailer_and_rx, unrouted_binding};
 
     /// Boot the cap against a fresh tempdir; assert the mailbox
     /// is registered.

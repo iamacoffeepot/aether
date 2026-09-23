@@ -1,50 +1,61 @@
-//! Bloomery chassis driver capability — a signal-blocking [`DriverCapability`]
-//! with no tick.
+//! A signal-blocking [`DriverCapability`] for chassis whose main thread has
+//! nothing to run.
 //!
-//! The bloomery is journal-driven: the bundle driver wakes on `WatchHead`, and
-//! nothing needs `LifecycleAdvance`. `run` blocks the main thread until
-//! SIGINT/SIGTERM, then drops the boot so the actor registry tears down and the
-//! driver's `Drop` abandons parked replies. Follows
-//! `HubServerDriverCapability`, which cannot be reused — its `boot` field is
-//! private and it lives in the hub crate.
+//! `run` blocks the main thread until SIGINT or SIGTERM arrives (Ctrl-C off
+//! Unix), then drops the `SubstrateBoot` so the actor registry tears down. The
+//! hub and the Bloomery compose it as their `Chassis::Driver`; headless polls a
+//! shutdown flag from its tick loop and desktop quits its winit loop, so both
+//! keep their own shutdown paths.
 //!
 //! Signal handling is sync: there is no async runtime to host. On Unix
 //! `signal-hook`'s iterator API blocks the driver thread until SIGINT
 //! or SIGTERM arrives; on Windows the `ctrlc` fallback covers Ctrl-C.
 
+use std::marker::PhantomData;
 use std::thread;
 
-use aether_substrate::SubstrateBoot;
 use aether_substrate::chassis::builder::{DriverCapability, DriverCtx, DriverRunning, RunError};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::{Chassis, SubstrateBoot, engine_name};
 
-/// Driver capability for the bloomery chassis. Owns the `SubstrateBoot` whose
-/// registry hosts the journal owner, the bundle driver, and the composed caps.
-/// `run` blocks the calling thread on a SIGINT/SIGTERM signal, then drops
-/// the boot so the actor registry tears down.
-pub struct BloomeryDriverCapability {
-    pub boot: SubstrateBoot,
-}
-
-/// Post-boot handle for [`BloomeryDriverCapability`].
-pub struct BloomeryDriverRunning {
+/// Driver capability that owns the `SubstrateBoot` whose registry hosts the
+/// chassis actors. `run` blocks the calling thread on a SIGINT/SIGTERM
+/// signal, then drops the boot so the actor registry tears down. The chassis
+/// parameter names the binary in the log lines ([`engine_name`]).
+pub struct SignalDriverCapability<C> {
     boot: SubstrateBoot,
+    chassis: PhantomData<fn() -> C>,
 }
 
-impl DriverCapability for BloomeryDriverCapability {
-    type Running = BloomeryDriverRunning;
-
-    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
-        let Self { boot } = self;
-        Ok(BloomeryDriverRunning { boot })
+impl<C> SignalDriverCapability<C> {
+    /// Wrap the boot the chassis composed its actors on.
+    #[must_use]
+    pub const fn new(boot: SubstrateBoot) -> Self {
+        Self { boot, chassis: PhantomData }
     }
 }
 
-impl DriverRunning for BloomeryDriverRunning {
+/// Post-boot handle for [`SignalDriverCapability`].
+pub struct SignalDriverRunning<C> {
+    boot: SubstrateBoot,
+    chassis: PhantomData<fn() -> C>,
+}
+
+impl<C: Chassis> DriverCapability for SignalDriverCapability<C> {
+    type Running = SignalDriverRunning<C>;
+
+    fn boot(self, _ctx: &mut DriverCtx<'_>) -> Result<Self::Running, BootError> {
+        let Self { boot, chassis } = self;
+        Ok(SignalDriverRunning { boot, chassis })
+    }
+}
+
+impl<C: Chassis> DriverRunning for SignalDriverRunning<C> {
     fn run(self: Box<Self>) -> Result<(), RunError> {
-        let Self { boot } = *self;
-        let sig = shutdown_signal();
-        tracing::info!("aether-bloomery: {sig} received, shutting down");
+        let Self { boot, .. } = *self;
+        let engine = engine_name::<C>();
+        let sig = shutdown_signal(&engine);
+        tracing::info!("{engine}: {sig} received, shutting down");
         // `boot` drops here — actor registries shut down, dispatcher
         // threads see their inbox senders drop and exit.
         drop(boot);
@@ -59,18 +70,18 @@ impl DriverRunning for BloomeryDriverRunning {
 /// Why both signals on Unix: interactive shells deliver SIGINT, but
 /// process supervisors (systemd, supervisord), shell utilities
 /// (`pkill`, `kill` without `-9`), and CI cancellation all send
-/// SIGTERM. Ignoring SIGTERM means `pkill -f aether-bloomery`
+/// SIGTERM. Ignoring SIGTERM means `pkill -f {engine}`
 /// kills the engine without running drops.
 #[cfg(unix)]
-fn shutdown_signal() -> &'static str {
+fn shutdown_signal(engine: &str) -> &'static str {
     use signal_hook::consts::{SIGINT, SIGTERM};
     use signal_hook::iterator::Signals;
 
     let mut signals = match Signals::new([SIGINT, SIGTERM]) {
-        Ok(signals) => signals,
-        Err(error) => {
+        Ok(s) => s,
+        Err(e) => {
             tracing::error!(
-                "aether-bloomery: signal handler install failed: {error}; \
+                "{engine}: signal handler install failed: {e}; \
                  parking thread — SIGKILL is the only exit"
             );
             thread::park();
@@ -89,15 +100,15 @@ fn shutdown_signal() -> &'static str {
 }
 
 #[cfg(not(unix))]
-fn shutdown_signal() -> &'static str {
+fn shutdown_signal(engine: &str) -> &'static str {
     use std::sync::mpsc;
 
     let (tx, rx) = mpsc::channel::<()>();
-    if let Err(error) = ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler(move || {
         let _ = tx.send(());
     }) {
         tracing::error!(
-            "aether-bloomery: ctrl-c handler install failed: {error}; \
+            "{engine}: ctrl-c handler install failed: {e}; \
              parking thread — SIGKILL is the only exit"
         );
         thread::park();

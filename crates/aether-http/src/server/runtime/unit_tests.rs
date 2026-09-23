@@ -7,10 +7,9 @@ use super::{
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use aether_actor::ErasedActorRef;
-use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::mail::{MailId, Source};
-use aether_substrate::testing::{boot_authority, fresh_substrate};
+use aether_substrate::testing::{boot_authority, fresh_substrate, unrouted_binding};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Run `body` against a fresh substrate — its registry and mailer — and a
@@ -18,7 +17,7 @@ use std::time::{Duration, UNIX_EPOCH};
 /// ctx shares.
 fn with_test_ctx<T>(body: impl FnOnce(&Registry, &Arc<Mailer>, &mut NativeCtx<'_>) -> T) -> T {
     let (registry, mailer) = fresh_substrate();
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAA)));
+    let binding = unrouted_binding(&mailer);
     let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
     body(&registry, &mailer, &mut ctx)
@@ -544,13 +543,12 @@ mod shard_startup {
         Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSink, ShardSlot,
         ShardStartup,
     };
-    use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, registered_binding, unrouted_binding};
     use std::collections::VecDeque;
     use std::io::Read;
     use std::iter::once;
@@ -573,9 +571,7 @@ mod shard_startup {
 
     /// A binding for the supervisor's handler ctx, over a test-local inbox.
     fn binding(registry: &Registry, mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
-        let supervisor = registry.register_inbox(&boot_authority(), "test.http.supervisor", discharging());
-
-        Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), supervisor))
+        registered_binding(registry, mailer, "test.http.supervisor", discharging())
     }
 
     /// A shard sink over a test-local inbox, proven the way the shard's
@@ -695,7 +691,7 @@ mod shard_startup {
         second_client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound capacity refusal read");
         let (_registry, mut state) = starting_state(1, once(first).collect());
         state.config.max_connections = 1;
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0x4067)));
+        let binding = unrouted_binding(&state.mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         state.assign_peer(&mut ctx, second.stream, second.peer);
@@ -738,7 +734,7 @@ mod wake_coalescing {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::registered_binding;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::mpsc;
@@ -757,12 +753,8 @@ mod wake_coalescing {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let counter_inbox = registry.register_inbox(
-            &boot_authority(),
-            "test.wake_target",
-            Arc::clone(&counter) as Arc<dyn InboxHandler>,
-        );
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, counter_inbox));
+        let binding =
+            registered_binding(&registry, &mailer, "test.wake_target", Arc::clone(&counter) as Arc<dyn InboxHandler>);
         let wake = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE).self_wake();
         let (inbound_tx, inbound_rx) = mpsc::channel();
         let sink = WakeSink { inbound_tx, wake, dirty: Arc::new(AtomicBool::new(false)) };

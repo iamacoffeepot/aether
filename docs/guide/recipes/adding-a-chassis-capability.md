@@ -220,12 +220,12 @@ recipe.
 `ctx.reply(&result)` / `ctx.reply_to(source, &result)` — the
 `NativeBinding` handler-reply path — is the complete router: it reaches
 every `SourceAddr`, including the `Component` local-RPC-server reply target
-an MCP-spawned engine tags. If you instead reach for the raw
-`HubOutbound::send_reply`, note that it is a silent no-op on a
-`SourceAddr::Component` target (iamacoffeepot/aether#1321) — that variant is
-`Mailer::send_reply`'s job, not the hub's — so an MCP-spawned caller's reply
-never lands. Reply through `ctx.reply` / `ctx.reply_to`; `HubOutbound::send_reply`'s
-own doc comment records the fork.
+an MCP-spawned engine tags. A reply that must outlive the handler (answered
+later from an embedder loop, say) retains the request's `InboundMail` guard
+and replies through it, which takes the same route. Reply through one of
+these and nothing else: a hub-only reply path once answered just `Session`
+and `EngineMailbox` senders and silently dropped the `Component` reply, so
+an MCP-spawned caller's reply never landed (iamacoffeepot/aether#1321).
 
 ## 3. Give it a config if it needs one
 
@@ -307,8 +307,9 @@ Most capabilities are **passive**: they sit on a dispatcher and answer
 mail, added with `with_actor`. `TextCapability` is passive. An executable chassis
 also composes exactly one **driver** — the cap that owns the chassis main thread
 and its lifetime (the winit loop on desktop and the std timer on headless). The
-hub's `HubServerDriverCapability` instead owns the `SubstrateBoot` and blocks that
-thread on SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
+shared `SignalDriverCapability` from `aether-chassis`, which the hub and the
+Bloomery compose, instead owns the `SubstrateBoot` and blocks that thread on
+SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
 listener. A driver implements `DriverCapability` (not `NativeActor`) and is
 supplied with `.driver(d)` rather than `.with_actor`; the type-state builder
 enforces exactly one. The in-process SubstrateHarness uses `build_passive` and lets its
@@ -339,9 +340,12 @@ shims are wasm32-only and belong to *components*, not capabilities; a
 native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 `#[cfg(all(test, feature = "runtime"))] mod tests`:
 
-1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()` —
-   `test_mailer_and_rx()` gives a `Mailer` plus the `Receiver<EgressEvent>`
-   its outbound bubbles to.
+1. Build a `NativeBinding` over a loopback mailer with `ctx_binding()`,
+   which wraps `aether_substrate::testing::unrouted_binding` over
+   `test_mailer_and_rx()`'s mailer — `test_mailer_and_rx()` gives a `Mailer`
+   plus the `Receiver<EgressEvent>` its outbound bubbles to. The test names
+   no mailbox id: the binding's own mailbox is never registered, so its
+   self-addressed mail bubbles to that receiver too.
 2. Construct fresh state (`TextCapabilityState::new()`) and a `NativeCtx`
    over the binding, then call the handler directly:
    `TextCapability::on_load_font(&mut state, &mut ctx, LoadFont { … })`.

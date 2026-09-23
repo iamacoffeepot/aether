@@ -135,19 +135,20 @@ After spawning:
 
 `spawn_substrate` may take a `components` list. The MCP layer first resolves
 each component selector from the hub registry, stages temporary wasm/config
-files and a boot manifest, and asks the new substrate to read them. It then
-polls the substrate's live loaded-component snapshot until every expected
-lineage name is present. The readiness check is name-presence only: it does not
-deduplicate expected names, validate that one row satisfied only one spec, or
-compare loaded bytes with the requested selector. A successful tool reply proves
-presence for unique expected names, not component identity/completeness under a
-collision. Give specs unique names, then describe and safely probe every expected
-lineage.
+files and a boot manifest, and asks the new substrate to read them. The
+substrate loads the boot components in manifest order, one at a time, and binds
+its RPC port only after every one has answered its load `Ok`, so the proxy's
+first successful dial means every boot component is live. A boot component that
+fails to load, including two specs that derive the same lineage name, makes the
+substrate exit nonzero with the component and the host's error on its stderr,
+and the spawn fails with a `spawn_failed` entry rather than leaving a
+half-booted engine running. A successful tool reply therefore proves that every
+boot instance loaded. Describe a component before relying on its handlers.
 
 `spawn_substrate` may also take a `mails` list — init mail (each entry
 `{address, kind_name, params?}`, a `send_mail` item without `engine_id`)
-dispatched after the readiness wait above, so an entry addressed at a boot
-component never races its load. Each item settles like a `send_mail` item and
+dispatched straight after the spawn reply, when every boot component is
+already live, so an entry addressed at a boot component never races its load. Each item settles like a `send_mail` item and
 the response carries a per-item `mails` status list alongside the engine
 information, so a failed init is visible in the spawn reply itself. Items are
 best-effort: the engine is live by the time the bundle runs, so one item's
@@ -250,7 +251,9 @@ Fleet operations do not share one universal timeout:
   failed RPC bind such as a stolen startup port, is reforked on a fresh port,
   within a bounded number of attempts. A usage error (exit code 2), a clean
   exit, a panic, or a signal is reported on the first attempt.
-- Boot-component readiness has its own finite polling budget.
+- Boot-component loads run inside the proxy startup dial: the substrate binds
+  only after they answer, so the same connect budget covers them, and a failed
+  load is a startup exit reported with the substrate's stderr.
 - Ordinary hub RPC calls such as list and terminate do not gain the
   `send_mail` settlement timeout merely because they are MCP tools.
 
@@ -270,7 +273,9 @@ An interrupted spawn is not evidence that no child exists.
 ## Source routes
 
 - MCP contracts: `crates/aether-mcp/src/tools/mod.rs` and `args.rs`
-- Spawn/readiness orchestration: `crates/aether-mcp/src/tools/engine.rs`
+- Spawn orchestration: `crates/aether-mcp/src/tools/engine.rs`
+- Boot order (build, load boot components, bind):
+  `crates/aether-chassis/src/boot.rs`
 - Fleet table, id allocation, death ring, and termination:
   `crates/aether-fleet/src/server/runtime.rs`
 - Child ownership and heartbeats:

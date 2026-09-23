@@ -34,10 +34,10 @@ use aether_substrate::actor::native::{Pending, TaskDone};
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
 use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
-use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority};
+use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
 use aether_substrate::{
-    Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeBinding, NativeCtx, NativeInitCtx,
-    PassiveChassis, Registry, mail::MailboxId,
+    Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
+    Registry, mail::MailboxId,
 };
 use std::thread;
 
@@ -818,7 +818,7 @@ fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
     adopter_holds_set_marker::<SetCfgPresent, CfgGatedSetAdopter>();
 
     let (_registry, mailer) = bare_substrate();
-    let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x1850_0002)));
+    let binding = unrouted_binding(&mailer);
     let mut adopter = CfgGatedSetAdopter { seen: AtomicU32::new(0) };
     let mut ctx: NativeCtx<'_, Erased, Manual> =
         NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
@@ -1282,7 +1282,7 @@ fn manual_handler_replies_through_ctx() {
     let caller =
         registry.register_inbox(&boot_authority(), "test.macro_native_actor.manual_caller", forward_to(reply_tx));
 
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x1850_0001)));
+    let binding = unrouted_binding(&mailer);
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 91);
 
     let mut cap = ManualReplyCap;

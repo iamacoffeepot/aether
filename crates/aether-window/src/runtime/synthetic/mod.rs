@@ -341,7 +341,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::MailDispatch;
     use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, unrouted_binding};
 
     use super::*;
     // The subscription request kinds moved to the `WindowManagerSurface` set,
@@ -359,8 +359,7 @@ mod tests {
 
     fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(1)));
-        (binding, mailer)
+        (unrouted_binding(&mailer), mailer)
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {

@@ -1012,9 +1012,9 @@ mod tests {
     use aether_substrate::actor::native::SpawnError;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch};
+    use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
     use aether_substrate::mail::{MailId, Source, SourceAddr};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, registered_binding, unrouted_binding};
 
     use super::*;
     // The subscription request kinds moved to the `WindowSubscriptions` set,
@@ -1040,8 +1040,7 @@ mod tests {
 
     fn test_ctx() -> (Arc<NativeBinding>, Arc<Mailer>) {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(1)));
-        (binding, mailer)
+        (unrouted_binding(&mailer), mailer)
     }
 
     fn spec(name: &str, title: &str) -> WindowSpec {
@@ -1336,8 +1335,8 @@ mod tests {
             }) as Arc<dyn InboxHandler>,
         );
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let manager = MailboxId(0xA37E);
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, manager));
+        let binding = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
+        let manager = registry.lookup("test.window.manager").expect("test setup: the manager is registered");
         let mut state = test_state();
         let root = MailId::new(MailboxId(0x100), 7);
         let parent = MailId::new(MailboxId(0x200), 9);
@@ -1408,8 +1407,7 @@ mod tests {
                 tx.send(dispatch).expect("record published input");
             }) as Arc<dyn InboxHandler>,
         );
-        let binding =
-            Arc::new(NativeBinding::new_for_test(Arc::new(Mailer::new(Arc::clone(&registry))), MailboxId(0xA37E)));
+        let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let subscriber = ctx.resolve_live(inbox).expect("the registered subscriber proves");
 

@@ -1,21 +1,16 @@
-use std::time::Duration;
-
 use aether_data::Kind;
 use aether_kinds::{
-    BinarySelector, ListComponents, ListComponentsResult, ListEngines, ListEnginesResult, SpawnEngine,
-    SpawnEngineResult, TerminateEngine, TerminateEngineResult,
+    BinarySelector, ListEngines, ListEnginesResult, SpawnEngine, SpawnEngineResult, TerminateEngine,
+    TerminateEngineResult,
 };
 use rmcp::ErrorData as McpError;
-use tokio::time;
 
 use crate::args::{
     DeadEngineInfo, EngineInfo, ListEnginesArgs, ListEnginesResponse, MailSpec, ReplyProjection, SpawnSubstrateArgs,
     SpawnSubstrateResponse, TerminateSubstrateArgs,
 };
 
-use super::components::components_all_loaded;
-use super::envelope::{engine_envelope, local_envelope};
-use super::ids::parse_engine_id;
+use super::envelope::local_envelope;
 use super::mail::settle_mail_item;
 use super::render::{death_reason_parts, internal, internal_msg, json};
 use super::{FLEET_CAP, Mcp};
@@ -126,29 +121,18 @@ pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Resu
         None => return Err(internal_msg("undecodable SpawnEngineResult")),
     };
 
-    // The spawn reply returns once the proxy connects, before any
-    // boot-manifest autoload (ADR-0116) settles — those loads are
-    // fire-and-forget and emit no completion signal. When components
-    // were requested, poll the engine's loaded-components query (issue
-    // 2020) until every requested component's lineage name is present in
-    // the live trampoline set, so the tool hands back a genuinely-ready
-    // engine rather than one mid-boot. Identity-based polling catches both
-    // baseline contamination (a pre-existing trampoline satisfying a count)
-    // and wrong-set false positives (a different component registering while
-    // a requested one stalls).
-    if let Some(ref staged) = staged
-        && !staged.expected_names.is_empty()
-    {
-        wait_for_loaded_components(mcp, &info.engine_id, &staged.expected_names).await?;
-    }
-
-    // Init mail dispatches only after the readiness wait above, so a
-    // bundle addressed at a boot component never races its load, and
-    // each item encodes against the live engine's merged kind view
-    // (ADR-0091). Per-item best-effort like `send_mail` (issue 3580):
-    // the engine is already live at this point, so an item's failure is
-    // reported in its status, never converted into a whole-call error
-    // that would strand a spawned engine behind an error reply.
+    // The spawn reply returns once the proxy connects, and the engine binds
+    // its RPC port only after every boot component has answered its load
+    // `Ok` (issue #6413), so the engine handed back is already ready. A boot
+    // component that fails to load exits the substrate, which surfaces above
+    // as a `SpawnEngineResult::Err` with a `spawn_failed` entry.
+    //
+    // Init mail therefore never races a boot component's load, and each item
+    // encodes against the live engine's merged kind view (ADR-0091).
+    // Per-item best-effort like `send_mail` (issue 3580): the engine is
+    // already live at this point, so an item's failure is reported in its
+    // status, never converted into a whole-call error that would strand a
+    // spawned engine behind an error reply.
     let mails = if args.mails.is_empty() {
         None
     } else {
@@ -174,36 +158,5 @@ pub(super) async fn terminate_substrate(mcp: &Mcp, args: TerminateSubstrateArgs)
         Some(TerminateEngineResult::Ok) => json(&serde_json::json!({ "engine_id": engine_id, "status": "terminated" })),
         Some(TerminateEngineResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable TerminateEngineResult")),
-    }
-}
-
-async fn wait_for_loaded_components(mcp: &Mcp, engine_id: &str, want_names: &[String]) -> Result<(), McpError> {
-    const POLL_INTERVAL: Duration = Duration::from_millis(100);
-    const BUDGET: Duration = Duration::from_secs(30);
-
-    let engine = parse_engine_id(engine_id)?;
-    let deadline = time::Instant::now() + BUDGET;
-    loop {
-        let reply = mcp
-            .session
-            .call_one(engine_envelope(engine, "aether.component", &ListComponents {}))
-            .await
-            .map_err(internal)?;
-        let Some(result) = ListComponentsResult::decode_from_bytes(&reply.payload) else {
-            return Err(internal_msg("undecodable ListComponentsResult"));
-        };
-        if components_all_loaded(want_names, &result.names) {
-            return Ok(());
-        }
-        if time::Instant::now() >= deadline {
-            let missing: Vec<&str> =
-                want_names.iter().filter(|w| !result.names.iter().any(|n| n == *w)).map(String::as_str).collect();
-            return Err(internal_msg(&format!(
-                "spawned engine did not load all boot components within {}s: \
-                     still missing: {missing:?}",
-                BUDGET.as_secs(),
-            )));
-        }
-        time::sleep(POLL_INTERVAL).await;
     }
 }

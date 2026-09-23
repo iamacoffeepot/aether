@@ -14,7 +14,9 @@ use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
-use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
+use crate::runtime::lifecycle::FatalAborter;
+#[cfg(any(test, feature = "test-support"))]
+use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, RequestContextTable};
 
 impl NativeBinding {
@@ -104,13 +106,17 @@ impl NativeBinding {
     }
 
     /// Test-only constructor with a [`PanicAborter`] and no spawner.
-    /// Lets unit tests build a transport without a chassis; not
-    /// appropriate for production capabilities, whose bindings the
-    /// chassis builds at boot.
-    pub fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
+    /// Lets the substrate's own unit tests build a transport without a
+    /// chassis; production capabilities get the binding the chassis builds
+    /// at boot. A test outside this crate names no mailbox id: it builds its
+    /// binding through [`crate::testing::unrouted_binding`] or
+    /// [`crate::testing::registered_binding`].
+    #[cfg(any(test, feature = "test-support"))]
+    pub(crate) fn new_for_test(mailer: Arc<Mailer>, self_mailbox: MailboxId) -> Self {
         Self::new_for_test_with_parent(mailer, self_mailbox, None)
     }
 
+    #[cfg(any(test, feature = "test-support"))]
     pub(crate) fn new_for_test_with_parent(
         mailer: Arc<Mailer>,
         self_mailbox: MailboxId,

@@ -218,18 +218,13 @@ impl PerSenderEgress {
 
 #[cfg(test)]
 mod tests {
-    // The test harness derives its own actor mailbox id by name so the
-    // worker's completion-wake push routes to a registered inbox rather than
-    // warn-dropping — fixture id derivation, not sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
-
     use super::PerSenderEgress;
     use aether_actor::ErasedActorRef;
-    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
+    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, fresh_substrate};
+    use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
     use std::sync::Arc;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces. Hand-rolled `Kind`
@@ -264,9 +259,8 @@ mod tests {
     /// comes back too, so a test can register and prove its senders.
     fn harness(tag: &str) -> (Arc<Registry>, Arc<NativeBinding>) {
         let (registry, mailer) = fresh_substrate();
-        let mailbox = mailbox_id_from_name(tag);
-        registry.register_inbox(&boot_authority(), tag, Arc::new(|_d| {}));
-        (registry, Arc::new(NativeBinding::new_for_test(mailer, mailbox)))
+        let binding = registered_binding(&registry, &mailer, tag, noop_handler());
+        (registry, binding)
     }
 
     /// Register a test-local sender inbox under `name` and prove it the way
@@ -422,9 +416,7 @@ mod tests {
     fn queued_fetch_holds_its_chain_until_reply() {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let mailbox = mailbox_id_from_name("test.egress.hold");
-        registry.register_inbox(&boot_authority(), "test.egress.hold", Arc::new(|_d| {}));
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, mailbox));
+        let binding = registered_binding(&registry, &mailer, "test.egress.hold", noop_handler());
 
         let sender = Some(sender(&registry, &binding, "test.egress.hold.sender"));
         let mut q = PerSenderEgress::new(1, 32);
