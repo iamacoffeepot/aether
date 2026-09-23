@@ -4,8 +4,9 @@
 //!
 //! The mail layer is byte-transparent — all of these primitives operate
 //! on raw payloads keyed by [`MailboxId`] and [`KindId`]. Typed
-//! interaction lives in the actor SDK (`aether_actor::Mailbox<K>`) and
-//! per-cap dispatchers.
+//! interaction lives in the actor SDK's typed handles and proven
+//! references (`aether_actor::WasmActorMailbox`, `aether_actor::ActorRef`)
+//! and per-cap dispatchers.
 
 pub mod boundary;
 pub mod capability;
