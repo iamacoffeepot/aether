@@ -30,7 +30,7 @@ use std::fs;
 
 use aether_actor::ActorRef;
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
@@ -278,7 +278,11 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
 
-    let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .namespace_roots(test_namespace_roots(init_save_sandbox("behavior-host")))
+        .with_component_host()
+        .build()
+        .expect("boot");
     let panel = load_panel_with_host(&mut harness, &kit_wasm, intercept);
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
@@ -366,7 +370,11 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
     };
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
 
-    let mut harness = SubstrateHarness::builder().with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .namespace_roots(test_namespace_roots(init_save_sandbox("behavior-host")))
+        .with_component_host()
+        .build()
+        .expect("boot");
     let panel = load_panel_with_radio_host(&mut harness, &kit_wasm);
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 

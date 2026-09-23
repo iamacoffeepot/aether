@@ -15,7 +15,7 @@ use std::fs;
 use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick, WindowId};
 use aether_kit_widget::set::{NumericWidget, VirtualListWidget};
@@ -193,7 +193,12 @@ fn named_load_exported_widget_defaults_adopters_succeeds() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+        let mut harness = SubstrateHarness::builder()
+            .size(64, 48)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
+            .with_component_host()
+            .build()
+            .expect("boot");
         for case in exported_adopters() {
             let name = load_named(&mut harness, &wasm, &case);
             assert_eq!(
@@ -216,7 +221,12 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
+        let mut harness = SubstrateHarness::builder()
+            .size(240, 80)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
+            .with_component_host()
+            .build()
+            .expect("boot");
         let panel = load_panel_with(
             &mut harness,
             &wasm,
@@ -283,7 +293,12 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
             continue;
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
-        let mut harness = SubstrateHarness::builder().size(240, 120).with_component_host().build().expect("boot");
+        let mut harness = SubstrateHarness::builder()
+            .size(240, 120)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-activation")))
+            .with_component_host()
+            .build()
+            .expect("boot");
         let panel = load_panel_with(
             &mut harness,
             &wasm,

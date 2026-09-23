@@ -74,7 +74,7 @@ struct ScriptLoadContext {
 /// The reference behavior host. Load it wrapped over a widget slot through the
 /// kit's declarative `WidgetKind::BehaviorHost` attachment (issue 2681 / 2692);
 /// the full live scripted-behavior e2e is #2688.
-#[actor(instanced, composable)]
+#[actor(instanced, composable, depends(FsCapability))]
 impl WasmActor for BehaviorHost {
     type Config = HostConfig;
     const NAMESPACE: &'static str = "aether.behavior.host";

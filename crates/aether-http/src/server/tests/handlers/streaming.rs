@@ -10,6 +10,7 @@ use crate::kinds::{
     HttpHeader, HttpRequestChunk, HttpRequestStreamEnd, HttpRequestStreamOpen, HttpResponseStreamOpen,
     HttpServerRequest, HttpServerResponse, HttpStreamCredit,
 };
+use crate::server::HttpServerCapability;
 use crate::{RequestStream, ResponseStream};
 
 use super::bind_catch_all;
@@ -38,7 +39,7 @@ pub struct StreamHttpHandlerState {
     ended: bool,
 }
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for StreamHttpHandler {
     type State = StreamHttpHandlerState;
     type Config = ();
@@ -105,7 +106,7 @@ pub struct StreamIdEchoHandlerState {
     emitted: bool,
 }
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for StreamIdEchoHandler {
     type State = StreamIdEchoHandlerState;
     type Config = ();
@@ -164,7 +165,7 @@ pub struct FloodHttpHandlerState {
     flooded: bool,
 }
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for FloodHttpHandler {
     type State = FloodHttpHandlerState;
     type Config = ();
@@ -224,7 +225,7 @@ pub struct StreamingUploadHandlerState {
     stream: Option<RequestStream>,
 }
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for StreamingUploadHandler {
     type State = StreamingUploadHandlerState;
     type Config = ();

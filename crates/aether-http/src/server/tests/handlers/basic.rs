@@ -7,6 +7,7 @@ use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 
 use crate::kinds::{HttpHeader, HttpServerRequest, HttpServerResponse};
+use crate::server::HttpServerCapability;
 
 use super::bind_catch_all;
 
@@ -19,7 +20,7 @@ pub struct EchoHttpHandler;
 /// stateless cap still names a state type rather than `()` / `Self`).
 pub struct EchoHttpHandlerState;
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for EchoHttpHandler {
     type State = EchoHttpHandlerState;
     type Config = ();
@@ -59,7 +60,7 @@ pub struct FixedBodyHttpHandler;
 /// Empty runtime state for the stateless fixed-body handler (ADR-0122).
 pub struct FixedBodyHttpHandlerState;
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for FixedBodyHttpHandler {
     type State = FixedBodyHttpHandlerState;
     type Config = ();
@@ -94,7 +95,7 @@ pub struct SilentHttpHandler;
 /// Empty runtime state for the stateless silent handler (ADR-0122).
 pub struct SilentHttpHandlerState;
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for SilentHttpHandler {
     type State = SilentHttpHandlerState;
     type Config = ();
