@@ -110,7 +110,7 @@ pub struct BundleComponent {
     tile: Option<ResidentTile>,
 }
 
-#[actor]
+#[actor(depends(LifecycleCapability), depends(RenderCapability))]
 impl WasmActor for BundleComponent {
     const NAMESPACE: &'static str = "aether.kit.bundle";
 

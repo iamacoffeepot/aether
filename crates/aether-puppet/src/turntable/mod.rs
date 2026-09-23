@@ -65,7 +65,7 @@ pub struct Turntable {
     ticks: u64,
 }
 
-#[actor(depends(Puppet))]
+#[actor(depends(Puppet), depends(LifecycleCapability))]
 impl WasmActor for Turntable {
     type Config = TurntableConfig;
     const NAMESPACE: &'static str = "aether.puppet-turntable";

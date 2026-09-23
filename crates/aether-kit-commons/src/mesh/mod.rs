@@ -32,7 +32,9 @@
 //! 4. Every `aether.lifecycle.render` stage emits cached faces immediately.
 //!    When DSL outline loops exist, the viewer asks the default-loaded
 //!    `aether.kit.camera` component for its active eye and emits the solved
-//!    outline triangles when the source-bound reply settles.
+//!    outline triangles when the source-bound reply settles. The viewer
+//!    declares that camera as a dependency, so it loads only beside it: a
+//!    viewer loaded without a live `aether.kit.camera` is refused at load.
 
 mod kinds;
 pub use kinds::*;
@@ -109,7 +111,7 @@ struct MeshLoadContext {
 /// to swap the cached mesh. Iterate on a DSL by writing the new source
 /// via `aether.fs.write` and re-sending `aether.kit.mesh.load` against the
 /// same path.
-#[actor]
+#[actor(depends(LifecycleCapability), depends(RenderCapability), depends(CameraComponent), depends(FsCapability))]
 impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "aether.kit.mesh";
 

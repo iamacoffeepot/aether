@@ -779,7 +779,7 @@ impl Puppet {
     }
 }
 
-#[actor]
+#[actor(depends(LifecycleCapability), depends(WindowCapability), depends(FsCapability), depends(RenderCapability))]
 impl WasmActor for Puppet {
     type Config = PuppetConfig;
     const NAMESPACE: &'static str = "aether.puppet";

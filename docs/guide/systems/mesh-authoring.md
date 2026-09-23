@@ -53,6 +53,9 @@ no default export, so a load that names no `export` is refused with the
 module's export list (ADR-0138); the mesh actor must be selected as
 `aether_kit_commons@aether.kit.mesh`. Export membership is in
 [`aether-kit-commons/src/lib.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-kit-commons/src/lib.rs).
+The viewer declares `aether.kit.camera` as a dependency: load
+`aether_kit_commons@aether.kit.camera` at its default name first. A viewer
+loaded alone is refused at load, naming `aether.kit.camera`.
 
 ## DSL vocabulary
 
