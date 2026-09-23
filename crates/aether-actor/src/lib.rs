@@ -19,9 +19,10 @@
 //!   pins the `init` / `receive` / lifecycle FFI exports plus the
 //!   `aether.kinds.inputs` and `aether.namespace` custom-section statics.
 //!
-//! The FFI externs in [`wasm::raw`] sit behind `#[cfg(target_family = "wasm")]`
-//! and the native stubs panic if called, so a host build links no FFI surface
-//! and `cargo test --workspace` builds this crate like any other.
+//! The FFI externs (the `wasm` module's private `raw` module) sit behind
+//! `#[cfg(target_family = "wasm")]` and the native stubs panic if called, so a
+//! host build links no FFI surface and `cargo test --workspace` builds this
+//! crate like any other.
 
 #![no_std]
 

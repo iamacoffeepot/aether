@@ -4,12 +4,14 @@
 //!
 //! Surface:
 //!
-//!   - [`raw`] — `extern "C"` host-fn imports + host-target panic
+//!   - `raw` — `extern "C"` host-fn imports + host-target panic
 //!     stubs (the only place the `_p32` symbols are named). These are
 //!     the literal FFI boundary: ABI names (`init`, `receive_p32`,
 //!     `_p32` suffix, `aether.kinds.inputs`, `aether.namespace`) are
 //!     an on-the-wire contract the substrate's wasm runtime expects and
-//!     are deliberately unchanged.
+//!     are deliberately unchanged. The module is private to `wasm`, so a
+//!     guest reaches the host only through `bridge` and the ctx verbs,
+//!     never through a bare import.
 //!   - [`bridge`] — per-concern free-function modules (`bridge::log`,
 //!     `bridge::mail`, `bridge::persist`). Each module owns one FFI op
 //!     family and forwards calls to the matching `raw::*` host fn.
@@ -30,7 +32,7 @@
 //!     `aether.namespace` custom-section pins.
 //!
 //! No FFI imports are pulled in unconditionally — the host-fn externs
-//! in [`raw`] live behind a `#[cfg(target_family = "wasm")]` block and
+//! in `raw` live behind a `#[cfg(target_family = "wasm")]` block and
 //! the native-target stubs panic if invoked, so the crate compiles
 //! for `cargo test --workspace` on the host without dragging the FFI
 //! surface into the linker.
@@ -52,7 +54,7 @@ pub mod bridge;
 pub mod ctx;
 pub mod inline;
 pub mod mailbox;
-pub mod raw;
+mod raw;
 
 // Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
 // allows mirror the def-site allows on each type.
@@ -309,10 +311,10 @@ pub trait ErasedWasmActor {
 }
 
 /// Stage a guest init-failure message into the substrate via
-/// `init_failed_p32` (ADR-0096). Shared by the multi-actor `export!`
-/// init shims so the byte-staging boilerplate isn't repeated at each
-/// construction site. wasm32-only — the host build carries no FFI
-/// surface.
+/// `init_failed_p32` (ADR-0096). Shared by the single- and multi-actor
+/// `export!` init shims so the byte-staging boilerplate isn't repeated at
+/// each construction site, and so no expansion names the private `raw`
+/// module. wasm32-only — the host build carries no FFI surface.
 #[cfg(target_family = "wasm")]
 #[doc(hidden)]
 pub fn stage_init_failure(message: &str) {
@@ -843,13 +845,7 @@ macro_rules! __export_internal {
                         ::core::stringify!($component),
                         " could not decode Config from bytes",
                     );
-                    let bytes = msg.as_bytes();
-                    unsafe {
-                        $crate::wasm::raw::init_failed(
-                            bytes.as_ptr().addr() as u32,
-                            bytes.len() as u32,
-                        );
-                    }
+                    $crate::wasm::stage_init_failure(msg);
                     return 1;
                 };
                 config
@@ -886,14 +882,7 @@ macro_rules! __export_internal {
                     0
                 }
                 Err(err) => {
-                    let msg = err.message();
-                    let bytes = msg.as_bytes();
-                    unsafe {
-                        $crate::wasm::raw::init_failed(
-                            bytes.as_ptr().addr() as u32,
-                            bytes.len() as u32,
-                        );
-                    }
+                    $crate::wasm::stage_init_failure(err.message());
                     1
                 }
             }

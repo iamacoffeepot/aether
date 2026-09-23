@@ -16,7 +16,8 @@
 //!   `aether_actor::WasmActor`. The wasmtime trampoline drives them
 //!   per inbound mail.
 //! - [`host_fns`] — `extern "C"` import linker registration matching
-//!   the names guest [`aether_actor::wasm::raw`] expects.
+//!   the `aether` wasm import-module names the guest SDK's private `raw`
+//!   declarations expect.
 //! - [`reply_table`] — wasm-only reply correlation table.
 //! - [`kind_manifest`] — parses the `aether.kinds` custom section the
 //!   guest's [`aether_actor::export!`] macro emits.

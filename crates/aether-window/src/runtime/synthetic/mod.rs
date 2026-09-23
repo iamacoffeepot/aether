@@ -5,7 +5,6 @@ mod instance;
 use std::collections::{BTreeMap, HashMap};
 
 use aether_actor::{ActorRef, Manual, runtime};
-use aether_data::MailboxId;
 use aether_kinds::MonitorNotice;
 use aether_substrate::{InboundMail, MonitorHandle, Subname};
 
@@ -134,12 +133,12 @@ impl NativeActor for SyntheticWindowCapability {
         })
     }
 
-    /// Settle every reservation the manager still owes a reply for. The staged
-    /// child may not have been applied yet, so the retirement rides the ordered
-    /// tail its reserved route already parks.
-    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        for (id, mut pending) in state.pending_creates.drain() {
-            ctx.actor_at::<SyntheticWindowInstance>(MailboxId(id.0)).send(&RetireWindow);
+    /// Settle every reservation the manager still owes a reply for. It retires
+    /// no staged window child: this boot singleton unwires only after chassis
+    /// teardown has closed the registry owner, which cancels every staged birth,
+    /// and closed every instanced actor, window children included.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        for (_, mut pending) in state.pending_creates.drain() {
             answer(&mut pending.reply, &CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
         }
     }
@@ -329,7 +328,7 @@ mod tests {
     use std::sync::Arc;
 
     use aether_actor::Addressable;
-    use aether_data::Kind;
+    use aether_data::{Kind, MailboxId};
     use aether_harness_substrate::{HarnessOp, SubstrateHarness};
     use aether_kinds::Key;
     use aether_substrate::Registry;
