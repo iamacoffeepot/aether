@@ -17,7 +17,7 @@
 //! derives it belongs with the pair that reads it.
 
 use aether_actor::{
-    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, Reaches,
+    ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, Reaches,
     ReplyMode, Singleton,
 };
 use aether_data::{MailId, MailboxId};
@@ -132,7 +132,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `ctx.mailer().registry()` to ask the same question itself: that chain
     /// is how a cap ends up owning a second answer to the registry's own
     /// liveness question, and the two answers drift.
-    pub fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
+    pub fn resolve_live(&self, position: MailboxId) -> Result<ErasedActorRef, ResolveLiveError> {
         self.binding.mailer().registry().resolve_live(position)
     }
 

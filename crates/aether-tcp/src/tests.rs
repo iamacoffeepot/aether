@@ -16,7 +16,7 @@ use super::{
     BindListener, BindListenerResult, Connect, ConnectResult, ListListeners, ListListenersResult, SessionClosed,
     SessionData, TcpCapability, TcpListenerActor, TcpNativeExt, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
-use aether_actor::{Addressable, AnyActorRef};
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
@@ -103,7 +103,7 @@ fn session_reply() -> Source {
     Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
 }
 
-fn enqueue<K: Kind>(registry: &Arc<Registry>, target: AnyActorRef, mail: &K, source: Source, root: MailId) {
+fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, source: Source, root: MailId) {
     let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("cap entry") else {
         panic!("expected mailbox entry");
     };
@@ -207,7 +207,7 @@ fn register_route_collision(registry: &Registry, canonical_name: &str) -> Mailbo
 fn drive_and_decode<K, R>(
     registry: &Arc<Registry>,
     rx: &mpsc::Receiver<EgressEvent>,
-    target: AnyActorRef,
+    target: ErasedActorRef,
     mail: &K,
 ) -> R
 where

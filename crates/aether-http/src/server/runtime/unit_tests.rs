@@ -6,7 +6,7 @@ use super::{
     validate_ws_handshake,
 };
 use crate::kinds::{HttpHeader, HttpMethod};
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate::mail::{MailId, Source};
@@ -26,7 +26,7 @@ fn with_test_ctx<T>(body: impl FnOnce(&Registry, &Arc<Mailer>, &mut NativeCtx<'_
 
 /// Register a named inline mailbox and prove it through the ctx verb — this
 /// crate cannot construct a reference any other way.
-fn proven(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> AnyActorRef {
+fn proven(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
     let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
 
     ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
@@ -356,8 +356,8 @@ fn config_layer_defaults_match_the_named_consts() {
 mod route_registration {
     use super::super::RouteTable;
     use super::{
-        AnyActorRef, Arc, KindId, RegisterRouteResult, RwLock, SharedRoutes, proven, register_route, unregister_route,
-        unregister_routes_all, with_test_ctx,
+        Arc, ErasedActorRef, KindId, RegisterRouteResult, RwLock, SharedRoutes, proven, register_route,
+        unregister_route, unregister_routes_all, with_test_ctx,
     };
     use crate::kinds::HttpMethod;
 
@@ -366,7 +366,7 @@ mod route_registration {
     }
 
     /// Two proven route holders.
-    fn holders() -> (AnyActorRef, AnyActorRef) {
+    fn holders() -> (ErasedActorRef, ErasedActorRef) {
         with_test_ctx(|registry, _, ctx| {
             (proven(registry, ctx, "test.http.route.a"), proven(registry, ctx, "test.http.route.b"))
         })
@@ -389,7 +389,7 @@ mod route_registration {
 
     /// Snapshot the sole route's `(members, kind, shared)`, asserting the
     /// table holds exactly one route — the shape every case below checks.
-    fn only_route(routes: &SharedRoutes) -> (Vec<AnyActorRef>, KindId, bool) {
+    fn only_route(routes: &SharedRoutes) -> (Vec<ErasedActorRef>, KindId, bool) {
         let table = routes.read().expect("route table lock");
         assert_eq!(table.routes.len(), 1, "expected exactly one route, got {}", table.routes.len());
         let route = table.routes.values().next().expect("one route");

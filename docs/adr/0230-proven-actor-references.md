@@ -12,7 +12,7 @@ a caller can *send to*), [ADR-0166](0166-typed-actor-lineage-and-abbreviated-ext
 [ADR-0133](0133-reply-based-stream-handles-for-the-http-server-data-phase.md) (its
 `send_detached_to(MailboxId)` recipient and its
 `{ counterparty: MailboxId, stream_id }` handle shape become the proven
-forms — an `AnyActorRef` constructed from `ctx.sender()`, so a stream
+forms — an `ErasedActorRef` constructed from `ctx.sender()`, so a stream
 handle cannot exist without the proof it sends to).
 
 ## Context
@@ -121,7 +121,7 @@ nothing, and the receiver proves it again on its own side.
 pub struct Namespace(&'static str);
 pub enum Address<R> { Scoped { key }, Beneath { parent, key }, Exact { id } }
 pub struct ActorRef<R> { id: MailboxId, _actor: PhantomData<fn() -> R> }
-pub struct AnyActorRef { id: MailboxId }
+pub struct ErasedActorRef { id: MailboxId }
 ```
 
 | Type | Claims | Made by | Can |
@@ -131,7 +131,7 @@ pub struct AnyActorRef { id: MailboxId }
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()` | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorPath` | the text is a well-formed ADR-0166 address, canonical or abbreviated; nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`), compared, displayed; become a position only through the host's `resolve_address` |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `AnyActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set |
+| `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 
 `ActorRef::id()` is free and total. There is no function from a `MailboxId`
@@ -143,7 +143,7 @@ typed description. Which `Address<R>` constructor exists is decided by `R`'s pla
 component's key is its load name, a validated `LoadName`; a window's is its
 window id. There is one addressing system and this is its value type.
 
-A capability keeps the envelope sender as an `AnyActorRef`.
+A capability keeps the envelope sender as an `ErasedActorRef`.
 
 The per-handler handle keeps its job of carrying origin, now fed by a
 reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
@@ -155,7 +155,7 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 |---|---|---|
 | A declared dependency of the actor | the `#[actor]` dependency list is emitted to the wasm custom section; each entry folds to its position through its strategy — `One` at the root, `Embedded` beneath the placement's parent — and the host requires a `Live` route there before `init` (native: at chassis build, and at spawn for a spawned child). A missing dependency refuses the load and names it. | none for `One` — at depth 1 the fold is a `const`; one registry read per `Embedded` entry |
 | Self, parent, inline cluster members | structural; the host supplies them at `init` and the SDK mints them | none |
-| A child this actor spawned or loaded | A native staged spawn's completion, `TaskDone<SpawnOutcome<C>, _>`, carries `ActorRef<C>` on its `Ok` arm, minted by the registry when the birth's finalizer runs after the owner has published the child's `Live` route. A loaded component's `LoadResult` stays a description (`mailbox_id`, `name`); a receiver that keeps or mails the loaded child proves `mailbox_id` at receipt through `resolve_live`. A guest's inline spawn returns the typed `InlineChild<C>` handle; a parent keeping children of several types keeps the erased form instead — `InlineChild::erase`, or `spawn_inline_child_by_tag`'s `AnyActorRef` — a proof without the type. Two embedder cases share the row: an embedder spawn's `finish` returns `ActorRef<A>` once its commit has published the route, and a chassis-composed actor's reference is recorded at boot, when the route goes `Live`, and read back by type through the chassis handle's `actor_ref::<R>()` | none for a spawn; one published-route read per loaded child |
+| A child this actor spawned or loaded | A native staged spawn's completion, `TaskDone<SpawnOutcome<C>, _>`, carries `ActorRef<C>` on its `Ok` arm, minted by the registry when the birth's finalizer runs after the owner has published the child's `Live` route. A loaded component's `LoadResult` stays a description (`mailbox_id`, `name`); a receiver that keeps or mails the loaded child proves `mailbox_id` at receipt through `resolve_live`. A guest's inline spawn returns the typed `InlineChild<C>` handle; a parent keeping children of several types keeps the erased form instead — `InlineChild::erase`, or `spawn_inline_child_by_tag`'s `ErasedActorRef` — a proof without the type. Two embedder cases share the row: an embedder spawn's `finish` returns `ActorRef<A>` once its commit has published the route, and a chassis-composed actor's reference is recorded at boot, when the route goes `Live`, and read back by type through the chassis handle's `actor_ref::<R>()` | none for a spawn; one published-route read per loaded child |
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value. A `MonitorNotice` is host-generated mail that carries one: the host stamps the departed actor, which `register_monitor` required to be `Live`, so the watcher's `ctx.sender()` is a reference to it. | none |
 | A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
 | An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |

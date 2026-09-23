@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_actor::{AnyActorRef, OutboundReply};
+use aether_actor::{ErasedActorRef, OutboundReply};
 use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
@@ -94,7 +94,7 @@ impl NativeActor for MacroProbeCap {
     }
 }
 
-fn push_envelope<K: Kind>(registry: &Registry, recipient: AnyActorRef, payload: &K) {
+fn push_envelope<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payload: &K) {
     use aether_substrate::mail::registry::MailboxEntry;
     let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient:?}");
@@ -1058,7 +1058,7 @@ fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
 /// Like [`push_envelope`] but stamps an explicit `reply_to` [`Source`] so
 /// the handler's deferred reply has somewhere to route — a registered
 /// caller inbox the test reads back.
-fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: AnyActorRef, payload: &K, reply_to: Source) {
+fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payload: &K, reply_to: Source) {
     use aether_substrate::mail::registry::MailboxEntry;
     let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
         panic!("expected mailbox entry under {recipient:?}");

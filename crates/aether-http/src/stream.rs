@@ -7,7 +7,7 @@
 //! or a middleware forwarding in front of the cap — never a compile-time
 //! singleton.
 //!
-//! A handle is plain data: the `counterparty` [`AnyActorRef`] — the proven
+//! A handle is plain data: the `counterparty` [`ErasedActorRef`] — the proven
 //! sender of the dispatch that opened the stream, minted by `ctx.sender()`
 //! (ADR-0230) — plus the `stream_id` naming the connection. It is
 //! constructed once (from the first credit grant, or the request-stream
@@ -24,7 +24,7 @@
 //!
 //! [`HttpServerCapability`]: super::HttpServerCapability
 
-use aether_actor::{AnyActorRef, MailSender};
+use aether_actor::{ErasedActorRef, MailSender};
 
 use super::kinds::{
     HttpRequestCredit, HttpRequestStreamOpen, HttpResponseChunk, HttpResponseStreamEnd, HttpStreamCredit,
@@ -39,7 +39,7 @@ use super::kinds::{
 pub struct ResponseStream {
     /// The proven sender that dispatched the opening credit — the cap, a
     /// mock, or a middleware. Every send on this handle targets it.
-    pub counterparty: AnyActorRef,
+    pub counterparty: ErasedActorRef,
     /// The stream id the cap assigned this response (ADR-0128), stamped on
     /// every chunk and the terminator.
     pub stream_id: u64,
@@ -54,7 +54,7 @@ impl ResponseStream {
     /// handler stores an `Option<ResponseStream>` that stays `None` until
     /// the first grant arms it.
     #[must_use]
-    pub fn from_credit(sender: AnyActorRef, credit: &HttpStreamCredit) -> Self {
+    pub fn from_credit(sender: ErasedActorRef, credit: &HttpStreamCredit) -> Self {
         Self { counterparty: sender, stream_id: credit.stream_id }
     }
 
@@ -79,7 +79,7 @@ impl ResponseStream {
 pub struct RequestStream {
     /// The proven sender that opened the request stream — every credit
     /// grant on this handle targets it.
-    pub counterparty: AnyActorRef,
+    pub counterparty: ErasedActorRef,
     /// The stream id the cap assigned this upload (ADR-0128), stamped on
     /// every credit grant.
     pub stream_id: u64,
@@ -91,7 +91,7 @@ impl RequestStream {
     /// sourceless dispatch yields none — the same guard as
     /// [`ResponseStream::from_credit`], decided at the call site.
     #[must_use]
-    pub fn from_open(sender: AnyActorRef, open: &HttpRequestStreamOpen) -> Self {
+    pub fn from_open(sender: ErasedActorRef, open: &HttpRequestStreamOpen) -> Self {
         Self { counterparty: sender, stream_id: open.stream_id }
     }
 
@@ -111,7 +111,7 @@ impl RequestStream {
 pub struct WebSocketStream {
     /// The proven sender that owns the upgraded connection — every outbound
     /// message and close on this handle targets it.
-    pub counterparty: AnyActorRef,
+    pub counterparty: ErasedActorRef,
     /// The connection's stream id (ADR-0132), stamped on every outbound
     /// message and close.
     pub stream_id: u64,
@@ -123,7 +123,7 @@ impl WebSocketStream {
     /// `sender` is that handler's `ctx.sender()`; a sourceless dispatch
     /// yields none, so the call site decides.
     #[must_use]
-    pub fn from_credit(sender: AnyActorRef, credit: &HttpStreamCredit) -> Self {
+    pub fn from_credit(sender: ErasedActorRef, credit: &HttpStreamCredit) -> Self {
         Self { counterparty: sender, stream_id: credit.stream_id }
     }
 

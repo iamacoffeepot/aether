@@ -438,7 +438,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         correlation: u64,
         conn_id: ConnId,
-        handler: AnyActorRef,
+        handler: ErasedActorRef,
         accept: &WebSocketAccept,
     ) {
         self.in_flight.remove(&correlation);
@@ -533,7 +533,7 @@ impl HttpShardState {
     /// The websocket-upgraded connection's dispatch handler + `stream_id`
     /// (ADR-0132), or `None` if `conn_id` names no such connection — the
     /// shared lookup behind every ws dispatch/close/send site.
-    fn ws_target(&self, conn_id: ConnId) -> Option<(AnyActorRef, u64)> {
+    fn ws_target(&self, conn_id: ConnId) -> Option<(ErasedActorRef, u64)> {
         self.connections.get(&conn_id).and_then(|conn| conn.websocket.as_ref()).map(|ws| (ws.handler, ws.stream_id))
     }
 

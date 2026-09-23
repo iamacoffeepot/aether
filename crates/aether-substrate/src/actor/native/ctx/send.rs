@@ -15,7 +15,7 @@
 //! what it does fails to unify rather than lying in its manifest.
 
 use aether_actor::{
-    Addressable, AnyActorRef, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi,
+    Addressable, CallerAddressable, CallerScoped, Emit, ErasedActorRef, HandlesKind, MailSender, Manual, Multi,
     OutboundReply, ReplyMode, Singleton,
 };
 use aether_data::{Kind, KindId, MailId, MailboxId};
@@ -51,13 +51,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// — subscribers register at runtime — so this keeps taking a runtime set
     /// rather than the typed `R: Singleton + HandlesKind<K>` shape of
     /// [`MailSender::send`]. What each one is has narrowed: an
-    /// [`AnyActorRef`] the publisher already holds, proven when the
+    /// [`ErasedActorRef`] the publisher already holds, proven when the
     /// subscription was accepted (ADR-0230), not a position handed over at
     /// the fan-out. The empty recipient set is a fast no-op — encoding only
     /// runs when there's at least one consumer.
     ///
     /// Issue iamacoffeepot/aether#723.
-    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = AnyActorRef>, payload: &K) {
+    pub fn fanout<K: Kind>(&mut self, recipients: impl IntoIterator<Item = ErasedActorRef>, payload: &K) {
         let mut recipients = recipients.into_iter();
         let Some(first) = recipients.next() else {
             return;
@@ -109,7 +109,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// [`Self::send_envelope_tracked`] for a caller that holds a proof:
-    /// the ADR-0230 form of the untyped dispatch, taking the [`AnyActorRef`]
+    /// the ADR-0230 form of the untyped dispatch, taking the [`ErasedActorRef`]
     /// rather than the position under it.
     ///
     /// A capability fanning out pre-encoded bytes to its own subscriber
@@ -125,7 +125,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// encodes one typed `K` and pushes it to many recipients, while this
     /// takes `(KindId, &[u8])` already encoded and dispatches one.
     #[must_use]
-    pub fn send_envelope_tracked_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+    pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(
             target.id().0,
             kind.0,
@@ -201,7 +201,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// [`Self::send_envelope_detached`] for a caller that holds a proof:
     /// the ADR-0230 form of the fresh-chain untyped dispatch, taking the
-    /// [`AnyActorRef`] rather than the position under it.
+    /// [`ErasedActorRef`] rather than the position under it.
     ///
     /// Use this when the cap is acting on an external event (wire-borne
     /// RPC call, file watcher, timer) rather than forwarding a mail that
@@ -214,7 +214,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// never fire (descendants don't settle individually; only the chain
     /// root does).
     #[must_use]
-    pub fn send_envelope_detached_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+    pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
     }
 
@@ -321,7 +321,7 @@ impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
 
     // By-id detached send — the by-name body with the caller's id, `None` /
     // `None` lineage minting a fresh root (ADR-0080 §7).
-    fn send_detached_to<K: Kind>(&mut self, target: AnyActorRef, payload: &K) {
+    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(target.id().0, K::ID.0, &bytes, 1, None, None);
     }

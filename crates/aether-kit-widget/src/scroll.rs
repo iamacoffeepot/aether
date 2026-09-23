@@ -13,7 +13,7 @@
 //! painting and hit testing from drifting under non-zero panel origins or
 //! ancestor offsets.
 
-use aether_actor::{ActorInitError, AnyActorRef, Erased, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, ErasedActorRef, Manual, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::MailboxId;
 use aether_kinds::MouseWheel;
 use aether_math::Vec2;
@@ -29,7 +29,7 @@ use crate::{
 use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
 struct ScrollContent {
-    reference: AnyActorRef,
+    reference: ErasedActorRef,
     /// The content is itself a scroll container, so its `ScrollOutcome` and
     /// `ScrollResidual` are the ones this container relays and applies.
     is_scroll: bool,
@@ -309,7 +309,7 @@ impl ScrollWidget {
         }
     }
 
-    fn nested_source(&self, source: Option<AnyActorRef>) -> bool {
+    fn nested_source(&self, source: Option<ErasedActorRef>) -> bool {
         self.content.as_ref().is_some_and(|content| content.is_scroll && source == Some(content.reference))
     }
 }
@@ -457,7 +457,7 @@ mod tests {
 
     /// What `spawn_virtual_list_child` hands back: a child that scrolls itself
     /// on the wheel without being a scroll viewport.
-    fn spawned_virtual_list(reference: AnyActorRef) -> SpawnedChild {
+    fn spawned_virtual_list(reference: ErasedActorRef) -> SpawnedChild {
         SpawnedChild {
             reference,
             width_pixels: None,

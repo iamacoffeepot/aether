@@ -1,6 +1,6 @@
 //! Input-only editor shell over independently-rooted peer regions (ADR-0141).
 
-use aether_actor::{ActorInitError, AnyActorRef, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
@@ -33,7 +33,7 @@ impl EditorShell {
         &self,
         ctx: &mut WasmCtx<'_>,
         focus: Option<RegionFocusTransition>,
-        target: Option<AnyActorRef>,
+        target: Option<ErasedActorRef>,
         payload: &K,
     ) {
         if let Some(next) = focus.and_then(|transition| transition.next)

@@ -15,7 +15,7 @@ use super::{ActorTypeTag, WasmCtx};
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::ReplyMode;
 use crate::model::{Addressable, HandlesKind};
-use crate::reference::AnyActorRef;
+use crate::reference::ErasedActorRef;
 
 /// A typed sendable handle to an inline child of type `C` — what
 /// [`WasmCtx::spawn_inline_child`] hands back, and what
@@ -30,7 +30,7 @@ use crate::reference::AnyActorRef;
 /// instead of nothing at all.
 ///
 /// A parent keeping children of several types erases the handle with
-/// [`Self::erase`] and keeps the [`AnyActorRef`] it yields — still a proof,
+/// [`Self::erase`] and keeps the [`ErasedActorRef`] it yields — still a proof,
 /// minus the type, and what a send or `despawn_inline_child` takes.
 /// [`Self::id`] remains as the key for a registry lookup, never as a send or
 /// despawn target: every by-id send takes a proof.
@@ -87,7 +87,7 @@ impl<C: Addressable> InlineChild<C> {
         ctx.send_to(self.erase(), payload);
     }
 
-    /// This child as an [`AnyActorRef`] — the ADR-0230 §3 spawn-result door
+    /// This child as an [`ErasedActorRef`] — the ADR-0230 §3 spawn-result door
     /// for a heterogeneous child set. A parent keeping children of several
     /// types keeps proofs, not positions: the erased reference drops `C` but
     /// keeps the fact that the spawn registered the child, so it is a valid
@@ -97,8 +97,8 @@ impl<C: Addressable> InlineChild<C> {
     /// and by its composite node's spawn. The *reference* erasure: unrelated
     /// to the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
     #[must_use]
-    pub const fn erase(self) -> AnyActorRef {
-        AnyActorRef::new(self.id)
+    pub const fn erase(self) -> ErasedActorRef {
+        ErasedActorRef::new(self.id)
     }
 
     /// This child's alias [`MailboxId`] — the key a registry lookup takes. A

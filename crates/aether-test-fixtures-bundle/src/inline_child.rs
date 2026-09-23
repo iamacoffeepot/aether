@@ -83,7 +83,7 @@
 #![allow(clippy::unused_self, clippy::needless_pass_by_value)]
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, AnyActorRef, Erased, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
+    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, Manual, OutboundReply, SpawnError, Subname, WasmActor,
     WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
@@ -243,7 +243,7 @@ impl WasmActor for InlineStatefulChild {
 pub struct InlineDespawnParent {
     /// The spawned child as an erased proof (set in `wire`), the handle
     /// the `DespawnChild` handler tears down. `None` until `wire` runs.
-    child: Option<AnyActorRef>,
+    child: Option<ErasedActorRef>,
 }
 
 #[actor]
@@ -510,7 +510,7 @@ impl WasmActor for NestedDetachedLeaf {
 /// `export: Some("test.inline.tag_parent")`.
 pub struct InlineTagParent {
     /// The by-tag-spawned child as an erased proof (set in `wire`).
-    child: Option<AnyActorRef>,
+    child: Option<ErasedActorRef>,
     /// Whether the deliberately-unknown-tag spawn attempted in `wire`
     /// returned [`SpawnError::UnknownActorTag`] — the only correct outcome.
     unknown_tag_rejected: bool,

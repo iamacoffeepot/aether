@@ -27,7 +27,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, RwLock};
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 
 use crate::actor::native::envelope::Envelope;
 use crate::mail::MailboxId;
@@ -157,7 +157,7 @@ impl ActorRegistry {
     /// ADR-0063: a poisoned lock means a prior writer panicked under
     /// the guard, a substrate-level invariant violation.
     #[must_use]
-    pub fn is_live(&self, actor: AnyActorRef) -> bool {
+    pub fn is_live(&self, actor: ErasedActorRef) -> bool {
         self.is_live_at(actor.id())
     }
 

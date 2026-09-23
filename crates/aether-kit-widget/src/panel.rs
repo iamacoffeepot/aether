@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, AnyActorRef, Erased, ErasedWasmActor, Manual, ModuleChild, Sends, Subname, WasmActor,
-    WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Sends, Subname,
+    WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -93,7 +93,7 @@ use crate::{accept_open_child_list, emit, flush_membership};
 /// value-up events under (for the map-editor translation / logging) — the
 /// child's spec subname.
 struct ChildRef {
-    reference: AnyActorRef,
+    reference: ErasedActorRef,
     name: String,
 }
 
@@ -120,7 +120,7 @@ impl ChildLayout {
 }
 
 pub struct SpawnedChild {
-    pub reference: AnyActorRef,
+    pub reference: ErasedActorRef,
     pub width_pixels: Option<f32>,
     pub height_pixels: f32,
     pub pointer_eligible: bool,
@@ -336,7 +336,7 @@ impl WidgetPanel {
 
     /// The logical name of the child a value-up event came from, for
     /// attribution.
-    fn child_name(&self, source: Option<AnyActorRef>) -> &str {
+    fn child_name(&self, source: Option<ErasedActorRef>) -> &str {
         source
             .and_then(|source| self.children.iter().find(|child| child.reference == source))
             .map_or("unknown", |child| child.name.as_str())
@@ -357,7 +357,7 @@ fn stack_column(config: &PanelConfig, gap: f32) -> Column {
 ///
 /// A spec that failed to spawn never reaches here, so it contributes neither a
 /// row nor the gap that would have preceded it.
-fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<AnyActorRef>> {
+fn stack_rows<'a>(children: impl IntoIterator<Item = &'a SpawnedChild>) -> Vec<Row<ErasedActorRef>> {
     children.into_iter().map(|child| stack_row(child.reference, child.width_pixels, child.height_pixels)).collect()
 }
 
@@ -894,7 +894,7 @@ fn apply_availability(sends: &mut Sends<'_>, effects: AvailabilityEffects, modif
 
 /// Spawn one inline widget under the caller's actual logical actor type,
 /// logging and dropping the slot on failure.
-fn spawn<A>(ctx: &mut WasmCtx<'_, Erased, Manual>, subname: &str, config: &A::Config) -> Option<AnyActorRef>
+fn spawn<A>(ctx: &mut WasmCtx<'_, Erased, Manual>, subname: &str, config: &A::Config) -> Option<ErasedActorRef>
 where
     A: ModuleChild + ErasedWasmActor,
     <A as WasmActor>::State: ErasedWasmActor,

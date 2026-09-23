@@ -16,7 +16,7 @@ use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Reaches, Singleton,
 };
-use crate::reference::{ActorRef, AnyActorRef};
+use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
 use crate::wasm::mailbox::WasmActorMailbox;
@@ -293,7 +293,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         ActorRef::new(self.singleton_handle::<R>().mailbox_id())
     }
 
-    /// The envelope sender as a proven [`AnyActorRef`]: mints the dispatch
+    /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
     /// source the host stamped, with no lookup. `None` for a sourceless
     /// dispatch (session / remote-engine / broadcast mail, or a lifecycle
     /// hook with no inbound). Needs no actor type, so it exists on the
@@ -301,8 +301,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// view (issue 2687), and a cluster-membrane interposer reads its lane
     /// direction there by comparing the sender against a stored child.
     #[must_use]
-    pub fn sender(&self) -> Option<AnyActorRef> {
-        (self.source != NO_INBOUND_SOURCE).then(|| AnyActorRef::new(MailboxId(self.source)))
+    pub fn sender(&self) -> Option<ErasedActorRef> {
+        (self.source != NO_INBOUND_SOURCE).then(|| ErasedActorRef::new(MailboxId(self.source)))
     }
 
     /// Typed singleton handle construction: the shared body behind

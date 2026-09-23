@@ -4,7 +4,7 @@
 //!
 //! The callers of the gated mint outside the SDK itself. Three mint with no
 //! read: the `Registry::declared_dependency` caller proved the dependency
-//! `Live` at the dependent's birth, the `Registry::structural_any` caller
+//! `Live` at the dependent's birth, the `Registry::structural_erased` caller
 //! mints a host-supplied position — the stamped dispatch source — and every
 //! `Registry::activated` caller has just published the actor's own `Live`
 //! route, whether the birth was a staged child, an embedder spawn, or a
@@ -14,7 +14,7 @@
 
 use core::fmt;
 
-use aether_actor::{__mint_actor_ref, __mint_any_actor_ref, ActorRef, AnyActorRef};
+use aether_actor::{__mint_actor_ref, __mint_erased_actor_ref, ActorRef, ErasedActorRef};
 
 use crate::mail::{KindId, MailboxId};
 
@@ -56,7 +56,7 @@ impl Registry {
     /// The http server's request reader is the consumer: it holds route
     /// members as references and skips one whose actor has departed but
     /// whose `MonitorNotice` has not yet purged it.
-    pub fn is_live(&self, target: AnyActorRef) -> bool {
+    pub fn is_live(&self, target: ErasedActorRef) -> bool {
         self.is_live_at(target.id())
     }
 
@@ -126,8 +126,8 @@ impl Registry {
     /// `crate::actor::native::slot::pumped`, which names the position it
     /// booted the probe at: a host turn has no sender, so
     /// `NativeCtx::sender` cannot serve.
-    pub(crate) fn structural_any(position: MailboxId) -> AnyActorRef {
-        __mint_any_actor_ref(position)
+    pub(crate) fn structural_erased(position: MailboxId) -> ErasedActorRef {
+        __mint_erased_actor_ref(position)
     }
 
     /// Prove a `position` that arrived in a payload (ADR-0230 section 3's
@@ -157,10 +157,10 @@ impl Registry {
     /// Its one caller is
     /// [`NativeCtx::resolve_live`](crate::actor::native::NativeCtx::resolve_live),
     /// the single public spelling a capability uses.
-    pub(crate) fn resolve_live(&self, position: MailboxId) -> Result<AnyActorRef, ResolveLiveError> {
+    pub(crate) fn resolve_live(&self, position: MailboxId) -> Result<ErasedActorRef, ResolveLiveError> {
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {
-            ResolvedRoute::Live { .. } => Ok(__mint_any_actor_ref(position)),
+            ResolvedRoute::Live { .. } => Ok(__mint_erased_actor_ref(position)),
             ResolvedRoute::Dropped => Err(ResolveLiveError::Dropped(position)),
             ResolvedRoute::Starting { .. } | ResolvedRoute::Unknown => Err(ResolveLiveError::Unknown(position)),
         }

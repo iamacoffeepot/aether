@@ -25,7 +25,7 @@ pub use aether_substrate::actor::native::{
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::runtime::trace::SettlementHold;
 
-use aether_actor::{ActorRef, AnyActorRef, runtime};
+use aether_actor::{ActorRef, ErasedActorRef, runtime};
 use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
@@ -58,7 +58,7 @@ pub struct TcpCapabilityState {
     /// pins the cap's monitor on the listener until close. Keyed by the
     /// listener's reference, which is the sender of its close notice, so
     /// the notice finds its entry by keyed lookup (ADR-0230).
-    pub listeners: HashMap<AnyActorRef, ListenerEntry>,
+    pub listeners: HashMap<ErasedActorRef, ListenerEntry>,
     /// Monotonic id assigned to the next outbound connect attempt.
     pub next_connect_id: u64,
     /// Outstanding connect replies parked until the dial sidecar
@@ -108,7 +108,7 @@ pub struct PendingConnect {
     pub addr: String,
     pub name: Option<String>,
     /// The consumer proven at `Connect` receipt (ADR-0230).
-    pub consumer: Option<AnyActorRef>,
+    pub consumer: Option<ErasedActorRef>,
 }
 
 /// The dial a staged session birth is answering, plus the request vocabulary

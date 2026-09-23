@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{AnyActorRef, Manual, OutboundReply, ReplyMode, Single};
+use aether_actor::{ErasedActorRef, Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{ActorPath, Kind, KindDescriptor};
 use aether_kinds::{
     ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
@@ -552,7 +552,7 @@ impl ComponentHostCapabilityState {
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         hash: &str,
-        live_actor: Option<AnyActorRef>,
+        live_actor: Option<ErasedActorRef>,
     ) {
         let entry = self.boot_registry.get_mut(hash).expect("requested actor's Live boot remains registered");
         entry.pending_requests = entry
@@ -566,7 +566,7 @@ impl ComponentHostCapabilityState {
         self.drop_orphan_boot(ctx, hash);
     }
 
-    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, actor: AnyActorRef) {
+    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, actor: ErasedActorRef) {
         let Some(hash) = self.boot_hash_by_actor.remove(&actor) else {
             return;
         };
@@ -686,7 +686,7 @@ impl ComponentHostCapabilityState {
     fn commit_replacement_boot<M: ReplyMode, A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
-        actor: AnyActorRef,
+        actor: ErasedActorRef,
         boot_operation: u64,
         new_hash: Option<String>,
     ) {
@@ -702,13 +702,13 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    fn next_boot_operation(&mut self, actor: AnyActorRef) -> u64 {
+    fn next_boot_operation(&mut self, actor: ErasedActorRef) -> u64 {
         let sequence = self.boot_operation_sequence_by_actor.entry(actor).or_default();
         *sequence = sequence.checked_add(1).expect("an actor's boot-operation sequence cannot overflow");
         *sequence
     }
 
-    fn accept_successful_boot_operation(&mut self, actor: AnyActorRef, boot_operation: u64) -> bool {
+    fn accept_successful_boot_operation(&mut self, actor: ErasedActorRef, boot_operation: u64) -> bool {
         let dominant = self.dominant_boot_operation_by_actor.entry(actor).or_default();
         if boot_operation < *dominant {
             return false;
@@ -717,7 +717,7 @@ impl ComponentHostCapabilityState {
         true
     }
 
-    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor: AnyActorRef) {
+    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor: ErasedActorRef) {
         let boot_operation = self.next_boot_operation(actor);
         self.dominant_boot_operation_by_actor.insert(actor, boot_operation);
     }
@@ -769,7 +769,7 @@ mod tests {
 
     /// Register a test-local inbox under `name` and prove it the way a drop or
     /// replace receipt does.
-    fn proven_actor(state: &ComponentHostCapabilityState, ctx: &NativeCtx<'_>, name: &str) -> AnyActorRef {
+    fn proven_actor(state: &ComponentHostCapabilityState, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
         let position = state.registry.register_inbox(&boot_authority(), name, noop_handler());
 
         ctx.resolve_live(position).expect("a freshly registered inbox proves")

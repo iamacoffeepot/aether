@@ -29,7 +29,7 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use aether_actor::{AnyActorRef, ReplyMode};
+use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::Kind;
 use aether_substrate::actor::native::{DispatchId, Erased, NativeCtx, Pending};
 
@@ -61,12 +61,12 @@ pub struct PerSenderEgress {
     /// sender `ctx.sender()` (ADR-0230). A local component keys on its own
     /// proof; MCP sessions, remote engines, and substrate-internal pushes have
     /// no local sender and share the `None` bucket.
-    senders: HashMap<Option<AnyActorRef>, SenderEntry>,
+    senders: HashMap<Option<ErasedActorRef>, SenderEntry>,
     /// Round-robin cursor over the senders that currently have pending work.
     /// A key is present iff its entry holds ≥1 pending request; admission
     /// rotates across it so a freed global slot does not always favor the
     /// sender whose completion freed it (ADR-0158 §3 drain fairness).
-    waiting: VecDeque<Option<AnyActorRef>>,
+    waiting: VecDeque<Option<ErasedActorRef>>,
 }
 
 impl PerSenderEgress {
@@ -97,7 +97,7 @@ impl PerSenderEgress {
     pub fn submit<O, F, M>(
         &mut self,
         ctx: &mut NativeCtx<'_, Erased, M>,
-        sender: Option<AnyActorRef>,
+        sender: Option<ErasedActorRef>,
         work: F,
     ) -> Pending<O>
     where
@@ -133,7 +133,7 @@ impl PerSenderEgress {
     /// sender's slot and one global slot, admits the next waiting request
     /// (rotating fairly across senders), then reclaims the completing sender's
     /// entry if it drained fully idle.
-    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>, sender: Option<AnyActorRef>) {
+    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>, sender: Option<ErasedActorRef>) {
         if let Some(entry) = self.senders.get_mut(&sender) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
         }
@@ -199,12 +199,12 @@ impl PerSenderEgress {
     }
 
     /// A `sender`'s running-fetch count, `0` if it has no live entry.
-    fn in_flight_for(&self, sender: Option<AnyActorRef>) -> usize {
+    fn in_flight_for(&self, sender: Option<ErasedActorRef>) -> usize {
         self.senders.get(&sender).map_or(0, |e| e.in_flight)
     }
 
     /// A `sender`'s queued-fetch count, `0` if it has no live entry.
-    fn pending_for(&self, sender: Option<AnyActorRef>) -> usize {
+    fn pending_for(&self, sender: Option<ErasedActorRef>) -> usize {
         self.senders.get(&sender).map_or(0, |e| e.pending.len())
     }
 
@@ -224,7 +224,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::PerSenderEgress;
-    use aether_actor::AnyActorRef;
+    use aether_actor::ErasedActorRef;
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
@@ -271,19 +271,19 @@ mod tests {
 
     /// Register a test-local sender inbox under `name` and prove it the way
     /// `ctx.sender()` hands the cap a local component's proof.
-    fn sender(registry: &Registry, binding: &Arc<NativeBinding>, name: &str) -> AnyActorRef {
+    fn sender(registry: &Registry, binding: &Arc<NativeBinding>, name: &str) -> ErasedActorRef {
         let position = registry.register_inbox(&boot_authority(), name, noop_handler());
         let ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         ctx.resolve_live(position).expect("a freshly registered inbox proves")
     }
 
-    fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<AnyActorRef>, cid: u64) {
+    fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>, cid: u64) {
         let mut ctx = NativeCtx::new(binding, session_reply_to(cid), MailId::NONE, root_id(cid));
         q.submit(&mut ctx, sender, move || Answer { value: cid });
     }
 
-    fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<AnyActorRef>) {
+    fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>) {
         let mut ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
         q.on_complete(&mut ctx, sender);
     }

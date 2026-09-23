@@ -19,8 +19,8 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, AnyActorRef, Erased, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle,
-    SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, MailboxId, Manual, OutboundReply, PriorState,
+    ReplyHandle, SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_data::KindId;
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
@@ -231,7 +231,7 @@ impl WasmActor for BehaviorHost {
     fn on_lane(&mut self, ctx: &mut WasmCtx<'_>, mail: Mail<'_>) {
         self.try_prime(&*ctx);
         let kind = mail.kind();
-        let is_up = self.lane_is_up(ctx.sender().map(AnyActorRef::id));
+        let is_up = self.lane_is_up(ctx.sender().map(ErasedActorRef::id));
         let bytes = mail.bytes();
 
         // A configured down-lane frame trigger offers FRAME to the script

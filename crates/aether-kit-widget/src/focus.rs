@@ -9,7 +9,7 @@
 
 use alloc::vec::Vec;
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_math::{Aabb, Vec3};
 
 use crate::WidgetControlState;
@@ -22,14 +22,14 @@ pub enum FocusDirection {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FocusTransition {
-    pub previous: Option<AnyActorRef>,
-    pub next: Option<AnyActorRef>,
+    pub previous: Option<ErasedActorRef>,
+    pub next: Option<ErasedActorRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HoverTransition {
-    pub previous: Option<AnyActorRef>,
-    pub next: Option<AnyActorRef>,
+    pub previous: Option<ErasedActorRef>,
+    pub next: Option<ErasedActorRef>,
 }
 
 /// Cleanup caused by a live availability or eligibility update. Losing
@@ -39,7 +39,7 @@ pub struct HoverTransition {
 pub struct AvailabilityEffects {
     pub focus: Option<FocusTransition>,
     pub hover: Option<HoverTransition>,
-    pub cleared_capture: Option<AnyActorRef>,
+    pub cleared_capture: Option<ErasedActorRef>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -63,7 +63,7 @@ struct Availability {
 }
 
 struct Entry {
-    child: AnyActorRef,
+    child: ErasedActorRef,
     rect: Aabb,
     eligibility: FocusEligibility,
     availability: Availability,
@@ -82,14 +82,14 @@ impl Entry {
 #[derive(Default)]
 pub struct Focus {
     entries: Vec<Entry>,
-    focused: Option<AnyActorRef>,
-    hovered: Option<AnyActorRef>,
-    capture: Option<AnyActorRef>,
+    focused: Option<ErasedActorRef>,
+    hovered: Option<ErasedActorRef>,
+    capture: Option<ErasedActorRef>,
     /// The modal pointer grab an open dropdown or popover holds: every
     /// pointer event routes here until it ends, across releases, so a press
     /// outside the widget's own slot still reaches it (to select a row drawn
     /// in its overlay, or to dismiss). Outranks drag capture.
-    grab: Option<AnyActorRef>,
+    grab: Option<ErasedActorRef>,
 }
 
 impl Focus {
@@ -122,19 +122,19 @@ impl Focus {
     /// check every retained routing answer passes through, so a capture or a
     /// grab held over a rebuild that dropped its child is inert rather than a
     /// black hole every press falls into.
-    fn pointer_live_child(&self, child: AnyActorRef) -> bool {
+    fn pointer_live_child(&self, child: ErasedActorRef) -> bool {
         self.entries.iter().any(|entry| entry.child == child && entry.pointer_live())
     }
 
     /// The same, for the keyboard ring.
-    fn focus_live_child(&self, child: AnyActorRef) -> bool {
+    fn focus_live_child(&self, child: ErasedActorRef) -> bool {
         self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
     }
 
     /// Route every pointer event to `child` until [`Self::end_grab`] — the
     /// modal grab a widget asks for while its overlay is open (a dropdown's
     /// list). Ignored for a child the table does not hold live.
-    pub fn begin_grab(&mut self, child: AnyActorRef) {
+    pub fn begin_grab(&mut self, child: ErasedActorRef) {
         if self.pointer_live_child(child) {
             self.grab = Some(child);
         }
@@ -147,7 +147,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn grabbed(&self) -> Option<AnyActorRef> {
+    pub fn grabbed(&self) -> Option<ErasedActorRef> {
         self.grab.filter(|child| self.pointer_live_child(*child))
     }
 
@@ -155,7 +155,7 @@ impl Focus {
     /// updated later without rebuilding the table.
     pub fn register(
         &mut self,
-        child: AnyActorRef,
+        child: ErasedActorRef,
         frame: FocusRect,
         eligibility: FocusEligibility,
         state: &WidgetControlState,
@@ -173,7 +173,7 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn hit_test(&self, x: f32, y: f32) -> Option<AnyActorRef> {
+    pub fn hit_test(&self, x: f32, y: f32) -> Option<ErasedActorRef> {
         let point = Vec3::new(x, y, 0.0);
         self.entries
             .iter()
@@ -183,16 +183,16 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn pointer_target(&self, x: f32, y: f32) -> Option<AnyActorRef> {
+    pub fn pointer_target(&self, x: f32, y: f32) -> Option<ErasedActorRef> {
         self.grabbed().or_else(|| self.captured()).or_else(|| self.hit_test(x, y))
     }
 
     #[must_use]
-    pub fn keyboard_target(&self) -> Option<AnyActorRef> {
+    pub fn keyboard_target(&self) -> Option<ErasedActorRef> {
         self.focused.filter(|child| self.focus_live_child(*child))
     }
 
-    pub fn begin_capture(&mut self, child: AnyActorRef) {
+    pub fn begin_capture(&mut self, child: ErasedActorRef) {
         if self.pointer_live_child(child) {
             self.capture = Some(child);
         }
@@ -219,11 +219,11 @@ impl Focus {
     }
 
     #[must_use]
-    pub fn captured(&self) -> Option<AnyActorRef> {
+    pub fn captured(&self) -> Option<ErasedActorRef> {
         self.capture.filter(|child| self.pointer_live_child(*child))
     }
 
-    pub fn set_focus(&mut self, next: Option<AnyActorRef>) -> Option<FocusTransition> {
+    pub fn set_focus(&mut self, next: Option<ErasedActorRef>) -> Option<FocusTransition> {
         if let Some(child) = next
             && !self.entries.iter().any(|entry| entry.child == child && entry.focus_live())
         {
@@ -243,7 +243,7 @@ impl Focus {
     /// second is what clears focus — and [`Self::focus_hit`] answers `None` to
     /// both.
     #[must_use]
-    pub fn focus_hit_test(&self, x: f32, y: f32) -> Option<AnyActorRef> {
+    pub fn focus_hit_test(&self, x: f32, y: f32) -> Option<ErasedActorRef> {
         let point = Vec3::new(x, y, 0.0);
         self.entries
             .iter()
@@ -299,7 +299,7 @@ impl Focus {
     /// handshake (`grabbed() == source`) misses while the child is away, and
     /// the grab re-arms the moment the child comes back, swallowing every press
     /// on the panel. Becoming available does not auto-focus or synthesize hover.
-    pub fn update_availability(&mut self, child: AnyActorRef, state: &WidgetControlState) -> AvailabilityEffects {
+    pub fn update_availability(&mut self, child: ErasedActorRef, state: &WidgetControlState) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
@@ -316,7 +316,7 @@ impl Focus {
     /// either does not auto-focus or synthesize hover. Hidden or disabled
     /// children stay unavailable. Unknown sources and identical updates are
     /// inert. Ring order, frames, and unrelated routing are unchanged.
-    pub fn update_eligibility(&mut self, child: AnyActorRef, eligibility: FocusEligibility) -> AvailabilityEffects {
+    pub fn update_eligibility(&mut self, child: ErasedActorRef, eligibility: FocusEligibility) -> AvailabilityEffects {
         let Some(index) = self.entries.iter().position(|entry| entry.child == child) else {
             return AvailabilityEffects::default();
         };
@@ -331,7 +331,7 @@ impl Focus {
 
     fn reconcile_live_routing(
         &mut self,
-        child: AnyActorRef,
+        child: ErasedActorRef,
         index: usize,
         was_pointer_live: bool,
         was_focus_live: bool,
@@ -361,7 +361,7 @@ impl Focus {
         effects
     }
 
-    fn next_live_from(&self, index: usize, direction: FocusDirection) -> Option<AnyActorRef> {
+    fn next_live_from(&self, index: usize, direction: FocusDirection) -> Option<ErasedActorRef> {
         let count = self.entries.len();
         for offset in 0..count {
             let candidate = match direction {

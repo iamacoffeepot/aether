@@ -26,7 +26,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::AnyActorRef;
+use aether_actor::ErasedActorRef;
 use aether_math::Vec2;
 
 use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, WidgetDrawList};
@@ -41,7 +41,7 @@ use crate::{ChildrenChanged, MembershipEntry, WidgetClipRect, WidgetDrawItem, Wi
 /// child's ordinary draws in the overlay lane instead of the ordinary one —
 /// see [`Composite::set_slot_overlay`].
 struct Slot {
-    child: AnyActorRef,
+    child: ErasedActorRef,
     subname: String,
     origin: Vec2,
     clip: Option<WidgetClipRect>,
@@ -89,7 +89,7 @@ impl Composite {
     /// membership delta, so a re-register does not re-announce the child.
     pub fn register_slot(
         &mut self,
-        child: AnyActorRef,
+        child: ErasedActorRef,
         origin: Vec2,
         clip: Option<WidgetClipRect>,
         subname: &str,
@@ -110,7 +110,7 @@ impl Composite {
     /// move one retained content root as their offset changes; re-registering
     /// would either be ignored as a duplicate or manufacture false membership
     /// churn.
-    pub fn update_slot_layout(&mut self, child: AnyActorRef, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
+    pub fn update_slot_layout(&mut self, child: ErasedActorRef, origin: Vec2, clip: Option<WidgetClipRect>) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
             return false;
         };
@@ -137,7 +137,7 @@ impl Composite {
     /// There is no layer number and no z-index here: the group is a set of
     /// slots the root already ordered, and the lane is the two-step order the
     /// root already emits in.
-    pub fn set_slot_overlay(&mut self, child: AnyActorRef, overlay: bool) -> bool {
+    pub fn set_slot_overlay(&mut self, child: ErasedActorRef, overlay: bool) -> bool {
         let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) else {
             return false;
         };
@@ -150,7 +150,7 @@ impl Composite {
     /// toward completion. Records a membership delta naming the dropped slot's
     /// `subname` (self-derived, so the caller need only key by the stable
     /// `child` alias). Returns whether a slot was removed.
-    pub fn forget_slot(&mut self, child: AnyActorRef) -> bool {
+    pub fn forget_slot(&mut self, child: ErasedActorRef) -> bool {
         let Some(index) = self.slots.iter().position(|slot| slot.child == child) else {
             return false;
         };
@@ -215,7 +215,7 @@ impl Composite {
     /// alias. A reply from a `child` with no registered slot is dropped
     /// (it cannot belong to this node's layout); a second reply from the
     /// same child overwrites. Returns whether the reply landed in a slot.
-    pub fn fill(&mut self, child: AnyActorRef, list: WidgetDrawList) -> bool {
+    pub fn fill(&mut self, child: ErasedActorRef, list: WidgetDrawList) -> bool {
         if let Some(slot) = self.slots.iter_mut().find(|slot| slot.child == child) {
             slot.list = Some(list);
             true

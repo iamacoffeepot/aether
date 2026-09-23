@@ -38,7 +38,7 @@ use aether_substrate::net::teardown_connect_addr;
 // methods below ride the same wall (used locally here).
 pub use crate::kinds::{CallSettled, ForwardEnvelope, RegisterEngineRouteResult};
 pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
-pub use aether_actor::AnyActorRef;
+pub use aether_actor::ErasedActorRef;
 pub use aether_codec::frame::{FrameError, write_frame};
 pub use aether_data::{EngineId, Kind};
 pub use aether_substrate::MonitorHandle;
@@ -81,7 +81,7 @@ pub struct InFlight {
     /// the call removes its correlation from that owner's
     /// [`RouteOwner::calls`] with one keyed lookup. `None` for a call
     /// dispatched into this server's local actor system.
-    pub route: Option<AnyActorRef>,
+    pub route: Option<ErasedActorRef>,
 }
 
 /// One registered engine route, keyed by its registrant in
@@ -117,11 +117,11 @@ pub struct RpcServerState {
     /// Engine → the proxy registered for it: the call path's lookup for
     /// an `engine = Some(_)` `Call`. Kept in step with
     /// [`Self::route_owners`]; neither map is ever scanned.
-    pub engine_routes: HashMap<EngineId, AnyActorRef>,
+    pub engine_routes: HashMap<EngineId, ErasedActorRef>,
     /// Registrant → its route: the notice path's lookup when a registered
     /// proxy departs, and the owner of its in-flight correlations. Kept in
     /// step with [`Self::engine_routes`]; neither map is ever scanned.
-    pub route_owners: HashMap<AnyActorRef, RouteOwner>,
+    pub route_owners: HashMap<ErasedActorRef, RouteOwner>,
     /// Cached `Arc<Mailer>` for the `Call` dispatcher's settlement
     /// subscription: it reads the chassis settlement registry and passes
     /// the same Arc into `subscribe_settlement_mail`. Init grabs it from
@@ -163,7 +163,7 @@ impl RpcServerState {
     pub fn register_engine_route(
         &mut self,
         ctx: &mut NativeCtx<'_>,
-        sender: AnyActorRef,
+        sender: ErasedActorRef,
         engine: EngineId,
     ) -> RegisterEngineRouteResult {
         if let Some(holder) = self.engine_routes.get(&engine) {

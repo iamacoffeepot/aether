@@ -123,7 +123,7 @@ fn expand_invocation(
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
-            parent: ::core::option::Option<::aether_actor::AnyActorRef>,
+            parent: ::core::option::Option<::aether_actor::ErasedActorRef>,
             waiting: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
                 #program::__macro_internals::Pending,

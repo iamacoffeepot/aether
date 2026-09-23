@@ -28,7 +28,7 @@ use std::time::Instant;
 fn ctx_monitor_fires_notice_at_target_close() {
     use crate::actor::native::spawn::Subname;
     use crate::mail::registry::MailboxEntry;
-    use aether_actor::AnyActorRef;
+    use aether_actor::ErasedActorRef;
     use aether_actor::HandlesKind;
     use aether_data::Kind;
     use std::sync::Mutex;
@@ -50,7 +50,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     struct Watcher {
         notice_count: Arc<AtomicU32>,
         sender_matched: Arc<AtomicBool>,
-        monitored: Option<AnyActorRef>,
+        monitored: Option<ErasedActorRef>,
         handle: Mutex<Option<MonitorHandle>>,
     }
     impl Addressable for Watcher {

@@ -16,7 +16,7 @@ mod menu;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, AnyActorRef, Manual, Single, runtime};
+use aether_actor::{ActorRef, Addressable, ErasedActorRef, Manual, Single, runtime};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -217,7 +217,7 @@ pub struct DesktopWindowCapabilityState {
     children: HashMap<WindowId, WindowChild>,
     /// Each supervised child's window, keyed by the child's reference: the
     /// `MonitorNotice` sender a departing child is found by (ADR-0230).
-    child_windows: HashMap<AnyActorRef, WindowId>,
+    child_windows: HashMap<ErasedActorRef, WindowId>,
     subscribers: WindowSubscribers,
     pending_creates: HashMap<WindowId, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,

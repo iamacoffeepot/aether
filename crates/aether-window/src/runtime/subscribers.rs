@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 
-use aether_actor::{AnyActorRef, ReplyMode};
+use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::KindId;
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::{Erased, NativeCtx};
@@ -22,9 +22,9 @@ use crate::{WindowId, WindowSelector};
 /// rows it holds, so a departure removes precisely that subscriber's rows
 /// without scanning anyone else's.
 pub struct WindowSubscribers {
-    all: HashMap<KindId, BTreeSet<AnyActorRef>>,
-    specific: HashMap<(WindowId, KindId), BTreeSet<AnyActorRef>>,
-    holders: HashMap<AnyActorRef, Holder>,
+    all: HashMap<KindId, BTreeSet<ErasedActorRef>>,
+    specific: HashMap<(WindowId, KindId), BTreeSet<ErasedActorRef>>,
+    holders: HashMap<ErasedActorRef, Holder>,
 }
 
 /// One subscriber's monitor and the rows it holds in the two selector maps.
@@ -60,7 +60,7 @@ impl WindowSubscribers {
         ctx: &mut NativeCtx<'_, Erased, M>,
         selector: WindowSelector,
         kind: KindId,
-        subscriber: AnyActorRef,
+        subscriber: ErasedActorRef,
     ) {
         self.insert(selector, kind, subscriber);
         self.watch(ctx, subscriber);
@@ -82,7 +82,7 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    pub fn unsubscribe(&mut self, selector: WindowSelector, kind: KindId, subscriber: AnyActorRef) {
+    pub fn unsubscribe(&mut self, selector: WindowSelector, kind: KindId, subscriber: ErasedActorRef) {
         self.remove(selector, kind, subscriber);
     }
 
@@ -108,7 +108,7 @@ impl WindowSubscribers {
     /// whose host-stamped sender is the departed subscriber (ADR-0230). The
     /// holder index names exactly the rows `subscriber` holds, so this
     /// removes those and touches nothing else.
-    pub fn unsubscribe_all(&mut self, subscriber: AnyActorRef) {
+    pub fn unsubscribe_all(&mut self, subscriber: ErasedActorRef) {
         let Some(holder) = self.holders.remove(&subscriber) else {
             return;
         };
@@ -117,7 +117,7 @@ impl WindowSubscribers {
         }
     }
 
-    pub fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<AnyActorRef> {
+    pub fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<ErasedActorRef> {
         let mut recipients = self.all.get(&kind).cloned().unwrap_or_default();
         if let Some(specific) = self.specific.get(&(window, kind)) {
             recipients.extend(specific);
@@ -125,7 +125,7 @@ impl WindowSubscribers {
         recipients
     }
 
-    fn insert(&mut self, selector: WindowSelector, kind: KindId, subscriber: AnyActorRef) {
+    fn insert(&mut self, selector: WindowSelector, kind: KindId, subscriber: ErasedActorRef) {
         match selector {
             WindowSelector::All => {
                 self.all.entry(kind).or_default().insert(subscriber);
@@ -137,7 +137,7 @@ impl WindowSubscribers {
         self.holders.entry(subscriber).or_default().rows.insert(Row::new(selector, kind));
     }
 
-    fn remove(&mut self, selector: WindowSelector, kind: KindId, subscriber: AnyActorRef) {
+    fn remove(&mut self, selector: WindowSelector, kind: KindId, subscriber: ErasedActorRef) {
         let row = Row::new(selector, kind);
         if let Some(holder) = self.holders.get_mut(&subscriber) {
             holder.rows.remove(&row);
@@ -147,7 +147,7 @@ impl WindowSubscribers {
 
     /// Remove `subscriber` from the selector map entry `row` names, dropping
     /// the entry once it is empty.
-    fn remove_row(&mut self, row: Row, subscriber: AnyActorRef) {
+    fn remove_row(&mut self, row: Row, subscriber: ErasedActorRef) {
         match row {
             Row::All(kind) => {
                 if self.all.get_mut(&kind).is_some_and(|recipients| {
@@ -168,7 +168,7 @@ impl WindowSubscribers {
         }
     }
 
-    fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
+    fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: ErasedActorRef) {
         let holder = self.holders.entry(subscriber).or_default();
         if holder.monitor.is_none() {
             holder.monitor = ctx.monitor(subscriber).ok();
@@ -199,9 +199,9 @@ mod tests {
     }
 
     /// Register a named inline mailbox and prove it through the ctx verb.
-    /// `aether-window` cannot construct an `AnyActorRef` at all, so this is
+    /// `aether-window` cannot construct an `ErasedActorRef` at all, so this is
     /// the only way a row reaches the table — the gate working.
-    fn proven(mailer: &Mailer, ctx: &NativeCtx<'_>, name: &str) -> AnyActorRef {
+    fn proven(mailer: &Mailer, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
         let position = mailer.registry().register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
 
         ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")

@@ -24,7 +24,7 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use crate::config::TcpSessionConfig;
 
-use aether_actor::{AnyActorRef, runtime};
+use aether_actor::{ErasedActorRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
@@ -53,7 +53,7 @@ pub struct TcpSessionState {
     /// proof rather than a runtime name, because a name cannot reach a
     /// nested actor such as a loaded component at
     /// `aether.component/aether.embedded:<name>`.
-    pub consumer: Option<AnyActorRef>,
+    pub consumer: Option<ErasedActorRef>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
