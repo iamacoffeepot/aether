@@ -2,9 +2,8 @@
 //!
 //! Three surfaces over one buffered push. The untyped `send_envelope_*`
 //! family carries already-encoded `(kind, bytes)` for endpoints that hold no
-//! compile-time types — addressed by proof where the caller holds one
-//! (ADR-0230), including the wire recipient the RPC server proves at
-//! receipt, and by position for callers not yet migrated — and `fanout`
+//! compile-time types, addressed only by proof (ADR-0230) — including the
+//! wire recipient the RPC server proves at receipt — and `fanout`
 //! multicasts one encoding to a runtime recipient set of proofs. A
 //! boundary bundle item, proven by
 //! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle), leaves
@@ -21,7 +20,7 @@ use aether_actor::{
     Addressable, CallerAddressable, CallerScoped, Emit, ErasedActorRef, HandlesKind, MailSender, Manual, Multi,
     OutboundReply, ReplyMode, Singleton,
 };
-use aether_data::{Kind, KindId, MailId, MailboxId, RequestId};
+use aether_data::{Kind, KindId, MailId, RequestId};
 
 use crate::mail::{BoundaryMail, Source};
 
@@ -75,54 +74,26 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         }
     }
 
-    /// Untyped sibling of [`NativeActorMailbox::send_tracked`](crate::actor::native::mailbox::NativeActorMailbox::send_tracked): dispatch
-    /// an already-encoded mail payload with runtime `recipient` /
-    /// `kind` ids and return the minted [`MailId`] for settlement
-    /// subscription.
+    /// Untyped sibling of [`NativeActorMailbox::send_tracked`](crate::actor::native::mailbox::NativeActorMailbox::send_tracked):
+    /// dispatch already-encoded bytes of `kind` to the actor `target` proves
+    /// (ADR-0230), inheriting this handler's causal chain, and return the
+    /// minted [`MailId`] for settlement subscription.
     ///
-    /// Issue 750: the typed `send_tracked` path is gated on
-    /// `R: HandlesKind<K>`, which requires the kind and receiver to be
-    /// known at compile site. Endpoints that route mail with runtime
-    /// ids have neither — they hold a `MailboxId` + `KindId` + opaque
-    /// payload bytes. This method is the escape hatch: skips the
-    /// type-system check, dispatches the raw bytes through the same
-    /// lineage-aware path the typed helpers go through.
+    /// The typed `send_tracked` is gated on `R: HandlesKind<K>`, which needs
+    /// the kind and receiver at the compile site. An endpoint that routes
+    /// mail with runtime kinds holds neither, only the proof and opaque
+    /// payload bytes, so this skips that check and dispatches through the
+    /// same lineage-aware path the typed helpers take. A capability fanning
+    /// out pre-encoded bytes to its own subscriber table is the shape this
+    /// exists for: `SyntheticWindowCapability::on_inject` replays an injected
+    /// event to the window subscribers, and `aether-lifecycle`'s
+    /// `broadcast_to_subscribers` pushes each stage payload to the proofs its
+    /// subscriber table holds.
     ///
-    /// When `ctx` represents a chassis-root edge (`in_flight_mail_id`
-    /// is `NONE`) the returned id is the root of a fresh causal chain;
-    /// when mid-handler, the returned id is the new mail's id inside
-    /// the inherited chain. Settlement subscription against a mid-
-    /// handler return only fires on settlement of *that mail's*
-    /// descendants, not the whole chain — callers wanting chain-root
-    /// settlement should be at chassis-root.
-    ///
-    /// No untraced counterpart at this layer — callers reaching for
-    /// untyped dispatch always want the returned `MailId`. The typed
-    /// `send` / `send_many` on `NativeActorMailbox` cover the
-    /// fire-and-forget case.
-    ///
-    /// This stays the runtime-*position* door: the recipient arrived on
-    /// the wire or came back from the registry, and nothing has proven it
-    /// (ADR-0230). A caller that already holds a proof takes
-    /// [`Self::send_envelope_tracked_to`] instead, and this signature
-    /// narrows when its last positional caller migrates.
-    #[must_use]
-    pub fn send_envelope_tracked(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
-        self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, self.outbound_parent(), self.outbound_root())
-    }
-
-    /// [`Self::send_envelope_tracked`] for a caller that holds a proof:
-    /// the ADR-0230 form of the untyped dispatch, taking the [`ErasedActorRef`]
-    /// rather than the position under it.
-    ///
-    /// A capability fanning out pre-encoded bytes to its own subscriber
-    /// table is the shape this exists for — the rows are already proofs, so
-    /// unwrapping one back to a position at the moment of the send is
-    /// exactly what the stored-state rule removes. Its first consumer is
-    /// `SyntheticWindowCapability::on_inject`, which replays an injected
-    /// event to the window subscribers; its second is `aether-lifecycle`'s
-    /// `broadcast_to_subscribers` (#6302), which pushes each stage payload
-    /// to the proofs the cap's subscriber table holds.
+    /// At a chassis-root edge (`in_flight_mail_id` is `NONE`) the returned id
+    /// is the root of a fresh causal chain; mid-handler it is the new mail's
+    /// id inside the inherited chain, and a settlement subscription on it
+    /// fires when *that mail's* descendants settle, not the whole chain.
     ///
     /// Differs from [`Self::fanout`] only in what it carries: `fanout`
     /// encodes one typed `K` and pushes it to many recipients, while this
@@ -139,43 +110,21 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         )
     }
 
-    /// Like [`Self::send_envelope_tracked`] but always starts a fresh
-    /// causal chain — ignores the ctx's in-flight lineage and passes
-    /// `parent_mail = None, inherited_root = None` to the dispatch
-    /// path. The returned [`MailId`] is the root of the new chain, so
-    /// subscribing to its settlement via
-    /// `SettlementRegistry::subscribe_settlement_mail` fires when the
-    /// dispatch's entire descendant subtree drains.
-    ///
-    /// Use this when the cap is acting on an external event (file
-    /// watcher, timer) rather than forwarding a mail that was already in
-    /// flight; [`Self::send_envelope_detached_to`] carries the full
-    /// motivation.
-    ///
-    /// This stays the runtime-*position* door: the recipient came back
-    /// from the registry or a stored table, and nothing has proven it
-    /// (ADR-0230). A caller that already holds a proof takes
-    /// [`Self::send_envelope_detached_to`] instead, and this signature
-    /// narrows when its last positional caller migrates.
-    #[must_use]
-    pub fn send_envelope_detached(&self, recipient: MailboxId, kind: KindId, bytes: &[u8]) -> MailId {
-        self.binding.push_envelope_buffered(recipient.0, kind.0, bytes, 1, None, None)
-    }
-
-    /// [`Self::send_envelope_detached`] for a caller that holds a proof:
-    /// the ADR-0230 form of the fresh-chain untyped dispatch, taking the
-    /// [`ErasedActorRef`] rather than the position under it.
+    /// Dispatch already-encoded bytes of `kind` to the actor `target` proves
+    /// (ADR-0230) on a fresh causal chain, ignoring this handler's in-flight
+    /// lineage, and return the minted [`MailId`]: the root of the new chain,
+    /// so a settlement subscription on it fires when the dispatch's whole
+    /// descendant subtree drains.
     ///
     /// Use this when the cap is acting on an external event (wire-borne
     /// RPC call, file watcher, timer) rather than forwarding a mail that
-    /// was already in flight. Its first consumer is
-    /// `RpcServerState::handle_call`, which proves the wire `Call`'s
-    /// recipient once at receipt and sends through the proof: the inbound
-    /// that wakes the cap is an internal wake mail causally unrelated to
-    /// the wire-borne `Call` — inheriting its chain would attribute the
-    /// dispatch to the wrong root and `subscribe_settlement_mail` would
-    /// never fire (descendants don't settle individually; only the chain
-    /// root does).
+    /// was already in flight. `RpcServerState::handle_call` is the model
+    /// consumer: it proves the wire `Call`'s recipient once at receipt and
+    /// sends through the proof. The inbound that wakes the cap is an
+    /// internal wake mail causally unrelated to the wire-borne `Call`, so
+    /// inheriting its chain would attribute the dispatch to the wrong root
+    /// and `subscribe_settlement_mail` would never fire (descendants don't
+    /// settle individually; only the chain root does).
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)

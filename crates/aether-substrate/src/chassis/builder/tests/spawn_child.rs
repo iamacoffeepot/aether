@@ -30,7 +30,7 @@ use std::time::Instant;
 /// Tripwire: the completion arm addresses the newborn child through the
 /// proof its `SpawnOutcome` carries. A completion whose reference named any
 /// position other than the registered child would warn-drop the mail instead
-/// of delivering it (the third element of `child_received` disappears).
+/// of delivering it (the second element of `child_received` disappears).
 #[test]
 fn ctx_spawn_child_routes_through_handler() {
     use crate::actor::native::spawn::Subname;
@@ -119,12 +119,9 @@ fn ctx_spawn_child_routes_through_handler() {
             if kind.0 == Hatch::ID.0 {
                 let hatch = Hatch::decode_from_bytes(payload)?;
                 if hatch.tag == 2 {
-                    let receipt = ctx
-                        .spawn_child::<ChildCap>(Subname::Named("conflict"), (), Arc::clone(&state.child_received))
+                    ctx.spawn_child::<ChildCap>(Subname::Named("conflict"), (), Arc::clone(&state.child_received))
                         .stage()
                         .expect("the conflict is authoritative owner state, not a local preparation failure");
-                    let _ =
-                        ctx.send_envelope_tracked(receipt.mailbox_id, Ping::ID, &Ping { tag: 99 }.encode_into_bytes());
                     return Some(());
                 }
                 let receipt = ctx
@@ -141,7 +138,6 @@ fn ctx_spawn_child_routes_through_handler() {
                     .stage()
                     .expect_err("the parent-local staged key rejects a duplicate synchronously");
                 assert!(matches!(duplicate, crate::SpawnError::SubnameInUse { .. }));
-                let _ = ctx.send_envelope_tracked(receipt.mailbox_id, Ping::ID, &Ping { tag: 43 }.encode_into_bytes());
                 return Some(());
             }
             if kind == TaskCompletionWake::ID {
@@ -199,7 +195,7 @@ fn ctx_spawn_child_routes_through_handler() {
     handler.enqueue(registry::test_owned_dispatch(<Hatch as Kind>::ID, &conflict, 1));
 
     let deadline = Instant::now() + Duration::from_millis(500);
-    while (child_received.lock().unwrap().len() < 3
+    while (child_received.lock().unwrap().len() < 2
         || spawn_count.load(AtomicOrdering::SeqCst) < 1
         || failure_count.load(AtomicOrdering::SeqCst) < 1
         || mailer.trace_handle().settlement_counter().live_roots() != 0)
@@ -220,12 +216,12 @@ fn ctx_spawn_child_routes_through_handler() {
     assert_eq!(
         mailer.trace_handle().settlement_counter().live_roots(),
         0,
-        "authoritative rejection settles same-flush tracked mail retained with the failed birth"
+        "every chain the handler started settled, including the rejected birth's"
     );
     assert_eq!(
         child_received.lock().unwrap().as_slice(),
-        [42, 43, 44],
-        "the explicit bootstrap prefix precedes same-flush child mail, and the rendered lineage \
+        [42, 44],
+        "the explicit bootstrap prefix precedes the completion arm's send, and the rendered lineage \
          name the completion arm sent to resolves to the same child"
     );
 
