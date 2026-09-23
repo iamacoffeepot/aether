@@ -9,7 +9,7 @@ use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, Rep
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
-    DeferredReply, Erased, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
+    DeferredReply, IntoDeferredReply, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone,
     spawn::Subname,
 };
 use aether_substrate::actor::wasm::asset_manifest;
@@ -175,11 +175,11 @@ pub(super) enum SpawnContext {
 }
 
 impl ComponentHostCapabilityState {
-    pub fn begin_load(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
+    pub fn begin_load<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponent) {
         self.begin_load_at(ctx, payload, LoadPlacement::ComponentHost);
     }
 
-    pub fn begin_load_under(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponentUnder) {
+    pub fn begin_load_under<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponentUnder) {
         let resolved = ActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
             .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()));
@@ -199,9 +199,9 @@ impl ComponentHostCapabilityState {
         );
     }
 
-    fn begin_load_at(
+    fn begin_load_at<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_, Erased, Manual>,
+        ctx: &mut NativeCtx<'_, A, Manual>,
         payload: LoadComponent,
         placement: LoadPlacement,
     ) {
@@ -635,7 +635,7 @@ impl ComponentHostCapabilityState {
         }
     }
 
-    pub fn begin_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
+    pub fn begin_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
         // ADR-0230: parse the target address with the host's boundary parser
         // and prove the answer at once. A dropped trampoline keeps its `Live`

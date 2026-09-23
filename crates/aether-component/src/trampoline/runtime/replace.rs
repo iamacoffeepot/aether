@@ -284,7 +284,7 @@ impl WasmTrampolineState {
         Ok(saved)
     }
 
-    pub fn handle_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) -> ReplaceResult {
+    pub fn handle_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) -> ReplaceResult {
         // `payload.wasm` is the new module bytes; `target` named this
         // trampoline and the host proved it before forwarding, so the field
         // only names the actor in a contract or carried-context refusal.
