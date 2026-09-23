@@ -14,15 +14,13 @@ pub use std::sync::mpsc;
 pub use std::thread::{self, JoinHandle};
 pub use std::time::Duration;
 
-pub use aether_data::Kind;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::{KindId, Mail, Mailer};
 
 pub use crate::config::{TcpListenerConfig, TcpSessionConfig};
 pub use crate::session::TcpSessionActor;
 
-use aether_actor::{Single, runtime};
+use aether_actor::{AnyActorRef, Single, runtime};
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
 use crate::kinds::{Close, ConnectionReady};
@@ -38,7 +36,9 @@ use super::TcpListenerActor;
 /// distinct ZST [`TcpListenerActor`].
 pub struct TcpListenerState {
     pub local_port: u16,
-    pub consumer: Option<aether_data::MailboxId>,
+    /// The consumer the cap proved at `BindListener` receipt (ADR-0230),
+    /// handed to every session this listener accepts.
+    pub consumer: Option<AnyActorRef>,
     pub shutdown: Arc<AtomicBool>,
     pub accept_start: Option<mpsc::Sender<()>>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -79,14 +79,14 @@ impl Drop for TcpListenerState {
     }
 }
 
+/// Accept connections until `shutdown`, handing each stream over
+/// `connection_tx` and calling `on_accept` to wake the dispatcher.
 fn run_accept_loop(
     listener: TcpListener,
     shutdown: Arc<AtomicBool>,
     connection_tx: mpsc::Sender<(TcpStream, SocketAddr)>,
     accept_start_rx: mpsc::Receiver<()>,
-    mailer: Arc<Mailer>,
-    self_id: aether_data::MailboxId,
-    connection_ready_kind: KindId,
+    on_accept: impl Fn(),
 ) {
     if accept_start_rx.recv().is_err() {
         return;
@@ -100,9 +100,9 @@ fn run_accept_loop(
             if connection_tx.send((stream, peer)).is_err() {
                 break;
             }
-            // The stream stays in the actor-owned channel; this mail is only
-            // the typed wake that makes the dispatcher drain it.
-            mailer.push(Mail::new(self_id, connection_ready_kind, ConnectionReady::default().encode_into_bytes(), 1));
+            // The stream stays in the actor-owned channel; this is only the
+            // typed wake that makes the dispatcher drain it.
+            on_accept();
         } else if shutdown.load(Ordering::Acquire) {
             break;
         }
@@ -138,12 +138,9 @@ impl NativeActor for TcpListenerActor {
         // cannot enqueue a wake against a Starting actor.
         let (accept_start_tx, accept_start_rx) = mpsc::channel::<()>();
 
-        // Wake-mail plumbing: capture the mailer + this actor's
-        // own MailboxId so the accept thread can fire a
-        // ConnectionReady mail at us per accept.
-        let mailer: Arc<Mailer> = ctx.mailer();
-        let self_id = ctx.self_id();
-        let connection_ready_kind = KindId(<ConnectionReady as Kind>::ID.0);
+        // The accept thread wakes this actor with one ConnectionReady per
+        // accept, through a self-wake that names no position.
+        let wake = ctx.self_wake::<ConnectionReady>();
 
         // Transport thread below the mail layer — it carries inbound mail in;
         // no inbound chain to inherit, so no settlement umbrella to honor.
@@ -151,15 +148,9 @@ impl NativeActor for TcpListenerActor {
         let thread = thread::Builder::new()
             .name(format!("aether-tcp-accept-{port}"))
             .spawn(move || {
-                run_accept_loop(
-                    listener,
-                    shutdown_for_thread,
-                    connection_tx,
-                    accept_start_rx,
-                    mailer,
-                    self_id,
-                    connection_ready_kind,
-                );
+                run_accept_loop(listener, shutdown_for_thread, connection_tx, accept_start_rx, move || {
+                    wake.wake(&ConnectionReady::default());
+                });
             })
             .map_err(|e| BootError::Other(Box::new(e)))?;
 
@@ -283,7 +274,6 @@ impl NativeActor for TcpListenerActor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_substrate::mail::registry::Registry;
 
     #[test]
     #[allow(clippy::disallowed_methods)]
@@ -294,17 +284,8 @@ mod tests {
         let shutdown_for_loop = Arc::clone(&shutdown);
         let (connection_tx, connection_rx) = mpsc::channel();
         let (start_tx, start_rx) = mpsc::channel();
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         let thread = thread::spawn(move || {
-            run_accept_loop(
-                listener,
-                shutdown_for_loop,
-                connection_tx,
-                start_rx,
-                mailer,
-                aether_data::MailboxId(0x4066),
-                KindId(<ConnectionReady as Kind>::ID.0),
-            );
+            run_accept_loop(listener, shutdown_for_loop, connection_tx, start_rx, || {});
         });
 
         let early_client = TcpStream::connect(addr).expect("kernel queues an early connection");
@@ -331,17 +312,8 @@ mod tests {
         let shutdown = Arc::new(AtomicBool::new(false));
         let (connection_tx, _connection_rx) = mpsc::channel();
         let (start_tx, start_rx) = mpsc::channel();
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         let thread = thread::spawn(move || {
-            run_accept_loop(
-                listener,
-                shutdown,
-                connection_tx,
-                start_rx,
-                mailer,
-                aether_data::MailboxId(0x4066_0001),
-                KindId(<ConnectionReady as Kind>::ID.0),
-            );
+            run_accept_loop(listener, shutdown, connection_tx, start_rx, || {});
         });
 
         drop(start_tx);

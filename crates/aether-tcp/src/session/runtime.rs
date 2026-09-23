@@ -19,14 +19,12 @@ pub use std::sync::mpsc;
 pub use std::thread::{self, JoinHandle};
 
 pub use aether_actor::MailSender;
-pub use aether_data::Kind;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::{KindId, Mail, Mailer};
 
 pub use crate::config::TcpSessionConfig;
 
-use aether_actor::runtime;
+use aether_actor::{AnyActorRef, runtime};
 use aether_codec::frame::pop_frame;
 // The moved handler bodies name the cap kinds backing their signatures; bring
 // them in crate-absolute, matching the style above.
@@ -40,17 +38,6 @@ use super::TcpSessionActor;
 /// chunk.
 pub const READ_BUFFER_BYTES: usize = 64 * 1024;
 
-/// Deliver `mail` to the session's bound consumer, inheriting the
-/// handler's causal chain. The consumer is addressed by `MailboxId`
-/// rather than by runtime name because a name resolves through
-/// `mailbox_id_from_name`, which cannot name a nested actor — a loaded
-/// wasm component lives at the lineage path
-/// `aether.component/aether.embedded:<name>`, and those are the
-/// consumers this field exists to serve.
-fn notify_consumer<K: Kind>(ctx: &NativeCtx<'_>, consumer: aether_data::MailboxId, mail: &K) {
-    let _ = ctx.send_envelope_tracked(consumer, K::ID, &mail.encode_into_bytes());
-}
-
 /// `aether.tcp.session` runtime state (issue 607 Phase 6b, ADR-0079). One end
 /// of a split `TcpStream`: the read sidecar owns the read half; the dispatcher
 /// owns `write_half` (used by `on_session_write`). Read-side errors / EOF flow
@@ -61,7 +48,12 @@ fn notify_consumer<K: Kind>(ctx: &NativeCtx<'_>, consumer: aether_data::MailboxI
 pub struct TcpSessionState {
     pub peer: String,
     pub session_name: String,
-    pub consumer: Option<aether_data::MailboxId>,
+    /// The bound consumer, proven by the cap at receipt (ADR-0230). Every
+    /// delivery fans out to it and inherits the handler's causal chain; a
+    /// proof rather than a runtime name, because a name cannot reach a
+    /// nested actor such as a loaded component at
+    /// `aether.component/aether.embedded:<name>`.
+    pub consumer: Option<AnyActorRef>,
     pub read_buffer: Vec<u8>,
     pub write_half: TcpStream,
     pub shutdown: Arc<AtomicBool>,
@@ -101,9 +93,7 @@ impl NativeActor for TcpSessionActor {
         // that is not live yet.
         let (read_start_tx, read_start_rx) = mpsc::channel::<()>();
 
-        let mailer_for_thread: Arc<Mailer> = ctx.mailer();
-        let self_id = ctx.self_id();
-        let data_ready_kind = KindId(<SessionDataReady as Kind>::ID.0);
+        let wake = ctx.self_wake::<SessionDataReady>();
 
         let thread_name = format!("aether-tcp-read-{}", config.session_name);
         // Transport thread below the mail layer — it carries inbound mail in;
@@ -124,12 +114,7 @@ impl NativeActor for TcpSessionActor {
                     match read_half.read(&mut buf) {
                         Ok(0) => {
                             let _ = bytes_tx.send(Err("eof".to_owned()));
-                            mailer_for_thread.push(Mail::new(
-                                self_id,
-                                data_ready_kind,
-                                SessionDataReady::default().encode_into_bytes(),
-                                1,
-                            ));
+                            wake.wake(&SessionDataReady::default());
                             break;
                         }
                         Ok(n) => {
@@ -137,12 +122,7 @@ impl NativeActor for TcpSessionActor {
                             if bytes_tx.send(Ok(chunk)).is_err() {
                                 break;
                             }
-                            mailer_for_thread.push(Mail::new(
-                                self_id,
-                                data_ready_kind,
-                                SessionDataReady::default().encode_into_bytes(),
-                                1,
-                            ));
+                            wake.wake(&SessionDataReady::default());
                         }
                         Err(e) => {
                             if shutdown_for_thread.load(Ordering::Acquire) {
@@ -150,12 +130,7 @@ impl NativeActor for TcpSessionActor {
                             }
                             let reason = format!("read error: {e}");
                             let _ = bytes_tx.send(Err(reason));
-                            mailer_for_thread.push(Mail::new(
-                                self_id,
-                                data_ready_kind,
-                                SessionDataReady::default().encode_into_bytes(),
-                                1,
-                            ));
+                            wake.wake(&SessionDataReady::default());
                             break;
                         }
                     }
@@ -222,17 +197,14 @@ impl NativeActor for TcpSessionActor {
                     loop {
                         match pop_frame(&mut state.read_buffer) {
                             Ok(Some(bytes)) => {
-                                if let Some(consumer) = state.consumer {
-                                    notify_consumer(
-                                        ctx,
-                                        consumer,
-                                        &SessionData {
-                                            session_name: state.session_name.clone(),
-                                            peer: state.peer.clone(),
-                                            bytes,
-                                        },
-                                    );
-                                }
+                                ctx.fanout(
+                                    state.consumer,
+                                    &SessionData {
+                                        session_name: state.session_name.clone(),
+                                        peer: state.peer.clone(),
+                                        bytes,
+                                    },
+                                );
                             }
                             Ok(None) => break,
                             Err(error) => {
@@ -243,17 +215,14 @@ impl NativeActor for TcpSessionActor {
                                     error = %error,
                                     "tcp session frame rejected",
                                 );
-                                if let Some(consumer) = state.consumer {
-                                    notify_consumer(
-                                        ctx,
-                                        consumer,
-                                        &SessionClosed {
-                                            session_name: state.session_name.clone(),
-                                            peer: state.peer.clone(),
-                                            reason: format!("frame rejected: {error}"),
-                                        },
-                                    );
-                                }
+                                ctx.fanout(
+                                    state.consumer,
+                                    &SessionClosed {
+                                        session_name: state.session_name.clone(),
+                                        peer: state.peer.clone(),
+                                        reason: format!("frame rejected: {error}"),
+                                    },
+                                );
                                 ctx.shutdown();
                                 return;
                             }
@@ -266,17 +235,10 @@ impl NativeActor for TcpSessionActor {
                     } else {
                         format!("{reason}; dropped {} trailing frame bytes", state.read_buffer.len())
                     };
-                    if let Some(consumer) = state.consumer {
-                        notify_consumer(
-                            ctx,
-                            consumer,
-                            &SessionClosed {
-                                session_name: state.session_name.clone(),
-                                peer: state.peer.clone(),
-                                reason,
-                            },
-                        );
-                    }
+                    ctx.fanout(
+                        state.consumer,
+                        &SessionClosed { session_name: state.session_name.clone(), peer: state.peer.clone(), reason },
+                    );
                     ctx.shutdown();
                     return;
                 }

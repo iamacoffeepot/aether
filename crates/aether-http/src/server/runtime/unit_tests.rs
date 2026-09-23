@@ -505,11 +505,10 @@ mod shard_startup {
     //! real owner/activation/task turns.
 
     use super::super::{
-        Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSlot,
-        ShardStartup, WakeSink,
+        Arc, HttpServerConfig, HttpSupervisorState, InboundEvent, PendingPeer, ShardSettlement, ShardSink, ShardSlot,
+        ShardStartup,
     };
-    use crate::kinds::HttpInboundReady;
-    use aether_data::{Kind, KindId, MailboxId};
+    use aether_data::MailboxId;
     use aether_substrate::actor::native::NativeCtx;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
@@ -532,23 +531,25 @@ mod shard_startup {
         (PendingPeer { stream, peer }, client)
     }
 
-    fn sink(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> (WakeSink, mpsc::Receiver<InboundEvent>) {
+    fn discharging() -> Arc<dyn InboxHandler> {
+        Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
+    }
+
+    /// A binding for the supervisor's handler ctx, over a test-local inbox.
+    fn binding(registry: &Registry, mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
+        let supervisor = registry.register_inbox(&boot_authority(), "test.http.supervisor", discharging());
+
+        Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), supervisor))
+    }
+
+    /// A shard sink over a test-local inbox, proven the way the shard's
+    /// `SpawnOutcome` hands the supervisor its proof.
+    fn sink(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
         let (inbound_tx, inbound_rx) = mpsc::channel();
-        let self_id = registry.register_inbox(
-            &boot_authority(),
-            name,
-            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()) as Arc<dyn InboxHandler>,
-        );
-        (
-            WakeSink {
-                inbound_tx,
-                mailer: Arc::clone(mailer),
-                self_id,
-                wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-                dirty: Arc::new(AtomicBool::new(false)),
-            },
-            inbound_rx,
-        )
+        let position = registry.register_inbox(&boot_authority(), name, discharging());
+        let shard = ctx.resolve_live(position).expect("a freshly registered inbox proves");
+
+        (ShardSink { inbound_tx, dirty: Arc::new(AtomicBool::new(false)), shard }, inbound_rx)
     }
 
     fn starting_state(count: usize, pending_peers: VecDeque<PendingPeer>) -> (Arc<Registry>, HttpSupervisorState) {
@@ -586,8 +587,10 @@ mod shard_startup {
         let expected = [first.peer, second.peer, third.peer];
         let pending_peers = [first, second, third].into_iter().collect();
         let (registry, mut state) = starting_state(3, pending_peers);
-        let (sink_zero, rx_zero) = sink(&registry, &state.mailer, "test.http.shard-zero");
-        let (sink_two, rx_two) = sink(&registry, &state.mailer, "test.http.shard-two");
+        let binding = binding(&registry, &state.mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let (sink_zero, rx_zero) = sink(&registry, &ctx, "test.http.shard-zero");
+        let (sink_two, rx_two) = sink(&registry, &ctx, "test.http.shard-two");
 
         assert!(matches!(state.finish_shard_spawn(2, Some(sink_two)), ShardSettlement::Pending));
         assert!(rx_zero.try_recv().is_err());
@@ -596,7 +599,7 @@ mod shard_startup {
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
         let settled = state.finish_shard_spawn(1, None);
         assert!(matches!(settled, ShardSettlement::Ready { shard_count: 2, .. }));
-        state.apply_shard_settlement(settled);
+        state.apply_shard_settlement(&mut ctx, settled);
 
         assert_eq!(event_peer(rx_zero.recv().expect("first FIFO peer reaches index zero")), expected[0]);
         assert_eq!(event_peer(rx_two.recv().expect("second FIFO peer reaches index two")), expected[1]);
@@ -613,7 +616,9 @@ mod shard_startup {
     #[test]
     fn duplicate_completion_cannot_finish_startup_twice() {
         let (registry, mut state) = starting_state(2, VecDeque::new());
-        let (sink_zero, _rx_zero) = sink(&registry, &state.mailer, "test.http.duplicate-zero");
+        let binding = binding(&registry, &state.mailer);
+        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let (sink_zero, _rx_zero) = sink(&registry, &ctx, "test.http.duplicate-zero");
 
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
         assert!(matches!(state.finish_shard_spawn(0, None), ShardSettlement::Stale));
@@ -628,11 +633,13 @@ mod shard_startup {
     fn all_failed_shards_refuse_every_retained_peer() {
         let (pending, mut client) = socket_pair();
         client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound refusal read");
-        let (_registry, mut state) = starting_state(1, once(pending).collect());
+        let (registry, mut state) = starting_state(1, once(pending).collect());
+        let binding = binding(&registry, &state.mailer);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         let settled = state.finish_shard_spawn(0, None);
         assert!(matches!(settled, ShardSettlement::Failed { .. }));
-        state.apply_shard_settlement(settled);
+        state.apply_shard_settlement(&mut ctx, settled);
 
         let mut response = String::new();
         client.read_to_string(&mut response).expect("read controlled startup refusal");
@@ -690,10 +697,11 @@ mod wake_coalescing {
     //! ADR-0135 §4 — the wake-mail coalescing protocol on [`WakeSink`].
 
     use super::super::{InboundEvent, WakeSink};
-    use crate::kinds::HttpInboundReady;
-    use aether_data::{Kind, KindId};
+    use aether_substrate::actor::native::NativeCtx;
+    use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
+    use aether_substrate::mail::{MailId, Source};
     use aether_substrate::testing::boot_authority;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -706,24 +714,23 @@ mod wake_coalescing {
         }
     }
 
-    fn sink_with_counter() -> (WakeSink, mpsc::Receiver<InboundEvent>, Arc<CountingInbox>) {
+    /// A sink whose wake lands on a counting inbox. The binding comes back
+    /// too: the sink's `SelfWake` holds it weakly, so it must outlive the
+    /// posts.
+    fn sink_with_counter() -> (WakeSink, mpsc::Receiver<InboundEvent>, Arc<CountingInbox>, Arc<NativeBinding>) {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let self_id = registry.register_inbox(
+        let counter_inbox = registry.register_inbox(
             &boot_authority(),
             "test.wake_target",
             Arc::clone(&counter) as Arc<dyn InboxHandler>,
         );
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, counter_inbox));
+        let wake = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE).self_wake();
         let (inbound_tx, inbound_rx) = mpsc::channel();
-        let sink = WakeSink {
-            inbound_tx,
-            mailer,
-            self_id,
-            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-            dirty: Arc::new(AtomicBool::new(false)),
-        };
-        (sink, inbound_rx, counter)
+        let sink = WakeSink { inbound_tx, wake, dirty: Arc::new(AtomicBool::new(false)) };
+        (sink, inbound_rx, counter, binding)
     }
 
     fn probe_event() -> InboundEvent {
@@ -736,7 +743,7 @@ mod wake_coalescing {
     /// remove).
     #[test]
     fn burst_fires_one_wake() {
-        let (sink, _rx, counter) = sink_with_counter();
+        let (sink, _rx, counter, _binding) = sink_with_counter();
         for _ in 0..16 {
             assert!(sink.post(probe_event()));
         }
@@ -750,7 +757,7 @@ mod wake_coalescing {
     /// aliases; the second wake is observable as a second count.
     #[test]
     fn post_after_arm_refires_wake() {
-        let (sink, rx, counter) = sink_with_counter();
+        let (sink, rx, counter, _binding) = sink_with_counter();
         assert!(sink.post(probe_event()));
         assert_eq!(counter.0.load(Ordering::SeqCst), 1);
 

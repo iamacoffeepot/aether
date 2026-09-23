@@ -15,7 +15,8 @@
 //! the current root plus the originating reply target — and buffers a thunk
 //! that replays the work via `dispatch_blocking_resumed_with` when a slot
 //! frees, exactly like `TaskQueue::submit` (iamacoffeepot/aether#1031). The
-//! sender's `MailboxId` rides through as the dispatch context, so the cap's
+//! sender key — the envelope sender `ctx.sender()` proves, or `None` for the
+//! shared bucket — rides through as the dispatch context, so the cap's
 //! `#[handler(task)]` completion reads it off the `TaskDone` and frees the
 //! right sender's slot.
 //!
@@ -28,8 +29,8 @@
 
 use std::collections::{HashMap, VecDeque};
 
-use aether_actor::ReplyMode;
-use aether_data::{Kind, MailboxId, Source, SourceAddr};
+use aether_actor::{AnyActorRef, ReplyMode};
+use aether_data::Kind;
 use aether_substrate::actor::native::{DispatchId, Erased, NativeCtx, Pending};
 
 /// A buffered fetch: replays an over-bound request via
@@ -48,21 +49,6 @@ struct SenderEntry {
     pending: VecDeque<PendingFetch>,
 }
 
-/// Read the sender's `MailboxId` from a mail envelope's reply target — the
-/// per-sender table key (ADR-0158 §2). A component sender comes through as
-/// `SourceAddr::EngineMailbox { mailbox_id }` and keys on its own id; every
-/// other source (MCP sessions, substrate-internal pushes) collapses to
-/// `MailboxId(0)` and shares one bucket. Mirrors `aether_audio`'s
-/// `sender_mailbox_id`, the same keying that isolates one sender's audio
-/// state.
-#[must_use]
-pub fn sender_mailbox_id(sender: Source) -> MailboxId {
-    match sender.addr {
-        SourceAddr::EngineMailbox { mailbox_id, .. } => mailbox_id,
-        _ => MailboxId(0),
-    }
-}
-
 /// Per-sender bounded async egress dispatcher (ADR-0158). Lives in the cap's
 /// plain (lock-free) actor state; every method runs on the single-threaded
 /// dispatcher, so the actor IS the mutual exclusion — no `Semaphore`, no
@@ -71,12 +57,16 @@ pub struct PerSenderEgress {
     per_sender_max: usize,
     global_max: usize,
     global_in_flight: usize,
-    senders: HashMap<MailboxId, SenderEntry>,
+    /// The per-sender table (ADR-0158 §2), keyed by the proven envelope
+    /// sender `ctx.sender()` (ADR-0230). A local component keys on its own
+    /// proof; MCP sessions, remote engines, and substrate-internal pushes have
+    /// no local sender and share the `None` bucket.
+    senders: HashMap<Option<AnyActorRef>, SenderEntry>,
     /// Round-robin cursor over the senders that currently have pending work.
     /// A key is present iff its entry holds ≥1 pending request; admission
     /// rotates across it so a freed global slot does not always favor the
     /// sender whose completion freed it (ADR-0158 §3 drain fairness).
-    waiting: VecDeque<MailboxId>,
+    waiting: VecDeque<Option<AnyActorRef>>,
 }
 
 impl PerSenderEgress {
@@ -104,7 +94,12 @@ impl PerSenderEgress {
     /// [`NativeCtx::dispatch_blocking_resumed_with`] when a slot frees, so the
     /// queued fetch keeps *its own* chain held from accept through its
     /// eventual re-reply and replies to *its own* caller (ADR-0158 §2).
-    pub fn submit<O, F, M>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, sender: MailboxId, work: F) -> Pending<O>
+    pub fn submit<O, F, M>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, Erased, M>,
+        sender: Option<AnyActorRef>,
+        work: F,
+    ) -> Pending<O>
     where
         O: Kind + serde::Serialize + Send + 'static,
         F: FnOnce() -> O + Send + 'static,
@@ -138,7 +133,7 @@ impl PerSenderEgress {
     /// sender's slot and one global slot, admits the next waiting request
     /// (rotating fairly across senders), then reclaims the completing sender's
     /// entry if it drained fully idle.
-    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>, sender: MailboxId) {
+    pub fn on_complete(&mut self, ctx: &mut NativeCtx<'_>, sender: Option<AnyActorRef>) {
         if let Some(entry) = self.senders.get_mut(&sender) {
             entry.in_flight = entry.in_flight.saturating_sub(1);
         }
@@ -204,12 +199,12 @@ impl PerSenderEgress {
     }
 
     /// A `sender`'s running-fetch count, `0` if it has no live entry.
-    fn in_flight_for(&self, sender: MailboxId) -> usize {
+    fn in_flight_for(&self, sender: Option<AnyActorRef>) -> usize {
         self.senders.get(&sender).map_or(0, |e| e.in_flight)
     }
 
     /// A `sender`'s queued-fetch count, `0` if it has no live entry.
-    fn pending_for(&self, sender: MailboxId) -> usize {
+    fn pending_for(&self, sender: Option<AnyActorRef>) -> usize {
         self.senders.get(&sender).map_or(0, |e| e.pending.len())
     }
 
@@ -229,9 +224,11 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
 
     use super::PerSenderEgress;
+    use aether_actor::AnyActorRef;
     use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr, mailbox_id_from_name};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
+    use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::{boot_authority, fresh_substrate};
     use std::sync::Arc;
 
@@ -263,20 +260,30 @@ mod tests {
     }
 
     /// Boot a fresh substrate + a binding whose self-mailbox is registered,
-    /// so worker completion-wake pushes route to a real inbox.
-    fn harness(tag: &str) -> Arc<NativeBinding> {
+    /// so worker completion-wake pushes route to a real inbox. The registry
+    /// comes back too, so a test can register and prove its senders.
+    fn harness(tag: &str) -> (Arc<Registry>, Arc<NativeBinding>) {
         let (registry, mailer) = fresh_substrate();
         let mailbox = mailbox_id_from_name(tag);
         registry.register_inbox(&boot_authority(), tag, Arc::new(|_d| {}));
-        Arc::new(NativeBinding::new_for_test(mailer, mailbox))
+        (registry, Arc::new(NativeBinding::new_for_test(mailer, mailbox)))
     }
 
-    fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: MailboxId, cid: u64) {
+    /// Register a test-local sender inbox under `name` and prove it the way
+    /// `ctx.sender()` hands the cap a local component's proof.
+    fn sender(registry: &Registry, binding: &Arc<NativeBinding>, name: &str) -> AnyActorRef {
+        let position = registry.register_inbox(&boot_authority(), name, noop_handler());
+        let ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
+
+        ctx.resolve_live(position).expect("a freshly registered inbox proves")
+    }
+
+    fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<AnyActorRef>, cid: u64) {
         let mut ctx = NativeCtx::new(binding, session_reply_to(cid), MailId::NONE, root_id(cid));
         q.submit(&mut ctx, sender, move || Answer { value: cid });
     }
 
-    fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: MailboxId) {
+    fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<AnyActorRef>) {
         let mut ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
         q.on_complete(&mut ctx, sender);
     }
@@ -292,8 +299,8 @@ mod tests {
     /// surplus queues, with `in_flight` pinned at the budget.
     #[test]
     fn over_per_sender_budget_queues() {
-        let binding = harness("test.egress.per_sender");
-        let sender = MailboxId(7);
+        let (registry, binding) = harness("test.egress.per_sender");
+        let sender = Some(sender(&registry, &binding, "test.egress.per_sender.sender"));
         let mut q = PerSenderEgress::new(2, 32);
         for cid in 1..=3 {
             submit(&mut q, &binding, sender, cid);
@@ -307,8 +314,8 @@ mod tests {
     /// is unchanged across the drain (one freed, one dispatched).
     #[test]
     fn on_complete_drains_the_queue() {
-        let binding = harness("test.egress.drain");
-        let sender = MailboxId(7);
+        let (registry, binding) = harness("test.egress.drain");
+        let sender = Some(sender(&registry, &binding, "test.egress.drain.sender"));
         let mut q = PerSenderEgress::new(1, 32);
         submit(&mut q, &binding, sender, 1);
         submit(&mut q, &binding, sender, 2);
@@ -324,9 +331,9 @@ mod tests {
     /// B dispatches immediately while A's surplus queues (ADR-0158 §2 fairness).
     #[test]
     fn per_sender_isolation() {
-        let binding = harness("test.egress.isolation");
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let (registry, binding) = harness("test.egress.isolation");
+        let a = Some(sender(&registry, &binding, "test.egress.isolation.a"));
+        let b = Some(sender(&registry, &binding, "test.egress.isolation.b"));
         let mut q = PerSenderEgress::new(2, 32);
         // A fills and overruns its budget.
         for cid in 1..=3 {
@@ -346,9 +353,9 @@ mod tests {
     /// the global ceiling of 2 is reached (ADR-0158 §3 protection).
     #[test]
     fn global_ceiling_gates_under_per_sender_budget() {
-        let binding = harness("test.egress.global");
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let (registry, binding) = harness("test.egress.global");
+        let a = Some(sender(&registry, &binding, "test.egress.global.a"));
+        let b = Some(sender(&registry, &binding, "test.egress.global.b"));
         let mut q = PerSenderEgress::new(4, 2);
         submit(&mut q, &binding, a, 1);
         submit(&mut q, &binding, b, 2);
@@ -366,9 +373,9 @@ mod tests {
     /// the slot (ADR-0158 §3 drain fairness).
     #[test]
     fn drain_rotates_across_senders_at_the_ceiling() {
-        let binding = harness("test.egress.rotate");
-        let a = MailboxId(1);
-        let b = MailboxId(2);
+        let (registry, binding) = harness("test.egress.rotate");
+        let a = Some(sender(&registry, &binding, "test.egress.rotate.a"));
+        let b = Some(sender(&registry, &binding, "test.egress.rotate.b"));
         // Per-sender budget 4 (never the binding constraint here), global 2.
         let mut q = PerSenderEgress::new(4, 2);
         submit(&mut q, &binding, a, 1); // A in flight
@@ -396,8 +403,8 @@ mod tests {
     /// tracks live senders rather than cumulative volume (ADR-0158 §5).
     #[test]
     fn idle_entry_reclaims() {
-        let binding = harness("test.egress.reclaim");
-        let sender = MailboxId(7);
+        let (registry, binding) = harness("test.egress.reclaim");
+        let sender = Some(sender(&registry, &binding, "test.egress.reclaim.sender"));
         let mut q = PerSenderEgress::new(2, 32);
         submit(&mut q, &binding, sender, 1);
         assert_eq!(q.tracked_senders(), 1, "the entry is created lazily on first submit");
@@ -419,7 +426,7 @@ mod tests {
         registry.register_inbox(&boot_authority(), "test.egress.hold", Arc::new(|_d| {}));
         let binding = Arc::new(NativeBinding::new_for_test(mailer, mailbox));
 
-        let sender = MailboxId(7);
+        let sender = Some(sender(&registry, &binding, "test.egress.hold.sender"));
         let mut q = PerSenderEgress::new(1, 32);
         let root_a = root_id(1);
         let root_b = root_id(2);

@@ -269,14 +269,8 @@ enum ReaderResolution {
     NoHandler,
 }
 
-fn resolve_at_reader(
-    shared: &ReaderShared,
-    sink: &WakeSink,
-    cursor: &mut usize,
-    path: &str,
-    method: HttpMethod,
-) -> ReaderResolution {
-    let registry = sink.mailer.registry();
+fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, method: HttpMethod) -> ReaderResolution {
+    let registry = &shared.registry;
     let picked = {
         let routes = shared.routes.read().expect("route table lock poisoned");
         match best_route(&routes, path, method) {
@@ -304,7 +298,7 @@ fn resolve_at_reader(
         Some((handler, kind)) => ReaderResolution::Live {
             handler,
             kind,
-            streaming: sink.mailer.capability_registry().accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
+            streaming: shared.capabilities.accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
         },
         None => ReaderResolution::NoHandler,
     }
@@ -457,7 +451,7 @@ pub fn run_reader_loop(
             reject_and_close(&mut stream, sink, conn_id, 501, "method not implemented");
             return;
         };
-        let resolution = resolve_at_reader(shared, sink, &mut route_cursor, &head.path, method);
+        let resolution = resolve_at_reader(shared, &mut route_cursor, &head.path, method);
         let (handler, dispatch_kind, streaming) = match resolution {
             ReaderResolution::Live { handler, kind, streaming } => (handler, kind, streaming),
             ReaderResolution::Dead => {
