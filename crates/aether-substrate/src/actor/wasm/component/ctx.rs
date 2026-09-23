@@ -14,14 +14,20 @@ use crate::actor::wasm::asset_manifest::LoadWindow;
 
 use super::StateBundle;
 
-/// The next correlation a mailbox's guest mints. Read from a live
-/// component with [`super::Component::correlation_cursor`] and resumed by
-/// its successor with [`ComponentCtx::resume_correlations`], so a mailbox
-/// never reuses a correlation id within a run (ADR-0139 §3). Opaque: it
-/// has no public constructor and no codec, so a cursor can only come from
-/// a live component and can never lower a counter.
+/// The next number in each of the two `MailId` correlation spaces a
+/// mailbox's guest mints in: the next send correlation and the next
+/// reply-lineage id. Read from a live component with
+/// [`super::Component::correlation_cursor`] and resumed by its successor
+/// with [`ComponentCtx::resume_correlations`], so a mailbox never reuses a
+/// request id or a reply's trace `MailId` within a run (ADR-0139 §3,
+/// #6422). Opaque: it has no public constructor, accessor or codec, so a
+/// cursor can only come from a live component and can never lower a
+/// counter.
 #[derive(Clone, Copy, Debug)]
-pub struct CorrelationCursor(u64);
+pub struct CorrelationCursor {
+    send: u64,
+    reply_lineage: u64,
+}
 
 /// A mailbox's pending reply handles and the next handle its guest issues.
 /// Taken from a guest leaving its slot with
@@ -135,6 +141,12 @@ pub struct ComponentCtx {
     /// the two never overlap. It is deliberately separate from
     /// `correlation_counter`: `prev_correlation_p32` reports a guest's
     /// own request correlations, and a reply is not one of them.
+    ///
+    /// One per mailbox slot, not per instance, like `correlation_counter`:
+    /// a fresh slot starts at [`REPLY_LINEAGE_BASE`], and a replacement
+    /// resumes its predecessor's value through
+    /// [`Self::resume_correlations`], so its replies never reuse a trace
+    /// `MailId` its predecessor already sent (#6422).
     reply_lineage_counter: Cell<u64>,
     /// ADR-0097: sibling-spawn requests staged by the `spawn_sibling`
     /// host fn and drained by the trampoline after `receive_p32`
@@ -317,20 +329,23 @@ impl ComponentCtx {
         self.binding = Some(binding);
     }
 
-    /// The next correlation this mailbox's guest mints, for its
-    /// successor to resume. Read through [`super::Component::correlation_cursor`].
+    /// The next send correlation and the next reply-lineage id this
+    /// mailbox's guest mints, for its successor to resume. Read through
+    /// [`super::Component::correlation_cursor`].
     pub(super) fn correlation_cursor(&self) -> CorrelationCursor {
-        CorrelationCursor(self.correlation_counter.get())
+        CorrelationCursor { send: self.correlation_counter.get(), reply_lineage: self.reply_lineage_counter.get() }
     }
 
-    /// Continue this mailbox's correlation sequence from a guest that
-    /// left the slot, so the new instance never mints an id its
-    /// predecessor already used (ADR-0139 §3). Only ever raises the
+    /// Continue this mailbox's send correlation and reply-lineage
+    /// sequences from a guest that left the slot, so the new instance
+    /// never mints a request id or a reply `MailId` its predecessor
+    /// already used (ADR-0139 §3, #6422). Only ever raises either
     /// counter. Call before [`super::Component::instantiate`], so sends
-    /// from `init` and `on_rehydrate` onward continue the sequence; the
-    /// consumer is the component trampoline's replace.
+    /// and replies from `init` and `on_rehydrate` onward continue the
+    /// sequences; the consumer is the component trampoline's replace.
     pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
-        self.correlation_counter.set(cursor.0.max(self.correlation_counter.get()));
+        self.correlation_counter.set(cursor.send.max(self.correlation_counter.get()));
+        self.reply_lineage_counter.set(cursor.reply_lineage.max(self.reply_lineage_counter.get()));
     }
 
     /// Move this guest's reply table out for the slot's next occupant.

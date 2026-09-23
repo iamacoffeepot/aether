@@ -61,10 +61,11 @@ pub struct WasmTrampolineState {
     /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
     /// never mutated.
     pub wasm_bytes: Arc<[u8]>,
-    /// ADR-0139 §3 (#6400): the correlation cursor of the last guest to
-    /// leave this slot, which the next occupant resumes, so the mailbox's
-    /// request ids stay monotonic across replace and refill. `None` until
-    /// a guest first leaves; a fresh slot starts its counter at 1.
+    /// ADR-0139 §3 (#6400, #6422): the correlation cursor of the last guest
+    /// to leave this slot, which the next occupant resumes, so the mailbox's
+    /// request ids and reply-lineage ids both stay monotonic across replace
+    /// and refill. `None` until a guest first leaves; a fresh slot starts
+    /// both counters at their bases.
     pub retired_correlations: Option<CorrelationCursor>,
     /// #6409: the reply table of the last guest to leave this slot, which
     /// the next occupant to start resumes, so a handle issued before the

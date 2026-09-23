@@ -54,10 +54,11 @@ impl Component {
         }
     }
 
-    /// The next correlation this guest would mint, recorded by the
-    /// component trampoline when the guest leaves its slot (unload or
-    /// replace) so the slot's next occupant resumes from it through
-    /// [`ComponentCtx::resume_correlations`] (ADR-0139 §3).
+    /// The next send correlation and the next reply-lineage id this guest
+    /// would mint, recorded by the component trampoline when the guest
+    /// leaves its slot (unload or replace) so the slot's next occupant
+    /// resumes both through [`ComponentCtx::resume_correlations`]
+    /// (ADR-0139 §3, #6422).
     #[must_use]
     pub fn correlation_cursor(&self) -> CorrelationCursor {
         self.store.data().correlation_cursor()
