@@ -9,10 +9,11 @@ use std::any::{Any, TypeId};
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Reaches, Singleton};
-use aether_data::{MailId, MailboxId};
+use aether_data::{Kind, MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::mailbox::NativeActorMailbox;
+use crate::actor::native::offload::self_wake::SelfWake;
 use crate::mail::mailer::Mailer;
 
 use super::ExportedHandles;
@@ -75,6 +76,15 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn mailer(&self) -> Arc<Mailer> {
         Arc::clone(&self.mailer)
+    }
+
+    /// A [`SelfWake<K>`] for a thread this cap spawns during `init` — an
+    /// accept loop, a socket reader, a timer — to wake this actor with one
+    /// `K`. `init` itself still mails nothing: the handle only wakes once the
+    /// thread calls it, and it names no position (ADR-0230).
+    #[must_use]
+    pub fn self_wake<K: Kind>(&self) -> SelfWake<K> {
+        SelfWake::new(self.binding)
     }
 
     /// Issue 629 / Phase A: publish a sub-handle bundle for cross-

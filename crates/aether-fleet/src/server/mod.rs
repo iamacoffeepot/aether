@@ -171,7 +171,7 @@ mod tests {
     use crate::kinds::{EngineAlive, EngineDied};
     use crate::store::{ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, StoredManifest};
     use aether_actor::Addressable;
-    use aether_data::{EngineId, Kind, MailboxId, Uuid, mailbox_id_from_name};
+    use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_kinds::descriptors;
     use aether_kinds::{
         BinaryManifest, BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
@@ -229,7 +229,7 @@ mod tests {
     /// `restart_policy` selects whether restart supervision is armed, so
     /// the same fixture serves both the historical death-is-terminal
     /// reducers and the restart ones.
-    fn lifecycle_state(restart_policy: Option<RestartPolicy>) -> (FleetServerState, PathBuf) {
+    fn lifecycle_state(restart_policy: Option<RestartPolicy>) -> (FleetServerState<u64>, PathBuf) {
         lifecycle_state_under_budget(restart_policy, DEFAULT_DISK_BUDGET_BYTES)
     }
 
@@ -238,7 +238,7 @@ mod tests {
     fn lifecycle_state_under_budget(
         restart_policy: Option<RestartPolicy>,
         disk_budget_bytes: u64,
-    ) -> (FleetServerState, PathBuf) {
+    ) -> (FleetServerState<u64>, PathBuf) {
         let root = PathBuf::from(isolated_store_dir());
         let store = ArtifactStore::open(&root, disk_budget_bytes).expect("test lifecycle store opens");
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
@@ -254,7 +254,6 @@ mod tests {
                 fleet_store_root: root.join("engines"),
                 recently_died: VecDeque::new(),
                 store,
-                self_mailbox: MailboxId(0x_FEE7_0000),
                 restart_policy,
                 pending_restarts: HashMap::new(),
                 next_restart_token: 1,
@@ -330,13 +329,13 @@ mod tests {
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
-                ProxySpawnOutcome::Applied(MailboxId(0x4068)),
+                ProxySpawnOutcome::Applied(0x4068),
             )
             .expect("the matching completion settles once");
 
         assert!(matches!(reply, SpawnEngineResult::Ok { rpc_port: port, .. } if port == rpc_port));
         assert!(state.pending_engines.is_empty(), "completion consumes the reservation");
-        assert_eq!(state.engines.get(&engine_id).map(|entry| entry.proxy_mailbox), Some(MailboxId(0x4068)));
+        assert_eq!(state.engines.get(&engine_id).map(|entry| entry.proxy), Some(0x4068));
 
         drop(state);
         let _ = fs::remove_dir_all(root);
@@ -369,7 +368,7 @@ mod tests {
         );
 
         let reply = state
-            .settle_pending_spawn(spawn.clone(), ProxySpawnOutcome::Applied(MailboxId(0x4068_0002)))
+            .settle_pending_spawn(spawn.clone(), ProxySpawnOutcome::Applied(0x4068_0002))
             .expect("the first completion settles");
         assert!(
             matches!(reply, SpawnEngineResult::Err { engine_id: Some(ref id), ref error }
@@ -431,11 +430,11 @@ mod tests {
     }
 
     /// Install one supervised engine so a death has something to evict.
-    fn supervise(state: &mut FleetServerState, engine_id: EngineId) {
+    fn supervise(state: &mut FleetServerState<u64>, engine_id: EngineId) {
         state.engines.insert(
             engine_id,
             EngineEntry {
-                proxy_mailbox: MailboxId(0x4068),
+                proxy: 0x4068,
                 rpc_port: 7000,
                 last_alive: Instant::now(),
                 supervision: Supervision::new(test_recipe()),
@@ -475,13 +474,13 @@ mod tests {
 
         let crashed = DeathReason::Crashed { detail: "connection closed".to_owned() };
         assert!(
-            state.consider_restart(&engine_id, &crashed, Supervision::new(test_recipe())),
+            state.consider_restart(&engine_id, &crashed, Supervision::new(test_recipe())).is_some(),
             "a crash under an armed policy is restarted",
         );
         assert_eq!(state.pending_restarts.len(), 1, "the crash files exactly one pending restart");
 
         assert!(
-            !state.consider_restart(&engine_id, &DeathReason::Terminated, Supervision::new(test_recipe())),
+            state.consider_restart(&engine_id, &DeathReason::Terminated, Supervision::new(test_recipe())).is_none(),
             "a deliberate terminate is never restarted",
         );
         assert_eq!(state.pending_restarts.len(), 1, "the terminate filed nothing of its own");
@@ -508,7 +507,10 @@ mod tests {
         assert_eq!(state.recently_died.len(), 1, "the death is still recorded");
 
         let crashed = DeathReason::Crashed { detail: "bye".to_owned() };
-        assert!(!state.consider_restart(&engine_id.0.to_string(), &crashed, *supervision), "no policy, no restart");
+        assert!(
+            state.consider_restart(&engine_id.0.to_string(), &crashed, *supervision).is_none(),
+            "no policy, no restart"
+        );
         assert!(state.pending_restarts.is_empty(), "restart supervision is off, so nothing is scheduled");
 
         drop(state);
@@ -529,7 +531,7 @@ mod tests {
 
         for restart in 0..policy.burst_limit {
             assert!(
-                state.consider_restart(&engine_id, &crashed, supervision.clone()),
+                state.consider_restart(&engine_id, &crashed, supervision.clone()).is_some(),
                 "restart {restart} is inside the budget",
             );
             // Spend the same instant on the carried ledger, standing in
@@ -540,7 +542,7 @@ mod tests {
         assert_eq!(state.pending_restarts.len(), policy.burst_limit as usize);
 
         assert!(
-            !state.consider_restart(&engine_id, &crashed, supervision),
+            state.consider_restart(&engine_id, &crashed, supervision).is_none(),
             "past the burst limit the cap gives up rather than restarting",
         );
         assert_eq!(state.pending_restarts.len(), policy.burst_limit as usize, "the refused restart filed nothing");
@@ -632,7 +634,7 @@ mod tests {
                     supervision: Supervision::new(test_recipe()),
                     origin: SpawnOrigin::Requested,
                 },
-                ProxySpawnOutcome::Applied(MailboxId(0x4068)),
+                ProxySpawnOutcome::Applied(0x4068),
             )
             .expect("the matching completion settles");
 
@@ -646,7 +648,7 @@ mod tests {
     /// Store `bytes` as an unnamed, unpinned binary in the state's own
     /// artifact store and return its content hash — an entry nothing but a
     /// runtime hold can protect from the budget.
-    fn store_binary(state: &mut FleetServerState, bytes: &[u8]) -> String {
+    fn store_binary(state: &mut FleetServerState<u64>, bytes: &[u8]) -> String {
         state
             .store
             .upload(
@@ -668,7 +670,7 @@ mod tests {
 
     /// Settle a staged birth as an authoritative apply, committing the
     /// engine on a recipe naming `hash`.
-    fn settle_applied(state: &mut FleetServerState, engine_id: EngineId, rpc_port: u16, hash: &str) {
+    fn settle_applied(state: &mut FleetServerState<u64>, engine_id: EngineId, rpc_port: u16, hash: &str) {
         let recipe = SpawnRecipe { hash: hash.to_owned(), args: Vec::new(), boot_manifest: None };
         let reply = state
             .settle_pending_spawn(
@@ -678,7 +680,7 @@ mod tests {
                     supervision: Supervision::new(recipe),
                     origin: SpawnOrigin::Requested,
                 },
-                ProxySpawnOutcome::Applied(MailboxId(u64::from(rpc_port))),
+                ProxySpawnOutcome::Applied(u64::from(rpc_port)),
             )
             .expect("the matching completion settles");
         assert!(matches!(reply, SpawnEngineResult::Ok { .. }), "test setup: the staged birth commits");
@@ -687,7 +689,7 @@ mod tests {
     /// Drive one engine through the real commit path — staged birth, then
     /// authoritative apply — so it is supervised exactly the way `on_spawn`
     /// leaves it rather than inserted into the table by hand.
-    fn commit_engine(state: &mut FleetServerState, engine_id: EngineId, rpc_port: u16, hash: &str) {
+    fn commit_engine(state: &mut FleetServerState<u64>, engine_id: EngineId, rpc_port: u16, hash: &str) {
         state.begin_pending_spawn(engine_id, rpc_port, hash.to_owned());
         settle_applied(state, engine_id, rpc_port, hash);
     }
@@ -696,7 +698,7 @@ mod tests {
     /// per-engine copy of the resolved binary, at the shape `prepare_fork`
     /// materializes into. Written out here rather than through the
     /// production helper so a change to that shape fails this loudly.
-    fn materialize_engine_dir(state: &FleetServerState, engine_id: EngineId) -> PathBuf {
+    fn materialize_engine_dir(state: &FleetServerState<u64>, engine_id: EngineId) -> PathBuf {
         let dir = state.fleet_store_root.join(engine_id.0.simple().to_string());
         fs::create_dir_all(&dir).expect("test setup: the per-engine scratch dir is creatable");
         fs::write(dir.join("substrate"), b"realized-binary-bytes").expect("test setup: the materialized binary writes");
@@ -834,7 +836,7 @@ mod tests {
             panic!("a supervised engine's death evicts it");
         };
         assert!(
-            state.consider_restart(&engine_id.0.to_string(), &crashed, *supervision),
+            state.consider_restart(&engine_id.0.to_string(), &crashed, *supervision).is_some(),
             "an armed policy files the restart this test is about",
         );
 

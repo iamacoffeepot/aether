@@ -15,7 +15,7 @@ pub use crate::kinds::{EngineAlive, EngineDied};
 use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 pub use aether_actor::root_mailbox;
 use aether_actor::runtime;
-pub use aether_data::{EngineId, Kind, KindId, MailboxId};
+pub use aether_data::{EngineId, Kind, MailboxId};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
 use aether_rpc::RpcInboundReady;
@@ -57,10 +57,6 @@ fn fleet_cap_mailbox() -> MailboxId {
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct FleetProxyState {
     pub engine_id: EngineId,
-    /// This proxy's registered mailbox, retained so `wire` can issue the
-    /// post-registration catch-up wake for reader frames that arrived during
-    /// `init`.
-    pub self_mailbox: MailboxId,
     /// Cached so `on_inbound_ready` can push correlation-preserving
     /// reply mail — `NativeCtx` doesn't expose `mailer()`, only
     /// `NativeInitCtx` does.
@@ -208,9 +204,8 @@ impl NativeActor for FleetProxy {
     const NAMESPACE: &'static str = "aether.fleet.proxy";
 
     fn init(mut config: FleetProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<FleetProxyState, BootError> {
-        let self_mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
+        let wake = ctx.self_wake::<RpcInboundReady>();
 
         // A freshly-forked substrate (`spawned.is_some()`) may not
         // have bound its RPC port yet, so the startup dial retries
@@ -220,9 +215,7 @@ impl NativeActor for FleetProxy {
         let retry = config.spawned.is_some();
         let conn = match connect_proxy(
             &config.rpc_addr,
-            &mailer,
-            self_mailbox,
-            wake_kind,
+            move || wake.wake(&RpcInboundReady::default()),
             retry,
             config.connect_budget,
             config.spawned.as_mut(),
@@ -249,13 +242,13 @@ impl NativeActor for FleetProxy {
         );
 
         // Arm the liveness heartbeat, if configured. The sidecar
-        // thread fires an `EngineHeartbeatTick` at this proxy's own
-        // mailbox every `interval`; `on_heartbeat_tick` does the
+        // thread wakes this proxy with an `EngineHeartbeatTick` every
+        // `interval`; `on_heartbeat_tick` does the
         // ping + miss accounting on the dispatcher thread (so the
         // RPC write and all proxy state stay single-threaded).
         let (heartbeat, miss_limit) = match config.heartbeat {
             Some(params) if !params.interval.is_zero() && params.miss_limit > 0 => {
-                let handle = spawn_heartbeat(Arc::clone(&mailer), self_mailbox, params.interval);
+                let handle = spawn_heartbeat(ctx.self_wake::<EngineHeartbeatTick>(), params.interval);
                 (Some(handle), params.miss_limit)
             }
             _ => (None, 0),
@@ -263,7 +256,6 @@ impl NativeActor for FleetProxy {
 
         Ok(FleetProxyState {
             engine_id: config.engine_id,
-            self_mailbox,
             mailer,
             conn,
             in_flight: HashMap::new(),
@@ -280,13 +272,8 @@ impl NativeActor for FleetProxy {
     /// frame can enqueue successfully while its accompanying wake is dropped
     /// as unresolved. `wire` runs after publication; this self-wake ensures
     /// the dispatcher drains any frame stranded in that gap.
-    fn wire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
-        state.mailer.push(Mail::new(
-            state.self_mailbox,
-            <RpcInboundReady as Kind>::ID,
-            RpcInboundReady::default().encode_into_bytes(),
-            1,
-        ));
+    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        ctx.self_wake::<RpcInboundReady>().wake(&RpcInboundReady::default());
     }
 
     /// Relay one mail to the substrate as an RPC `Call`.

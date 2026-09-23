@@ -12,15 +12,12 @@
 //! a wire kind and the timer stays a pure alarm clock.
 //!
 //! One-shot and detached, unlike the proxy's repeating heartbeat: there is
-//! nothing to stop early and nothing to join. A cap that shuts down while
-//! a timer is still sleeping leaves that timer to push at a mailbox that
-//! no longer resolves, which the mailer already treats as a no-op.
+//! nothing to stop early and nothing to join. The timer holds a
+//! [`SelfWake`], never the cap's mailbox position (ADR-0230), so a timer
+//! that outlives its cap wakes nothing.
 
 use crate::kinds::EngineRestartDue;
-use aether_data::{Kind, KindId, MailboxId};
-use aether_substrate::Mail;
-use aether_substrate::mail::mailer::Mailer;
-use std::sync::Arc;
+use aether_substrate::actor::native::SelfWake;
 use std::thread;
 use std::time::Duration;
 
@@ -30,16 +27,14 @@ use std::time::Duration;
 /// Fire-and-forget: the caller has already recorded the pending restart,
 /// so the only thing that can be lost by a chassis teardown mid-sleep is
 /// a restart whose cap is going away anyway.
-pub fn schedule_restart(mailer: &Arc<Mailer>, cap_mailbox: MailboxId, token: u64, backoff: Duration) {
-    let mailer = Arc::clone(mailer);
-    let due_kind = KindId(<EngineRestartDue as Kind>::ID.0);
+pub fn schedule_restart(wake: SelfWake<EngineRestartDue>, token: u64, backoff: Duration) {
     // An infra timer below the mail layer, like the proxy's heartbeat
     // sidecar: it fires one wake-mail and exits, with no inbound chain to
     // inherit and so no settlement umbrella to honor.
     #[allow(clippy::disallowed_methods)] // aether-suppression-request: infra timer; one wake-mail then exits
     let spawned = thread::Builder::new().name("aether-fleet-restart".into()).spawn(move || {
         thread::sleep(backoff);
-        mailer.push(Mail::new(cap_mailbox, due_kind, EngineRestartDue { token }.encode_into_bytes(), 1));
+        wake.wake(&EngineRestartDue { token });
     });
 
     if let Err(e) = spawned {

@@ -14,8 +14,8 @@ use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
 use aether_actor::runtime;
-pub use aether_actor::{Manual, Single};
-pub use aether_data::{EngineId, Kind, MailboxId, Uuid};
+pub use aether_actor::{ActorRef, Manual, Single};
+pub use aether_data::{EngineId, Uuid};
 use aether_kinds::{
     BinarySelector, ListComponentBinaries, ListEngineBinaries, ListEngines, ResolveComponent, SetArtifactPinned,
     SpawnEngine, TerminateEngine, UploadBinary, UploadComponent,
@@ -26,7 +26,6 @@ pub use aether_kinds::{
     UploadBinaryResult, UploadComponentResult,
 };
 use aether_rpc::RouteEnvelope;
-pub use aether_substrate::Mail;
 pub use aether_substrate::Subname;
 pub use aether_substrate::actor::native::{
     DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
@@ -217,10 +216,14 @@ fn prepare_fork_io_detail(stage: &str, hash: &str, err: &io::Error) -> String {
 }
 
 /// One supervised engine in [`FleetServerState`]'s table.
-pub struct EngineEntry {
-    /// Mailbox of the `aether.fleet.proxy:<id>` actor — the
-    /// forward target for `TerminateEngine`.
-    pub proxy_mailbox: MailboxId,
+///
+/// `P` is the proxy handle: the [`ActorRef<FleetProxy>`] the proxy's
+/// spawn outcome proved. The reducer only stores and returns it, so its
+/// deterministic tests stand a plain value in for the proof.
+pub struct EngineEntry<P = ActorRef<FleetProxy>> {
+    /// The `aether.fleet.proxy:<id>` actor — the target for
+    /// `TerminateEngine` and every routed `ForwardEnvelope`.
+    pub proxy: P,
     /// The localhost RPC port the cap assigned this substrate.
     pub rpc_port: u16,
     /// When the cap last saw this engine alive (issue 1339): set at
@@ -313,9 +316,19 @@ pub enum PrepareFailure {
     PostAllocation { engine_id: EngineId, rpc_port: u16, error: String },
 }
 
-pub enum ProxySpawnOutcome {
-    Applied(MailboxId),
+/// How a staged proxy birth settled, as the reducer sees it: the proxy
+/// handle the birth proved, or why it was refused.
+pub enum ProxySpawnOutcome<P = ActorRef<FleetProxy>> {
+    Applied(P),
     Rejected(String),
+}
+
+/// A restart [`FleetServerState::consider_restart`] filed: the token its
+/// backoff timer fires back, and how long that timer sleeps. The caller
+/// arms the timer, since only a handler ctx can mint its self-wake.
+pub struct FiledRestart {
+    pub token: u64,
+    pub backoff: Duration,
 }
 
 pub enum EngineDeathDisposition {
@@ -336,8 +349,8 @@ pub enum EngineDeathDisposition {
 /// macro-emitted `Dispatch` impl. Living in this private module keeps it
 /// `pub`-enough to satisfy the `NativeActor::State` interface without exposing
 /// it as crate-public API.
-pub struct FleetServerState {
-    pub engines: HashMap<EngineId, EngineEntry>,
+pub struct FleetServerState<P = ActorRef<FleetProxy>> {
+    pub engines: HashMap<EngineId, EngineEntry<P>>,
     /// Initialized proxy births awaiting authoritative owner settlement.
     /// Entries never participate in the public fleet surfaces.
     pub pending_engines: HashMap<EngineId, PendingEngine>,
@@ -347,10 +360,9 @@ pub struct FleetServerState {
     /// dependency. Starts at 1 (`Uuid::from_u128(0)` is the nil
     /// uuid).
     pub next_engine_seq: u128,
-    /// Cached so `on_route` can push a `ForwardEnvelope` at a proxy
-    /// while *propagating the inbound reply-to* — `NativeCtx`'s
-    /// sends stamp the cap as sender, but a routed call's reply
-    /// must reach the originating `RpcServerCapability`, not here.
+    /// Cached so `settle_err` can push a `CallSettled` straight at a
+    /// routed call's originating `RpcServerCapability`, echoing the
+    /// inbound correlation.
     pub mailer: Arc<Mailer>,
     /// Liveness-heartbeat tuning each spawned proxy is armed with
     /// (issue 1339), resolved once from `FleetConfig` at init.
@@ -389,9 +401,6 @@ pub struct FleetServerState {
     /// hub child); the spawn cutover (#1954) reads it back through the
     /// store's `get` seam.
     pub store: ArtifactStore,
-    /// This cap's own mailbox, retained so a restart-backoff timer has
-    /// somewhere to fire its [`EngineRestartDue`] wake.
-    pub self_mailbox: MailboxId,
     /// The automatic-restart policy, or `None` when a dead engine stays
     /// dead. Resolved once from `FleetConfig` at init.
     pub restart_policy: Option<RestartPolicy>,
@@ -405,7 +414,7 @@ pub struct FleetServerState {
     pub next_restart_token: u64,
 }
 
-impl FleetServerState {
+impl<P> FleetServerState<P> {
     /// Re-derive which stored binaries supervision is currently running
     /// and hand the set to the store, which spares them from LRU eviction
     /// (issue 5686).
@@ -457,7 +466,7 @@ impl FleetServerState {
     /// hold on its binary, and hand back the entry so the caller can record
     /// the death and forward the terminate. `None` when no engine has that
     /// id.
-    pub fn retire_engine(&mut self, engine_id: EngineId) -> Option<EngineEntry> {
+    pub fn retire_engine(&mut self, engine_id: EngineId) -> Option<EngineEntry<P>> {
         let entry = self.engines.remove(&engine_id)?;
         self.refresh_binary_holds();
         self.reap_engine_dir(engine_id);
@@ -524,21 +533,24 @@ impl FleetServerState {
     }
 
     /// Decide whether a just-evicted engine should be restarted, and if
-    /// so file its recipe and start the backoff timer.
+    /// so file its recipe under a fresh token.
     ///
     /// The death is already recorded by the time this runs, so every exit
     /// here is a complete, honest outcome — a refusal leaves exactly the
     /// state the cap had before restart supervision existed.
     ///
-    /// Returns whether a restart was scheduled, so a caller (and a test)
-    /// can distinguish "declined" from "under way" without inspecting the
-    /// timer.
-    pub fn consider_restart(&mut self, engine_id: &str, reason: &DeathReason, mut supervision: Supervision) -> bool {
-        let Some(policy) = self.restart_policy else {
-            return false;
-        };
+    /// Returns the filed restart, or `None` when it was declined. The
+    /// caller arms the backoff timer from the returned token and backoff,
+    /// so a test can tell "declined" from "under way" without a timer.
+    pub fn consider_restart(
+        &mut self,
+        engine_id: &str,
+        reason: &DeathReason,
+        mut supervision: Supervision,
+    ) -> Option<FiledRestart> {
+        let policy = self.restart_policy?;
         if !restart_applies_to(reason) {
-            return false;
+            return None;
         }
 
         if !supervision.admit_restart(policy, Instant::now()) {
@@ -553,7 +565,7 @@ impl FleetServerState {
                 burst_window_secs = policy.burst_window.as_secs(),
                 "engine restart: burst limit exhausted; giving up on this engine",
             );
-            return false;
+            return None;
         }
 
         let token = self.next_restart_token;
@@ -569,8 +581,7 @@ impl FleetServerState {
             backoff_millis = u64::try_from(policy.backoff.as_millis()).unwrap_or(u64::MAX),
             "engine restart: scheduling a re-fork after the backoff",
         );
-        schedule_restart(&self.mailer, self.self_mailbox, token, policy.backoff);
-        true
+        Some(FiledRestart { token, backoff: policy.backoff })
     }
 
     /// Reserve a port, mint an engine id, realize the binary, and fork it
@@ -730,7 +741,7 @@ impl FleetServerState {
     pub fn settle_pending_spawn(
         &mut self,
         spawn: FleetSpawnContext,
-        outcome: ProxySpawnOutcome,
+        outcome: ProxySpawnOutcome<P>,
     ) -> Option<SpawnEngineResult> {
         let FleetSpawnContext { engine_id, rpc_port, supervision, .. } = spawn;
         let pending = self.pending_engines.remove(&engine_id)?;
@@ -738,7 +749,7 @@ impl FleetServerState {
 
         let reply = match outcome {
             ProxySpawnOutcome::Rejected(error) => self.fail_spawn(engine_id, rpc_port, error),
-            ProxySpawnOutcome::Applied(proxy_mailbox) => {
+            ProxySpawnOutcome::Applied(proxy) => {
                 if let Some(reason) = pending.early_death {
                     let error = format!("proxy died before supervision committed: {reason:?}");
                     self.record_death(engine_id.0.to_string(), rpc_port, reason);
@@ -748,7 +759,7 @@ impl FleetServerState {
                     self.engines.insert(
                         engine_id,
                         EngineEntry {
-                            proxy_mailbox,
+                            proxy,
                             rpc_port,
                             // Authoritative activation + no early death =
                             // alive at the supervision commit boundary.
@@ -847,7 +858,6 @@ impl NativeActor for FleetServer {
             fleet_store_root,
             recently_died: VecDeque::new(),
             store,
-            self_mailbox: ctx.self_id(),
             restart_policy: config.restart_policy(),
             pending_restarts: HashMap::new(),
             next_restart_token: 1,
@@ -1054,7 +1064,7 @@ impl NativeActor for FleetServer {
         let engine_id = spawn.engine_id;
         let origin = spawn.origin;
         let outcome = match &done.output().result {
-            Ok(_) => ProxySpawnOutcome::Applied(done.output().mailbox_id),
+            Ok(proxy) => ProxySpawnOutcome::Applied(*proxy),
             Err(error) => ProxySpawnOutcome::Rejected(format!("proxy activation failed: {error:?}")),
         };
         let Some(reply) = state.settle_pending_spawn(spawn, outcome) else {
@@ -1123,15 +1133,13 @@ impl NativeActor for FleetServer {
         // proxy deliberately does not `report_died` for a terminate —
         // the cap initiated it — so there is no second signal to
         // reconcile and this is the one record for this death.
-        let proxy_mailbox = entry.proxy_mailbox;
         state.record_death(mail.engine_id.clone(), entry.rpc_port, DeathReason::Terminated);
 
-        // Forward to the proxy: it terminates its substrate's group and
-        // self-shuts-down. Fire-and-forget — the proxy doesn't
-        // reply, and the table entry is already gone, so the
-        // returned MailId has nothing to subscribe against.
-        let payload = mail.encode_into_bytes();
-        let _ = ctx.send_envelope_tracked(proxy_mailbox, <TerminateEngine as Kind>::ID, &payload);
+        // Forward to the proxy through the reference its spawn proved: it
+        // terminates its substrate's group and self-shuts-down.
+        // Fire-and-forget — the proxy doesn't reply, and the table entry
+        // is already gone.
+        ctx.to(&entry.proxy).send(&mail);
         TerminateEngineResult::Ok
     }
 
@@ -1182,15 +1190,13 @@ impl NativeActor for FleetServer {
             return;
         };
 
-        // Re-emit as a ForwardEnvelope at the proxy, carrying the
-        // inbound reply-to verbatim so the substrate's reply — and
-        // the proxy's CallSettled — route straight back to the
-        // originating RpcServerCapability.
+        // Re-emit as a ForwardEnvelope at the proxy through the
+        // reference its spawn proved. `forward_to` keeps the inbound
+        // reply target, so the substrate's reply — and the proxy's
+        // CallSettled — route straight back to the originating
+        // RpcServerCapability. The forward joins this handler's chain.
         let forward = ForwardEnvelope { mailbox: mail.mailbox, kind: mail.kind, payload: mail.payload };
-        state.mailer.push(
-            Mail::new(entry.proxy_mailbox, <ForwardEnvelope as Kind>::ID, forward.encode_into_bytes(), 1)
-                .with_reply_to(reply_to),
-        );
+        ctx.forward_to(&entry.proxy, &forward);
     }
 
     /// Evict a dead engine from the table (issue 1339).
@@ -1204,7 +1210,7 @@ impl NativeActor for FleetServer {
     /// `terminate_substrate` already dropped) is a logged no-op, so
     /// it can't race the terminate path.
     #[handler::single]
-    fn on_engine_died(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: EngineDied) {
+    fn on_engine_died(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: EngineDied) {
         let Ok(uuid) = Uuid::parse_str(&mail.engine_id) else {
             tracing::warn!(
                 target: "aether_substrate::fleet_server",
@@ -1229,7 +1235,11 @@ impl NativeActor for FleetServer {
                     reason = ?mail.reason,
                     "engine evicted: proxy reported death",
                 );
-                state.consider_restart(&mail.engine_id, &mail.reason, *supervision);
+                if let Some(FiledRestart { token, backoff }) =
+                    state.consider_restart(&mail.engine_id, &mail.reason, *supervision)
+                {
+                    schedule_restart(ctx.self_wake::<EngineRestartDue>(), token, backoff);
+                }
             }
             EngineDeathDisposition::PendingDuplicate | EngineDeathDisposition::Unknown => {}
         }

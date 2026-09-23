@@ -7,9 +7,7 @@
 use super::RpcInboundReady;
 use crate::{RpcError, WireFrame};
 use aether_codec::frame::{FrameError, read_frame};
-use aether_data::{Kind, KindId, MailboxId};
-use aether_substrate::Mail;
-use aether_substrate::mail::mailer::Mailer;
+use aether_substrate::actor::native::SelfWake;
 use std::io::{self, BufReader};
 use std::net::{SocketAddr, TcpStream};
 use std::sync::Arc;
@@ -95,9 +93,7 @@ pub fn run_reader_loop(
     conn_id: ConnId,
     shutdown: &AtomicBool,
     inbound_tx: &mpsc::Sender<InboundEvent>,
-    mailer: &Arc<Mailer>,
-    self_id: MailboxId,
-    wake_kind: KindId,
+    wake: &SelfWake<RpcInboundReady>,
 ) {
     let mut reader = BufReader::new(read_half);
     loop {
@@ -109,16 +105,15 @@ pub fn run_reader_loop(
                 if inbound_tx.send(InboundEvent::FrameReceived { conn_id, frame }).is_err() {
                     return;
                 }
-                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+                wake.wake(&RpcInboundReady::default());
             }
             Err(FrameError::Io(io_err)) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
                 let _ = inbound_tx.send(InboundEvent::ReaderClosed { conn_id, reason: "eof".into() });
-                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+                wake.wake(&RpcInboundReady::default());
                 return;
             }
             Err(FrameError::FrameTooLarge { size, max }) => {
-                let outcome =
-                    handle_oversize_frame(&mut reader, conn_id, size, max, inbound_tx, mailer, self_id, wake_kind);
+                let outcome = handle_oversize_frame(&mut reader, conn_id, size, max, inbound_tx, wake);
                 if outcome.is_terminal() {
                     return;
                 }
@@ -128,7 +123,7 @@ pub fn run_reader_loop(
                     return;
                 }
                 let _ = inbound_tx.send(InboundEvent::ReaderClosed { conn_id, reason: format!("read error: {e}") });
-                mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+                wake.wake(&RpcInboundReady::default());
                 return;
             }
         }
@@ -155,7 +150,6 @@ impl OversizeOutcome {
 /// body (if `size <= 2 * max`) so the stream re-syncs and the
 /// connection survives, or post a structured-abort event that
 /// asks the dispatcher to close the connection with a `Bye`.
-#[allow(clippy::too_many_arguments)]
 #[allow(clippy::cast_possible_truncation)]
 fn handle_oversize_frame(
     reader: &mut BufReader<TcpStream>,
@@ -163,9 +157,7 @@ fn handle_oversize_frame(
     size: usize,
     max: usize,
     inbound_tx: &mpsc::Sender<InboundEvent>,
-    mailer: &Arc<Mailer>,
-    self_id: MailboxId,
-    wake_kind: KindId,
+    wake: &SelfWake<RpcInboundReady>,
 ) -> OversizeOutcome {
     let drain_ceiling = max.saturating_mul(2);
     if size > drain_ceiling {
@@ -176,7 +168,7 @@ fn handle_oversize_frame(
         if inbound_tx.send(event).is_err() {
             return OversizeOutcome::Terminal;
         }
-        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+        wake.wake(&RpcInboundReady::default());
         return OversizeOutcome::Terminal;
     }
     // `take(size)` bounds the drain so a racy / lying peer can't
@@ -189,7 +181,7 @@ fn handle_oversize_frame(
             conn_id,
             reason: format!("frame too large drain failed: {size} > {max}"),
         });
-        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+        wake.wake(&RpcInboundReady::default());
         return OversizeOutcome::Terminal;
     };
     if (drained as usize) != size {
@@ -198,7 +190,7 @@ fn handle_oversize_frame(
             conn_id,
             reason: format!("frame too large partial drain: {drained}/{size}"),
         });
-        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+        wake.wake(&RpcInboundReady::default());
         return OversizeOutcome::Terminal;
     }
     let event = InboundEvent::FrameDecodeError {
@@ -208,6 +200,6 @@ fn handle_oversize_frame(
     if inbound_tx.send(event).is_err() {
         return OversizeOutcome::Terminal;
     }
-    mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+    wake.wake(&RpcInboundReady::default());
     OversizeOutcome::Continue
 }

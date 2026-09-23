@@ -13,6 +13,8 @@
 //!   *later* handler turn. The worker pushes a result and dies, and the reply
 //!   is sent from a subsequent invocation, so the hold has to outlive the
 //!   worker and neither thread shape fits.
+//! - [`self_wake`] — the handle a cap's own long-lived thread holds to wake
+//!   its actor, in place of a stored mailbox id plus a mailer (ADR-0230).
 //!
 //! [`task_queue`] sits above [`blocking`] rather than beside it: the framework
 //! owns the spawn, hold, and completion routing, and the one thing it
@@ -23,5 +25,6 @@
 //! being rather than moving work off an existing one.
 
 pub mod blocking;
+pub mod self_wake;
 pub mod task_queue;
 pub mod thread;

@@ -156,6 +156,12 @@ handful of infrastructure capabilities — not how actors run, and not something
 reach for from ordinary actor logic (use one of the three shapes above). It's a
 cap-local spawn, scoped tightly to the blocking call ([ADR-0050](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0050-llm-completion-sink.md)).
 
+Such a thread wakes its actor through the handle `ctx.self_wake::<K>()` returns
+(on the `init` ctx as well as a handler's), never through a stored mailbox id
+plus a mailer. The `SelfWake<K>` names no position and sends nothing but that one
+wake, and a wake after the actor has dropped does nothing
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
+
 ## Where to read more
 
 - The contracts this page implements — [Invariants & guarantees](../foundations/invariants.md).
