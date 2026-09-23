@@ -16,7 +16,7 @@ mod menu;
 use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, Manual, Single, runtime};
+use aether_actor::{ActorRef, Addressable, AnyActorRef, Manual, Single, runtime};
 use aether_data::{Kind, MailboxId};
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MonitorNotice, MouseButton, MouseButtonRelease, MouseMove, MouseWheel,
@@ -215,6 +215,9 @@ pub struct DesktopWindowCapabilityState {
     native_windows: HashMap<WindowId, Arc<Window>>,
     winit_windows: HashMap<WinitWindowId, WindowId>,
     children: HashMap<WindowId, WindowChild>,
+    /// Each supervised child's window, keyed by the child's reference: the
+    /// `MonitorNotice` sender a departing child is found by (ADR-0230).
+    child_windows: HashMap<AnyActorRef, WindowId>,
     subscribers: WindowSubscribers,
     pending_creates: HashMap<WindowId, PendingCreate>,
     pending_host_actions: VecDeque<WindowHostAction>,
@@ -387,6 +390,7 @@ impl DesktopWindowCapabilityState {
             return self.rollback_attached_create(id, pending, error);
         };
         self.children.insert(id, WindowChild { reference: child, _monitor: monitor });
+        self.child_windows.insert(child.erase(), id);
         state.lifecycle = DesktopWindowLifecycle::Live;
         self.shutdown_when_idle = false;
         let info = state.info(id);
@@ -848,6 +852,7 @@ impl NativeActor for DesktopWindowCapability {
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
             children: HashMap::new(),
+            child_windows: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),
@@ -932,12 +937,16 @@ impl NativeActor for DesktopWindowCapability {
     }
 
     #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        let id = WindowId(notice.target.0);
-        if state.children.remove(&id).is_some() {
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        if let Some(id) = state.child_windows.remove(&departed)
+            && state.children.remove(&id).is_some()
+        {
             let _ = state.queue_close(id, None);
         }
-        state.subscribers.purge_departed(notice);
+        state.subscribers.unsubscribe_all(departed);
     }
 }
 
@@ -1019,6 +1028,7 @@ mod tests {
             native_windows: HashMap::new(),
             winit_windows: HashMap::new(),
             children: HashMap::new(),
+            child_windows: HashMap::new(),
             subscribers: WindowSubscribers::new(),
             pending_creates: HashMap::new(),
             pending_host_actions: VecDeque::new(),

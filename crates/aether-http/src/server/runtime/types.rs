@@ -12,15 +12,17 @@ pub type ConnId = u64;
 /// The route table (ADR-0130) shared across the supervisor, its dispatch
 /// shards, and (in later ADR-0135 stages) the reader threads: the
 /// supervisor's registration handlers write, request dispatch reads.
-pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
+pub type SharedRoutes = Arc<RwLock<RouteTable>>;
 
 /// Read-mostly state a reader thread consults to make the fast-path
 /// decision itself (ADR-0135 §2): the shared route table, the connection's
 /// peer string (captured once at adoption; every request's `peer_addr`
 /// clones it on the reader thread rather than the shard), and the two
-/// registries route resolution reads — the routing registry that validates
-/// a matched member and the capability registry that answers whether it
-/// takes the streamed body path.
+/// registries route resolution reads through the matched member's proven
+/// reference (ADR-0230) — the routing registry's `is_live`, which skips a
+/// departed member its notice has not yet purged, and the capability
+/// registry's `accepts_actor`, which answers whether it takes the streamed
+/// body path.
 pub struct ReaderShared {
     pub routes: SharedRoutes,
     pub peer: String,
@@ -135,7 +137,7 @@ pub enum InboundEvent {
     /// and read its accept-set; the shard opens the inbound request
     /// stream and replies [`ReaderControl::Stream`] down the control
     /// channel. Buffered requests never take this round trip.
-    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: MailboxId },
+    RequestHeadParsed { conn_id: ConnId, head: ParsedHead, handler: AnyActorRef },
     /// A complete, size-bounded buffered request, resolved and encoded
     /// at the reader (ADR-0135 §2): `payload` is the ready-to-send
     /// `HttpServerRequest` (or routed-kind) wire image; the shard's
@@ -143,7 +145,7 @@ pub enum InboundEvent {
     RequestParsed {
         conn_id: ConnId,
         payload: Vec<u8>,
-        handler: MailboxId,
+        handler: AnyActorRef,
         kind: KindId,
         method: HttpMethod,
         keep_alive: bool,
@@ -251,11 +253,11 @@ pub struct ConnState {
 /// Per-connection websocket state (ADR-0129), set on accept. Outbound frames
 /// ride the ADR-0128 writer thread through the [`StreamState`] keyed by
 /// `stream_id` in [`HttpShardState::streams`]; `handler` is the
-/// mailbox each inbound message is dispatched to.
+/// actor each inbound message is dispatched to.
 pub struct WsConn {
-    /// The handler mailbox resolved at handshake — inbound messages dispatch
-    /// here, and outbound credit grants address it.
-    pub handler: MailboxId,
+    /// The handler resolved at handshake — inbound messages dispatch here,
+    /// and outbound credit grants address it.
+    pub handler: AnyActorRef,
     /// The `stream_id` of this connection's outbound writer [`StreamState`].
     pub stream_id: u64,
 }
@@ -277,7 +279,7 @@ pub struct PendingRequest {
     /// The handler this request dispatched to. Carried so a `WebSocketAccept`
     /// reply (ADR-0129) resolves the same handler for the upgraded
     /// connection's inbound dispatch + credit grants without re-resolving.
-    pub handler: MailboxId,
+    pub handler: AnyActorRef,
 }
 
 /// Per-connection response-stream state (ADR-0128), keyed in
@@ -288,11 +290,13 @@ pub struct StreamState {
     /// The connection this stream writes to. Teardown paths locate a stream
     /// by connection through this field.
     pub conn_id: ConnId,
-    /// The handler mailbox this stream's credit grants address. For a response
-    /// stream (ADR-0128) it is the registrant of the matched route (ADR-0130);
-    /// for a websocket (ADR-0129) it is the handler resolved at handshake. Stored
-    /// so credit replenishment addresses the right actor without a re-lookup.
-    pub handler: MailboxId,
+    /// The handler this stream's credit grants address. For a response stream
+    /// (ADR-0128) it is the registrant of the matched route (ADR-0130); for a
+    /// websocket (ADR-0129) it is the handler resolved at handshake. Stored so
+    /// credit replenishment addresses the right actor without a re-lookup.
+    /// `None` for a response stream whose in-flight record was already gone
+    /// at open, which then grants no credit.
+    pub handler: Option<AnyActorRef>,
     /// Bounded hand-off to the writer thread. `try_send` never blocks the
     /// dispatcher: the credit accounting keeps the invariant
     /// `credit_outstanding + queued <= window`, so a slot is always free when
@@ -336,10 +340,10 @@ pub struct RequestStreamState {
     /// The connection whose reader feeds this stream. Teardown locates a
     /// stream by connection through this field.
     pub conn_id: ConnId,
-    /// The resolved handler mailbox the cap delivers `HttpRequestChunk` /
+    /// The resolved handler the cap delivers `HttpRequestChunk` /
     /// `HttpRequestStreamEnd` to. Captured at stream open so mid-stream
     /// delivery skips route re-resolution.
-    pub handler: MailboxId,
+    pub handler: AnyActorRef,
     /// The request method, carried to the final response's [`PendingRequest`]
     /// so a HEAD response suppresses its body.
     pub method: HttpMethod,

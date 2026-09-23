@@ -438,7 +438,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         correlation: u64,
         conn_id: ConnId,
-        handler: MailboxId,
+        handler: AnyActorRef,
         accept: &WebSocketAccept,
     ) {
         self.in_flight.remove(&correlation);
@@ -500,7 +500,7 @@ impl HttpShardState {
             stream_id,
             StreamState {
                 conn_id,
-                handler,
+                handler: Some(handler),
                 tx,
                 writer_thread: Some(writer_thread),
                 credit_outstanding: window,
@@ -533,7 +533,7 @@ impl HttpShardState {
     /// The websocket-upgraded connection's dispatch handler + `stream_id`
     /// (ADR-0132), or `None` if `conn_id` names no such connection — the
     /// shared lookup behind every ws dispatch/close/send site.
-    fn ws_target(&self, conn_id: ConnId) -> Option<(MailboxId, u64)> {
+    fn ws_target(&self, conn_id: ConnId) -> Option<(AnyActorRef, u64)> {
         self.connections.get(&conn_id).and_then(|conn| conn.websocket.as_ref()).map(|ws| (ws.handler, ws.stream_id))
     }
 
@@ -547,7 +547,7 @@ impl HttpShardState {
             return;
         };
         let payload = WebSocketMessage { stream_id, binary, data }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached(handler, <WebSocketMessage as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached_to(handler, <WebSocketMessage as Kind>::ID, &payload);
     }
 
     /// Report a peer-initiated websocket close to the handler (ADR-0129 §5) as
@@ -558,7 +558,7 @@ impl HttpShardState {
             return;
         };
         let payload = WebSocketClose { stream_id, code, reason: reason.to_string() }.encode_into_bytes();
-        let _ = ctx.send_envelope_detached(handler, <WebSocketClose as Kind>::ID, &payload);
+        let _ = ctx.send_envelope_detached_to(handler, <WebSocketClose as Kind>::ID, &payload);
     }
 
     /// Frame an outbound application message and hand it to the connection's

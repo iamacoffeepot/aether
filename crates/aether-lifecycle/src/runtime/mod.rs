@@ -456,14 +456,18 @@ impl NativeActor for LifecycleCapability {
     /// monitor map bounded by live subscribers; a later occupant of
     /// the same mailbox re-registers through its own subscribe.
     ///
-    /// The notice names the departed *position* while both tables hold
-    /// references, so this compares rather than looks up: the actor is gone,
-    /// which is precisely the state no proof of it can describe.
+    /// The host stamps the departed actor as the notice's sender, so
+    /// `ctx.sender()` is the same proven reference both tables are keyed by
+    /// (ADR-0230) and each removal is a keyed lookup. A notice with no
+    /// sender names nothing and changes nothing.
     #[handler::single]
-    fn on_monitor_notice(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, notice: MonitorNotice) {
-        state.monitors.retain(|reference, _| reference.id() != notice.target);
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        state.monitors.remove(&departed);
         for set in state.subscribers.values_mut() {
-            set.retain(|reference| reference.id() != notice.target);
+            set.remove(&departed);
         }
     }
 

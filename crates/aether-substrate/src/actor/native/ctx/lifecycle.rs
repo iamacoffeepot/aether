@@ -57,9 +57,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `Live` → `Dead`) or on vacate ([`Self::vacate`]: the occupant
     /// unloads while the slot stays live), whichever comes first
     /// (ADR-0079 §8, amended). The watcher receives that notice as
-    /// ordinary mail and reads the `target` field to identify the
-    /// vacated actor; either way the notice means state keyed by
-    /// `target` is stale.
+    /// ordinary mail whose envelope sender is the departed actor, so its
+    /// handler reads `ctx.sender()` to get the same [`AnyActorRef`] it
+    /// monitored; either way the notice means state keyed by that
+    /// reference is stale.
     ///
     /// Validation: `target` is the ADR-0230 proof that an actor reached
     /// `Live` in the routing [`Registry`](crate::Registry). The runtime check
@@ -139,7 +140,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// ADR-0114 teardown (#4228): declare one inline-child `alias` folded onto
     /// the calling actor's mailbox vacated, because the child that occupied it
     /// was despawned. Drains that alias's watchers and fires one
-    /// [`aether_kinds::MonitorNotice`] naming it — the single-address form of
+    /// [`aether_kinds::MonitorNotice`] sent from it — the single-address form of
     /// what [`Self::vacate`] does for a whole departing cluster.
     ///
     /// Self-service like `vacate`, and narrower: an actor can only vacate an

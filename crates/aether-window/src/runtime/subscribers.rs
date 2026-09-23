@@ -2,11 +2,10 @@
 //! subscription *mail surface* over it lives in the sibling `manager` module,
 //! alongside the rest of the shared manager surface (ADR-0169).
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use aether_actor::{AnyActorRef, ReplyMode};
-use aether_data::{KindId, MailboxId};
-use aether_kinds::MonitorNotice;
+use aether_data::KindId;
 use aether_substrate::actor::monitor::MonitorHandle;
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
@@ -18,15 +17,42 @@ use crate::{WindowId, WindowSelector};
 /// subscription naturally includes windows created later. Recipient lookup
 /// unions into a `BTreeSet` of proven subscribers, which makes an actor
 /// subscribed through both selectors receive one copy.
+///
+/// `holders` is the reverse index: each subscriber's monitor and the exact
+/// rows it holds, so a departure removes precisely that subscriber's rows
+/// without scanning anyone else's.
 pub struct WindowSubscribers {
     all: HashMap<KindId, BTreeSet<AnyActorRef>>,
     specific: HashMap<(WindowId, KindId), BTreeSet<AnyActorRef>>,
-    monitors: HashMap<AnyActorRef, MonitorHandle>,
+    holders: HashMap<AnyActorRef, Holder>,
+}
+
+/// One subscriber's monitor and the rows it holds in the two selector maps.
+#[derive(Default)]
+struct Holder {
+    monitor: Option<MonitorHandle>,
+    rows: HashSet<Row>,
+}
+
+/// One row of a subscriber's, named by the selector map key it sits under.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+enum Row {
+    All(KindId),
+    One(WindowId, KindId),
+}
+
+impl Row {
+    const fn new(selector: WindowSelector, kind: KindId) -> Self {
+        match selector {
+            WindowSelector::All => Self::All(kind),
+            WindowSelector::One(window) => Self::One(window, kind),
+        }
+    }
 }
 
 impl WindowSubscribers {
     pub fn new() -> Self {
-        Self { all: HashMap::new(), specific: HashMap::new(), monitors: HashMap::new() }
+        Self { all: HashMap::new(), specific: HashMap::new(), holders: HashMap::new() }
     }
 
     pub fn subscribe<M: ReplyMode>(
@@ -75,30 +101,20 @@ impl WindowSubscribers {
         Ok(())
     }
 
-    /// Drop every subscription held at `mailbox`, addressed by position
-    /// rather than by proof.
+    /// Drop every subscription `subscriber` holds and release its monitor.
     ///
-    /// `aether.window.unsubscribe_all` exists to reclaim a mailbox that is
-    /// usually already gone — a component that unloaded, an actor that
-    /// retired — so demanding a proof would refuse exactly the request the
-    /// kind is for. Nothing here sends: the removal is a key comparison over
-    /// rows this table already owns.
-    pub fn unsubscribe_all(&mut self, mailbox: MailboxId) {
-        self.forget(mailbox);
-    }
-
-    /// Drop the departed actor's rows on its `MonitorNotice`.
-    ///
-    /// The notice names a position, and the table's rows are proofs, so this
-    /// compares rather than exchanges. `ActorRef::entomb` trades a reference
-    /// for a `Tombstone<R>`, but there is no erased tombstone for an
-    /// `AnyActorRef` — and the window wants the rows *gone*, not replaced by
-    /// a tombstone it would then have to skip on every fan-out. ADR-0230's
-    /// named-consumer rule makes the comparison the right call here, not a
-    /// shortcut around a missing type.
-    pub fn purge_departed(&mut self, notice: MonitorNotice) {
-        self.monitors.retain(|reference, _| reference.id() != notice.target);
-        self.forget(notice.target);
+    /// Two callers: `aether.window.unsubscribe_all`, whose position the
+    /// manager proves once at receipt, and the `MonitorNotice` handlers,
+    /// whose host-stamped sender is the departed subscriber (ADR-0230). The
+    /// holder index names exactly the rows `subscriber` holds, so this
+    /// removes those and touches nothing else.
+    pub fn unsubscribe_all(&mut self, subscriber: AnyActorRef) {
+        let Some(holder) = self.holders.remove(&subscriber) else {
+            return;
+        };
+        for row in holder.rows {
+            self.remove_row(row, subscriber);
+        }
     }
 
     pub fn recipients(&self, window: WindowId, kind: KindId) -> BTreeSet<AnyActorRef> {
@@ -118,48 +134,44 @@ impl WindowSubscribers {
                 self.specific.entry((window, kind)).or_default().insert(subscriber);
             }
         }
+        self.holders.entry(subscriber).or_default().rows.insert(Row::new(selector, kind));
     }
 
     fn remove(&mut self, selector: WindowSelector, kind: KindId, subscriber: AnyActorRef) {
-        let empty = match selector {
-            WindowSelector::All => self.all.get_mut(&kind).is_some_and(|recipients| {
-                recipients.remove(&subscriber);
-                recipients.is_empty()
-            }),
-            WindowSelector::One(window) => self.specific.get_mut(&(window, kind)).is_some_and(|recipients| {
-                recipients.remove(&subscriber);
-                recipients.is_empty()
-            }),
-        };
-        if empty {
-            match selector {
-                WindowSelector::All => {
+        let row = Row::new(selector, kind);
+        if let Some(holder) = self.holders.get_mut(&subscriber) {
+            holder.rows.remove(&row);
+        }
+        self.remove_row(row, subscriber);
+    }
+
+    /// Remove `subscriber` from the selector map entry `row` names, dropping
+    /// the entry once it is empty.
+    fn remove_row(&mut self, row: Row, subscriber: AnyActorRef) {
+        match row {
+            Row::All(kind) => {
+                if self.all.get_mut(&kind).is_some_and(|recipients| {
+                    recipients.remove(&subscriber);
+                    recipients.is_empty()
+                }) {
                     self.all.remove(&kind);
                 }
-                WindowSelector::One(window) => {
+            }
+            Row::One(window, kind) => {
+                if self.specific.get_mut(&(window, kind)).is_some_and(|recipients| {
+                    recipients.remove(&subscriber);
+                    recipients.is_empty()
+                }) {
                     self.specific.remove(&(window, kind));
                 }
             }
         }
     }
 
-    /// Drop every row whose subscriber sits at `position`, from both maps.
-    fn forget(&mut self, position: MailboxId) {
-        self.all.retain(|_, recipients| {
-            recipients.retain(|reference| reference.id() != position);
-            !recipients.is_empty()
-        });
-        self.specific.retain(|_, recipients| {
-            recipients.retain(|reference| reference.id() != position);
-            !recipients.is_empty()
-        });
-    }
-
     fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
-        if !self.monitors.contains_key(&subscriber)
-            && let Ok(handle) = ctx.monitor(subscriber)
-        {
-            self.monitors.insert(subscriber, handle);
+        let holder = self.holders.entry(subscriber).or_default();
+        if holder.monitor.is_none() {
+            holder.monitor = ctx.monitor(subscriber).ok();
         }
     }
 }
@@ -168,7 +180,7 @@ impl WindowSubscribers {
 mod tests {
     use std::sync::Arc;
 
-    use aether_data::{Kind, SessionToken, Uuid};
+    use aether_data::{Kind, MailboxId, SessionToken, Uuid};
     use aether_kinds::{Key, MouseMove};
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
@@ -267,7 +279,7 @@ mod tests {
         subscribers.unsubscribe(WindowSelector::All, Key::ID, subscriber);
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([subscriber, other]));
 
-        subscribers.unsubscribe_all(subscriber.id());
+        subscribers.unsubscribe_all(subscriber);
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([other]));
     }
 
@@ -282,7 +294,7 @@ mod tests {
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, survivor);
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), MouseMove::ID, departed);
 
-        subscribers.purge_departed(MonitorNotice { target: departed.id() });
+        subscribers.unsubscribe_all(departed);
 
         assert_eq!(subscribers.recipients(WindowId(3), Key::ID), BTreeSet::from([survivor]));
         assert!(subscribers.recipients(WindowId(3), MouseMove::ID).is_empty());

@@ -30,7 +30,7 @@ use serde::{Deserialize, Serialize};
 /// layer keeps `"get"` / `"GET"` / `"Get"` from disagreeing
 /// across guests; the substrate maps each variant to its
 /// canonical uppercase name when calling the HTTP backend.
-#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HttpMethod {
     Get,
     Post,
