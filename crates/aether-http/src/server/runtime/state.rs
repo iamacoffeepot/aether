@@ -19,10 +19,11 @@ pub struct PendingPeer {
     pub peer: SocketAddr,
 }
 
-/// Move-only context attached to one staged shard birth. The child's identity
+/// Move-only context attached to one staged shard birth. The child's proof
 /// rides its `SpawnOutcome`; what stays supervisor-owned until authoritative
-/// activation is the half of the [`WakeSink`] no spawn result can supply — the
-/// shard's index in the round-robin set, its inbound sender, and its wake flag.
+/// activation is the half of the [`ShardSink`] no spawn result can supply —
+/// the shard's index in the round-robin set, its inbound sender, and its wake
+/// flag.
 pub struct ShardSpawnContext {
     pub index: usize,
     pub subname: String,
@@ -35,7 +36,7 @@ pub struct ShardSpawnContext {
 /// twice.
 pub enum ShardSlot {
     Pending,
-    Ready(WakeSink),
+    Ready(ShardSink),
     Failed,
 }
 
@@ -51,7 +52,7 @@ pub enum ShardStartup {
         pending_peers: VecDeque<PendingPeer>,
     },
     Ready {
-        shards: Vec<WakeSink>,
+        shards: Vec<ShardSink>,
         next_shard: usize,
     },
     Failed,
@@ -93,7 +94,7 @@ pub struct HttpSupervisorState {
     /// the connections themselves live sharded.
     pub live_connections: Arc<AtomicUsize>,
     /// Cached `Arc<Mailer>` for registry validation in the registration
-    /// handlers and for building each shard's wake sink.
+    /// handlers.
     pub mailer: Arc<Mailer>,
     pub listener_port: u16,
     pub accept_shutdown: Arc<AtomicBool>,
@@ -105,10 +106,6 @@ pub struct HttpSupervisorState {
     /// shared with the accept sink; cleared at the top of
     /// `on_inbound_ready`.
     pub wake_dirty: Arc<AtomicBool>,
-    /// Stable target for the private `HttpInboundReady` turns that stage one
-    /// shard per transactional owner batch. This is the supervisor's
-    /// already-Live mailbox, never a reserved child route.
-    pub self_mailbox: MailboxId,
     /// Lazy dispatch-shard lifecycle. Accepted sockets remain here while
     /// child activation is pending and only enter a shard after its
     /// `SpawnOutcome` completion proves the route Live.
@@ -150,12 +147,16 @@ pub struct HttpShardState {
     /// `request_timeout`, which stays the in-flight read + response
     /// deadline.
     pub keep_alive_timeout: Duration,
+    /// The shard's own position, for [`Self::subscribe_settlement`] alone:
+    /// the settlement registry takes a subscriber position.
     pub self_mailbox: MailboxId,
-    /// Cached `Arc<Mailer>` so the shard can fire wake mails into itself,
-    /// validate a matched route's registrant against the registry at
-    /// dispatch time, and subscribe to settlement. The shard is
-    /// single-threaded post-ADR-0038 so direct storage is fine.
+    /// Cached `Arc<Mailer>` so the shard can validate a matched route's
+    /// registrant against the registry at dispatch time and subscribe to
+    /// settlement. The shard is single-threaded post-ADR-0038 so direct
+    /// storage is fine.
     pub mailer: Arc<Mailer>,
+    /// Wakes this shard; every reader and writer sink holds a clone.
+    pub wake: SelfWake<HttpInboundReady>,
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
     pub inbound_tx: mpsc::Sender<InboundEvent>,
     /// This shard's wake-coalescing flag (ADR-0135 §4), shared by every
@@ -233,7 +234,6 @@ impl HttpSupervisorState {
             accept_thread: None,
             inbound_rx,
             wake_dirty: Arc::new(AtomicBool::new(false)),
-            self_mailbox: MailboxId::NONE,
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
@@ -256,12 +256,10 @@ impl HttpSupervisorState {
         }
     }
 
-    fn schedule_shard_wake<A>(&self, ctx: &NativeCtx<'_, A, Single>) {
-        let _ = ctx.send_envelope_tracked(
-            self.self_mailbox,
-            KindId(<HttpInboundReady as Kind>::ID.0),
-            &HttpInboundReady::default().encode_into_bytes(),
-        );
+    /// Wake this supervisor for its next private `HttpInboundReady` turn,
+    /// which stages one shard per transactional owner batch.
+    fn schedule_shard_wake<A>(ctx: &NativeCtx<'_, A, Single>) {
+        ctx.self_wake::<HttpInboundReady>().wake(&HttpInboundReady::default());
     }
 
     /// Stage at most one deterministic dispatch-shard child in this handler
@@ -309,7 +307,7 @@ impl HttpSupervisorState {
                 "http dispatch shard preparation failed",
             );
             let settlement = self.finish_shard_spawn(index, None);
-            self.apply_shard_settlement(settlement);
+            self.apply_shard_settlement(ctx, settlement);
         }
 
         if let ShardStartup::Starting { next_to_stage, slots_by_index, .. } = &mut self.shard_startup
@@ -317,14 +315,14 @@ impl HttpSupervisorState {
         {
             *next_to_stage = Some(index + 1);
         }
-        self.schedule_shard_wake(ctx);
+        Self::schedule_shard_wake(ctx);
         true
     }
 
     /// Record one synchronous or authoritative shard result. Completions may
     /// arrive out of index order; the final compaction always walks the slots
     /// in deterministic index order.
-    pub fn finish_shard_spawn(&mut self, index: usize, sink: Option<WakeSink>) -> ShardSettlement {
+    pub fn finish_shard_spawn(&mut self, index: usize, sink: Option<ShardSink>) -> ShardSettlement {
         let finished = match &mut self.shard_startup {
             ShardStartup::Starting { remaining, slots_by_index, .. } => {
                 let Some(slot) = slots_by_index.get_mut(index) else {
@@ -370,7 +368,11 @@ impl HttpSupervisorState {
     /// the lifecycle authoritative. Ready drains retained sockets FIFO;
     /// Failed returns one controlled `503` per retained socket. Pending and
     /// stale attempts perform no side effect.
-    pub fn apply_shard_settlement(&mut self, settlement: ShardSettlement) {
+    pub fn apply_shard_settlement<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        settlement: ShardSettlement,
+    ) {
         match settlement {
             ShardSettlement::Pending => {}
             ShardSettlement::Ready { mut pending_peers, shard_count } => {
@@ -381,7 +383,7 @@ impl HttpSupervisorState {
                     "http dispatch shards activated",
                 );
                 while let Some(PendingPeer { stream, peer }) = pending_peers.pop_front() {
-                    self.dispatch_ready_peer(stream, peer);
+                    self.dispatch_ready_peer(ctx, stream, peer);
                 }
             }
             ShardSettlement::Failed { mut pending_peers } => {
@@ -408,7 +410,12 @@ impl HttpSupervisorState {
         }
     }
 
-    fn dispatch_ready_peer(&mut self, stream: TcpStream, peer: SocketAddr) {
+    fn dispatch_ready_peer<A, M: ReplyMode>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        stream: TcpStream,
+        peer: SocketAddr,
+    ) {
         let ShardStartup::Ready { shards, next_shard } = &mut self.shard_startup else {
             refuse_connection(stream, 503, "no dispatch shards");
             return;
@@ -416,7 +423,7 @@ impl HttpSupervisorState {
         let index = *next_shard % shards.len();
         *next_shard = next_shard.wrapping_add(1);
         self.live_connections.fetch_add(1, Ordering::AcqRel);
-        if !shards[index].post(InboundEvent::PeerAccepted { stream, peer }) {
+        if !shards[index].post(ctx, InboundEvent::PeerAccepted { stream, peer }) {
             // The shard's receiver is gone — teardown is in progress; the
             // socket just dropped with the event.
             self.live_connections.fetch_sub(1, Ordering::AcqRel);
@@ -459,7 +466,7 @@ impl HttpSupervisorState {
             ShardStartup::Starting { pending_peers, .. } => {
                 pending_peers.push_back(PendingPeer { stream, peer });
             }
-            ShardStartup::Ready { .. } => self.dispatch_ready_peer(stream, peer),
+            ShardStartup::Ready { .. } => self.dispatch_ready_peer(ctx, stream, peer),
             ShardStartup::Failed => {
                 refuse_connection(stream, 503, "no dispatch shards");
                 tracing::warn!(
@@ -471,7 +478,7 @@ impl HttpSupervisorState {
         }
         if let Some(count) = start_count {
             debug_assert!(count > 0, "configured shard count is always positive");
-            self.schedule_shard_wake(ctx);
+            Self::schedule_shard_wake(ctx);
         }
     }
 
@@ -520,7 +527,7 @@ impl HttpSupervisorState {
     /// symptom it produces is indistinguishable from a lost `MonitorNotice`,
     /// and without this line neither branch leaves any trace to tell them
     /// apart.
-    pub fn watch<M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
+    pub fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: AnyActorRef) {
         // A monitor that already failed for this mailbox will fail again — the
         // condition is a property of the target, not of the attempt — so the
         // second route it registers must not re-report it.
@@ -578,13 +585,7 @@ impl HttpSupervisorState {
 
 impl HttpShardState {
     pub fn wake_sink(&self) -> WakeSink {
-        WakeSink {
-            inbound_tx: self.inbound_tx.clone(),
-            mailer: Arc::clone(&self.mailer),
-            self_id: self.self_mailbox,
-            wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
-            dirty: Arc::clone(&self.wake_dirty),
-        }
+        WakeSink { inbound_tx: self.inbound_tx.clone(), wake: self.wake.clone(), dirty: Arc::clone(&self.wake_dirty) }
     }
 
     pub fn subscribe_settlement(&self, mail_id: MailId) {
@@ -656,7 +657,12 @@ impl HttpShardState {
             ws_idle_timeout: self.ws_idle_timeout,
             ws_max_message_bytes: self.max_request_bytes,
         };
-        let shared = ReaderShared { routes: Arc::clone(&self.routes), peer: peer.to_string() };
+        let shared = ReaderShared {
+            routes: Arc::clone(&self.routes),
+            peer: peer.to_string(),
+            registry: Arc::clone(self.mailer.registry()),
+            capabilities: Arc::clone(self.mailer.capability_registry()),
+        };
 
         // Per-connection transport reader below the mail layer — carries
         // inbound mail in; no inbound chain to inherit, no settlement

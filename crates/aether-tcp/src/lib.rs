@@ -11,9 +11,9 @@
 //!
 //! `TcpCapability` is the supervisor of its listener fleet: it spawns
 //! listeners, monitors them, and replies to unbind requests on their
-//! close. The cap holds its own `MailboxId → ListenerEntry` map; it
-//! does NOT walk the chassis-wide actor registry to enumerate
-//! children. Cap handlers don't introspect the registry — the
+//! close. The cap holds its own listener entries, each with the proof
+//! its spawn returned; it does NOT walk the chassis-wide actor registry
+//! to enumerate children. Cap handlers don't introspect the registry — the
 //! cap-as-supervisor pattern keeps the actor model intact (caps
 //! communicate via mail at runtime; chassis-level introspection is a
 //! test/embedder affordance, not a handler-side surface).
@@ -94,8 +94,8 @@ pub use config::{TcpListenerConfig, TcpSessionConfig};
 ///
 /// The cap is the supervisor of its listener fleet: it spawns listeners,
 /// monitors them, and replies to unbind requests on their close. It holds its
-/// own `MailboxId → ListenerEntry` map; it does NOT walk the chassis-wide
-/// actor registry to enumerate children.
+/// own listener entries, each with the proof its spawn returned; it does NOT
+/// walk the chassis-wide actor registry to enumerate children.
 #[actor(singleton, root)]
 pub struct TcpCapability;
 

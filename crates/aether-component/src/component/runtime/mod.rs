@@ -44,7 +44,7 @@ pub use aether_actor::Manual;
 // imports: drop-time cleanup rides the ADR-0079 vacate/close
 // `MonitorNotice` (each cap monitors its registrants and purges its own
 // rows), so the host names no peer cap's type or kinds.
-use aether_actor::{OutboundReply, ReplyMode, Single};
+use aether_actor::{AnyActorRef, OutboundReply, ReplyMode, Single};
 use aether_data::ActorPath;
 use aether_data::{Kind, MailboxCategory, Source};
 
@@ -112,11 +112,13 @@ pub struct ComponentHostCapabilityState {
     /// not authoritative `Live` yet. Same-hash loads and replacements retain
     /// their own move-only deferred replies here and join the first boot result.
     pending_boots: HashMap<String, load::PendingBoot>,
-    /// ADR-0147: a loaded non-boot actor's own trampoline mailbox → the content
-    /// hash of the module it came from. Populated only for actors sourced from a
-    /// module that declares a boot slot, so a drop / replace can find and
-    /// decrement the right boot refcount. A bootless module inserts nothing.
-    pub boot_hash_by_actor: HashMap<MailboxId, String>,
+    /// ADR-0147: a loaded non-boot actor → the content hash of the module it
+    /// came from. The key is the actor's proof, taken from its spawn outcome or
+    /// proven once at the receipt of a drop / replace (ADR-0230). Populated only
+    /// for actors sourced from a module that declares a boot slot, so a drop /
+    /// replace can find and decrement the right boot refcount. A bootless module
+    /// inserts nothing.
+    pub boot_hash_by_actor: HashMap<AnyActorRef, String>,
     /// ADR-0147: in-flight `aether.component.replace` forwards awaiting their
     /// trampoline `ReplaceResult`, keyed by the forward's correlation id. The
     /// boot-refcount transfer for a replace is committed only after the swap
@@ -124,29 +126,32 @@ pub struct ComponentHostCapabilityState {
     /// replacement wasm are parked here across the hop. Empty except while a
     /// replace is settling.
     pub pending_replace: HashMap<u64, PendingReplace>,
-    /// Last replace/drop operation sequence allocated for each actor mailbox.
-    /// A replace reserves its sequence when forwarded; a drop reserves the
-    /// next sequence and immediately makes it dominant. Entries survive the
-    /// deterministic mailbox id's drop/reload boundary so an older incarnation
-    /// can never become current again.
-    pub boot_operation_sequence_by_actor: HashMap<MailboxId, u64>,
+    /// Last replace/drop operation sequence allocated for each actor, keyed by
+    /// the proof taken at the drop / replace receipt. A replace reserves its
+    /// sequence when forwarded; a drop reserves the next sequence and
+    /// immediately makes it dominant. A proof compares by the position it
+    /// proves, so entries survive the deterministic mailbox id's drop/reload
+    /// boundary and an older incarnation can never become current again.
+    pub boot_operation_sequence_by_actor: HashMap<AnyActorRef, u64>,
     /// Latest successful replacement or drop operation that is allowed to
-    /// mutate each actor's boot mapping. Failed replacements never enter this
-    /// table, so they cannot suppress an earlier successful replacement.
-    pub dominant_boot_operation_by_actor: HashMap<MailboxId, u64>,
+    /// mutate each actor's boot mapping, keyed like the sequence table. Failed
+    /// replacements never enter this table, so they cannot suppress an earlier
+    /// successful replacement.
+    pub dominant_boot_operation_by_actor: HashMap<AnyActorRef, u64>,
 }
 
 /// ADR-0147: a parked `aether.component.replace` forward. `source` is the
 /// original caller's reply target (the trampoline's `ReplaceResult` is routed
-/// to the cap instead, then re-replied here); `actor_mailbox` and `new_wasm`
-/// are what `commit_replacement_boot` needs to commit the boot-refcount
-/// transfer once the swap is confirmed successful. `boot_operation` is
+/// to the cap instead, then re-replied here); `actor` — the target proven at
+/// the replace's receipt — and `new_wasm` are what `commit_replacement_boot`
+/// needs to commit the boot-refcount transfer once the swap is confirmed
+/// successful. `boot_operation` is
 /// reserved when the request is forwarded; it becomes dominant only if that
 /// request succeeds, so a later failed request cannot suppress this one.
 #[derive(Clone)]
 pub struct PendingReplace {
     pub source: Source,
-    pub actor_mailbox: MailboxId,
+    pub actor: AnyActorRef,
     pub new_wasm: Arc<[u8]>,
     pub boot_operation: u64,
 }
@@ -333,12 +338,22 @@ impl NativeActor for ComponentHostCapability {
             });
             return;
         }
+        // ADR-0230: prove the wire position once, at receipt. A position with
+        // no live route has no trampoline to drop, so it answers `Err` now
+        // rather than forwarding into nothing.
+        let actor = match ctx.resolve_live(payload.mailbox_id) {
+            Ok(actor) => actor,
+            Err(error) => {
+                ctx.reply(&DropResult::Err { error: error.to_string() });
+                return;
+            }
+        };
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
         // own `DropComponent` handler vacates its registrations).
-        state.invalidate_replacement_boot_operation(payload.mailbox_id);
-        state.release_boot_ref(ctx, payload.mailbox_id);
+        state.invalidate_replacement_boot_operation(actor);
+        state.release_boot_ref(ctx, actor);
         forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
     }
 

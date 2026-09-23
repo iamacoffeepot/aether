@@ -13,9 +13,9 @@
 
 // Parent-level items this module names. `HttpCapability` is the impl's `Self`
 // type and `HttpConfig` is named by `init`'s signature.
-use super::egress::{PerSenderEgress, sender_mailbox_id};
+use super::egress::PerSenderEgress;
 use super::{HttpCapability, HttpConfig};
-use aether_actor::runtime;
+use aether_actor::{AnyActorRef, runtime};
 
 use std::collections::HashSet;
 use std::sync::Arc;
@@ -24,7 +24,6 @@ use std::time::Duration;
 use ureq::http::Method;
 use ureq::http::Request;
 
-pub use aether_data::MailboxId;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, Pending, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 
@@ -146,7 +145,7 @@ impl NativeActor for HttpCapability {
     fn on_fetch(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: Fetch) -> Pending<FetchResult> {
         let timeout = mail.timeout_ms.map_or(state.default_timeout, |ms| Duration::from_millis(u64::from(ms)));
         let request_id = mail.request_id;
-        let sender = sender_mailbox_id(ctx.reply_target());
+        let sender = ctx.sender();
 
         let url = mail.url.clone();
         let adapter = Arc::clone(&state.adapter);
@@ -162,10 +161,14 @@ impl NativeActor for HttpCapability {
     /// ADR-0093 completion for a finished fetch: re-reply the worker's
     /// `FetchResult` to the original caller (dropping the hold), then free the
     /// sender's slot — which drains that sender's (or a peer's) next queued
-    /// fetch. The completing sender's `MailboxId` rides through as the
-    /// `TaskDone` context.
+    /// fetch. The completing sender's key — its proven envelope sender, or
+    /// `None` for the shared bucket — rides through as the `TaskDone` context.
     #[handler(task)]
-    fn on_fetch_done(state: &mut Self::State, ctx: &mut NativeCtx<'_>, done: TaskDone<FetchResult, MailboxId>) {
+    fn on_fetch_done(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        done: TaskDone<FetchResult, Option<AnyActorRef>>,
+    ) {
         let sender = *done.context();
         done.resolve(ctx);
         state.egress.on_complete(ctx, sender);

@@ -31,6 +31,8 @@ Nothing in the repository sends `aether.http.fetch` today — the only in-tree c
 
 Cap state holds a per-sender table, `MailboxId -> PerSenderEgress { in_flight, pending }`, composed over the ADR-0093 `TaskQueue` bound-and-hold machinery. The key is `sender_mailbox_id(ctx.reply_target())`, the same helper and the same `SourceAddr::EngineMailbox` read `aether.audio` uses. A component sender keys on its own engine mailbox id; sessions and substrate-internal pushes collapse to `MailboxId(0)` and share one bucket, so the per-sender bound also throttles the aggregate of MCP-session-driven fetches — acceptable, because those callers are the harness rather than untrusted guests, and the global ceiling below still protects the host.
 
+> **Amendment — 2026-09-22 (ADR-0230).** The key is the proven envelope sender, `ctx.sender()`, not the `EngineMailbox` id: the table is `Option<AnyActorRef> -> SenderEntry`, and `sender_mailbox_id` is gone. A local component keys on its own proof; MCP sessions, remote engines, and substrate-internal pushes have no local sender and share the `None` bucket. The `EngineMailbox` read never separated local components — a local sender arrives as `SourceAddr::Component`, so every component fell into the `MailboxId(0)` bucket and the per-sender bound isolated nobody. Keying on the proof delivers the fairness this section decided, and stored state holds a proof rather than a position, as ADR-0230 requires.
+
 A queued fetch holds its chain from accept, exactly as `TaskQueue::submit` already does: `acquire_settlement_hold()` on the current root plus `reply_target()` are captured at accept time and replayed through `dispatch_blocking_resumed` when a slot frees.
 
 ### 3. A global ceiling composes with the per-sender bound

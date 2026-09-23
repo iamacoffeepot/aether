@@ -36,8 +36,8 @@
 //! the handler trades for its `TaskDone` through `NativeCtx::take_task_done` —
 //! the documented hand-wired form of `#[handler(task)]`.
 
-use aether_actor::OutboundReply;
-use aether_data::{Kind, KindId, MailboxId, ReplyContract};
+use aether_actor::{ActorRef, OutboundReply};
+use aether_data::{Kind, KindId, ReplyContract};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::actor::native::offload::blocking::TaskCompletionWake;
 use aether_substrate::actor::native::{DispatchId, SpawnOutcome};
@@ -154,9 +154,11 @@ impl Dispatch<Self> for CommitChild {
 /// discharges every resulting completion. See the module docs for why this
 /// shape rather than concurrent embedder threads.
 pub struct CommitParent {
-    /// Children staged and not yet closed. The parent holds these so a churn
-    /// cycle can retire exactly what it created.
-    live: Vec<MailboxId>,
+    /// Children whose births completed and that are not yet closed, held by
+    /// the proof each completion returned. The parent holds these so a churn
+    /// cycle can retire exactly what it created; every `StageBurst` is
+    /// settle-gated, so each completion lands before the next `CloseBurst`.
+    live: Vec<ActorRef<CommitChild>>,
     staged: u64,
     succeeded: u64,
     failed: u64,
@@ -238,7 +240,7 @@ impl Dispatch<Self> for CommitParent {
         }
         if kind.0 == CloseBurst::ID.0 {
             for child in state.live.drain(..) {
-                let _ = ctx.send_envelope_tracked(child, CloseChild::ID, &CloseChild::default().encode_into_bytes());
+                ctx.to(&child).send(&CloseChild::default());
             }
             return Some(());
         }
@@ -255,7 +257,10 @@ impl Dispatch<Self> for CommitParent {
             let wake = TaskCompletionWake::decode_from_bytes(payload)?;
             let done = ctx.take_task_done::<SpawnOutcome<CommitChild>, ()>(DispatchId(wake.dispatch_id))?;
             match &done.output().result {
-                Ok(_) => state.succeeded += 1,
+                Ok(child) => {
+                    state.live.push(*child);
+                    state.succeeded += 1;
+                }
                 Err(_) => state.failed += 1,
             }
             // The discharge #4176 called a blocking contract. Without it the
@@ -276,8 +281,7 @@ impl CommitParent {
     fn stage_burst(&mut self, ctx: &mut NativeCtx<'_, Self, aether_substrate::Manual>, count: u32) {
         for _ in 0..count {
             match ctx.spawn_child::<CommitChild>(Subname::Counter, (), ()).stage() {
-                Ok(receipt) => {
-                    self.live.push(receipt.mailbox_id);
+                Ok(_) => {
                     self.staged += 1;
                 }
                 // A local preparation failure never reached the owner, so it

@@ -8,9 +8,7 @@
 //! `use runtime::*` glob in the parent.
 
 pub use std::collections::HashMap;
-pub use std::collections::hash_map::Entry;
 pub use std::net::{TcpListener, TcpStream};
-pub use std::sync::Arc;
 pub use std::sync::mpsc;
 pub use std::thread;
 
@@ -22,15 +20,12 @@ pub use aether_actor::OutboundReply;
 pub use aether_substrate::actor::monitor::MonitorHandle;
 pub use aether_substrate::actor::native::spawn::Subname;
 pub use aether_substrate::actor::native::{
-    DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
+    DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::runtime::trace::SettlementHold;
-pub use aether_substrate::{KindId, Mail, Mailer};
 
-pub use aether_data::Kind;
-
-use aether_actor::{ActorRef, runtime};
+use aether_actor::{ActorRef, AnyActorRef, runtime};
 use aether_substrate::Erased;
 // `MonitorNotice` is named by `on_monitor_notice`'s signature; the parent's
 // import of it is private, so re-import it directly where the body expands.
@@ -45,27 +40,23 @@ use super::{TcpCapability, TcpListenerActor, TcpListenerConfig, TcpSessionActor,
 /// `aether.tcp` runtime state (issue 607 Phase 6a, ADR-0079). The singleton
 /// control-plane cap owns its listener fleet directly — it is the supervisor,
 /// not a thin shim over the chassis registry. Each `on_bind` registers a
-/// monitor on the new listener and inserts a [`ListenerEntry`] into
+/// monitor on the new listener and pushes a [`ListenerEntry`] onto
 /// `listeners`; `on_monitor_notice` removes the entry on listener close.
 /// The addressing identity is the distinct ZST
 /// [`TcpCapability`]. Living in this private module keeps
 /// it `pub`-enough to satisfy the `NativeActor::State` interface without
 /// exposing it as crate-public API.
 ///
-/// Issue 629 / Phase B: plain `HashMap` fields. The dispatcher thread is the
+/// Issue 629 / Phase B: plain collection fields. The dispatcher thread is the
 /// sole writer / reader; pre-Phase-A's `Mutex<HashMap<...>>` was a
 /// worker-pool-era tax, not a contention point.
 pub struct TcpCapabilityState {
-    /// Live listeners spawned by this cap. Key is the listener's
-    /// full-name `MailboxId`. Each entry holds the bind metadata
-    /// surfaced via `ListListeners` plus the monitor handle that
-    /// pins the cap's monitor on the listener until close.
-    pub listeners: HashMap<aether_data::MailboxId, ListenerEntry>,
-    /// Outstanding unbind replies parked until `MonitorNotice`
-    /// arrives from the listener being closed. Key is the same
-    /// `MailboxId` as `listeners`; the cap's monitor (registered
-    /// at spawn time) is what fires the notice.
-    pub pending_unbinds: HashMap<aether_data::MailboxId, PendingUnbind>,
+    /// Live listeners spawned by this cap. Each entry holds the proof the
+    /// listener's spawn returned, the bind metadata surfaced via
+    /// `ListListeners`, any parked unbind reply, and the monitor handle that
+    /// pins the cap's monitor on the listener until close. A close notice
+    /// finds its entry through `ActorRef::entomb`.
+    pub listeners: Vec<ListenerEntry>,
     /// Monotonic id assigned to the next outbound connect attempt.
     pub next_connect_id: u64,
     /// Outstanding connect replies parked until the dial sidecar
@@ -76,10 +67,9 @@ pub struct TcpCapabilityState {
     pub connect_rx: mpsc::Receiver<(u64, Result<TcpStream, String>)>,
     /// Retained sender cloned into each one-shot dial sidecar.
     pub connect_tx: mpsc::Sender<(u64, Result<TcpStream, String>)>,
-    /// Wake-mail plumbing captured at init for one-shot dial sidecars.
-    pub connect_mailer: Arc<Mailer>,
-    pub connect_self_id: aether_data::MailboxId,
-    pub connect_ready_kind: KindId,
+    /// Wakes this cap with `ConnectReady`; each one-shot dial sidecar holds
+    /// a clone.
+    pub connect_wake: SelfWake<ConnectReady>,
 }
 
 /// Cap-local supervisor state for one live listener. Drops with
@@ -90,8 +80,12 @@ pub struct ListenerEntry {
     pub port: u16,
     pub name: String,
     /// The reference the listener's spawn outcome proved; `on_unbind` mails
-    /// `Close` through it.
+    /// `Close` through it, and `on_monitor_notice` entombs it.
     pub listener: ActorRef<TcpListenerActor>,
+    /// The unbind reply parked until this listener's close notice arrives.
+    /// One unbind at a time: a second request while this is `Some` is
+    /// refused.
+    pub pending_unbind: Option<PendingUnbind>,
     // Held to keep the cap's monitor registered against the
     // listener for its lifetime. Drops when the entry is removed
     // (in `on_monitor_notice`).
@@ -111,7 +105,8 @@ pub struct PendingConnect {
     pub owed: DeferredReply,
     pub addr: String,
     pub name: Option<String>,
-    pub consumer: Option<aether_data::MailboxId>,
+    /// The consumer proven at `Connect` receipt (ADR-0230).
+    pub consumer: Option<AnyActorRef>,
 }
 
 /// The dial a staged session birth is answering, plus the request vocabulary
@@ -149,15 +144,12 @@ impl NativeActor for TcpCapability {
     fn init((): (), ctx: &mut NativeInitCtx<'_>) -> Result<TcpCapabilityState, BootError> {
         let (connect_tx, connect_rx) = mpsc::channel::<(u64, Result<TcpStream, String>)>();
         Ok(TcpCapabilityState {
-            listeners: HashMap::new(),
-            pending_unbinds: HashMap::new(),
+            listeners: Vec::new(),
             next_connect_id: 0,
             pending_connects: HashMap::new(),
             connect_rx,
             connect_tx,
-            connect_mailer: ctx.mailer(),
-            connect_self_id: ctx.self_id(),
-            connect_ready_kind: KindId(<ConnectReady as Kind>::ID.0),
+            connect_wake: ctx.self_wake(),
         })
     }
 
@@ -175,6 +167,14 @@ impl NativeActor for TcpCapability {
     /// remains available while the OS resolves and connects `mail.addr`.
     #[handler::manual]
     fn on_connect(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: Connect) {
+        // ADR-0230: prove the consumer once, at receipt.
+        let consumer = match mail.consumer.map(|position| ctx.resolve_live(position)).transpose() {
+            Ok(consumer) => consumer,
+            Err(error) => {
+                ctx.reply(&ConnectResult::Err { addr: mail.addr, error: format!("consumer not live: {error}") });
+                return;
+            }
+        };
         let id = state.next_connect_id;
         state.next_connect_id += 1;
         state.pending_connects.insert(
@@ -183,14 +183,12 @@ impl NativeActor for TcpCapability {
                 owed: ctx.defer_reply_to(ctx.reply_target()),
                 addr: mail.addr.clone(),
                 name: mail.name,
-                consumer: mail.consumer,
+                consumer,
             },
         );
 
         let connect_tx = state.connect_tx.clone();
-        let mailer = Arc::clone(&state.connect_mailer);
-        let self_id = state.connect_self_id;
-        let connect_ready_kind = state.connect_ready_kind;
+        let wake = state.connect_wake.clone();
         let addr = mail.addr;
 
         // Transport thread below the mail layer — it carries a dial result
@@ -201,7 +199,7 @@ impl NativeActor for TcpCapability {
                 .send((id, TcpStream::connect(&addr).map_err(|error| format!("connect failed: {error}"))))
                 .is_ok()
             {
-                mailer.push(Mail::new(self_id, connect_ready_kind, ConnectReady {}.encode_into_bytes(), 1));
+                wake.wake(&ConnectReady {});
             }
         });
 
@@ -285,6 +283,14 @@ impl NativeActor for TcpCapability {
     /// spawn; `Err` on addr parse / bind / spawn / monitor failure.
     #[handler::manual]
     fn on_bind(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: BindListener) {
+        // ADR-0230: prove the consumer once, at receipt, before binding.
+        let consumer = match mail.consumer.map(|position| ctx.resolve_live(position)).transpose() {
+            Ok(consumer) => consumer,
+            Err(error) => {
+                ctx.reply(&BindListenerResult::Err { addr: mail.addr, error: format!("consumer not live: {error}") });
+                return;
+            }
+        };
         let listener = match TcpListener::bind(&mail.addr) {
             Ok(l) => l,
             Err(e) => {
@@ -306,12 +312,7 @@ impl NativeActor for TcpCapability {
         if let Err((error, owed)) = ctx
             .spawn_child::<TcpListenerActor>(
                 Subname::Named(&subname_str),
-                TcpListenerConfig {
-                    listener: Some(listener),
-                    addr: mail.addr.clone(),
-                    port: local_port,
-                    consumer: mail.consumer,
-                },
+                TcpListenerConfig { listener: Some(listener), addr: mail.addr.clone(), port: local_port, consumer },
                 (),
             )
             .continue_from(
@@ -362,16 +363,14 @@ impl NativeActor for TcpCapability {
         };
 
         let listener_mailbox = done.output().mailbox_id;
-        state.listeners.insert(
-            listener_mailbox,
-            ListenerEntry {
-                addr,
-                port: local_port,
-                name: listener_name.clone(),
-                listener,
-                _monitor_handle: monitor_handle,
-            },
-        );
+        state.listeners.push(ListenerEntry {
+            addr,
+            port: local_port,
+            name: listener_name.clone(),
+            listener,
+            pending_unbind: None,
+            _monitor_handle: monitor_handle,
+        });
         done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
             listener_name,
             listener_id: listener_mailbox,
@@ -392,36 +391,32 @@ impl NativeActor for TcpCapability {
         // Resolve listener_id from the cap-local supervisor map by
         // name. The cap is the source of truth for "what listeners
         // exist"; no registry walk needed.
-        let found = state
-            .listeners
-            .iter()
-            .find(|(_, entry)| entry.name == mail.listener_name)
-            .map(|(id, entry)| (*id, entry.listener));
-        let Some((listener_id, listener)) = found else {
+        let Some(entry) = state.listeners.iter_mut().find(|entry| entry.name == mail.listener_name) else {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
                 error: "no such listener (or already closed)".into(),
             });
             return;
         };
-        // Park the reply target keyed on listener_id. The cap's
+        // Park the reply target on the entry. The cap's
         // already-registered monitor (set at spawn time) fires
         // MonitorNotice on close, which drives the reply. Preserve
         // the first caller when a duplicate request arrives while
         // that close is still in flight; replacing it would drop the
         // original settlement hold without ever replying.
-        let Entry::Vacant(pending) = state.pending_unbinds.entry(listener_id) else {
+        if entry.pending_unbind.is_some() {
             ctx.reply(&UnbindListenerResult::Err {
                 listener_name: mail.listener_name,
                 error: "unbind already in progress".into(),
             });
             return;
-        };
-        pending.insert(PendingUnbind {
+        }
+        entry.pending_unbind = Some(PendingUnbind {
             sender: ctx.reply_target(),
             hold: ctx.acquire_settlement_hold(),
             listener_name: mail.listener_name,
         });
+        let listener = entry.listener;
         // Mail Close through the reference the listener's spawn outcome
         // proved. ADR-0099 §3: the listener is a spawned child, so its id
         // is the lineage fold, not `hash(NAMESPACE:name)` — re-resolving by
@@ -438,7 +433,7 @@ impl NativeActor for TcpCapability {
     fn on_list(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, _mail: ListListeners) -> ListListenersResult {
         let listeners: Vec<ListenerInfo> = state
             .listeners
-            .values()
+            .iter()
             .map(|entry| ListenerInfo { name: entry.name.clone(), addr: entry.addr.clone(), port: entry.port })
             .collect();
         ListListenersResult { listeners }
@@ -447,19 +442,22 @@ impl NativeActor for TcpCapability {
     /// Listener tombstoned — remove from the supervisor map and
     /// fire the parked unbind reply if one is waiting.
     ///
-    /// `MonitorNotice.target` identifies which listener closed.
-    /// The cap's monitor on every spawned listener (registered in
-    /// `on_bind`) fires this notice; if the close came from an
-    /// unbind request, `pending_unbinds` has an entry with the
-    /// originator to reply to.
+    /// The entry whose listener proof entombs against the notice is the
+    /// listener that closed. The cap's monitor on every spawned listener
+    /// (registered in `on_bind`) fires this notice; if the close came from
+    /// an unbind request, the entry's `pending_unbind` holds the originator
+    /// to reply to.
     #[handler::manual]
     fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, notice: MonitorNotice) {
+        let Some(index) = state.listeners.iter().position(|entry| entry.listener.entomb(&notice).is_ok()) else {
+            return;
+        };
         // Drop the supervisor entry. The held MonitorHandle drops
         // here; deregister is idempotent with the close path's
         // forward-index drain.
-        let _entry = state.listeners.remove(&notice.target);
+        let entry = state.listeners.remove(index);
         // Fire the parked unbind reply if one was waiting.
-        if let Some(PendingUnbind { sender, hold, listener_name }) = state.pending_unbinds.remove(&notice.target) {
+        if let Some(PendingUnbind { sender, hold, listener_name }) = entry.pending_unbind {
             let root = hold.as_ref().map_or(aether_data::MailId::NONE, SettlementHold::root);
             ctx.reply_to_target(sender, &UnbindListenerResult::Ok { listener_name }, root, None);
             drop(hold);
