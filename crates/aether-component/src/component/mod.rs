@@ -114,8 +114,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry as InlineRegistry;
-    use aether_actor::{Addressable, Embedded, Erased, Manual, Resolve, WasmActorMailbox, WasmCtx};
-    use aether_data::mailbox_id_from_name;
+    use aether_actor::{Addressable, Embedded, Erased, Manual, Resolve, WasmCtx};
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
 
@@ -141,16 +140,14 @@ mod tests {
         // resolution, so a throwaway registry and a zero sender suffice
         // (issue 1987).
         let registry = InlineRegistry::new();
-        let parent = mailbox_id_from_name(ComponentHostCapability::NAMESPACE);
+        let parent = ComponentHostCapability::resolve(0, ());
         let caller = Embedded::resolve(parent.0, "test.component.caller", ());
         registry.set_self_id(caller.0);
         registry.set_parent_id(parent.0);
-        let host = WasmActorMailbox::<ComponentHostCapability>::__new(parent.0, 0, &registry);
-        let name = Guest::NAMESPACE;
-        let trampoline = host.resolve::<WasmTrampoline>(name);
+        let trampoline = WasmTrampoline::resolve(parent.0, Guest::NAMESPACE);
         let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
 
-        assert_eq!(ctx.actor::<Guest>().mailbox_id(), trampoline.mailbox_id());
+        assert_eq!(ctx.actor::<Guest>().mailbox_id(), trampoline);
     }
 
     /// Tripwire: typed lookup follows the parent mailbox injected into each
@@ -183,14 +180,8 @@ mod tests {
     /// mailbox, while reverse lookup retains only the canonical spelling.
     #[test]
     fn registry_resolves_typed_canonical_and_short_component_addresses_equally() {
-        let inline_registry = InlineRegistry::new();
-        let host = WasmActorMailbox::<ComponentHostCapability>::__new(
-            mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
-            0,
-            &inline_registry,
-        );
         let name = "camera";
-        let typed = host.resolve::<WasmTrampoline>(name).mailbox_id();
+        let typed = WasmTrampoline::resolve(ComponentHostCapability::resolve(0, ()).0, name);
         let canonical = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
         let registry = Registry::new();
         registry

@@ -286,14 +286,17 @@ settled. A `set_menu`, `set_title`, or `set_cursor` sent from a tick
 handler with the chained `send` therefore puts the window's own mail
 inside the chain the frame is waiting on, and the frame loop wedges
 (`gate desktop.frame_advance wedged`, then a fatal abort). From a
-component, address the window by the id every input and size event
-carries — a window id *is* a mailbox id — and send detached:
+component, address the `aether.window` root and send detached:
 
 ```rust
-ctx.actor::<WindowCapability>().at::<WindowInstance>(size.window.0).send_detached(&SetWindowMenu { menus });
+ctx.actor::<WindowCapability>().send_detached(&SetWindowMenu { menus });
 ```
 
-The reply (`set_menu_result` and its siblings) still reaches the sender.
+The root routes a per-window command to the sole live window, and replies
+the op's `Err` when there are zero or several. A string-addressed caller
+(MCP, a harness) names one window by its short path, such as
+`aether.window/:main`. The reply (`set_menu_result` and its siblings) still
+reaches the sender.
 
 `id` is the caller's own opaque number. It rides back verbatim on
 `aether.window.menu_activated { window, id }`, which reaches subscribers

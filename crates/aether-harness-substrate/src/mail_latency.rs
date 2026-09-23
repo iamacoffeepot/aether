@@ -25,20 +25,20 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::env;
-use std::sync::Arc;
 use std::thread::{self, available_parallelism};
 use std::time::{Duration, Instant};
 
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::{Kind, KindId, MailId, MailboxId, ReplyContract, mailbox_id_from_name};
 use aether_kinds::trace::{DescribeTreeResult, MailNodeWire, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
 use aether_kinds::{ComponentCapabilities, HandlerCapability};
 use aether_substrate::chassis::settlement::{TerminalDisposition, WaitOutcome, await_internal_signal};
 use aether_substrate::{BootError, Dispatch, NativeActor, NativeCtx, NativeInitCtx, Subname};
 
-use super::SubstrateHarness;
+use super::{HarnessOp, SubstrateHarness};
 use crate::perf::harness::{
-    CellResult, Drive, Ping, Relay, RelayConfig, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain,
-    fanout, fanout_heavy, heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, summarize, tiers_from_env,
+    CellResult, Drive, Ping, Stats, SweepConfig, Tier, Topology, default_topologies, depth_chain, fanout, fanout_heavy,
+    heavy_work_iters_from_env, pace_hz_from_env, relay_id, run_sweep, spawn_relays, summarize, tiers_from_env,
     two_level_tree, wide_fanout_widths_from_env,
 };
 
@@ -49,9 +49,26 @@ use crate::perf::harness::{
 /// injector involvement after seeding — so a profile attributes the
 /// multi-worker load tail (shared-queue contention vs actor
 /// serialization vs settlement).
+///
+/// The ring is a cycle, so no spawn order hands every relay its
+/// successor's proof at spawn. Relay 0 spawns first with neither field;
+/// relays `n - 1` down to `1` then spawn holding their successor's proof,
+/// and relay 1 also holds relay 0's as `close`. A [`RingLink`] the harness
+/// settles at relay 1 is forwarded to relay 0, which keeps the envelope
+/// sender — relay 1 — as its `next`, closing the ring before any token is
+/// seeded. The relay is its own spawn config.
 struct RingRelay {
-    next: MailboxId,
+    /// The successor's proof. `None` only on relay 0 before the link, which
+    /// drops a `Ping` rather than forwarding it.
+    next: Option<ErasedActorRef>,
+    /// Relay 0's proof, held by relay 1 alone: where it forwards the link.
+    close: Option<ActorRef<Self>>,
 }
+
+/// The fieldless mail that closes the [`RingRelay`] cycle: the harness
+/// settles one at relay 1, which forwards it to relay 0.
+#[aether_data::kind(name = "mlat.ring.link", default)]
+struct RingLink;
 
 impl aether_actor::Addressable for RingRelay {
     const NAMESPACE: &'static str = "mlat.ring";
@@ -59,14 +76,15 @@ impl aether_actor::Addressable for RingRelay {
 }
 impl aether_actor::Root for RingRelay {}
 impl aether_actor::HandlesKind<Ping> for RingRelay {}
+impl aether_actor::HandlesKind<RingLink> for RingRelay {}
 impl aether_actor::Lifecycle<Self> for RingRelay {
-    type Config = MailboxId;
+    type Config = Self;
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
     type Ctx<'a> = NativeCtx<'a>;
-    fn init(next: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { next })
+    fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(config)
     }
 }
 impl NativeActor for RingRelay {
@@ -79,12 +97,20 @@ impl Dispatch<Self> for RingRelay {
     /// made about it falls back.
     fn capabilities() -> ComponentCapabilities {
         ComponentCapabilities {
-            handlers: vec![HandlerCapability {
-                id: Ping::ID,
-                name: <Ping as Kind>::NAME.to_owned(),
-                doc: None,
-                reply: ReplyContract::None,
-            }],
+            handlers: vec![
+                HandlerCapability {
+                    id: Ping::ID,
+                    name: <Ping as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                },
+                HandlerCapability {
+                    id: RingLink::ID,
+                    name: <RingLink as Kind>::NAME.to_owned(),
+                    doc: None,
+                    reply: ReplyContract::None,
+                },
+            ],
             ..ComponentCapabilities::default()
         }
     }
@@ -95,13 +121,24 @@ impl Dispatch<Self> for RingRelay {
         kind: KindId,
         payload: &[u8],
     ) -> Option<()> {
+        if kind.0 == RingLink::ID.0 {
+            if let Some(close) = state.close {
+                ctx.to(&close).send(&RingLink);
+            }
+            if state.next.is_none() {
+                state.next = ctx.sender();
+            }
+            return Some(());
+        }
         if kind.0 != Ping::ID.0 {
             return None;
         }
         let ping = Ping::decode_from_bytes(payload)?;
-        if ping.seq > 0 {
+        if ping.seq > 0
+            && let Some(next) = state.next
+        {
             let bytes = Ping { seq: ping.seq - 1 }.encode_into_bytes();
-            let _ = ctx.send_envelope_tracked(state.next, Ping::ID, &bytes);
+            let _ = ctx.send_envelope_tracked_to(next, Ping::ID, &bytes);
         }
         Some(())
     }
@@ -109,8 +146,8 @@ impl Dispatch<Self> for RingRelay {
 
 const RING_NS: &str = "mlat.ring";
 
-// Harness wires its synthetic relay-ring topology from precomputed name-hashed
-// ids before any actor spawns — id derivation, not sibling-cap addressing.
+// Harness derives a spawned ring relay's name-hashed id to seed tokens at it —
+// id derivation, not sibling-cap addressing.
 #[allow(clippy::disallowed_methods)]
 fn ring_id(i: usize) -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{RING_NS}:{i}")).0)
@@ -193,13 +230,12 @@ fn hold_id() -> MailboxId {
     MailboxId(mailbox_id_from_name(&format!("{HOLD_NS}:0")).0)
 }
 
-/// Spawn every relay in `topo` onto `tb` (subname = relay index), wiring
-/// each relay's downstream ids. Shared by the settlement guards.
+/// Spawn every relay in `topo` onto `tb` (subname = relay index) through
+/// [`spawn_relays`], which hands each relay its downstreams' proofs. Shared
+/// by the settlement guards.
 fn spawn_topology(tb: &SubstrateHarness, topo: &Topology) {
-    for i in 0..topo.downstreams.len() {
-        let downstreams: Arc<[MailboxId]> = topo.downstreams[i].iter().map(|&j| relay_id(j)).collect();
-        let config = RelayConfig { downstreams, work_iters: topo.work_iters[i] };
-        tb.spawn_actor::<Relay>(Subname::Named(&i.to_string()), config, ()).finish().expect("spawn relay");
+    if let Err((relay, e)) = spawn_relays(tb, topo) {
+        panic!("spawn relay {relay}: {e:?}");
     }
 }
 
@@ -250,17 +286,28 @@ fn mail_saturation_profile() {
         .and_then(|s| s.parse::<usize>().ok())
         .filter(|&w| w >= 1)
         .unwrap_or_else(|| available_parallelism().map_or(2, |n| n.get().saturating_sub(1).max(1)));
-    let Ok(tb) = SubstrateHarness::builder().with_workers(Some(workers)).size(16, 16).build() else {
+    let Ok(mut tb) = SubstrateHarness::builder().with_workers(Some(workers)).size(16, 16).build() else {
         eprintln!("skipping mail_saturation_profile: SubstrateHarness boot failed (no wgpu adapter)");
         return;
     };
 
+    // Relay 0 first, holding nothing; then `n - 1` down to `1`, each holding
+    // its successor's proof (relay `n - 1`'s is relay 0's), and relay 1 also
+    // holding relay 0's as the link target. See `RingRelay`.
     let n = 64usize;
-    for i in 0..n {
-        let next = ring_id((i + 1) % n);
-        let sub = i.to_string();
-        tb.spawn_actor::<RingRelay>(Subname::Named(&sub), next, ()).finish().expect("spawn ring relay");
+    let spawn = |i: usize, relay: RingRelay| {
+        tb.spawn_actor::<RingRelay>(Subname::Named(&i.to_string()), relay, ()).finish().expect("spawn ring relay")
+    };
+    let first = spawn(0, RingRelay { next: None, close: None });
+    let mut successor = first;
+    for i in (1..n).rev() {
+        let close = (i == 1).then_some(first);
+        successor = spawn(i, RingRelay { next: Some(successor.erase()), close });
     }
+
+    // Close the ring: the settle returns once relay 0 has kept relay 1 as its
+    // successor, so seeding starts on a closed ring.
+    tb.execute(vec![("ring.link", HarnessOp::send_and_settle("mlat.ring:1", &RingLink))]).expect("the ring links");
 
     let m: usize = env::var("TOKENS").ok().and_then(|s| s.parse().ok()).unwrap_or(6000);
     let ttl = 100_000_000u32;
@@ -806,8 +853,7 @@ fn settlement_detection_latency() {
     // nothing, returns. Its whole causal tree is the one injected mail,
     // so settlement fires on that mail's `Finished` alone.
     let topo = depth_chain(1);
-    let config = RelayConfig { downstreams: topo.downstreams[0].iter().map(|&j| relay_id(j)).collect(), work_iters: 0 };
-    tb.spawn_actor::<Relay>(Subname::Named("0"), config, ()).finish().expect("spawn leaf relay");
+    spawn_topology(&tb, &topo);
     let entry = relay_id(0);
 
     let samples: usize = env::var("SETTLE_SAMPLES").ok().and_then(|s| s.parse().ok()).unwrap_or(1000);

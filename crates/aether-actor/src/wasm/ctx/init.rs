@@ -5,10 +5,9 @@
 use core::cell::OnceCell;
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::MailboxId;
 
 use crate::asset::{AssetCatalog, AssetInfo, AssetWindow};
-use crate::mail::mailbox::{KindId, Mailbox, resolve, resolve_mailbox};
 use crate::wasm::bridge::asset;
 use alloc::vec::Vec;
 
@@ -39,27 +38,6 @@ impl WasmInitCtx<'_> {
     #[must_use]
     pub fn mailbox_id(&self) -> MailboxId {
         MailboxId(self.mailbox)
-    }
-
-    /// Resolve a kind by its `const ID`. Pure compile-time construction
-    /// under ADR-0030 Phase 2 — no host-fn round trip, never fails.
-    #[must_use]
-    pub const fn resolve<K: Kind>(&self) -> KindId<K> {
-        resolve::<K>()
-    }
-
-    /// Resolve a mailbox by name and bind it to kind `K`, producing a
-    /// typed [`Mailbox<K>`]. Pure compile-time construction; the returned
-    /// token is pure addressing.
-    ///
-    /// The by-name escape hatch, for a target the component knows only as a
-    /// runtime string. A component that knows the peer's *type* addresses it
-    /// through `ctx.actor::<C>()` from `wire` onwards, which resolves through
-    /// the ADR-0099 lineage carry instead of freezing a name.
-    #[must_use]
-    #[allow(clippy::disallowed_methods)] // aether-suppression-request: the SDK's one sanctioned wrapper over the by-name token constructor, so the free fn stays gated for everyone else
-    pub const fn resolve_mailbox<K: Kind>(&self, name: &str) -> Mailbox<K> {
-        resolve_mailbox::<K>(name)
     }
 
     // Issue 1987: the init ctx exposes no `actor()` sender shortcut. A

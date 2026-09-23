@@ -22,7 +22,7 @@ use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_substrate::ReplyTarget;
 use aether_substrate::actor::native::binding::NativeBinding;
-use aether_substrate::actor::native::{NativeActorMailbox, PumpedSlot};
+use aether_substrate::actor::native::{NativeCtx, PumpedSlot};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::MailId;
 use aether_substrate::mail::mailer::Mailer;
@@ -647,12 +647,10 @@ fn connect_roundtrip_spawns_writable_session() {
     assert_eq!(received.peer, peer.to_string());
     assert_eq!(received.bytes, REPLY);
 
-    let sender_binding = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00C0_FFEE));
-    NativeActorMailbox::<TcpCapability>::__new(
-        registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered").0,
-        &sender_binding,
-    )
-    .connect_session_write(&session_name, b"connect-roundtrip");
+    let sender_binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00C0_FFEE)));
+    NativeCtx::new_dispatching(&sender_binding, Source::NONE, MailId::NONE, MailId::NONE)
+        .actor::<TcpCapability>()
+        .connect_session_write(&session_name, b"connect-roundtrip");
     sender_binding.flush_outbound();
 
     assert_eq!(server_thread.join().expect("loopback server thread completes"), *b"connect-roundtrip");

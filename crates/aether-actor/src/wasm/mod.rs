@@ -66,11 +66,6 @@ pub use ctx::{
 #[allow(clippy::module_name_repetitions)]
 pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
 
-// Issue 665 retired the `ffi::Mailbox<K>` 1-arg alias and the
-// `resolve_mailbox` shim. The transport-free [`crate::mail::mailbox::Mailbox<K>`]
-// is now the only `Mailbox` type; the crate-root [`crate::resolve_mailbox`]
-// builds it directly.
-
 /// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
 /// (config parse failure, required handle missing, malformed env var).
 /// The message rides the `init_failed_p32` host fn into the substrate,
@@ -193,8 +188,8 @@ pub trait WasmActor:
     /// no-persistence actor is unchanged and pays nothing (stable Rust has no
     /// associated-type defaults — rust-lang/rust#29661 — so the synthesis
     /// stands in). Distinct from `Self` because the durable fields are a
-    /// subset of the actor's state: the `Mailbox` tokens and handle ids `init`
-    /// rebuilds are intentionally excluded (ADR-0113).
+    /// subset of the actor's state: the handle ids `init` rebuilds are
+    /// intentionally excluded (ADR-0113).
     type Persist: aether_data::Kind;
 
     /// Save-side hot-swap hook (ADR-0040 / ADR-0101). Runs once on the

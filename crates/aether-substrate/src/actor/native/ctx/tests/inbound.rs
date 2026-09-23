@@ -33,7 +33,7 @@ fn native_actor_mailbox_send_with_context_stores_by_minted_correlation() {
 
     let (_registry, mailer) = bare_substrate();
     let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x00BE_EF11)));
-    let mailbox = NativeActorMailbox::<'_, StubActor>::__new_in_flight(0x00FE_ED01, &binding, None, None);
+    let mailbox = NativeActorMailbox::<'_, StubActor>::new(0x00FE_ED01, &binding, None, None);
     let context = NativeRequestContext { value: 13 };
 
     let mail_id = mailbox.with_context(&context).send(&CastOnly { code: 1 });

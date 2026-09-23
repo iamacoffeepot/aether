@@ -279,16 +279,12 @@ mod tests {
     fn typed_and_external_window_instance_addresses_resolve_to_one_live_mailbox() {
         use std::collections::BTreeSet;
 
-        use aether_actor::wasm::inline::Registry as InlineRegistry;
         use aether_data::name_inventory::{ParamKind, child_entries, template_entries};
         use aether_substrate::Registry;
         use aether_substrate::mail::registry::noop_handler;
         use aether_substrate::testing::boot_authority;
 
-        let inline = InlineRegistry::new();
-        let manager_id = WindowCapability::resolve(0, ());
-        let manager = WasmActorMailbox::<WindowCapability>::__new(manager_id.0, 0, &inline);
-        let typed = manager.resolve::<WindowInstance>("main").mailbox_id();
+        let typed = WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main");
         let canonical = "aether.window/aether.window.instance:main";
         let registry = Registry::new();
         registry
