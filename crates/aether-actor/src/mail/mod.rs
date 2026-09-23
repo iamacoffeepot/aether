@@ -5,9 +5,7 @@
 
 //! Mail layer of the actor SDK: the inbound `Mail` envelope,
 //! `PriorState` bundle, and `ReplyHandle` opaque handle live here in
-//! `mod.rs` (pure decoders, no transport coupling). The
-//! [`Mailbox<K>`](mailbox) addressing token lives in
-//! the [`mailbox`] submodule.
+//! `mod.rs` (pure decoders, no transport coupling).
 //!
 //! Issue 665 retired the `MailTransport` trait that previously sat at
 //! `transport.rs` here. Per-stage capability traits in
@@ -20,7 +18,6 @@ use alloc::vec::Vec;
 use core::slice;
 use serde::de::DeserializeOwned;
 pub mod facade;
-pub mod mailbox;
 
 use core::marker::PhantomData;
 

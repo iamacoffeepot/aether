@@ -1,12 +1,11 @@
-//! The receive ctx's outbound surface — the inherent by-token / by-id sends
+//! The receive ctx's outbound surface — the inherent by-reference send
 //! and the [`MailSender`] / [`OutboundReply`] / [`Emit`] impls on
 //! [`WasmCtx`].
 
-use aether_data::{Kind, RequestId, Source};
+use aether_data::Kind;
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
-use crate::mail::mailbox::Mailbox;
 use crate::model::ctx::emit::Emit;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
@@ -14,60 +13,18 @@ use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
 use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
-use crate::wasm::inline::{ChainMode, RouteDecision};
+use crate::wasm::inline::ChainMode;
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
-    /// Issue 1987: send `payload` through a stored [`Mailbox<K>`] addressing
-    /// token, threading this actor's own id as the send's `from` so the
-    /// recipient's `ctx.sender()` resolves the sender and the host
-    /// stamps the correct origin. A `Mailbox<K>` is a pure address (it
-    /// carries no origin), so the ctx supplies the "from" half — the
-    /// by-token counterpart of `ctx.actor::<R>().send(&k)`. Routes through
-    /// the inline registry like every ctx send: a cluster-member recipient
-    /// dispatches in place, any other hands off to the host. Inherits the
-    /// handler's in-flight causal chain (ADR-0080 §7).
-    pub fn send<K: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(mailbox.mailbox(), K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
-    }
-
-    /// Send through a stored mailbox token and store a typed context for the
-    /// reply correlation id.
-    #[must_use]
-    pub fn send_with_context<K: Kind, C: Kind>(&mut self, mailbox: Mailbox<K>, payload: &K, context: &C) -> RequestId {
-        match self.inline.route_decision(mailbox.mailbox()) {
-            RouteDecision::Local => {
-                tracing::warn!(
-                    kind = K::NAME,
-                    recipient = mailbox.mailbox(),
-                    "send_with_context on an inline-cluster local route has no host correlation",
-                );
-                self.send(mailbox, payload);
-                RequestId(Source::NO_CORRELATION)
-            }
-            RouteDecision::Remote => {
-                self.send(mailbox, payload);
-                let request = RequestId(mail::prev_correlation());
-                // SAFETY: the macro-emitted registry is accessed only under the
-                // serialized wasm guest entrypoint.
-                unsafe {
-                    self.inline.request_contexts_mut().insert(request, context);
-                }
-                request
-            }
-        }
-    }
-
     /// Issue 1987: send `payload` to a proven [`ErasedActorRef`], threading this
     /// actor's own id as the send's `from`. The untyped cell for a recipient
     /// known only at runtime takes the proof a spawn
     /// ([`InlineChild::erase`](super::InlineChild::erase),
     /// [`Self::spawn_inline_child_by_tag`]), a `child_as` / `sibling_as`
     /// lookup, or [`Self::sender`] produced — never a computed position
-    /// (ADR-0230). The typed-token counterpart is [`Self::send`]; there is no
-    /// by-name counterpart, because text is not a proof. Routes through the
-    /// inline registry and inherits the handler's causal chain like every ctx
-    /// send.
+    /// (ADR-0230). There is no by-name counterpart, because text is not a
+    /// proof. Routes through the inline registry and inherits the handler's
+    /// causal chain like every ctx send.
     pub fn send_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);

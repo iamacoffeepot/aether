@@ -181,7 +181,8 @@ kind's schema. For a batch that must settle as one traced unit, use
 [the harness](../mcp-harness.md) explains the operating model.
 
 **From inside a component.** Address another actor *by type* —
-`ctx.actor::<RenderCapability>().send(&kind)` — or hold a `Mailbox<K>` token.
+`ctx.actor::<RenderCapability>().send(&kind)` — or send through a proven
+reference it holds (`ctx.to(&reference)`).
 `Kind::ID` and the typed resolver are compile-time constants, so there's no
 host round-trip to resolve an address. You receive mail with a
 `#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
@@ -197,7 +198,7 @@ recipe).
 - **Bare names** (`"camera"`, `"player"`) are not registered and warn-drop
   silently. If mail seems to vanish, check the address first.
 - **Never hash a name into a `MailboxId` yourself.** `mailbox_id_from_name`,
-  `MailboxId::from_name`, `mailbox_id_from_path` and `resolve_mailbox` are all
+  `MailboxId::from_name` and `mailbox_id_from_path` are all
   disallowed by `clippy.toml`, because a hand-computed address freezes the
   target's registration shape into the caller. Boot and driver code that has no
   ctx to resolve through still doesn't need them: `aether_actor::root_mailbox::<C>()`
