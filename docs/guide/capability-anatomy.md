@@ -196,9 +196,11 @@ Feature presence is not chassis presence. Verify builder composition and live
 Actor dispatch remains the state owner. Host operations that can block must use
 an established boundary:
 
-- sidecar reader/writer/callback threads post bounded events to the actor and
-  wake it through a `SelfWake<K>` from `ctx.self_wake::<K>()`, never a stored
-  mailbox id plus a mailer;
+- sidecar reader/writer/callback threads are spawned with
+  `wake.spawn_sidecar(name, body)` from the `SelfWake<K>` that
+  `ctx.self_wake::<K>()` returns, so a panic on one fails the chassis fast;
+  they post bounded events to the actor and wake it through that handle,
+  never a stored mailbox id plus a mailer;
 - `dispatch_blocking`/task completion holds settlement and returns results;
 - a cap-local queue bounds paid or expensive provider calls;
 - shutdown closes/detaches resources without indefinite joins on the dispatcher.

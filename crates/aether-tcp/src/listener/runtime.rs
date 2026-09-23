@@ -11,7 +11,7 @@ pub use std::net::{SocketAddr, TcpListener, TcpStream};
 pub use std::sync::Arc;
 pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
-pub use std::thread::{self, JoinHandle};
+pub use std::thread::JoinHandle;
 pub use std::time::Duration;
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
@@ -144,10 +144,9 @@ impl NativeActor for TcpListenerActor {
 
         // Transport thread below the mail layer — it carries inbound mail in;
         // no inbound chain to inherit, so no settlement umbrella to honor.
-        #[allow(clippy::disallowed_methods)]
-        let thread = thread::Builder::new()
-            .name(format!("aether-tcp-accept-{port}"))
-            .spawn(move || {
+        let thread = wake
+            .clone()
+            .spawn_sidecar(format!("aether-tcp-accept-{port}"), move || {
                 run_accept_loop(listener, shutdown_for_thread, connection_tx, accept_start_rx, move || {
                     wake.wake(&ConnectionReady::default());
                 });
@@ -273,6 +272,8 @@ impl NativeActor for TcpListenerActor {
 
 #[cfg(test)]
 mod tests {
+    use std::thread;
+
     use super::*;
 
     #[test]

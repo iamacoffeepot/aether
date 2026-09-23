@@ -7,7 +7,6 @@
 //! this thread, parks it in the per-actor in-flight ledger, and replies from
 //! a later handler turn when the completion wake lands.
 
-use std::panic::{self, AssertUnwindSafe};
 use std::sync::Arc;
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
@@ -15,11 +14,11 @@ use aether_actor::{Addressable, ReplyMode, Singleton};
 use aether_data::Kind;
 
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
+use crate::actor::native::offload::fail_fast;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
 use crate::actor::native::{InheritCtx, RootCtx};
 use crate::mail::Source;
-use crate::runtime::panic_hook::payload_string;
 use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
@@ -43,6 +42,11 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// arrives; callers gate-sensitive to settlement should not
     /// rely on the parent chain staying open for the worker's
     /// lifetime today.
+    ///
+    /// A panic in `f` is fatal (ADR-0063): the worker escalates it through
+    /// the chassis aborter with the panic payload in the reason, after its
+    /// settlement hold has dropped. An expected failure belongs in what the
+    /// worker sends, never in a panic.
     pub fn spawn_inherit<W, F>(&self, f: F) -> JoinHandle<()>
     where
         // ADR-0119: `W` only supplies `W::NAMESPACE` (thread name) and
@@ -64,6 +68,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// (TCP per-connection workers, pollers). For short-burst CPU
     /// offload that is part of the current handler's causal closure,
     /// use [`Self::spawn_inherit`].
+    ///
+    /// A panic in `f` is fatal (ADR-0063): the worker escalates it through
+    /// the chassis aborter with the panic payload in the reason. An expected
+    /// failure belongs in what the worker sends, never in a panic.
     pub fn spawn_detached<W, F>(&self, f: F) -> JoinHandle<()>
     where
         W: Addressable + Singleton + 'static,
@@ -218,21 +226,9 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         // This IS the ADR-0093 dispatch_blocking primitive — the hold lives in the
         // ledger (not on this worker), so the chain stays open until the resolve.
         #[allow(clippy::disallowed_methods)]
-        let spawned =
-            ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(
-                move || match panic::catch_unwind(AssertUnwindSafe(f)) {
-                    Ok(output) => completion.complete(output),
-                    Err(payload) => {
-                        let reason = format!("dispatch_blocking worker panicked: {}", payload_string(payload.as_ref()));
-                        tracing::error!(
-                            target: "aether_substrate::actor::native::offload::blocking",
-                            reason = %reason,
-                            "dispatch_blocking worker caught a panic; escalating fatal abort",
-                        );
-                        aborter.abort(reason);
-                    }
-                },
-            );
+        let spawned = ThreadBuilder::new().name(String::from("aether-dispatch-blocking")).spawn(move || {
+            completion.complete(fail_fast::run_or_abort(aborter.as_ref(), "dispatch_blocking worker", f));
+        });
         if let Err(e) = spawned {
             tracing::error!(
                 target: "aether_substrate::actor::native::offload::blocking",

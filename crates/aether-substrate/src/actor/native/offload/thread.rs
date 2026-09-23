@@ -35,6 +35,11 @@
 //! The observer gates `Settled` emission on
 //! `(in_flight == 0 && held_open == 0)`, so a worker thread that
 //! outlives its handler keeps the chain open until it exits.
+//!
+//! A panic in either worker is fatal (ADR-0063): the body runs under
+//! `fail_fast::run_or_abort` with the aborter taken before the
+//! spawn, so the escalation holds whatever state the owning actor is
+//! in. An unwinding `InheritCtx<A>` drops its hold before the abort.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -45,6 +50,7 @@ use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
 use aether_data::{Kind, MailId};
 
 use crate::actor::native::binding::NativeBinding;
+use crate::actor::native::offload::fail_fast;
 use crate::runtime::trace::SettlementHold;
 
 /// ADR-0080 §12 spawn-context that captures the spawning handler's
@@ -299,11 +305,12 @@ where
     // acquire hands back no hold. Symmetric with the `outbound_root` /
     // `outbound_parent` `None` cases.
     let hold = binding.mailer().acquire_settlement_hold(in_flight_root);
+    let aborter = binding.fatal_aborter();
     thread::Builder::new()
         .name(format!("aether-inherit-{}", A::NAMESPACE))
         .spawn(move || {
             let ctx = InheritCtx::<A>::new(binding, in_flight_mail_id, in_flight_root, hold);
-            f(ctx);
+            fail_fast::run_or_abort(aborter.as_ref(), "spawn_inherit worker", move || f(ctx));
         })
         .expect("spawn aether-inherit thread")
 }
@@ -319,11 +326,12 @@ where
     A: Addressable + Singleton + 'static,
     F: FnOnce(RootCtx<A>) + Send + 'static,
 {
+    let aborter = binding.fatal_aborter();
     thread::Builder::new()
         .name(format!("aether-root-{}", A::NAMESPACE))
         .spawn(move || {
             let ctx = RootCtx::<A>::new(binding);
-            f(ctx);
+            fail_fast::run_or_abort(aborter.as_ref(), "spawn_detached worker", move || f(ctx));
         })
         .expect("spawn aether-root thread")
 }
@@ -346,6 +354,7 @@ mod tests {
 
     use crate::mail::registry::{OwnedDispatch, Registry};
     use crate::mail::{Mail, Mailer};
+    use crate::runtime::panic_hook::payload_string;
     use crate::testing::boot_authority;
 
     /// Stub actor used as the `A` phantom marker on [`InheritCtx`] /
@@ -673,6 +682,55 @@ mod tests {
         // The InheritCtx dropped on worker exit → hold released → the
         // (0, 0) cell is reclaimed.
         assert_eq!(counter.held_open(inherited_root), 0, "the hold must release when the worker exits");
+    }
+
+    /// A panic in a `spawn_inherit` worker escalates through the binding's
+    /// chassis aborter with the payload in the reason (ADR-0063), and the
+    /// unwinding worker drops its settlement hold on the way out. The test
+    /// binding's aborter is `PanicAborter`, so the joined payload is the
+    /// aborter's own message; a worker run bare joins with the probe alone.
+    #[test]
+    fn spawn_inherit_worker_panic_escalates_through_the_aborter() {
+        let (_registry, mailer) = fresh_substrate();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x6431)));
+        let inherited_root = MailId::new(MailboxId(0x6431), 1);
+        let inherited_mail_id = MailId::new(MailboxId(0x6431), 2);
+
+        let payload = spawn_inherit::<StubActor, _>(binding, inherited_mail_id, inherited_root, |_inherit| {
+            panic!("inherit probe 6431");
+        })
+        .join()
+        .expect_err("the worker panics");
+        let reason = payload_string(payload.as_ref());
+
+        assert!(reason.contains("fatal abort"), "the aborter ran: {reason}");
+        assert!(
+            reason.contains("spawn_inherit worker panicked: inherit probe 6431"),
+            "reason carries the payload: {reason}"
+        );
+        assert_eq!(counter.held_open(inherited_root), 0, "the unwinding worker released its hold");
+    }
+
+    /// A panic in a `spawn_detached` worker escalates through the binding's
+    /// chassis aborter with the payload in the reason (ADR-0063).
+    #[test]
+    fn spawn_detached_worker_panic_escalates_through_the_aborter() {
+        let (_registry, mailer) = fresh_substrate();
+        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x6432)));
+
+        let payload = spawn_detached::<StubActor, _>(binding, |_root| {
+            panic!("detached probe 6431");
+        })
+        .join()
+        .expect_err("the worker panics");
+        let reason = payload_string(payload.as_ref());
+
+        assert!(reason.contains("fatal abort"), "the aborter ran: {reason}");
+        assert!(
+            reason.contains("spawn_detached worker panicked: detached probe 6431"),
+            "reason carries the payload: {reason}"
+        );
     }
 
     /// `MailId::NONE` inherited root skips the hold — there's no chain to

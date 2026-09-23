@@ -8,8 +8,8 @@
 # worker pools, device-callback threads, periodic timers, the primitive's own impl)
 # and must carry an explicit #[allow(clippy::disallowed_methods)] + a one-line reason.
 disallowed-methods = [
-    { path = "std::thread::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached or the ADR-0093 task system, or #[allow] with a reason for infra threads" },
-    { path = "std::thread::Builder::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached or the ADR-0093 task system, or #[allow] with a reason for infra threads" },
+    { path = "std::thread::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached, the ADR-0093 task system, or SelfWake::spawn_sidecar for a cap's dedicated sidecar thread, or #[allow] with a reason for infra threads" },
+    { path = "std::thread::Builder::spawn", reason = "raw thread spawn bypasses the settlement/trace umbrella; use NativeCtx::spawn_inherit/spawn_detached, the ADR-0093 task system, or SelfWake::spawn_sidecar for a cap's dedicated sidecar thread, or #[allow] with a reason for infra threads" },
     { path = "aether_data::mailbox_id_from_name", reason = "hardcodes an actor namespace into a MailboxId; address siblings via ctx.actor::<Cap>() (resolves through the ADR-0099 lineage carry). Only the core id-constant defs and runtime-name routing may #[allow] with a reason." },
     { path = "aether_data::mailbox_id_from_name_pair", reason = "scoped-name variant of the above; use the typed resolver, or #[allow] with a reason in the core id/routing API." },
     { path = "aether_data::MailboxId::from_name", reason = "inherent alias for `mailbox_id_from_name` — the same hardcoded namespace and the same frozen depth-1 shape, reached through the id type instead of the free fn. Address a root cap with `aether_actor::root_mailbox::<C>()` and a sibling via ctx.actor::<Cap>(). Only the registry's own canonical name→id derivation may #[allow] with a reason." },
