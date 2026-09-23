@@ -94,37 +94,48 @@ factor across a drag between displays; a synthetic window publishes `1.0`.
 
 ## Subscribe by kind and window
 
-Subscribe in `wire`, where mail is allowed, through the neutral window
-identity:
+Subscribe in `wire`, where mail is allowed. Declare the neutral window identity
+as a dependency, spell your actor on the `wire` context, and name the publisher
+and the kind:
 
 ```rust
-use aether_kinds::{Key, MouseMove, WindowSize};
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_kinds::{Key, WindowSize};
+use aether_window::WindowCapability;
 
-fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let windows = ctx.actor::<WindowCapability>();
-
-    windows.subscribe::<Key>(WindowSelector::All);
-    windows.subscribe::<WindowSize>(WindowSelector::All);
-    windows.subscribe::<MouseMove>(WindowSelector::One(self.editor_window));
+#[actor(depends(WindowCapability))]
+impl WasmActor for Editor {
+    fn wire(&mut self, ctx: &mut WireCtx<'_, '_, Self>) {
+        ctx.subscribe::<WindowCapability, Key>();
+        ctx.subscribe::<WindowCapability, WindowSize>();
+    }
 }
 ```
 
-`WindowSelector::One(id)` receives the kind only from that window.
-`WindowSelector::All` includes all current windows and windows created later.
-If one mailbox matches both selectors, it receives one copy.
+A window subscribe covers every window: all current windows and windows created
+later. `ctx.unsubscribe::<WindowCapability, K>()` is the teardown twin.
 
-Both subscribe surfaces are gated on `aether_actor::Publishes<K>`, the send-side
-mirror of `HandlesKind`: `WindowCapability` implements it for the event
+The verb is checked at compile time three ways. `WindowCapability` implements
+`aether_actor::Publishes<K>`, the send-side mirror of `HandlesKind`, for the event
 vocabulary above, `LifecycleCapability` for the stage kinds, and a kind neither
 publishes has no impl at all. So subscribing at the wrong capability —
-`windows.subscribe::<Tick>(..)`, `lifecycle.subscribe::<Key>()` — is an `E0277`
-at the `wire` call site whose message names the capability that does publish the
-kind, instead of a stored subscription row that never fires. The failure it
-replaces is entirely silent: the row is accepted, the event is dropped at its
-source for want of a matching subscriber, and the component just looks dead. The
-same bound is on `subscribe_for`, `unsubscribe`, and `unsubscribe_for`, since a
-kind that cannot be subscribed cannot be unsubscribed either.
+`ctx.subscribe::<WindowCapability, Tick>()` — is an `E0277` at the `wire` call
+site whose message names the capability that does publish the kind, instead of a
+stored subscription row that never fires. The failure it replaces is entirely
+silent: the row is accepted, the event is dropped at its source for want of a
+matching subscriber, and the component just looks dead. The actor must also
+declare `depends(WindowCapability)`, and its handler for `K` must not declare a
+reply (a `-> ()` handler, or a manual one), because a broadcast event has no one
+waiting for a reply. `unsubscribe` carries the first two checks: a kind that
+cannot be subscribed cannot be unsubscribed either.
+
+The older facade form, `ctx.actor::<WindowCapability>()` with
+`WindowManagerMailboxExt`, still compiles until the remaining callers move to the
+flat verb, and it is the one place a per-window filter lives:
+`windows.subscribe::<MouseMove>(WindowSelector::One(self.editor_window))`
+receives the kind only from that window, and `WindowSelector::All` matches every
+window as the flat verb does. If one mailbox matches both selectors, it receives
+one copy. The same `Publishes<K>` bound is on the facade's `subscribe`,
+`subscribe_for`, `unsubscribe`, and `unsubscribe_for`.
 
 Then handle the event as ordinary mail and inspect its source id:
 

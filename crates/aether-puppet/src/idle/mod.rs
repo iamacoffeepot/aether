@@ -44,7 +44,7 @@ pub use kinds::*;
 use crate::{Pose, Puppet};
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
-use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
+use aether_lifecycle::LifecycleCapability;
 
 /// Channels the rig carries, which is the width of every array here.
 const CHANNELS: usize = 8;
@@ -87,8 +87,8 @@ impl WasmActor for Idle {
 
     /// Subscribe the frame stage. `wire` is the placement rather than `init`
     /// because `init`'s ctx cannot mail.
-    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_, Self>) {
+        ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
     /// Advance every channel one tick and restate the pose. A parked motor,
