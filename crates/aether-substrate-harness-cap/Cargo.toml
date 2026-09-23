@@ -23,9 +23,10 @@ publish = false
 
 # ADR-0122 identity/runtime split: the wasm-safe identities and their
 # `HandlesKind` markers compile always-on; the `aether_substrate`-typed runtime
-# halves (the `HubOutbound` reply path, the embedder event channel) are gated,
-# so a marker-only guest can address `ctx.actor::<SubstrateHarnessCapability>()`
-# without dragging the substrate through.
+# halves (the `NativeActor` impls, the embedder event channel whose `Advance`
+# carries an `InboundMail` reply guard) are gated, so a marker-only guest can
+# address `ctx.actor::<SubstrateHarnessCapability>()` without dragging the
+# substrate through.
 [features]
 default = ["runtime"]
 runtime = ["dep:aether-substrate"]

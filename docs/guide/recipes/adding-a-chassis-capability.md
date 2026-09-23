@@ -220,12 +220,12 @@ recipe.
 `ctx.reply(&result)` / `ctx.reply_to(source, &result)` — the
 `NativeBinding` handler-reply path — is the complete router: it reaches
 every `SourceAddr`, including the `Component` local-RPC-server reply target
-an MCP-spawned engine tags. If you instead reach for the raw
-`HubOutbound::send_reply`, note that it is a silent no-op on a
-`SourceAddr::Component` target (iamacoffeepot/aether#1321) — that variant is
-`Mailer::send_reply`'s job, not the hub's — so an MCP-spawned caller's reply
-never lands. Reply through `ctx.reply` / `ctx.reply_to`; `HubOutbound::send_reply`'s
-own doc comment records the fork.
+an MCP-spawned engine tags. A reply that must outlive the handler (answered
+later from an embedder loop, say) retains the request's `InboundMail` guard
+and replies through it, which takes the same route. Reply through one of
+these and nothing else: a hub-only reply path once answered just `Session`
+and `EngineMailbox` senders and silently dropped the `Component` reply, so
+an MCP-spawned caller's reply never landed (iamacoffeepot/aether#1321).
 
 ## 3. Give it a config if it needs one
 
