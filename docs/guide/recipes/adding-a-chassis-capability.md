@@ -307,8 +307,9 @@ Most capabilities are **passive**: they sit on a dispatcher and answer
 mail, added with `with_actor`. `TextCapability` is passive. An executable chassis
 also composes exactly one **driver** — the cap that owns the chassis main thread
 and its lifetime (the winit loop on desktop and the std timer on headless). The
-hub's `HubServerDriverCapability` instead owns the `SubstrateBoot` and blocks that
-thread on SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
+shared `SignalDriverCapability` from `aether-chassis`, which the hub and the
+Bloomery compose, instead owns the `SubstrateBoot` and blocks that thread on
+SIGINT/SIGTERM; `RpcServerCapability`, a passive actor, owns the socket
 listener. A driver implements `DriverCapability` (not `NativeActor`) and is
 supplied with `.driver(d)` rather than `.with_actor`; the type-state builder
 enforces exactly one. The in-process SubstrateHarness uses `build_passive` and lets its
