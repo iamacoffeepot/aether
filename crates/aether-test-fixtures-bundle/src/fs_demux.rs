@@ -7,9 +7,10 @@
 //!
 //! [`RunFsContextDemux`] (issue 5508) is a separate additive flow on the same
 //! actor: two in-flight reads carry distinct typed contexts, and the same
-//! `ReadResult` handler recovers them by probe-then-take.
+//! `ReadResult` handler recovers them by trying each context type in turn, A
+//! first, so the reply carrying context B crosses a wrong-kind take of A.
 
-use aether_actor::{ActorInitError, Erased, Kind, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Erased, Manual, RequestId, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
     FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux, SubstrateHarnessObserver,
@@ -100,26 +101,12 @@ impl WasmActor for FsDemux {
 }
 
 impl FsDemux {
-    /// Probe-then-take for [`RunFsContextDemux`]. Returns whether this reply
-    /// carried a typed context (consumed here even if recovery failed).
+    /// Recover the typed context for [`RunFsContextDemux`] by trying each
+    /// context type in turn, A first: a wrong-kind take leaves the context
+    /// stored, so the reply carrying context B still recovers it. Returns
+    /// whether this reply carried either context.
     fn handle_typed_context(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>) -> bool {
-        let Some(kind) = ctx.context_kind() else {
-            return false;
-        };
-        if ctx.context_kind() != Some(kind) {
-            tracing::warn!(target: "test.fs_demux", "context_kind probe was not stable");
-            return true;
-        }
-
-        if kind == FsDemuxContextA::ID {
-            let Some(context) = ctx.take_context::<FsDemuxContextA>() else {
-                tracing::warn!(target: "test.fs_demux", "failed to take context A after matching probe");
-                return true;
-            };
-            if ctx.context_kind().is_some() {
-                tracing::warn!(target: "test.fs_demux", "take_context A did not clear the current peek");
-                return true;
-            }
+        if let Some(context) = ctx.take_context::<FsDemuxContextA>() {
             if context.payload != CONTEXT_A_PAYLOAD {
                 tracing::warn!(
                     target: "test.fs_demux",
@@ -129,15 +116,7 @@ impl FsDemux {
                 return true;
             }
             self.context_first_payload = Some(context.payload);
-        } else if kind == FsDemuxContextB::ID {
-            let Some(context) = ctx.take_context::<FsDemuxContextB>() else {
-                tracing::warn!(target: "test.fs_demux", "failed to take context B after matching probe");
-                return true;
-            };
-            if ctx.context_kind().is_some() {
-                tracing::warn!(target: "test.fs_demux", "take_context B did not clear the current peek");
-                return true;
-            }
+        } else if let Some(context) = ctx.take_context::<FsDemuxContextB>() {
             if context.payload != CONTEXT_B_PAYLOAD {
                 tracing::warn!(
                     target: "test.fs_demux",
@@ -148,12 +127,7 @@ impl FsDemux {
             }
             self.context_second_payload = Some(context.payload);
         } else {
-            tracing::warn!(
-                target: "test.fs_demux",
-                kind = kind.0,
-                "read_result context kind did not match either pending context",
-            );
-            return true;
+            return false;
         }
 
         if let (Some(first_payload), Some(second_payload)) = (self.context_first_payload, self.context_second_payload) {
@@ -161,7 +135,7 @@ impl FsDemux {
                 target: "test.fs_demux",
                 first_payload,
                 second_payload,
-                "fs_context_demux probe-then-take recovered both contexts",
+                "fs_context_demux recovered both contexts by trying each type in turn",
             );
             ctx.actor::<SubstrateHarnessObserver>().send(&FsContextDemuxReport { first_payload, second_payload });
         }

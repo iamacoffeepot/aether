@@ -1102,13 +1102,7 @@ macro_rules! __export_internal {
                 &__AETHER_INLINE,
                 |ctx| <$component as $crate::WasmActor>::on_dehydrate(instance, ctx),
             );
-            let __aether_state = {
-                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
-                // entrypoint, matching the registry's interior-mutability
-                // invariant.
-                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
-                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
-            };
+            let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> =
                     $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
@@ -1804,13 +1798,7 @@ macro_rules! __export_multi_internal {
                 &__AETHER_INLINE,
                 |ctx| instance.erased_on_dehydrate(ctx),
             );
-            let __aether_state = {
-                // SAFETY: `on_dehydrate` runs under the serialized wasm guest
-                // entrypoint, matching the registry's interior-mutability
-                // invariant.
-                let __aether_contexts = unsafe { __AETHER_INLINE.request_contexts_mut() };
-                $crate::compose_state_envelope(__aether_contexts, __aether_user_state)
-            };
+            let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
                 let mut ctx: $crate::WasmDropCtx<'_> =
                     $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));

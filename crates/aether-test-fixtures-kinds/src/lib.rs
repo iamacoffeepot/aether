@@ -318,9 +318,10 @@ pub struct FsDemuxReport {
     pub second_matched: bool,
 }
 
-/// Issue 5508: trigger for the typed request-context probe-then-take fixture.
-/// The fixture sends two `aether.fs.read` requests carrying distinct context
-/// kinds and recovers them from the shared `ReadResult` handler.
+/// Issue 5508: trigger for the typed request-context fixture that recovers
+/// contexts by trying each context type in turn. The fixture sends two
+/// `aether.fs.read` requests carrying distinct context kinds and recovers them
+/// from the shared `ReadResult` handler.
 #[aether_data::kind(name = "aether.test_fixtures.run_fs_context_demux", default)]
 pub struct RunFsContextDemux {
     pub namespace: String,
@@ -328,8 +329,9 @@ pub struct RunFsContextDemux {
 }
 
 /// Issue 5508: report emitted once both distinct typed request contexts were
-/// recovered by probe-then-take on the shared `ReadResult` handler. Payloads
-/// are the values actually decoded from each context, not synthetic flags.
+/// recovered by trying each context type in turn on the shared `ReadResult`
+/// handler. Payloads are the values actually decoded from each context, not
+/// synthetic flags.
 #[aether_data::kind(name = "aether.test_fixtures.fs_context_demux_report", eq)]
 pub struct FsContextDemuxReport {
     pub first_payload: u32,
@@ -528,3 +530,35 @@ pub const SUMMARIZE_PROGRAM: &str = "test.program.summarize";
 pub const MIXED_BUNDLE: Head<OpaqueBytes> = Head::new("test.bloomery.mixed.bundle");
 
 const _: () = assert!(ProgramName::is_valid(SUMMARIZE_PROGRAM));
+
+/// Issue 6400: trigger that makes the correlation-carry requester send one
+/// [`CarriedRequest`] carrying `tag`, with the same `tag` bound as the
+/// request's context.
+#[aether_data::kind(name = "aether.test_fixtures.run_carried_request", copy, default)]
+pub struct RunCarriedRequest {
+    pub tag: u32,
+}
+
+/// Issue 6400: request the correlation-carry requester sends to the reply
+/// holder, which parks its reply handle until [`ReleaseCarried`].
+#[aether_data::kind(name = "aether.test_fixtures.carried_request", copy)]
+pub struct CarriedRequest {
+    pub tag: u32,
+}
+
+/// Issue 6400: tells the reply holder to answer every parked request, in
+/// arrival order.
+#[aether_data::kind(name = "aether.test_fixtures.release_carried", default)]
+pub struct ReleaseCarried;
+
+/// Issue 6400: the reply holder's answer to a [`CarriedRequest`], echoing its
+/// `tag`.
+#[aether_data::kind(name = "aether.test_fixtures.carried_request_result", copy)]
+pub struct CarriedRequestResult {
+    pub tag: u32,
+}
+
+/// Issue 6400: report the requester emits when a [`CarriedRequestResult`] recovered
+/// the context of the request it answers.
+#[aether_data::kind(name = "aether.test_fixtures.carried_reply_matched", default)]
+pub struct CarriedReplyMatched;

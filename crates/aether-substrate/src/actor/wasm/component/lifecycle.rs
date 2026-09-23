@@ -3,7 +3,10 @@ use std::mem;
 use wasmtime::Store;
 
 use super::instantiate::Placement;
-use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES, StateBundle};
+use super::{
+    Component, ComponentCtx, CorrelationCursor, MAX_DELIVERABLE_MAIL_BYTES, PendingSpawn, SMALL_REGION_BYTES,
+    StateBundle,
+};
 use crate::mail::MailboxId;
 use crate::mail::registry::PreparedAliasRoute;
 
@@ -49,6 +52,15 @@ impl Component {
         {
             tracing::error!(target: "aether_substrate::component", error = %e, "on_dehydrate hook trapped");
         }
+    }
+
+    /// The next correlation this guest would mint, recorded by the
+    /// component trampoline when the guest leaves its slot (unload or
+    /// replace) so the slot's next occupant resumes from it through
+    /// [`ComponentCtx::resume_correlations`] (ADR-0139 §3).
+    #[must_use]
+    pub fn correlation_cursor(&self) -> CorrelationCursor {
+        self.store.data().correlation_cursor()
     }
 
     /// Extract the state bundle the guest deposited via `save_state`

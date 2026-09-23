@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — kind-typed request contexts + reply correlation ids in aether-actor; consumers migrated across fs/audio/text/behavior/kit)
 - **Date:** 2026-07-08
+- **Amended (#6397):** a wrong-kind `take_context` leaves the entry stored; see §4.
 
 Amends **ADR-0134** (multi reply class): one-shot request/reply flows correlate on the envelope, not the payload; `multi`-class emissions keep the payload-level keying ADR-0133 established. Builds on the correlation machinery **ADR-0042** left in place at its retirement, the `MailId` / causal-chain model of **ADR-0080**, the reply classes of **ADR-0109** / **ADR-0112**, and the inline-cluster addressing of **ADR-0114**.
 
@@ -51,7 +52,7 @@ Additive is the load-bearing property: a new import leaves `receive_p32`'s signa
 On top of the primitive, `aether-actor` owns the pending map itself:
 
 - `send_with_context(&request, context)` — a tracked send that stores `context` keyed by the minted `RequestId`. The context type is a **`Kind`**: the table stores `RequestId -> (KindId, encoded bytes)`, so storage is schema-typed rather than type-erased.
-- `ctx.take_context::<C>() -> Option<C>` in the reply handler — resolves `in_reply_to()`, removes the entry, checks the stored `KindId` against `C::ID` (a mismatch warn-logs and returns `None` — exact, unlike an `Any` downcast), and decodes.
+- `ctx.take_context::<C>() -> Option<C>` in the reply handler — resolves `in_reply_to()` and checks the stored `KindId` against `C::ID` (exact, unlike an `Any` downcast). A mismatch returns `None` and leaves the entry stored for a later take of the right type. A match removes and decodes the entry; a decode failure consumes it with a warn.
 - **Hot reload:** because entries are `(KindId, bytes)`, the table serialises through the existing `save_state` machinery — pending requests ride `on_dehydrate` / `on_rehydrate` across `replace_component` with no per-consumer code.
 - **Eviction:** bounded, drop-oldest with a warning naming the kind and entry age. Capacity is an SDK default constant — the table lives in actor memory (guest-side, a wasm static), which the ADR-0090 chassis-knob seeding does not reach cheaply; a knob follows only if a real consumer needs one. Eviction is memory hygiene only, never correctness — correlation ids are monotonic, so a stale entry can never be wrongly matched by a later reply, and an entry holds nothing open engine-side (no settlement hold; the leak's blast radius is the actor's own heap). Contexts are bookkeeping, not storage: fat state (an assembling bank, a parsed manifest) belongs in actor fields keyed by a small id the context carries.
 - **Scope:** take-once semantics serving `single` and `manual` reply flows. `multi`-class streams are out of scope by construction — their emissions are detached chain roots that echo nothing, and payload `stream_id` keying remains their correlation story (ADR-0133 / ADR-0134). Identity lives at the layer that spans the relationship: one reply → the envelope already spans it; N messages over time → only the payload does.

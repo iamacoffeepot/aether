@@ -3,7 +3,22 @@
 //! The table is keyed by the reply correlation id minted for an outbound
 //! request. Context values are ordinary `Kind`s, so the stored bytes carry a
 //! schema-derived `KindId` and can be restored across guest replacement.
+//!
+//! Request ids are monotonic per mailbox (ADR-0139 §3): a native actor mints
+//! them from its binding's counter, and a wasm guest's counter carries across
+//! `replace_component`. The smallest stored id is therefore the oldest
+//! context, so capacity eviction pops the first key.
+//!
+//! The snapshot keeps the layout older SDKs wrote: `next_seq`, `count`, then
+//! per entry `request`, `kind`, `insert_seq`, `len`, `bytes`. The table no
+//! longer tracks insertion sequence, so restore ignores both sequence fields.
+//! The writer sets `next_seq` to the entry count and each `insert_seq` to the
+//! entry's position in id order, which an older reader takes as the same age
+//! order. Keeping the layout, rather than bumping the envelope version, lets
+//! snapshots cross in both directions: an older reader treats an unknown
+//! version as plain user state.
 
+use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
 
 use aether_data::{Kind, KindId, RequestId, Source};
@@ -16,24 +31,21 @@ const ENVELOPE_MAGIC: &[u8; 8] = b"AECTX001";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct RequestContextEntry {
-    request: RequestId,
     kind: KindId,
     bytes: Vec<u8>,
-    insert_seq: u64,
 }
 
 /// Per-actor request-context table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestContextTable {
-    entries: Vec<RequestContextEntry>,
-    next_seq: u64,
+    entries: BTreeMap<RequestId, RequestContextEntry>,
     capacity: usize,
 }
 
 impl RequestContextTable {
     #[must_use]
     pub const fn new() -> Self {
-        Self { entries: Vec::new(), next_seq: 0, capacity: REQUEST_CONTEXT_CAPACITY }
+        Self { entries: BTreeMap::new(), capacity: REQUEST_CONTEXT_CAPACITY }
     }
 
     #[must_use]
@@ -43,69 +55,42 @@ impl RequestContextTable {
 
     /// Store a context under `request`, replacing any older entry for the same
     /// correlation id. A no-correlation request is ignored because no reply can
-    /// recover it exactly.
+    /// recover it exactly. A new request on a full table evicts the oldest
+    /// context, the one with the smallest request id.
     pub fn insert<C: Kind>(&mut self, request: RequestId, context: &C) {
         if request.0 == Source::NO_CORRELATION {
             tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id",);
             return;
         }
 
-        if let Some(existing) = self.entries.iter_mut().find(|entry| entry.request == request) {
-            existing.kind = C::ID;
-            existing.bytes = context.encode_into_bytes();
-            existing.insert_seq = self.next_seq;
-            self.next_seq = self.next_seq.wrapping_add(1);
-            return;
-        }
-
-        if self.entries.len() >= self.capacity
-            && let Some((oldest, _)) = self.entries.iter().enumerate().min_by_key(|(_, entry)| entry.insert_seq)
+        if !self.entries.contains_key(&request)
+            && self.entries.len() >= self.capacity
+            && let Some((dropped_request, dropped)) = self.entries.pop_first()
         {
-            let dropped = self.entries.remove(oldest);
             tracing::warn!(
-                request = dropped.request.0,
+                request = dropped_request.0,
                 kind = dropped.kind.0,
-                age = self.next_seq.saturating_sub(dropped.insert_seq),
+                age = request.0.saturating_sub(dropped_request.0),
                 "request context table full; dropped oldest context",
             );
         }
 
-        self.entries.push(RequestContextEntry {
-            request,
-            kind: C::ID,
-            bytes: context.encode_into_bytes(),
-            insert_seq: self.next_seq,
-        });
-        self.next_seq = self.next_seq.wrapping_add(1);
-    }
-
-    /// Kind of the context stored under `request`, without removing it.
-    ///
-    /// A dispatcher that serves several context kinds from one reply handler
-    /// probes with this before committing to a [`Self::take`], so a
-    /// wrong-kind guess leaves the other branch's context intact.
-    #[must_use]
-    pub fn kind(&self, request: RequestId) -> Option<KindId> {
-        self.entries.iter().find(|entry| entry.request == request).map(|entry| entry.kind)
+        self.entries.insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes() });
     }
 
     /// Remove and decode the context associated with `request`.
     ///
-    /// Wrong-kind and decode failures consume the stored entry. A reply is a
-    /// one-shot event, and retaining a malformed or wrong-type context would
-    /// make a later handler observe stale bookkeeping.
+    /// A take of the wrong type returns `None` and leaves the entry stored, so
+    /// a reply handler that serves several context kinds tries each type in
+    /// turn. A matching kind removes the entry; if its bytes then fail to
+    /// decode, the entry is consumed with a warning, since no other type could
+    /// ever take it.
     pub fn take<C: Kind>(&mut self, request: RequestId) -> Option<C> {
-        let index = self.entries.iter().position(|entry| entry.request == request)?;
-        let entry = self.entries.remove(index);
-        if entry.kind != C::ID {
-            tracing::warn!(
-                request = request.0,
-                expected_kind = C::ID.0,
-                actual_kind = entry.kind.0,
-                "request context kind mismatch",
-            );
+        if self.entries.get(&request)?.kind != C::ID {
             return None;
         }
+
+        let entry = self.entries.remove(&request)?;
         let decoded = C::decode_from_bytes(&entry.bytes);
         if decoded.is_none() {
             tracing::warn!(request = request.0, kind = C::ID.0, "request context decode failed",);
@@ -116,12 +101,12 @@ impl RequestContextTable {
     #[must_use]
     pub fn snapshot_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
-        push_u64(&mut out, self.next_seq);
+        push_u64(&mut out, self.entries.len() as u64);
         push_len(&mut out, self.entries.len());
-        for entry in &self.entries {
-            push_u64(&mut out, entry.request.0);
+        for (position, (request, entry)) in (0_u64..).zip(&self.entries) {
+            push_u64(&mut out, request.0);
             push_u64(&mut out, entry.kind.0);
-            push_u64(&mut out, entry.insert_seq);
+            push_u64(&mut out, position);
             push_len(&mut out, entry.bytes.len());
             out.extend_from_slice(&entry.bytes);
         }
@@ -130,18 +115,16 @@ impl RequestContextTable {
 
     pub fn restore_snapshot_bytes(&mut self, bytes: &[u8]) -> bool {
         let mut cursor = bytes;
-        let Some(next_seq) = take_u64(&mut cursor) else {
-            return false;
-        };
-        let Some(count) = take_u32(&mut cursor) else {
+        let (Some(_next_seq), Some(count)) = (take_u64(&mut cursor), take_u32(&mut cursor)) else {
             return false;
         };
         if count as usize > self.capacity {
             return false;
         }
-        let mut entries = Vec::with_capacity(count as usize);
+
+        let mut entries = BTreeMap::new();
         for _ in 0..count {
-            let (Some(request), Some(kind), Some(insert_seq), Some(len)) =
+            let (Some(request), Some(kind), Some(_insert_seq), Some(len)) =
                 (take_u64(&mut cursor), take_u64(&mut cursor), take_u64(&mut cursor), take_u32(&mut cursor))
             else {
                 return false;
@@ -152,18 +135,17 @@ impl RequestContextTable {
             }
             let (payload, rest) = cursor.split_at(len);
             cursor = rest;
-            entries.push(RequestContextEntry {
-                request: RequestId(request),
-                kind: KindId(kind),
-                bytes: payload.to_vec(),
-                insert_seq,
-            });
+
+            let entry = RequestContextEntry { kind: KindId(kind), bytes: payload.to_vec() };
+            if entries.insert(RequestId(request), entry).is_some() {
+                return false;
+            }
         }
         if !cursor.is_empty() {
             return false;
         }
+
         self.entries = entries;
-        self.next_seq = next_seq;
         true
     }
 }
@@ -305,26 +287,56 @@ mod tests {
     }
 
     #[test]
-    fn wrong_kind_take_consumes_entry() {
+    fn wrong_kind_take_leaves_entry() {
         let mut table = RequestContextTable::new();
         table.insert(RequestId(7), &TestContext { value: 42 });
         assert_eq!(table.take::<OtherContext>(RequestId(7)), None);
-        assert_eq!(table.take::<TestContext>(RequestId(7)), None);
+        assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
-    /// Probing the stored kind must leave the entry intact, so a dispatcher
-    /// that serves several context kinds from one reply handler can route on
-    /// the probe and still take the context on the branch it picks.
+    /// Request ids are monotonic per mailbox, so the smallest id is the
+    /// oldest context. Eviction must pick it after a take and a snapshot
+    /// restore, when larger ids arrive on a full table.
     #[test]
-    fn kind_probe_reports_stored_kind_without_consuming() {
-        let mut table = RequestContextTable::new();
-        table.insert(RequestId(7), &TestContext { value: 42 });
+    fn eviction_drops_the_smallest_request_id() {
+        let mut table = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
+        table.insert(RequestId(100), &TestContext { value: 0 });
+        table.insert(RequestId(101), &TestContext { value: 1 });
+        table.insert(RequestId(102), &TestContext { value: 2 });
+        assert_eq!(table.take::<TestContext>(RequestId(101)), Some(TestContext { value: 1 }));
 
-        assert_eq!(table.kind(RequestId(7)), Some(TestContext::ID));
-        assert_ne!(TestContext::ID, OtherContext::ID, "the probe distinguishes the two context kinds");
-        assert_eq!(table.kind(RequestId(8)), None, "an unstored request has no context kind");
+        let mut restored = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
+        assert!(restored.restore_snapshot_bytes(&table.snapshot_bytes()));
+        restored.insert(RequestId(103), &TestContext { value: 3 });
+        restored.insert(RequestId(104), &TestContext { value: 4 });
 
-        assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(100)), None, "the oldest context is evicted");
+        assert_eq!(restored.take::<TestContext>(RequestId(102)), Some(TestContext { value: 2 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(103)), Some(TestContext { value: 3 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(104)), Some(TestContext { value: 4 }));
+    }
+
+    /// An older SDK wrote entries in insertion order with its own sequence
+    /// numbers; a guest on this SDK must still restore that snapshot, whatever
+    /// the sequence fields hold.
+    #[test]
+    fn older_sdk_snapshot_restores_whatever_its_sequence_fields_hold() {
+        let mut bytes = Vec::new();
+        push_u64(&mut bytes, 5);
+        push_len(&mut bytes, 2);
+        for (request, value, insert_seq) in [(9, 1, 40), (7, 2, 12)] {
+            let payload = TestContext { value }.encode_into_bytes();
+            push_u64(&mut bytes, request);
+            push_u64(&mut bytes, TestContext::ID.0);
+            push_u64(&mut bytes, insert_seq);
+            push_len(&mut bytes, payload.len());
+            bytes.extend_from_slice(&payload);
+        }
+
+        let mut restored = RequestContextTable::new();
+        assert!(restored.restore_snapshot_bytes(&bytes));
+        assert_eq!(restored.take::<TestContext>(RequestId(9)), Some(TestContext { value: 1 }));
+        assert_eq!(restored.take::<TestContext>(RequestId(7)), Some(TestContext { value: 2 }));
     }
 
     #[test]

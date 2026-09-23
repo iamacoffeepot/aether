@@ -14,6 +14,15 @@ use crate::actor::wasm::asset_manifest::LoadWindow;
 
 use super::StateBundle;
 
+/// The next correlation a mailbox's guest mints. Read from a live
+/// component with [`super::Component::correlation_cursor`] and resumed by
+/// its successor with [`ComponentCtx::resume_correlations`], so a mailbox
+/// never reuses a correlation id within a run (ADR-0139 §3). Opaque: it
+/// has no public constructor and no codec, so a cursor can only come from
+/// a live component and can never lower a counter.
+#[derive(Clone, Copy, Debug)]
+pub struct CorrelationCursor(u64);
+
 /// Per-component context stored as wasmtime `Store` data. Holds the
 /// sender's own `MailboxId`, a handle to the shared mail queue, and a
 /// handle to the registry so the `send_mail` host function can route
@@ -72,13 +81,15 @@ pub struct ComponentCtx {
     /// Phase 4 PR 3); `None` for the test paths that build
     /// `ComponentCtx` without a real trampoline.
     pub binding: Option<Arc<NativeBinding>>,
-    /// ADR-0042 correlation counter. Per-component (one
-    /// `ComponentCtx` per component instance). Holds the *next* id
-    /// to mint; `prev_correlation()` reads `counter - 1` to return
-    /// the last one minted. Starts at `1` so that `0` always means
+    /// ADR-0042 correlation counter. One per mailbox slot, not per
+    /// instance: a fresh slot starts at `1` so that `0` always means
     /// "no correlation" (backward-compat sentinel for replies that
     /// don't filter on correlation, and for `prev_correlation` before
-    /// any send).
+    /// the slot's first send), and a replacement instance resumes its
+    /// predecessor's value through [`Self::resume_correlations`], so a
+    /// mailbox never reuses an id within a run (ADR-0139 §3). Holds the
+    /// *next* id to mint; `prev_correlation()` reads `counter - 1` to
+    /// return the last one minted.
     ///
     /// `Cell` instead of `AtomicU64`: the component is single-
     /// threaded (ADR-0038 actor-per-component), so the counter is
@@ -293,6 +304,22 @@ impl ComponentCtx {
         self.binding = Some(binding);
     }
 
+    /// The next correlation this mailbox's guest mints, for its
+    /// successor to resume. Read through [`super::Component::correlation_cursor`].
+    pub(super) fn correlation_cursor(&self) -> CorrelationCursor {
+        CorrelationCursor(self.correlation_counter.get())
+    }
+
+    /// Continue this mailbox's correlation sequence from a guest that
+    /// left the slot, so the new instance never mints an id its
+    /// predecessor already used (ADR-0139 §3). Only ever raises the
+    /// counter. Call before [`super::Component::instantiate`], so sends
+    /// from `init` and `on_rehydrate` onward continue the sequence; the
+    /// consumer is the component trampoline's replace.
+    pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
+        self.correlation_counter.set(cursor.0.max(self.correlation_counter.get()));
+    }
+
     /// Mint the next correlation id and bump the counter. Private —
     /// callers that want a correlation use `ComponentCtx::send`,
     /// which mints internally and tags the outgoing mail.
@@ -318,7 +345,9 @@ impl ComponentCtx {
     /// `ComponentCtx::send` call. The `prev_correlation_p32` host fn
     /// surfaces this to the guest so a handler can match an inbound
     /// reply to the request it sent. Returns `0` (the "no
-    /// correlation" sentinel) before any send has been made.
+    /// correlation" sentinel) before the mailbox's first send; a
+    /// resumed instance reports its predecessor's last id until its own
+    /// first send, since the counter belongs to the mailbox.
     pub fn prev_correlation(&self) -> u64 {
         // counter holds the *next* id to mint; subtract to get the
         // last one. `.saturating_sub(1)` covers the pre-send case

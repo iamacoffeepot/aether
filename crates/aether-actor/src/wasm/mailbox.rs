@@ -209,11 +209,7 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     {
         let request = self.send_tracked(payload);
         if request.0 != Source::NO_CORRELATION {
-            // SAFETY: the macro-emitted registry is accessed only under the
-            // serialized wasm guest entrypoint.
-            unsafe {
-                self.inline.request_contexts_mut().insert(request, context);
-            }
+            self.inline.insert_request_context(request, context);
         }
         request
     }
