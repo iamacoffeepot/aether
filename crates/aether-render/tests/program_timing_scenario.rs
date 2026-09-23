@@ -30,6 +30,7 @@ use std::env;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, InputSlot, OutputSlot, PassStage, PassStageKind, ProgramDispatch, ProgramPass,
     ProgramRegister, ProgramRegisterResult, ProgramTimings, ProgramTimingsResult, SlotExtent, SlotSpec, TextureFormat,
@@ -127,7 +128,7 @@ fn texture(harness: &mut SubstrateHarness, label: &'static str, usage: TextureUs
         pixels,
     };
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", &mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -139,7 +140,10 @@ fn texture(harness: &mut SubstrateHarness, label: &'static str, usage: TextureUs
 /// timing table back.
 fn timings_after_dispatches(harness: &mut SubstrateHarness) -> (u32, ProgramTimingsResult) {
     let registered = harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", &register()))])
+        .execute(vec![(
+            "register",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &register()),
+        )])
         .expect("register sequence");
     let program_id = match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult")
     {
@@ -163,14 +167,17 @@ fn timings_after_dispatches(harness: &mut SubstrateHarness) -> (u32, ProgramTimi
     for _ in 0..6 {
         harness
             .execute(vec![
-                ("dispatch", HarnessOp::send_and_settle("aether.render", &dispatch)),
+                ("dispatch", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &dispatch)),
                 ("settle", HarnessOp::advance(2)),
             ])
             .expect("dispatch frame");
     }
 
     let read = harness
-        .execute(vec![("timings", HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }))])
+        .execute(vec![(
+            "timings",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &ProgramTimings { program_id }),
+        )])
         .expect("timings sequence");
     let reply = read.reply::<ProgramTimingsResult>("timings").expect("decode ProgramTimingsResult");
     (program_id, reply)
@@ -249,7 +256,10 @@ fn an_unknown_program_id_is_an_error_rather_than_an_absent_measurement() {
     let read = harness
         .execute(vec![(
             "unknown",
-            HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id: program_id + 1000 }),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<RenderCapability>(),
+                &ProgramTimings { program_id: program_id + 1000 },
+            ),
         )])
         .expect("timings sequence");
     match read.reply::<ProgramTimingsResult>("unknown").expect("decode ProgramTimingsResult") {

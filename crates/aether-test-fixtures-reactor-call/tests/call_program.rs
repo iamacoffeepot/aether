@@ -4,16 +4,15 @@
 use std::error::Error;
 use std::fs;
 
-use aether_actor::Addressable;
+use aether_actor::ErasedActorRef;
 use aether_bloomery_kinds::{
     BUNDLE_NAMESPACE, CallProgram, Digest, Evaluated, Event, Head, HeadMoved, JournalEntry, OpaqueBytes, ProgramName,
     Ref, Tree, artifact_digest,
 };
-use aether_component::ComponentHostCapability;
 use aether_data::{Kind, Storage, StorageData};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{SUMMARIZE_BUNDLE, SUMMARIZE_PROGRAM, SummarizeInput};
 
 fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> JournalEntry {
@@ -27,29 +26,18 @@ fn moved_to<K: Kind + 'static>(seq: u64, head: &'static str, to: Ref<K>) -> Jour
     }
 }
 
-fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> String {
+fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>) -> ErasedActorRef {
     let digest = artifact_digest(OpaqueBytes::ID, &wasm).to_string();
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(digest.clone()),
-                    config: Vec::new(),
-                    export: Some(BUNDLE_NAMESPACE.to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("load_component({digest}): {error}"),
-    }
+    let loaded = harness.load_any(&LoadComponent {
+        wasm,
+        name: Some(digest.clone()),
+        config: Vec::new(),
+        export: Some(BUNDLE_NAMESPACE.to_owned()),
+    });
+    loaded.unwrap_or_else(|error| panic!("load_component({digest}): {error}")).0
 }
 
-fn evaluated(harness: &mut SubstrateHarness, root: &str, event: &Event) -> Evaluated {
+fn evaluated(harness: &mut SubstrateHarness, root: ErasedActorRef, event: &Event) -> Evaluated {
     harness
         .execute(vec![("event", HarnessOp::send_and_await_reply(root, event))])
         .expect("event sequence")
@@ -69,7 +57,7 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
     // Catches a driver intent encoded through a codec the root or driver can't decode; the rule not
     // selected in the bundle; `input` not taken from the trigger; the wrong program head or name reaching #6210.
     let moved = moved_to(1, "inputs", Ref::<SummarizeInput>::from_digest(Digest::from_bytes([7; 32])));
-    match evaluated(&mut harness, &root, &Event::new(moved)) {
+    match evaluated(&mut harness, root, &Event::new(moved)) {
         Evaluated::Completed { seq: 1, intents } => {
             assert_eq!(intents.len(), 1);
             let intent = &intents[0];
@@ -91,7 +79,7 @@ fn call_summarize_returns_call_program_for_the_summarize_input_move() -> Result<
     // Catches a trigger that fires on every head move: under #6210 that would call the program on the
     // reactor-set move itself.
     let other_kind = moved_to(2, "inputs", Ref::<Tree>::from_digest(Digest::from_bytes([9; 32])));
-    match evaluated(&mut harness, &root, &Event::new(other_kind)) {
+    match evaluated(&mut harness, root, &Event::new(other_kind)) {
         Evaluated::Completed { seq: 2, intents } => assert!(intents.is_empty()),
         other => panic!("{other:?}"),
     }

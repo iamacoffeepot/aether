@@ -21,8 +21,9 @@
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::ActorRef;
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_RIGHT};
@@ -31,6 +32,7 @@ use aether_kinds::{
     Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, MouseButton, MouseButtonRelease, ReplaceComponent,
     ReplaceResult, Tick, WindowId,
 };
+use aether_kit_widget::set::{DropdownWidget, MenuBarWidget, TabStripWidget};
 use aether_kit_widget::{
     DialogConfig, DropdownConfig, Menu, MenuBarConfig, MenuItem, PanelConfig, SplitterAxis, SplitterConfig,
     TabStripConfig, Theme, ToastConfig, TooltipConfig, TooltipSection, WidgetChildSpec, WidgetControlState,
@@ -57,16 +59,12 @@ fn wasm_or_skip(stem: &str) -> Option<Vec<u8>> {
     Some(fs::read(&path).unwrap_or_else(|error| panic!("read {stem} wasm: {error}")))
 }
 
-fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
+fn key(subname: &str) -> LoadName {
+    LoadName::new(subname).expect("a valid child subname")
 }
 
-fn child_address(subname: &str) -> String {
-    format!("{}/{}:{subname}", panel_address(), aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
-    match harness.log_tail(&panel_address(), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
+    match harness.log_tail(panel.erase(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|entry| entry.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -197,7 +195,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
         .execute(vec![(
             "bare",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm: wasm.to_vec(), name: None, config: Vec::new(), export: None },
             ),
         )])
@@ -225,7 +223,7 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
             .execute(vec![(
                 "named",
                 HarnessOp::send_and_await_reply(
-                    "aether.component",
+                    &harness.actor_ref::<ComponentHostCapability>(),
                     &LoadComponent {
                         wasm: wasm.to_vec(),
                         name: None,
@@ -257,7 +255,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config_bytes = config.encode_into_bytes();
     let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
 
-    let (_, path) = harness
+    let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -266,7 +264,6 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
         })
         .unwrap_or_else(|error| panic!("{stem}: load WidgetPanel: {error}"));
 
-    let panel = panel_address();
     harness
         .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
         .expect("first tick spawns the declared children");
@@ -275,7 +272,7 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent {
                     target: path,
                     wasm: wasm.to_vec(),
@@ -292,10 +289,12 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     }
 
     // No Tick after replace. Mail the reconstructed children at the aliases
-    // typed spawn assigned before the swap.
-    let tabs = child_address("tabs");
-    let dropdown = child_address("dropdown");
-    let menu = child_address("menu");
+    // typed spawn assigned before the swap; a child reconstruct dropped has no
+    // live alias to look up.
+    let tabs = harness.child::<WidgetPanel, TabStripWidget>(&panel, key("tabs")).expect("tabs reconstructed");
+    let dropdown =
+        harness.child::<WidgetPanel, DropdownWidget>(&panel, key("dropdown")).expect("dropdown reconstructed");
+    let menu = harness.child::<WidgetPanel, MenuBarWidget>(&panel, key("menu")).expect("menu reconstructed");
     harness
         .execute(vec![
             ("tabs_right", HarnessOp::send_and_settle(&tabs, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
@@ -311,20 +310,17 @@ fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
             ),
             (
                 "menu_frame",
-                HarnessOp::send_and_settle(&menu, &WidgetFrame { x: 10.0, y: 10.0, width: 200.0, height: 24.0 }),
+                // The frame kind rides the adopted widget handler set, which
+                // carries no typed marker, so it is sent erased.
+                HarnessOp::send_and_settle(menu.erase(), &WidgetFrame { x: 10.0, y: 10.0, width: 200.0, height: 24.0 }),
             ),
             ("menu_press", HarnessOp::send_and_settle(&menu, &press(20.0, 20.0))),
             ("menu_release", HarnessOp::send_and_settle(&menu, &release(20.0, 20.0))),
             ("menu_enter", HarnessOp::send_and_settle(&menu, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
         ])
-        .unwrap_or_else(|error| {
-            panic!(
-                "{stem}: post-replace mail to original child aliases must dispatch; unknown mailbox here means \
-                 reconstruct dropped the child: {error}"
-            )
-        });
+        .unwrap_or_else(|error| panic!("{stem}: post-replace mail to original child aliases must dispatch: {error}"));
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|message| message.contains("widget tab strip selected") && message.contains("index=1")),

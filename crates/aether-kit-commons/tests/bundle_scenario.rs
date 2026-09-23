@@ -25,6 +25,7 @@
 //! and returns `None` when both are absent). CI builds the wasm before
 //! `cargo test`.
 
+use aether_component::ComponentHostCapability;
 use aether_data::ActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
@@ -56,7 +57,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     name: Some(COMPONENT_NAME.to_owned()),
@@ -149,7 +150,13 @@ fn bundle_unwire_destroys_the_resident_tile() {
 
     let dropped = harness
         .execute(vec![
-            ("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: path })),
+            (
+                "drop",
+                HarnessOp::send_and_await_reply(
+                    &harness.actor_ref::<ComponentHostCapability>(),
+                    &DropComponent { target: path },
+                ),
+            ),
             ("settle", HarnessOp::advance(1)),
         ])
         .expect("drop sequence");

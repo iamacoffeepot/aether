@@ -4,6 +4,7 @@
 
 use std::time::Duration;
 
+use aether_actor::ErasedActorRef;
 use aether_data::Kind;
 use serde::{Deserialize, Serialize};
 
@@ -37,15 +38,15 @@ pub struct KeepUp {
 }
 
 /// Harvest the real tier's keep-up counters (iamacoffeepot/aether#1233).
-/// Mails a [`CountQuery`] to every participating actor (by the same names the
-/// trace harvest used), sums `offered = Σ sent` and `completed = Σ received`,
+/// Mails a [`CountQuery`] to every participating actor (through the same
+/// proofs the trace harvest used, each named for the log), sums `offered = Σ sent` and `completed = Σ received`,
 /// and brackets them with the paced elapsed-vs-expected timing. Returns `None`
 /// (logged) if any actor's reply fails to arrive or decode, so a botched
 /// harvest yields no keep-up cell rather than a wrong one — mirroring the
 /// trace harvest's fail-closed posture.
 pub(super) fn harvest_keepup(
     tb: &mut SubstrateHarness,
-    names: &[String],
+    participants: &[(String, ErasedActorRef)],
     topo_name: &str,
     drive: Drive,
     frames: u32,
@@ -53,9 +54,9 @@ pub(super) fn harvest_keepup(
 ) -> Option<KeepUp> {
     let mut offered = 0u64;
     let mut completed = 0u64;
-    for name in names {
+    for (name, participant) in participants {
         let req = CountQuery::default().encode_into_bytes();
-        let reply = match tb.send_bytes_and_await(name, CountQuery::ID, req) {
+        let reply = match tb.request_bytes(*participant, CountQuery::ID, req) {
             Ok(reply) => reply,
             Err(e) => {
                 tracing::warn!(target: "aether_perf", topo = %topo_name, %name, error = ?e, "count_query send failed");

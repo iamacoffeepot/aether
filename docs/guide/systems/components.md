@@ -237,10 +237,13 @@ module, its compiled code shared across the instances while each keeps its own s
 ### Explicit logical parents in `SubstrateHarness`
 
 Component-composition tests can load a different binary beneath an already-live
-logical actor with `HarnessOp::load_component_under`:
+logical actor with `HarnessOp::load_component_under`, sent through the
+component host's reference:
 
 ```rust,ignore
+let host = harness.actor_ref::<ComponentHostCapability>();
 let nested_load = HarnessOp::load_component_under(
+    &host,
     parent_name,
     LoadComponent {
         wasm,

@@ -44,9 +44,10 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::Addressable;
+use aether_actor::{ActorRef, Addressable, ChildOf, ErasedActorRef, Instanced};
 use aether_clipboard::{ClipboardCapability, ClipboardParams, GetClipboardText, GetClipboardTextResult};
-use aether_data::{Kind, mailbox_id_from_path};
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, LoadName, mailbox_id_from_path};
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::{
@@ -64,7 +65,7 @@ use aether_kinds::{
     FrameReduction, FrameVerdict, ImePreedit, Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers,
     MouseButton, MouseButtonRelease, MouseMove, MouseWheel, NamedMail, TextInput, Tick, WindowId,
 };
-use aether_kit_widget::set::text_baseline_y;
+use aether_kit_widget::set::{ButtonWidget, SliderWidget, VirtualListWidget, text_baseline_y};
 use aether_kit_widget::{
     ButtonConfig, EditorConfig, EditorRegionRect, LabelConfig, NumericConfig, PanelConfig, RegionInputLanes,
     RegionSpec, ScrollConfig, ScrollExtent, ScrollOffset, SegmentedConfig, SetTheme, SetWidgetState, SliderConfig,
@@ -76,6 +77,7 @@ use aether_render::RenderCapability;
 use aether_render::{DrawShapes, DrawTexturedQuads, Shape, WHITE_TEXTURE_ID};
 use aether_test_fixtures_kinds::{DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig};
 use aether_text::{FontMetricsRequest, FontMetricsResult, FontRef, LoadFont, LoadFontResult, TextCapability};
+use aether_window::SyntheticWindowCapability;
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
@@ -131,7 +133,20 @@ const ACCENT_FILL_SRGB: [u8; 3] = [176, 207, 131];
 /// so the un-pressed fill scores empty and the pressed fill scores full.
 const DARKEN_TOLERANCE: u8 = 6;
 
-/// The full trampoline address the loaded panel registers at (ADR-0099 §4).
+/// The `C` child the panel spawned under `subname`.
+fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
+    harness: &SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    subname: &str,
+) -> ActorRef<C> {
+    harness
+        .child::<WidgetPanel, C>(&panel, LoadName::new(subname).expect("a valid child subname"))
+        .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
+}
+
+/// The full trampoline path the loaded panel registers at (ADR-0099 §4) — the
+/// recipient a capture bundle's `NamedMail` carries, and the root of the
+/// paths the guest-printed container ids below are folded from.
 fn panel_address() -> String {
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
@@ -187,7 +202,7 @@ fn load_font(harness: &mut SubstrateHarness) -> u32 {
         .execute(vec![(
             "font",
             HarnessOp::send_and_await_reply(
-                "aether.text",
+                &harness.actor_ref::<TextCapability>(),
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
         )])
@@ -205,7 +220,10 @@ fn load_metrics(harness: &mut SubstrateHarness, font_id: u32) -> CachedFontMetri
     let got = harness
         .execute(vec![(
             "metrics",
-            HarnessOp::send_and_await_reply("aether.text", &FontMetricsRequest { font: FontRef::Id(font_id) }),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<TextCapability>(),
+                &FontMetricsRequest { font: FontRef::Id(font_id) },
+            ),
         )])
         .expect("font_metrics sequence");
     match got.reply::<FontMetricsResult>("metrics").expect("decode FontMetricsResult") {
@@ -219,12 +237,17 @@ fn load_metrics(harness: &mut SubstrateHarness, font_id: u32) -> CachedFontMetri
 /// theme pinned to the already-resident `font_id` (empty font path, so the
 /// panel does not kick off its own load). Every widget draws text with that
 /// font.
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) {
-    load_panel_with_children(harness, wasm, font_id, Vec::new());
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32) -> ActorRef<WidgetPanel> {
+    load_panel_with_children(harness, wasm, font_id, Vec::new())
 }
 
-fn load_panel_with_children(harness: &mut SubstrateHarness, wasm: &[u8], font_id: u32, children: Vec<WidgetChildSpec>) {
-    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "");
+fn load_panel_with_children(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    font_id: u32,
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
+    load_panel_with_children_and_ownership(harness, wasm, font_id, children, true, "")
 }
 
 /// `editor_region` is the shell-declared region this panel announces itself as
@@ -236,7 +259,7 @@ fn load_panel_with_children_and_ownership(
     children: Vec<WidgetChildSpec>,
     owns_input: bool,
     editor_region: &str,
-) {
+) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -248,7 +271,7 @@ fn load_panel_with_children_and_ownership(
         owns_input,
         editor_region: editor_region.to_owned(),
     };
-    let (_, path) = harness
+    let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {
             wasm: wasm.to_vec(),
             name: Some("panel".to_owned()),
@@ -257,27 +280,19 @@ fn load_panel_with_children_and_ownership(
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
-fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load-region-probe",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: fs::read(wasm_path).expect("read fixture wasm"),
-                    name: Some("region-b".to_owned()),
-                    config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
-                    export: Some("test.editor_region_probe".to_owned()),
-                },
-            ),
-        )])
-        .expect("load editor region probe");
-    match loaded.reply::<LoadResult>("load-region-probe").expect("decode probe LoadResult") {
-        LoadResult::Ok { path: address, .. } => address.to_string(),
-        LoadResult::Err { error } => panic!("load editor region probe: {error}"),
-    }
+fn load_editor_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ErasedActorRef {
+    harness
+        .load_any(&LoadComponent {
+            wasm: fs::read(wasm_path).expect("read fixture wasm"),
+            name: Some("region-b".to_owned()),
+            config: EditorRegionProbeConfig { name: "region-b".to_owned() }.encode_into_bytes(),
+            export: Some("test.editor_region_probe".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load editor region probe: {error}"))
+        .0
 }
 
 /// Load the shell under its **default** name, so the panel and the probe can
@@ -322,7 +337,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8]) {
         .execute(vec![(
             "load-editor-shell",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: None,
@@ -338,7 +353,7 @@ fn load_editor_shell(harness: &mut SubstrateHarness, wasm: &[u8]) {
     }
 }
 
-fn drain_editor_probe(harness: &mut SubstrateHarness, probe: &str) -> DrainEditorInputsResult {
+fn drain_editor_probe(harness: &mut SubstrateHarness, probe: ErasedActorRef) -> DrainEditorInputsResult {
     harness
         .execute(vec![("drain-editor-probe", HarnessOp::send_and_await_reply(probe, &DrainEditorInputs))])
         .expect("drain editor region probe")
@@ -351,20 +366,25 @@ fn drain_editor_probe(harness: &mut SubstrateHarness, probe: &str) -> DrainEdito
 /// creates its atlas texture, whose `create_texture` reply has to round-trip
 /// before glyphs rasterize into it), and the `advance` settles that
 /// round-trip — so the first real capture draws with glyphs resident.
-fn boot_panel(harness: &mut SubstrateHarness, wasm: &[u8]) {
+fn boot_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> ActorRef<WidgetPanel> {
     let font_id = load_font(harness);
-    load_panel(harness, wasm, font_id);
-    warm_panel(harness);
+    let panel = load_panel(harness, wasm, font_id);
+    warm_panel(harness, panel);
+    panel
 }
 
-fn boot_panel_with_children(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn boot_panel_with_children(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
     let font_id = load_font(harness);
-    load_panel_with_children(harness, wasm, font_id, children);
-    warm_panel(harness);
+    let panel = load_panel_with_children(harness, wasm, font_id, children);
+    warm_panel(harness, panel);
+    panel
 }
 
-fn warm_panel(harness: &mut SubstrateHarness) {
-    let panel = panel_address();
+fn warm_panel(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
@@ -855,16 +875,23 @@ fn assert_updated_control_snapshot(snapshot: &[DrawTexturedQuads], shapes: &[Dra
     );
 }
 
-fn assert_stationary_hover_survives_focus_traversal(harness: &mut SubstrateHarness, panel: &str, hover_y: f32) {
+fn assert_stationary_hover_survives_focus_traversal(
+    harness: &mut SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    hover_y: f32,
+) {
     // Focus is independent from hover: Tab to the hovered button and away
     // again without moving the pointer. The button must remain hovered because
     // only a root-issued HoverLost may clear that fact.
     harness
         .execute(vec![
-            ("focus_hovered_button", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
+            (
+                "focus_hovered_button",
+                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }),
+            ),
             (
                 "focus_away_without_motion",
-                HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }),
+                HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }),
             ),
             ("capture_stationary_hover", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
@@ -895,7 +922,7 @@ fn capture(harness: &mut SubstrateHarness, checks: Vec<FrameCheck>) -> FrameVerd
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                RenderCapability::NAMESPACE,
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![tick_to_panel()],
@@ -929,7 +956,7 @@ fn capture_guarded(
         .execute(vec![(
             "snap",
             HarnessOp::send_and_await_reply(
-                RenderCapability::NAMESPACE,
+                &harness.actor_ref::<RenderCapability>(),
                 &CaptureFrame {
                     window: None,
                     mails: vec![tick_to_panel()],
@@ -970,8 +997,8 @@ fn bounding_box(result: &FrameCheckResult) -> Option<FrameRect> {
 
 /// Every log message in the panel's ring, oldest first — the value-up
 /// observation surface (`widget_set`'s idiom).
-fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
-    match harness.log_tail(&panel_address(), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
+    match harness.log_tail(panel.erase(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -998,7 +1025,7 @@ fn clipboard_text(harness: &mut SubstrateHarness) -> String {
     let result = harness
         .execute(vec![(
             "clipboard",
-            HarnessOp::send_and_await_reply(ClipboardCapability::NAMESPACE, &GetClipboardText),
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<ClipboardCapability>(), &GetClipboardText),
         )])
         .expect("read deterministic clipboard");
     match result.reply::<GetClipboardTextResult>("clipboard").expect("decode clipboard reply") {
@@ -1199,9 +1226,8 @@ fn slider_drag_renders_fill_at_track_fraction() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
-    let panel = panel_address();
     harness
         .execute(vec![
             ("drag_press", HarnessOp::send_and_settle(&panel, &press(110.0, 52.0))),
@@ -1251,7 +1277,7 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     // Shell first: a region that announces before the shell exists announces
     // into nothing, so the shell is what the panel and the probe attach to.
     load_editor_shell(&mut harness, &kit_wasm);
-    load_panel_with_children_and_ownership(
+    let panel = load_panel_with_children_and_ownership(
         &mut harness,
         &kit_wasm,
         font_id,
@@ -1259,8 +1285,9 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
         false,
         "panel",
     );
-    warm_panel(&mut harness);
+    warm_panel(&mut harness, panel);
     let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
+    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
 
     // The press begins in the panel editor region. Motion and release cross
     // x=120 into the peer region, but the shell's first-press ownership keeps
@@ -1268,31 +1295,42 @@ fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
     // typing `Z`, distinguishes capture (`Z`) from a lost drag (`Zabcd`).
     harness
         .execute(vec![
-            ("press", HarnessOp::window_event(TEST_WINDOW_ID, &press(PANEL_X + PAD, PANEL_Y + 12.0))),
+            ("press", HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &press(PANEL_X + PAD, PANEL_Y + 12.0))),
             (
                 "cross-region-drag",
                 HarnessOp::window_event(
+                    &synthetic,
                     TEST_WINDOW_ID,
                     &MouseMove { window: TEST_WINDOW_ID, x: 150.0, y: PANEL_Y + 12.0 },
                 ),
             ),
-            ("cross-region-release", HarnessOp::window_event(TEST_WINDOW_ID, &release(150.0, PANEL_Y + 12.0))),
+            (
+                "cross-region-release",
+                HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &release(150.0, PANEL_Y + 12.0)),
+            ),
             (
                 "replace-selection",
-                HarnessOp::window_event(TEST_WINDOW_ID, &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() }),
+                HarnessOp::window_event(
+                    &synthetic,
+                    TEST_WINDOW_ID,
+                    &TextInput { window: TEST_WINDOW_ID, text: "Z".to_owned() },
+                ),
             ),
-            ("commit", HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            (
+                "commit",
+                HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+            ),
         ])
         .expect("route real panel drag through editor shell");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|message| message.contains("widget text committed") && message.contains("text=Z")),
         "cross-region drag must select the complete initial value before replacement; log was:\n{joined}",
     );
     assert_eq!(
-        drain_editor_probe(&mut harness, &probe),
+        drain_editor_probe(&mut harness, probe),
         DrainEditorInputsResult { region_name: "region-b".to_owned(), inputs: Vec::new() },
         "the peer region must not steal motion or release from the press owner",
     );
@@ -1310,11 +1348,10 @@ fn radio_click_moves_marker_into_clicked_row() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
     // The panel seeds the radio at index 0; click the third option row (y in
     // [118, 142)) to move the selection to index 2.
-    let panel = panel_address();
     harness
         .execute(vec![
             ("radio_press", HarnessOp::send_and_settle(&panel, &press(30.0, 125.0))),
@@ -1379,7 +1416,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
     // The field's glyph region: its interior, inset past the focus-ring border
     // (the field draws a border + caret while focused, both accent; the inset
@@ -1396,7 +1433,6 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     let glyph_check =
         || vec![check(FrameReduction::BoundingBox, field_region, SURFACE_RAISED_SRGB, PARTITION_TOLERANCE)];
 
-    let panel = panel_address();
     // Focus the field and type; a follow-up tick + advance rasterizes any new
     // glyph ('x' is unseen) into the atlas before the measuring capture.
     harness
@@ -1444,7 +1480,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
         .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
         .expect("commit");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget text committed") && m.contains("text=hi")),
@@ -1467,7 +1503,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
     // Score a glyph-free strip of the button fill (its "Apply" label is
     // left-aligned at `x = pad`, so the right portion is pure accent), inset
@@ -1484,7 +1520,6 @@ fn button_press_renders_pressed_state_and_reports_click() {
 
     let baseline_cov = coverage(&capture(&mut harness, fill_check()).results[0]);
 
-    let panel = panel_address();
     let button_x = PANEL_X + PANEL_WIDTH * 0.5;
     let button_y = button_top + ROW_HEIGHT * 0.5;
     harness
@@ -1508,7 +1543,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
         .execute(vec![("release", HarnessOp::send_and_settle(&panel, &release(button_x, button_y)))])
         .expect("button release");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget button activated")),
@@ -1529,7 +1564,7 @@ fn focus_ring_follows_tab() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
     // The ring is a 2px accent border; probe the top edge band of a widget's
     // frame, where only the ring can light up (the slider's fill sits lower in
@@ -1540,7 +1575,6 @@ fn focus_ring_follows_tab() {
     let top_edge = |top: f32| rect(PANEL_X + BORDER + 1.0, top, PANEL_X + PANEL_WIDTH - BORDER, top + BORDER);
     let slider_edge = || vec![check(FrameReduction::Coverage, top_edge(slider_top), SURFACE_SRGB, PARTITION_TOLERANCE)];
 
-    let panel = panel_address();
     // Tab from no focus lands on the first focusable widget — the slider.
     harness
         .execute(vec![("tab1", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
@@ -1601,7 +1635,7 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
     };
 
     let mut harness = build_bench();
-    boot_panel_with_children(
+    let panel = boot_panel_with_children(
         &mut harness,
         &wasm,
         vec![
@@ -1649,7 +1683,6 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
             .count()
     };
 
-    let panel = panel_address();
     let hover = |x: f32, y: f32| MouseMove { window: TEST_WINDOW_ID, x, y };
     let (wide_top, _) = row_band(0, 1.0);
     let narrow_top = wide_top + ROW_HEIGHT + GAP;
@@ -1717,7 +1750,7 @@ fn a_press_on_nothing_focusable_clears_focus() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel(&mut harness, &wasm);
+    let panel = boot_panel(&mut harness, &wasm);
 
     let (slider_top, _) = row_band(SLIDER_ROW, 1.0);
     let (label_top, _) = row_band(LABEL_ROW, 1.0);
@@ -1730,7 +1763,6 @@ fn a_press_on_nothing_focusable_clears_focus() {
         )]
     };
 
-    let panel = panel_address();
     harness
         .execute(vec![("tab", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB }))])
         .expect("focus the slider");
@@ -1773,8 +1805,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
 
     let font_id = load_font(&mut harness);
     let metrics = load_metrics(&mut harness, font_id);
-    load_panel(&mut harness, &wasm, font_id);
-    let panel = panel_address();
+    let panel = load_panel(&mut harness, &wasm, font_id);
     // Warm up: spawn + prime the atlas, and give the field's own single-flight
     // metrics request the extra ticks it needs to round-trip and install before
     // the measured interactions.
@@ -1977,7 +2008,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
         .execute(vec![("commit", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER }))])
         .expect("commit");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|m| m.contains("widget text committed") && m.contains("text=abéZ")),
@@ -2004,8 +2035,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
 
     let font_id = load_font(&mut harness);
     let metrics = load_metrics(&mut harness, font_id);
-    load_panel_with_children(&mut harness, &wasm, font_id, vec![text_area_child("notes", 2, font_id)]);
-    let panel = panel_address();
+    let panel = load_panel_with_children(&mut harness, &wasm, font_id, vec![text_area_child("notes", 2, font_id)]);
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
@@ -2263,7 +2293,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
         ])
         .expect("commit multiline replacement");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     assert!(
         log.iter().any(|message| { message.contains("widget text committed") && message.contains("lasZl") }),
@@ -2282,9 +2312,8 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
 
-    boot_panel_with_children(&mut harness, &wasm, control_state_children());
+    let panel = boot_panel_with_children(&mut harness, &wasm, control_state_children());
 
-    let panel = panel_address();
     let slider_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0;
     let hover_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0;
     harness
@@ -2316,7 +2345,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
         slider_y,
         hover_y,
     );
-    assert_stationary_hover_survives_focus_traversal(&mut harness, &panel, hover_y);
+    assert_stationary_hover_survives_focus_traversal(&mut harness, panel, hover_y);
 
     // Moving to empty clears hover; runtime mail reveals the hidden slot and
     // changes the slider's validation role without changing either value.
@@ -2336,11 +2365,17 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
             (
                 "show_hidden",
                 HarnessOp::send_and_settle(
-                    child_address("hidden"),
+                    &panel_child::<ButtonWidget>(&harness, panel, "hidden"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
-            ("warn_value", HarnessOp::send_and_settle(child_address("value"), &SetWidgetState { state: warning })),
+            (
+                "warn_value",
+                HarnessOp::send_and_settle(
+                    &panel_child::<SliderWidget>(&harness, panel, "value"),
+                    &SetWidgetState { state: warning },
+                ),
+            ),
             ("capture_updated", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("runtime state update snapshot");
@@ -2377,9 +2412,8 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
         slider_child("pressed", WidgetControlState::default()),
         slider_child("tabbed", WidgetControlState::default()),
     ];
-    boot_panel_with_children(&mut harness, &wasm, children);
+    let panel = boot_panel_with_children(&mut harness, &wasm, children);
 
-    let panel = panel_address();
     let pressed_y = PANEL_Y;
     let tabbed_y = PANEL_Y + ROW_HEIGHT + GAP;
     harness
@@ -2412,94 +2446,94 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
     );
 }
 
-fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: &str) {
+fn drive_toggle_and_segmented(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     let toggle_y = PANEL_Y + ROW_HEIGHT * 0.5;
     let segment_top = PANEL_Y + ROW_HEIGHT + GAP;
     let segment_y = segment_top + ROW_HEIGHT * 0.5;
     let segment_width = PANEL_WIDTH / 3.0;
     harness
         .execute(vec![
-            ("toggle_press", HarnessOp::send_and_settle(panel, &press(PANEL_X + 12.0, toggle_y))),
-            ("toggle_release", HarnessOp::send_and_settle(panel, &release(PANEL_X + 12.0, toggle_y))),
-            ("space_press", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
+            ("toggle_press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + 12.0, toggle_y))),
+            ("toggle_release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + 12.0, toggle_y))),
+            ("space_press", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_SPACE })),
             (
                 "space_release",
-                HarnessOp::send_and_settle(panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_SPACE }),
             ),
-            ("enter_press", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("enter_press", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
             (
                 "enter_release",
-                HarnessOp::send_and_settle(panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
+                HarnessOp::send_and_settle(&panel, &KeyRelease { window: TEST_WINDOW_ID, code: KEY_ENTER }),
             ),
         ])
         .expect("toggle pointer and keyboard activation");
     let middle_x = PANEL_X + segment_width * 1.5;
     harness
         .execute(vec![
-            ("segment_press", HarnessOp::send_and_settle(panel, &press(middle_x, segment_y))),
-            ("segment_release", HarnessOp::send_and_settle(panel, &release(middle_x, segment_y))),
-            ("segment_right", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
-            ("segment_left", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
+            ("segment_press", HarnessOp::send_and_settle(&panel, &press(middle_x, segment_y))),
+            ("segment_release", HarnessOp::send_and_settle(&panel, &release(middle_x, segment_y))),
+            ("segment_right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("segment_left", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
         ])
         .expect("segmented pointer and arrow selection");
 }
 
-fn drive_numeric_lifecycle(harness: &mut SubstrateHarness, panel: &str) {
+fn drive_numeric_lifecycle(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     let numeric_y = PANEL_Y + (ROW_HEIGHT + GAP) * 2.0 + ROW_HEIGHT * 0.5;
     harness
         .execute(vec![
-            ("numeric_press", HarnessOp::send_and_settle(panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
-            ("numeric_release", HarnessOp::send_and_settle(panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
+            ("numeric_press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + PAD + 4.0, numeric_y))),
+            ("numeric_release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + PAD + 4.0, numeric_y))),
             (
                 "ctrl_on",
                 HarnessOp::send_and_settle(
-                    panel,
+                    &panel,
                     &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
                 ),
             ),
-            ("select_all", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("select_all", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
             (
                 "ctrl_off",
-                HarnessOp::send_and_settle(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
             ),
             (
                 "type_numeric",
-                HarnessOp::send_and_settle(panel, &TextInput { window: TEST_WINDOW_ID, text: "12.4".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "12.4".to_owned() }),
             ),
-            ("move_left", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
-            ("backspace", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE })),
+            ("move_left", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_LEFT })),
+            ("backspace", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_BACKSPACE })),
             (
                 "replace_decimal",
-                HarnessOp::send_and_settle(panel, &TextInput { window: TEST_WINDOW_ID, text: ".".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: ".".to_owned() }),
             ),
-            ("commit_numeric", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
-            ("step_up", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
-            ("step_down", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
+            ("commit_numeric", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_ENTER })),
+            ("step_up", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_UP })),
+            ("step_down", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
             (
                 "clipboard_ctrl_on",
                 HarnessOp::send_and_settle(
-                    panel,
+                    &panel,
                     &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
                 ),
             ),
-            ("clipboard_select", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
-            ("copy", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_C })),
+            ("clipboard_select", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("copy", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_C })),
         ])
         .expect("numeric typed, step, and copy lifecycle");
     assert_eq!(clipboard_text(harness), "12.5", "Ctrl+C copies the selected canonical buffer");
     harness
         .execute(vec![
-            ("cut", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_X })),
-            ("paste", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_V })),
+            ("cut", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_X })),
+            ("paste", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_V })),
             (
                 "clipboard_ctrl_off",
-                HarnessOp::send_and_settle(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
             ),
         ])
         .expect("numeric cut and paste lifecycle");
 }
 
-fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: &str) {
+fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     let segment_width = PANEL_WIDTH / 3.0;
     let disabled_y = PANEL_Y + (ROW_HEIGHT + GAP) * 3.0 + ROW_HEIGHT * 0.5;
     let readonly_y = PANEL_Y + (ROW_HEIGHT + GAP) * 4.0 + ROW_HEIGHT * 0.5;
@@ -2508,35 +2542,35 @@ fn drive_blur_and_blocked_states(harness: &mut SubstrateHarness, panel: &str) {
             (
                 "invalid_ctrl_on",
                 HarnessOp::send_and_settle(
-                    panel,
+                    &panel,
                     &Modifiers { window: TEST_WINDOW_ID, ctrl: true, ..Modifiers::default() },
                 ),
             ),
-            ("invalid_select", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
+            ("invalid_select", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_A })),
             (
                 "invalid_ctrl_off",
-                HarnessOp::send_and_settle(panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
+                HarnessOp::send_and_settle(&panel, &Modifiers { window: TEST_WINDOW_ID, ..Modifiers::default() }),
             ),
             (
                 "invalid_text",
-                HarnessOp::send_and_settle(panel, &TextInput { window: TEST_WINDOW_ID, text: "-".to_owned() }),
+                HarnessOp::send_and_settle(&panel, &TextInput { window: TEST_WINDOW_ID, text: "-".to_owned() }),
             ),
             (
                 "blur_press",
-                HarnessOp::send_and_settle(panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
+                HarnessOp::send_and_settle(&panel, &press(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
             ),
             (
                 "blur_release",
-                HarnessOp::send_and_settle(panel, &release(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
+                HarnessOp::send_and_settle(&panel, &release(WINDOW_WIDTH as f32 - 2.0, WINDOW_HEIGHT as f32 - 2.0)),
             ),
-            ("disabled_press", HarnessOp::send_and_settle(panel, &press(PANEL_X + 12.0, disabled_y))),
-            ("disabled_release", HarnessOp::send_and_settle(panel, &release(PANEL_X + 12.0, disabled_y))),
-            ("readonly_press", HarnessOp::send_and_settle(panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
+            ("disabled_press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + 12.0, disabled_y))),
+            ("disabled_release", HarnessOp::send_and_settle(&panel, &release(PANEL_X + 12.0, disabled_y))),
+            ("readonly_press", HarnessOp::send_and_settle(&panel, &press(PANEL_X + segment_width * 2.5, readonly_y))),
             (
                 "readonly_release",
-                HarnessOp::send_and_settle(panel, &release(PANEL_X + segment_width * 2.5, readonly_y)),
+                HarnessOp::send_and_settle(&panel, &release(PANEL_X + segment_width * 2.5, readonly_y)),
             ),
-            ("readonly_right", HarnessOp::send_and_settle(panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
+            ("readonly_right", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_RIGHT })),
         ])
         .expect("blur and blocked state mutations");
 }
@@ -2664,13 +2698,12 @@ fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel_with_children(&mut harness, &wasm, advanced_control_children());
+    let panel = boot_panel_with_children(&mut harness, &wasm, advanced_control_children());
 
-    let panel = panel_address();
-    drive_toggle_and_segmented(&mut harness, &panel);
-    drive_numeric_lifecycle(&mut harness, &panel);
-    drive_blur_and_blocked_states(&mut harness, &panel);
-    assert_advanced_control_logs(&panel_log_messages(&mut harness));
+    drive_toggle_and_segmented(&mut harness, panel);
+    drive_numeric_lifecycle(&mut harness, panel);
+    drive_blur_and_blocked_states(&mut harness, panel);
+    assert_advanced_control_logs(&panel_log_messages(&mut harness, panel));
     assert_advanced_control_raster(&mut harness);
 }
 
@@ -2748,9 +2781,8 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
 
     let mut harness = build_bench();
     let font_id = load_font(&mut harness);
-    load_panel_with_children(&mut harness, &wasm, font_id, vec![outer]);
-    warm_panel(&mut harness);
-    let panel = panel_address();
+    let panel = load_panel_with_children(&mut harness, &wasm, font_id, vec![outer]);
+    warm_panel(&mut harness, panel);
     harness
         .execute(vec![
             (
@@ -2830,8 +2862,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let button = button_child("captor", "Hold", WidgetControlState::default());
 
     let mut harness = build_bench();
-    boot_panel_with_children(&mut harness, &wasm, vec![outer, button, side]);
-    let panel = panel_address();
+    let panel = boot_panel_with_children(&mut harness, &wasm, vec![outer, button, side]);
 
     // The button row is y=46..70. Hold its left-button capture, then wheel at
     // y=20 over the outer viewport. Wheel ownership must use its independent
@@ -2869,7 +2900,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let inner_address = nested_child_address(&outer_address, "inner");
     let outer_id = mailbox_id_from_path(&outer_address).0;
     let inner_id = mailbox_id_from_path(&inner_address).0;
-    let first_log = panel_log_messages(&mut harness);
+    let first_log = panel_log_messages(&mut harness, panel);
     let outcomes: Vec<_> = first_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(outcomes.len(), 5, "inner-only, split, and pinned requests emit 1 + 2 + 2 typed outcomes: {outcomes:?}");
     assert_eq!(log_u64(outcomes[0], "container"), Some(inner_id));
@@ -2946,7 +2977,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
         ])
         .expect("reverse, independent axis, and sibling scroll routing");
 
-    let final_log = panel_log_messages(&mut harness);
+    let final_log = panel_log_messages(&mut harness, panel);
     let final_outcomes: Vec<_> = final_log.iter().filter(|message| message.contains("widget scroll outcome")).collect();
     assert_eq!(final_outcomes.len(), 10, "all outcome events remain observable");
     assert_eq!(log_u64(final_outcomes[5], "container"), Some(inner_id));
@@ -2984,7 +3015,11 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = build_bench();
-    boot_panel_with_children(&mut harness, &wasm, vec![virtual_list_child("inventory", WidgetControlState::default())]);
+    let panel = boot_panel_with_children(
+        &mut harness,
+        &wasm,
+        vec![virtual_list_child("inventory", WidgetControlState::default())],
+    );
 
     harness
         .execute(vec![("initial", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new()))])
@@ -2993,8 +3028,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     assert_virtual_list_rows(&harness.committed_shape_snapshot(), 0, Theme::DEFAULT.selection, 0);
     assert_five_virtual_list_glyph_rows(&initial);
 
-    let panel = panel_address();
-    let list = child_address("inventory");
+    let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
     let warning = WidgetControlState {
         validation: WidgetValidation::Warning { message: "check selection".to_owned() },
         ..WidgetControlState::default()
@@ -3054,7 +3088,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
             )])
             .expect("page toward virtual-list tail");
     }
-    let selection_events_before_noop = panel_log_messages(&mut harness)
+    let selection_events_before_noop = panel_log_messages(&mut harness, panel)
         .iter()
         .filter(|message| message.contains("widget virtual list selected"))
         .count();
@@ -3065,7 +3099,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
             ("tail_capture", HarnessOp::capture_with_mails(vec![tick_to_panel()], Vec::new())),
         ])
         .expect("tail clamp and capture");
-    let tail_log = panel_log_messages(&mut harness);
+    let tail_log = panel_log_messages(&mut harness, panel);
     let selection_events_after_noop =
         tail_log.iter().filter(|message| message.contains("widget virtual list selected")).count();
     assert_eq!(

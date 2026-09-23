@@ -64,6 +64,9 @@ inventory = { workspace = true }
 # cap crates a composition names appear here with their default `runtime`
 # feature on — dev-only, the wasm lib build keeps the marker-only face above.
 [dev-dependencies]
+# The component-lifecycle scenarios address the component host by its
+# proven reference, which names its type.
+aether-component = { path = "../aether-component" }
 aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }

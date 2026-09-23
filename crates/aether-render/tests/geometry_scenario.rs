@@ -20,6 +20,7 @@ use std::env;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::has_wgpu_adapter;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, DestroyGeometry, UpdateGeometry, VertexAttribute, VertexFormat,
 };
@@ -47,7 +48,7 @@ fn indices_bytes(indices: &[u32]) -> Vec<u8> {
 
 fn create_reply(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateGeometry) -> CreateGeometryResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_geometry sequence")
         .reply::<CreateGeometryResult>(label)
         .expect("decode CreateGeometryResult")
@@ -109,7 +110,7 @@ fn geometry_lifecycle_round_trips_over_mail() {
             (
                 "update",
                 HarnessOp::send_and_settle(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &UpdateGeometry {
                         geometry_id: first,
                         vertices: vec![0u8; 48],
@@ -117,11 +118,17 @@ fn geometry_lifecycle_round_trips_over_mail() {
                     },
                 ),
             ),
-            ("destroy", HarnessOp::send_and_settle("aether.render", &DestroyGeometry { geometry_id: first })),
+            (
+                "destroy",
+                HarnessOp::send_and_settle(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &DestroyGeometry { geometry_id: first },
+                ),
+            ),
             (
                 "update_after_destroy",
                 HarnessOp::send_and_settle(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &UpdateGeometry { geometry_id: first, vertices: vec![0u8; 12], indices: indices_bytes(&[0]) },
                 ),
             ),

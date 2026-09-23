@@ -13,10 +13,16 @@ use std::fs;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_data::Kind;
+use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::LoadName;
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{ExecutionError, ExecutionResult, HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
+use aether_test_fixtures_bundle::{
+    InlineDespawnChild, InlineDespawnParent, InlineStatefulChild, InlineStatefulParent, InlineTagParent,
+    NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
+};
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
     SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
@@ -27,8 +33,12 @@ use aether_test_fixtures_kinds::{
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-/// Send `probe` to an inline child's alias once that alias resolves, and
-/// hand back the sequence that reached it under the label `"probe"`.
+/// A child's instance key.
+fn key(text: &str) -> LoadName {
+    LoadName::new(text).expect("a valid instance key")
+}
+
+/// The `C` inline child keyed `key` beneath `parent`, once its alias is live.
 ///
 /// An awaited `LoadResult::Ok` is not a barrier for the child becoming
 /// addressable (iamacoffeepot/aether#4186). The load reply rides the
@@ -38,21 +48,20 @@ use aether_test_fixtures_kinds as _;
 /// holds no chain and the load's settlement never covered it. ADR-0165's
 /// activation suffix submits the batch and deliberately does not wait for
 /// the owner to apply it, so nothing orders the alias against the reply.
-/// There is no ordering to assert here, only an address to observe
-/// becoming resolvable: poll to a bounded deadline so the test measures the
-/// outcome rather than the runner. A child that never appears still fails,
-/// just after 5s.
-fn probe_child_alias<K: Kind>(harness: &mut SubstrateHarness, child_addr: &str, probe: &K) -> ExecutionResult {
+/// There is no ordering to assert here, only a child to observe going live:
+/// poll to a bounded deadline so the test measures the outcome rather than
+/// the runner. A child that never appears still fails, just after 5s.
+fn await_child<P, C>(harness: &SubstrateHarness, parent: ActorRef<P>, name: &str) -> ActorRef<C>
+where
+    P: Addressable,
+    C: ChildOf<P> + Instanced,
+{
     let deadline = Instant::now() + Duration::from_secs(5);
     loop {
-        match harness.execute(vec![("probe", HarnessOp::send_and_await_reply(child_addr, probe))]) {
-            Ok(reached) => return reached,
-            Err(ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(_), .. })
-                if Instant::now() < deadline =>
-            {
-                thread::sleep(Duration::from_millis(10));
-            }
-            Err(error) => panic!("inline child alias {child_addr} never answered a probe within 5s: {error}"),
+        match harness.child::<P, C>(&parent, key(name)) {
+            Ok(child) => return child,
+            Err(_) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
+            Err(error) => panic!("inline child {name} never went live within 5s: {error}"),
         }
     }
 }
@@ -72,56 +81,37 @@ fn probe_child_alias<K: Kind>(harness: &mut SubstrateHarness, child_addr: &str, 
 /// proved the over-the-wire child addressing, so this doesn't re-prove it.
 #[test]
 fn replace_preserves_inline_child_state_via_reconstruct() {
-    use aether_actor::Addressable;
-
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_stateful";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
-    // The child's first-class lineage address: the parent's rendered name
-    // plus the inline-child node (ADR-0114). The parent spawns it under
-    // the `Named("widget")` subname in `wire`.
-    let child_addr = format!("{parent_addr}/aether.embedded:widget");
-
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineStatefulParent` from the `inline_child` bundle, capturing
-    // its mailbox id for the replace. The name override keeps the registered
-    // lineage address stable so the existing `parent_addr` / `child_addr`
-    // strings remain valid.
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.inline.stateful_parent".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("inline_child_stateful load failed: {error}"),
-    };
+    // its path for the replace.
+    let (parent, path) = harness
+        .load::<InlineStatefulParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.stateful_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_stateful load failed: {error}"));
 
     // Bump the *child's* counter to 2 (mail demuxed to the child's alias),
     // then read it back. `send_and_settle` waits out each bump's whole chain,
-    // so the bumps land before the query — but the alias itself only resolves once its own
-    // owner batch applies, which the load reply does not order.
-    probe_child_alias(&mut harness, &child_addr, &CountQuery);
+    // so the bumps land before the query — but the alias itself only resolves
+    // once its own owner batch applies, which the load reply does not order.
+    // The parent spawns the child under the `Named("widget")` subname in `wire`.
+    let child = await_child::<InlineStatefulParent, InlineStatefulChild>(&harness, parent, "widget");
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&child, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -138,7 +128,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -152,7 +142,7 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
     // A 0 here means the child vanished across the reload (its state lost,
     // or it booted fresh) — the regression ADR-0114 §5 closes.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&child, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -173,47 +163,31 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
-    use aether_actor::Addressable;
-
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_nested_lineage";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let root_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
-    let branch_addr = format!("{root_addr}/aether.embedded:branch");
-    let leaf_addr = format!("{branch_addr}/aether.embedded:leaf");
-    let worker_addr = format!("{branch_addr}/aether.embedded:worker");
-
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.inline.nested_parent".to_owned()),
-                },
-            ),
-        )])
-        .expect("load nested lineage fixture");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("nested lineage fixture load failed: {error}"),
-    };
+    let (root, path) = harness
+        .load::<NestedLineageParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.nested_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("nested lineage fixture load failed: {error}"));
 
     // Grandchild-depth delivery proves the inline alias extends `branch`.
-    probe_child_alias(&mut harness, &leaf_addr, &CountQuery);
+    let branch = await_child::<NestedLineageParent, NestedLineageChild>(&harness, root, "branch");
+    let leaf = await_child::<NestedLineageChild, NestedLineageLeaf>(&harness, branch, "leaf");
     let before = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(leaf_addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(leaf_addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(&leaf, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(&leaf, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&leaf, &CountQuery)),
         ])
         .expect("deliver to nested inline leaf");
     assert_eq!(before.reply::<CountReport>("query").expect("decode nested leaf count"), CountReport { count: 2 },);
@@ -223,12 +197,15 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     harness
         .execute(vec![(
             "spawn_worker",
-            HarnessOp::send_and_settle::<SpawnNestedDetached>(branch_addr.as_str(), &SpawnNestedDetached),
+            HarnessOp::send_and_settle::<SpawnNestedDetached>(&branch, &SpawnNestedDetached),
         )])
         .expect("nested detached spawn settles");
-    let worker = probe_child_alias(&mut harness, &worker_addr, &CountQuery);
+    let worker = await_child::<NestedLineageChild, NestedDetachedLeaf>(&harness, branch, "worker");
+    let reached = harness
+        .execute(vec![("probe", HarnessOp::send_and_await_reply(&worker, &CountQuery))])
+        .expect("the detached worker answers");
     assert_eq!(
-        worker.reply::<CountReport>("probe").expect("decode nested worker reply"),
+        reached.reply::<CountReport>("probe").expect("decode nested worker reply"),
         CountReport { count: 77 },
         "the detached worker is delivered at the executing inline actor's lineage",
     );
@@ -238,7 +215,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -249,7 +226,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     }
 
     let after = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&leaf, &CountQuery))])
         .expect("query reconstructed nested leaf");
     assert_eq!(
         after.reply::<CountReport>("query").expect("decode reconstructed nested leaf count"),
@@ -257,7 +234,7 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
         "rehydration restores the leaf under its persisted branch parent",
     );
     let worker_after = harness
-        .execute(vec![("worker", HarnessOp::send_and_await_reply(worker_addr.as_str(), &CountQuery))])
+        .execute(vec![("worker", HarnessOp::send_and_await_reply(&worker, &CountQuery))])
         .expect("detached worker outlives root replacement");
     assert_eq!(
         worker_after.reply::<CountReport>("worker").expect("decode post-replace worker reply"),
@@ -267,21 +244,10 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
     // The reconstructed branch resolves its reconstructed child by logical
     // parent and retires that exact grandchild alias.
     harness
-        .execute(vec![(
-            "despawn_leaf",
-            HarnessOp::send_and_settle::<DespawnChild>(branch_addr.as_str(), &DespawnChild),
-        )])
+        .execute(vec![("despawn_leaf", HarnessOp::send_and_settle::<DespawnChild>(&branch, &DespawnChild))])
         .expect("despawn reconstructed nested leaf");
-    let retired =
-        harness.execute(vec![("leaf", HarnessOp::send_and_await_reply(leaf_addr.as_str(), &CountQuery))]).err();
-    assert!(
-        matches!(
-            &retired,
-            Some(ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(name), .. })
-                if name == &leaf_addr
-        ),
-        "the reconstructed grandchild route retires at its nested address; got {retired:?}",
-    );
+    let retired = harness.child::<NestedLineageChild, NestedLineageLeaf>(&branch, key("leaf"));
+    assert!(retired.is_err(), "the reconstructed grandchild route retires at its nested position; got {retired:?}");
 }
 
 /// Issue 2692: the real `export!`-generated by-tag resolver spawns an inline
@@ -301,54 +267,37 @@ fn nested_wasm_spawns_preserve_lineage_through_delivery_replace_and_teardown() {
 #[test]
 #[allow(clippy::too_many_lines)]
 fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
-    use aether_actor::Addressable;
-
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_tag";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
-    // The tag-spawned child's first-class lineage address — the parent spawns
-    // it under the `Named("tagged")` subname in `wire`.
-    let child_addr = format!("{parent_addr}/aether.embedded:tagged");
-
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    // Load `InlineTagParent`, capturing its mailbox id for the replace. The
-    // name override keeps the lineage address stable so `child_addr` is valid.
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.inline.tag_parent".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("inline_child_tag load failed: {error}"),
-    };
+    // Load `InlineTagParent`, capturing its path for the replace.
+    let (parent, path) = harness
+        .load::<InlineTagParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.tag_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_tag load failed: {error}"));
 
     // (1) Assert the generated resolver accepted only the composable child
     // and rejected wrong-parent, non-instanced, and unknown selections before
     // allocation. (2) The accepted child is live and stateful — bump it to 2
-    // through its own alias and read it back, once that alias resolves.
-    probe_child_alias(&mut harness, &child_addr, &CountQuery);
+    // through its own alias and read it back, once that alias resolves. The
+    // parent spawns it under the `Named("tagged")` subname in `wire`.
+    let child = await_child::<InlineTagParent, InlineStatefulChild>(&harness, parent, "tagged");
     let pre = harness
         .execute(vec![
-            ("tag_report", HarnessOp::send_and_await_reply(parent_addr.as_str(), &TagSpawnQuery)),
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(child_addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery)),
+            ("tag_report", HarnessOp::send_and_await_reply(&parent, &TagSpawnQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(&child, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(&child, &CountQuery)),
         ])
         .expect("tag report + bump + query sequence");
     assert_eq!(
@@ -375,7 +324,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -386,7 +335,7 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(child_addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(&child, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -403,69 +352,52 @@ fn spawn_inline_child_by_tag_spawns_and_reconstructs() {
 /// `export: Some("test.inline.despawn_parent")`, probes the child's
 /// first-class alias and asserts the *child* answers, sends a
 /// `DespawnChild` trigger to the parent (which calls
-/// `ctx.despawn_inline_child` on the stored alias), then addresses the
-/// **same** alias again.
+/// `ctx.despawn_inline_child` on the stored alias), then looks the **same**
+/// child up again.
 ///
-/// Teardown retires the alias route with the child (#4228), and name
-/// resolution answers only for a live route — so the second probe does not
-/// reach the parent's dispatch tail as it once did, it fails to resolve at
-/// all. That is the correcting signal a peer holding a stale address was
+/// Teardown retires the alias route with the child (#4228), and a child
+/// lookup proves only a live route — so the second lookup does not land on
+/// the parent's dispatch tail as a probe once did, it is refused outright.
+/// That is the correcting signal a peer holding a stale address was
 /// previously denied: before this, the alias resolved, the membrane found no
 /// resident child, and the parent silently answered for an actor that no
 /// longer existed.
 ///
-/// The parent is probed on its own address afterwards as the positive
-/// control: it still answers, so the alias's disappearance is the retirement
-/// rather than a host that went away with its child. A peer holding the
-/// alias's `MailboxId` rather than its name takes the retired-route path
-/// instead, which settles the chain (ADR-0080 §2) — asserted at the route
-/// level in `aether-substrate`'s
-/// `despawning_an_inline_child_retires_its_alias_and_notifies_watchers`,
-/// since the harness addresses only by name. #1916's `FleetHarness` already
-/// proved over-the-wire inline addressing.
+/// The parent is probed through its own reference afterwards as the
+/// positive control: it still answers, so the alias's disappearance is the
+/// retirement rather than a host that went away with its child. Mail sent to
+/// the retired alias's position takes the retired-route path instead, which
+/// settles the chain (ADR-0080 §2) — asserted at the route level in
+/// `aether-substrate`'s
+/// `despawning_an_inline_child_retires_its_alias_and_notifies_watchers`.
+/// #1916's `FleetHarness` already proved over-the-wire inline addressing.
 #[test]
 fn despawn_inline_child_retires_the_alias_address() {
-    use aether_actor::Addressable;
-
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_despawn";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
-    // The child's first-class lineage address: the parent's rendered name
-    // plus the inline-child node (ADR-0114). The parent spawns it under the
-    // `Named("widget")` subname in `wire`.
-    let child_addr = format!("{parent_addr}/aether.embedded:widget");
-
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load `InlineDespawnParent` from the `inline_child` bundle, then probe
     // the *live* child's alias: the membrane demuxes to the child, which
-    // answers with the child marker, and the chain settles. The name override
-    // keeps the registered lineage address stable so `parent_addr` / `child_addr`
-    // remain valid.
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.inline.despawn_parent".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("inline_child_despawn load failed: {error}"),
-    }
-    let live = probe_child_alias(&mut harness, &child_addr, &InlineProbe);
+    // answers with the child marker, and the chain settles. The parent spawns
+    // the child under the `Named("widget")` subname in `wire`.
+    let (parent, _) = harness
+        .load::<InlineDespawnParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.despawn_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_despawn load failed: {error}"));
+    let child = await_child::<InlineDespawnParent, InlineDespawnChild>(&harness, parent, "widget");
+    let live = harness
+        .execute(vec![("probe", HarnessOp::send_and_await_reply(&child, &InlineProbe))])
+        .expect("the live child answers");
     assert_eq!(
         live.reply::<InlineEcho>("probe").expect("decode live-probe InlineEcho"),
         InlineEcho { who: INLINE_WHO_CHILD },
@@ -473,28 +405,23 @@ fn despawn_inline_child_retires_the_alias_address() {
     );
 
     // Tear the child down via the parent (`ctx.despawn_inline_child(self.child)`),
-    // then address the *same* alias again. Its route is retired with the child,
-    // and only a live route resolves, so the probe never reaches the parent.
+    // then look the *same* child up again. Its route is retired with the child,
+    // and only a live route proves, so the lookup never lands on the parent.
     harness
-        .execute(vec![("despawn", HarnessOp::send_and_settle::<DespawnChild>(parent_addr.as_str(), &DespawnChild))])
+        .execute(vec![("despawn", HarnessOp::send_and_settle::<DespawnChild>(&parent, &DespawnChild))])
         .expect("despawn must settle");
 
-    let orphan =
-        harness.execute(vec![("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe))]).err();
+    let orphan = harness.child::<InlineDespawnParent, InlineDespawnChild>(&parent, key("widget"));
     assert!(
-        matches!(
-            &orphan,
-            Some(ExecutionError::OpFailed { label, error: SubstrateHarnessError::UnknownMailbox(name) })
-                if label == "probe" && name == &child_addr,
-        ),
-        "a despawned alias must stop resolving, so a peer holding the stale address is told the \
-         recipient is unknown instead of being silently answered by the host; got {orphan:?}",
+        orphan.is_err(),
+        "a despawned alias must stop resolving, so a peer looking the child up is refused instead of \
+         being silently answered by the host; got {orphan:?}",
     );
 
     // Positive control: the parent is still live and still answers, so the
     // alias's disappearance is the retirement and not a departed host.
     let parent = harness
-        .execute(vec![("parent", HarnessOp::send_and_await_reply(parent_addr.as_str(), &InlineProbe))])
+        .execute(vec![("parent", HarnessOp::send_and_await_reply(&parent, &InlineProbe))])
         .expect("the parent must still be addressable after tearing its child down");
     assert_eq!(
         parent.reply::<InlineEcho>("parent").expect("decode post-teardown InlineEcho"),
@@ -523,41 +450,48 @@ fn despawn_inline_child_retires_the_alias_address() {
 // apply, which is the defect class ADR-0168 was written for.
 #[test]
 fn settled_load_covers_the_inline_child_alias_publication() {
-    use aether_actor::Addressable;
-
     const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
     const FIXTURE_NAME: &str = "inline_child_settled_load";
 
     let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
         return;
     };
-    let parent_addr = format!("aether.component/{}:{FIXTURE_NAME}", aether_component::WasmTrampoline::NAMESPACE);
-    let child_addr = format!("{parent_addr}/aether.embedded:widget");
-
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // `send_and_settle` is the settlement-gated op — it blocks on `Settled { root }`
-    // for the whole load chain, where `send_and_await_reply` would resolve on the
-    // `LoadResult` correlation alone. The probe follows in the same sequence,
-    // so nothing but the hold orders it against the owner's alias apply.
-    let reached = harness
-        .execute(vec![
-            (
-                "load",
-                HarnessOp::send_and_settle(
-                    "aether.component",
-                    &LoadComponent {
-                        wasm,
-                        name: Some(FIXTURE_NAME.to_owned()),
-                        config: Vec::new(),
-                        export: Some("test.inline.despawn_parent".to_owned()),
-                    },
-                ),
+    // for the whole load chain, where a reply wait would resolve on the
+    // `LoadResult` correlation alone. The lookups follow with no poll, so
+    // nothing but the hold orders them against the owner's alias apply.
+    harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_settle(
+                &host,
+                &LoadComponent {
+                    wasm,
+                    name: Some(FIXTURE_NAME.to_owned()),
+                    config: Vec::new(),
+                    export: Some("test.inline.despawn_parent".to_owned()),
+                },
             ),
-            ("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &InlineProbe)),
-        ])
+        )])
+        .expect("the load chain settles");
+
+    // A settle carries no reply, so the loaded parent is reached as what it
+    // is to the host: the trampoline child keyed by its load name. The inline
+    // child's alias resolves to that trampoline's endpoint, keyed `widget`
+    // beneath it, so it is looked up as a trampoline too and probed erased.
+    let parent = harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(FIXTURE_NAME))
+        .expect("the settled load's trampoline is live");
+    let child = harness
+        .child::<WasmTrampoline, WasmTrampoline>(&parent, key("widget"))
         .expect("a settled load must leave the inline child addressable");
+    let reached = harness
+        .execute(vec![("probe", HarnessOp::send_and_await_reply(child.erase(), &InlineProbe))])
+        .expect("the inline child answers");
     assert_eq!(
         reached.reply::<InlineEcho>("probe").expect("decode InlineEcho"),
         InlineEcho { who: INLINE_WHO_CHILD },

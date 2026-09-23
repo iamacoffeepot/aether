@@ -41,7 +41,7 @@ mod route;
 mod staged;
 
 pub use birth::{CapturedDisposition, RouteContinuation};
-pub use proven::{AdoptRefused, ResolveLiveError};
+pub use proven::{AdoptRefused, ChildRefused, ResolveLiveError};
 pub use resolve::RouteResolution;
 pub use route::RouteEndpoint;
 

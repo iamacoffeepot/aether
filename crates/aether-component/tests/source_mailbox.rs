@@ -33,11 +33,11 @@ use aether_test_fixtures_kinds as _;
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_component::ComponentHostCapability;
+use aether_actor::ErasedActorRef;
+use aether_data::ActorPath;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult, LogTailResult};
+use aether_kinds::{LoadComponent, LogTailResult};
 use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
@@ -45,28 +45,23 @@ const SOURCE_OBSERVER: &str = "aether_test_fixtures_bundle";
 /// Load one non-entry actor out of the fixture bundle, under `name` or — with
 /// `None` — under the actor's own namespace, which is where a declared
 /// dependency looks for it.
-fn load_fixture(harness: &mut SubstrateHarness, wasm: Vec<u8>, export: &str, name: Option<&str>) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: name.map(str::to_owned),
-                    config: Vec::new(),
-                    export: Some(export.to_owned()),
-                },
-            ),
-        )])
-        .expect("load fixture actor");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("load_component {export} as {name:?}: {error}"),
-    }
+fn load_fixture(
+    harness: &mut SubstrateHarness,
+    wasm: Vec<u8>,
+    export: &str,
+    name: Option<&str>,
+) -> (ErasedActorRef, ActorPath) {
+    harness
+        .load_any(&LoadComponent {
+            wasm,
+            name: name.map(str::to_owned),
+            config: Vec::new(),
+            export: Some(export.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load_component {export} as {name:?}: {error}"))
 }
 
-fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> String {
+fn load_source_observer(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (ErasedActorRef, ActorPath) {
     load_fixture(harness, wasm, "test.source_observer", Some(name))
 }
 
@@ -80,10 +75,10 @@ fn session_source_returns_none() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let reader_addr = load_source_observer(&mut harness, wasm, "reader");
+    let (reader, _) = load_source_observer(&mut harness, wasm, "reader");
 
     let result = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(&reader_addr, &SourceQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(reader, &SourceQuery))])
         .expect("send_and_await_reply SourceQuery");
 
     let report = result.reply::<SourceReport>("query").expect("decode SourceReport");
@@ -109,16 +104,16 @@ fn component_source_returns_sender_mailbox() {
     // The reader loads under its own namespace and first: the forwarder
     // declares it as a dependency, so a load in the other order is refused.
     let wasm = fs::read(&wasm_path).expect("read source_observer wasm");
-    let reader_addr = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
-    let sender_addr = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
+    let (_, reader_path) = load_fixture(&mut harness, wasm.clone(), "test.source_observer", None);
+    let (sender, sender_path) = load_fixture(&mut harness, wasm, "test.source_forwarder", None);
 
     // `send_and_settle`: the whole chain (forwarder → reader → forwarder)
     // settles before `execute` returns, so the log entry is already in the ring.
     harness
-        .execute(vec![("trigger", HarnessOp::send_and_settle(&sender_addr, &SendSourceQuery))])
+        .execute(vec![("trigger", HarnessOp::send_and_settle(sender, &SendSourceQuery))])
         .expect("SendSourceQuery to the forwarder");
 
-    let logs = harness.log_tail(&sender_addr, None, None);
+    let logs = harness.log_tail(sender, None, None);
     let found = match &logs {
         LogTailResult::Ok { entries, .. } => entries.iter().any(|e| e.message == "source_report_received"),
         LogTailResult::Err { error } => panic!("log_tail on forwarder failed: {error}"),
@@ -127,8 +122,8 @@ fn component_source_returns_sender_mailbox() {
     assert!(
         found,
         "the reader's report did not reach the forwarder through its sender;\n\
-         reader_addr: {reader_addr:?}\n\
-         sender_addr: {sender_addr:?}\n\
+         reader: {reader_path}\n\
+         sender: {sender_path}\n\
          forwarder log entries: {logs:?}",
     );
 }

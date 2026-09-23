@@ -14,6 +14,7 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
+use aether_render::RenderCapability;
 use aether_render::{
     ComputeBufferBinding, ComputePass, CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult,
     DrawPass, DrawTexturedQuads, GeometryBuffer, GeometrySlotSpec, OutputSlot, PassLoad, PassStage, PassStageKind,
@@ -83,7 +84,7 @@ fn index_bytes(indices: &[u32]) -> Vec<u8> {
 
 fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateGeometry) -> u32 {
     match harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create geometry sequence")
         .reply::<CreateGeometryResult>(label)
         .expect("decode create geometry reply")
@@ -103,7 +104,10 @@ fn create_output(harness: &mut SubstrateHarness) -> u32 {
         pixels: Vec::new(),
     };
     match harness
-        .execute(vec![("create_output", HarnessOp::send_and_await_reply("aether.render", &mail))])
+        .execute(vec![(
+            "create_output",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &mail),
+        )])
         .expect("create output sequence")
         .reply::<CreateTextureResult>("create_output")
         .expect("decode create output reply")
@@ -175,7 +179,10 @@ fn program() -> ProgramRegister {
 
 fn register_program(harness: &mut SubstrateHarness) -> u32 {
     match harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", &program()))])
+        .execute(vec![(
+            "register",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &program()),
+        )])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>("register")
         .expect("decode register reply")
@@ -297,13 +304,16 @@ fn compute_derives_indirect_geometry_refreshes_after_update_and_recovers_after_d
     for _ in 0..6 {
         harness
             .execute(vec![
-                ("dispatch", HarnessOp::send_and_settle("aether.render", &dispatch)),
+                ("dispatch", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &dispatch)),
                 ("settle", HarnessOp::advance(2)),
             ])
             .expect("timed dispatch frame");
     }
     let timings = harness
-        .execute(vec![("timings", HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }))])
+        .execute(vec![(
+            "timings",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &ProgramTimings { program_id }),
+        )])
         .expect("timings sequence")
         .reply::<ProgramTimingsResult>("timings")
         .expect("decode timings reply");

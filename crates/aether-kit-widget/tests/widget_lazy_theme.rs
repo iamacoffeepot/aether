@@ -18,15 +18,15 @@ use std::env;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use aether_actor::Addressable;
+use aether_actor::{ActorRef, Addressable};
 use aether_data::Kind;
 use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, init_save_sandbox, require_runtime};
-use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, Tick};
+use aether_kinds::{ClipRect, LoadComponent, NamedMail, Tick};
 use aether_kit_widget::{
     ButtonConfig, LabelConfig, PanelConfig, ScrollConfig, ScrollExtent, ScrollOffset, SetTheme, Theme, WidgetChildSpec,
-    WidgetKind,
+    WidgetKind, WidgetPanel,
 };
 use aether_math::Rgba;
 use aether_render::{DrawShapes, WHITE_TEXTURE_ID};
@@ -115,7 +115,7 @@ fn assert_row_lacks_fill(shapes: &[DrawShapes], clip: &ClipRect, color: Rgba, me
     );
 }
 
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -127,26 +127,16 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetC
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load WidgetPanel");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel: {error}"),
-    }
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
 fn color_bench() -> SubstrateHarness {
@@ -159,9 +149,9 @@ fn capture_first_collect(harness: &mut SubstrateHarness) {
         .expect("capture the first Collect");
 }
 
-fn send_theme(harness: &mut SubstrateHarness, theme: Theme) {
+fn send_theme(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>, theme: Theme) {
     harness
-        .execute(vec![("set_theme", HarnessOp::send_and_settle(panel_address(), &SetTheme { theme }))])
+        .execute(vec![("set_theme", HarnessOp::send_and_settle(&panel, &SetTheme { theme }))])
         .expect("send SetTheme before the first Tick");
 }
 
@@ -177,7 +167,7 @@ fn load_font(harness: &mut SubstrateHarness) -> u32 {
         .execute(vec![(
             "font",
             HarnessOp::send_and_await_reply(
-                "aether.text",
+                &harness.actor_ref::<TextCapability>(),
                 &LoadFont { namespace: "assets".to_owned(), path: "fonts/RobotoMono.ttf".to_owned() },
             ),
         )])
@@ -199,8 +189,8 @@ fn early_set_theme_restyles_the_first_collect_plate() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = color_bench();
-    load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
-    send_theme(&mut harness, accent_theme(RESTYLE_RED));
+    let panel = load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
+    send_theme(&mut harness, panel, accent_theme(RESTYLE_RED));
     capture_first_collect(&mut harness);
 
     let snapshot = harness.committed_shape_snapshot();
@@ -228,9 +218,9 @@ fn early_theme_updates_latest_win_on_the_first_collect() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = color_bench();
-    load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
-    send_theme(&mut harness, accent_theme(RESTYLE_RED));
-    send_theme(&mut harness, accent_theme(RESTYLE_BLUE));
+    let panel = load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
+    send_theme(&mut harness, panel, accent_theme(RESTYLE_RED));
+    send_theme(&mut harness, panel, accent_theme(RESTYLE_BLUE));
     capture_first_collect(&mut harness);
 
     let snapshot = harness.committed_shape_snapshot();
@@ -310,8 +300,8 @@ fn nested_scroll_forwards_early_theme_before_the_first_collect() {
     let outer = scroll_child("outer", viewport, viewport, inner);
 
     let mut harness = color_bench();
-    load_panel(&mut harness, &wasm, vec![outer]);
-    send_theme(&mut harness, accent_theme(RESTYLE_RED));
+    let panel = load_panel(&mut harness, &wasm, vec![outer]);
+    send_theme(&mut harness, panel, accent_theme(RESTYLE_RED));
     capture_first_collect(&mut harness);
 
     let snapshot = harness.committed_shape_snapshot();
@@ -366,9 +356,8 @@ fn early_load_font_result_survives_lazy_spawn_and_renders_glyphs_after_priming()
         }
         .encode_into_bytes(),
     };
-    load_panel(&mut harness, &wasm, vec![label]);
+    let panel = load_panel(&mut harness, &wasm, vec![label]);
 
-    let panel = panel_address();
     harness
         .execute(vec![(
             "font_result",

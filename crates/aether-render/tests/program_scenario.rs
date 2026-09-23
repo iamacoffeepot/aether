@@ -24,6 +24,7 @@ use aether_harness_substrate_capture::visual::{background_top_left, decode_png};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot, PassStage,
     ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec, TextureFormat,
@@ -99,7 +100,7 @@ fn ping_pong_register() -> ProgramRegister {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -136,7 +137,7 @@ fn register_reply(
     mail: &ProgramRegister,
 ) -> ProgramRegisterResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>(label)
         .expect("decode ProgramRegisterResult")

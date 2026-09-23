@@ -15,6 +15,7 @@ aether-http = { path = "../aether-http", default-features = false }
 aether-process = { path = "../aether-process", default-features = false }
 
 [dev-dependencies]
+aether-component = { path = "../aether-component" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-http = { path = "../aether-http", default-features = false }

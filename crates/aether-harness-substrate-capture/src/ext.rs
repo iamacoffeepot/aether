@@ -12,7 +12,7 @@
 use std::any::Any;
 use std::sync::Arc;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::ErasedActorRef;
 use aether_data::{Kind, MailId};
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
@@ -275,10 +275,8 @@ impl RenderHarnessExt for SubstrateHarness {
     fn program_gpu_timings(&mut self, program_id: u32) -> Result<ProgramTimingsResult, ExecutionError> {
         const LABEL: &str = "program gpu timings";
 
-        self.execute(vec![(
-            LABEL,
-            HarnessOp::send_and_await_reply(RenderCapability::NAMESPACE, &ProgramTimings { program_id }),
-        )])?
-        .reply(LABEL)
+        let render = self.actor_ref::<RenderCapability>();
+        self.execute(vec![(LABEL, HarnessOp::send_and_await_reply(&render, &ProgramTimings { program_id }))])?
+            .reply(LABEL)
     }
 }

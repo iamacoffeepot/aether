@@ -18,13 +18,14 @@
 use std::fs;
 use std::path::Path;
 
-use aether_actor::Addressable;
+use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput, WindowId};
+use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, TextInput, WindowId};
 use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
+use aether_window::SyntheticWindowCapability;
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
@@ -34,41 +35,33 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ActorPath {
+fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("load_component({name}): {error}"),
-    }
+    harness
+        .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component({name}): {error}"))
 }
 
 /// Inject `count` synthetic `Key` presses from one window. The synthetic
 /// window actor fans each out to every matching subscriber; `execute` blocks on
 /// settlement, so the `key_observed` broadcasts have landed by return.
 fn send_keys(harness: &mut SubstrateHarness, count: usize) {
+    let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
     let labels: Vec<String> = (0..count).map(|i| format!("key{i}")).collect();
     let steps: Vec<(&str, HarnessOp)> = labels
         .iter()
         .map(|label| {
-            (label.as_str(), HarnessOp::window_event(TEST_WINDOW_ID, &Key { window: TEST_WINDOW_ID, code: KEY_CODE }))
+            let key = Key { window: TEST_WINDOW_ID, code: KEY_CODE };
+            (label.as_str(), HarnessOp::window_event(&synthetic, TEST_WINDOW_ID, &key))
         })
         .collect();
     harness.execute(steps).expect("key send sequence");
 }
 
-/// Have the probe at `probe` unsubscribe itself from `Key` on every window.
-fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: &ActorPath) {
+/// Have `probe` unsubscribe itself from `Key` on every window.
+fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: ErasedActorRef) {
     harness
-        .execute(vec![("unsub", HarnessOp::send_and_settle(probe.to_string(), &UnsubscribeKeys))])
+        .execute(vec![("unsub", HarnessOp::send_and_settle(probe, &UnsubscribeKeys))])
         .expect("unsubscribe sequence");
 }
 
@@ -76,7 +69,10 @@ fn drop_component(harness: &mut SubstrateHarness, path: ActorPath) {
     let result = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { target: path }),
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DropComponent { target: path },
+            ),
         )])
         .expect("drop sequence");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -120,7 +116,11 @@ fn subscribed_component_receives_published_text_input() {
     harness
         .execute(vec![(
             "text",
-            HarnessOp::window_event(TEST_WINDOW_ID, &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() }),
+            HarnessOp::window_event(
+                &harness.actor_ref::<SyntheticWindowCapability>(),
+                TEST_WINDOW_ID,
+                &TextInput { window: TEST_WINDOW_ID, text: "hi".to_owned() },
+            ),
         )])
         .expect("text send sequence");
 
@@ -175,7 +175,7 @@ fn unsubscribe_stops_delivery() {
         return;
     };
     let mut harness = boot_bench();
-    let probe = load_probe_named(&mut harness, &wasm_path, "listener");
+    let (probe, _) = load_probe_named(&mut harness, &wasm_path, "listener");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -187,7 +187,7 @@ fn unsubscribe_stops_delivery() {
     );
     let pre_unsub = harness.count_observed(KeyObserved::NAME);
 
-    unsubscribe_keys(&mut harness, &probe);
+    unsubscribe_keys(&mut harness, probe);
     send_keys(&mut harness, 2);
     assert_eq!(
         harness.count_observed(KeyObserved::NAME),
@@ -207,7 +207,7 @@ fn drop_clears_subscriptions() {
         return;
     };
     let mut harness = boot_bench();
-    let probe = load_probe_named(&mut harness, &wasm_path, "victim");
+    let (_, probe) = load_probe_named(&mut harness, &wasm_path, "victim");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);

@@ -11,9 +11,10 @@ publish = false
 # former fixture; the integration tests load this one wasm and select an
 # in-bundle actor with `export: Some("<NAMESPACE>")`. The typed↔reshaped
 # replace pair lives in standalone satellite crates — a cross-module
-# replace needs two distinct binaries.
+# replace needs two distinct binaries. The `rlib` lets host tests name the
+# actor types they load and the children those actors spawn.
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 aether-actor = { path = "../aether-actor" }

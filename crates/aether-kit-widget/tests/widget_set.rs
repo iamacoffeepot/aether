@@ -29,8 +29,8 @@
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::{ActorRef, ChildOf, Instanced};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{
@@ -38,30 +38,33 @@ use aether_kinds::keycode::{
 };
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{
-    Key, KeyRelease, LoadComponent, LoadResult, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove,
-    TextInput, Tick, WindowId,
+    Key, KeyRelease, LoadComponent, LogTailResult, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput,
+    Tick, WindowId,
 };
+use aether_kit_widget::set::{ButtonWidget, RadioGroupWidget, SliderWidget, TextFieldWidget, VirtualListWidget};
 use aether_kit_widget::{
     BehaviorHostSpec, ButtonConfig, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, TextFieldConfig,
-    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetControlState, WidgetKind,
+    Theme, VirtualListConfig, VirtualListRow, Widget, WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
 
-/// The full trampoline address the loaded panel registers at (ADR-0099 §4).
-fn panel_address() -> String {
-    format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
-}
-
-fn child_address(subname: &str) -> String {
-    format!("{}/{}:{}", panel_address(), aether_component::WasmTrampoline::NAMESPACE, subname)
+/// The `C` child the panel spawned under `subname`.
+fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
+    harness: &SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    subname: &str,
+) -> ActorRef<C> {
+    harness
+        .child::<WidgetPanel, C>(&panel, LoadName::new(subname).expect("a valid child subname"))
+        .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
 }
 
 /// Load the `WidgetPanel` root under the name `panel` (export
 /// `aether.kit.widget.panel`) with a config that places its stack at
 /// `(10, 10)` 200px wide, no font (`font_path` empty, so no `aether.text`
 /// dependency), and the default theme.
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -73,32 +76,26 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-            name.to_string()
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+    load_configured_panel(harness, wasm, &config)
+}
+
+/// Load the `WidgetPanel` root under the name `panel` with `config`.
+fn load_configured_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &PanelConfig) -> ActorRef<WidgetPanel> {
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
 /// Every log message in the panel's ring, oldest first.
-fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
-    match harness.log_tail(&panel_address(), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
+    match harness.log_tail(panel.erase(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|e| e.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -161,7 +158,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
         ])
         .expect("input session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
 
     assert!(
@@ -190,12 +187,11 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     );
 }
 
-/// The `LoadResult.path` returned at the public component boundary is the
-/// prefix for first-class inline-child names. Appending the built-in slot's
-/// `aether.embedded:button` node must let an external name-addressed sender
-/// change that live Button's state; a blocked then enabled click is the
-/// positive/negative proof that the mail reached the child rather than being
-/// warn-dropped at an unknown name.
+/// The panel reference a load returns is the parent a first-class inline child
+/// is looked up beneath. The built-in slot's `button` child, reached by type
+/// and key under it, must let an external sender change that live Button's
+/// state; a blocked then enabled click is the positive/negative proof that the
+/// mail reached the child rather than being dropped.
 #[test]
 fn load_result_lineage_reaches_builtin_button_state_externally() {
     let Some(wasm_path) = require_wasm("aether_kit_widget") else {
@@ -204,12 +200,14 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
     let panel = load_panel(&mut harness, &wasm);
-    let button = format!("{panel}/{}:button", aether_component::WasmTrampoline::NAMESPACE);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the built-in stack");
+    let button = panel_child::<ButtonWidget>(&harness, panel, "button");
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("disable_by_lineage", HarnessOp::send_and_settle(&button, &SetWidgetState { state: unavailable })),
             ("blocked_press", HarnessOp::send_and_settle(&panel, &press(30.0, 190.0))),
             ("blocked_release", HarnessOp::send_and_settle(&panel, &release(30.0, 190.0))),
@@ -222,7 +220,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
         ])
         .expect("external inline-child lineage session");
 
-    let log = match harness.log_tail(&panel, None, None) {
+    let log = match harness.log_tail(panel.erase(), None, None) {
         LogTailResult::Ok { entries, .. } => entries,
         LogTailResult::Err { error } => panic!("log_tail on the loaded panel failed: {error}"),
     };
@@ -291,7 +289,11 @@ fn text_field_spec(subname: &str, initial: &str, state: WidgetControlState) -> W
 /// Load the reference `WidgetPanel` root with an explicit `children` list (so
 /// it stacks exactly those specs rather than its built-in reference stack) at
 /// `(10, 10)` 200px wide, no font, default theme.
-fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
+fn load_panel_with(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
         x: 10.0,
         y: 10.0,
@@ -303,26 +305,7 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+    load_configured_panel(harness, wasm, &config)
 }
 
 /// The widget name a `widget slider changed` log line attributes its value to
@@ -443,8 +426,8 @@ fn button_click_widgets(log: &[String]) -> Vec<&str> {
         .collect()
 }
 
-fn take_log_delta(harness: &mut SubstrateHarness, cursor: &mut usize) -> Vec<String> {
-    let log = panel_log_messages(harness);
+fn take_log_delta(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>, cursor: &mut usize) -> Vec<String> {
+    let log = panel_log_messages(harness, panel);
     let delta =
         log.get(*cursor..).expect("take_log_delta cursor exceeds current panel log length; history was lost").to_vec();
     *cursor = log.len();
@@ -468,9 +451,8 @@ fn panel_stacks_declared_children_in_order() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
-    load_panel_with(&mut harness, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
+    let panel = load_panel_with(&mut harness, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
-    let panel = panel_address();
     harness
         .execute(vec![
             // First tick spawns + lays out the declared stack.
@@ -485,7 +467,7 @@ fn panel_stacks_declared_children_in_order() {
         ])
         .expect("declared-children session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let order: Vec<String> = log
         .iter()
@@ -512,14 +494,16 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 150).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut harness, &wasm, vec![virtual_list_spec("inventory", read_only)]);
+    let panel = load_panel_with(&mut harness, &wasm, vec![virtual_list_spec("inventory", read_only)]);
 
-    let panel = panel_address();
-    let list = child_address("inventory");
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus_read_only", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_read_only_page",
@@ -548,7 +532,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
         ])
         .expect("virtual-list state and selection session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let selected_indices: Vec<u32> = log.iter().filter_map(|message| virtual_list_selected_index(message)).collect();
     assert_eq!(
         selected_indices,
@@ -565,13 +549,15 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     );
 }
 
-fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness) {
-    let panel = panel_address();
-    let value = child_address("value");
-    let run = child_address("run");
+fn drive_state_and_keyboard_session(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
+    harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    let value = panel_child::<SliderWidget>(harness, panel, "value");
+    let run = panel_child::<ButtonWidget>(harness, panel, "run");
+
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             // Forward Tab skips the disabled first slider and focuses the
             // read-only value. Its arrow input must not mutate.
             ("tab_value", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
@@ -633,7 +619,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -643,9 +629,9 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
         ],
     );
 
-    drive_state_and_keyboard_session(&mut harness);
+    drive_state_and_keyboard_session(&mut harness, panel);
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let value_changes = log
         .iter()
@@ -677,12 +663,14 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", read_only)]);
+    let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", read_only)]);
 
-    let panel = panel_address();
+    harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             ("blocked_key", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_DOWN })),
             ("blocked_pointer", HarnessOp::send_and_settle(&panel, &press(30.0, 70.0))),
@@ -690,7 +678,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
             (
                 "enable",
                 HarnessOp::send_and_settle(
-                    child_address("choice"),
+                    &panel_child::<RadioGroupWidget>(&harness, panel, "choice"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
@@ -700,7 +688,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
         ])
         .expect("read-only radio session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let selections: Vec<u32> = log
         .iter()
@@ -727,11 +715,10 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 100).with_component_host().build().expect("boot");
-    load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", WidgetControlState::default())]);
+    let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", WidgetControlState::default())]);
 
-    let panel = panel_address();
     let choice_selections = |harness: &mut SubstrateHarness| -> (Vec<u32>, String) {
-        let log = panel_log_messages(harness);
+        let log = panel_log_messages(harness, panel);
         let joined = log.join("\n");
         let selections = log
             .iter()
@@ -784,9 +771,9 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
 }
 
 /// Arm, disable, and re-enable Button before its decisive stale release.
-fn drive_button_cancellation_session(harness: &mut SubstrateHarness) {
-    let run = child_address("run");
+fn drive_button_cancellation_session(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+    let run = panel_child::<ButtonWidget>(harness, panel, "run");
     harness
         .execute(vec![
             // Address the live child directly so focus loss cannot mask a
@@ -804,10 +791,9 @@ fn drive_button_cancellation_session(harness: &mut SubstrateHarness) {
         .expect("button state cancellation session");
 }
 
-fn drive_slider_cancellation_session(harness: &mut SubstrateHarness) {
-    let panel = panel_address();
-    let value = child_address("value");
+fn drive_slider_cancellation_session(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) {
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+    let value = panel_child::<SliderWidget>(harness, panel, "value");
     harness
         .execute(vec![
             // Read-only leaves root capture intact. Re-enable before moving;
@@ -843,18 +829,17 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 90).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![button_spec("run", WidgetControlState::default()), slider_spec("value", 0.0)],
     );
 
-    let panel = panel_address();
     harness.execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))]).expect("spawn widget set");
-    drive_button_cancellation_session(&mut harness);
-    drive_slider_cancellation_session(&mut harness);
+    drive_button_cancellation_session(&mut harness, panel);
+    drive_slider_cancellation_session(&mut harness, panel);
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let clicks = log
         .iter()
@@ -889,12 +874,14 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(&mut harness, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
+    let panel = load_panel_with(&mut harness, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
 
-    let panel = panel_address();
+    harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "blocked_text",
@@ -904,7 +891,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
             (
                 "enable",
                 HarnessOp::send_and_settle(
-                    child_address("locked"),
+                    &panel_child::<TextFieldWidget>(&harness, panel, "locked"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
@@ -912,7 +899,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
         ])
         .expect("read-only text activation session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let commits: Vec<_> = log
         .iter()
@@ -940,7 +927,7 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -949,7 +936,6 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
         ],
     );
 
-    let panel = panel_address();
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
@@ -974,7 +960,7 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
         ])
         .expect("stale-shift tab cycle session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let commits: Vec<_> =
         log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
@@ -994,9 +980,9 @@ fn pointer_focus_inherits_already_held_ctrl() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
-    load_panel_with(&mut harness, &wasm, vec![text_field_spec("field", "prior", WidgetControlState::default())]);
+    let panel =
+        load_panel_with(&mut harness, &wasm, vec![text_field_spec("field", "prior", WidgetControlState::default())]);
 
-    let panel = panel_address();
     harness
         .execute(vec![
             ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
@@ -1018,7 +1004,7 @@ fn pointer_focus_inherits_already_held_ctrl() {
         ])
         .expect("pointer-gain ctrl session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let commits: Vec<_> =
         log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
@@ -1038,7 +1024,7 @@ fn availability_focus_move_inherits_already_held_ctrl() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1047,10 +1033,12 @@ fn availability_focus_move_inherits_already_held_ctrl() {
         ],
     );
 
-    let panel = panel_address();
+    harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+
     harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("focus_first", HarnessOp::send_and_settle(&panel, &Key { window: TEST_WINDOW_ID, code: KEY_TAB })),
             (
                 "ctrl_down",
@@ -1062,7 +1050,7 @@ fn availability_focus_move_inherits_already_held_ctrl() {
             (
                 "hide_first",
                 HarnessOp::send_and_settle(
-                    child_address("first"),
+                    &panel_child::<TextFieldWidget>(&harness, panel, "first"),
                     &SetWidgetState { state: WidgetControlState { visible: false, ..WidgetControlState::default() } },
                 ),
             ),
@@ -1075,7 +1063,7 @@ fn availability_focus_move_inherits_already_held_ctrl() {
         ])
         .expect("availability-gain ctrl session");
 
-    let log = panel_log_messages(&mut harness);
+    let log = panel_log_messages(&mut harness, panel);
     let joined = log.join("\n");
     let commits: Vec<_> =
         log.iter().filter(|message| message.contains("widget text committed")).map(String::as_str).collect();
@@ -1140,7 +1128,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1148,13 +1136,15 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
             button_spec("run", WidgetControlState::default()),
         ],
     );
-    let panel = panel_address();
-    let list = child_address("inventory");
     let mut cursor = 0;
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
             ("empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
             ("empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
@@ -1163,7 +1153,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
             ("empty_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
         ])
         .expect("empty list baseline");
-    assert_list_phase("empty baseline", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+    assert_list_phase("empty baseline", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &["run"]);
 
     harness
         .execute(vec![
@@ -1173,7 +1163,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
             ("unchanged_empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
         ])
         .expect("unchanged empty config");
-    assert_list_phase("unchanged empty config", &take_log_delta(&mut harness, &mut cursor), &[], &[], &[]);
+    assert_list_phase("unchanged empty config", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &[]);
 
     harness
         .execute(vec![
@@ -1183,7 +1173,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         .expect("populate hover");
     assert_list_phase(
         "populate hover",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("0"))],
         &[],
         &[],
@@ -1195,7 +1185,13 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
             ("down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("tab and down");
-    assert_list_phase("tab+down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
+    assert_list_phase(
+        "tab+down",
+        &take_log_delta(&mut harness, panel, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
 
     // A re-sent config holds the reader's row: the config's `initial` seeded
     // the list when it had no selection and is ignored now that it has one, so
@@ -1208,7 +1204,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         .expect("unchanged live config");
     assert_list_phase(
         "unchanged live config keeps focus and selection",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[],
         &[(Some("inventory"), 2)],
         &[],
@@ -1224,7 +1220,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
         .expect("row click");
     assert_list_phase(
         "click row 1",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("1"))],
         &[(Some("inventory"), 1)],
         &[],
@@ -1241,7 +1237,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1249,13 +1245,15 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
             button_spec("run", WidgetControlState::default()),
         ],
     );
-    let panel = panel_address();
-    let list = child_address("inventory");
     let mut cursor = 0;
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
             ("focus", HarnessOp::send_and_settle(&panel, &tab())),
             ("select_one", HarnessOp::send_and_settle(&panel, &down())),
@@ -1264,14 +1262,20 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
         .expect("arm list");
     assert_list_phase(
         "arm",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("0"))],
         &[(Some("inventory"), 1), (Some("inventory"), 0)],
         &[],
     );
 
     harness.execute(vec![("empty", HarnessOp::send_and_settle(&list, &empty_list_config()))]).expect("empty the list");
-    assert_list_phase("empty", &take_log_delta(&mut harness, &mut cursor), &[(Some("inventory"), None)], &[], &[]);
+    assert_list_phase(
+        "empty",
+        &take_log_delta(&mut harness, panel, &mut cursor),
+        &[(Some("inventory"), None)],
+        &[],
+        &[],
+    );
 
     harness
         .execute(vec![
@@ -1279,7 +1283,13 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
             ("sibling_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
         ])
         .expect("sibling keyboard while empty");
-    assert_list_phase("sibling keyboard while empty", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+    assert_list_phase(
+        "sibling keyboard while empty",
+        &take_log_delta(&mut harness, panel, &mut cursor),
+        &[],
+        &[],
+        &["run"],
+    );
 
     harness
         .execute(vec![
@@ -1290,7 +1300,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
         .expect("stale release and move after repopulate");
     assert_list_phase(
         "stale release/move before any fresh press",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[],
         &[],
         &[],
@@ -1302,7 +1312,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
             ("sibling_release", HarnessOp::send_and_settle(&panel, &release(30.0, 148.0))),
         ])
         .expect("sibling pointer");
-    assert_list_phase("sibling pointer", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+    assert_list_phase("sibling pointer", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &["run"]);
 
     harness
         .execute(vec![
@@ -1313,7 +1323,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
         .expect("fresh list input");
     assert_list_phase(
         "fresh list input",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("0")), (Some("inventory"), Some("2"))],
         &[(Some("inventory"), 2)],
         &[],
@@ -1331,7 +1341,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
     let mut harness = SubstrateHarness::builder().size(240, 320).with_component_host().build().expect("boot");
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1340,23 +1350,25 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             button_spec("run", WidgetControlState::default()),
         ],
     );
-    let panel = panel_address();
     let mut cursor = 0;
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             (
                 "populate_blocked",
                 HarnessOp::send_and_settle(
-                    child_address("blocked"),
+                    &panel_child::<VirtualListWidget>(&harness, panel, "blocked"),
                     &live_list_config(populated_rows(), Some(0), disabled),
                 ),
             ),
             (
                 "populate_ghost",
                 HarnessOp::send_and_settle(
-                    child_address("ghost"),
+                    &panel_child::<VirtualListWidget>(&harness, panel, "ghost"),
                     &live_list_config(populated_rows(), Some(0), hidden),
                 ),
             ),
@@ -1371,14 +1383,14 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             ("space_up", HarnessOp::send_and_settle(&panel, &space_up())),
         ])
         .expect("unavailable populate session");
-    assert_list_phase("unavailable populate", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+    assert_list_phase("unavailable populate", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &["run"]);
 
     harness
         .execute(vec![
             (
                 "enable_blocked",
                 HarnessOp::send_and_settle(
-                    child_address("blocked"),
+                    &panel_child::<VirtualListWidget>(&harness, panel, "blocked"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
@@ -1389,7 +1401,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
         .expect("enable blocked");
     assert_list_phase(
         "enable blocked",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("blocked"), Some("0"))],
         &[(Some("blocked"), 1)],
         &[],
@@ -1400,7 +1412,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
             (
                 "show_ghost",
                 HarnessOp::send_and_settle(
-                    child_address("ghost"),
+                    &panel_child::<VirtualListWidget>(&harness, panel, "ghost"),
                     &SetWidgetState { state: WidgetControlState::default() },
                 ),
             ),
@@ -1411,7 +1423,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
         .expect("show ghost");
     assert_list_phase(
         "show ghost",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("blocked"), None), (Some("ghost"), Some("0")), (Some("ghost"), Some("1"))],
         &[(Some("ghost"), 1)],
         &[],
@@ -1428,7 +1440,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1436,13 +1448,15 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
             button_spec("run", WidgetControlState::default()),
         ],
     );
-    let panel = panel_address();
-    let list = child_address("inventory");
     let mut cursor = 0;
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("populate", HarnessOp::send_and_settle(&list, &live_list_config(populated_rows(), Some(0), read_only))),
             ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
             ("focus", HarnessOp::send_and_settle(&panel, &tab())),
@@ -1453,7 +1467,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
         .expect("read-only input");
     assert_list_phase(
         "read-only hover/focus/click",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("0")), (Some("inventory"), Some("2"))],
         &[],
         &[],
@@ -1468,7 +1482,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
         .expect("tab away");
     assert_list_phase(
         "tab away does not emit HoverLost",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[],
         &[],
         &["run"],
@@ -1481,7 +1495,13 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
             ("allowed_down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("mutable down");
-    assert_list_phase("mutable down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
+    assert_list_phase(
+        "mutable down",
+        &take_log_delta(&mut harness, panel, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
 }
 
 /// A behavior-wrapped initially empty list must become eligible through the
@@ -1493,7 +1513,7 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
     let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
-    load_panel_with(
+    let panel = load_panel_with(
         &mut harness,
         &wasm,
         vec![
@@ -1501,13 +1521,19 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
             button_spec("run", WidgetControlState::default()),
         ],
     );
-    let panel = panel_address();
-    let host = child_address("inventory");
     let mut cursor = 0;
 
     harness
+        .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+        .expect("spawn the widget set");
+    // The slot is `aether-behavior`'s `BehaviorHost`, which this crate's tests
+    // do not link; it is looked up as the composable widget it stands in for —
+    // an embedded instanced child whose position its key alone determines —
+    // and its mail is sent erased.
+    let host = panel_child::<Widget>(&harness, panel, "inventory");
+
+    harness
         .execute(vec![
-            ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
             ("empty_hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
             ("empty_press", HarnessOp::send_and_settle(&panel, &press(30.0, 22.0))),
             ("empty_release", HarnessOp::send_and_settle(&panel, &release(30.0, 22.0))),
@@ -1516,17 +1542,17 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
             ("empty_space_up", HarnessOp::send_and_settle(&panel, &space_up())),
         ])
         .expect("empty host baseline");
-    assert_list_phase("empty host baseline", &take_log_delta(&mut harness, &mut cursor), &[], &[], &["run"]);
+    assert_list_phase("empty host baseline", &take_log_delta(&mut harness, panel, &mut cursor), &[], &[], &["run"]);
 
     harness
         .execute(vec![
-            ("populate", HarnessOp::send_and_settle(&host, &populated_list_config(Some(0)))),
+            ("populate", HarnessOp::send_and_settle(host.erase(), &populated_list_config(Some(0)))),
             ("hover", HarnessOp::send_and_settle(&panel, &hover_row_zero())),
         ])
         .expect("populate host hover");
     assert_list_phase(
         "host populate hover",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("0"))],
         &[],
         &[],
@@ -1538,7 +1564,13 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
             ("down", HarnessOp::send_and_settle(&panel, &down())),
         ])
         .expect("host tab and down");
-    assert_list_phase("host tab+down", &take_log_delta(&mut harness, &mut cursor), &[], &[(Some("inventory"), 1)], &[]);
+    assert_list_phase(
+        "host tab+down",
+        &take_log_delta(&mut harness, panel, &mut cursor),
+        &[],
+        &[(Some("inventory"), 1)],
+        &[],
+    );
 
     harness
         .execute(vec![
@@ -1548,7 +1580,7 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
         .expect("host row click");
     assert_list_phase(
         "host click row 2",
-        &take_log_delta(&mut harness, &mut cursor),
+        &take_log_delta(&mut harness, panel, &mut cursor),
         &[(Some("inventory"), Some("2"))],
         &[(Some("inventory"), 2)],
         &[],

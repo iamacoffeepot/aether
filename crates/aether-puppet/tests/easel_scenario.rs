@@ -20,13 +20,14 @@ use core::iter;
 use std::fs;
 use std::path::Path;
 
-use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
+use aether_actor::ActorRef;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::decode_png;
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
     test_helpers::{init_save_sandbox, require_runtime, rgba_at, test_namespace_roots, write_fixture},
 };
-use aether_kinds::{LoadComponent, LoadResult, WindowId, WindowSize};
+use aether_kinds::{LoadComponent, WindowId, WindowSize};
 use aether_puppet::{Load, Puppet, labels};
 
 const CUBE_OBJ: &[u8] = include_bytes!("fixtures/cube.obj");
@@ -35,13 +36,6 @@ const CUBE_OBJ: &[u8] = include_bytes!("fixtures/cube.obj");
 /// ADR-0138: the merged three-actor module is defaultless, so every load
 /// names the actor it wants.
 const PUPPET_EXPORT: &str = "aether.puppet";
-
-/// The loaded puppet's typed sender. A nameless load registers the actor
-/// under its own namespace, so `HarnessOp::loaded_default` renders the
-/// lineage address (ADR-0099 §4) the substrate answers on.
-fn puppet() -> HarnessActor<Puppet> {
-    HarnessOp::loaded_default::<Puppet>()
-}
 
 /// A 2x2x2 material field over the cube, hair on one side of `x = 0` and
 /// skin on the other, so both a pigmented wash and a mostly-reserved one
@@ -61,21 +55,12 @@ fn labels_field() -> Vec<u8> {
     bytes
 }
 
-fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
+fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Puppet> {
     let wasm = fs::read(wasm_path).expect("read the puppet wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component(puppet): {error}"),
-    }
+    harness
+        .load::<Puppet>(LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) })
+        .unwrap_or_else(|error| panic!("load_component(puppet): {error}"))
+        .0
 }
 
 /// Ink reads as "clearly darker than paper", not as an absolute black: the
@@ -102,21 +87,30 @@ fn the_sheet_stands_behind_the_ink() {
         .with_component_host()
         .build()
         .expect("boot a rendering harness with a component host");
-    load_puppet(&mut harness, &wasm_path);
+    let puppet = load_puppet(&mut harness, &wasm_path);
 
     harness
         .execute(vec![
-            ("size", puppet().send(&WindowSize { window: WindowId(1), width: 128, height: 96, scale_factor: 1.0 })),
+            (
+                "size",
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &WindowSize { window: WindowId(1), width: 128, height: 96, scale_factor: 1.0 },
+                ),
+            ),
             (
                 "subject",
-                puppet().send(&Load {
-                    namespace: "assets".to_owned(),
-                    path: subject,
-                    labels: field,
-                    material_field_padding: 0.12,
-                    rig: String::new(),
-                    palette: String::new(),
-                }),
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &Load {
+                        namespace: "assets".to_owned(),
+                        path: subject,
+                        labels: field,
+                        material_field_padding: 0.12,
+                        rig: String::new(),
+                        palette: String::new(),
+                    },
+                ),
             ),
         ])
         .expect("the size and subject load settle");

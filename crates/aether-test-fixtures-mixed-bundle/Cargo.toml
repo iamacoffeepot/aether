@@ -21,7 +21,6 @@ aether-data = { path = "../aether-data", features = ["derive"] }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 
 [dev-dependencies]
-aether-component = { path = "../aether-component" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-kinds = { path = "../aether-kinds" }
 wasmparser = "0.246"

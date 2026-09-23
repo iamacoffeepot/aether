@@ -9,16 +9,19 @@
 #![allow(clippy::print_stderr)]
 
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
+use aether_render::RenderCapability;
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::ActorRef;
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{Image, Rect, decode_png, target_color_stats};
-use aether_kinds::{ClipRect, LoadComponent, LoadResult, NamedMail, QuadSpace, Tick};
+use aether_kinds::{ClipRect, LoadComponent, NamedMail, QuadSpace, Tick};
+use aether_kit_widget::set::ImageWidget;
 use aether_kit_widget::{
     ImageConfig, ImageFit, PanelConfig, SetWidgetState, Theme, WidgetChildSpec, WidgetControlState, WidgetKind,
+    WidgetPanel,
 };
 use aether_math::Rgba;
 use aether_render::{
@@ -50,7 +53,7 @@ fn create_texture(harness: &mut SubstrateHarness, label: &'static str, pixels: V
         .execute(vec![(
             label,
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CreateTexture {
                     width: 2,
                     height: 2,
@@ -84,7 +87,9 @@ fn image_config(texture_id: u32, fit: ImageFit, state: WidgetControlState) -> Im
     }
 }
 
-fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig) -> String {
+/// Load the image panel, returning its reference and the lineage path it
+/// registered at — the path a capture bundle's `NamedMail` carries.
+fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig) -> (ActorRef<WidgetPanel>, String) {
     let panel_config = PanelConfig {
         x: PANEL_X,
         y: PANEL_Y,
@@ -102,24 +107,15 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &ImageConfig)
         owns_input: true,
         editor_region: String::new(),
     };
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: panel_config.encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load image panel");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("load image panel: {error}"),
-    }
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: panel_config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load image panel: {error}"));
+    (panel, path.to_string())
 }
 
 fn tick_to(panel: &str) -> NamedMail {
@@ -176,11 +172,14 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let first_texture_id = create_texture(&mut harness, "first_texture", first_texture_pixels());
     let second_texture_id = create_texture(&mut harness, "second_texture", second_texture_pixels());
     let tint = Rgba::WHITE;
-    let panel =
+    let (panel_ref, panel) =
         load_panel(&mut harness, &wasm, &image_config(first_texture_id, ImageFit::Fill, WidgetControlState::default()));
-    let image = format!("{panel}/{}:image", aether_component::WasmTrampoline::NAMESPACE);
 
+    // The first capture's tick spawns the panel's `image` child.
     let fill_pixels = capture(&mut harness, &panel);
+    let image = harness
+        .child::<WidgetPanel, ImageWidget>(&panel_ref, LoadName::new("image").expect("a valid child subname"))
+        .expect("the image child is live");
     assert_image_shape(
         &harness,
         image_shape(first_texture_id, [PANEL_X, PANEL_Y, PANEL_WIDTH, ROW_HEIGHT], [0.0, 0.0, 1.0, 1.0], tint),
@@ -276,11 +275,17 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
         .execute(vec![
             (
                 "destroy_first",
-                HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id: first_texture_id }),
+                HarnessOp::send_and_settle(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &DestroyTexture { texture_id: first_texture_id },
+                ),
             ),
             (
                 "destroy_second",
-                HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id: second_texture_id }),
+                HarnessOp::send_and_settle(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &DestroyTexture { texture_id: second_texture_id },
+                ),
             ),
         ])
         .expect("consumer destroys borrowed image textures after the last capture");

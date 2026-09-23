@@ -19,12 +19,13 @@
 //! gate) live in `aether_harness_substrate_capture::test_helpers`
 //! (issues 460 + 821).
 
+use aether_actor::ActorRef;
 use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{decode_png, not_all_black};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::LoadComponent;
 use aether_kit_commons::camera::{CameraComponent, CameraDestroy};
 use aether_render::ViewProjection;
 
@@ -41,10 +42,7 @@ use aether_kit_commons as _;
 use std::fs;
 use std::path::Path;
 
-/// Component name passed to `LoadComponent`, and the name
-/// `HarnessOp::loaded::<CameraComponent>` renders the addressable
-/// `/`-joined lineage from (ADR-0099 §4) — bare `"cam"` is not
-/// addressable.
+/// Component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "cam";
 
 /// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
@@ -52,26 +50,17 @@ const COMPONENT_NAME: &str = "cam";
 /// the export selector is required), and await `LoadResult`. Panics on load failure so
 /// the calling test surfaces the error message rather than wedging on
 /// a missing subscription.
-fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) {
+fn load_camera(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<CameraComponent> {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(COMPONENT_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("aether.kit.camera".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component: {error}"),
-    }
+    harness
+        .load::<CameraComponent>(LoadComponent {
+            wasm,
+            name: Some(COMPONENT_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("aether.kit.camera".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load_component: {error}"))
+        .0
 }
 
 #[test]
@@ -140,7 +129,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
 
     let mut harness =
         SubstrateHarness::builder().size(64, 48).with_render().with_component_host().build().expect("boot");
-    load_camera(&mut harness, &wasm_path);
+    let camera = load_camera(&mut harness, &wasm_path);
 
     harness.execute(vec![("pre", HarnessOp::advance(2))]).expect("pre-destroy advance");
     // Baseline: default orbit was publishing before destroy.
@@ -151,10 +140,8 @@ fn camera_destroy_main_keeps_substrate_alive() {
         harness.observed_kinds(),
     );
 
-    // Drop the only camera the component was bootstrapped with —
-    // `HarnessOp::loaded` renders the trampoline's full name from the
-    // component identity, since the bare namespace is not addressable —
-    // then advance and capture.
+    // Drop the only camera the component was bootstrapped with, then
+    // advance and capture.
     //
     // Survivability: the chassis still renders its clear pass after
     // the active camera was removed. If the component panicked or the
@@ -162,10 +149,7 @@ fn camera_destroy_main_keeps_substrate_alive() {
     // all-black.
     let result = harness
         .execute(vec![
-            (
-                "destroy",
-                HarnessOp::loaded::<CameraComponent>(COMPONENT_NAME).send(&CameraDestroy { name: "main".to_owned() }),
-            ),
+            ("destroy", HarnessOp::send_and_settle(&camera, &CameraDestroy { name: "main".to_owned() })),
             ("post", HarnessOp::advance(5)),
             ("snap", HarnessOp::capture()),
         ])

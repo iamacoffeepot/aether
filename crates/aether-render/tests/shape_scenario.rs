@@ -18,6 +18,7 @@ use aether_harness_substrate_capture::{
 };
 use aether_kinds::{ClipRect, QuadScale, QuadSpace};
 use aether_math::Rgba;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawShapes, QuadBlend, Shape, ShapeShadow, ShapeStroke, ShapeTexture,
     TextureFormat, TextureSampling, TextureUsage,
@@ -260,7 +261,7 @@ fn a_textured_shape_samples_the_image_inside_its_rounded_coverage() {
         .execute(vec![(
             "create",
             HarnessOp::send_and_await_reply(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &CreateTexture {
                     width: 2,
                     height: 1,

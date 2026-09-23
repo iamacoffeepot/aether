@@ -46,6 +46,7 @@ use aether_puppet::easel::program::{self, stroke};
 use aether_puppet::easel::regions;
 use aether_puppet::{deform, ribbon};
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, DrawTriangle, InputSlot, OutputSlot, PassStage,
     ProgramDispatch, ProgramPass, ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, TextureFormat,
@@ -232,7 +233,7 @@ fn depth_probe_program() -> ProgramRegister {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -260,7 +261,10 @@ fn develop(harness: &mut SubstrateHarness, raster: &[f32]) -> Vec<f32> {
         create_texture(harness, "create_output", &rgba(Vec::new(), TextureUsage::Writable, TextureSampling::Linear));
 
     let program_id = match harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", &probed_program()))])
+        .execute(vec![(
+            "register",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &probed_program()),
+        )])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>("register")
         .expect("decode ProgramRegisterResult")
@@ -336,7 +340,7 @@ fn depth_weights(harness: &mut SubstrateHarness) -> [f32; 2] {
     let program_id = match harness
         .execute(vec![(
             "register_depth_probe",
-            HarnessOp::send_and_await_reply("aether.render", &depth_probe_program()),
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &depth_probe_program()),
         )])
         .expect("register depth probe sequence")
         .reply::<ProgramRegisterResult>("register_depth_probe")

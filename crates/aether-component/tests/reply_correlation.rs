@@ -16,36 +16,25 @@ use aether_test_fixtures_kinds as _;
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_component::ComponentHostCapability;
+use aether_actor::ErasedActorRef;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux};
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
-fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> String {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent {
-                    wasm,
-                    name: Some(name.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.fs_demux".to_owned()),
-                },
-            ),
-        )])
-        .expect("load fs_demux");
-
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("load_component {name}: {error}"),
-    }
+fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> ErasedActorRef {
+    harness
+        .load_any(&LoadComponent {
+            wasm,
+            name: Some(name.to_owned()),
+            config: Vec::new(),
+            export: Some("test.fs_demux".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load_component {name}: {error}"))
+        .0
 }
 
 #[test]
@@ -66,13 +55,13 @@ fn same_payload_fs_replies_demux_by_request_id() {
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let fixture_addr = load_fs_demux(&mut harness, wasm, "fs-demux");
+    let fixture = load_fs_demux(&mut harness, wasm, "fs-demux");
     let baseline = harness.count_observed(FsDemuxReport::NAME);
 
     harness
         .execute(vec![(
             "trigger",
-            HarnessOp::send_and_settle(&fixture_addr, &RunFsDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_and_settle(fixture, &RunFsDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsDemux to fixture");
 
@@ -100,14 +89,14 @@ fn typed_fs_replies_demux_by_context_kind_probe_then_take() {
 
     let path = write_fixture("typed-context.txt", b"same path, distinct typed contexts");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let fixture_addr = load_fs_demux(&mut harness, wasm, "fs-context-demux");
+    let fixture = load_fs_demux(&mut harness, wasm, "fs-context-demux");
     let baseline = harness.count_observed(FsContextDemuxReport::NAME);
     let raw_baseline = harness.count_observed(FsDemuxReport::NAME);
 
     harness
         .execute(vec![(
             "trigger",
-            HarnessOp::send_and_settle(&fixture_addr, &RunFsContextDemux { namespace: "save".to_owned(), path }),
+            HarnessOp::send_and_settle(fixture, &RunFsContextDemux { namespace: "save".to_owned(), path }),
         )])
         .expect("RunFsContextDemux to fixture");
 

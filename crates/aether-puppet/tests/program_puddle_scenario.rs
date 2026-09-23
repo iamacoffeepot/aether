@@ -54,6 +54,7 @@ use aether_puppet::easel::program::puddle::{
 };
 use aether_puppet::math3::hash_unit;
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot, OutputSlot, ProgramDispatch, ProgramPass,
     ProgramRegister, ProgramRegisterResult, SlotExtent, SlotSpec, TextureFormat, TextureSampling, TextureUsage,
@@ -128,7 +129,7 @@ fn output_binding(input_count: usize) -> u32 {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -183,7 +184,10 @@ fn develop(
     let output_id = *bindings.last().expect("output binding just pushed");
 
     let program_id = match harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", register))])
+        .execute(vec![(
+            "register",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), register),
+        )])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>("register")
         .expect("decode ProgramRegisterResult")

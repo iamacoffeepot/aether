@@ -14,14 +14,15 @@
 use std::fs;
 use std::path::Path;
 
-use aether_component::WasmTrampoline;
-use aether_data::ActorPath;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{ActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
     DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, Ping, ReplaceComponent,
     ReplaceResult,
 };
+use aether_test_fixtures_bundle::{Panel, RootManager};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -44,6 +45,11 @@ fn probe_address() -> String {
     format!("aether.component/{}:{PROBE_NAME}", WasmTrampoline::NAMESPACE)
 }
 
+/// A child's instance key.
+fn key(text: &str) -> LoadName {
+    LoadName::new(text).expect("a valid instance key")
+}
+
 /// The kind the probe broadcasts to the harness observer once per tick.
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
 
@@ -58,7 +64,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
             ),
         )])
@@ -82,24 +88,19 @@ fn list_components_reports_loaded_probe_lineage() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    let name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path.to_string(),
-        LoadResult::Err { error } => panic!("load_component: {error}"),
-    };
+    let name = harness
+        .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component: {error}"))
+        .1
+        .to_string();
     assert_eq!(name, probe_address(), "LoadResult must return the registered nested trampoline route");
     assert_ne!(name, format!("aether.embedded:{PROBE_NAME}"));
 
     let listed = harness
-        .execute(vec![("list", HarnessOp::send_and_await_reply("aether.component", &ListComponents {}))])
+        .execute(vec![(
+            "list",
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<ComponentHostCapability>(), &ListComponents {}),
+        )])
         .expect("list sequence");
     let result = listed.reply::<ListComponentsResult>("list").expect("decode ListComponentsResult");
     assert!(
@@ -149,7 +150,7 @@ fn multi_actor_module_loads_entry_export() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     // No name: resolve from the entry type's aether.namespace section.
@@ -196,7 +197,7 @@ fn multi_actor_module_loads_selected_export() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     // No name: defaults to the selected export's namespace.
@@ -237,7 +238,7 @@ fn multi_actor_unknown_export_errors() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("ui.does_not_exist".to_owned()) },
             ),
         )])
@@ -275,7 +276,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
             ),
         )])
@@ -297,7 +298,7 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm,
                     name: None,
@@ -337,42 +338,31 @@ fn multi_actor_sibling_spawn() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: None,
-                    // `RootManager` is a non-entry actor in the bundle; select
-                    // it by its `test.ui.root` export.
-                    config: Vec::new(),
-                    export: Some("test.ui.root".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
-    };
+    let (root, root_path) = harness
+        .load::<RootManager>(LoadComponent {
+            wasm,
+            name: None,
+            // `RootManager` is a non-entry actor in the bundle; select
+            // it by its `test.ui.root` export.
+            config: Vec::new(),
+            export: Some("test.ui.root".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("multi-actor load failed: {error}"));
+    let root_name = root_path.to_string();
     assert!(root_name.ends_with(":test.ui.root"), "selected export should resolve to test.ui.root; got {root_name}");
 
-    // ADR-0099 §3/§4: a spawned sibling nests under its spawner, so the
-    // Panel registers at the `/`-rendered lineage path — the RootManager's
-    // name with the sibling's trampoline segment appended — and its id is
-    // the lineage fold of that path, not `hash("…trampoline:0")`.
-    // The Counter discriminator is a flat segment ("0") — no type prefix.
-    let panel_name = format!("{root_name}/aether.embedded:0");
+    // RootManager spawns a Panel sibling (Counter → 0).
     harness
-        .execute(vec![
-            // RootManager spawns a Panel sibling (Counter → 0).
-            ("spawn", HarnessOp::send_and_settle::<Ping>(root_name.as_str(), &Ping { seq: 0 })),
-            // The spawned Panel broadcasts TickObserved when pinged.
-            ("ping_panel", HarnessOp::send_and_settle::<Ping>(panel_name.as_str(), &Ping { seq: 1 })),
-        ])
-        .expect("spawn + ping sequence");
+        .execute(vec![("spawn", HarnessOp::send_and_settle::<Ping>(&root, &Ping { seq: 0 }))])
+        .expect("spawn sequence");
+
+    // ADR-0099 §3/§4: a spawned sibling nests under its spawner, keyed by
+    // its Counter discriminator — a flat segment ("0"), no type prefix. The
+    // spawned Panel broadcasts TickObserved when pinged.
+    let panel = harness.child::<RootManager, Panel>(&root, key("0")).expect("the spawned Panel is live");
+    harness
+        .execute(vec![("ping_panel", HarnessOp::send_and_settle::<Ping>(&panel, &Ping { seq: 1 }))])
+        .expect("ping sequence");
 
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
@@ -399,34 +389,32 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some("test.ui.root".to_owned()) },
-            ),
-        )])
-        .expect("load sequence");
-    let root_name = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("multi-actor load failed: {error}"),
-    };
+    let (root, _) = harness
+        .load::<RootManager>(LoadComponent {
+            wasm,
+            name: None,
+            config: Vec::new(),
+            export: Some("test.ui.root".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("multi-actor load failed: {error}"));
+
+    // RootManager spawns two Panel siblings (Counter 0 and 1) from this one
+    // Ping receive.
+    harness
+        .execute(vec![("spawn_two", HarnessOp::send_and_settle::<Ping>(&root, &Ping { seq: 2 }))])
+        .expect("spawn-twice sequence");
 
     // Both Panels nest under RootManager's lineage; the Counter
     // discriminator advances once per spawn_child call, in guest call
-    // order, so the two staged within one receive predict "0" then "1".
-    let panel_0 = format!("{root_name}/aether.embedded:0");
-    let panel_1 = format!("{root_name}/aether.embedded:1");
+    // order, so the two staged within one receive are keyed "0" then "1".
+    let panel_0 = harness.child::<RootManager, Panel>(&root, key("0")).expect("Panel 0 is live");
+    let panel_1 = harness.child::<RootManager, Panel>(&root, key("1")).expect("Panel 1 is live");
     harness
         .execute(vec![
-            // RootManager spawns two Panel siblings (Counter 0 and 1)
-            // from this one Ping receive.
-            ("spawn_two", HarnessOp::send_and_settle::<Ping>(root_name.as_str(), &Ping { seq: 2 })),
-            ("ping_panel_0", HarnessOp::send_and_settle::<Ping>(panel_0.as_str(), &Ping { seq: 1 })),
-            ("ping_panel_1", HarnessOp::send_and_settle::<Ping>(panel_1.as_str(), &Ping { seq: 1 })),
+            ("ping_panel_0", HarnessOp::send_and_settle::<Ping>(&panel_0, &Ping { seq: 1 })),
+            ("ping_panel_1", HarnessOp::send_and_settle::<Ping>(&panel_1, &Ping { seq: 1 })),
         ])
-        .expect("spawn-twice + ping-both sequence");
+        .expect("ping-both sequence");
 
     assert_eq!(
         harness.count_observed(TICK_OBSERVED),
@@ -462,7 +450,13 @@ fn drop_component_silences_tick_echoes() {
     // ahead of the next advance. `SendAndAwaitReply` blocks on `DropResult`
     // so the probe's mailbox is fully gone before the next advance.
     let dropped = harness
-        .execute(vec![("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: probe }))])
+        .execute(vec![(
+            "drop",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &DropComponent { target: probe },
+            ),
+        )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -511,7 +505,7 @@ fn replace_component_preserves_mailbox_identity() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: probe, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -545,47 +539,34 @@ fn replace_component_preserves_mailbox_identity() {
 /// the hooks as no-ops and the replacement booted fresh at 0.
 #[test]
 fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
-    use aether_actor::Addressable;
-
     const FIXTURE_NAME: &str = "stateful_replace";
 
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
     // Load the `Counter` actor (a non-entry actor in the bundle) under the
     // `stateful_replace` name and capture its mailbox id.
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: Some("test.stateful.counter".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
-    };
+    let (counter, path) = harness
+        .load_any(&LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.stateful.counter".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 
     // Bump the counter to 3, then read it back. `send_and_settle` waits out
     // each bump's whole chain, so all three land before the query.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     let pre_count = pre.reply::<CountReport>("query").expect("decode pre-replace CountReport");
@@ -599,7 +580,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -612,7 +593,7 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
     // The new instance booted fresh (init count = 0) and then rehydrated
     // from the saved bundle. Query it: the count must still be 3.
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -633,39 +614,26 @@ fn replace_preserves_multi_actor_state_via_dehydrate_rehydrate() {
 /// `decode_kind`, so the count survives the swap.
 #[test]
 fn replace_preserves_state_via_typed_state_kind() {
-    use aether_actor::Addressable;
-
     const FIXTURE_NAME: &str = "stateful_replace_typed";
 
     let Some(wasm_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
-    };
+    let (counter, path) = harness
+        .load_any(&LoadComponent { wasm, name: Some(FIXTURE_NAME.to_owned()), config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
     // Bump the counter to 3, then read it back.
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -680,7 +648,7 @@ fn replace_preserves_state_via_typed_state_kind() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -691,7 +659,7 @@ fn replace_preserves_state_via_typed_state_kind() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -714,8 +682,6 @@ fn replace_preserves_state_via_typed_state_kind() {
 /// route `aether.log` mail through its observed sinks).
 #[test]
 fn typed_state_decode_miss_boots_fresh() {
-    use aether_actor::Addressable;
-
     const TYPED_NAME: &str = "stateful_replace_typed";
 
     let Some(typed_path) = require_wasm("aether_test_fixtures_stateful_typed") else {
@@ -724,36 +690,25 @@ fn typed_state_decode_miss_boots_fresh() {
     let Some(reshaped_path) = require_wasm("aether_test_fixtures_stateful_reshaped") else {
         return;
     };
-    let addr = format!("aether.component/{}:{TYPED_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let typed_wasm = fs::read(&typed_path).expect("read typed fixture wasm");
 
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: typed_wasm,
-                    name: Some(TYPED_NAME.to_owned()),
-                    config: Vec::new(),
-                    export: None,
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("stateful_replace_typed load failed: {error}"),
-    };
+    let (counter, path) = harness
+        .load_any(&LoadComponent {
+            wasm: typed_wasm,
+            name: Some(TYPED_NAME.to_owned()),
+            config: Vec::new(),
+            export: None,
+        })
+        .unwrap_or_else(|error| panic!("stateful_replace_typed load failed: {error}"));
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_c", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_c", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -769,7 +724,7 @@ fn typed_state_decode_miss_boots_fresh() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent {
                     target: path,
                     wasm: reshaped_wasm,
@@ -786,7 +741,7 @@ fn typed_state_decode_miss_boots_fresh() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
         .expect("post-replace query sequence");
     let post_count = post.reply::<CountReport>("query").expect("decode post-replace CountReport");
     assert_eq!(
@@ -806,43 +761,30 @@ fn typed_state_decode_miss_boots_fresh() {
 /// guards it at the bundle layer.
 #[test]
 fn childless_component_hot_reloads_unchanged() {
-    use aether_actor::Addressable;
-
     const FIXTURE_NAME: &str = "stateful_replace";
 
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let addr = format!("aether.component/{}:{FIXTURE_NAME}", WasmTrampoline::NAMESPACE);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let wasm = fs::read(&wasm_path).expect("read fixture wasm");
 
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(FIXTURE_NAME.to_owned()),
-                    config: Vec::new(),
-                    // `Counter` is a non-entry actor in the bundle.
-                    export: Some("test.stateful.counter".to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let path = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path, .. } => path,
-        LoadResult::Err { error } => panic!("stateful_replace load failed: {error}"),
-    };
+    let (counter, path) = harness
+        .load_any(&LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            // `Counter` is a non-entry actor in the bundle.
+            export: Some("test.stateful.counter".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("stateful_replace load failed: {error}"));
 
     let pre = harness
         .execute(vec![
-            ("bump_a", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("bump_b", HarnessOp::send_and_settle::<Bump>(addr.as_str(), &Bump)),
-            ("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery)),
+            ("bump_a", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("bump_b", HarnessOp::send_and_settle::<Bump>(counter, &Bump)),
+            ("query", HarnessOp::send_and_await_reply(counter, &CountQuery)),
         ])
         .expect("bump + query sequence");
     assert_eq!(
@@ -856,7 +798,7 @@ fn childless_component_hot_reloads_unchanged() {
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
             ),
         )])
@@ -867,7 +809,7 @@ fn childless_component_hot_reloads_unchanged() {
     }
 
     let post = harness
-        .execute(vec![("query", HarnessOp::send_and_await_reply(addr.as_str(), &CountQuery))])
+        .execute(vec![("query", HarnessOp::send_and_await_reply(counter, &CountQuery))])
         .expect("post-replace query sequence");
     assert_eq!(
         post.reply::<CountReport>("query").expect("decode post-replace CountReport"),

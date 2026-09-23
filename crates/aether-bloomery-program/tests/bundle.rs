@@ -8,10 +8,11 @@ use aether_bloomery_kinds::{
     Utf8Text, artifact_digest,
 };
 use aether_bloomery_program::declarations;
-use aether_data::{Cites, Kind, Storage};
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{Cites, Kind, LoadName, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{ExecutionError, HarnessOp, SubstrateHarness, SubstrateHarnessError};
-use aether_kinds::{LoadComponent, LoadResult};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::LoadComponent;
 use wasmparser::{Parser, Payload};
 
 const SECTION_NAME: &str = "aether.bloomery.programs";
@@ -99,25 +100,15 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     assert_fixture_section(&wasm);
 
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm,
-                    name: Some(digest.to_string()),
-                    config: Vec::new(),
-                    export: Some(BUNDLE_NAMESPACE.to_owned()),
-                },
-            ),
-        )])
-        .expect("load sequence");
-    let root = match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => name.to_string(),
-        LoadResult::Err { error } => panic!("program fixture load failed: {error}"),
-    };
-    assert_eq!(root, expected_name, "root is named by the OpaqueBytes artifact digest");
+    let (root, path) = harness
+        .load_any(&LoadComponent {
+            wasm,
+            name: Some(digest.to_string()),
+            config: Vec::new(),
+            export: Some(BUNDLE_NAMESPACE.to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("program fixture load failed: {error}"));
+    assert_eq!(path.to_string(), expected_name, "root is named by the OpaqueBytes artifact digest");
 
     let text = "hello";
     let text_artifact = ClosureArtifact::new(Utf8Text::ID, text.as_bytes().to_vec());
@@ -130,7 +121,7 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
         vec![text_artifact, input_artifact],
     );
     let summarized = harness
-        .execute(vec![("summarize", HarnessOp::send_and_await_reply(root.as_str(), &summarize))])
+        .execute(vec![("summarize", HarnessOp::send_and_await_reply(root, &summarize))])
         .expect("summarize invoke");
     let Invoked::Completed { seq, result, staged } =
         summarized.reply::<Invoked>("summarize").expect("decode summarize Invoked")
@@ -144,33 +135,31 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
     assert_eq!(result, expected_encoded.digest());
     assert_eq!(staged, vec![EncodedArtifact::text("summary:hello"), expected_encoded]);
 
-    let child_addr = format!("{root}/aether.embedded:1");
-    let orphan =
-        harness.execute(vec![("probe", HarnessOp::send_and_await_reply(child_addr.as_str(), &summarize))]).err();
-    assert!(
-        matches!(
-            &orphan,
-            Some(ExecutionError::OpFailed { label, error: SubstrateHarnessError::UnknownMailbox(name) })
-                if label == "probe" && name == &child_addr
-        ),
-        "a completed invocation must despawn its seq child; got {orphan:?}",
-    );
+    // The bundle root and its per-seq inline child are generated types the
+    // test cannot name, so both are looked up as the host sees them: the root
+    // is the trampoline keyed by its load name, and the seq child's alias —
+    // keyed by its seq beneath the root — resolves to that trampoline's
+    // endpoint.
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let trampoline = harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new(&digest.to_string())?)
+        .expect("the bundle root is live");
+    let orphan = harness.child::<WasmTrampoline, WasmTrampoline>(&trampoline, LoadName::new("1")?);
+    assert!(orphan.is_err(), "a completed invocation must despawn its seq child; got {orphan:?}");
 
     let refuse_input = RefuseInput { marker: 1 };
     let refuse_artifact = closure_of(&refuse_input)?;
     let refuse = Invoke::new(2, program_name("test.program.refuse"), refuse_artifact.digest(), vec![refuse_artifact]);
-    let refused = harness
-        .execute(vec![("refuse", HarnessOp::send_and_await_reply(root.as_str(), &refuse))])
-        .expect("refuse invoke");
+    let refused =
+        harness.execute(vec![("refuse", HarnessOp::send_and_await_reply(root, &refuse))]).expect("refuse invoke");
     match refused.reply::<Invoked>("refuse").expect("decode refuse Invoked") {
         Invoked::Refused { seq, refusal: Refusal::Refused { .. } } => assert_eq!(seq, 2),
         other => panic!("expected Refused, got {other:?}"),
     }
 
     let unknown = Invoke::new(3, program_name("test.program.missing"), summarize.input(), Vec::new());
-    let rejected = harness
-        .execute(vec![("unknown", HarnessOp::send_and_await_reply(root.as_str(), &unknown))])
-        .expect("unknown invoke");
+    let rejected =
+        harness.execute(vec![("unknown", HarnessOp::send_and_await_reply(root, &unknown))]).expect("unknown invoke");
     match rejected.reply::<Invoked>("unknown").expect("decode unknown Invoked") {
         Invoked::Rejected { seq, .. } => assert_eq!(seq, 3),
         other => panic!("expected Rejected, got {other:?}"),

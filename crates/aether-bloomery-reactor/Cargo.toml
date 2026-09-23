@@ -17,7 +17,6 @@ serde = { workspace = true, default-features = false, features = ["derive", "all
 aether-actor = { path = "../aether-actor" }
 aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
 aether-bloomery-view = { path = "../aether-bloomery-view" }
-aether-component = { path = "../aether-component" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-kinds = { path = "../aether-kinds" }

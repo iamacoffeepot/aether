@@ -43,7 +43,9 @@ use std::iter;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use aether_data::Kind;
+use aether_actor::ErasedActorRef;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
@@ -65,10 +67,8 @@ use aether_puppet::{
     Channel, Expression, EyeArchetype, Gaze, GpuSilhouetteMode, IdleConfig, Load, LoadResult as PuppetLoadResult, Look,
     Motion, Pose, Viseme, anchor, chart, deform,
 };
-use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult};
+use aether_render::{PassTimingRow, ProgramTimings, ProgramTimingsResult, RenderCapability};
 
-/// The address a loaded component registers at (ADR-0099).
-const PUPPET: &str = "aether.component/aether.embedded:aether.puppet";
 /// ADR-0138: the merged three-actor module is defaultless, so every load
 /// names the actor it wants.
 const PUPPET_EXPORT: &str = "aether.puppet";
@@ -97,6 +97,17 @@ fn canvas() -> (u32, u32) {
             (width.parse().expect("canvas width"), height.parse().expect("canvas height"))
         }
     }
+}
+
+/// The loaded puppet: the trampoline the component host loaded under the
+/// puppet export's own name. Its mail is sent erased — the instrument drives
+/// the harness it boots through helpers that hold only the harness.
+fn puppet(harness: &SubstrateHarness) -> ErasedActorRef {
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new(PUPPET_EXPORT).expect("load name"))
+        .expect("the puppet is loaded")
+        .erase()
 }
 
 /// The pinned framing: facing her, slightly above, her whole height in
@@ -205,7 +216,7 @@ fn mounted_staged_at(
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: fs::read(wasm).expect("read the puppet wasm"),
                     name: None,
@@ -224,7 +235,7 @@ fn mounted_staged_at(
         .execute(vec![(
             "subject",
             HarnessOp::send_and_await_reply(
-                PUPPET,
+                puppet(&harness),
                 &Load {
                     namespace: "assets".to_owned(),
                     path: "subject.obj".to_owned(),
@@ -257,7 +268,10 @@ fn mounted_staged_at(
     harness
         .execute(vec![(
             "canvas",
-            HarnessOp::send_and_settle(PUPPET, &WindowSize { window: WindowId(0), width, height, scale_factor: 1.0 }),
+            HarnessOp::send_and_settle(
+                puppet(&harness),
+                &WindowSize { window: WindowId(0), width, height, scale_factor: 1.0 },
+            ),
         )])
         .expect("the canvas announcement settles");
 
@@ -307,7 +321,10 @@ fn the_frame_paces_at_the_pinned_framing() {
     // the drawing needs a handful of round trips before it is there to
     // photograph.
     harness
-        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
+        .execute(vec![
+            ("frame", HarnessOp::send_and_settle(puppet(&harness), &look(AZIMUTH))),
+            ("prime", HarnessOp::advance(24)),
+        ])
         .expect("prime the pinned framing");
 
     if let Some(pinned) = photograph(&mut harness, "AETHER_PUPPET_GATE_PNG", "the pinned framing") {
@@ -333,7 +350,10 @@ fn the_frame_paces_at_the_pinned_framing() {
 
     let turned = AZIMUTH + (SAMPLES + WARMUP - 1) as f32 * ORBIT_STEP;
     harness
-        .execute(vec![("turn", HarnessOp::send_and_settle(PUPPET, &look(turned))), ("settle", HarnessOp::advance(8))])
+        .execute(vec![
+            ("turn", HarnessOp::send_and_settle(puppet(&harness), &look(turned))),
+            ("settle", HarnessOp::advance(8)),
+        ])
         .expect("settle the turned framing");
     if let Some(turned) =
         photograph(&mut harness, "AETHER_PUPPET_TURNED_PNG", &format!("azimuth {turned:.1} after the orbit"))
@@ -553,7 +573,7 @@ fn rig_channel_limits_capture() {
 fn capture_rig_limit_pose(harness: &mut SubstrateHarness, pose: &Pose) -> Vec<u8> {
     harness
         .execute(vec![
-            ("pose", HarnessOp::send_and_settle(PUPPET, pose)),
+            ("pose", HarnessOp::send_and_settle(puppet(harness), pose)),
             ("settle", HarnessOp::advance(8)),
             ("capture", HarnessOp::capture()),
         ])
@@ -841,7 +861,7 @@ fn capture_small_canvas(save: &Path, wasm: &Path, dimensions: (u32, u32)) -> Vec
     let mut harness = mounted_staged_at(save, wasm, false, false, dimensions);
     harness
         .execute(vec![
-            ("look", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))),
+            ("look", HarnessOp::send_and_settle(puppet(&harness), &look(AZIMUTH))),
             ("settle", HarnessOp::advance(24)),
             ("capture", HarnessOp::capture()),
         ])
@@ -1061,9 +1081,9 @@ fn capture_silhouette_mode(
 ) -> Vec<u8> {
     harness
         .execute(vec![
-            ("mode", HarnessOp::send_and_settle(PUPPET, mode)),
-            ("pose", HarnessOp::send_and_settle(PUPPET, pose)),
-            ("look", HarnessOp::send_and_settle(PUPPET, look)),
+            ("mode", HarnessOp::send_and_settle(puppet(harness), mode)),
+            ("pose", HarnessOp::send_and_settle(puppet(harness), pose)),
+            ("look", HarnessOp::send_and_settle(puppet(harness), look)),
             ("settle", HarnessOp::advance(24)),
             ("capture", HarnessOp::capture()),
         ])
@@ -1101,7 +1121,7 @@ fn capture_control_family<K: Kind>(harness: &mut SubstrateHarness, output: &Path
     for (label, mail) in states {
         let captured = harness
             .execute(vec![
-                ("control", HarnessOp::send_and_settle(PUPPET, mail)),
+                ("control", HarnessOp::send_and_settle(puppet(harness), mail)),
                 ("settle", HarnessOp::advance(4)),
                 ("capture", HarnessOp::capture()),
             ])
@@ -1225,7 +1245,10 @@ fn glyph(letter: char) -> [u8; 7] {
 fn motion_frame(dir: &Path, wasm: &Path, ticks: u32, delta: Duration) -> Vec<u8> {
     let mut harness = mounted(dir, wasm);
     harness
-        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
+        .execute(vec![
+            ("frame", HarnessOp::send_and_settle(puppet(&harness), &look(AZIMUTH))),
+            ("prime", HarnessOp::advance(24)),
+        ])
         .expect("prime the resting subject before loading the motor");
 
     let config = IdleConfig {
@@ -1239,7 +1262,7 @@ fn motion_frame(dir: &Path, wasm: &Path, ticks: u32, delta: Duration) -> Vec<u8>
         .execute(vec![(
             "motor",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: fs::read(wasm).expect("read the puppet wasm for its idle export"),
                     name: None,
@@ -1320,7 +1343,10 @@ const POSE_STEP: f32 = 0.6;
 /// it and can be moved in the sequence without moving any other number.
 fn pace_the_pose_sweep(harness: &mut SubstrateHarness) {
     harness
-        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("settle", HarnessOp::advance(8))])
+        .execute(vec![
+            ("frame", HarnessOp::send_and_settle(puppet(harness), &look(AZIMUTH))),
+            ("settle", HarnessOp::advance(8)),
+        ])
         .expect("return to the pinned framing");
 
     let held = timed(harness, None);
@@ -1331,7 +1357,10 @@ fn pace_the_pose_sweep(harness: &mut SubstrateHarness) {
         let started = Instant::now();
         harness
             .execute(vec![
-                ("pose", HarnessOp::send_and_settle(PUPPET, &Pose { yaw, jaw: yaw.abs() * 0.2, ..Pose::default() })),
+                (
+                    "pose",
+                    HarnessOp::send_and_settle(puppet(harness), &Pose { yaw, jaw: yaw.abs() * 0.2, ..Pose::default() }),
+                ),
                 ("frame", HarnessOp::advance(1)),
             ])
             .expect("timed pose frame");
@@ -1357,7 +1386,10 @@ fn pace_the_pose_sweep(harness: &mut SubstrateHarness) {
     let held_pose =
         Pose { yaw: 22.0, pitch: -6.0, jaw: 7.0, ear_twist_left: 18.0, ear_twist_right: -18.0, ..Pose::default() };
     harness
-        .execute(vec![("hold", HarnessOp::send_and_settle(PUPPET, &held_pose)), ("settle", HarnessOp::advance(8))])
+        .execute(vec![
+            ("hold", HarnessOp::send_and_settle(puppet(harness), &held_pose)),
+            ("settle", HarnessOp::advance(8)),
+        ])
         .expect("settle the held pose");
     if let Some(posed) = photograph(harness, "AETHER_PUPPET_POSED_PNG", "a held pose at the pinned framing") {
         compare_against_baseline(&posed, "AETHER_PUPPET_BASELINE_PNG", "AETHER_PUPPET_POSED_DIFF_PNG");
@@ -1365,7 +1397,7 @@ fn pace_the_pose_sweep(harness: &mut SubstrateHarness) {
 
     harness
         .execute(vec![
-            ("rest", HarnessOp::send_and_settle(PUPPET, &Pose::default())),
+            ("rest", HarnessOp::send_and_settle(puppet(harness), &Pose::default())),
             ("settle", HarnessOp::advance(4)),
         ])
         .expect("return to the rest pose");
@@ -1426,7 +1458,7 @@ fn photograph(harness: &mut SubstrateHarness, variable: &str, what: &str) -> Opt
 /// EWMA `actor_cost` reads. Zero when the handler has never run.
 fn handler_cost(harness: &mut SubstrateHarness, kind: aether_data::KindId) -> f64 {
     let read = harness
-        .execute(vec![("cost", HarnessOp::send_and_await_reply(PUPPET, &CostTail { kind: Some(kind) }))])
+        .execute(vec![("cost", HarnessOp::send_and_await_reply(puppet(harness), &CostTail { kind: Some(kind) }))])
         .expect("query one handler's cost");
     match read.reply::<CostTailResult>("cost").expect("decode CostTailResult") {
         CostTailResult::Ok { rows } => rows.first().map_or(0.0, |row| row.mean_nanos as f64 / 1.0e6),
@@ -1544,7 +1576,7 @@ fn timed(harness: &mut SubstrateHarness, orbit: Option<f32>) -> Pace {
         let started = Instant::now();
         let mut ops = Vec::new();
         if let Some(from) = orbit {
-            ops.push(("turn", HarnessOp::send_and_settle(PUPPET, &look(from + sample as f32 * ORBIT_STEP))));
+            ops.push(("turn", HarnessOp::send_and_settle(puppet(harness), &look(from + sample as f32 * ORBIT_STEP))));
         }
         ops.push(("frame", HarnessOp::advance(1)));
         harness.execute(ops).expect("timed frame");
@@ -1996,7 +2028,10 @@ fn the_frame_divides_by_pass() {
     let mut harness = mounted_with(&dir, &wasm, true);
 
     harness
-        .execute(vec![("frame", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH))), ("prime", HarnessOp::advance(24))])
+        .execute(vec![
+            ("frame", HarnessOp::send_and_settle(puppet(&harness), &look(AZIMUTH))),
+            ("prime", HarnessOp::advance(24)),
+        ])
         .expect("prime the pinned framing");
     // The EWMA needs samples, and the readback lands a frame or two
     // behind the encode that placed the queries.
@@ -2008,7 +2043,7 @@ fn the_frame_divides_by_pass() {
     for sample in 0..SAMPLES {
         harness
             .execute(vec![
-                ("turn", HarnessOp::send_and_settle(PUPPET, &look(AZIMUTH + sample as f32 * ORBIT_STEP))),
+                ("turn", HarnessOp::send_and_settle(puppet(&harness), &look(AZIMUTH + sample as f32 * ORBIT_STEP))),
                 ("frame", HarnessOp::advance(1)),
             ])
             .expect("orbit frame");
@@ -2027,7 +2062,10 @@ fn table(harness: &mut SubstrateHarness, condition: &str) -> bool {
         let read = harness
             .execute(vec![(
                 "timings",
-                HarnessOp::send_and_await_reply("aether.render", &ProgramTimings { program_id }),
+                HarnessOp::send_and_await_reply(
+                    &harness.actor_ref::<RenderCapability>(),
+                    &ProgramTimings { program_id },
+                ),
             )])
             .expect("query the per-pass timings");
         let rows = match read.reply::<ProgramTimingsResult>("timings").expect("decode ProgramTimingsResult") {
@@ -2056,7 +2094,7 @@ fn table(harness: &mut SubstrateHarness, condition: &str) -> bool {
 /// which pass to look at first.
 fn report_handler_cost(harness: &mut SubstrateHarness) {
     let read = harness
-        .execute(vec![("cost", HarnessOp::send_and_await_reply(PUPPET, &CostTail { kind: None }))])
+        .execute(vec![("cost", HarnessOp::send_and_await_reply(puppet(harness), &CostTail { kind: None }))])
         .expect("query the puppet's handler costs");
     let rows = match read.reply::<CostTailResult>("cost").expect("decode CostTailResult") {
         CostTailResult::Ok { rows } => rows,

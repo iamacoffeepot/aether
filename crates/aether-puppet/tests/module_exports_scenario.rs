@@ -7,6 +7,7 @@
 use std::fs;
 
 use aether_actor::Addressable;
+use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -31,7 +32,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
         .execute(vec![(
             "bare",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
             ),
         )])
@@ -54,7 +55,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
             .execute(vec![(
                 label,
                 HarnessOp::send_and_await_reply(
-                    "aether.component",
+                    &harness.actor_ref::<ComponentHostCapability>(),
                     &LoadComponent {
                         wasm: wasm.clone(),
                         name: None,

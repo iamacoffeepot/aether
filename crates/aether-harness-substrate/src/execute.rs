@@ -22,13 +22,12 @@
 use std::collections::HashMap;
 use std::error;
 use std::fmt;
-use std::marker::PhantomData;
 use std::path::Path;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use aether_actor::{Addressable, Embedded, HandlesKind, One};
-use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_actor::{ActorRef, ErasedActorRef, HandlesKind};
+use aether_component::ComponentHostCapability;
 use aether_data::{Kind, KindId};
 use aether_kinds::{LoadComponent, LoadComponentUnder, NamedMail};
 use aether_window::{InjectWindowEvent, SyntheticWindowCapability, WindowId};
@@ -69,9 +68,11 @@ pub const DEFAULT_TICK_DELTA_MICROS: u32 = 16_667;
 /// payload from a typed kind via [`Kind::encode_into_bytes`], so callers
 /// never hand-encode.
 ///
-/// Recipients are mailbox *names* (`"aether.fs"`, `"aether.component"`,
-/// a loaded component's trampoline address) — mailbox ids are
-/// one-way name hashes, so every send resolves by name.
+/// Recipients are proven references ([`SendTarget`], ADR-0230): a composed
+/// capability's from [`SubstrateHarness::actor_ref`], a loaded component's
+/// from [`SubstrateHarness::load`] / [`SubstrateHarness::load_any`], and a
+/// child's or window's from [`SubstrateHarness::child`] beneath a reference
+/// already held. No op takes an address to render or parse.
 ///
 /// # Which wait to reach for
 ///
@@ -107,7 +108,7 @@ pub enum HarnessOp {
     /// recipient's handler and every mail descended from it have run
     /// (`Settled { root }`, ADR-0080 §6). No reply is stored. Build with
     /// the typed [`HarnessOp::send_and_settle`].
-    SendAndSettle { recipient: String, kind: KindId, payload: Vec<u8> },
+    SendAndSettle { to: ErasedActorRef, kind: KindId, payload: Vec<u8> },
     /// Send a mail and wait for the reply carrying its correlation id,
     /// stashing the raw reply bytes — and wait for nothing else, so
     /// anything else the handler started may still be in flight. Build
@@ -115,7 +116,7 @@ pub enum HarnessOp {
     /// component load / replace / drop and the `aether.fs`
     /// read / write / delete / list round trips uniformly — decode
     /// the stored bytes downstream with [`ExecutionResult::reply`].
-    SendAndAwaitReply { recipient: String, kind: KindId, payload: Vec<u8> },
+    SendAndAwaitReply { to: ErasedActorRef, kind: KindId, payload: Vec<u8> },
     /// Capture the current frame as PNG bytes. Build with
     /// [`HarnessOp::capture`]. Does not dispatch a tick — sequence a
     /// [`HarnessOp::Advance`] before it if the world must move first.
@@ -139,7 +140,7 @@ pub enum HarnessOp {
     /// one, so [`ExecutionResult::reply`] decodes the observation that
     /// ended the wait rather than a re-read of it.
     PollUntil {
-        recipient: String,
+        to: ErasedActorRef,
         kind: KindId,
         payload: Vec<u8>,
         budget: Duration,
@@ -170,55 +171,51 @@ pub struct PollObserver(ObserveFn);
 /// The erased decode-and-test closure a [`PollObserver`] wraps.
 type ObserveFn = Box<dyn FnMut(&[u8]) -> Observation>;
 
-/// Typed actor sender for declarative harness operations.
-///
-/// Construct one with [`HarnessOp::actor`] for a root capability, or with
-/// [`HarnessOp::loaded`] / [`HarnessOp::loaded_default`] for a loaded wasm
-/// component. The constructor resolves the identity to the mailbox name it
-/// registers under and this sender holds it, so the recipient string is
-/// rendered in one place rather than at each call site; [`Self::send`] and
-/// [`Self::send_and_await_reply`] infer the kind from the borrowed mail and
-/// compile-check that the actor handles it.
-pub struct HarnessActor<R> {
-    recipient: String,
-    actor: PhantomData<fn() -> R>,
+mod sealed {
+    /// Seals [`super::SendTarget`] to the two reference shapes it names.
+    pub trait Sealed {}
 }
 
-impl<R> HarnessActor<R> {
-    /// The mailbox name this sender addresses — a root capability's
-    /// `NAMESPACE`, or a loaded component's rendered lineage address.
-    ///
-    /// The seam for the harness surfaces that take a name rather than a
-    /// [`HarnessOp`]: `SubstrateHarness::log_tail`, a
-    /// [`NamedMail`] recipient inside a
-    /// [`HarnessOp::capture_with_mails`] bundle, or an assertion against
-    /// the `LoadResult.path` a load reported.
-    #[must_use]
-    pub fn address(&self) -> &str {
-        &self.recipient
-    }
+/// A proven reference a harness send can address mail of kind `K` to
+/// (ADR-0230).
+///
+/// Two shapes implement it. A typed `&ActorRef<R>` compile-checks that `R`
+/// handles `K`, so a wrong-kind send is refused where it is written; an
+/// [`ErasedActorRef`] names some actor that reached `Live` and is unchecked,
+/// as ADR-0230 §2 allows for an erased target — the shape for a fixture
+/// loaded through [`SubstrateHarness::load_any`], or for a query every actor
+/// answers, such as [`SubstrateHarness::log_tail`]'s. `K` is inferred from
+/// the mail, so no call site names it.
+///
+/// A kind the actor does not handle fails at compile time:
+///
+/// ```compile_fail
+/// use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+/// use aether_kinds::Tick;
+/// use aether_window::SyntheticWindowCapability;
+///
+/// let harness = SubstrateHarness::start().expect("boot");
+/// let window = harness.actor_ref::<SyntheticWindowCapability>();
+/// let _ = HarnessOp::send_and_settle(&window, &Tick::default());
+/// ```
+pub trait SendTarget<K: Kind>: sealed::Sealed {
+    /// The erased reference the harness pushes the mail through.
+    fn erased(self) -> ErasedActorRef;
+}
 
-    /// Build a settlement-gated send for a kind handled by `R` — the
-    /// [`HarnessOp::send_and_settle`] wait, addressed by actor identity.
-    #[must_use]
-    pub fn send<K>(&self, mail: &K) -> HarnessOp
-    where
-        K: Kind,
-        R: HandlesKind<K>,
-    {
-        HarnessOp::send_and_settle(self.recipient.clone(), mail)
-    }
+impl<R> sealed::Sealed for &ActorRef<R> {}
 
-    /// Build a reply-awaiting send for a kind handled by `R` — the
-    /// [`HarnessOp::send_and_await_reply`] wait, addressed by actor
-    /// identity. Decode the stored reply with [`ExecutionResult::reply`].
-    #[must_use]
-    pub fn send_and_await_reply<K>(&self, mail: &K) -> HarnessOp
-    where
-        K: Kind,
-        R: HandlesKind<K>,
-    {
-        HarnessOp::send_and_await_reply(self.recipient.clone(), mail)
+impl sealed::Sealed for ErasedActorRef {}
+
+impl<K: Kind, R: HandlesKind<K>> SendTarget<K> for &ActorRef<R> {
+    fn erased(self) -> ErasedActorRef {
+        self.erase()
+    }
+}
+
+impl<K: Kind> SendTarget<K> for ErasedActorRef {
+    fn erased(self) -> ErasedActorRef {
+        self
     }
 }
 
@@ -251,92 +248,22 @@ impl HarnessOp {
         Self::CaptureWithMails { pre, after }
     }
 
-    /// Bind a root actor identity for a compile-checked typed send.
-    ///
-    /// Only root identities using [`One`] can be constructed because a
-    /// declarative operation has no parent carry or instance key with which to
-    /// resolve nested or instanced actors.
-    ///
-    /// Unsupported direct kinds fail at compile time:
-    ///
-    /// ```compile_fail
-    /// use aether_harness_substrate::HarnessOp;
-    /// use aether_kinds::Tick;
-    /// use aether_window::SyntheticWindowCapability;
-    ///
-    /// let _ = HarnessOp::actor::<SyntheticWindowCapability>().send(&Tick::default());
-    /// ```
-    #[must_use]
-    pub fn actor<R>() -> HarnessActor<R>
-    where
-        R: Addressable<Resolver = One>,
-    {
-        HarnessActor { recipient: R::NAMESPACE.to_owned(), actor: PhantomData }
-    }
-
-    /// Bind a loaded component's identity, instantiated under the load-time
-    /// `name`, for a compile-checked typed send.
-    ///
-    /// A component resolves under the reserved embed scope ([`Embedded`],
-    /// ADR-0119), so its registered mailbox is the ADR-0099 lineage
-    /// `aether.component/aether.embedded:<name>` — never the bare
-    /// `NAMESPACE`, which is only the segment inside that scope. This
-    /// renders that address from the identity, so a scenario states which
-    /// component it is talking to instead of rebuilding the rendering by
-    /// hand and getting an unknown-recipient drop when it writes the
-    /// namespace instead.
-    ///
-    /// `name` is the `LoadComponent.name` the scenario loaded under; reach
-    /// for [`HarnessOp::loaded_default`] when the load took the actor's own
-    /// namespace as its name.
-    ///
-    /// Two shapes stay on the string constructors, addressed through
-    /// [`HarnessActor::address`] or written out: an `#[actor(instanced)]`
-    /// component resolves through `EmbeddedMany` rather than [`Embedded`],
-    /// and a kind a wasm actor adopts from a `#[handler_set]` carries no
-    /// `HandlesKind` marker on that transport (ADR-0169), so
-    /// [`HarnessActor::send`] cannot compile-check it.
-    ///
-    /// A root capability is not reachable this way — it has no embed scope
-    /// to render, so the address would be a live-nowhere string:
-    ///
-    /// ```compile_fail
-    /// use aether_harness_substrate::HarnessOp;
-    /// use aether_window::SyntheticWindowCapability;
-    ///
-    /// let _ = HarnessOp::loaded::<SyntheticWindowCapability>("synthetic");
-    /// ```
-    #[must_use]
-    pub fn loaded<R>(name: &str) -> HarnessActor<R>
-    where
-        R: Addressable<Resolver = Embedded>,
-    {
-        let recipient = format!("{}/{}:{name}", ComponentHostCapability::NAMESPACE, WasmTrampoline::NAMESPACE);
-        HarnessActor { recipient, actor: PhantomData }
-    }
-
-    /// [`HarnessOp::loaded`] for a component loaded under its own
-    /// [`Addressable::NAMESPACE`] — the name the component host assigns
-    /// when `LoadComponent.name` is `None`.
-    #[must_use]
-    pub fn loaded_default<R>() -> HarnessActor<R>
-    where
-        R: Addressable<Resolver = Embedded>,
-    {
-        Self::loaded::<R>(R::NAMESPACE)
-    }
-
-    /// Inject any typed event as originating from `window`.
+    /// Inject any typed event as originating from `window`, through the
+    /// synthetic window capability `synthetic` proves — the reference
+    /// [`SubstrateHarness::actor_ref`] returns for it.
     ///
     /// `K` is inferred from `event`; the synthetic runtime forwards its
     /// already-encoded payload without a maintained window-event kind list.
     #[must_use]
-    pub fn window_event<K: Kind>(window: WindowId, event: &K) -> Self {
+    pub fn window_event<K: Kind>(synthetic: &ActorRef<SyntheticWindowCapability>, window: WindowId, event: &K) -> Self {
         let injection = InjectWindowEvent { window, kind: K::ID, payload: event.encode_into_bytes() };
-        Self::actor::<SyntheticWindowCapability>().send(&injection)
+        Self::send_and_settle(synthetic, &injection)
     }
 
-    /// Load `component` beneath the live logical actor addressed by `parent`.
+    /// Load `component` beneath the live logical actor addressed by `parent`,
+    /// through the component host `host` proves — the reference
+    /// [`SubstrateHarness::actor_ref`] returns for it. `parent` stays address
+    /// text because it is the `LoadComponentUnder.parent` kind field.
     ///
     /// This is the public harness composition seam for explicit-parent and
     /// nested-component scenarios. The component host canonicalizes `parent`
@@ -349,11 +276,12 @@ impl HarnessOp {
     /// retains root component-host placement. This constructor does not add a
     /// production hub or MCP load mode.
     #[must_use]
-    pub fn load_component_under(parent: impl Into<String>, component: LoadComponent) -> Self {
-        Self::send_and_await_reply(
-            ComponentHostCapability::NAMESPACE,
-            &LoadComponentUnder { parent: parent.into(), load: component },
-        )
+    pub fn load_component_under(
+        host: &ActorRef<ComponentHostCapability>,
+        parent: impl Into<String>,
+        component: LoadComponent,
+    ) -> Self {
+        Self::send_and_await_reply(host, &LoadComponentUnder { parent: parent.into(), load: component })
     }
 
     /// Send a typed mail and wait for its whole causal chain to settle:
@@ -367,8 +295,8 @@ impl HarnessOp {
     /// [`Kind::encode_into_bytes`] — works for both cast and structured
     /// kinds.
     #[must_use]
-    pub fn send_and_settle<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendAndSettle { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
+    pub fn send_and_settle<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
+        Self::SendAndSettle { to: to.erased(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 
     /// Send a typed mail and wait for the reply carrying its correlation
@@ -382,11 +310,11 @@ impl HarnessOp {
     /// rides the caller's chain, [`HarnessOp::send_and_settle`] is the
     /// barrier that orders it; see the rule on [`HarnessOp`].
     #[must_use]
-    pub fn send_and_await_reply<K: Kind>(recipient: impl Into<String>, mail: &K) -> Self {
-        Self::SendAndAwaitReply { recipient: recipient.into(), kind: K::ID, payload: mail.encode_into_bytes() }
+    pub fn send_and_await_reply<K: Kind>(to: impl SendTarget<K>, mail: &K) -> Self {
+        Self::SendAndAwaitReply { to: to.erased(), kind: K::ID, payload: mail.encode_into_bytes() }
     }
 
-    /// Re-send `probe` to `recipient` until its reply satisfies
+    /// Re-send `probe` to `to` until its reply satisfies
     /// `observed`, then store that reply the way
     /// [`HarnessOp::send_and_await_reply`] would. Waits up to
     /// [`DEFAULT_POLL_BUDGET`].
@@ -406,11 +334,12 @@ impl HarnessOp {
     /// Annotate the closure's parameter to name the reply kind:
     ///
     /// ```no_run
-    /// # use aether_harness_substrate::HarnessOp;
-    /// # use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
-    /// # use aether_actor::Addressable;
+    /// # use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+    /// # use aether_window::{ListWindows, ListWindowsResult, SyntheticWindowCapability};
+    /// # let harness = SubstrateHarness::start().expect("boot");
     /// # let surviving = aether_window::WindowId(0);
-    /// HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |reply: &ListWindowsResult| {
+    /// let window = harness.actor_ref::<SyntheticWindowCapability>();
+    /// HarnessOp::poll_until(&window, &ListWindows, move |reply: &ListWindowsResult| {
     ///     matches!(reply, ListWindowsResult::Ok { windows }
     ///         if windows.iter().map(|window| window.id).eq([surviving]))
     /// });
@@ -420,12 +349,12 @@ impl HarnessOp {
     /// which reports the last reply the probe actually got — a red that
     /// names the state reached, not only that the wait ran out.
     #[must_use]
-    pub fn poll_until<K, R>(recipient: impl Into<String>, probe: &K, observed: impl FnMut(&R) -> bool + 'static) -> Self
+    pub fn poll_until<K, R>(to: impl SendTarget<K>, probe: &K, observed: impl FnMut(&R) -> bool + 'static) -> Self
     where
         K: Kind,
         R: Kind + fmt::Debug,
     {
-        Self::poll_until_within(DEFAULT_POLL_BUDGET, recipient, probe, observed)
+        Self::poll_until_within(DEFAULT_POLL_BUDGET, to, probe, observed)
     }
 
     /// [`HarnessOp::poll_until`] with an explicit wall-clock budget, for
@@ -438,7 +367,7 @@ impl HarnessOp {
     #[must_use]
     pub fn poll_until_within<K, R>(
         budget: Duration,
-        recipient: impl Into<String>,
+        to: impl SendTarget<K>,
         probe: &K,
         mut observed: impl FnMut(&R) -> bool + 'static,
     ) -> Self
@@ -447,7 +376,7 @@ impl HarnessOp {
         R: Kind + fmt::Debug,
     {
         Self::PollUntil {
-            recipient: recipient.into(),
+            to: to.erased(),
             kind: K::ID,
             payload: probe.encode_into_bytes(),
             budget,
@@ -569,7 +498,7 @@ pub enum ExecutionError {
     /// into a diagnosis.
     PollTimeout {
         label: String,
-        recipient: String,
+        probe_kind: String,
         observed_kind: &'static str,
         budget: Duration,
         probes: u32,
@@ -592,10 +521,10 @@ impl fmt::Display for ExecutionError {
             Self::ReplyDecode { label, error } => {
                 write!(f, "decode reply for label {label:?}: {error}")
             }
-            Self::PollTimeout { label, recipient, observed_kind, budget, probes, observed } => {
+            Self::PollTimeout { label, probe_kind, observed_kind, budget, probes, observed } => {
                 write!(
                     f,
-                    "execute() step {label:?} polled {recipient:?} for {budget:?} across {probes} probes \
+                    "execute() step {label:?} polled with {probe_kind} for {budget:?} across {probes} probes \
                      and the observation never held; last {observed_kind} seen: {observed}",
                 )
             }
@@ -701,21 +630,20 @@ impl SubstrateHarness {
                 HarnessOp::Advance { ticks, delta_micros } => {
                     self.advance(ticks, delta_micros).map(|_| HarnessOutput::Advanced).map_err(failed)
                 }
-                HarnessOp::SendAndSettle { recipient, kind, payload } => {
-                    self.send_bytes(&recipient, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
+                HarnessOp::SendAndSettle { to, kind, payload } => {
+                    self.settle_bytes(to, kind, payload).map(|()| HarnessOutput::Mailed).map_err(failed)
                 }
-                HarnessOp::SendAndAwaitReply { recipient, kind, payload } => {
-                    self.send_bytes_and_await(&recipient, kind, payload).map(HarnessOutput::Replied).map_err(failed)
+                HarnessOp::SendAndAwaitReply { to, kind, payload } => {
+                    self.request_bytes(to, kind, payload).map(HarnessOutput::Replied).map_err(failed)
                 }
                 HarnessOp::Capture => self.capture().map(HarnessOutput::Captured).map_err(failed),
                 HarnessOp::CaptureWithMails { pre, after } => {
                     self.capture_with_mails(pre, after).map(HarnessOutput::Captured).map_err(failed)
                 }
-                HarnessOp::PollUntil { recipient, kind, payload, budget, observed_kind, observe } => self
-                    .poll_until_observed(
-                        PollStep { label, recipient: &recipient, kind, payload: &payload, budget, observed_kind },
-                        observe,
-                    ),
+                HarnessOp::PollUntil { to, kind, payload, budget, observed_kind, observe } => self.poll_until_observed(
+                    PollStep { label, to, kind, payload: &payload, budget, observed_kind },
+                    observe,
+                ),
             }
             .map_err(|error| Box::new(ExecutionFailure { error, completed: completed.clone() }))?;
 
@@ -729,7 +657,7 @@ impl SubstrateHarness {
     /// Body of the [`HarnessOp::PollUntil`] step: re-send the probe
     /// until `observe` is satisfied or `budget` elapses.
     ///
-    /// The probe rides [`Self::send_bytes_and_await`] — the correlation-only
+    /// The probe rides [`Self::request_bytes`] — the correlation-only
     /// wait — deliberately. This op exists precisely because the effect
     /// under observation is not on the probe's chain, so the probe needs
     /// only to fetch the current answer; what orders the wait is the
@@ -740,13 +668,13 @@ impl SubstrateHarness {
         step: PollStep<'_>,
         mut observe: PollObserver,
     ) -> Result<HarnessOutput, ExecutionError> {
-        let PollStep { label, recipient, kind, payload, budget, observed_kind } = step;
+        let PollStep { label, to, kind, payload, budget, observed_kind } = step;
         let start = Instant::now();
         let mut probes = 0u32;
 
         loop {
             let bytes = self
-                .send_bytes_and_await(recipient, kind, payload.to_vec())
+                .request_bytes(to, kind, payload.to_vec())
                 .map_err(|error| ExecutionError::OpFailed { label: label.to_owned(), error })?;
             probes = probes.saturating_add(1);
 
@@ -756,8 +684,8 @@ impl SubstrateHarness {
                     return Err(ExecutionError::ReplyDecode {
                         label: label.to_owned(),
                         error: format!(
-                            "probe reply from {recipient:?} ({} bytes) does not decode as the observed kind \
-                             {observed_kind}",
+                            "reply to the {} probe ({} bytes) does not decode as the observed kind {observed_kind}",
+                            self.kind_label(kind),
                             bytes.len()
                         ),
                     });
@@ -768,7 +696,7 @@ impl SubstrateHarness {
                 Observation::Pending(rendered) if start.elapsed() >= budget => {
                     return Err(ExecutionError::PollTimeout {
                         label: label.to_owned(),
-                        recipient: recipient.to_owned(),
+                        probe_kind: self.kind_label(kind),
                         observed_kind,
                         budget,
                         probes,
@@ -786,7 +714,7 @@ impl SubstrateHarness {
 #[derive(Clone, Copy)]
 struct PollStep<'a> {
     label: &'a str,
-    recipient: &'a str,
+    to: ErasedActorRef,
     kind: KindId,
     payload: &'a [u8],
     budget: Duration,
@@ -800,7 +728,7 @@ mod tests {
     use std::process::id;
     use std::time::{SystemTime, UNIX_EPOCH};
 
-    use aether_window::{ListWindows, ListWindowsResult, WindowCapability};
+    use aether_window::{ListWindows, ListWindowsResult};
 
     use super::*;
 
@@ -851,10 +779,12 @@ mod tests {
         let mut harness = SubstrateHarness::start().expect("boot harness");
         let budget = Duration::from_millis(200);
 
-        let never =
-            HarnessOp::poll_until_within(budget, WindowCapability::NAMESPACE, &ListWindows, |_: &ListWindowsResult| {
-                false
-            });
+        let never = HarnessOp::poll_until_within(
+            budget,
+            &harness.actor_ref::<SyntheticWindowCapability>(),
+            &ListWindows,
+            |_: &ListWindowsResult| false,
+        );
 
         let Err(error) = harness.execute(vec![("never", never)]) else {
             panic!("an observation that never holds fails the step");
@@ -886,10 +816,14 @@ mod tests {
         let result = harness
             .execute(vec![(
                 "settles",
-                HarnessOp::poll_until(WindowCapability::NAMESPACE, &ListWindows, move |_: &ListWindowsResult| {
-                    seen += 1;
-                    seen >= 3
-                }),
+                HarnessOp::poll_until(
+                    &harness.actor_ref::<SyntheticWindowCapability>(),
+                    &ListWindows,
+                    move |_: &ListWindowsResult| {
+                        seen += 1;
+                        seen >= 3
+                    },
+                ),
             )])
             .expect("an observation that comes true inside the budget succeeds");
 
@@ -933,7 +867,7 @@ mod tests {
 
         let missing = HarnessOp::poll_until_within(
             Duration::ZERO,
-            WindowCapability::NAMESPACE,
+            &harness.actor_ref::<SyntheticWindowCapability>(),
             &ListWindows,
             |_: &ListWindowsResult| false,
         );
@@ -975,7 +909,7 @@ mod tests {
             "missing",
             HarnessOp::poll_until_within(
                 Duration::ZERO,
-                WindowCapability::NAMESPACE,
+                &ordinary.actor_ref::<SyntheticWindowCapability>(),
                 &ListWindows,
                 |_: &ListWindowsResult| false,
             ),
@@ -990,7 +924,7 @@ mod tests {
                 "missing",
                 HarnessOp::poll_until_within(
                     Duration::ZERO,
-                    WindowCapability::NAMESPACE,
+                    &diagnosed.actor_ref::<SyntheticWindowCapability>(),
                     &ListWindows,
                     |_: &ListWindowsResult| false,
                 ),
@@ -1012,7 +946,7 @@ mod tests {
             "missing",
             HarnessOp::poll_until_within(
                 Duration::ZERO,
-                WindowCapability::NAMESPACE,
+                &ordinary.actor_ref::<SyntheticWindowCapability>(),
                 &ListWindows,
                 |_: &ListWindowsResult| false,
             ),
@@ -1036,7 +970,7 @@ mod tests {
                     "missing",
                     HarnessOp::poll_until_within(
                         Duration::ZERO,
-                        WindowCapability::NAMESPACE,
+                        &diagnosed.actor_ref::<SyntheticWindowCapability>(),
                         &ListWindows,
                         |_: &ListWindowsResult| false,
                     ),

@@ -14,15 +14,11 @@
 //! gate). CI builds every discovered component crate and sets
 //! `AETHER_REQUIRE_RUNTIME=1` so a missing pre-build is loud.
 
-// Integration test derives the fs cap's own id by name to probe the registry —
-// reference id derivation, not sibling-cap addressing.
-#![allow(clippy::disallowed_methods)]
-
 use std::path::Path;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::ErasedActorRef;
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, Kind, KindId, mailbox_id_from_name};
+use aether_data::{ActorPath, Kind, KindId};
 use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
@@ -101,11 +97,12 @@ fn cap_registry_updates_on_replace() {
     }
 
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let swapped = harness
         .execute(vec![(
             "swap",
             HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
+                &host,
                 &ReplaceComponent {
                     target: path,
                     wasm: kit_wasm,
@@ -152,11 +149,9 @@ fn cap_registry_clears_on_drop() {
         "sanity: loaded probe accepts Tick before drop"
     );
 
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let dropped = harness
-        .execute(vec![(
-            "drop",
-            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { target: path }),
-        )])
+        .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path }))])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
         DropResult::Ok => {}
@@ -177,13 +172,13 @@ fn cap_registry_covers_native_cap() {
     let harness =
         SubstrateHarness::builder().size(64, 48).namespace_roots(test_namespace_roots(sandbox)).build().expect("boot");
 
-    let fs_mbox = mailbox_id_from_name(FsCapability::NAMESPACE);
+    let fs = harness.actor_ref::<FsCapability>().erase();
     let caps = harness.capability_registry();
-    assert!(caps.accepts(fs_mbox, Write::ID), "the native aether.fs cap should accept its declared Write handler");
-    // A native cap with no `#[fallback]` rejects undeclared kinds.
+    assert!(caps.accepts_actor(fs, Write::ID), "the native aether.fs cap should accept its declared Write handler");
+    // A native cap with no `#[fallback]` rejects undeclared kinds — a
+    // fallback would accept this one, so the refusal also proves there is none.
     assert!(
-        !caps.accepts(fs_mbox, KindId(0xDEAD_BEEF)),
+        !caps.accepts_actor(fs, KindId(0xDEAD_BEEF)),
         "aether.fs is a strict receiver — undeclared kinds are rejected",
     );
-    assert!(!caps.has_fallback(fs_mbox));
 }

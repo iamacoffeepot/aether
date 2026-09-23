@@ -9,11 +9,11 @@
 
 use std::fs;
 
-use aether_actor::{Addressable, EMBEDDED_SCOPE};
-use aether_component::ComponentHostCapability;
-use aether_data::ActorPath;
+use aether_actor::ActorRef;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{ActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_harness_substrate::{ExecutionError, HarnessOp, SubstrateHarness, SubstrateHarnessError};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_kinds::Bump;
 
@@ -36,9 +36,10 @@ fn load_result(
         config: Vec::new(),
         export: Some(export.to_owned()),
     };
+    let host = harness.actor_ref::<ComponentHostCapability>();
     let operation = match parent {
-        Some(parent) => HarnessOp::load_component_under(parent, component),
-        None => HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &component),
+        Some(parent) => HarnessOp::load_component_under(&host, parent, component),
+        None => HarnessOp::send_and_await_reply(&host, &component),
     };
     let result = harness.execute(vec![(label, operation)]).expect("component load operation");
     result.reply::<LoadResult>(label).expect("decode LoadResult")
@@ -56,6 +57,18 @@ fn load_named(
         LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("{label} must load: {error}"),
     }
+}
+
+fn key(name: &str) -> LoadName {
+    LoadName::new(name).expect("a valid load name")
+}
+
+/// The root trampoline the component host loaded as `name`.
+fn root_trampoline(harness: &SubstrateHarness, name: &str) -> ActorRef<WasmTrampoline> {
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, key(name))
+        .unwrap_or_else(|error| panic!("the trampoline loaded as {name} is live: {error}"))
 }
 
 fn fixture_harness() -> Option<(SubstrateHarness, Vec<u8>)> {
@@ -83,28 +96,22 @@ fn missing_declared_dependency_refuses_the_load() {
         "the refusal names the actor and the missing namespace",
     );
 
-    // Refusal happens before creation: the dependent's address is unknown.
-    let unserved = format!("{outer}/{EMBEDDED_SCOPE}:{DEPENDENT_EXPORT}");
-    let Err(err) = harness.execute(vec![("void", HarnessOp::send_and_settle(&unserved, &Bump))]) else {
-        panic!("mail to the refused address must find no mailbox")
-    };
-    assert!(
-        matches!(
-            err,
-            ExecutionError::OpFailed { error: SubstrateHarnessError::UnknownMailbox(ref addr), .. }
-            if addr == &unserved
-        ),
-        "the refused load must not have created anything: {err:?}",
-    );
+    // Refusal happens before creation: no dependent stands beneath the parent.
+    let outer_trampoline = root_trampoline(&harness, "outer");
+    let unserved = harness.child::<WasmTrampoline, WasmTrampoline>(&outer_trampoline, key(DEPENDENT_EXPORT));
+    assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
     let baseline = harness.count_observed(TICK_OBSERVED);
 
     load_named(&mut harness, &wasm, "target", Some(&outer), None, TARGET_EXPORT);
 
-    let dependent = load_named(&mut harness, &wasm, "dependent", Some(&outer), None, DEPENDENT_EXPORT);
+    load_named(&mut harness, &wasm, "dependent", Some(&outer), None, DEPENDENT_EXPORT);
+    let dependent = harness
+        .child::<WasmTrampoline, WasmTrampoline>(&outer_trampoline, key(DEPENDENT_EXPORT))
+        .expect("the satisfied dependent is live");
 
     // The satisfied load really spawns: the probe answers `Bump` with
     // exactly one `TickObserved`.
-    harness.execute(vec![("bump", HarnessOp::send_and_settle(&dependent, &Bump))]).expect("bump the dependent");
+    harness.execute(vec![("bump", HarnessOp::send_and_settle(dependent.erase(), &Bump))]).expect("bump the dependent");
     assert_eq!(harness.count_observed(TICK_OBSERVED), baseline + 1, "the loaded dependent must answer mail");
 }
 
@@ -120,7 +127,7 @@ fn replace_with_unmet_dependency_keeps_running_module() {
 
     let replace = |harness: &mut SubstrateHarness, label: &str, export: Option<&str>| {
         let operation = HarnessOp::send_and_await_reply(
-            "aether.component",
+            &harness.actor_ref::<ComponentHostCapability>(),
             &ReplaceComponent {
                 target: victim_path.clone(),
                 wasm: wasm.clone(),

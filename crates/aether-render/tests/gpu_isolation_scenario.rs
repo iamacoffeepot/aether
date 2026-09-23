@@ -27,6 +27,7 @@ use aether_harness_substrate_capture::visual::decode_png;
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateTexture, CreateTextureResult, DestroyTexture, DrawShapes, DrawTexturedQuads, InputSlot, OutputSlot,
     PassRepeat, PassStage, ProgramPass, ProgramRegister, ProgramRegisterResult, Shape, SlotExtent, SlotSpec,
@@ -63,7 +64,7 @@ fn full(format: TextureFormat) -> SlotSpec {
 
 fn create_reply(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> CreateTextureResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence")
         .reply::<CreateTextureResult>(label)
         .expect("decode CreateTextureResult")
@@ -75,7 +76,7 @@ fn register_reply(
     mail: &ProgramRegister,
 ) -> ProgramRegisterResult {
     harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("register sequence")
         .reply::<ProgramRegisterResult>(label)
         .expect("decode ProgramRegisterResult")
@@ -289,7 +290,10 @@ fn destroyed_texture_ids_drop_cleanly_and_are_never_reissued() {
     };
 
     harness
-        .execute(vec![("destroy", HarnessOp::send_and_settle("aether.render", &DestroyTexture { texture_id: first }))])
+        .execute(vec![(
+            "destroy",
+            HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &DestroyTexture { texture_id: first }),
+        )])
         .expect("destroy sequence");
 
     // Drawing with the destroyed id must drop the batch, not fault the

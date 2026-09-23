@@ -247,10 +247,7 @@ mod tests {
     use crate::SubstrateHarnessError;
 
     fn failure() -> ExecutionError {
-        ExecutionError::OpFailed {
-            label: "fail".to_owned(),
-            error: SubstrateHarnessError::UnknownMailbox("missing".to_owned()),
-        }
+        ExecutionError::OpFailed { label: "fail".to_owned(), error: SubstrateHarnessError::Load("missing".to_owned()) }
     }
 
     fn temporary_root(name: &str) -> PathBuf {
@@ -305,7 +302,7 @@ mod tests {
             ExecutionError::ReplyDecode { label: "decode".to_owned(), error: "bad".to_owned() },
             ExecutionError::PollTimeout {
                 label: "poll".to_owned(),
-                recipient: "mailbox".to_owned(),
+                probe_kind: "test.probe".to_owned(),
                 observed_kind: "test.kind",
                 budget: Duration::ZERO,
                 probes: 1,

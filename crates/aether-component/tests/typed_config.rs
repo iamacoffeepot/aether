@@ -9,9 +9,8 @@
 
 use std::path::Path;
 
-use aether_actor::Addressable;
-use aether_component::ComponentHostCapability;
-use aether_data::Kind;
+use aether_component::{ComponentHostCapability, WasmTrampoline};
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -22,6 +21,19 @@ use std::fs;
 // entries are present in this test binary.
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
+
+/// Ask the loaded `probe_with_config` trampoline which config its `init` saw.
+fn echo_config(harness: &mut SubstrateHarness) -> ConfigEcho {
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let probe = harness
+        .child::<ComponentHostCapability, WasmTrampoline>(&host, LoadName::new("probe_with_config").expect("load name"))
+        .expect("the loaded probe_with_config is live");
+    harness
+        .execute(vec![("echo", HarnessOp::send_and_await_reply(probe.erase(), &ConfigQuery))])
+        .expect("echo sequence")
+        .reply::<ConfigEcho>("echo")
+        .expect("decode ConfigEcho")
+}
 
 /// Issue 2878: an empty config byte slice resolves guest-side to
 /// `ProbeConfig::default()` instead of failing decode.
@@ -34,27 +46,18 @@ fn typed_config_guest_without_config_bytes_uses_default() {
     let wasm = fs::read::<&Path>(wasm_path.as_ref()).expect("read fixture wasm");
 
     let report = harness
-        .execute(vec![
-            (
-                "load",
-                HarnessOp::send_and_await_reply(
-                    ComponentHostCapability::NAMESPACE,
-                    &LoadComponent {
-                        wasm,
-                        name: Some("probe_with_config".to_owned()),
-                        config: Vec::new(),
-                        export: Some("test.probe_with_config".to_owned()),
-                    },
-                ),
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &LoadComponent {
+                    wasm,
+                    name: Some("probe_with_config".to_owned()),
+                    config: Vec::new(),
+                    export: Some("test.probe_with_config".to_owned()),
+                },
             ),
-            (
-                "echo",
-                HarnessOp::send_and_await_reply(
-                    format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
-                    &ConfigQuery,
-                ),
-            ),
-        ])
+        )])
         .expect("load sequence");
 
     match report.reply::<LoadResult>("load").expect("decode LoadResult") {
@@ -68,7 +71,7 @@ fn typed_config_guest_without_config_bytes_uses_default() {
         }
     }
 
-    let echo = report.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
+    let echo = echo_config(&mut harness);
     let expected = ProbeConfig::default();
     assert_eq!(echo.seed, expected.seed, "default seed reaches init");
     assert_eq!(echo.label, expected.label, "default label reaches init");
@@ -96,27 +99,18 @@ fn typed_config_guest_with_config_bytes_round_trips() {
     let config_bytes = config.encode_into_bytes();
 
     let report = harness
-        .execute(vec![
-            (
-                "load",
-                HarnessOp::send_and_await_reply(
-                    ComponentHostCapability::NAMESPACE,
-                    &LoadComponent {
-                        wasm,
-                        name: Some("probe_with_config".to_owned()),
-                        config: config_bytes,
-                        export: Some("test.probe_with_config".to_owned()),
-                    },
-                ),
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &LoadComponent {
+                    wasm,
+                    name: Some("probe_with_config".to_owned()),
+                    config: config_bytes,
+                    export: Some("test.probe_with_config".to_owned()),
+                },
             ),
-            (
-                "echo",
-                HarnessOp::send_and_await_reply(
-                    format!("aether.component/{}:probe_with_config", aether_component::WasmTrampoline::NAMESPACE),
-                    &ConfigQuery,
-                ),
-            ),
-        ])
+        )])
         .expect("load + query sequence");
 
     match report.reply::<LoadResult>("load").expect("decode LoadResult") {
@@ -130,7 +124,7 @@ fn typed_config_guest_with_config_bytes_round_trips() {
         }
     }
 
-    let echo = report.reply::<ConfigEcho>("echo").expect("decode ConfigEcho");
+    let echo = echo_config(&mut harness);
     assert_eq!(echo.seed, 0xABCD_1234, "seed round-trips through init");
     assert_eq!(echo.label, "c2-round-trip", "label round-trips through init");
 }

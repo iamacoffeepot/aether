@@ -37,13 +37,14 @@ use std::fmt::Write as _;
 use std::fs;
 use std::path::Path;
 
-use aether_harness_substrate::{HarnessActor, HarnessOp, SubstrateHarness};
+use aether_actor::ActorRef;
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{Image, decode_png};
 use aether_harness_substrate_capture::{
     RenderHarnessBuilderExt,
     test_helpers::{init_save_sandbox, require_runtime, rgba_at, test_namespace_roots, write_fixture},
 };
-use aether_kinds::{LoadComponent, LoadResult, WindowId, WindowSize};
+use aether_kinds::{LoadComponent, WindowId, WindowSize};
 use aether_puppet::{Load, Look, Puppet};
 
 /// ADR-0138: the merged multi-actor module is defaultless, so every load
@@ -68,10 +69,6 @@ const DISTANCE: f32 = 5.0;
 /// this sits low enough to count those and high enough to ignore the
 /// clear colour's own dither.
 const INK_MARGIN: u8 = 20;
-
-fn puppet() -> HarnessActor<Puppet> {
-    HarnessOp::loaded_default::<Puppet>()
-}
 
 /// A UV sphere of radius one at the origin, as OBJ text.
 ///
@@ -116,21 +113,12 @@ fn sphere_obj(meridians: u16, rings: u16) -> String {
     out
 }
 
-fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) {
+fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorRef<Puppet> {
     let wasm = fs::read(wasm_path).expect("read the puppet wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { .. } => {}
-        LoadResult::Err { error } => panic!("load_component(puppet): {error}"),
-    }
+    harness
+        .load::<Puppet>(LoadComponent { wasm, name: None, config: Vec::new(), export: Some(PUPPET_EXPORT.to_owned()) })
+        .unwrap_or_else(|error| panic!("load_component(puppet): {error}"))
+        .0
 }
 
 /// Ink as a fraction of the subject's own silhouette, not of the frame.
@@ -198,24 +186,30 @@ fn hatching_reads_as_shading_from_every_azimuth() {
         .with_component_host()
         .build()
         .expect("boot a rendering harness with a component host");
-    load_puppet(&mut harness, &wasm_path);
+    let puppet = load_puppet(&mut harness, &wasm_path);
 
     harness
         .execute(vec![
             (
                 "size",
-                puppet().send(&WindowSize { window: WindowId(1), width: WIDTH, height: HEIGHT, scale_factor: 1.0 }),
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &WindowSize { window: WindowId(1), width: WIDTH, height: HEIGHT, scale_factor: 1.0 },
+                ),
             ),
             (
                 "subject",
-                puppet().send(&Load {
-                    namespace: "assets".to_owned(),
-                    path: subject,
-                    labels: String::new(),
-                    material_field_padding: 0.12,
-                    rig: String::new(),
-                    palette: String::new(),
-                }),
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &Load {
+                        namespace: "assets".to_owned(),
+                        path: subject,
+                        labels: String::new(),
+                        material_field_padding: 0.12,
+                        rig: String::new(),
+                        palette: String::new(),
+                    },
+                ),
             ),
         ])
         .expect("the size and subject load settle");
@@ -229,7 +223,13 @@ fn hatching_reads_as_shading_from_every_azimuth() {
         .zip(AZIMUTHS)
         .flat_map(|(&(look, prime, view), azimuth)| {
             [
-                (look, puppet().send(&Look { azimuth, elevation: 12.0, distance: DISTANCE, height: 0.0 })),
+                (
+                    look,
+                    HarnessOp::send_and_settle(
+                        &puppet,
+                        &Look { azimuth, elevation: 12.0, distance: DISTANCE, height: 0.0 },
+                    ),
+                ),
                 (prime, HarnessOp::advance(5)),
                 (view, HarnessOp::capture()),
             ]
@@ -568,29 +568,30 @@ fn hatch_directions_keep_crossing_through_a_turn() {
         .with_component_host()
         .build()
         .expect("boot a rendering harness with a component host");
-    load_puppet(&mut harness, &wasm_path);
+    let puppet = load_puppet(&mut harness, &wasm_path);
 
     harness
         .execute(vec![
             (
                 "size",
-                puppet().send(&WindowSize {
-                    window: WindowId(1),
-                    width: SWEEP_WIDTH,
-                    height: SWEEP_HEIGHT,
-                    scale_factor: 1.0,
-                }),
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &WindowSize { window: WindowId(1), width: SWEEP_WIDTH, height: SWEEP_HEIGHT, scale_factor: 1.0 },
+                ),
             ),
             (
                 "subject",
-                puppet().send(&Load {
-                    namespace: "assets".to_owned(),
-                    path: subject,
-                    labels: String::new(),
-                    material_field_padding: 0.12,
-                    rig: String::new(),
-                    palette: String::new(),
-                }),
+                HarnessOp::send_and_settle(
+                    &puppet,
+                    &Load {
+                        namespace: "assets".to_owned(),
+                        path: subject,
+                        labels: String::new(),
+                        material_field_padding: 0.12,
+                        rig: String::new(),
+                        palette: String::new(),
+                    },
+                ),
             ),
         ])
         .expect("the size and subject load settle");
@@ -609,7 +610,10 @@ fn hatch_directions_keep_crossing_through_a_turn() {
             [
                 (
                     look.as_str(),
-                    puppet().send(&Look { azimuth, elevation: 12.0, distance: TEAPOT_DISTANCE, height: TEAPOT_HEIGHT }),
+                    HarnessOp::send_and_settle(
+                        &puppet,
+                        &Look { azimuth, elevation: 12.0, distance: TEAPOT_DISTANCE, height: TEAPOT_HEIGHT },
+                    ),
                 ),
                 (prime.as_str(), HarnessOp::advance(5)),
                 (view.as_str(), HarnessOp::capture()),

@@ -39,9 +39,9 @@ pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
 pub use inline_child::{
-    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnParent, InlineParent, InlineStatefulChild,
-    InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf,
-    NestedLineageParent,
+    InlineConfiguredChild, InlineConfiguredParent, InlineDespawnChild, InlineDespawnParent, InlineParent,
+    InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild,
+    NestedLineageLeaf, NestedLineageParent,
 };
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};

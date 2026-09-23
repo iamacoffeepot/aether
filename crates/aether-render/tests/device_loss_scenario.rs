@@ -17,6 +17,7 @@ use aether_harness_substrate_capture::visual::{Image, background_top_left, decod
 use aether_harness_substrate_capture::{RenderHarnessBuilderExt, RenderHarnessExt};
 use aether_kinds::QuadSpace;
 use aether_math::Rgba;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawPass, DrawTexturedQuads,
     GeometrySlotSpec, OutputSlot, PassLoad, PassStage, ProgramDispatch, ProgramPass, ProgramRegister,
@@ -73,7 +74,7 @@ fn writable_texture() -> CreateTexture {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     match harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create texture sequence")
         .reply::<CreateTextureResult>(label)
         .expect("decode create texture reply")
@@ -98,7 +99,10 @@ fn triangle_geometry() -> CreateGeometry {
 
 fn create_geometry(harness: &mut SubstrateHarness, label: &'static str) -> u32 {
     match harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", &triangle_geometry()))])
+        .execute(vec![(
+            label,
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &triangle_geometry()),
+        )])
         .expect("create geometry sequence")
         .reply::<CreateGeometryResult>(label)
         .expect("decode create geometry reply")
@@ -134,7 +138,10 @@ fn draw_program() -> ProgramRegister {
 
 fn register_program(harness: &mut SubstrateHarness, label: &'static str) -> u32 {
     match harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", &draw_program()))])
+        .execute(vec![(
+            label,
+            HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), &draw_program()),
+        )])
         .expect("register program sequence")
         .reply::<ProgramRegisterResult>(label)
         .expect("decode register program reply")

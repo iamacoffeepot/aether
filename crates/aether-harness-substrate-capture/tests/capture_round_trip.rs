@@ -8,7 +8,6 @@
 // (issue 891).
 #![allow(clippy::print_stderr)]
 
-use aether_actor::Addressable;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_kinds::{CaptureFrame, CaptureFrameResult};
@@ -62,13 +61,14 @@ fn capture_frame_send_and_await_reply_returns_png() {
             return;
         }
     };
+    let render = tb.actor_ref::<RenderCapability>();
     let result = tb
         .execute(vec![
             ("tick", HarnessOp::advance(1)),
             (
                 "capture",
                 HarnessOp::send_and_await_reply(
-                    RenderCapability::NAMESPACE,
+                    &render,
                     &CaptureFrame {
                         window: None,
                         mails: Vec::new(),

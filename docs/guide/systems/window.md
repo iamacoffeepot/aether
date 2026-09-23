@@ -371,13 +371,14 @@ Backspace delete repeatedly in a text field.
 ## Testing and extension
 
 `SubstrateHarness` composes the synthetic manager and its supervised children.
-Use the root typed actor sender for manager operations, an addressed child for
-controls, and `HarnessOp::window_event` for an event:
+Send manager operations through the manager's reference, controls through a
+child's reference looked up beneath it, and events with
+`HarnessOp::window_event`:
 
 ```rust
-use aether_actor::Addressable;
-
-let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
+let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
+let subscribe = HarnessOp::send_and_settle(
+    &synthetic,
     &SubscribeWindow {
         selector: WindowSelector::One(window),
         kind: Key::ID,
@@ -385,22 +386,20 @@ let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
     },
 );
 
-let main = format!("{}/:main", WindowCapability::NAMESPACE);
-let title = HarnessOp::send_and_await_reply(
-    main,
-    &SetWindowTitle { title: "Inspector".to_owned() },
-);
+let main = harness.child::<SyntheticWindowCapability, SyntheticWindowInstance>(&synthetic, LoadName::new("main")?)?;
+let title = HarnessOp::send_and_await_reply(&main, &SetWindowTitle { title: "Inspector".to_owned() });
 
 let press = HarnessOp::window_event(
+    &synthetic,
     window,
     &Key { window, code: keycode::KEY_ENTER },
 );
 ```
 
-The child-control operation assumes the named window has already been created
-and its creation operation has settled. Derive string recipients from
-`WindowCapability::NAMESPACE` when Rust genuinely needs a boundary address;
-ordinary actor code should use typed `resolve::<WindowInstance>(name)` instead.
+The child lookup assumes the named window has already been created and its
+creation operation has settled: it proves only a `Live` child. Ordinary actor
+code reaches a window through its own typed `resolve::<WindowInstance>(name)`
+instead.
 
 Synthetic injection is not a headless production API. The headless runtime
 stays fail-fast so tests cannot accidentally turn unsupported production

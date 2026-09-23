@@ -12,14 +12,16 @@
 
 use std::fs;
 
-use aether_actor::Addressable;
-use aether_data::Kind;
+use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick, WindowId};
+use aether_kit_widget::set::{NumericWidget, VirtualListWidget};
 use aether_kit_widget::{
     ButtonConfig, FocusLost, HoverLost, NumericConfig, PanelConfig, SegmentedConfig, TextAreaConfig, TextFieldConfig,
-    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetKind,
+    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetKind, WidgetPanel,
 };
 
 const TEST_WINDOW_ID: WindowId = WindowId(1);
@@ -29,8 +31,15 @@ fn trampoline_address(name: &str) -> String {
     format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-fn panel_child_address(subname: &str) -> String {
-    format!("{}/{}:{subname}", trampoline_address("panel"), aether_component::WasmTrampoline::NAMESPACE)
+/// The `C` child the panel spawned under `subname`.
+fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
+    harness: &SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    subname: &str,
+) -> ActorRef<C> {
+    harness
+        .child::<WidgetPanel, C>(&panel, LoadName::new(subname).expect("a valid child subname"))
+        .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
 }
 
 struct NamedLoad {
@@ -114,7 +123,7 @@ fn load_named(harness: &mut SubstrateHarness, wasm: &[u8], case: &NamedLoad) -> 
         .execute(vec![(
             "load",
             HarnessOp::send_and_await_reply(
-                "aether.component",
+                &harness.actor_ref::<ComponentHostCapability>(),
                 &LoadComponent {
                     wasm: wasm.to_vec(),
                     name: Some(case.name.to_owned()),
@@ -130,42 +139,36 @@ fn load_named(harness: &mut SubstrateHarness, wasm: &[u8], case: &NamedLoad) -> 
     }
 }
 
-fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<WidgetChildSpec>) {
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                "aether.component",
-                &LoadComponent {
-                    wasm: wasm.to_vec(),
-                    name: Some("panel".to_owned()),
-                    config: PanelConfig {
-                        x: 10.0,
-                        y: 10.0,
-                        width: 200.0,
-                        font_namespace: String::new(),
-                        font_path: String::new(),
-                        theme: Theme::DEFAULT,
-                        children,
-                        owns_input: true,
-                        editor_region: String::new(),
-                    }
-                    .encode_into_bytes(),
-                    export: Some("aether.kit.widget.panel".to_owned()),
-                },
-            ),
-        )])
-        .expect("load panel sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { path: name, .. } => {
-            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
-        }
-        LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
-    }
+fn load_panel_with(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
+    let config = PanelConfig {
+        x: 10.0,
+        y: 10.0,
+        width: 200.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+        children,
+        owns_input: true,
+        editor_region: String::new(),
+    };
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.kit.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
 }
 
-fn panel_log_messages(harness: &mut SubstrateHarness) -> Vec<String> {
-    match harness.log_tail(&trampoline_address("panel"), None, None) {
+fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
+    match harness.log_tail(panel.erase(), None, None) {
         LogTailResult::Ok { entries, .. } => entries.into_iter().map(|entry| entry.message).collect(),
         LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
     }
@@ -214,7 +217,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
         let mut harness = SubstrateHarness::builder().size(240, 80).with_component_host().build().expect("boot");
-        load_panel_with(
+        let panel = load_panel_with(
             &mut harness,
             &wasm,
             vec![WidgetChildSpec {
@@ -233,18 +236,17 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
                 .encode_into_bytes(),
             }],
         );
-        let panel = trampoline_address("panel");
-        let numeric = panel_child_address("numeric");
         harness
-            .execute(vec![
-                ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
-                (
-                    "type",
-                    HarnessOp::send_and_settle(&numeric, &TextInput { window: TEST_WINDOW_ID, text: "7".to_owned() }),
-                ),
-            ])
+            .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+            .expect("spawn the numeric child");
+        let numeric = panel_child::<NumericWidget>(&harness, panel, "numeric");
+        harness
+            .execute(vec![(
+                "type",
+                HarnessOp::send_and_settle(&numeric, &TextInput { window: TEST_WINDOW_ID, text: "7".to_owned() }),
+            )])
             .expect("numeric type session");
-        let before = panel_log_messages(&mut harness);
+        let before = panel_log_messages(&mut harness, panel);
         let before_numeric: Vec<&String> =
             before.iter().filter(|message| message.contains("widget numeric changed")).collect();
         assert_eq!(
@@ -257,9 +259,11 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         assert_eq!(numeric_value(before_numeric[0]), Some(7.0));
         assert_eq!(field(before_numeric[0], "committed"), Some("false"));
         harness
-            .execute(vec![("blur", HarnessOp::send_and_settle(&numeric, &FocusLost))])
+            // `FocusLost` rides the adopted `WidgetDefaults` set, which carries
+            // no typed marker, so it is sent erased.
+            .execute(vec![("blur", HarnessOp::send_and_settle(numeric.erase(), &FocusLost))])
             .expect("numeric focus-lost session");
-        let after = panel_log_messages(&mut harness);
+        let after = panel_log_messages(&mut harness, panel);
         let after_numeric: Vec<&String> =
             after.iter().filter(|message| message.contains("widget numeric changed")).collect();
         assert_eq!(after_numeric.len(), 2, "{stem}: FocusLost must append the commit; log was:\n{}", after.join("\n"));
@@ -280,7 +284,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         };
         let wasm = fs::read(&wasm_path).expect("read kit wasm");
         let mut harness = SubstrateHarness::builder().size(240, 120).with_component_host().build().expect("boot");
-        load_panel_with(
+        let panel = load_panel_with(
             &mut harness,
             &wasm,
             vec![WidgetChildSpec {
@@ -298,18 +302,17 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
                 .encode_into_bytes(),
             }],
         );
-        let panel = trampoline_address("panel");
-        let list = panel_child_address("inventory");
         harness
-            .execute(vec![
-                ("spawn", HarnessOp::send_and_settle(&panel, &Tick::default())),
-                (
-                    "hover_row",
-                    HarnessOp::send_and_settle(&list, &MouseMove { window: TEST_WINDOW_ID, x: 30.0, y: 22.0 }),
-                ),
-            ])
+            .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+            .expect("spawn the list child");
+        let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+        harness
+            .execute(vec![(
+                "hover_row",
+                HarnessOp::send_and_settle(&list, &MouseMove { window: TEST_WINDOW_ID, x: 30.0, y: 22.0 }),
+            )])
             .expect("virtual-list hover session");
-        let before = panel_log_messages(&mut harness);
+        let before = panel_log_messages(&mut harness, panel);
         let before_hover: Vec<&String> =
             before.iter().filter(|message| message.contains("widget virtual list hover")).collect();
         assert_eq!(
@@ -323,9 +326,11 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         // a missing `row` is the leave only on this newly emitted second hover event.
         assert_eq!(field(before_hover[0], "index"), Some("0"));
         harness
-            .execute(vec![("leave", HarnessOp::send_and_settle(&list, &HoverLost))])
+            // `HoverLost` rides the adopted `WidgetDefaults` set, which carries
+            // no typed marker, so it is sent erased.
+            .execute(vec![("leave", HarnessOp::send_and_settle(list.erase(), &HoverLost))])
             .expect("virtual-list hover-lost session");
-        let after = panel_log_messages(&mut harness);
+        let after = panel_log_messages(&mut harness, panel);
         let after_hover: Vec<&String> =
             after.iter().filter(|message| message.contains("widget virtual list hover")).collect();
         assert_eq!(after_hover.len(), 2, "{stem}: HoverLost must append the leave; log was:\n{}", after.join("\n"));

@@ -106,6 +106,7 @@ use aether_puppet::labels::Labels;
 use aether_puppet::mesh::Mesh;
 use aether_puppet::{Pose, anchor, chart, deform, ribbon, style, visibility};
 use aether_render::QuadBlend;
+use aether_render::RenderCapability;
 use aether_render::{
     CreateGeometry, CreateGeometryResult, CreateTexture, CreateTextureResult, DrawTexturedQuads, InputSlot,
     ProgramDispatch, ProgramRegister, ProgramRegisterResult, TextureFormat, TextureSampling, TextureUsage,
@@ -267,7 +268,7 @@ fn probed_program() -> ProgramRegister {
 
 fn create_texture(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateTexture) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_texture sequence");
     match created.reply::<CreateTextureResult>(label).expect("decode CreateTextureResult") {
         CreateTextureResult::Ok { texture_id } => texture_id,
@@ -317,7 +318,7 @@ fn create_targets(harness: &mut SubstrateHarness, width: usize, height: usize) -
 
 fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, mail: &CreateGeometry) -> u32 {
     let created = harness
-        .execute(vec![(label, HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![(label, HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("create_geometry sequence");
     match created.reply::<CreateGeometryResult>(label).expect("decode CreateGeometryResult") {
         CreateGeometryResult::Ok { geometry_id } => geometry_id,
@@ -327,7 +328,7 @@ fn create_geometry(harness: &mut SubstrateHarness, label: &'static str, mail: &C
 
 fn register(harness: &mut SubstrateHarness, mail: &ProgramRegister) -> u32 {
     let registered = harness
-        .execute(vec![("register", HarnessOp::send_and_await_reply("aether.render", mail))])
+        .execute(vec![("register", HarnessOp::send_and_await_reply(&harness.actor_ref::<RenderCapability>(), mail))])
         .expect("register sequence");
     match registered.reply::<ProgramRegisterResult>("register").expect("decode ProgramRegisterResult") {
         ProgramRegisterResult::Ok { program_id } => program_id,
@@ -559,7 +560,7 @@ fn re_point(
             (
                 "update_points",
                 HarnessOp::send_and_settle(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &UpdateGeometry {
                         geometry_id: rig.points[1],
                         vertices: sight::posed_point_vertices(drawing, layout.volatile()),
@@ -570,7 +571,7 @@ fn re_point(
             (
                 "update_curves",
                 HarnessOp::send_and_settle(
-                    "aether.render",
+                    &harness.actor_ref::<RenderCapability>(),
                     &UpdateGeometry {
                         geometry_id: rig.curves,
                         vertices: sight::curve_vertices(drawing, layout, eye),
@@ -1149,7 +1150,7 @@ fn a_re_uploaded_subject_re_occludes_from_its_new_vertices() {
         .execute(vec![(
             "update_subject",
             HarnessOp::send_and_settle(
-                "aether.render",
+                &harness.actor_ref::<RenderCapability>(),
                 &UpdateGeometry {
                     geometry_id: rig.subject,
                     vertices: sight::subject_vertices(&posed, None),
@@ -1405,7 +1406,7 @@ fn report_cost(harness: &mut SubstrateHarness, rig: &Rig, eye: Vec3, view_proj: 
             let started = Instant::now();
             let ops = if dispatched {
                 vec![
-                    ("dispatch", HarnessOp::send_and_settle("aether.render", &dispatch)),
+                    ("dispatch", HarnessOp::send_and_settle(&harness.actor_ref::<RenderCapability>(), &dispatch)),
                     ("frame", HarnessOp::advance(1)),
                 ]
             } else {
