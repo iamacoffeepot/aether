@@ -5,10 +5,8 @@
       "Bash(cargo check *)",
       "Bash(cargo clippy *)",
       "Bash(cargo fmt -- --check*)",
-      "mcp__aether-hub__receive_mail",
       "mcp__aether-hub__list_engines",
-      "mcp__aether-hub__describe_kinds",
-      "mcp__aether-hub__engine_logs"
+      "mcp__aether-hub__describe_kinds"
     ]
   },
   "hooks": {

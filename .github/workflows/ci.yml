@@ -191,6 +191,10 @@ jobs:
           python3 scripts/test-check-suppressions.py
           python3 scripts/test-check-reference-mint.py
           python3 scripts/test-check-raw-mailbox-ratchet.py
+      # The local guardrail hooks' fixture suite, from the head tree for the
+      # same reason: a pull request that edits a hook is judged against it.
+      - name: Hook regression tests
+        run: bash .hooks/tests/run.sh
 
   # Every mechanical gate below invokes `cargo xtask transform verify.<id>`
   # (iamacoffeepot/aether#4883). `xtask/src/transform/verify` owns each gate's

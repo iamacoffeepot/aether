@@ -168,6 +168,7 @@ class MatcherTests(unittest.TestCase):
             ".github/workflows/ci.yml",
             ".agents/skills/approve/scripts/resolve_approval_tier.py",
             ".claude/hooks/check-no-divider-comments.sh",
+            ".hooks/check-no-divider-comments.sh",
             "scripts/surface-match.py",
         ]:
             with self.subTest(guarded=guarded):
