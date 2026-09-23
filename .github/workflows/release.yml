@@ -171,7 +171,10 @@ jobs:
           # chassis would leave this file absent from the depot and see its
           # binary shipped twice while the desktop one shipped not at all, so
           # the mismatch fails here rather than reaching a release.
-          depot=$(jq -r '.package_chassis.desktop' "$inventory")
+          # jq on the Windows runner ends every output line with CRLF, and a
+          # trailing `\r` read into a filename makes `cp` look for
+          # `aether-headless.exe\r`. Strip it from every jq read here.
+          depot=$(jq -r '.package_chassis.desktop' "$inventory" | tr -d '\r')
           if [ ! -e "target/staging/${STEM}/${depot}" ]; then
             echo "the depot does not carry ${depot} — the spec selected another chassis" >&2
             exit 1
@@ -180,7 +183,7 @@ jobs:
           plan="${RUNNER_TEMP}/chassis-bins.tsv"
           jq -r --arg depot "$depot" '
             .chassis_bins[] | select(.file != $depot) | [.package, .bin, .file] | @tsv
-          ' "$inventory" > "$plan"
+          ' "$inventory" | tr -d '\r' > "$plan"
 
           while IFS=$'\t' read -r package bin file; do
             cargo build --release -p "$package" --bin "$bin"
