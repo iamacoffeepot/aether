@@ -15,7 +15,7 @@ $land <PR> --no-sweep
 $land --sweep
 ```
 
-The invocation authorizes clearing draft state, an ordinary squash merge, closing-issue reconciliation, and safe cleanup for the named eligible pull request. It does not authorize changing implementation, waiving a gate, resolving a conflict, or force-pushing. Ask separately before the exact force-push procedure below.
+The invocation authorizes clearing draft state, an ordinary squash merge, closing-issue reconciliation, and safe cleanup for the named eligible pull request, plus the ordinary merge of `origin/main` into a behind-but-clean branch described below when branch protection requires it. It does not authorize changing implementation, waiving a gate, resolving a conflict, rebasing, or force-pushing. A content-conflicted draft routes to `$resolve <PR>`.
 
 ## Read and correlate
 
@@ -51,7 +51,7 @@ Price every changed path outside the approved surface:
    - **human** — print the paths and stop for the owner's explicit confirmation naming this pull request. In a sweep, the first-turn plan lists the overflow so that confirmation covers it.
 4. Write the "Surface overflow" pull-request comment naming the head SHA and frozen blobs, with one `<path> — <tier> — <settlement>` line per overflow path, or "None." when there is no overflow. Edit the existing comment in place when present. The settlement is `listed` for auto, `ACCEPT` or `REJECT: <reason>` for judge, and `awaiting owner` or `confirmed by owner` for human.
 
-Confirm the diff implements the scoped concept and contains no unrelated change. Re-price overflow after any rebase and immediately before merge.
+Confirm the diff implements the scoped concept and contains no unrelated change. Re-price overflow after any merge of `origin/main` into the branch and immediately before merge.
 
 ### Checks
 
@@ -69,24 +69,14 @@ Use the pull request's REST mergeability fields as hints and compute locally fro
 
 1. verify the head commit object and approval-base ancestry;
 2. determine whether head already contains current `origin/main`;
-3. run a merge-tree prediction between current main and head;
+3. run `git merge-tree --write-tree origin/main <head>` as the local oracle;
 4. classify as clean/direct, behind but clean, or content-conflicted.
 
-A content conflict stops landing. Do not rewrite implementation or choose a resolution in this skill.
+On content conflict, stop and route the named draft to `$resolve <PR>`. Do not rewrite implementation, choose a resolution, or edit the branch from this skill.
 
-If the branch is behind but the platform can merge it cleanly, prefer direct squash merge after all gates. Rebase only when branch protection or the merge API requires an up-to-date branch.
+If the branch is behind but the platform can merge it cleanly, prefer direct squash merge after all gates. Only when branch protection or the merge API requires an up-to-date branch, require a clean owned worktree and unchanged remote head, then merge `origin/main` into the branch without rebasing, run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`, commit the merge, and plain-push. Wait for the new head's CI, directly inspect and repair it, then append and re-read its hidden direct-review record through the shared file-backed, concurrent-edit-safe procedure. Re-price overflow and apply every landing gate again. If that merge produces content conflicts, run `git merge --abort` and route the pull request to `$resolve <PR>`.
 
-## Explicit rebase and force-push
-
-Because a rebase rewrites reviewed commits, show the exact branch, old head, current main, predicted result, and `--force-with-lease` command, then obtain a fresh explicit user approval. After approval:
-
-1. require a clean issue worktree and unchanged remote head;
-2. fetch and rebase onto current `origin/main`;
-3. abort the rebase and stop on any conflict;
-4. run `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`;
-5. push with `--force-with-lease`, never plain force;
-6. wait for the new head's CI;
-7. run fresh direct inspection and append a new trusted hidden issue-body direct-review record for the rewritten head through the shared file-backed, concurrent-edit-safe procedure; require no native review blocker, resolved threads, fresh overflow pricing, and every landing gate again.
+Never rebase or force-push from this skill.
 
 Do not run full local tests or distributions unless the user explicitly asks; CI is the full build engine.
 
@@ -109,7 +99,7 @@ After confirmed merge, re-read the closing issue and require it closed by the pu
 
 Unless `--no-sweep` was passed, inspect the exact issue worktree. Remove it and delete its local branch only when the pull request is confirmed merged and the worktree is clean. Never force-remove a dirty or locked worktree. Report retained artifacts for `$sweep worktrees`.
 
-Report pull-request URL, merge SHA, approved digest/base, overflow, checks, review, threads, direct-versus-native merge, any rebase, issue closure, and cleanup.
+Report pull-request URL, merge SHA, approved digest/base, overflow, checks, review, threads, direct-versus-native merge, any merge of main into the branch, issue closure, and cleanup.
 
 ## Sweep mode
 
@@ -117,8 +107,8 @@ Sweep is two-turn and serial.
 
 1. Enumerate open draft pull requests over REST.
 2. Correlate each with one closing issue and apply every gate.
-3. Predict clean/direct, behind/direct, behind/rebase requiring separate approval, or conflicted.
-4. Show the ordered sequence, each candidate's priced overflow, and all proposed mutations: clear draft, optional separately authorized rebase, squash merge, issue verification, worktree removal, and branch deletion.
+3. Predict clean/direct, behind but clean, or conflicted.
+4. Show the ordered sequence, each candidate's priced overflow, and all proposed mutations: clear draft, any required merge of `origin/main` into the branch, squash merge, issue verification, worktree removal, and branch deletion.
 5. End for confirmation.
 
-After confirmation, revalidate and land one at a time. Fetch and recompute every remaining candidate after each merge because main changed. A newly ineligible or conflicted pull request halts the sequence; report what landed and what remains. Never land in parallel.
+After confirmation, revalidate and land one at a time. Fetch and recompute every remaining candidate after each merge because main changed. A newly ineligible pull request halts the sequence; report what landed and what remains. A conflicted candidate is routed to `$resolve <PR>` and retained for a later land pass; continue only when the confirmed sweep plan explicitly said conflicted candidates would be routed. Never land in parallel.

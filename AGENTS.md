@@ -11,11 +11,12 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 ## Workflow
 
 - Planned work lives in GitHub issues. `scope` records the managed Plan sections, declared surface, and exact size/model routing lines in the issue body. `approve` appends a trusted hidden record bound to that Plan digest and an exact `origin/main` commit; taxonomy labels do not carry workflow state or routing authority.
-- Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, land, sweep, wish, review, and related flows. Codex skills and their shared contracts are authoritative for Codex and execute through the active Codex tools. `CLAUDE.md` and `.claude/skills/` are the separate Claude Code surface; consult them only when intentionally adapting a workflow.
+- Use the repo skills in `.agents/skills/` for sketch, scope, approve, implement, resolve, land, sweep, wish, review, and related flows. Codex skills and their shared contracts are authoritative for Codex and execute through the active Codex tools. `CLAUDE.md` and `.claude/skills/` are the separate Claude Code surface; consult them only when intentionally adapting a workflow.
 - Do not implement directly in the primary `main` checkout. Issue work uses one verified `.agents/worktrees/issue-<N>` worktree and issue branch cut from the approved base commit. Every agent surface keeps its worktrees under `.agents/worktrees/`; `.claude/worktrees/` holds only legacy symlinks.
 - Branches use `type/short-slug` or the issue branch shape from the implement skill, for example `chore/issue-2742-make-repository-codex-friendly`.
 - PR titles and commits use Conventional Commits.
 - An implementation remains a draft PR while its current head accumulates green checks, direct-review acceptance, resolved threads, and priced surface overflow. Repair findings in the implementation loop; a new head must prove those facts again.
+- A content-conflicted draft uses `resolve`, which merges current `main` into the owned branch and proves the new head again without rebasing or force-pushing.
 - Landing is a separate explicitly authorized operation. Do not push to `main`, force-push reviewed branches, clear draft state, merge, or run destructive git commands without the workflow's required user approval.
 - Keep PRs focused: one concept per PR.
 

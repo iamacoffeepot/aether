@@ -88,15 +88,16 @@ its own documented workflow and nothing adjacent.
 | Authorize a complete Plan | `approve` | A trusted hidden digest/base-bound record |
 | Implement approved work | `implement` | A reviewed, green draft PR with priced overflow reported |
 | Audit existing code or a non-PR change | `review` | A read-only findings rollup |
+| Merge current `main` into a content-conflicted draft | `resolve` | The same draft, green and re-reviewed on a merge commit |
 | Land an accepted draft | `land` | Merged PR, closed issue, and safe cleanup |
 | Reclaim proven-stale local state | `sweep` | Only the explicitly confirmed cleanup |
 | Capture repeatable session friction | `retrospect` | Confirmed unscoped issues, if any |
 | Draft a load-bearing decision | `adr` | Proposed ADR draft in its own worktree |
 
-Claude Code exposes the corresponding slash-prefixed skills and additionally
-uses `/resolve <PR>` for a content-conflicted draft. Always read the current
-skill frontmatter before invoking it. One workflow name does not authorize an
-adjacent consequential action; implementation never implies landing.
+Claude Code exposes the corresponding slash-prefixed skills. Always read the
+current skill frontmatter before invoking it. One workflow name does not
+authorize an adjacent consequential action; implementation never implies
+landing.
 
 ## Scope and routing live in the issue body
 
@@ -210,15 +211,13 @@ artifact instead of being silently waived.
 ## Conflicts preserve both intents
 
 Landing predicts the merge against current `main`. A content conflict is not
-permission to choose a resolution inside the landing step. Claude Code hands the
-draft to `/resolve <PR>`, which merges current `main` into the same branch,
-resolves every hunk in three-way context at any path, with overflow priced at
-landing, and drives the resulting head through checks, review, and repair again.
-It does not rebase, force-push, open a second PR, or merge.
-
-Other surfaces stop with the exact conflict evidence and use their checked-in
-contract or explicit owner direction for the equivalent resolution. A genuinely
-incompatible product intent returns to scope rather than manufacturing a merge.
+permission to choose a resolution inside the landing step. Landing hands the
+draft to `resolve` (`$resolve <PR>` in Codex, `/resolve <PR>` in Claude Code),
+which merges current `main` into the same branch, resolves every hunk in
+three-way context at any path, with overflow priced at landing, and drives the
+resulting head through checks, review, and repair again. It does not rebase,
+force-push, open a second PR, or merge. A genuinely incompatible product intent
+returns to scope rather than manufacturing a merge.
 
 ## Landing is a separate authorization boundary
 
