@@ -80,13 +80,15 @@ pub struct HttpSupervisorState {
     pub config: HttpServerConfig,
     /// Registered routes (ADR-0130), shared with every shard (and, in later
     /// stages, the readers): the supervisor's registration handlers write
-    /// under the lock, dispatch-time resolution reads. Unordered —
-    /// resolution picks the winner per request by `(prefix length, method
+    /// under the lock, dispatch-time resolution reads. Keyed by
+    /// `(prefix, method)`, with a reverse index from each holder's
+    /// reference to its keys so a departure edits only its own routes.
+    /// Resolution picks the winner per request by `(prefix length, method
     /// specificity)`, which is deterministic without a sort: two distinct
-    /// equal-length prefixes cannot both match one path, and duplicate
-    /// `(prefix, method)` keys are rejected at registration. Route counts
-    /// are tens per substrate, so the linear scan is dwarfed by the header
-    /// parse that precedes it (ADR-0130).
+    /// equal-length prefixes cannot both match one path, and at most one
+    /// route stands under a key. Route counts are tens per substrate, so
+    /// the per-request scan is dwarfed by the header parse that precedes it
+    /// (ADR-0130).
     pub routes: SharedRoutes,
     /// Global live-connection count backing the `max_connections` ceiling
     /// (ADR-0108 §6): incremented here at assignment, decremented by the
@@ -226,7 +228,7 @@ impl HttpSupervisorState {
         let (_inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         Self {
             config,
-            routes: Arc::new(RwLock::new(Vec::new())),
+            routes: Arc::new(RwLock::new(RouteTable::default())),
             live_connections: Arc::new(AtomicUsize::new(0)),
             mailer,
             listener_port: 0,
@@ -482,12 +484,12 @@ impl HttpSupervisorState {
         }
     }
 
-    /// Claim `(prefix, method)` for `mailbox`, dispatching as `kind`
+    /// Claim `(prefix, method)` for `holder`, dispatching as `kind`
     /// (ADR-0130), or join its shared member set (ADR-0136). Exclusive
     /// (`shared: false`): a key held by anyone else is answered `Err`;
-    /// the same sole mailbox re-claiming its own key is an idempotent
+    /// the same sole holder re-claiming its own key is an idempotent
     /// `Ok` that updates `kind` — so a component re-running `wire`
-    /// after `replace_component` re-registers cleanly (its `MailboxId`
+    /// after `replace_component` re-registers cleanly (its reference
     /// is stable). Shared (`shared: true`): joins the key's member set
     /// when the set is shared and the `kind` matches; re-registering an
     /// existing membership is an idempotent `Ok`. Mixing exclusive and
@@ -503,10 +505,10 @@ impl HttpSupervisorState {
         prefix: &str,
         method: Option<HttpMethod>,
         kind: KindId,
-        mailbox: MailboxId,
+        holder: AnyActorRef,
         shared: bool,
     ) -> RegisterRouteResult {
-        register_route(&self.routes, prefix, method, kind, mailbox, shared)
+        register_route(&self.routes, prefix, method, kind, holder, shared)
     }
 
     /// Monitor the proven route holder `subscriber` on its first route claim
@@ -553,10 +555,10 @@ impl HttpSupervisorState {
         }
     }
 
-    /// Release `mailbox`'s membership in the `(prefix, method)` route
+    /// Release `holder`'s membership in the `(prefix, method)` route
     /// (ADR-0136); the last member's release drops the route.
     /// Idempotent — releasing a route that isn't held (or a set the
-    /// mailbox never joined) is still `Ok`, mirroring the window cap's
+    /// holder never joined) is still `Ok`, mirroring the window cap's
     /// unsubscribe semantics.
     ///
     /// # Panics
@@ -566,20 +568,20 @@ impl HttpSupervisorState {
         &mut self,
         prefix: &str,
         method: Option<HttpMethod>,
-        mailbox: MailboxId,
+        holder: AnyActorRef,
     ) -> RegisterRouteResult {
-        unregister_route(&self.routes, prefix, method, mailbox)
+        unregister_route(&self.routes, prefix, method, holder)
     }
 
-    /// Release every route membership held by `mailbox` (ADR-0130's
+    /// Release every route membership held by `holder` (ADR-0130's
     /// `UnregisterRoutesAll`, ADR-0136 set semantics); sets it empties
     /// drop entirely.
     ///
     /// # Panics
     /// Panics if the route-table `RwLock` is poisoned — fail-fast per
     /// ADR-0063.
-    pub fn unregister_routes_all(&mut self, mailbox: MailboxId) {
-        unregister_routes_all(&self.routes, mailbox);
+    pub fn unregister_routes_all(&mut self, holder: AnyActorRef) {
+        unregister_routes_all(&self.routes, holder);
     }
 }
 
@@ -718,7 +720,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
         payload: &[u8],
-        handler: MailboxId,
+        handler: AnyActorRef,
         kind: KindId,
         method: HttpMethod,
         keep_alive: bool,
@@ -729,7 +731,7 @@ impl HttpShardState {
         {
             conn.ws_pending_key = ws_key;
         }
-        let mail_id = ctx.send_envelope_detached(handler, kind, payload);
+        let mail_id = ctx.send_envelope_detached_to(handler, kind, payload);
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
@@ -750,7 +752,7 @@ impl HttpShardState {
         ctx: &mut NativeCtx<'_>,
         conn_id: ConnId,
         head: ParsedHead,
-        handler: MailboxId,
+        handler: AnyActorRef,
     ) {
         let Some(method) = parse_http_method(&head.method) else {
             self.write_status_response(conn_id, 501, "method not implemented");

@@ -30,6 +30,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::RwLock;
 
+use aether_actor::AnyActorRef;
 use aether_kinds::ComponentCapabilities;
 
 use crate::mail::{KindId, MailboxId};
@@ -97,6 +98,21 @@ impl CapabilityRegistry {
     pub fn accepts(&self, mailbox: MailboxId, kind: KindId) -> bool {
         let guard = self.caps.read().expect("capability registry lock poisoned");
         guard.get(&mailbox).is_some_and(|c| c.has_fallback || c.handlers.contains(&kind))
+    }
+
+    /// Does the actor `target` proves accept `kind`? The reference form of
+    /// [`Self::accepts`], with the same answer: a departed actor's caps are
+    /// removed at drop, so it accepts nothing.
+    ///
+    /// The http server's request reader is the consumer: it holds route
+    /// members as references (ADR-0230) and reads whether the chosen member
+    /// takes a streamed request body.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned (see [`Self::accepts`]).
+    #[must_use]
+    pub fn accepts_actor(&self, target: AnyActorRef, kind: KindId) -> bool {
+        self.accepts(target.id(), kind)
     }
 
     /// Does `mailbox` carry a `#[fallback]` catch-all? Unknown

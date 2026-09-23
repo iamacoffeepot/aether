@@ -134,10 +134,15 @@ pub trait WindowManagerSurface {
         }
     }
 
-    /// Drop a mailbox from every window-event subscription it holds.
+    /// Drop a mailbox from every window-event subscription it holds. The
+    /// mailbox is proven at receipt (ADR-0230); one that no longer proves is
+    /// a no-op, its subscriptions having already gone with its
+    /// `MonitorNotice`.
     #[handler::single]
-    fn on_unsubscribe_all(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
-        Self::subscribers(state).unsubscribe_all(mail.mailbox);
+    fn on_unsubscribe_all(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: UnsubscribeAllWindows) {
+        if let Ok(subscriber) = ctx.resolve_live(mail.mailbox) {
+            Self::subscribers(state).unsubscribe_all(subscriber);
+        }
     }
 
     /// Close the sole window.

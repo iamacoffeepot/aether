@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — HTTP server route registration in `crates/aether-http/src/server/mod.rs`)
 - **Date:** 2026-07-03
+- **Amended:** 2026-09-22 — Route members are proven references (ADR-0230), not mailbox positions. The wire kinds keep their `mailbox` positions as boundary data, proven at receipt; an `UnregisterRoute` or `UnregisterRoutesAll` whose mailbox no longer proves answers `Ok` or does nothing, since a monitored holder's routes already went with its `MonitorNotice`. The table is keyed by `(prefix, method)` with a reverse index from each holder to its keys, so a departure removes exactly that holder's routes.
 
 Extends **ADR-0108** (the `aether.http.server` capability), realizing the routing refinements its §Follow-on parked. Mirrors the declare-interest-by-mail model of **ADR-0021** / **ADR-0083** (input-stream subscriptions) and rides the shared lifecycle `wire` hook of iamacoffeepot/aether#2048. Composes unchanged with **ADR-0128** (response streaming) and **ADR-0129** (websocket upgrade), both of which act downstream of dispatch, keyed by the request's correlation.
 

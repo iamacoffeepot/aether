@@ -25,13 +25,12 @@ pub struct UnresolvedMail {
 /// watcher, and only then flips the target's slot from `Live` to
 /// `Dead`.
 ///
-/// The watcher receives this kind as ordinary mail; its `#[handler]`
-/// reads `target` to identify which actor it was monitoring. v1 carries
-/// only the target id — no `CloseReason` field — so the wire shape is
-/// purely additive if a future revision wants to surface trap vs
-/// shutdown vs cooperative close.
+/// The notice carries no fields: the host stamps the departed actor as
+/// the envelope sender, so the watcher's handler reads it as a proven
+/// reference from `ctx.sender()` and matches it against the references
+/// it holds (ADR-0230). An inline child departs under its own alias
+/// (ADR-0114 §4), the identity its sends stamp, so the notice's sender
+/// is the alias rather than the host.
 #[repr(C)]
 #[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq)]
-pub struct MonitorNotice {
-    pub target: aether_data::MailboxId,
-}
+pub struct MonitorNotice;
