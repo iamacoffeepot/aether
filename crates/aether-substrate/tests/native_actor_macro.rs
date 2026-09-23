@@ -27,7 +27,7 @@ use std::sync::atomic::{AtomicU32, AtomicU64, Ordering as AtomicOrdering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_actor::OutboundReply;
+use aether_actor::{AnyActorRef, OutboundReply};
 use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{Pending, TaskDone};
@@ -94,11 +94,10 @@ impl NativeActor for MacroProbeCap {
     }
 }
 
-fn push_envelope<K: Kind>(registry: &Registry, recipient: &str, payload: &K) {
+fn push_envelope<K: Kind>(registry: &Registry, recipient: AnyActorRef, payload: &K) {
     use aether_substrate::mail::registry::MailboxEntry;
-    let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry exists") else {
-        panic!("expected mailbox entry under {recipient}");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
+        panic!("expected mailbox entry under {recipient:?}");
     };
     let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(
@@ -138,7 +137,7 @@ fn macro_emitted_cap_routes_structured_kind_through_dispatch() {
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Greet { tag: 7 });
+    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Greet { tag: 7 });
     assert!(
         wait_for(7, &greet_total, Duration::from_millis(500)),
         "macro dispatcher should route Greet → on_greet within budget"
@@ -171,7 +170,7 @@ fn seize_and_run_dispatches_seed_in_place() {
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    let id = registry.lookup(MacroProbeCap::NAMESPACE).expect("cap mailbox registered");
+    let id = chassis.actor_ref::<MacroProbeCap>().erase();
 
     // The cap boots with no pre-load mail, so its slot quiesces to `Idle`.
     // Resolve the seize handle off the `Inbox` entry's deferred cell (the
@@ -232,7 +231,7 @@ fn macro_emitted_cap_routes_cast_kind_through_dispatch() {
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Ping { seq: 42 });
+    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Ping { seq: 42 });
     assert!(
         wait_for(42, &ping_total, Duration::from_millis(500)),
         "macro dispatcher should route Ping → on_ping within budget"
@@ -263,8 +262,8 @@ fn macro_routes_task_completions_by_output_type() {
     // own mailbox; the chassis redelivers those wakes through the macro's
     // single completion arm, which routes each to its output-typed
     // handler.
-    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickA { seed: 7 });
-    push_envelope(&registry, TaskRouteCap::NAMESPACE, &KickB { seed: 9 });
+    push_envelope(&registry, chassis.actor_ref::<TaskRouteCap>().erase(), &KickA { seed: 7 });
+    push_envelope(&registry, chassis.actor_ref::<TaskRouteCap>().erase(), &KickB { seed: 9 });
 
     assert!(wait_for(1, &obs.a_calls, Duration::from_secs(2)), "the ResultA completion routed to on_result_a");
     assert!(wait_for(1, &obs.b_calls, Duration::from_secs(2)), "the ResultB completion routed to on_result_b");
@@ -312,7 +311,12 @@ fn macro_pending_request_borrow_completion_replies_once() {
     // The inbound names the caller as its reply target, so the deferred
     // reply routes back there.
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 55);
-    push_envelope_replying_to(&registry, DeferredReplyCap::NAMESPACE, &KickP { seed: 21 }, caller_reply_to);
+    push_envelope_replying_to(
+        &registry,
+        chassis.actor_ref::<DeferredReplyCap>().erase(),
+        &KickP { seed: 21 },
+        caller_reply_to,
+    );
 
     let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the deferred reply lands on the caller");
     assert_eq!(reply.kind, <EchoReply as Kind>::ID, "the completion's `-> EchoReply` return routed back as the reply");
@@ -353,7 +357,12 @@ fn macro_borrow_task_no_reply_releases_without_replying() {
         .expect("deferred-reply cap boots");
 
     let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 9);
-    push_envelope_replying_to(&registry, DeferredReplyCap::NAMESPACE, &KickS { seed: 88 }, caller_reply_to);
+    push_envelope_replying_to(
+        &registry,
+        chassis.actor_ref::<DeferredReplyCap>().erase(),
+        &KickS { seed: 88 },
+        caller_reply_to,
+    );
 
     assert!(
         wait_for(1, &obs.silent_calls, Duration::from_secs(2)),
@@ -406,7 +415,7 @@ fn macro_emitted_cap_drops_unknown_kind_via_dispatch() {
         .build_passive()
         .expect("macro-emitted cap boots");
 
-    push_envelope(&registry, MacroProbeCap::NAMESPACE, &Unknown { payload: 99 });
+    push_envelope(&registry, chassis.actor_ref::<MacroProbeCap>().erase(), &Unknown { payload: 99 });
 
     // Settle: give the dispatcher time to observe + drop the envelope.
     // The macro-emitted dispatch returns None; the chassis-side
@@ -1049,11 +1058,10 @@ fn forward_to(tx: mpsc::Sender<OwnedDispatch>) -> Arc<dyn InboxHandler> {
 /// Like [`push_envelope`] but stamps an explicit `reply_to` [`Source`] so
 /// the handler's deferred reply has somewhere to route — a registered
 /// caller inbox the test reads back.
-fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: &str, payload: &K, reply_to: Source) {
+fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: AnyActorRef, payload: &K, reply_to: Source) {
     use aether_substrate::mail::registry::MailboxEntry;
-    let id: MailboxId = registry.lookup(recipient).expect("mailbox registered");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("entry exists") else {
-        panic!("expected mailbox entry under {recipient}");
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(recipient).expect("entry exists") else {
+        panic!("expected mailbox entry under {recipient:?}");
     };
     let bytes = payload.encode_into_bytes();
     handler.enqueue(OwnedDispatch::disarmed(

@@ -518,7 +518,7 @@ impl ComponentCtx {
         // `in_flight` balances; `Closure` does NOT because the actor's
         // downstream dispatch loop records the bracket. See [`MailboxEntry`]
         // docs for the contract.
-        match registry.entry(mail.recipient) {
+        match registry.entry_at(mail.recipient) {
             Some(MailboxEntry::Inbox { handler, .. }) => {
                 // Component-originated mail: the sender is this ctx's
                 // mailbox, so its registry name is the `origin` any

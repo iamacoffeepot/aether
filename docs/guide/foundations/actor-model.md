@@ -670,7 +670,10 @@ before it reports success waits for that completion; one that only needs
 somewhere to send mail can use the receipt directly. Synchronous commit still
 exists, but only at the boot/embedder boundary — `BuiltChassis::spawn_actor` /
 `PassiveChassis::spawn_actor` and their `.finish()` terminal, which block until
-the birth is live and hand back the `MailboxId` you can immediately address.
+the birth is live and hand back its `ActorRef<A>`, a proof you can immediately
+send through. The actors the chassis composed itself — each singleton
+capability and pumped actor — are recorded the same way when their routes go
+live, and `actor_ref::<R>()` on either chassis handle reads one back by type.
 
 That terminal spans the chassis's one authority boundary, the **registry
 authority seal**. A chassis seals once boot is over: a built chassis after its

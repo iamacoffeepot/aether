@@ -60,7 +60,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     owner.run_once();
     assert!(alias_completion.wait_timeout(Duration::from_millis(100)).unwrap().is_ok());
     assert!(registry.route_lookup(KindId(7), alias_id).is_starting());
-    assert!(registry.entry(alias_id).is_none(), "compatibility projection does not expose the Starting parent");
+    assert!(registry.entry_at(alias_id).is_none(), "compatibility projection does not expose the Starting parent");
     assert!(
         registry.inventory().mailboxes.iter().all(|descriptor| descriptor.id != alias_id),
         "an alias following a Starting parent is not announced as live"
@@ -78,7 +78,7 @@ fn manual_owner_cycles_alias_to_starting_parent_parks_until_parent_promotes() {
     mailer.push(activation_barrier(parent_id, token, 1));
     owner.run_once();
     assert_eq!(*deliveries.lock().unwrap(), [1, 2], "bootstrap precedes the alias-addressed parked tail");
-    assert!(matches!(registry.entry(alias_id), Some(MailboxEntry::Inbox { .. })));
+    assert!(matches!(registry.entry_at(alias_id), Some(MailboxEntry::Inbox { .. })));
     assert_eq!(registry.lookup(&alias_name), Some(alias_id));
     assert!(
         registry.inventory().mailboxes.iter().any(|descriptor| descriptor.id == alias_id),
@@ -129,7 +129,7 @@ fn logical_alias_repeat_is_idempotent_and_conflicting_target_is_rejected() {
     let conflict = submit(second_parent);
     owner.run_once();
     assert!(matches!(conflict.wait_timeout(Duration::from_millis(100)).unwrap(), Err(RegistryEffectError::Name(_))));
-    let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry(alias_id) else {
+    let Some(MailboxEntry::Inbox { handler, .. }) = registry.entry_at(alias_id) else {
         panic!("accepted alias still projects its target inbox")
     };
     assert!(Arc::ptr_eq(&handler, &first_handler), "rejection leaves the first logical target unchanged");

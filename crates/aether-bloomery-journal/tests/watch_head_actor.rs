@@ -6,6 +6,7 @@ use std::path::Path;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
+use aether_actor::ActorRef;
 use aether_bloomery_journal::{Batch, Journal, JournalActor, MAX_HEAD_WATCHERS, Seq};
 use aether_bloomery_kinds::{
     AppendRecords, AppendRecordsResult, Digest, DriverRecord, Head, MoveHead, MoveHeadResult, NativeOrigin,
@@ -37,7 +38,7 @@ const ALSO: Head<Note> = Head::new("also");
 struct Fixture {
     registry: Arc<Registry>,
     _chassis: PassiveChassis<TestChassis>,
-    actor: MailboxId,
+    actor: ActorRef<JournalActor>,
     caller: MailboxId,
     replies: mpsc::Receiver<OwnedDispatch>,
     watcher: MailboxId,

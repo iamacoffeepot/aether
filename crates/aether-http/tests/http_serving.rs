@@ -84,16 +84,14 @@ const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
 /// Poll the chassis's boundary address parser until the handler loaded under
-/// `name` has a live trampoline, answering its position. Panics after 30s with
-/// the address and the parser's last answer.
+/// `name` resolves to its trampoline, answering its position. Panics after 30s
+/// with the address and the parser's last answer.
 fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> MailboxId {
     let address = format!("aether.component://aether.embedded:{name}");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let resolved = built.resolve_address(&address);
-        if let Ok(live) = &resolved
-            && built.actor_registry().is_live(live.mailbox_id)
-        {
+        if let Ok(live) = &resolved {
             return live.mailbox_id;
         }
         assert!(

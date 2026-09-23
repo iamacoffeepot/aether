@@ -71,11 +71,14 @@ pub fn normalize_prefix(raw: &str) -> Result<String, String> {
 /// mailbox at receipt through `ctx.resolve_live` — so this remains only
 /// because the route table holds positions rather than proven
 /// references; it goes when the table does.
-pub fn validate_route_mailbox(registry: &Registry, id: MailboxId) -> Result<(), String> {
-    match registry.entry(id) {
-        Some(MailboxEntry::Inbox { .. } | MailboxEntry::Inline(_)) => Ok(()),
-        Some(MailboxEntry::Dropped) => Err(format!("mailbox {id:?} already dropped")),
-        None => Err(format!("unknown mailbox id {id:?}")),
+///
+/// Reads the published route state the mailer's route step reads, so a
+/// member this answers live for is one a dispatch to `(kind, id)` reaches.
+pub fn validate_route_mailbox(registry: &Registry, kind: KindId, id: MailboxId) -> Result<(), String> {
+    match registry.resolve_route_state(kind, id) {
+        RouteResolution::Live => Ok(()),
+        RouteResolution::Dropped => Err(format!("mailbox {id:?} already dropped")),
+        RouteResolution::Starting | RouteResolution::Unknown => Err(format!("unknown mailbox id {id:?}")),
     }
 }
 

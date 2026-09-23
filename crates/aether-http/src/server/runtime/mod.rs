@@ -40,7 +40,7 @@ pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
+pub use aether_substrate::mail::registry::{Registry, RouteResolution};
 pub use aether_substrate::mail::{CapabilityRegistry, MailId};
 
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind

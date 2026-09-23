@@ -281,7 +281,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
                 let mut live = None;
                 for offset in 0..len {
                     let member = route.members[(start + offset) % len];
-                    if validate_route_mailbox(registry, member).is_ok() {
+                    if validate_route_mailbox(registry, route.kind, member).is_ok() {
                         live = Some((member, route.kind));
                         break;
                     }

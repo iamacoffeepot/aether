@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use aether_actor::Instanced;
+use aether_actor::{ActorRef, Instanced};
 use aether_data::Kind as _;
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, Subname};
-use crate::mail::{MailboxId, Source};
+use crate::mail::Source;
 use crate::testing::boot_authority;
 
 use super::support::{ActivationConfig, ActivationPoke, ActivationProbe, activation_fixture};
@@ -43,7 +43,7 @@ type EagerTerminal<'ctx, A, R> = fn(SpawnBuilder<'ctx, A>) -> Result<R, SpawnErr
 /// handler code. Re-adding `HandlerSpawnBuilder::finish` (or
 /// `finish_with_name`) makes the inherent method win method resolution
 /// above, so the `&'static str` bindings stop type-checking against
-/// `Result<MailboxId, SpawnError>` and this file fails to compile.
+/// `Result<ActorRef<A>, SpawnError>` and this file fails to compile.
 /// Deleting the boot terminals breaks the paired coercions below, so the
 /// asymmetry is pinned from both sides rather than only one.
 #[allow(dead_code, reason = "the compile is the assertion; there is no handler binding to construct here")]
@@ -54,8 +54,8 @@ fn spawn_terminals_stay_split<'ctx, A: Instanced + NativeActor>(
     let _: &'static str = staged_only.finish();
     let _: &'static str = staged_only_named.finish_with_name();
 
-    let _: EagerTerminal<'ctx, A, MailboxId> = SpawnBuilder::finish;
-    let _: EagerTerminal<'ctx, A, (MailboxId, String)> = SpawnBuilder::finish_with_name;
+    let _: EagerTerminal<'ctx, A, ActorRef<A>> = SpawnBuilder::finish;
+    let _: EagerTerminal<'ctx, A, (ActorRef<A>, String)> = SpawnBuilder::finish_with_name;
 }
 
 #[test]

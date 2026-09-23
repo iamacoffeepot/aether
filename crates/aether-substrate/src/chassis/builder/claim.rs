@@ -12,6 +12,7 @@ use std::collections::BTreeSet;
 use std::sync::Arc;
 
 use super::passive_boot::PassiveBoot;
+use super::references::ComposedReferences;
 use crate::chassis::ctx::{ChassisCtx, FallbackRouter, MailboxClaim};
 use crate::chassis::error::BootError;
 use crate::config::RingCapacities;
@@ -67,6 +68,9 @@ pub(super) fn claim_only(
     // receiver, actor slots, and wake slot the reservation produced never
     // reach a Start stage on this path.
     let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+    // Describe composes nothing that runs, so the record stays empty and drops
+    // with the stash above.
+    let references = ComposedReferences::default();
 
     for boot in &mut passives {
         let mut ctx = ChassisCtx::new(
@@ -77,6 +81,7 @@ pub(super) fn claim_only(
             &mut claimed_actor_mailboxes,
             &spawner,
             &mut reserved_driver_mailboxes,
+            &references,
         );
         boot.claim(&mut ctx)?;
     }
@@ -89,6 +94,7 @@ pub(super) fn claim_only(
         &mut claimed_actor_mailboxes,
         &spawner,
         &mut reserved_driver_mailboxes,
+        &references,
     );
     driver_claim(&mut ctx)?;
 

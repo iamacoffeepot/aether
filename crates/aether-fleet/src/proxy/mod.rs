@@ -121,10 +121,9 @@ mod tests {
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
     use aether_rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
-    use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
-    use aether_substrate::mail::{Mail, Source, SourceAddr};
     use aether_substrate::testing::{TestChassis, fresh_substrate};
+    use aether_substrate::{ReplyTarget, Subname};
     use aether_trace::TraceDispatchCapability;
     use std::io::BufReader;
     use std::net::TcpListener;
@@ -170,7 +169,7 @@ mod tests {
         // bridge with no engines cap in the picture, so it borrows the
         // test-support parentless placement rather than widening the proxy's
         // shipped ADR-0166 permissions to `root`.
-        let proxy_mailbox = chassis
+        let proxy = chassis
             .spawn_actor_for_test::<FleetProxy>(
                 Subname::Named("e1"),
                 FleetProxyConfig {
@@ -188,19 +187,20 @@ mod tests {
             .expect("proxy spawns + connects");
 
         let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
-        let sink_mailbox = mailbox_id_from_name(<ProxyReplySink as Addressable>::NAMESPACE);
 
         // Forge a `ForwardEnvelope` at the proxy, reply-to the sink.
-        // `mailer.push` directly (rather than through an actor send) so
-        // the test controls the `Source` the proxy parks.
+        // Pushed from the embedder (rather than through an actor send) so
+        // the test controls the reply target the proxy parks.
         let fwd = ForwardEnvelope {
             mailbox: echo_mailbox,
             kind: <TestEchoRequest as Kind>::ID,
             payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
         };
-        mailer.push(
-            Mail::new(proxy_mailbox, <ForwardEnvelope as Kind>::ID, fwd.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink_mailbox), 777)),
+        chassis.send_for_reply(
+            proxy.erase(),
+            <ForwardEnvelope as Kind>::ID,
+            fwd.encode_into_bytes(),
+            ReplyTarget::Actor { to: chassis.actor_ref::<ProxyReplySink>().erase(), correlation: 777 },
         );
 
         // Poll for the sink to record the echoed value. The round trip

@@ -104,20 +104,20 @@ fn ctx_monitor_fires_notice_at_target_close() {
 
     // Spawn target first so the watcher can register against a
     // Live id.
-    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
+    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish_commit().expect("spawn target");
 
     let notice_count = Arc::new(AtomicU32::new(0));
     let last_target = Arc::new(AtomicU64::new(0));
     let watcher_id = chassis
         .spawn_actor::<Watcher>(Subname::Counter, (), (Arc::clone(&notice_count), Arc::clone(&last_target)))
-        .finish()
+        .finish_commit()
         .expect("spawn watcher");
 
     // Drive the watcher to register the monitor by pushing a
     // WatchOrder through its sink handler. After this returns
     // the watcher's handle is stored in `self.handle`.
     let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry(watcher_id).expect("watcher sink registered")
+        registry.entry_at(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
@@ -140,7 +140,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
     // dispatcher's close path runs `close_actor`, which fans out
     // a MonitorNotice mail to watcher_id.
     let MailboxEntry::Inbox { handler: target_handler, .. } =
-        registry.entry(target_id).expect("target sink registered")
+        registry.entry_at(target_id).expect("target sink registered")
     else {
         panic!("expected mailbox entry for target");
     };
@@ -165,11 +165,11 @@ fn ctx_monitor_fires_notice_at_target_close() {
     // Wait for target slot to flip Dead (the close path runs
     // close_actor → mark_dead after fan-out).
     let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live(target_id) && Instant::now() < deadline {
+    while chassis.actor_registry().is_live_at(target_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(
-        !chassis.actor_registry().is_live(target_id),
+        !chassis.actor_registry().is_live_at(target_id),
         "target slot should transition Live → Dead after close fan-out",
     );
     assert!(chassis.actor_registry().is_tombstoned(target_id), "target id should be tombstoned");
@@ -283,16 +283,16 @@ fn watcher_close_prunes_targets_forward_index() {
         .build_passive()
         .expect("empty chassis boots");
 
-    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish().expect("spawn target");
+    let target_id = chassis.spawn_actor::<Target>(Subname::Counter, (), ()).finish_commit().expect("spawn target");
     let close_observed = Arc::new(AtomicU32::new(0));
     let watcher_id = chassis
         .spawn_actor::<Watcher>(Subname::Counter, (), Arc::clone(&close_observed))
-        .finish()
+        .finish_commit()
         .expect("spawn watcher");
 
     // Watcher registers monitor against target.
     let MailboxEntry::Inbox { handler: watcher_handler, .. } =
-        registry.entry(watcher_id).expect("watcher sink registered")
+        registry.entry_at(watcher_id).expect("watcher sink registered")
     else {
         panic!("expected mailbox entry for watcher");
     };
@@ -323,11 +323,11 @@ fn watcher_close_prunes_targets_forward_index() {
     // Watcher slot tombstones; target slot still Live; target's
     // forward index drained of the dead watcher.
     let deadline = Instant::now() + Duration::from_millis(500);
-    while chassis.actor_registry().is_live(watcher_id) && Instant::now() < deadline {
+    while chassis.actor_registry().is_live_at(watcher_id) && Instant::now() < deadline {
         thread::sleep(Duration::from_millis(5));
     }
     assert!(chassis.actor_registry().is_tombstoned(watcher_id), "watcher tombstoned");
-    assert!(chassis.actor_registry().is_live(target_id), "target should still be Live (watcher closed, not target)");
+    assert!(chassis.actor_registry().is_live_at(target_id), "target should still be Live (watcher closed, not target)");
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while chassis.actor_registry().monitor_count(target_id) != 0 && Instant::now() < deadline {

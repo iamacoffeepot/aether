@@ -20,7 +20,7 @@ use aether_substrate::chassis::error::BootError;
 use crate::chassis::BloomeryChassis;
 
 /// Spawn the journal owner under `Subname::Named("journal")` and the bundle
-/// driver under `Subname::Named("driver")` over the journal's born id, so the
+/// driver under `Subname::Named("driver")` over the journal's born reference, so the
 /// engine answers as `aether.bloomery.journal:journal` and
 /// `aether.bloomery.driver:driver`.
 ///
@@ -42,8 +42,8 @@ pub fn mount(built: &BuiltChassis<BloomeryChassis>, path: &Path, limit: ClosureL
         .map_err(|error| spawn_failed("aether.bloomery.driver:driver", &error))?;
     tracing::info!(
         journal = %path.display(),
-        %journal,
-        %driver,
+        ?journal,
+        ?driver,
         "bloomery chassis mounted the journal owner and the bundle driver",
     );
     Ok(())

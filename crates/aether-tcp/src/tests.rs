@@ -16,10 +16,11 @@ use super::{
     BindListener, BindListenerResult, Connect, ConnectResult, ListListeners, ListListenersResult, SessionClosed,
     SessionData, TcpCapability, TcpListenerActor, TcpNativeExt, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
-use aether_actor::Addressable;
+use aether_actor::{Addressable, AnyActorRef};
 use aether_data::{Kind, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
+use aether_substrate::ReplyTarget;
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::actor::native::{NativeActorMailbox, PumpedSlot};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
@@ -102,9 +103,8 @@ fn session_reply() -> Source {
     Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
 }
 
-fn enqueue<K: Kind>(registry: &Arc<Registry>, cap_namespace: &str, mail: &K, source: Source, root: MailId) {
-    let id = registry.lookup(cap_namespace).expect("cap mailbox registered");
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(id).expect("cap entry") else {
+fn enqueue<K: Kind>(registry: &Arc<Registry>, target: AnyActorRef, mail: &K, source: Source, root: MailId) {
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("cap entry") else {
         panic!("expected mailbox entry");
     };
     handler.enqueue(OwnedDispatch::disarmed(
@@ -207,14 +207,14 @@ fn register_route_collision(registry: &Registry, canonical_name: &str) -> Mailbo
 fn drive_and_decode<K, R>(
     registry: &Arc<Registry>,
     rx: &mpsc::Receiver<EgressEvent>,
-    cap_namespace: &str,
+    target: AnyActorRef,
     mail: &K,
 ) -> R
 where
     K: Kind,
     R: Kind,
 {
-    enqueue(registry, cap_namespace, mail, session_reply(), MailId::NONE);
+    enqueue(registry, target, mail, session_reply(), MailId::NONE);
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let frame = loop {
@@ -236,15 +236,12 @@ where
 /// reflects every step (bound, listed, unbound).
 #[test]
 fn bind_then_list_then_unbind_roundtrip() {
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
 
     // Bind to port 0 — let the OS pick a free port.
-    let bind_reply: BindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None },
-    );
+    let bind_reply: BindListenerResult =
+        drive_and_decode(&registry, &rx, tcp, &BindListener { addr: "127.0.0.1:0".into(), name: None, consumer: None });
     let (listener_name, local_port) = match bind_reply {
         BindListenerResult::Ok { listener_name, local_port, .. } => (listener_name, local_port),
         BindListenerResult::Err { error, .. } => panic!("bind failed: {error}"),
@@ -253,8 +250,7 @@ fn bind_then_list_then_unbind_roundtrip() {
     assert!(local_port > 0, "OS-picked port should be non-zero");
 
     // List enumerates the one listener.
-    let list_reply: ListListenersResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    let list_reply: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
     assert_eq!(list_reply.listeners.len(), 1, "exactly one listener");
     let entry = &list_reply.listeners[0];
     assert_eq!(entry.name, listener_name);
@@ -262,12 +258,8 @@ fn bind_then_list_then_unbind_roundtrip() {
     assert_eq!(entry.addr, "127.0.0.1:0");
 
     // Unbind — asynchronous reply via MonitorNotice.
-    let unbind_reply: UnbindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &UnbindListener { listener_name: listener_name.clone() },
-    );
+    let unbind_reply: UnbindListenerResult =
+        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: listener_name.clone() });
     match unbind_reply {
         UnbindListenerResult::Ok { listener_name: ln } => assert_eq!(ln, listener_name),
         UnbindListenerResult::Err { error, .. } => panic!("unbind failed: {error}"),
@@ -275,27 +267,24 @@ fn bind_then_list_then_unbind_roundtrip() {
 
     // List should now be empty — cap-local supervisor map
     // dropped the entry on MonitorNotice.
-    let list_reply: ListListenersResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    let list_reply: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
     assert!(list_reply.listeners.is_empty(), "list should drop the unbound listener");
 }
 
 #[test]
 fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     const LISTENER_NAME: &str = "held-bind";
-    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let session = SessionToken(Uuid::from_u128(0x4066_B1AD));
     let correlation_id = 0x4066;
-    let root = MailId::new(MailboxId(0x4066_B1AD), correlation_id);
-    let settled = chassis.settlement_registry().subscribe_settlement(root);
-    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
-    mailer.record_sent(root, root, None, root.sender, cap_id, BindListener::ID);
-    enqueue(
-        &registry,
-        TcpCapability::NAMESPACE,
-        &BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None },
-        Source::with_correlation(SourceAddr::Session(session), correlation_id),
-        root,
+    let settled = chassis.send_tracked(
+        tcp,
+        BindListener::ID,
+        BindListener { addr: "127.0.0.1:0".into(), name: Some(LISTENER_NAME.into()), consumer: None }
+            .encode_into_bytes(),
+        correlation_id,
+        Some(ReplyTarget::Session { session, correlation: correlation_id }),
     );
 
     let event = rx.recv_timeout(Duration::from_secs(2)).expect("staged bind reply arrives");
@@ -316,18 +305,13 @@ fn staged_bind_reply_preserves_the_original_root_and_follows_monitor_commit() {
     assert_eq!(listener_name, LISTENER_NAME);
     settled.recv_timeout(Duration::from_secs(2)).expect("the original root settles after the staged reply");
 
-    let listed: ListListenersResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    let listed: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
     assert!(
         listed.listeners.iter().any(|entry| entry.name == LISTENER_NAME && entry.port == local_port),
         "the success reply is sent only after monitor installation and supervisor-map commit",
     );
-    let unbound: UnbindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &UnbindListener { listener_name: LISTENER_NAME.into() },
-    );
+    let unbound: UnbindListenerResult =
+        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
 }
 
@@ -336,13 +320,14 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     const LISTENER_NAME: &str = "owner-rejected-listener";
     let socket_addr = available_loopback_addr();
     let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let collision_id = register_route_collision(&registry, &canonical_name);
 
     let rejected: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
     );
     assert!(
@@ -363,7 +348,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let retried: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: socket_addr.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
     );
     assert!(
@@ -372,12 +357,8 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
         "the rejected parent-local reservation is released for retry: {retried:?}",
     );
 
-    let unbound: UnbindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &UnbindListener { listener_name: LISTENER_NAME.into() },
-    );
+    let unbound: UnbindListenerResult =
+        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }), "retry listener shuts down cleanly");
 }
 
@@ -390,20 +371,21 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     let addr_beta = reservation_beta.local_addr().expect("beta duplicate-name address");
     drop(reservation_alpha);
     drop(reservation_beta);
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let session_alpha = SessionToken(Uuid::from_u128(0x4066_DA1A));
     let session_beta = SessionToken(Uuid::from_u128(0x4066_DB7A));
 
     enqueue(
         &registry,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: addr_alpha.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_alpha), 1),
         MailId::NONE,
     );
     enqueue(
         &registry,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: addr_beta.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_beta), 2),
         MailId::NONE,
@@ -446,12 +428,8 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
     let live_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), successes[0]);
     assert!(TcpListener::bind(live_addr).is_err(), "the accepted listener retains its socket");
 
-    let unbound: UnbindListenerResult = drive_and_decode(
-        &registry,
-        &rx,
-        TcpCapability::NAMESPACE,
-        &UnbindListener { listener_name: LISTENER_NAME.into() },
-    );
+    let unbound: UnbindListenerResult =
+        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: LISTENER_NAME.into() });
     assert!(matches!(unbound, UnbindListenerResult::Ok { .. }));
 }
 
@@ -469,12 +447,13 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
     });
 
     let canonical_name = format!("{}/{}:{SESSION_NAME}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let _collision_id = register_route_collision(&registry, &canonical_name);
     let rejected: ConnectResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &Connect { addr: socket_addr.to_string(), name: Some(SESSION_NAME.into()), consumer: None },
     );
 
@@ -496,11 +475,12 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
 /// after that deferred reply has been emitted.
 #[test]
 fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
-    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let bind_reply: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("held-unbind".into()), consumer: None },
     );
     let listener_name = match bind_reply {
@@ -510,27 +490,13 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
 
     let session = SessionToken(Uuid::from_u128(0x3051));
     let correlation_id = 0x3051;
-    let root = MailId::new(MailboxId(0x3051), correlation_id);
-    let settled = chassis.settlement_registry().subscribe_settlement(root);
-    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
-    mailer.record_sent(root, root, None, root.sender, cap_id, UnbindListener::ID);
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(cap_id).expect("cap entry") else {
-        panic!("expected cap inbox");
-    };
-    let unbind = UnbindListener { listener_name: listener_name.clone() };
-    handler.enqueue(OwnedDispatch::disarmed(
+    let settled = chassis.send_tracked(
+        tcp,
         UnbindListener::ID,
-        None,
-        Source::with_correlation(SourceAddr::Session(session), correlation_id),
-        MailRef::from(unbind.encode_into_bytes()),
-        1,
-        root,
-        root,
-        None,
-        Nanos(0),
-        0,
-        cap_id,
-    ));
+        UnbindListener { listener_name: listener_name.clone() }.encode_into_bytes(),
+        correlation_id,
+        Some(ReplyTarget::Session { session, correlation: correlation_id }),
+    );
 
     let event = rx.recv_timeout(Duration::from_secs(2)).expect("deferred unbind reply arrives before deadline");
     let EgressEvent::ToSession {
@@ -552,8 +518,7 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
         matches!(rx.recv_timeout(Duration::from_millis(50)), Err(mpsc::RecvTimeoutError::Timeout)),
         "deferred unbind emits exactly one result",
     );
-    let listeners: ListListenersResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    let listeners: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
     assert!(listeners.listeners.is_empty(), "monitor cleanup removes the unbound listener");
 }
 
@@ -572,10 +537,11 @@ fn unbind_monitor_reply_releases_the_originating_settlement_hold() {
 /// already-closed path instead of the parked one under CI load.
 #[test]
 fn duplicate_unbind_preserves_the_first_parked_reply() {
-    let (registry, rx, _chassis, mut cap) = boot_pumped_tcp_substrate();
+    let (registry, rx, chassis, mut cap) = boot_pumped_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     enqueue(
         &registry,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
         session_reply(),
         MailId::NONE,
@@ -591,20 +557,8 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     let first_session = SessionToken(Uuid::from_u128(0x3051_0001));
     let duplicate_session = SessionToken(Uuid::from_u128(0x3051_0002));
     let unbind = UnbindListener { listener_name: listener_name.clone() };
-    enqueue(
-        &registry,
-        TcpCapability::NAMESPACE,
-        &unbind,
-        Source::with_correlation(SourceAddr::Session(first_session), 1),
-        MailId::NONE,
-    );
-    enqueue(
-        &registry,
-        TcpCapability::NAMESPACE,
-        &unbind,
-        Source::with_correlation(SourceAddr::Session(duplicate_session), 2),
-        MailId::NONE,
-    );
+    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(first_session), 1), MailId::NONE);
+    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(duplicate_session), 2), MailId::NONE);
 
     let mut first_reply = None;
     let mut duplicate_reply = None;
@@ -662,12 +616,13 @@ fn connect_roundtrip_spawns_writable_session() {
         received
     });
 
-    let (registry, mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let consumer_rx = register_session_consumer(&registry, CONSUMER);
     let connect_reply = drive_and_decode::<Connect, ConnectResult>(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &Connect { addr: addr.to_string(), name: None, consumer: Some(mailbox_id_from_path(CONSUMER)) },
     );
     let (session_name, session_id, peer) = match connect_reply {
@@ -716,31 +671,25 @@ fn concurrent_connects_reply_to_their_own_origins() {
     let server_alpha = thread::spawn(move || listener_alpha.accept().expect("accept alpha connect").1);
     let server_beta = thread::spawn(move || listener_beta.accept().expect("accept beta connect").1);
 
-    let (registry, mailer, rx, chassis) = boot_tcp_substrate();
+    let (_registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let session_alpha = SessionToken(Uuid::from_u128(0xA11A));
     let session_beta = SessionToken(Uuid::from_u128(0xB37A));
     let correlation_alpha = 0xA11A;
     let correlation_beta = 0xB37A;
-    let root_alpha = MailId::new(MailboxId(0xA11A), correlation_alpha);
-    let root_beta = MailId::new(MailboxId(0xB37A), correlation_beta);
-    let settled_alpha = chassis.settlement_registry().subscribe_settlement(root_alpha);
-    let settled_beta = chassis.settlement_registry().subscribe_settlement(root_beta);
-    let cap_id = registry.lookup(TcpCapability::NAMESPACE).expect("cap mailbox registered");
-    mailer.record_sent(root_alpha, root_alpha, None, root_alpha.sender, cap_id, Connect::ID);
-    mailer.record_sent(root_beta, root_beta, None, root_beta.sender, cap_id, Connect::ID);
-    enqueue(
-        &registry,
-        TcpCapability::NAMESPACE,
-        &Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None },
-        Source::with_correlation(SourceAddr::Session(session_alpha), correlation_alpha),
-        root_alpha,
+    let settled_alpha = chassis.send_tracked(
+        tcp,
+        Connect::ID,
+        Connect { addr: addr_alpha.to_string(), name: Some("alpha".into()), consumer: None }.encode_into_bytes(),
+        correlation_alpha,
+        Some(ReplyTarget::Session { session: session_alpha, correlation: correlation_alpha }),
     );
-    enqueue(
-        &registry,
-        TcpCapability::NAMESPACE,
-        &Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None },
-        Source::with_correlation(SourceAddr::Session(session_beta), correlation_beta),
-        root_beta,
+    let settled_beta = chassis.send_tracked(
+        tcp,
+        Connect::ID,
+        Connect { addr: addr_beta.to_string(), name: Some("beta".into()), consumer: None }.encode_into_bytes(),
+        correlation_beta,
+        Some(ReplyTarget::Session { session: session_beta, correlation: correlation_beta }),
     );
 
     let mut saw_alpha = false;
@@ -801,12 +750,13 @@ fn concurrent_connects_reply_to_their_own_origins() {
 /// the first bind's actually-bound port to drive the second.
 #[test]
 fn bind_port_in_use_returns_err() {
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
 
     let first: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("first".into()), consumer: None },
     );
     let local_port = match first {
@@ -818,7 +768,7 @@ fn bind_port_in_use_returns_err() {
     let second: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: format!("127.0.0.1:{local_port}"), name: Some("second".into()), consumer: None },
     );
     match second {
@@ -834,10 +784,11 @@ fn bind_port_in_use_returns_err() {
 /// echoed back.
 #[test]
 fn unbind_unknown_listener_errors() {
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
 
     let reply: UnbindListenerResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &UnbindListener { listener_name: "nope".into() });
+        drive_and_decode(&registry, &rx, tcp, &UnbindListener { listener_name: "nope".into() });
     match reply {
         UnbindListenerResult::Err { listener_name, .. } => {
             assert_eq!(listener_name, "nope");
@@ -851,13 +802,14 @@ fn unbind_unknown_listener_errors() {
 #[test]
 fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
     const CONSUMER: &str = "test.tcp.consumer";
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let consumer_rx = register_session_consumer(&registry, CONSUMER);
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener {
             addr: "127.0.0.1:0".into(),
             name: Some("delivery".into()),
@@ -919,13 +871,14 @@ fn session_reassembles_frames_for_bound_consumer_and_reports_eof() {
 #[test]
 fn nested_lineage_consumer_receives_session_mail() {
     const CONSUMER: &str = "aether.component/aether.embedded:probe";
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let consumer_rx = register_session_consumer(&registry, CONSUMER);
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener {
             addr: "127.0.0.1:0".into(),
             name: Some("nested".into()),
@@ -953,13 +906,14 @@ fn nested_lineage_consumer_receives_session_mail() {
 #[test]
 fn session_reports_frame_rejection_to_bound_consumer() {
     const CONSUMER: &str = "test.tcp.rejection-consumer";
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
     let consumer_rx = register_session_consumer(&registry, CONSUMER);
 
     let bind: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener {
             addr: "127.0.0.1:0".into(),
             name: Some("rejection".into()),
@@ -989,23 +943,23 @@ fn session_reports_frame_rejection_to_bound_consumer() {
 /// `ListListeners`.
 #[test]
 fn list_enumerates_two_concurrent_listeners() {
-    let (registry, _mailer, rx, _chassis) = boot_tcp_substrate();
+    let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
+    let tcp = chassis.actor_ref::<TcpCapability>().erase();
 
     let _: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("admin".into()), consumer: None },
     );
     let _: BindListenerResult = drive_and_decode(
         &registry,
         &rx,
-        TcpCapability::NAMESPACE,
+        tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("game".into()), consumer: None },
     );
 
-    let list: ListListenersResult =
-        drive_and_decode(&registry, &rx, TcpCapability::NAMESPACE, &ListListeners::default());
+    let list: ListListenersResult = drive_and_decode(&registry, &rx, tcp, &ListListeners::default());
     let mut names: Vec<String> = list.listeners.iter().map(|l| l.name.clone()).collect();
     names.sort();
     assert_eq!(names, vec!["admin".to_string(), "game".to_string()]);
