@@ -52,13 +52,12 @@ impl Ctx<'_, NativeCtx<'_, Erased, Manual>> {
     /// `to` resolves `R` through the **component host's** handle with
     /// [`hosted`](NativeActorMailbox::hosted), so the carry is the component
     /// host's rather than the caller's, and one call site addresses both a
-    /// native root cap (whose
-    /// [`One`](aether_actor::One) resolver ignores the carry) and an embedded
-    /// component (whose [`Embedded`](aether_actor::Embedded) resolver folds it
-    /// beneath the component host, under the component's default load name).
-    /// That is why it is not
-    /// `ctx.actor::<R>()`, which supplies the caller's carry and therefore
-    /// refuses an embedded target outright (ADR-0119 amendment).
+    /// native root cap (whose [`One`](aether_actor::One) resolver ignores the
+    /// carry) and an embedded component (whose
+    /// [`Embedded`](aether_actor::Embedded) resolver folds it beneath the
+    /// component host, under the component's default load name). That is why
+    /// it is not `ctx.actor::<R>()`, which supplies the caller's carry and
+    /// therefore refuses an embedded target outright (ADR-0119 amendment).
     #[must_use = "a deferred request does nothing until `.to::<R>()` forwards it"]
     pub fn defer<'ctx, 'request, K: Kind>(&'ctx self, request: &'request K) -> DeferredRequest<'ctx, 'request, K> {
         DeferredRequest { host: self.actor::<ComponentHostCapability>(), request, source: self.reply_target() }
