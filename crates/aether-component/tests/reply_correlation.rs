@@ -7,7 +7,9 @@
 //!
 //! Issue 5508 adds a separate typed-context trigger on the same fixture: two
 //! in-flight reads carry distinct context kinds, and the shared `ReadResult`
-//! handler recovers them by `context_kind` probe-then-take.
+//! handler recovers them by trying each context type in turn, A first. The
+//! reply carrying context B therefore crosses a wrong-kind take of A, so the
+//! test also guards that a wrong-kind take leaves the other context stored.
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
 // entries are present in this test binary.
@@ -74,7 +76,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
 }
 
 #[test]
-fn typed_fs_replies_demux_by_context_kind_probe_then_take() {
+fn typed_fs_replies_demux_by_trying_each_context_type() {
     let Some(wasm_path) = require_wasm(FIXTURE_CRATE) else {
         return;
     };
@@ -103,7 +105,7 @@ fn typed_fs_replies_demux_by_context_kind_probe_then_take() {
     assert_eq!(
         harness.count_observed(FsContextDemuxReport::NAME) - baseline,
         1,
-        "fixture did not report both distinct typed contexts recovered by probe-then-take; observed kinds: {:?}",
+        "fixture did not report both distinct typed contexts recovered by trying each context type; observed kinds: {:?}",
         harness.observed_kinds(),
     );
     assert_eq!(

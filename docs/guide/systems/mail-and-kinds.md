@@ -119,7 +119,9 @@ one-shot request that needs to match a later reply should call
 `send_with_context(&request, &context)` and recover the bookkeeping in the
 reply handler with `ctx.take_context::<Context>()`. Contexts are `Kind`s, so the
 table stores schema-typed bytes, checks the `KindId` on take, and rides guest
-dehydrate/rehydrate automatically. Keep contexts small: stash routing
+dehydrate/rehydrate automatically. A take of the wrong type returns `None` and
+leaves the context stored, so a reply handler that serves several context kinds
+tries each type in turn. Keep contexts small: stash routing
 bookkeeping such as the caller's reply handle, origin, or parse mode; keep bulky
 domain state in actor fields and put only an id in the context.
 

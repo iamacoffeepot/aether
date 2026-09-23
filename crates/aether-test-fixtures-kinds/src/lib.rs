@@ -318,9 +318,10 @@ pub struct FsDemuxReport {
     pub second_matched: bool,
 }
 
-/// Issue 5508: trigger for the typed request-context probe-then-take fixture.
-/// The fixture sends two `aether.fs.read` requests carrying distinct context
-/// kinds and recovers them from the shared `ReadResult` handler.
+/// Issue 5508: trigger for the typed request-context fixture that recovers
+/// contexts by trying each context type in turn. The fixture sends two
+/// `aether.fs.read` requests carrying distinct context kinds and recovers them
+/// from the shared `ReadResult` handler.
 #[aether_data::kind(name = "aether.test_fixtures.run_fs_context_demux", default)]
 pub struct RunFsContextDemux {
     pub namespace: String,
@@ -328,8 +329,9 @@ pub struct RunFsContextDemux {
 }
 
 /// Issue 5508: report emitted once both distinct typed request contexts were
-/// recovered by probe-then-take on the shared `ReadResult` handler. Payloads
-/// are the values actually decoded from each context, not synthetic flags.
+/// recovered by trying each context type in turn on the shared `ReadResult`
+/// handler. Payloads are the values actually decoded from each context, not
+/// synthetic flags.
 #[aether_data::kind(name = "aether.test_fixtures.fs_context_demux_report", eq)]
 pub struct FsContextDemuxReport {
     pub first_payload: u32,
