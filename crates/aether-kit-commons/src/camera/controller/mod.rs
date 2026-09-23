@@ -48,7 +48,7 @@ pub use kinds::*;
 
 use core::f32::consts::FRAC_PI_3;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, KeyRelease, Tick, keycode};
 use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
 use aether_math::{TAU, Vec2, Vec3};
@@ -187,7 +187,7 @@ impl WasmActor for CameraController {
 impl CameraController {
     /// Send the full-`Some` seed for the current mode, pinning orbit
     /// auto-advance off so it never fights the keys.
-    fn seed(&self, ctx: &mut WasmCtx<'_>) {
+    fn seed<A: Reaches<CameraComponent>>(&self, ctx: &mut WasmCtx<'_, A>) {
         let camera = self.config.camera.clone();
         match &self.shadow {
             Shadow::Orbit(orbit) => {

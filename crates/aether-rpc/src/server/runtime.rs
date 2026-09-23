@@ -287,9 +287,9 @@ impl RpcServerState {
     /// Record `sender` as the route for `engine` (the five cases of
     /// `on_register_engine_route`). Every answer is one keyed lookup in
     /// one of the two route maps.
-    pub fn register_engine_route(
+    pub fn register_engine_route<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         sender: ErasedActorRef,
         engine: EngineId,
     ) -> RegisterEngineRouteResult {
@@ -329,7 +329,7 @@ impl RpcServerState {
 
     /// Allocate a fresh `ConnId`, store the connection's write half,
     /// spin a reader thread for the read half.
-    pub fn spawn_reader_for_peer(&mut self, _ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
+    pub fn spawn_reader_for_peer<A>(&mut self, _ctx: &mut NativeCtx<'_, A>, stream: TcpStream, peer: SocketAddr) {
         let conn_id = self.next_conn_id;
         self.next_conn_id += 1;
 
@@ -383,7 +383,7 @@ impl RpcServerState {
     }
 
     /// Dispatch one incoming frame.
-    pub fn dispatch_frame(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, frame: WireFrame) {
+    pub fn dispatch_frame<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, frame: WireFrame) {
         match frame {
             WireFrame::Hello(hello) => self.handle_hello(conn_id, hello),
             WireFrame::HelloAck(_) => {
@@ -435,7 +435,13 @@ impl RpcServerState {
         );
     }
 
-    pub fn handle_call(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, cid: Option<u64>, envelope: MailEnvelope) {
+    pub fn handle_call<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        conn_id: ConnId,
+        cid: Option<u64>,
+        envelope: MailEnvelope,
+    ) {
         // The envelope names an engine (issue 763 P5a): relay to the
         // proxy registered for it, as a `ForwardEnvelope`. This server is
         // the sender, so the send's default reply target is this server

@@ -289,8 +289,8 @@ impl AnthropicComponent {
     }
 
     /// Reply a `MessagesSendResult` to the original caller, if one awaits.
-    fn reply_messages(
-        ctx: &mut WasmCtx<'_, Erased, Manual>,
+    fn reply_messages<A>(
+        ctx: &mut WasmCtx<'_, A, Manual>,
         reply: Option<ReplyHandle>,
         request_id: u64,
         outcome: Result<(String, String, Usage), AnthropicError>,
@@ -306,8 +306,8 @@ impl AnthropicComponent {
     }
 
     /// Reply a `CliSendResult` to the original caller, if one awaits.
-    fn reply_cli(
-        ctx: &mut WasmCtx<'_, Erased, Manual>,
+    fn reply_cli<A>(
+        ctx: &mut WasmCtx<'_, A, Manual>,
         reply: Option<ReplyHandle>,
         request_id: u64,
         outcome: Result<(String, String, Usage), AnthropicError>,

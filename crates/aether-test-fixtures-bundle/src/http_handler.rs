@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorPath, Kind};
 use aether_http as http;
@@ -41,7 +41,7 @@ use aether_kinds::DropComponent;
 /// for the retired `handler_mailbox` config default. Shared by every
 /// catch-all fixture in this module; the routed fixtures register their
 /// specific prefixes instead.
-fn bind_catch_all(ctx: &mut WasmCtx<'_>) {
+fn bind_catch_all<A: Reaches<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
     ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
         prefix: "/".to_string(),
         method: None,
@@ -134,7 +134,7 @@ impl StreamProgress {
     /// spending it would overrun the window and the cap would tear the
     /// connection down as a flood. Grants for *other* streams are no longer a
     /// case to defend against — each has its own entry.
-    fn spend_credit(&mut self, ctx: &mut WasmCtx<'_>, credit: &HttpStreamCredit) {
+    fn spend_credit<A>(&mut self, ctx: &mut WasmCtx<'_, A>, credit: &HttpStreamCredit) {
         let state = match self.streams.entry(credit.stream_id) {
             Entry::Occupied(occupied) => occupied.into_mut(),
             Entry::Vacant(vacant) => {

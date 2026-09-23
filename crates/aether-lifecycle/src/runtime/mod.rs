@@ -130,11 +130,7 @@ impl LifecycleCapabilityState {
     /// binding) means "not monitorable": the rows then live until
     /// substrate teardown, exactly as they would for a mailbox that
     /// never goes away.
-    pub fn watch<M: aether_actor::ReplyMode>(
-        &mut self,
-        ctx: &mut NativeCtx<'_, Erased, M>,
-        subscriber: ErasedActorRef,
-    ) {
+    pub fn watch<A, M: aether_actor::ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
         if !self.monitors.contains_key(&subscriber)
             && let Ok(handle) = ctx.monitor(subscriber)
         {
