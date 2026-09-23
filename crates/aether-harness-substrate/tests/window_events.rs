@@ -21,8 +21,8 @@ fn canonical_window(name: &str) -> String {
     format!("{}/{}:{name}", WindowCapability::NAMESPACE, WindowInstance::NAMESPACE)
 }
 
-fn abbreviated_window(name: &str) -> String {
-    format!("{}://{name}", WindowCapability::NAMESPACE)
+fn short_window(name: &str) -> String {
+    format!("{}/:{name}", WindowCapability::NAMESPACE)
 }
 
 fn spec(title: &str, width: u32, height: u32) -> WindowSpec {
@@ -165,18 +165,18 @@ fn synthetic_runtime_models_window_lifecycle_and_controls_in_memory() {
             (
                 "resize-second",
                 HarnessOp::send_and_await_reply(
-                    abbreviated_window("second"),
+                    short_window("second"),
                     &SetWindowMode { mode: WindowMode::Windowed, width: Some(640), height: Some(360) },
                 ),
             ),
             ("focus-first", HarnessOp::send_and_await_reply(canonical_window("first"), &FocusWindow)),
-            ("redraw-second", HarnessOp::send_and_await_reply(abbreviated_window("second"), &RequestWindowRedraw)),
+            ("redraw-second", HarnessOp::send_and_await_reply(short_window("second"), &RequestWindowRedraw)),
             ("listed", HarnessOp::send_and_await_reply(window_mailbox(), &ListWindows)),
             ("close-first", HarnessOp::send_and_await_reply(canonical_window("first"), &CloseWindow)),
             (
                 "title-second-after-close",
                 HarnessOp::send_and_await_reply(
-                    abbreviated_window("second"),
+                    short_window("second"),
                     &SetWindowTitle { title: "survivor".to_owned() },
                 ),
             ),

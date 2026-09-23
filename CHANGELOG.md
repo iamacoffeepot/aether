@@ -17,7 +17,7 @@ APIs without a deprecation window.
 
 ### Engine
 
-- Actor identity is a fold over lineage, not a hash of a name. `ctx.actor::<C>()` resolves a sibling at compile time and stays correct when the target is re-parented; external addresses abbreviate (`aether.window://main`).
+- Actor identity is a fold over lineage, not a hash of a name. `ctx.actor::<C>()` resolves a sibling at compile time and stays correct when the target is re-parented; external addresses have a short form (`aether.window/:main`).
 - One wasm module can export several actors (`export!(A, B, C)`), name an entry at load time, and spawn co-located inline children that persist and reconstruct across a replace.
 - Handler classes are explicit — `#[handler::single]`, `#[handler::multi]`, `#[handler::manual]` — and a handler's return type is its reply contract, recorded in a link-time manifest.
 - Handler sets let one runtime block of handlers be written once and mixed into several actors.

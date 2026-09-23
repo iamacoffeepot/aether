@@ -189,7 +189,7 @@ engine reachability matters.
 
 Use `replace_component` with the current engine id, the component's `address`,
 and a previously uploaded selector. The address is the same spelling every other
-tool takes: a canonical ADR-0099 lineage, an unambiguous ADR-0166 abbreviation,
+tool takes: a canonical ADR-0099 lineage, an unambiguous ADR-0166 short path,
 or the tagged `mbx-…` id the load returned. Prefer a content hash for the
 selector so the replacement is unambiguous.
 

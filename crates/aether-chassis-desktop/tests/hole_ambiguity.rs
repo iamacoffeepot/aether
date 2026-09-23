@@ -1,10 +1,11 @@
-//! Gate on which abbreviated addresses this binary can still resolve
+//! Gate on which short paths this binary can still resolve
 //! (iamacoffeepot/aether#4127).
 //!
-//! ADR-0166 §5 lets `parent://name` omit the child namespace only when exactly
-//! one instanced child namespace is possible at that point. That is computed
-//! over declared placement permissions, so a `child_of(...)` added in an
-//! unrelated crate can silently collapse an abbreviation that an MCP call, a
+//! ADR-0166 §5 lets the hole in `parent/:name` stand for the child namespace
+//! only when exactly one instanced child namespace is possible at that point.
+//! That is computed over declared placement permissions, so a `child_of(...)`
+//! added in an unrelated crate can silently collapse a short path that an MCP
+//! call, a
 //! config file, or a manifest already depends on. Nothing else notices until
 //! the address fails to resolve in a live session.
 //!
@@ -20,7 +21,7 @@
 
 use aether_chassis_desktop::DesktopChassis;
 use aether_substrate::chassis::Chassis;
-use aether_substrate::mail::registry::{AmbiguousAbbreviation, ambiguous_abbreviations};
+use aether_substrate::mail::registry::{AmbiguousHole, ambiguous_holes};
 
 /// Read the ambiguity points, having first pulled the chassis's own link set in.
 ///
@@ -30,17 +31,17 @@ use aether_substrate::mail::registry::{AmbiguousAbbreviation, ambiguous_abbrevia
 /// vacuously. Naming the chassis type is what makes the linker keep the crates
 /// a real desktop binary composes, and therefore what makes this gate about the
 /// engine rather than about the test.
-fn ambiguity_over_the_desktop_link_set() -> Vec<AmbiguousAbbreviation> {
+fn ambiguity_over_the_desktop_link_set() -> Vec<AmbiguousHole> {
     assert_eq!(DesktopChassis::PROFILE, "desktop", "the fixture must name the chassis this gate claims to cover");
-    ambiguous_abbreviations().expect("the desktop link set carries well-formed placement facts")
+    ambiguous_holes().expect("the desktop link set carries well-formed placement facts")
 }
 
-/// Parents that already carry more than one instanced child, so a bare
-/// discriminator beneath them is ambiguous by design and callers must name the
-/// child namespace explicitly.
+/// Parents that already carry more than one instanced child, so a hole beneath
+/// them is ambiguous by design and callers must name the child namespace
+/// explicitly.
 ///
 /// This is a record of the present state, not an aspiration. An entry here says
-/// "this abbreviation was already unavailable"; a *new* entry appearing is the
+/// "this short path was already unavailable"; a *new* entry appearing is the
 /// regression the test exists to catch.
 const KNOWN_AMBIGUOUS: &[(&str, &[&str])] =
     &[("aether.tcp", &["aether.tcp.listener", "aether.tcp.session"] as &[&str])];
@@ -54,15 +55,15 @@ const KNOWN_AMBIGUOUS: &[(&str, &[&str])] =
 /// caused it — the `child_of(...)` naming that parent from the new child.
 ///
 /// Adding a second instanced child under a parent is a real decision, not a
-/// mistake to be forbidden: it trades an abbreviation for a placement. Updating
+/// mistake to be forbidden: it trades a short path for a placement. Updating
 /// this list is how that decision gets stated, and the diff is where anyone
-/// depending on the abbreviation finds out.
+/// depending on the short path finds out.
 #[test]
-fn no_new_parent_loses_its_bare_discriminator() {
+fn no_new_parent_loses_its_hole() {
     let observed = ambiguity_over_the_desktop_link_set();
     let expected = KNOWN_AMBIGUOUS
         .iter()
-        .map(|(parent, children)| AmbiguousAbbreviation {
+        .map(|(parent, children)| AmbiguousHole {
             parent_namespace: (*parent).to_owned(),
             child_namespaces: children.iter().map(|child| (*child).to_owned()).collect(),
         })
@@ -70,15 +71,15 @@ fn no_new_parent_loses_its_bare_discriminator() {
 
     assert_eq!(
         observed, expected,
-        "the set of parents with an ambiguous bare discriminator changed.\n\
-         A new entry means a `child_of(...)` collapsed an abbreviation that used to resolve — \
+        "the set of parents with an ambiguous hole changed.\n\
+         A new entry means a `child_of(...)` collapsed a short path that used to resolve — \
          address those children as `namespace:discriminator`, and record the trade here.\n\
-         A removed entry means an abbreviation became available again; drop it from KNOWN_AMBIGUOUS."
+         A removed entry means a short path became available again; drop it from KNOWN_AMBIGUOUS."
     );
 }
 
-/// The component host is the abbreviation the harness surface leans on:
-/// `aether.component://camera` is how an operator names a loaded component
+/// The component host is the short path the harness surface leans on:
+/// `aether.component/:camera` is how an operator names a loaded component
 /// without spelling the full `aether.component/aether.embedded:camera` lineage.
 ///
 /// Tripwire: asserted separately from the list above because the list's failure
@@ -86,10 +87,10 @@ fn no_new_parent_loses_its_bare_discriminator() {
 /// A second instanced child under `aether.component` fails both, and this is
 /// the one that names the cost.
 #[test]
-fn the_component_host_keeps_its_bare_discriminator() {
+fn the_component_host_keeps_its_hole() {
     let observed = ambiguity_over_the_desktop_link_set();
     assert!(
         !observed.iter().any(|point| point.parent_namespace == "aether.component"),
-        "aether.component gained a second instanced child, so `aether.component://name` no longer resolves: {observed:?}"
+        "aether.component gained a second instanced child, so `aether.component/:name` no longer resolves: {observed:?}"
     );
 }

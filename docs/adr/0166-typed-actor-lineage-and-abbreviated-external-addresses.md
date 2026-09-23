@@ -48,7 +48,7 @@ aether.component/aether.embedded:camera
 That spelling is useful for durable identity and diagnosis but cumbersome for
 an operator who already chose the component root and only wants the `camera`
 instance. ADR-0099 explicitly permits alternate display spellings because the
-string is not the identity, but there is no shared abbreviation mechanism
+string is not the identity, but there is no shared short-path mechanism
 today. Teaching MCP or each capability a separate shortened root name would
 duplicate namespace ownership and let clients disagree.
 
@@ -61,16 +61,16 @@ sender sides.
 
 Constraints:
 
-- Rust callers continue to resolve through actor ZSTs. External abbreviations
+- Rust callers continue to resolve through actor ZSTs. External short paths
   do not become an SDK routing language.
 - `Addressable::NAMESPACE` remains declared only by its owning actor. Neither
-  relationships nor abbreviations repeat namespace strings.
+  relationships nor short paths repeat namespace strings.
 - An actor may be allowed beneath more than one parent. A relationship is a
   placement permission, not one global topology or a claim that the placement
   is always live.
 - Canonical lineage, `MailboxId`, registration names, and reverse lookup remain
-  authoritative. An abbreviated address must expand to a canonical lineage
-  before hashing or lookup.
+  authoritative. A short path must expand to a canonical lineage before
+  hashing or lookup.
 - Shared logical identities remain valid. Runtime variants with the same
   namespace and future embedding mechanisms sharing the embedding-host class
   are one address node, not a child ambiguity.
@@ -127,8 +127,8 @@ keyless native-child resolver inside this decision.
 `root` names two properties, and they are carried by two artifacts rather than
 one. **Placement permission** — this identity may exist with no actor parent —
 is the `Root` implementation, which the chassis spawn surfaces read as a bound;
-every `root` declaration gets it. **Anchoring** — this namespace may stand
-before `://` in an abbreviated address — is the `RootEntry` record §4 emits,
+every `root` declaration gets it. **Anchoring** — this namespace may root a
+short path — is the `RootEntry` record §4 emits,
 which the boundary resolver reads at link time. Only a singleton root anchors:
 an instanced namespace identifies no single actor, so §5 has nothing for it to
 resolve to. An instanced `#[actor(instanced, root)]` therefore takes the
@@ -267,7 +267,7 @@ whose lineage section is absent or unreadable loads normally.
 inside actor namespace declarations. A loaded module entry is embedded, not an
 actor-tree `Root`; `export!` membership and load selection control entry
 placement independently. `ModuleChild` supplies no globally exact parent edge,
-so only exact `Root` and `Child` records participate in external abbreviation.
+so only exact `Root` and `Child` records participate in short-path expansion.
 
 ### 4. The macro emits anonymous lineage metadata
 
@@ -301,58 +301,76 @@ selected parent. Multiple `ChildEntry` records naturally represent branching
 and multiple allowed parents. Records with the same logical actor tags and
 namespaces deduplicate, which preserves shared runtime variants.
 
-### 5. External abbreviations retain the canonical root namespace
+### 5. Short paths retain the canonical root namespace
 
-Abbreviated paths exist only at string-addressed boundaries. Rust actor code
+Short paths exist only at string-addressed boundaries. Rust actor code
 continues to use ZSTs and typed mailboxes.
 
-The external grammar is:
+The external grammar is one grammar of `/`-separated steps:
 
 ```text
-address          := canonical-path | abbreviated-path
-abbreviated-path := root-namespace "://" relative-path?
-relative-path    := relative-segment ( "/" relative-segment )*
-relative-segment := discriminator | canonical-segment
+address    := first-step ( "/" step )*
+first-step := namespace | namespace ":" discriminator
+step       := namespace | namespace ":" discriminator | ":" discriminator
 ```
 
 `aether_data::ActorPath` owns this grammar: its constructor and decode accept
 exactly `address`, and the engine's resolver expands only an `ActorPath`.
 
-`root-namespace` is the exact `NAMESPACE` of a declared `Root`. The `://`
-delimiter says that the remaining segments are relative to that canonical
-root; it does not introduce a URL scheme or a second actor name:
+A path with no hole is canonical and resolves by the lineage fold. A path with
+at least one hole is short: its first step is the exact bare `NAMESPACE` of a
+declared singleton `Root`, and the engine's declarations fill each hole. A
+short path's first step never carries `:`, so a path starting at an instanced
+root (`swarm:3/:x`) is refused at parse time; a canonical path may still start
+at one. A hole expands to exactly one segment, so written depth equals expanded
+depth. Each step has one meaning:
+
+- A bare `namespace` step is always a singleton child. It never elides an
+  instanced child's namespace, so a singleton child's name cannot shadow an
+  instance of the same name.
+- A `namespace:discriminator` step is an instance of that declared instanced
+  child namespace.
+- A hole, `:discriminator`, is an instance of the one instanced child
+  declared under the current actor.
 
 ```text
-aether.component://camera
-aether.window://main
+aether.component/:camera
+aether.window/:main
 ```
+
+The `://` separator of the earlier short form is removed. Text containing
+`://` is refused by the constructor, wire decode, and serde decode with an
+error naming the hole form; nothing accepts it as an alias.
 
 The boundary resolver walks generated lineage records from that root:
 
-- The prefix before `://` selects a root by its canonical namespace, so no
-  root-alias derivation, registration, or uniqueness check exists.
-- A canonical segment (`namespace` or `namespace:discriminator`) selects that
-  declared child namespace explicitly.
-- A bare discriminator may omit the child namespace only when exactly one
-  logical instanced-child namespace is possible at that point.
+- The first step selects a root by its canonical namespace, so no root-alias
+  derivation, registration, or uniqueness check exists.
+- A bare step selects the declared singleton child of that namespace, or is
+  an illegal segment.
+- A `namespace:discriminator` step selects that declared instanced child
+  namespace explicitly.
+- A hole is filled only when exactly one logical instanced-child namespace is
+  possible at that point; with none it is an illegal segment.
 - Several concrete child types sharing one logical namespace count as one
   choice because their canonical address node is identical.
-- Several distinct child namespaces make the abbreviation ambiguous. The
-  caller must provide the canonical child segment.
+- Several distinct instanced child namespaces make the hole ambiguous. The
+  error lists each `namespace:discriminator` spelling, and the caller must
+  provide one.
 - Expansion is iterative and retains ADR-0099's path depth and byte limits.
 
 A declaration the index cannot use excludes its own namespace and nothing
 else. Two shapes reach this: a root whose namespace is instanced, which
 identifies no single actor and so anchors nothing; and a namespace carrying a
 placement fact without a matching cardinality fact, or carrying two that
-contradict, whose elision behaviour is undefined. Both are reachable only
+contradict, whose traversal is undefined. Both are reachable only
 through a hand-written `inventory::submit!` — the macro emits placement and
 cardinality together, and withholds the record entirely for an instanced root
 (§1) — and both are per-namespace rather than fatal to the
-index, because rejecting the whole index would disable abbreviated addressing
+index, because rejecting the whole index would disable short paths
 process-wide over one unrelated declaration and report a namespace the caller
-was not addressing. An excluded root keeps its reason, so a `://` prefix
-naming one is a structured boundary error distinguishing it from a root
+was not addressing. An excluded root keeps its reason, so a short path
+rooted at one is a structured boundary error distinguishing it from a root
 nothing declares; an excluded child drops its own edge while its siblings
 still resolve. A malformed namespace or an actor tag disagreeing with the
 namespace it claims stays fatal: the fact cannot be trusted to name what it
@@ -361,16 +379,16 @@ says it names, so there is no offending namespace to exclude.
 For the first consumer:
 
 ```text
-aether.component://camera
+aether.component/:camera
     ->
 aether.component/aether.embedded:camera
 ```
 
-If the component host admitted two distinct child namespaces, the short form
-would fail with candidates and the explicit form would remain valid:
+If the component host admitted two distinct child namespaces, the short path
+would fail with candidates and the canonical form would remain valid:
 
 ```text
-aether.component://aether.embedded:camera
+aether.component/aether.embedded:camera
 ```
 
 Raw MCP, CLI, configuration, and manifest strings cannot fail Rust
@@ -382,7 +400,7 @@ relationship is absent; naming the type removes the textual ambiguity:
 host.resolve::<WasmTrampoline>("camera");
 ```
 
-Abbreviation expansion happens once in the shared mailbox-name resolution
+Short-path expansion happens once in the shared mailbox-name resolution
 seam, before the existing canonical path validation,
 `mailbox_id_from_path` fold, and exact registered-name check:
 
@@ -391,10 +409,10 @@ let canonical = addresses.expand(input)?;
 let mailbox = registry.lookup_canonical(&canonical);
 ```
 
-An abbreviated spelling is never registered, stored as the mailbox name,
+A short spelling is never registered, stored as the mailbox name,
 reverse-mapped as the canonical identity, or hashed directly. Existing
 canonical inputs remain valid. MCP and other clients do not carry their own
-abbreviation tables; inventory may expose the generated root and child records
+short-path tables; inventory may expose the generated root and child records
 for discovery and autocomplete, while the engine remains the resolver of
 record.
 
@@ -423,7 +441,7 @@ Regression coverage proves all three spellings land on the same
 ```text
 typed host -> trampoline resolution
 canonical external path
-aether.component://camera
+aether.component/:camera
 ```
 
 The window manager and per-window actors adopt the mechanism only after this
@@ -442,7 +460,7 @@ smaller root/child path is working.
   clients gain concise addresses through one engine-owned boundary resolver.
 - Namespace strings remain single-owner. Root qualification and child
   expansions read `Addressable::NAMESPACE`, never copied helper constants.
-- Canonical lineage and `MailboxId` do not change, so abbreviation rules can
+- Canonical lineage and `MailboxId` do not change, so short-path rules can
   evolve without a wire migration.
 - The same model fits component hosts, per-window actors, component trees,
   session actors, and other nested capabilities.
@@ -458,15 +476,15 @@ smaller root/child path is working.
 - Existing child spawns must name and declare their logical parent as they
   adopt enforcement. Because contexts erase that type today, spawn initially
   carries two type parameters plus a runtime parent-tag check.
-- Textual abbreviations are resolved at runtime. An ambiguous MCP or config
+- Textual short paths are resolved at runtime. An ambiguous MCP or config
   string returns an error rather than receiving Rust's compile-time
   diagnostic.
 - The initial child-resolution surface covers the instanced children supported
   by current spawn APIs. A true keyless singleton beneath a native parent
   requires a relative singleton resolver and a deliberate extension.
 - A `ModuleChild` deliberately permits more parents than an exact
-  `ChildOf<P>` edge. It cannot contribute a globally exact external
-  abbreviation edge, and actors needing restricted topology must use exact
+  `ChildOf<P>` edge. It cannot contribute a globally exact short-path
+  edge, and actors needing restricted topology must use exact
   declarations.
 
 ### Neutral and follow-on
@@ -477,11 +495,11 @@ smaller root/child path is working.
   APIs support both. This ADR does not impose "children can never run at the
   root."
 - Canonical names remain the durable values returned by existing APIs.
-  Surfaces may additionally display a preferred abbreviation, but must not
+  Surfaces may additionally display a preferred short path, but must not
   replace canonical identity fields without a separate compatibility
   decision.
 - The implementation arc lands core traits and macro metadata, typed
-  resolution/spawn enforcement, the component consumer plus abbreviation
+  resolution/spawn enforcement, the component consumer plus short-path
   expansion, and then the window manager/per-window consumer.
 
 ## Alternatives considered
@@ -489,10 +507,17 @@ smaller root/child path is working.
 - **A named `actor_routes!` topology.** Rejected because it restates
   relationships in a central manifest, selects parents too early, and creates
   a second place for actor namespaces to drift.
-- **A shortened root alias such as `component://`.** Rejected because retaining
-  the canonical root as `aether.component://` removes the alias declaration,
-  derivation, uniqueness check, and rename synchronization.
-- **Use `aether.component://...` inside Rust actor code.** Rejected because
+- **A shortened root alias such as `component/:camera`.** Rejected because
+  retaining the canonical root as `aether.component/:camera` removes the alias
+  declaration, derivation, uniqueness check, and rename synchronization.
+- **Keep `X://Y` beside or instead of holes.** The first short form split the
+  text at `://` into a root and relative segments, and read a bare relative
+  segment as a singleton child when one had that name and otherwise as the
+  discriminator of the one instanced child. Rejected because it is a second
+  grammar beside the canonical one, the fallback let a singleton child's name
+  shadow an instance of the same name, and the separator reads as a URL scheme.
+  Holes keep one grammar in which every step has one meaning.
+- **Use `aether.component/:camera` inside Rust actor code.** Rejected because
   typed ZST resolution is already stronger, allocation-free, and
   compile-checked.
 - **Resolve a tuple of actor types and instance keys in one call.** Rejected
@@ -505,11 +530,11 @@ smaller root/child path is working.
 - **Make `ChildOf<P>` mean the actor can never be a root.** Rejected because
   placement permissions are orthogonal; `Root` independently controls
   top-level placement.
-- **Infer abbreviations from only the currently live mailbox set.** Rejected
-  because an abbreviation would change meaning as actors start and stop.
+- **Infer short paths from only the currently live mailbox set.** Rejected
+  because a short path would change meaning as actors start and stop.
   Generated relationship facts make ambiguity stable; liveness remains the
   later registry check.
-- **Hash or register the abbreviated string.** Rejected because it would
+- **Hash or register the short string.** Rejected because it would
   create a second identity and contradict ADR-0099's canonical lineage fold.
 - **Let downstream crates implement relationships between two foreign actor
   types.** Rejected by Rust's orphan rules and by the semantic concern: that

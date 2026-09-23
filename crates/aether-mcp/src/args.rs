@@ -278,7 +278,7 @@ pub struct CollectFailureEvidenceArgs {
     #[serde(default)]
     pub operation: Option<String>,
     /// Up to eight live actor addresses — each a canonical ADR-0099 lineage
-    /// (or an unambiguous ADR-0166 abbreviation) or a tagged `mbx-…` id, the
+    /// (or an unambiguous ADR-0166 short path) or a tagged `mbx-…` id, the
     /// same spelling every other tool's `address` accepts. Each receives a
     /// log tail capped at 100 entries and its complete current cost table.
     #[serde(default)]
@@ -344,7 +344,7 @@ pub struct EngineMailSpec {
     /// Address of the recipient mailbox on the target engine: a canonical
     /// ADR-0099 lineage (e.g. `"aether.render"`, or a loaded component's
     /// `"aether.component/aether.embedded:aether.kit.camera"`), an
-    /// unambiguous ADR-0166 abbreviation, or a tagged `mbx-…` id — the same
+    /// unambiguous ADR-0166 short path, or a tagged `mbx-…` id — the same
     /// spelling every other tool's `address` takes.
     ///
     /// The pre-0.4 spelling `recipient_name` is still accepted as a
@@ -659,7 +659,7 @@ pub struct ReplaceComponentArgs {
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Address of the live component to replace: its canonical ADR-0099
-    /// lineage (or an unambiguous ADR-0166 abbreviation) or the tagged
+    /// lineage (or an unambiguous ADR-0166 short path) or the tagged
     /// `mbx-…` id `load_component` returned. Textual addresses resolve
     /// against the selected engine through the same resolver
     /// `describe_component` / `actor_logs` / `send_mail` use, so the
@@ -707,7 +707,7 @@ pub struct DescribeComponentArgs {
     pub engine_id: Option<String>,
     /// Address of the component to describe: its full ADR-0099 lineage
     /// (returned by `load_component`, or retained/derived from an explicit
-    /// boot spec), an unambiguous ADR-0166 abbreviation, OR its tagged
+    /// boot spec), an unambiguous ADR-0166 short path, OR its tagged
     /// mailbox id (`mbx-…`). `spawn_substrate` returns engine information
     /// only and `list_components` reports stored artifacts. A name-addressed
     /// cache miss resolves against the substrate; a cache hit and a `mbx-` id
@@ -732,7 +732,7 @@ pub struct ComponentContractSubject {
     #[serde(default)]
     pub engine_id: Option<String>,
     /// Address of the live component revision: its canonical ADR-0099
-    /// lineage or an unambiguous ADR-0166 abbreviation. This one must be
+    /// lineage or an unambiguous ADR-0166 short path. This one must be
     /// textual — a tagged `mbx-…` id is rejected — so the selected engine
     /// can prove its canonical lineage and current mailbox identity before
     /// comparison.
@@ -762,7 +762,7 @@ pub struct ActorLogsArgs {
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
     /// `"aether.component/aether.embedded:aether.camera"`, an unambiguous
-    /// ADR-0166 abbreviation, or a tagged `mbx-…` id). The substrate's
+    /// ADR-0166 short path, or a tagged `mbx-…` id). The substrate's
     /// dispatch loop services `aether.log.tail` for every actor
     /// automatically; agents don't need to know which actor
     /// implements the handler.
@@ -840,7 +840,7 @@ pub struct ActorCostArgs {
     pub engine_id: Option<String>,
     /// Address of the actor to query (e.g. `"aether.audio"`,
     /// `"aether.component/aether.embedded:aether.camera"`, an unambiguous
-    /// ADR-0166 abbreviation, or a tagged `mbx-…` id). Every actor serves
+    /// ADR-0166 short path, or a tagged `mbx-…` id). Every actor serves
     /// `aether.cost.tail` via the substrate's framework dispatch arm.
     pub address: String,
     /// Optional kind-id filter (tagged `knd-XXXX-XXXX-XXXX` or raw

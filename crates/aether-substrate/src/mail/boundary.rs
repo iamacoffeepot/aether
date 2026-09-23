@@ -40,10 +40,10 @@ pub struct BoundaryMail {
 /// item has moved.
 ///
 /// Each recipient resolves through [`Registry::resolve_address`], not
-/// `lookup`, so an ADR-0166 abbreviated recipient reports what actually went
+/// `lookup`, so an ADR-0166 short-path recipient reports what actually went
 /// wrong. `lookup` collapses every structured failure to `None`, which made an
-/// *ambiguous* address — one whose bare discriminator matches several
-/// instanced child namespaces — indistinguishable from an absent one, losing
+/// *ambiguous* address — one whose hole matches several instanced child
+/// namespaces — indistinguishable from an absent one, losing
 /// the candidate spellings ADR-0166 §5 specifies (issue 4125). This is the
 /// path `send_mail_traced` and `capture_frame(mails=…)` take, so that
 /// diagnostic is what an operator or agent sees.
@@ -69,11 +69,11 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
 /// ADR-0166 §5 — the structured resolution diagnostic reaching the bundle
 /// proof (issue 4125). The bundle path used to call `Registry::lookup`, which
 /// collapses every `AddressResolutionError` except the path caps to `None` — so
-/// an *ambiguous* abbreviated address reported "unknown recipient" with no
+/// an *ambiguous* short path reported "unknown recipient" with no
 /// candidates and no indication that the address was ambiguous rather than
 /// absent. The ambiguity is only reachable from real linked inventory, so the
 /// fixtures below declare it: two instanced children beneath one root make a
-/// bare discriminator under that root ambiguous by construction.
+/// hole under that root ambiguous by construction.
 #[cfg(test)]
 // The fixtures register their own canonical mailboxes: the fold of an expanded
 // path is the reference value under test, not a sibling-cap address.
@@ -111,9 +111,9 @@ mod tests {
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
 
-    /// First instanced child. On its own it would let a bare discriminator
-    /// elide the child segment; paired with [`SecondChild`] it makes that
-    /// elision ambiguous instead, which is the state under test.
+    /// First instanced child. On its own it would fill a hole beneath the
+    /// root; paired with [`SecondChild`] it makes that hole ambiguous
+    /// instead, which is the state under test.
     struct FirstChild;
 
     #[aether_actor::actor(instanced, child_of(DiagnosticsRoot))]
@@ -176,15 +176,15 @@ mod tests {
         register(&registry, DiagnosticsRoot::NAMESPACE);
         register(&registry, &canonical);
 
-        // Canonical input is unchanged — it never touched the abbreviation path.
+        // Canonical input is unchanged — it never touched short-path expansion.
         let accepted = accept(&registry, bundle(&canonical), "test bundle").expect("canonical recipient resolves");
         assert_eq!(accepted.len(), 1);
 
         // Ambiguous: two instanced children are declared beneath the root, so a
-        // bare discriminator cannot pick one. The error must say so and list both
-        // spellings that would disambiguate it.
-        let ambiguous = format!("{}://one", DiagnosticsRoot::NAMESPACE);
-        let error = accept(&registry, bundle(&ambiguous), "test bundle").expect_err("bare discriminator ambiguous");
+        // hole cannot pick one. The error must say so and list both spellings
+        // that would disambiguate it.
+        let ambiguous = format!("{}/:one", DiagnosticsRoot::NAMESPACE);
+        let error = accept(&registry, bundle(&ambiguous), "test bundle").expect_err("hole ambiguous");
         assert!(error.contains("ambiguous"), "the error names the ambiguity: {error}");
         assert!(error.contains(FirstChild::NAMESPACE), "the error lists the first candidate: {error}");
         assert!(error.contains(SecondChild::NAMESPACE), "the error lists the second candidate: {error}");

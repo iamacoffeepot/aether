@@ -159,13 +159,12 @@ mod tests {
         assert_ne!(ctx_a.actor::<Guest>().mailbox_id(), ctx_b.actor::<Guest>().mailbox_id());
     }
 
-    /// The external registry boundary expands abbreviated component
-    /// addresses before its canonical live lookup. Typed resolution,
-    /// the full canonical path, the short discriminator, and the
-    /// explicit child segment therefore identify one mailbox, while
-    /// reverse lookup retains only the canonical spelling.
+    /// The external registry boundary expands short component paths
+    /// before its canonical live lookup. Typed resolution, the full
+    /// canonical path, and the short path therefore identify one
+    /// mailbox, while reverse lookup retains only the canonical spelling.
     #[test]
-    fn registry_resolves_typed_canonical_and_abbreviated_component_addresses_equally() {
+    fn registry_resolves_typed_canonical_and_short_component_addresses_equally() {
         let inline_registry = InlineRegistry::new();
         let host = WasmActorMailbox::<ComponentHostCapability>::__new(
             mailbox_id_from_name(ComponentHostCapability::NAMESPACE).0,
@@ -180,7 +179,7 @@ mod tests {
             .try_register_inbox_with_id(&boot_authority(), typed, canonical.clone(), noop_handler())
             .expect("register canonical trampoline mailbox");
 
-        for address in [canonical.as_str(), "aether.component://camera", "aether.component://aether.embedded:camera"] {
+        for address in [canonical.as_str(), "aether.component/:camera"] {
             let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
             let resolved = registry.resolve_address(&address).expect("address resolves to the live trampoline");
             assert_eq!(resolved.mailbox_id, typed);
@@ -188,8 +187,8 @@ mod tests {
         }
         assert_eq!(registry.mailbox_name(typed).as_deref(), Some(canonical.as_str()));
         assert!(
-            registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("://")),
-            "alias spellings never enter registry inventory"
+            registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("/:")),
+            "short spellings never enter registry inventory"
         );
     }
 }

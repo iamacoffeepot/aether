@@ -191,7 +191,7 @@ async fn lookup_descriptor_picks_up_a_post_load_kind_via_inventory() {
 
 #[tokio::test]
 async fn engine_address_resolver_returns_the_engine_mailbox_without_local_folding() {
-    let supplied = "aether.test://short";
+    let supplied = "aether.test/:short";
     let canonical = "aether.test/aether.test.child:short";
     let engine_answer = MailboxId(0xABCD_EF01_2345_6789);
     #[allow(clippy::disallowed_methods)]
@@ -203,8 +203,7 @@ async fn engine_address_resolver_returns_the_engine_mailbox_without_local_foldin
     let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, canonical, Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
-    let resolved =
-        mcp.resolve_engine_address(engine, supplied).await.expect("routed engine resolves abbreviated address");
+    let resolved = mcp.resolve_engine_address(engine, supplied).await.expect("routed engine resolves a short path");
     assert_eq!(resolved, (engine_answer, canonical.to_owned()));
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");

@@ -155,7 +155,7 @@ cargo xtask dev-component \
 The flag takes a tagged id only: `dev-component` does not hash or infer a
 mailbox id from a name, and a malformed id is rejected before the watcher
 starts. (The `replace_component` tool itself is wider — its `address` accepts a
-canonical lineage, an ADR-0166 abbreviation, or the tagged id — but the flag
+canonical lineage, an ADR-0166 short path, or the tagged id — but the flag
 stays narrow so the watcher never guesses.) `--mailbox-id` and `--export`
 conflict because replace-first mode already has a hosted actor to reuse.
 

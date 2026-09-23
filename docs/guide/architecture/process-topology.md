@@ -97,7 +97,7 @@ tool JSON
 Failures at these layers look different. A schema error happens before mail is
 sent. An unknown engine fails at the fleet boundary. An unknown recipient fails
 inside the selected engine during address resolution. Canonical lineage and
-ADR-0166 abbreviated spellings share that engine-owned seam; the MCP
+ADR-0166 short paths share that engine-owned seam; the MCP
 coordinator keeps no alias table and never hashes operator paths. A handler
 error or non-settling descendant happens
 after dispatch. A tagged id that names nothing live, or an actor still

@@ -981,8 +981,8 @@ fn emit_handler_set_markers(handler_set: Option<&syn::Path>, self_ty: &Type) -> 
 /// - **Placement permission** — "this identity may exist with no actor parent"
 ///   — is the `aether_actor::Root` impl, read as a bound by the
 ///   chassis spawn surfaces. It is emitted for every `root` declaration.
-/// - **Anchoring** — "this namespace can anchor an abbreviated
-///   `namespace://relative` address" — is the `RootEntry` inventory record,
+/// - **Anchoring** — "this namespace can anchor a short path
+///   `namespace/:discriminator`" — is the `RootEntry` inventory record,
 ///   read at link time by `AddressIndex`. An instanced namespace identifies no
 ///   single actor, so it can never anchor (ADR-0166 §5) and submits no entry.
 ///
@@ -1152,7 +1152,7 @@ fn emit_native_identity_markers(
     // Gating it on anything else is what let an un-split `#[actor(root)]` submit
     // a `RootEntry` naming a namespace with no cardinality fact — a half
     // declaration `AddressIndex::build` rejects, taking the whole index and
-    // every other namespace's abbreviated addressing down with it
+    // every other namespace's short paths down with it
     // (iamacoffeepot/aether#4138).
     let name_entry = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
         quote! {

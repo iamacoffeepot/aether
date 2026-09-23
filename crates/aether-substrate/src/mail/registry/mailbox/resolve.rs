@@ -127,7 +127,7 @@ impl Registry {
                 tracing::warn!(name, ?error, "scope path over cap; resolution miss");
                 return None;
             }
-            Err(ActorPathError::Segment { .. }) => return None,
+            Err(ActorPathError::Segment { .. } | ActorPathError::RetiredShortForm) => return None,
         };
         match self.resolve_address(&address) {
             Ok(resolved) => Some(resolved.mailbox_id),
@@ -139,17 +139,17 @@ impl Registry {
         }
     }
 
-    /// Resolve a canonical or ADR-0166 abbreviated [`ActorPath`] to one live
+    /// Resolve a canonical or ADR-0166 short [`ActorPath`] to one live
     /// mailbox: the one place an address becomes a position (ADR-0230 §3).
-    /// Canonical inputs preserve the existing fold/exact-name lookup. An
-    /// abbreviated input expands its parsed segments through the generated
-    /// root/child inventory before that canonical lookup, so aliases are
-    /// never hashed, stored, or reverse-reported.
+    /// Canonical inputs preserve the existing fold/exact-name lookup. A short
+    /// path fills its holes through the generated root/child inventory before
+    /// that canonical lookup, so short spellings are never hashed, stored, or
+    /// reverse-reported.
     pub fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         let canonical_path = match address.form() {
             ActorPathForm::Canonical(path) => path.to_owned(),
-            ActorPathForm::Abbreviated { root, relative } => {
-                self.addresses.as_ref().map_err(Clone::clone)?.expand(root, &relative)?
+            ActorPathForm::Short { root, steps } => {
+                self.addresses.as_ref().map_err(Clone::clone)?.expand(root, &steps)?
             }
         };
         let mailbox_id = self
@@ -160,7 +160,7 @@ impl Registry {
 
     fn lookup_canonical(&self, name: &str) -> Result<Option<MailboxId>, ScopePathError> {
         // ADR-0098 wire boundary: `name` is user-controlled text that arrived
-        // as an `ActorPath` (or is an abbreviation's expansion, which can
+        // as an `ActorPath` (or is a short path's expansion, which can
         // outgrow what was written), so cap its scope depth / byte size
         // before it folds to a registry key. An over-cap name is a
         // resolution miss, not a key-space bloat.

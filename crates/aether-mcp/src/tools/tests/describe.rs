@@ -475,7 +475,7 @@ async fn describe_component_reads_the_cache() {
 
 #[tokio::test]
 async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplied_alias() {
-    let supplied = "aether.component://camera";
+    let supplied = "aether.component/:camera";
     let canonical = "aether.component/aether.embedded:camera";
     let engine_answer = MailboxId(0x4057_0000_0000_0100);
     let engine = EngineId(Uuid::from_u128(0x4057));

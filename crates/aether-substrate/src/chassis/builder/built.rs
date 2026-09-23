@@ -23,7 +23,7 @@ use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
     () => {
-        /// Resolve a canonical or ADR-0166 abbreviated
+        /// Resolve a canonical or ADR-0166 short
         /// [`ActorPath`](aether_data::ActorPath) to the position of one live
         /// mailbox. This is the host's boundary parser (ADR-0230 §3), the one
         /// place an address becomes a position; it answers with a position

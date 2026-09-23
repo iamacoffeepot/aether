@@ -209,7 +209,7 @@ impl Spawner {
         &self.registry
     }
 
-    /// Resolve a canonical or ADR-0166 abbreviated [`ActorPath`] to one live
+    /// Resolve a canonical or ADR-0166 short [`ActorPath`] to one live
     /// mailbox through the registry's boundary parser, keeping the registry
     /// itself behind the spawner. The chassis handle's embedder lookup
     /// forwards here.

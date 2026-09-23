@@ -88,7 +88,7 @@ const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 /// `name` resolves to its trampoline, answering its position. Panics after 30s
 /// with the address and the parser's last answer.
 fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> MailboxId {
-    let address = ActorPath::new(&format!("aether.component://aether.embedded:{name}"))
+    let address = ActorPath::new(&format!("aether.component/aether.embedded:{name}"))
         .expect("a loaded handler name forms a well-formed actor path");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {

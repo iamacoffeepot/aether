@@ -991,7 +991,7 @@ fn macro_emits_native_instanced_child_inventory_from_actor_types() {
 }
 
 /// An instanced cap that declares `root`. It is placeable at the chassis root
-/// and, being instanced, anchors no abbreviated address — the two halves of
+/// and, being instanced, roots no short path — the two halves of
 /// `root` that iamacoffeepot/aether#4121 separates.
 struct InstancedRootCap;
 
@@ -1012,7 +1012,7 @@ impl NativeActor for InstancedRootCap {
 }
 
 /// ADR-0166 §1/§5, issue 4121: `root` grants placement permission and, for a
-/// singleton, the right to anchor an abbreviated address. Those are two
+/// singleton, the right to root a short path. Those are two
 /// artifacts — the `Root` impl and the `RootEntry` — and an instanced actor
 /// gets only the first, because an instanced namespace identifies no single
 /// actor and so anchors nothing.
@@ -1033,7 +1033,7 @@ fn instanced_root_takes_placement_without_claiming_an_address_anchor() {
     // would have to exclude.
     assert!(
         !root_entries().any(|entry| entry.namespace == InstancedRootCap::NAMESPACE),
-        "an instanced root must submit no RootEntry — it cannot anchor an abbreviated address"
+        "an instanced root must submit no RootEntry — it cannot root a short path"
     );
 }
 

@@ -24,7 +24,7 @@ ctx.actor::<WindowCapability>()
 
 This is an awkward endpoint for multi-window composition. A named window
 cannot be handed to another subsystem as a typed actor address, an external
-client cannot target it through the abbreviated address syntax added by
+client cannot target it through the short-path syntax added by
 ADR-0166, and the manager has to decode both the operation and a second
 identity inside the operation. Mutable presentation state such as the title
 is also being asked to stand in for the stable name by which code wants to
@@ -35,7 +35,7 @@ declare `ChildOf<WindowCapability>`, Rust callers may resolve it from the
 manager mailbox, and string-addressed boundaries may expand:
 
 ```text
-aether.window://main
+aether.window/:main
     ->
 aether.window/aether.window.instance:main
 ```
@@ -156,14 +156,14 @@ String-addressed boundaries use the shared ADR-0166 resolver. No window alias
 table or hard-coded shortened namespace is added:
 
 ```text
-aether.window://main
-aether.window://palette
+aether.window/:main
+aether.window/:palette
 ```
 
 The expanded canonical paths remain authoritative. Branching and multiple
 allowed parents do not create a diamond for window identity: each canonical
-path includes its complete parent lineage, and ADR-0166 rejects an abbreviated
-step if more than one logical child namespace is possible.
+path includes its complete parent lineage, and ADR-0166 rejects a hole if more
+than one logical child namespace is possible.
 
 ### 2. `WindowId` is the child actor's mailbox identity
 
@@ -394,7 +394,7 @@ it does not mail or monitor window children.
 
 - Every live window is a typed actor recipient. Rust uses
   `resolve::<WindowInstance>(name)` and MCP/configuration may use
-  `aether.window://name`; both produce the canonical child mailbox.
+  `aether.window/:name`; both produce the canonical child mailbox.
 - The recipient address selects the window, so public control payloads and
   replies stop duplicating `WindowId`.
 - Actor identity, window identity, render key, input source, and selector key
@@ -437,7 +437,7 @@ it does not mail or monitor window children.
   manager-local id allocator, and its manager-addressed control payloads. It
   preserves ADR-0164's thread, native ownership, subscription, render, and
   chassis boundaries.
-- Verification must cover typed/canonical/abbreviated identity equivalence;
+- Verification must cover typed/canonical/short-path identity equivalence;
   two-window control isolation; `All` and `One` subscription routing; duplicate,
   invalid, and retired names; create rollback; expected and unexpected child
   departure; closing one window without global shutdown; last-window shutdown;
@@ -479,5 +479,5 @@ it does not mail or monitor window children.
 - ADR-0164 — window-owned winit integration and multi-window manager.
 - ADR-0165 — handler-driven spawn semantics; creation must consume its
   authoritative activation result if that work changes native spawn.
-- ADR-0166 — typed parent/child placement, mailbox resolution, and abbreviated
+- ADR-0166 — typed parent/child placement, mailbox resolution, and short
   external addresses.

@@ -105,7 +105,7 @@ mod tests {
         };
 
         let built = HeadlessChassis::build(env).expect("build headless chassis");
-        let address = ActorPath::new("aether.component://aether.embedded:probe").expect("a well-formed actor path");
+        let address = ActorPath::new("aether.component/aether.embedded:probe").expect("a well-formed actor path");
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             let resolved = built.resolve_address(&address);

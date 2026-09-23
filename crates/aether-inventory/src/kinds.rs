@@ -15,7 +15,7 @@
 //! - [`Resolve`] → per-id `Option<String>`, for ids the client can't
 //!   compute from the manifest alone (ADR-0088 §5).
 //! - [`ResolveAddress`] → the live mailbox id and canonical path for a
-//!   canonical or ADR-0166 abbreviated actor address.
+//!   canonical or ADR-0166 short actor address.
 //! - [`ListKinds`] → the engine's live kind vocabulary (ADR-0091).
 //! - [`ListHandlers`] → the native handler manifest (ADR-0109 §5).
 //!
@@ -150,8 +150,8 @@ pub struct ResolveResult {
 }
 
 /// `aether.inventory.resolve_address` — resolve one canonical or ADR-0166
-/// abbreviated actor address inside the selected engine. The engine registry
-/// owns abbreviation expansion, canonical validation, liveness, and the final
+/// short actor address inside the selected engine. The engine registry
+/// owns short-path expansion, canonical validation, liveness, and the final
 /// mailbox id; external clients must not fold the supplied string themselves.
 #[aether_data::kind(name = "aether.inventory.resolve_address")]
 pub struct ResolveAddress {

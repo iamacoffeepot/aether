@@ -51,7 +51,7 @@ pub(super) async fn settle_mail_item(
     let status = match mcp.deliver_one(spec).await {
         Ok(delivered) => {
             // The prepared direct path carries the engine's resolved mailbox
-            // id forward, so an abbreviated spelling consults the same
+            // id forward, so a short-path spelling consults the same
             // component-capability cache entry as its canonical spelling.
             let declared_reply = {
                 let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
