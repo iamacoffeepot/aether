@@ -48,7 +48,7 @@ use aether_actor::{ErasedActorRef, OutboundReply, ReplyMode, Single};
 use aether_data::ActorPath;
 use aether_data::{Kind, MailboxCategory, Source};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use wasmtime::{Engine, Linker};
@@ -106,8 +106,14 @@ pub struct ComponentHostCapabilityState {
     /// this table is the per-engine half of that pairing (the state itself is
     /// the per-substrate-process singleton every load runs through). Refcounted
     /// against the module's non-boot actors and empty for every bootless module,
-    /// so the common case costs nothing.
-    pub boot_registry: HashMap<String, BootEntry>,
+    /// so the common case costs nothing. Changed only through
+    /// `register_boot` / `unregister_boot`, which keep [`Self::boot_actors`]
+    /// in lockstep.
+    boot_registry: HashMap<String, BootEntry>,
+    /// ADR-0147: every live module boot's reference — the reverse index of
+    /// [`Self::boot_registry`], so the drop guard refusing a drop addressed at
+    /// a boot actor is one lookup rather than a scan over every module.
+    boot_actors: HashSet<ErasedActorRef>,
     /// Actor-local reservations for module boots that have been staged but are
     /// not authoritative `Live` yet. Same-hash loads and replacements retain
     /// their own move-only deferred replies here and join the first boot result.
@@ -230,6 +236,7 @@ impl NativeActor for ComponentHostCapability {
             default_name_counter: 0,
             module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
@@ -350,7 +357,7 @@ impl NativeActor for ComponentHostCapability {
         // guard never blocks it. The guard runs after the receipt proof because
         // a boot entry's actor is live for as long as the entry exists, so the
         // proof succeeds for it and the comparison is by reference.
-        if state.boot_registry.values().any(|entry| entry.boot == actor) {
+        if state.boot_actors.contains(&actor) {
             ctx.reply(&DropResult::Err {
                 error: format!(
                     "{} is a module boot actor (ADR-0147): the boot singleton is unconditional \
@@ -536,6 +543,7 @@ mod tests {
             default_name_counter: 0,
             module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),

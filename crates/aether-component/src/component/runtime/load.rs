@@ -458,7 +458,7 @@ impl ComponentHostCapabilityState {
         match booted {
             Ok(boot) => {
                 self.mailer.capability_registry().register(mailbox_id, &plan.capabilities);
-                self.boot_registry.insert(plan.hash.clone(), BootEntry { boot, refcount: 0, pending_requests: 0 });
+                self.register_boot(plan.hash.clone(), BootEntry { boot, refcount: 0, pending_requests: 0 });
                 self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
                 for waiter in pending.waiters.drain(..) {
                     self.finish_boot_successor(ctx, waiter.owed, waiter.successor, &plan.hash);
@@ -554,11 +554,26 @@ impl ComponentHostCapabilityState {
         }
     }
 
+    /// Record a module's Live boot under its content hash, indexing its
+    /// reference for the drop guard.
+    fn register_boot(&mut self, hash: String, entry: BootEntry) {
+        self.boot_actors.insert(entry.boot);
+        self.boot_registry.insert(hash, entry);
+    }
+
+    /// Remove a module's boot and its reference index together, handing back
+    /// the entry the teardown sends through.
+    fn unregister_boot(&mut self, hash: &str) -> Option<BootEntry> {
+        let entry = self.boot_registry.remove(hash)?;
+        self.boot_actors.remove(&entry.boot);
+        Some(entry)
+    }
+
     fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, hash: &str) {
         let removable =
             self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
         if removable {
-            let entry = self.boot_registry.remove(hash).expect("orphan boot remains present");
+            let entry = self.unregister_boot(hash).expect("orphan boot remains present");
             ctx.send_detached_to(entry.boot, &BootTeardown {});
         }
     }
@@ -595,7 +610,7 @@ impl ComponentHostCapabilityState {
             false
         };
         if remove {
-            let entry = self.boot_registry.remove(&hash).expect("zero-ref boot remains present");
+            let entry = self.unregister_boot(&hash).expect("zero-ref boot remains present");
             ctx.send_detached_to(entry.boot, &BootTeardown {});
         }
     }
@@ -742,7 +757,7 @@ impl ComponentHostCapabilityState {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
+    use std::collections::{HashMap, HashSet};
 
     use aether_data::Source;
     use aether_substrate::actor::native::NativeBinding;
@@ -772,6 +787,7 @@ mod tests {
             default_name_counter: 0,
             module_cache: ModuleCache::default(),
             boot_registry: HashMap::new(),
+            boot_actors: HashSet::new(),
             pending_boots: HashMap::new(),
             boot_hash_by_actor: HashMap::new(),
             pending_replace: HashMap::new(),
@@ -812,7 +828,7 @@ mod tests {
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let live_actor = proven_actor(&state, &ctx, "test.component.live-actor");
         let boot = boot_entry(&state, &ctx, "test.component.boot-pending", 1, 1);
-        state.boot_registry.insert(hash.clone(), boot);
+        state.register_boot(hash.clone(), boot);
         state.boot_hash_by_actor.insert(live_actor, hash.clone());
 
         // Manual state-machine proof: the last Live actor drops while another
@@ -839,8 +855,8 @@ mod tests {
         assert!(state.accept_successful_boot_operation(actor, new_operation));
         let old_boot = boot_entry(&state, &ctx, "test.component.boot-n1", 0, 0);
         let new_boot = boot_entry(&state, &ctx, "test.component.boot-n2", 0, 0);
-        state.boot_registry.insert(old_hash.clone(), old_boot);
-        state.boot_registry.insert(new_hash.clone(), new_boot);
+        state.register_boot(old_hash.clone(), old_boot);
+        state.register_boot(new_hash.clone(), new_boot);
 
         // Manual state-machine proof: N2's absent boot promotes first, then
         // N1's different boot promotes late. This is not a scheduler-order
@@ -883,7 +899,7 @@ mod tests {
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
         let boot = boot_entry(&state, &ctx, "test.component.boot-after-drop", 0, 0);
-        state.boot_registry.insert(hash.clone(), boot);
+        state.register_boot(hash.clone(), boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor
         // before its boot completion arrives. This deliberately proves the
