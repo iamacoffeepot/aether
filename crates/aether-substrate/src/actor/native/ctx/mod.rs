@@ -33,8 +33,8 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Manual, Multi, ReplyMode, Single};
-use aether_data::{Kind, MailId};
+use aether_actor::{Manual, ReplyMode, Single};
+use aether_data::MailId;
 use core::marker::PhantomData;
 use core::ptr;
 
@@ -290,21 +290,6 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
         // The reborrow swaps the marker without touching any real field and
         // only removes capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Single>>() }
-    }
-
-    /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
-    /// [`Multi<K>`] ctx, swapping the `OutboundReply` surface for the
-    /// [`Emit<K>`](aether_actor::Emit) surface. The `#[actor]` macro hands a `#[handler::multi]`
-    /// handler this view (with `K` read off its `Multi<K>` signature), so a
-    /// handler whose marker disagrees with its class fails to unify.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn as_multi<K: Kind>(&mut self) -> &mut NativeCtx<'a, A, Multi<K>> {
-        // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
-        // `K`, so `NativeCtx<'a, A, Manual>` and `NativeCtx<'a, A, Multi<K>>`
-        // are layout-identical (see `native_ctx_layout_identical_across_modes`).
-        // The reborrow swaps the marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<NativeCtx<'a, A, Multi<K>>>() }
     }
 
     /// #1757: the per-dispatch constructor — moves the single dispatched

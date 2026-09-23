@@ -87,7 +87,7 @@ fn additions_are_additive_but_all_declared_breaking_categories_are_incompatible(
         HandlerContract {
             input_schema: SchemaType::Bool,
             reply: ReplyContractSnapshot {
-                class: "multi".to_owned(),
+                class: "one".to_owned(),
                 id: Some("knd-new".to_owned()),
                 name: Some("aether.test.reply_new".to_owned()),
                 schema: Some(SchemaType::Bytes),

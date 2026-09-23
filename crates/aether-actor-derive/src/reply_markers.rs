@@ -22,7 +22,6 @@ pub fn reply_marker_impl(
     class: HandlerClass,
     reply: &HandlerReply,
     kind_ty: &Type,
-    multi_kind: Option<&Type>,
     site: &ReplyMarkerSite<'_>,
 ) -> TokenStream2 {
     let ReplyMarkerSite { impl_generics, self_ty, where_clause, cfgs } = site;
@@ -33,15 +32,6 @@ pub fn reply_marker_impl(
                 type Reply = #reply_ty;
             }
         },
-        (HandlerClass::Multi, _) => {
-            let item_ty = multi_kind.expect("multi_kind_or_return_error supplies every multi handler's emit kind");
-            quote! {
-                #(#cfgs)*
-                impl #impl_generics ::aether_actor::Streams<#kind_ty> for #self_ty #where_clause {
-                    type Item = #item_ty;
-                }
-            }
-        }
         (HandlerClass::Single, HandlerReply::None) | (HandlerClass::Manual, _) => quote! {},
     }
 }

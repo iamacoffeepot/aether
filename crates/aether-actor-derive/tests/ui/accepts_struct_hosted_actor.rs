@@ -29,20 +29,6 @@ struct Pong {
     seq: u32,
 }
 
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.query_struct_hosted")]
-struct Query {
-    count: u32,
-}
-
-#[repr(C)]
-#[derive(Copy, Clone, bytemuck::Pod, bytemuck::Zeroable, aether_data::Kind, aether_data::Schema)]
-#[kind(name = "test.row_struct_hosted")]
-struct Row {
-    index: u32,
-}
-
 pub struct Parent;
 
 impl Addressable for Parent {
@@ -57,9 +43,7 @@ fn main() {
     fn root<T: Root>() {}
     fn child<T: ChildOf<Parent>>() {}
     fn replies<T: aether_actor::Replies<Ping, Reply = Pong>>() {}
-    fn streams<T: aether_actor::Streams<Query, Item = Row>>() {}
     root::<Cap>();
     child::<Cap>();
     replies::<Cap>();
-    streams::<Cap>();
 }

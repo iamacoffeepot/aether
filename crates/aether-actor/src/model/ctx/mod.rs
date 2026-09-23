@@ -5,7 +5,6 @@
 //!
 //! - [`MailSender`] — outbound mail (every ctx).
 //! - [`OutboundReply`] — reply-to-originator (per-handler ctxs only).
-//! - [`Emit`] — multi-class 0..n emission (multi-mode ctxs only, ADR-0134).
 //! - [`Persistence`] — `replace_component` migration bundle (drop
 //!   ctxs only).
 //!
@@ -17,17 +16,15 @@
 //! [`MailSender`] cover the routing methods so the per-impl code is
 //! the stage-specific accessors.
 
-pub mod emit;
 pub mod mail_sender;
 pub mod outbound_reply;
 pub mod persistence;
 pub mod reply_mode;
 
-pub use emit::Emit;
 pub use mail_sender::MailSender;
 pub use outbound_reply::OutboundReply;
 pub use persistence::Persistence;
-pub use reply_mode::{Manual, Multi, ReplyMode, Single};
+pub use reply_mode::{Manual, ReplyMode, Single};
 
 /// The actor marker of a ctx that names no actor.
 ///

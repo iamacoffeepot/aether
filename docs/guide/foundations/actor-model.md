@@ -290,33 +290,15 @@ its return value — `-> R` sends `R` back, `-> ()` is fire-and-forget. The
 replies by hand (`ctx.reply` / `ctx.reply_to`), for a reply it can't compute this
 turn.
 
-The **multi** class (`#[handler::multi]`) answers one dispatch with *several*
-mails. Its ctx is `Multi<K>` and it emits 0..n mails of the declared kind `K`
-through `ctx.emit`, returning `()` — the emissions are the reply:
-
-```rust
-#[handler::multi]
-fn on_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Multi<Row>>, q: Query) {
-    for row in self.rows_matching(&q) {
-        ctx.emit(&row);            // one Row mail per match
-    }
-}
-```
-
-Each `emit` is a **detached chain root addressed at the dispatch source** — the
-mail goes back to whoever sent the query, correlated by its payload, on a fresh
-causal chain rather than the request's. So the request chain settles promptly on
-the handler's return instead of staying open for the stream, and every emission
-has the same chain shape regardless of when the producer sends it. A dispatch with
-no routable source (session / broadcast mail) drops the emission with a warning.
-The `#[actor]` macro reads `K` off the `Multi<K>` marker, so
-`describe_component` reports the real `ReplyContract::Multi(K)` element kind.
+A bounded many-item answer is one reply whose kind carries a list, as the log,
+trace, and cost tails do. Incremental or unbounded delivery publishes to
+subscribers (`Publishes<K>` / `subscribe`).
 
 ### Helpers that only send
 
 The class marker rides on the context type — `WasmCtx<'_>` is
-`WasmCtx<'_, Erased, Single>`, a manual handler holds `WasmCtx<'_, Erased, Manual>`, a multi
-handler `WasmCtx<'_, Erased, Multi<K>>` — which is what makes a stray `ctx.reply` in a
+`WasmCtx<'_, Erased, Single>` and a manual handler holds
+`WasmCtx<'_, Erased, Manual>` — which is what makes a stray `ctx.reply` in a
 single handler a compile error. A handler may spell its actor instead of the
 default — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
 actor; `Erased` names no actor. The actor is the first parameter, the reply

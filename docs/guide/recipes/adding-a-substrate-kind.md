@@ -106,7 +106,7 @@ fn on_get_text(
 Use:
 
 - `single` for zero-or-one typed return;
-- `multi` for a declared repeated reply element;
+- a single reply whose kind carries a list for a bounded repeated result;
 - `manual` only when reply timing/type cannot be expressed as a return;
 - `task` completion for sanctioned off-thread work.
 

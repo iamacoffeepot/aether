@@ -450,10 +450,6 @@ impl WireEncode for ReplyContract {
                 1u32.encode(out)?;
                 id.encode(out)
             }
-            Self::Multi(id) => {
-                2u32.encode(out)?;
-                id.encode(out)
-            }
             Self::Manual => 3u32.encode(out),
         }
     }
@@ -464,7 +460,7 @@ impl<'de> WireDecode<'de> for ReplyContract {
         match u32::decode(cursor)? {
             0 => Ok(Self::None),
             1 => Ok(Self::One(crate::KindId::decode(cursor)?)),
-            2 => Ok(Self::Multi(crate::KindId::decode(cursor)?)),
+            // Selector 2 is reserved (retired by #6440) and never reused.
             3 => Ok(Self::Manual),
             other => Err(Error::InvalidEnum(other)),
         }

@@ -12,13 +12,13 @@
 //! `deliver_forwarded` for a bundle item and by `forward_to` for a typed
 //! payload to a proof. The
 //! per-stage capability traits carry the typed vocabulary FFI guests share:
-//! [`MailSender`] on every mode, [`OutboundReply`] on [`Manual`] only, and
-//! [`Emit`] on [`Multi<K>`] only, so a handler whose class disagrees with
-//! what it does fails to unify rather than lying in its manifest.
+//! [`MailSender`] on every mode and [`OutboundReply`] on [`Manual`] only, so
+//! a handler whose class disagrees with what it does fails to unify rather
+//! than lying in its manifest.
 
 use aether_actor::{
-    Addressable, CallerAddressable, CallerScoped, Emit, ErasedActorRef, HandlesKind, MailSender, Manual, Multi,
-    OutboundReply, ReplyMode, Singleton,
+    Addressable, CallerAddressable, CallerScoped, ErasedActorRef, HandlesKind, MailSender, Manual, OutboundReply,
+    ReplyMode, Singleton,
 };
 use aether_data::{Kind, KindId, MailId, RequestId};
 
@@ -374,26 +374,5 @@ impl<A> OutboundReply for NativeCtx<'_, A, Manual> {
 
     fn reply_to<K: Kind>(&mut self, sender: Source, payload: &K) {
         self.binding.send_reply_for_handler(sender, payload, self.in_flight_root, self.outbound_parent());
-    }
-}
-
-// ADR-0134: the emit surface is the multi class's, implemented only for
-// the `Multi<K>` mode. Each `emit` is `send_detached_to` at the proven
-// `ctx.sender()` and starts a fresh detached chain (`None` / `None`
-// lineage), so an emission does not hold the request chain open. A
-// sourceless dispatch (broadcast / substrate-generated mail, no
-// `SourceAddr::Component`) has no routable target, so the emission
-// warn-drops.
-impl<K: Kind, A> Emit<K> for NativeCtx<'_, A, Multi<K>> {
-    fn emit(&mut self, payload: &K) {
-        let Some(target) = self.sender() else {
-            tracing::warn!(
-                kind = <K as Kind>::NAME,
-                "multi handler emit dropped: the dispatch carries no routable \
-                 source (broadcast / substrate-origin mail)",
-            );
-            return;
-        };
-        self.send_detached_to(target, payload);
     }
 }

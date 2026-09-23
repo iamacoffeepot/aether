@@ -6,9 +6,9 @@ use crate::diagnostics::{doc_attrs, extract_agent_doc};
 use crate::export_desc::emit_actor_export_desc;
 use crate::handler_parse::{
     FallbackFn, HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler,
-    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, handler_cfgs, multi_kind_or_return_error,
-    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
-    validate_addressable_consts, validate_fallback_sig,
+    classify_handler_reply, ctx_names_actor, extract_handler_kind_type, handler_cfgs, parse_handler_class,
+    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, validate_addressable_consts,
+    validate_fallback_sig,
 };
 use crate::manifest::{
     build_actor_lineage_manifest_consts, build_inputs_manifest_consts, build_kinds_section_retention_statics,
@@ -133,16 +133,12 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                     // ADR-0112 / ADR-0134: read the reply class off the marker
                     // path.
                     let class = parse_handler_class(&f.attrs[idx], variant)?;
-                    // ADR-0134: a multi handler emits through `ctx.emit` and
-                    // must return `()` (the emissions are the reply, not a
-                    // return value); `K` rides its `Multi<K>` ctx marker.
-                    let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
                     // iamacoffeepot/aether#4811: the method keeps its own `#[cfg]`s
                     // (only the marker attribute is removed), so clone them for
                     // the artifacts derived from it.
                     let cfgs = handler_cfgs(&f.attrs);
                     f.attrs.remove(idx);
-                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, multi_kind, cfgs });
+                    handlers.push(HandlerFn { method: f, kind_ty, agent_doc, reply, class, cfgs });
                 } else if let Some(idx) = fallback_attr_idx {
                     if fallback.is_some() {
                         return Err(syn::Error::new_spanned(&f, "at most one #[fallback] method per component"));
@@ -442,7 +438,6 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             h.class,
             &h.reply,
             &h.kind_ty,
-            h.multi_kind.as_ref(),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
                 self_ty: &self_ty_ts,
@@ -769,12 +764,6 @@ fn build_dispatch_body(
             },
             (HandlerClass::Manual, _) => quote! {
                 self.#method(#ctx, __aether_decoded);
-            },
-            // ADR-0134: a multi handler is called with the `Multi<K>` view
-            // (`K` inferred from its ctx signature); it emits 0..n mails and
-            // returns `()`, so there is no auto-reply.
-            (HandlerClass::Multi, _) => quote! {
-                self.#method(#ctx.as_multi(), __aether_decoded);
             },
         };
         // `Mail::kind()` and `Kind::ID` are both the typed `KindId`

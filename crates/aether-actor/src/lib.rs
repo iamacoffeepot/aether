@@ -46,12 +46,12 @@ pub mod wasm;
 pub use asset::{AssetCatalog, AssetInfo, AssetWindow};
 pub use local::Local;
 pub use model::address::{address, address_at, address_named, child_address};
-pub use model::ctx::{Emit, Erased, MailSender, Manual, Multi, OutboundReply, Persistence, ReplyMode, Single};
+pub use model::ctx::{Erased, MailSender, Manual, OutboundReply, Persistence, ReplyMode, Single};
 pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, DependencyResolver, DependsOn,
     EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many, NAMESPACE_SEGMENT_MAX_LEN,
-    NamespaceError, One, Publishes, Reaches, Replies, Resolve, Root, Singleton, Streams, Subname, root_mailbox,
+    NamespaceError, One, Publishes, Reaches, Replies, Resolve, Root, Singleton, Subname, root_mailbox,
     validate_namespace_segment,
 };
 #[doc(hidden)]

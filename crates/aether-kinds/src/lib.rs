@@ -739,8 +739,7 @@ mod control_plane {
         pub doc: Option<String>,
         /// ADR-0112 / ADR-0134: the handler's reply class — `None` / `One(R)`
         /// for a single-class handler (the ADR-0109 return-type contract),
-        /// `Manual` for a manual-class handler that replies by hand,
-        /// `Multi(R)` for a multi-class handler emitting 0..n `R` mails. Lets
+        /// `Manual` for a manual-class handler that replies by hand. Lets
         /// `describe_component` report the real `In -> Out` so a caller reads
         /// what a call returns before issuing it. Native chassis caps report
         /// `None` until the native handler manifest lands (ADR-0109 §5, a
