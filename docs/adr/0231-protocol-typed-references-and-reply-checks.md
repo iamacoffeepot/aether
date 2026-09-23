@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
+- **Amended (#6440):** 2026-09-23 — with the multi class removed (ADR-0134 amendment), a contract row's reply is `Silent` or a kind `O` (`One(O)` on the manifest). `Multi<O>` leaves `Contract`, `ReplyHandledBy` and `#[protocol]` signatures; the multi rows of the scenario sweep (A: multi `Multi<O>`; D: `emit` on the reply path; E: a multi request passed on by a relay) and the multi sentence of §9 no longer apply; the §4 reason for widening `HandlerEntry.reply` (telling a multi row from a single one) is gone, and whether the widening stays is left to the ADR-0231 implementation.
 
 References are proofs of what is handled. [ADR-0230](0230-proven-actor-references.md)
 made a reference a proof of identity: an actor of this type reached `Live` at

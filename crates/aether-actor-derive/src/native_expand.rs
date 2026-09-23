@@ -9,10 +9,9 @@ use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
-    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, handler_cfgs,
-    multi_kind_or_return_error, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
-    rename_lifecycle_hooks, rewrite_self_state_first_param, types_token_eq, validate_addressable_consts,
-    validate_native_fallback_sig,
+    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, handler_cfgs, parse_handler_class,
+    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
+    types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -186,21 +185,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                         HandlerVariant::Mail => {
                             let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
-                            // ADR-0134: enforce the multi-class `-> ()` return
-                            // and the required `Multi<K>` ctx marker (a pointed
-                            // error when absent). The native dispatch reads `K`
-                            // by inference off the signature, so the extracted
-                            // kind itself is not retained here.
-                            let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
-                            handlers.push(NativeActorHandlerFn {
-                                method: f,
-                                kind_ty,
-                                is_slice,
-                                reply,
-                                class,
-                                multi_kind,
-                                cfgs,
-                            });
+                            handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
                         }
                         HandlerVariant::Task => {
                             // A task handler always dispatches with the `Single`
@@ -213,7 +198,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                                 return Err(syn::Error::new_spanned(
                                     &f,
                                     "#[handler(task)] always uses the single reply class; \
-                                     drop the `manual` / `multi` class marker — task replies \
+                                     drop the `manual` class marker — task replies \
                                      go through `TaskDone`, not the handler class \
                                      (ADR-0112 / ADR-0134)",
                                 ));
@@ -379,7 +364,6 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     kind: h.kind_ty.clone(),
                     reply: h.reply.clone(),
                     class: h.class,
-                    multi_kind: h.multi_kind.clone(),
                     cfgs: h.cfgs.clone(),
                 })
                 .collect();
@@ -473,12 +457,6 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             },
             (HandlerClass::Manual, _) => quote! {
                 #self_ty::#method_ident(__aether_state, __aether_ctx #erase, __aether_decoded);
-            },
-            // ADR-0134: a multi handler is called with the `Multi<K>` view
-            // (`K` inferred from its ctx signature); it emits 0..n mails and
-            // returns `()`, so there is no auto-reply.
-            (HandlerClass::Multi, _) => quote! {
-                #self_ty::#method_ident(__aether_state, __aether_ctx.as_multi() #erase, __aether_decoded);
             },
         };
         let decode = if h.is_slice {
@@ -914,14 +892,13 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 }
 
 /// One mail handler's marker payload: its inbound kind type, reply class and
-/// return kind, optional multi emit kind, and the `#[cfg]`s the handler method
+/// return kind, and the `#[cfg]`s the handler method
 /// carries, so a configuration that strips the method strips every marker impl
 /// and inventory row with it.
 struct HandlerMarker {
     kind: Type,
     reply: HandlerReply,
     class: HandlerClass,
-    multi_kind: Option<Type>,
     cfgs: Vec<syn::Attribute>,
 }
 
@@ -939,7 +916,6 @@ fn emit_native_reply_markers(
             marker.class,
             &marker.reply,
             &marker.kind,
-            marker.multi_kind.as_ref(),
             &ReplyMarkerSite {
                 impl_generics: &impl_generics_ts,
                 self_ty: &self_ty_ts,
@@ -1323,12 +1299,12 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
 /// expression plus the declared parents and dependencies, named by the
 /// `Addressable` / `ChildOf` / `DependsOn` impls), each handler's argument
 /// kind under that handler's own `#[cfg]`s,
-/// single-reply and multi-item kinds used by the always-on ADR-0227 marker
-/// impls, and each inventory reply kind under the handler cfgs plus `not(wasm)`.
+/// single-reply kinds used by the always-on ADR-0227 marker impls, and each
+/// inventory reply kind under the handler cfgs plus `not(wasm)`.
 ///
 /// A generic identity emits no handler inventory (the non-generic `NAMESPACE`
 /// const would not resolve in the inventory static), but its always-on reply
-/// markers still demand the reply or item types they name.
+/// markers still demand the reply types they name.
 fn identity_import_demands(
     identity: &HarvestedIdentity,
     opts: &ActorOpts,
@@ -1348,9 +1324,6 @@ fn identity_import_demands(
             && let Some(reply) = marker.reply.manifest_kind()
         {
             demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #reply } });
-        }
-        if let Some(item) = marker.multi_kind.as_ref() {
-            demands.push(ImportDemand { cfgs: cfgs.clone(), tokens: quote! { #item } });
         }
         if let Some(reply) = marker.reply.manifest_kind()
             && generics.params.is_empty()
@@ -1540,17 +1513,10 @@ fn harvest_native_actor_impl(
         let class = parse_handler_class(handler_attr, variant).map_err(remap)?;
         let (kind, _is_slice) = extract_native_actor_handler_kind(&f.sig, true).map_err(remap)?;
         let handler_reply = classify_handler_reply(&f.sig.output);
-        let multi_kind = multi_kind_or_return_error(class, &handler_reply, &f.sig).map_err(remap)?;
         // iamacoffeepot/aether#4811: the harvest is cfg-blind, so a gated handler
         // in the runtime module is read here regardless. Carry its `#[cfg]`s onto
         // the markers this identity emits so both halves strip together.
-        handler_kinds.push(HandlerMarker {
-            kind,
-            reply: handler_reply,
-            class,
-            multi_kind,
-            cfgs: handler_cfgs(&f.attrs),
-        });
+        handler_kinds.push(HandlerMarker { kind, reply: handler_reply, class, cfgs: handler_cfgs(&f.attrs) });
     }
 
     // A `NativeActor` impl with no `#[handler]`, no `#[fallback]`, and no

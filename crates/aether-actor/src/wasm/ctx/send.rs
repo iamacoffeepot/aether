@@ -1,15 +1,13 @@
 //! The receive ctx's outbound surface — the inherent by-reference send
-//! and the [`MailSender`] / [`OutboundReply`] / [`Emit`] impls on
-//! [`WasmCtx`].
+//! and the [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
 use aether_data::Kind;
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
-use crate::model::ctx::emit::Emit;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
-use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode};
+use crate::model::ctx::reply_mode::{Manual, ReplyMode};
 use crate::model::{Addressable, CallerAddressable, CallerScoped, HandlesKind, Singleton};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
@@ -119,26 +117,5 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
     fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1, self.mailbox);
-    }
-}
-
-// ADR-0134: the emit surface is the multi class's, implemented only for
-// the `Multi<K>` mode. Each `emit` is `send_detached_to` at the proven
-// `ctx.sender()` (a detached chain root addressed at the dispatch source),
-// so an emission starts a fresh chain rather than holding the request
-// chain open. A sourceless dispatch (session / broadcast / substrate-origin
-// mail, `ctx.sender()` is `None`) has no routable target, so the emission
-// warn-drops.
-impl<A, K: Kind> Emit<K> for WasmCtx<'_, A, Multi<K>> {
-    fn emit(&mut self, payload: &K) {
-        let Some(target) = self.sender() else {
-            tracing::warn!(
-                kind = <K as Kind>::NAME,
-                "multi handler emit dropped: the dispatch carries no routable \
-                 source (session / broadcast / substrate-origin mail)",
-            );
-            return;
-        };
-        self.send_detached_to(target, payload);
     }
 }

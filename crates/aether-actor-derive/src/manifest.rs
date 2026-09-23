@@ -76,16 +76,10 @@ fn handler_record_terms(h: &HandlerFn, section_version: &TokenStream2) -> Record
     let doc_expr = option_str_token(h.agent_doc.as_ref());
     // ADR-0112 / ADR-0134: the reply class rides the handler record as a
     // `ReplyContract` `(tag, id)` pair — `(0, 0)` for a single `-> ()`,
-    // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(2, K::ID)` for
-    // a multi handler emitting `K` (the element kind off its `Multi<K>`
-    // ctx marker), `(3, 0)` for a manual handler (no single static reply
-    // kind).
+    // `(1, R::ID)` for a single `-> R` / `-> Pending<R>`, `(3, 0)` for a
+    // manual handler (no single static reply kind). Tag 2 is reserved.
     let (reply_tag_expr, reply_id_expr) = match (h.class, h.reply.manifest_kind()) {
         (HandlerClass::Manual, _) => (quote! { 3u8 }, quote! { 0u64 }),
-        (HandlerClass::Multi, _) => {
-            let k = h.multi_kind.as_ref().expect("a multi handler carries its `Multi<K>` emit kind");
-            (quote! { 2u8 }, quote! { <#k as ::aether_actor::__macro_internals::Kind>::ID.0 })
-        }
         (HandlerClass::Single, Some(r)) => {
             (quote! { 1u8 }, quote! { <#r as ::aether_actor::__macro_internals::Kind>::ID.0 })
         }

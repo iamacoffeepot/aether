@@ -670,36 +670,65 @@ pub struct KindLabels {
 /// ADR-0134). The successor to ADR-0109's `Option<KindId>` reply field: a
 /// single-class handler reports `None` (`-> ()`) or `One(R)`
 /// (`-> R` / `-> Pending<R>`); a manual-class handler reports `Manual` (it
-/// issues its own replies, so no single static reply kind); a multi-class
-/// handler reports `Multi(R)` — it emits 0..n `R` mails, each a detached
-/// chain root at the dispatch source (ADR-0134). `describe_*` surfaces
-/// this so a caller reads the real reply shape, not a `None` that lies for
-/// a handler that replies by hand.
+/// issues its own replies, so no single static reply kind). `describe_*`
+/// surfaces this so a caller reads the real reply shape, not a `None` that
+/// lies for a handler that replies by hand.
 ///
-/// **Variant order is the wire discriminant** — `None` = 0,
-/// `One` = 1, `Multi` = 2, `Manual` = 3. The const-fn encoders in
-/// [`crate::canonical`] and the macro emission depend on it; do not
-/// reorder.
+/// **The wire selectors are fixed** — `None` = 0, `One` = 1, `Manual` = 3.
+/// Selector 2 is reserved (retired by #6440) and is never reused: a record
+/// still carrying it fails to decode. The const-fn encoders in
+/// [`crate::canonical`], the owned codec, and the macro emission depend on
+/// these numbers; do not renumber.
 ///
-/// The `Schema` impl is hand-written (aether-data has no
-/// `extern crate self` alias and never self-derives `Schema`, which is
-/// behind the optional `derive` feature). The shape mirrors what the
-/// derive would emit for this enum so `describe_kinds` renders it the
-/// same as any derived enum.
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+/// The serde impls are hand-written so `Manual` keeps selector 3 on the
+/// positional serde path despite the gap, following the `LabelNode` /
+/// `VariantLabel` precedent above. The `Schema` impl is hand-written too
+/// (aether-data has no `extern crate self` alias and never self-derives
+/// `Schema`, which is behind the optional `derive` feature). The shape
+/// mirrors what the derive would emit for this enum so `describe_kinds`
+/// renders it the same as any derived enum.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ReplyContract {
     /// `-> ()` — a single-class handler that replies nothing.
     None,
     /// `-> R` / `-> Pending<R>` — a single-class handler whose reply kind
     /// is `R`.
     One(KindId),
-    /// A multi-class handler (ADR-0134) that emits 0..n `R` mails, each a
-    /// detached chain root addressed at the dispatch source. `R` is the
-    /// declared element kind read off the handler's `Multi<R>` ctx marker.
-    Multi(KindId),
     /// A manual-class handler that issues its own replies — no single
     /// static reply kind to report.
     Manual,
+}
+
+impl Serialize for ReplyContract {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::None => serializer.serialize_unit_variant("ReplyContract", 0, "None"),
+            Self::One(id) => serializer.serialize_newtype_variant("ReplyContract", 1, "One", id),
+            Self::Manual => serializer.serialize_unit_variant("ReplyContract", 3, "Manual"),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for ReplyContract {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        use serde::de::Error as _;
+
+        // Positional shadow of the selectors: the placeholder holds index 2
+        // so `Manual` decodes at 3, and a record carrying 2 is refused.
+        #[derive(Deserialize)]
+        enum ReplyContractDe {
+            None,
+            One(KindId),
+            RetiredSelector2,
+            Manual,
+        }
+        match ReplyContractDe::deserialize(deserializer)? {
+            ReplyContractDe::None => Ok(Self::None),
+            ReplyContractDe::One(id) => Ok(Self::One(id)),
+            ReplyContractDe::RetiredSelector2 => Err(D::Error::custom("ReplyContract selector 2 is reserved")),
+            ReplyContractDe::Manual => Ok(Self::Manual),
+        }
+    }
 }
 
 impl crate::Schema for ReplyContract {
@@ -711,19 +740,14 @@ impl crate::Schema for ReplyContract {
                 discriminant: 1,
                 fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
             },
-            EnumVariant::Tuple {
-                name: Cow::Borrowed("Multi"),
-                discriminant: 2,
-                fields: Cow::Borrowed(&[SchemaType::TypeId(KindId::TYPE_ID)]),
-            },
             EnumVariant::Unit { name: Cow::Borrowed("Manual"), discriminant: 3 },
         ]),
     };
 
     const LABEL: Option<&'static str> = Some("ReplyContract");
 
-    // Parallel-shape label tree mirroring `SCHEMA`. The `One` / `Multi`
-    // fields carry `LabelNode::Anonymous` — identical to
+    // Parallel-shape label tree mirroring `SCHEMA`. The `One` field
+    // carries `LabelNode::Anonymous` — identical to
     // `<KindId as Schema>::LABEL_NODE`, since a typed-id field has no
     // nominal sub-shape.
     const LABEL_NODE: LabelNode = LabelNode::Enum {
@@ -731,7 +755,6 @@ impl crate::Schema for ReplyContract {
         variants: Cow::Borrowed(&[
             VariantLabel::Unit { name: Cow::Borrowed("None") },
             VariantLabel::Tuple { name: Cow::Borrowed("One"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
-            VariantLabel::Tuple { name: Cow::Borrowed("Multi"), fields: Cow::Borrowed(&[LabelNode::Anonymous]) },
             VariantLabel::Unit { name: Cow::Borrowed("Manual") },
         ]),
     };
@@ -754,9 +777,8 @@ pub enum InputsRecord {
         doc: Option<Cow<'static, str>>,
         /// ADR-0112 / ADR-0134: the handler's reply class — `None` / `One(R)`
         /// for a single-class handler (the ADR-0109 return-type contract),
-        /// `Manual` for a manual-class handler that replies by hand,
-        /// `Multi(R)` for a multi-class handler emitting 0..n `R` mails. Lets
-        /// a caller read the real `In -> Out` before issuing the call.
+        /// `Manual` for a manual-class handler that replies by hand. Lets a
+        /// caller read the real `In -> Out` before issuing the call.
         /// Successor to ADR-0109's `Option<KindId>` reply field.
         reply: ReplyContract,
     },
@@ -803,7 +825,7 @@ pub const INPUTS_SECTION: &str = "aether.kinds.inputs";
 /// v0x03 (ADR-0109 / issue 1803) added the `reply` kind id to the
 /// `Handler` variant; v0x04 (ADR-0112 / issue 1850) widened that field
 /// from `Option<KindId>` to [`ReplyContract`] so a handler's reply
-/// *class* (single / manual / multi) is reported, not just a single
+/// *class* (single / manual) is reported, not just a single
 /// reply kind; v0x05 (ADR-0118 / issue 1984) moved every record
 /// onto the owned aether-wire format (fixed little-endian
 /// selectors / ids / counts). A component built before any of these and

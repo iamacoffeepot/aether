@@ -1,11 +1,10 @@
 //! What leaves a ctx and under whose chain: a handle send inherits the
-//! handler's causal chain while a detached one mints a fresh root, a multi
-//! emit addresses the dispatch source detached, and every reply entry point
-//! accepts a `Pod`-without-`Serialize` cast kind (ADR-0100).
+//! handler's causal chain while a detached one mints a fresh root, and every
+//! reply entry point accepts a `Pod`-without-`Serialize` cast kind (ADR-0100).
 
 use std::sync::Arc;
 
-use aether_actor::{Emit, Manual, OutboundReply, Single};
+use aether_actor::{Manual, OutboundReply, Single};
 use aether_data::{MailId, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -71,55 +70,6 @@ fn handle_send_inherits_chain_detached_mints_fresh() {
     let detached = rx.try_recv().expect("detached send routed at flush");
     assert!(detached.parent_mail.is_none(), "detached send carries no parent edge");
     assert_eq!(detached.root, detached.mail_id, "detached send is its own root");
-}
-
-/// ADR-0134: a multi handler's `ctx.emit` addresses the dispatch source
-/// and starts a fresh detached chain (no parent edge, its own root);
-/// a dispatch with no routable source (`SourceAddr::None`) drops the
-/// emission. The buffered send routes at handler end (`NativeCtx`'s
-/// `Drop` flush), so the assertions read the routed dispatch off the
-/// source-registered sink.
-#[test]
-fn emit_routes_detached_at_source_and_drops_when_sourceless() {
-    use crate::mail::registry::OwnedDispatch;
-    use crate::testing::{bare_substrate, boot_authority};
-    use std::sync::mpsc;
-
-    let (registry, mailer) = bare_substrate();
-    let (tx, rx) = mpsc::channel::<Envelope>();
-    // The sink is registered under the id the dispatch source names, so
-    // a receipt here proves the emit addressed the source.
-    let source_id = registry.register_inbox(
-        &boot_authority(),
-        "test.multi_emit.sink",
-        Arc::new(move |dispatch: OwnedDispatch| {
-            // Terminal test sink (ADR-0094): discharge before observing.
-            dispatch.discharge();
-            let _ = tx.send(dispatch);
-        }),
-    );
-
-    let actor_mailbox = MailboxId(0x00BE_EF03);
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-    // A dispatch whose source is the sink component: emit addresses it.
-    let source = Source::with_correlation(SourceAddr::Component(source_id), 0);
-    {
-        let mut ctx = NativeCtx::new_dispatching(&binding, source, MailId::NONE, MailId::NONE);
-        Emit::<CastOnly>::emit(ctx.as_multi::<CastOnly>(), &CastOnly { code: 7 });
-        // ctx drops here → `flush_outbound` routes the buffered emit.
-    }
-    let emitted = rx.try_recv().expect("emit routed at flush");
-    assert!(emitted.parent_mail.is_none(), "emit carries no parent edge — it is a detached root");
-    assert_eq!(emitted.root, emitted.mail_id, "a detached emit is its own chain root");
-
-    // A sourceless dispatch (`SourceAddr::None`) drops the emission.
-    let none_source = Source::with_correlation(SourceAddr::None, 0);
-    {
-        let mut ctx = NativeCtx::new_dispatching(&binding, none_source, MailId::NONE, MailId::NONE);
-        Emit::<CastOnly>::emit(ctx.as_multi::<CastOnly>(), &CastOnly { code: 8 });
-    }
-    assert!(rx.try_recv().is_err(), "a sourceless emit routes nothing — the emission drops");
 }
 
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple

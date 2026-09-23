@@ -1,9 +1,9 @@
 //! What a ctx reads off the dispatch it was built for — the threaded
-//! source, the reply correlation, the reply-mode views' layout, the multi
-//! class's emit, and the relative verbs' in-place routing.
+//! source, the reply correlation, the reply-mode views' layout, and the
+//! relative verbs' in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
-use crate::model::ctx::{Emit, Erased, Manual, Multi, Single};
+use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
 use crate::wasm::WasmActorMailbox;
 use crate::wasm::inline::RouteDecision;
@@ -26,41 +26,6 @@ fn local_dispatch_ctx_never_reads_host_reply_correlation() {
     let registry = Registry::new();
     let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new_local_dispatch(0x10, &registry, NO_INBOUND_SOURCE);
     assert_eq!(ctx.in_reply_to(), None, "cluster-drained dispatches carry no host correlation");
-}
-
-/// ADR-0134: `emit` on a `Multi<K>` ctx routes a detached mail at the
-/// threaded dispatch source, and a sourceless dispatch drops the
-/// emission. The source is set to a cluster member (the self id) so the
-/// detached route resolves in place and enqueues locally — no host call
-/// (the host stub panics on the host build, so reaching the assert
-/// without a panic proves the local branch). A `()` payload encodes to
-/// empty bytes.
-#[test]
-fn emit_routes_at_the_threaded_source_and_drops_when_sourceless() {
-    let registry = Registry::new();
-    let source = 0x7200_u64;
-    registry.set_self_id(source);
-
-    // A dispatch whose source is a cluster member: emit routes a
-    // detached mail there and enqueues locally.
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(source, &registry, source);
-    Emit::<()>::emit(ctx.as_multi::<()>(), &());
-    assert_eq!(registry.queued_len(), 1, "emit routes a detached mail at the threaded source");
-
-    // A sourceless dispatch (NONE) has no routable target — the emit
-    // drops rather than enqueuing.
-    let mut none_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(source, &registry, NO_INBOUND_SOURCE);
-    Emit::<()>::emit(none_ctx.as_multi::<()>(), &());
-    assert_eq!(registry.queued_len(), 1, "a sourceless emit drops — no additional mail enqueued");
-}
-
-/// ADR-0134: the multi mode marker is layout-neutral — a `Multi<K>`
-/// view has the same size + alignment as the `Single` / `Manual` views.
-/// This is the invariant the `as_multi` pointer reborrow rests on.
-#[test]
-fn ffi_ctx_layout_identical_for_multi_mode() {
-    assert_eq!(size_of::<WasmCtx<'static, Erased, Single>>(), size_of::<WasmCtx<'static, Erased, Multi<u32>>>(),);
-    assert_eq!(align_of::<WasmCtx<'static, Erased, Single>>(), align_of::<WasmCtx<'static, Erased, Multi<u32>>>(),);
 }
 
 /// ADR-0112: the mode marker is layout-neutral — the `Single` and

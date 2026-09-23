@@ -133,8 +133,8 @@ available when the request id itself is the domain key. `in_reply_to()` returns
 dispatches that never crossed the host envelope boundary. Echoed payload fields
 such as the echoed `addr` on `aether.fs.read_result` remain useful domain
 context, but exact duplicate-safe matching belongs to the request context or
-envelope request id. Multi emissions and detached data phases still carry their
-own domain-level correlation in their payloads.
+envelope request id. Detached data phases still carry their own domain-level
+correlation in their payloads.
 
 **The ordering spine** ([ADR-0087](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0087-blob-unit-of-dispatch.md)) — **the single contract to hold in your head
 when writing handlers.** Get it wrong and you write code that passes in dev and

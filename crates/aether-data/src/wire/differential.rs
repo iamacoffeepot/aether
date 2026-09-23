@@ -246,7 +246,6 @@ fn kind_labels_and_reply_contract_match_serde() {
     assert_drivers_agree(&labels);
     assert_drivers_agree(&ReplyContract::None);
     assert_drivers_agree(&ReplyContract::One(KindId(1)));
-    assert_drivers_agree(&ReplyContract::Multi(KindId(2)));
     assert_drivers_agree(&ReplyContract::Manual);
     assert_drivers_agree(&VariantLabel::Unit { name: Cow::Borrowed("Pending") });
 }

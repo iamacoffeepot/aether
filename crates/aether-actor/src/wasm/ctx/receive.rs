@@ -13,7 +13,7 @@ use aether_data::{Kind, MailboxId, RequestId, Source};
 
 use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
-use crate::model::ctx::reply_mode::{Manual, Multi, ReplyMode, Single};
+use crate::model::ctx::reply_mode::{Manual, ReplyMode, Single};
 use crate::model::{
     Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Reaches, Singleton,
 };
@@ -149,30 +149,13 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
         // capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Single>>() }
     }
-
-    /// ADR-0134 downgrade-only coercion: view this [`Manual`] ctx as a
-    /// [`Multi<K>`] ctx, swapping the `OutboundReply` surface for the
-    /// [`Emit<K>`](crate::Emit) surface. The `#[actor]` macro hands a `#[handler::multi]`
-    /// handler this view (with `K` read off its `Multi<K>` signature), so a
-    /// handler whose marker disagrees with its class fails to unify.
-    /// Preserves the actor marker `A`.
-    #[doc(hidden)]
-    #[must_use]
-    pub fn as_multi<K: Kind>(&mut self) -> &mut WasmCtx<'a, A, Multi<K>> {
-        // SAFETY: `M` is `PhantomData`-only and `Multi<K>` is a ZST for every
-        // `K`, so `WasmCtx<'a, A, Manual>` and `WasmCtx<'a, A, Multi<K>>` are
-        // layout-identical (see `reply_mode_types_are_zsts` and
-        // `ffi_ctx_layout_identical_across_modes`). The reborrow swaps the
-        // marker without touching any real field.
-        unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Multi<K>>>() }
-    }
 }
 
 impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
     /// Upgrade this erased ctx to the actor being dispatched (issue 6279).
     /// The `#[actor]` macro calls it with `Self` for a handler, `#[fallback]`,
     /// `wire`, or `unwire` hook whose signature names its actor, ahead of the
-    /// per-class [`Self::as_single`] / [`Self::as_multi`] downgrade; every
+    /// per-class [`Self::as_single`] downgrade; every
     /// other arm receives the erased ctx as today. Defined on the erased form
     /// only, so the upgrade always starts from the dispatcher's erased ctx.
     ///

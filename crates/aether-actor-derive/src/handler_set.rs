@@ -83,8 +83,8 @@ use syn::{FnArg, ItemTrait, TraitItem, Type};
 use crate::diagnostics::extract_agent_doc;
 use crate::handler_parse::{
     HandlerClass, HandlerFn, HandlerReply, HandlerVariant, attr_is_fallback, attr_is_handler, classify_handler_reply,
-    extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs, multi_kind_or_return_error,
-    parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds,
+    extract_handler_kind_type, extract_native_actor_handler_kind, handler_cfgs, parse_handler_class,
+    parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
 use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
@@ -267,7 +267,6 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         let agent_doc = extract_agent_doc(&f.attrs);
         let reply = classify_handler_reply(&f.sig.output);
         let class = parse_handler_class(&f.attrs[idx], variant)?;
-        let multi_kind = multi_kind_or_return_error(class, &reply, &f.sig)?;
         let cfgs = handler_cfgs(&f.attrs);
         f.attrs.remove(idx);
 
@@ -286,7 +285,7 @@ pub fn expand_handler_set(mut item: ItemTrait) -> syn::Result<TokenStream2> {
         // from it, and all of them resolve in this crate — the three emitted
         // here directly, and the bridge markers through the gate pair
         // `build_native_marker_bridge` resolves at definition time.
-        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class, multi_kind });
+        handlers.push(HandlerFn { method, kind_ty, agent_doc, cfgs, reply, class });
     }
 
     if handlers.is_empty() {
@@ -463,7 +462,6 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
             h.class,
             &h.reply,
             kind_ty,
-            h.multi_kind.as_ref(),
             &ReplyMarkerSite { impl_generics: &empty, self_ty: &self_ty, where_clause: &empty, cfgs: &[] },
         );
         let mut markers = vec![handles_marker];
@@ -556,9 +554,6 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
             },
             (HandlerClass::Manual, _) => quote! {
                 Self::#method(#receiver, __aether_ctx, __aether_decoded);
-            },
-            (HandlerClass::Multi, _) => quote! {
-                Self::#method(#receiver, __aether_ctx.as_multi(), __aether_decoded);
             },
         };
         let (matches_kind, decode) = transport.arm_terms(k);

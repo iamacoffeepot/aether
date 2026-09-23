@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-20
+- **Amended (#6440):** 2026-09-23 — `Streams<K, Item = O>` is removed with the multi class (ADR-0134 amendment); `Replies<K, Reply = O>` is the one reply marker, and the `#[handler::multi]` row of decision 1 and the `(2, K::ID)` manifest pair no longer exist.
 
 Amends [ADR-0109](0109-handler-reply-contracts.md) (the handler return
 type is the reply contract, published on the inputs manifest) and

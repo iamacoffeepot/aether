@@ -27,15 +27,10 @@ pub struct HandlerFn {
     /// return type. Drives the auto-emitted `ctx.reply` and the reply
     /// kind id on the inputs manifest record.
     pub reply: HandlerReply,
-    /// ADR-0112 / ADR-0134: the declared reply class (single / manual /
-    /// multi). Selects the ctx view the macro passes (`as_single()` for
-    /// single, the full `Manual` ctx for manual, `as_multi::<K>()` for
-    /// multi) and the manifest `ReplyContract` tag.
+    /// ADR-0112 / ADR-0134: the declared reply class (single / manual).
+    /// Selects the ctx view the macro passes (`as_single()` for single, the
+    /// full `Manual` ctx for manual) and the manifest `ReplyContract` tag.
     pub class: HandlerClass,
-    /// ADR-0134: the multi-class emit kind `K`, read off the `Multi<K>` ctx
-    /// marker. `Some` iff `class == Multi`; drives the `ReplyContract::Multi(K::ID)`
-    /// manifest pair.
-    pub multi_kind: Option<Type>,
 }
 
 pub struct FallbackFn {
@@ -45,23 +40,20 @@ pub struct FallbackFn {
 
 /// Match a handler attribute — bare `#[handler]` (any path whose last
 /// segment is `handler`, so `#[crate::handler]` / `#[aether_data::handler]`
-/// resolve too) or a class-marked `#[handler::single|manual|multi]`
-/// (ADR-0112 / ADR-0134), whose last segment is the class and whose
-/// preceding segment is `handler`. The class path never reaches attribute
+/// resolve too) or a class-marked `#[handler::<class>]` (ADR-0112 /
+/// ADR-0134), any path whose second-last segment is `handler`. The class
+/// word itself is not checked here: [`parse_handler_class`] accepts
+/// `single` / `manual` and gives any other word a pointed error, so a
+/// misspelled or retired class never falls through to rustc's
+/// unresolved-attribute error. The class path never reaches attribute
 /// resolution — `#[actor]` parses and strips it.
 pub fn attr_is_handler(attr: &Attribute) -> bool {
     let segments = &attr.path().segments;
     let Some(last) = segments.last() else {
         return false;
     };
-    if last.ident == "handler" {
-        return true;
-    }
-    if matches!(last.ident.to_string().as_str(), "single" | "manual" | "multi") {
-        let len = segments.len();
-        return len >= 2 && segments[len - 2].ident == "handler";
-    }
-    false
+    let len = segments.len();
+    last.ident == "handler" || (len >= 2 && segments[len - 2].ident == "handler")
 }
 
 /// Same logic for `#[fallback]`.
@@ -116,32 +108,30 @@ pub fn parse_handler_variant(attr: &Attribute) -> syn::Result<HandlerVariant> {
         Meta::NameValue(nv) => Err(syn::Error::new_spanned(
             nv,
             "#[handler] takes no `= value` — write `#[handler::single]`, \
-             `#[handler::manual]`, `#[handler::multi]`, or `#[handler(task)]`",
+             `#[handler::manual]`, or `#[handler(task)]`",
         )),
     }
 }
 
 /// The reply class of a handler (ADR-0112, ADR-0134), read off the
-/// attribute path: `#[handler::single]` is [`Single`](HandlerClass::Single),
-/// `#[handler::manual]` is [`Manual`](HandlerClass::Manual), and
-/// `#[handler::multi]` is [`Multi`](HandlerClass::Multi) — every mail
+/// attribute path: `#[handler::single]` is [`Single`](HandlerClass::Single)
+/// and `#[handler::manual]` is [`Manual`](HandlerClass::Manual) — every mail
 /// handler names its class explicitly. Orthogonal to [`HandlerVariant`]
 /// (the `mail` / `task` trigger), which is read from the parens.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HandlerClass {
     Single,
     Manual,
-    Multi,
 }
 
 /// Read a handler's [`HandlerClass`] off its attribute path (ADR-0112,
 /// ADR-0134), given the already-parsed [`HandlerVariant`]. The last path
-/// segment is the class (`single` / `manual` / `multi`); a bare `handler`
+/// segment is the class (`single` / `manual`); a bare `handler`
 /// segment is classless task exemption for [`HandlerVariant::Task`] (its
 /// reply rides `TaskDone`, not the handler class) and a pointed compile
 /// error for [`HandlerVariant::Mail`] — the class is no longer defaulted.
-/// `attr_is_handler` is the gate, so the path is known to end in one of
-/// these segments.
+/// `attr_is_handler` is the gate, so the path ends in `handler` or follows
+/// it; any other class word is a pointed compile error.
 pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Result<HandlerClass> {
     let last = attr.path().segments.last().expect("attr_is_handler guarantees a non-empty path");
     let class = match last.ident.to_string().as_str() {
@@ -153,20 +143,18 @@ pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Re
                 return Err(syn::Error::new_spanned(
                     attr,
                     "#[handler] requires an explicit reply class (ADR-0134): write \
-                     `#[handler::single]` (the return value is the reply), \
-                     `#[handler::manual]` (the handler issues replies), or \
-                     `#[handler::multi]` (detached emissions of a declared kind)",
+                     `#[handler::single]` (the return value is the reply) or \
+                     `#[handler::manual]` (the handler issues replies)",
                 ));
             }
         },
         "single" => HandlerClass::Single,
         "manual" => HandlerClass::Manual,
-        "multi" => HandlerClass::Multi,
         other => {
             return Err(syn::Error::new_spanned(
                 attr,
                 format!(
-                    "unknown #[handler::<class>] — accepts `single`, `manual`, or `multi` \
+                    "unknown #[handler::<class>] — accepts `single` or `manual` \
                      (ADR-0112 / ADR-0134); got `{other}`"
                 ),
             ));
@@ -181,7 +169,7 @@ pub fn parse_handler_class(attr: &Attribute, variant: HandlerVariant) -> syn::Re
 /// transports spell the actor first (issues 4158 + 6279), so one positional
 /// reader serves `WasmCtx` / `NativeCtx` / `WireCtx` alike.
 /// `None` when the second parameter is not a reference to a path type at all —
-/// each caller phrases that failure in its own vocabulary.
+/// [`ctx_names_actor`] reads that as naming no actor.
 fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
     let FnArg::Typed(pt) = sig.inputs.get(1)? else {
         return None;
@@ -221,85 +209,9 @@ pub fn ctx_names_actor(sig: &Signature) -> bool {
 /// Whether a ctx type argument spells the `Erased` actor marker — any path
 /// whose last segment is `Erased` (`Erased`, `crate::Erased`,
 /// `aether_substrate::Erased`). The macro has no type resolution, so the
-/// match is syntactic, the same way `extract_multi_emit_kind` matches `Multi`.
+/// match is syntactic.
 fn type_is_erased(ty: &Type) -> bool {
     matches!(ty, Type::Path(p) if p.path.segments.last().is_some_and(|s| s.ident == "Erased"))
-}
-
-/// Extract the element kind `K` from a `#[handler::multi]` method's ctx
-/// parameter (ADR-0134). The ctx is the second parameter and must be
-/// `ctx: &mut WasmCtx<'_, Erased, Multi<K>>` (wasm) or
-/// `ctx: &mut NativeCtx<'_, Erased, Multi<K>>` (native): the macro reads `K` off
-/// the `Multi<K>` marker so the manifest's `ReplyContract::Multi(K::ID)`
-/// and the `emit` element kind cannot drift. A ctx that lacks the
-/// `Multi<K>` marker earns a pointed error naming the required shape
-/// rather than an opaque unification failure at the generated call site.
-fn extract_multi_emit_kind(sig: &Signature) -> syn::Result<Type> {
-    // Nested (non-capturing) so every `Multi<K>`-shape failure earns one
-    // message, spanned at whichever token the parse got stuck on.
-    fn shape_err<T: quote::ToTokens>(span: T) -> syn::Error {
-        syn::Error::new_spanned(
-            span,
-            "#[handler::multi] requires a `Multi<K>` ctx marker naming the emit kind — \
-             write `ctx: &mut WasmCtx<'_, Erased, Multi<K>>` (or `NativeCtx<'_, Erased, Multi<K>>`), \
-             where `K` is the kind the handler emits (ADR-0134)",
-        )
-    }
-    let ctx_param = sig.inputs.get(1).ok_or_else(|| shape_err(sig))?;
-    // Span every shape failure below on the ctx *type* rather than the whole
-    // parameter — the type is what the author has to rewrite.
-    let FnArg::Typed(ctx_pat) = ctx_param else {
-        return Err(shape_err(ctx_param));
-    };
-    let ctx_ty = &*ctx_pat.ty;
-    // The reply mode is the ctx's *second* type argument on both transports —
-    // the first names the actor (`WasmCtx<'_, Self, Multi<K>>`, issues 4158 +
-    // 6279) — so the reader is positional with no transport split.
-    let args = ctx_type_args(sig).ok_or_else(|| shape_err(ctx_ty))?;
-    let mode_arg = args.get(1);
-    let marker_ty = *mode_arg.ok_or_else(|| shape_err(ctx_ty))?;
-    let Type::Path(marker_path) = marker_ty else {
-        return Err(shape_err(marker_ty));
-    };
-    let marker_seg = marker_path.path.segments.last().ok_or_else(|| shape_err(marker_ty))?;
-    if marker_seg.ident != "Multi" {
-        return Err(shape_err(marker_ty));
-    }
-    let PathArguments::AngleBracketed(marker_args) = &marker_seg.arguments else {
-        return Err(shape_err(marker_ty));
-    };
-    marker_args
-        .args
-        .iter()
-        .find_map(|a| match a {
-            GenericArgument::Type(t) => Some(t.clone()),
-            _ => None,
-        })
-        .ok_or_else(|| shape_err(marker_ty))
-}
-
-/// Resolve a mail handler's [`HandlerClass::Multi`] emit kind, enforcing
-/// its `-> ()` return contract (ADR-0134). A non-multi class carries no
-/// emit kind (`Ok(None)`). A multi handler must return `()` — its 0..n
-/// `ctx.emit` calls *are* the reply, so a return value is a contradiction
-/// — and its `K` is read off the `Multi<K>` ctx marker. Shared by the wasm
-/// and native collection sites so the enforcement can't drift between them.
-pub fn multi_kind_or_return_error(
-    class: HandlerClass,
-    reply: &HandlerReply,
-    sig: &Signature,
-) -> syn::Result<Option<Type>> {
-    if class != HandlerClass::Multi {
-        return Ok(None);
-    }
-    if !matches!(reply, HandlerReply::None) {
-        return Err(syn::Error::new_spanned(
-            &sig.output,
-            "#[handler::multi] must return `()` — a multi handler answers with 0..n \
-             `ctx.emit` calls, so a return value has no reply path (ADR-0134)",
-        ));
-    }
-    Ok(Some(extract_multi_emit_kind(sig)?))
 }
 
 /// Extract `(O, C, is_borrow)` from a `#[handler(task)]` method's third
@@ -467,14 +379,10 @@ pub struct NativeActorHandlerFn {
     /// return type. A `-> R` native handler auto-replies `R` through
     /// `OutboundReply::reply`, the same path a manual `ctx.reply` takes.
     pub reply: HandlerReply,
-    /// ADR-0112 / ADR-0134: the declared reply class (single / manual /
-    /// multi). Selects the ctx view the dispatch arm passes and the
-    /// manifest reply tag.
+    /// ADR-0112 / ADR-0134: the declared reply class (single / manual).
+    /// Selects the ctx view the dispatch arm passes and the manifest reply
+    /// tag.
     pub class: HandlerClass,
-    /// ADR-0134: the multi-class emit kind `K`, read off the `Multi<K>` ctx
-    /// marker. `Some` iff `class == Multi`; the dispatch arm still infers it
-    /// from the signature, while ADR-0227 uses it for `Streams`.
-    pub multi_kind: Option<Type>,
     /// The handler method's `#[cfg]` attributes (see [`handler_cfgs`]), replayed
     /// onto its dispatch arm, capability entry, measured-kind id, marker impl,
     /// and inventory submission.

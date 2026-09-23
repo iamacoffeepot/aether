@@ -58,7 +58,7 @@ pub(super) async fn settle_mail_item(
                 cache.get(&(delivered.engine, canonical)).and_then(|caps| {
                     caps.handlers.iter().find(|handler| handler.name == delivered.kind_name).and_then(|handler| {
                         match handler.reply {
-                            aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
+                            aether_data::ReplyContract::One(id) => Some(id),
                             _ => None,
                         }
                     })

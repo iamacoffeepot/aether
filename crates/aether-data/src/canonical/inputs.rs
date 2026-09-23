@@ -15,15 +15,14 @@ use super::primitives::{
 
 /// Byte length of a [`ReplyContract`](crate::ReplyContract)'s aether-wire
 /// encoding from its `(tag, id)` pair. The selector is a fixed `u32`; the
-/// `One` / `Multi` arms carry a trailing `KindId` (a bare `u64`), the
-/// `None` / `Manual` arms carry nothing. Variant order (`None` = 0,
-/// `One` = 1, `Multi` = 2, `Manual` = 3) is the selector, matching the
-/// enum's declared order.
+/// `One` arm carries a trailing `KindId` (a bare `u64`), the `None` /
+/// `Manual` arms carry nothing. The selectors are `None` = 0, `One` = 1,
+/// `Manual` = 3; 2 is reserved (retired by #6440).
 #[must_use]
 pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
     match reply_tag {
-        // One / Multi carry a trailing `KindId` (bare u64).
-        1 | 2 => U32_WIDTH + U64_WIDTH,
+        // One carries a trailing `KindId` (bare u64).
+        1 => U32_WIDTH + U64_WIDTH,
         // None / Manual (and any other) carry just the selector.
         _ => U32_WIDTH,
     }
@@ -32,11 +31,11 @@ pub const fn reply_contract_len(reply_tag: u8, _reply_id: u64) -> usize {
 /// Serialize a [`ReplyContract`](crate::ReplyContract) into `out` at
 /// `pos` from its `(tag, id)` pair, returning the new cursor. Exact
 /// `wire::to_vec(ReplyContract)` shape: a `u32` LE selector then, for
-/// `One` / `Multi`, the `KindId` as a bare `u64` LE.
+/// `One`, the `KindId` as a bare `u64` LE.
 #[must_use]
 pub const fn write_reply_contract(reply_tag: u8, reply_id: u64, out: &mut [u8], mut pos: usize) -> usize {
     pos = write_u32_le(reply_tag as u32, out, pos);
-    if reply_tag == 1 || reply_tag == 2 {
+    if reply_tag == 1 {
         pos = write_u64_le(reply_id, out, pos);
     }
     pos

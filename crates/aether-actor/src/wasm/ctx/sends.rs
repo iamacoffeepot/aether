@@ -4,8 +4,8 @@
 //!
 //! [`WasmCtx<'_, A, M>`](WasmCtx) is generic over its reply class (ADR-0112,
 //! ADR-0134) because the marker selects which reply surface the handler is
-//! allowed to reach: `reply` / `reply_to` exist only on `Manual`, `emit` only
-//! on `Multi<K>`, and neither on `Single`. That is load-bearing at the handler
+//! allowed to reach: `reply` / `reply_to` exist only on `Manual`, not on
+//! `Single`. That is load-bearing at the handler
 //! boundary — a `#[handler::single]` whose body calls `ctx.reply` must not
 //! compile. It is pure friction one call deeper: a helper factored out of a
 //! handler to *send* something inherits a type parameter it never reads, and
@@ -62,7 +62,7 @@ pub struct Sends<'a> {
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// The reply-class-free view of this ctx's outbound surface (see
     /// [`Sends`]). Hand it to a helper that only sends mail, so the helper
-    /// stays callable from a `single`, `manual`, and `multi` handler alike
+    /// stays callable from a `single` and a `manual` handler alike
     /// without a `M: ReplyMode` parameter of its own.
     #[must_use]
     pub fn sends(&mut self) -> Sends<'_> {

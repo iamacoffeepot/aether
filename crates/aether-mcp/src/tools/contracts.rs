@@ -153,7 +153,6 @@ fn reply_snapshot(
             return Ok(ReplyContractSnapshot { class: "manual".to_owned(), id: None, name: None, schema: None });
         }
         ReplyContract::One(id) => ("one", id),
-        ReplyContract::Multi(id) => ("multi", id),
     };
     let descriptor = kinds
         .values()
