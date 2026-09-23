@@ -15,7 +15,8 @@
 //! trampoline manages its own lifecycle, dispatch rides the framework's
 //! `NativeActor` loop, and an in-place replace swaps the `Component` inside
 //! the trampoline behind a stable mailbox handle, so a mailbox id or route
-//! cache taken before the swap stays valid (ADR-0022).
+//! cache taken before the swap stays valid (ADR-0022). [`kinds`] holds the
+//! capability's own internal mail, such as the module-boot teardown.
 //!
 //! The `runtime` feature carries the wasmtime half:
 //! `ComponentHostCapabilityState`, `WasmTrampolineState`, and the
@@ -30,6 +31,7 @@
 extern crate alloc;
 
 pub mod component;
+pub mod kinds;
 pub mod trampoline;
 
 pub use component::ComponentHostCapability;

@@ -3,11 +3,9 @@
 
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, Manual, OutboundReply, ReplyMode, Single};
+use aether_actor::{ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{ActorPath, Kind, KindDescriptor};
-use aether_kinds::{
-    ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
-};
+use aether_kinds::{ComponentCapabilities, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult};
 use wasmtime::Module;
 
 use aether_substrate::actor::native::{
@@ -22,6 +20,7 @@ use super::LoadResult;
 use super::dependencies::{dependency_refusal, missing_dependency, replacement_refusal};
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
+use crate::kinds::BootTeardown;
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
 fn content_hash_hex(wasm: &[u8]) -> String {
@@ -452,19 +451,14 @@ impl ComponentHostCapabilityState {
         first: BootSuccessor,
     ) {
         let outcome = done.output();
-        let booted = outcome
-            .result
-            .as_ref()
-            .map_err(|error| format!("{error:?}"))
-            .and_then(|actor| Ok((actor.erase(), canonical_path(&outcome.canonical_name)?)));
+        let booted = outcome.result.as_ref().map(|actor| actor.erase()).map_err(|error| format!("{error:?}"));
         let mailbox_id = outcome.mailbox_id;
         let mut pending =
             self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
         match booted {
-            Ok((actor, path)) => {
+            Ok(boot) => {
                 self.mailer.capability_registry().register(mailbox_id, &plan.capabilities);
-                self.boot_registry
-                    .insert(plan.hash.clone(), BootEntry { actor, path, refcount: 0, pending_requests: 0 });
+                self.boot_registry.insert(plan.hash.clone(), BootEntry { boot, refcount: 0, pending_requests: 0 });
                 self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
                 for waiter in pending.waiters.drain(..) {
                     self.finish_boot_successor(ctx, waiter.owed, waiter.successor, &plan.hash);
@@ -565,8 +559,7 @@ impl ComponentHostCapabilityState {
             self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
         if removable {
             let entry = self.boot_registry.remove(hash).expect("orphan boot remains present");
-            let bytes = DropComponent { target: entry.path }.encode_into_bytes();
-            let _ = ctx.send_envelope_detached_to(entry.actor, DropComponent::ID, &bytes);
+            ctx.send_detached_to(entry.boot, &BootTeardown {});
         }
     }
 
@@ -603,8 +596,7 @@ impl ComponentHostCapabilityState {
         };
         if remove {
             let entry = self.boot_registry.remove(&hash).expect("zero-ref boot remains present");
-            let bytes = DropComponent { target: entry.path }.encode_into_bytes();
-            let _ = ctx.send_envelope_detached_to(entry.actor, DropComponent::ID, &bytes);
+            ctx.send_detached_to(entry.boot, &BootTeardown {});
         }
     }
 
@@ -809,10 +801,7 @@ mod tests {
         refcount: u32,
         pending_requests: u32,
     ) -> BootEntry {
-        let actor = proven_actor(state, ctx, name);
-        let path = ActorPath::new(name).expect("test boot names are actor paths");
-
-        BootEntry { actor, path, refcount, pending_requests }
+        BootEntry { boot: proven_actor(state, ctx, name), refcount, pending_requests }
     }
 
     #[test]

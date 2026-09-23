@@ -156,10 +156,11 @@ pub struct PendingReplace {
     pub boot_operation: u64,
 }
 
-/// ADR-0147: one module's boot singleton. `actor` is the boot trampoline's
+/// ADR-0147: one module's boot singleton. `boot` is the boot trampoline's
 /// proven reference, taken from its spawn outcome (spawned through the same
-/// `WasmTrampoline` path as any export), and `path` its canonical lineage,
-/// which the orphan drop names as its target; `refcount` counts the module's live **non-boot** actors — boot never counts
+/// `WasmTrampoline` path as any export), which the teardown sends
+/// [`BootTeardown`](crate::kinds::BootTeardown) through;
+/// `refcount` counts the module's live **non-boot** actors — boot never counts
 /// itself, so its own drop could never be the one that zeroes the count. The
 /// `pending_requests` counts requested actors whose trampoline birth has been
 /// accepted but has not yet promoted or rejected. The boot is torn down only
@@ -167,8 +168,7 @@ pub struct PendingReplace {
 /// zero-refcount boot alive, and its later rejection performs the final
 /// orphan check.
 pub struct BootEntry {
-    pub actor: ErasedActorRef,
-    pub path: ActorPath,
+    pub boot: ErasedActorRef,
     pub refcount: u32,
     pub pending_requests: u32,
 }
@@ -347,8 +347,10 @@ impl NativeActor for ComponentHostCapability {
         // a dangling `boot_registry` entry. The boot is torn down automatically
         // (internally, through `release_boot_ref`) when its last non-boot actor
         // unloads; that internal path is not routed through this handler, so the
-        // guard never blocks it.
-        if state.boot_registry.values().any(|entry| entry.actor == actor) {
+        // guard never blocks it. The guard runs after the receipt proof because
+        // a boot entry's actor is live for as long as the entry exists, so the
+        // proof succeeds for it and the comparison is by reference.
+        if state.boot_registry.values().any(|entry| entry.boot == actor) {
             ctx.reply(&DropResult::Err {
                 error: format!(
                     "{} is a module boot actor (ADR-0147): the boot singleton is unconditional \
@@ -362,7 +364,8 @@ impl NativeActor for ComponentHostCapability {
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
-        // own `DropComponent` handler vacates its registrations).
+        // `BootTeardown` handler unloads its guest and vacates its
+        // registrations).
         state.invalidate_replacement_boot_operation(actor);
         state.release_boot_ref(ctx, actor);
         forward_to_trampoline(ctx, position, DropComponent::ID, &payload);

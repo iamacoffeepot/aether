@@ -30,6 +30,7 @@ pub use std::sync::Arc;
 
 use super::WasmTrampoline;
 use crate::component::LoadDelivered;
+use crate::kinds::BootTeardown;
 pub use aether_actor::Local;
 use aether_actor::{Manual, OutboundReply, Single, runtime};
 pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceResult};
@@ -173,45 +174,16 @@ impl NativeActor for WasmTrampoline {
     /// `state.component` is `None`.
     #[handler::single]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: DropComponent) -> DropResult {
-        if let Some(mut component) = state.component.take() {
-            // Issue 584 Phase 3 (ADR-0079 amended): unwire is the
-            // single pre-shutdown hook — the legacy `on_drop`
-            // retired alongside `WasmActor::on_drop`. Component
-            // drops at end of scope, tearing down linear memory.
-            component.unwire();
-        }
-        // iamacoffeepot/aether#1037: clear the trampoline's
-        // capabilities — the wasm is unloaded, so the mailbox now
-        // accepts nothing until a `replace` refills it. The
-        // trampoline (and its mailbox name) survives as an empty
-        // slot, but it has no accept-set while empty.
-        state.mailer.capability_registry().remove(state.mailbox);
-        // iamacoffeepot/aether#1128: drop the unloaded guest's per-handler
-        // cost cells from the global table and the per-actor cache.
-        // `on_drop_component` runs on the trampoline's own thread
-        // inside `with_stamped`, so both indexes clear together.
-        //
-        // The trampoline's own framework arms are re-seeded rather than
-        // dropped with them (iamacoffeepot/aether#4269): the mailbox survives
-        // this as an empty refillable slot and goes on dispatching
-        // `ReplaceComponent`, `DropComponent` and its task wakes, so retiring
-        // their cells left the arms that outlive the guest unmeasured — this
-        // very handler among them, which folds into its cell just after it
-        // returns. The re-seed is neutral, which is the honest reading of an
-        // estimate whose occupant just changed.
-        state.mailer.cost_table().drop_mailbox(state.mailbox);
-        let framework_kinds = <Self as Dispatch<WasmTrampolineState>>::measured_kinds();
-        let seeded = state.mailer.cost_table().seed(state.mailbox, &framework_kinds);
-        CostCells::try_with_mut(|cells| cells.seed(seeded));
-        // ADR-0079 §8 (amended, issue 3741): declare the mailbox
-        // vacated — drain this trampoline's watchers and fire one
-        // `MonitorNotice` each, so every cap holding state keyed by
-        // this mailbox (input subscriptions, lifecycle stages, http
-        // routes) purges its own rows. The slot stays live for a
-        // `replace` refill; the next occupant's watchers register
-        // fresh.
-        ctx.vacate();
+        state.unload(ctx);
         DropResult::Ok
+    }
+
+    /// The component host's module-boot teardown (ADR-0147): the host sends
+    /// it when the module's last non-boot actor unloads. The trampoline
+    /// unloads its guest as [`Self::on_drop_component`] does, with no reply.
+    #[handler::single]
+    fn on_boot_teardown(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _payload: BootTeardown) {
+        state.unload(ctx);
     }
 
     /// Replace the wasm component with a fresh module. ADR-0022 +
