@@ -79,16 +79,16 @@ impl SyntheticWindowCapabilityState {
         }
     }
 
-    fn publish<K: aether_data::Kind>(&self, ctx: &mut NativeCtx<'_>, window: WindowId, event: &K) {
+    fn publish<K: aether_data::Kind, A>(&self, ctx: &mut NativeCtx<'_, A>, window: WindowId, event: &K) {
         ctx.fanout(self.subscribers.recipients(window, K::ID), event);
     }
 
     /// Promote an authoritatively applied child into the live window set, or
     /// retire it and report why it could not become live. Either way the
     /// reservation's reply is sent exactly once.
-    fn publish_applied_window(
+    fn publish_applied_window<A>(
         &mut self,
-        ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_, A>,
         child: ActorRef<SyntheticWindowInstance>,
         pending: PendingWindowCreate,
     ) {

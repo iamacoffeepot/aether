@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use aether_actor::runtime;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_actor::{Manual, ReplyMode, handler_set};
+use aether_actor::{Manual, Reaches, ReplyMode, handler_set};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
@@ -37,9 +37,9 @@ impl WindowInstanceState {
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn forward(
+pub(super) fn forward<A: Reaches<WindowCapability>>(
     state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, Erased, Manual>,
+    ctx: &mut NativeCtx<'_, A, Manual>,
     command: WindowCommand,
 ) {
     let inbound = ctx.take_inbound();
@@ -54,9 +54,9 @@ pub(super) fn forward(
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn complete<M: ReplyMode>(
+pub(super) fn complete<A, M: ReplyMode>(
     state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, Erased, M>,
+    ctx: &mut NativeCtx<'_, A, M>,
     result: ApplyWindowCommandResult,
 ) {
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
@@ -107,9 +107,9 @@ pub(super) fn complete<M: ReplyMode>(
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn retire<M: ReplyMode>(
+pub(super) fn retire<A, M: ReplyMode>(
     _state: &mut WindowInstanceState,
-    ctx: &mut NativeCtx<'_, Erased, M>,
+    ctx: &mut NativeCtx<'_, A, M>,
     _mail: RetireWindow,
 ) {
     ctx.shutdown();

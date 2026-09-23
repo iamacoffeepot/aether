@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::KindId;
 use aether_substrate::actor::monitor::MonitorHandle;
-use aether_substrate::actor::native::{Erased, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 
 use crate::{WindowId, WindowSelector};
 
@@ -55,9 +55,9 @@ impl WindowSubscribers {
         Self { all: HashMap::new(), specific: HashMap::new(), holders: HashMap::new() }
     }
 
-    pub fn subscribe<M: ReplyMode>(
+    pub fn subscribe<A, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, Erased, M>,
+        ctx: &mut NativeCtx<'_, A, M>,
         selector: WindowSelector,
         kind: KindId,
         subscriber: ErasedActorRef,
@@ -66,9 +66,9 @@ impl WindowSubscribers {
         self.watch(ctx, subscriber);
     }
 
-    pub fn subscribe_self<M: ReplyMode>(
+    pub fn subscribe_self<A, M: ReplyMode>(
         &mut self,
-        ctx: &mut NativeCtx<'_, Erased, M>,
+        ctx: &mut NativeCtx<'_, A, M>,
         selector: WindowSelector,
         kind: KindId,
     ) -> Result<(), String> {
@@ -86,9 +86,9 @@ impl WindowSubscribers {
         self.remove(selector, kind, subscriber);
     }
 
-    pub fn unsubscribe_self<M: ReplyMode>(
+    pub fn unsubscribe_self<A, M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, Erased, M>,
+        ctx: &NativeCtx<'_, A, M>,
         selector: WindowSelector,
         kind: KindId,
     ) -> Result<(), String> {
@@ -168,7 +168,7 @@ impl WindowSubscribers {
         }
     }
 
-    fn watch<M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, Erased, M>, subscriber: ErasedActorRef) {
+    fn watch<A, M: ReplyMode>(&mut self, ctx: &mut NativeCtx<'_, A, M>, subscriber: ErasedActorRef) {
         let holder = self.holders.entry(subscriber).or_default();
         if holder.monitor.is_none() {
             holder.monitor = ctx.monitor(subscriber).ok();
