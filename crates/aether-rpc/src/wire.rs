@@ -221,6 +221,17 @@ mod client {
     use std::sync::mpsc;
     use std::thread;
     use std::thread::JoinHandle;
+    use std::time::Duration;
+
+    /// How long [`RpcClient::connect`] waits for the server's `HelloAck`
+    /// before failing with [`RpcClientError::Handshake`]. A healthy
+    /// loopback handshake takes well under a millisecond, so ten seconds
+    /// leaves four orders of magnitude of headroom for a busy scheduler.
+    /// It is a third of the fleet's default 30-second proxy connect
+    /// budget, so a silent peer fails a spawn inside that budget, and the
+    /// worst case (a dial refused for most of the budget that then lands
+    /// on a silent peer) stays under `FleetHarness`'s 60-second spawn cap.
+    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
 
     /// The outbound half of a live RPC connection: the write socket plus
     /// a monotonic call-id counter. `.call()` and `.ping()` write frames;
@@ -279,7 +290,8 @@ mod client {
     ///
     /// - `Connect` — the TCP dial (or the reader-thread spawn) failed.
     /// - `Handshake` — the server's first frame wasn't a `HelloAck`, was
-    ///   a `Bye`, or carried a mismatched `wire_version`.
+    ///   a `Bye`, or carried a mismatched `wire_version`, or no `HelloAck`
+    ///   arrived within the handshake timeout.
     /// - `Frame` — a codec error reading or writing a frame.
     #[derive(Debug)]
     pub enum RpcClientError {
@@ -318,12 +330,27 @@ mod client {
         /// consumers capture their `Mailer` + mailbox + wake kind in the
         /// closure and fire wake mail; non-actor consumers pass `|| {}`
         /// and block / poll [`RpcConnection::inbound`] directly.
+        ///
+        /// A peer that sends no `HelloAck` within ten seconds fails the
+        /// connect with [`RpcClientError::Handshake`].
         pub fn connect(
             addr: &str,
             peer: PeerKind,
             on_frame: impl Fn() + Send + 'static,
         ) -> Result<RpcConnection, RpcClientError> {
+            Self::connect_within(addr, peer, on_frame, HANDSHAKE_TIMEOUT)
+        }
+
+        /// [`RpcClient::connect`] with the handshake read bounded by
+        /// `handshake_timeout` rather than [`HANDSHAKE_TIMEOUT`].
+        fn connect_within(
+            addr: &str,
+            peer: PeerKind,
+            on_frame: impl Fn() + Send + 'static,
+            handshake_timeout: Duration,
+        ) -> Result<RpcConnection, RpcClientError> {
             let stream = TcpStream::connect(addr).map_err(RpcClientError::Connect)?;
+            stream.set_read_timeout(Some(handshake_timeout)).map_err(RpcClientError::Connect)?;
             let mut write_half = stream.try_clone().map_err(RpcClientError::Connect)?;
             let wake_handle = stream.try_clone().map_err(RpcClientError::Connect)?;
 
@@ -336,7 +363,14 @@ mod client {
                 .map_err(RpcClientError::Frame)?;
 
             let mut reader = BufReader::new(stream);
-            let first: WireFrame = read_frame(&mut reader).map_err(RpcClientError::Frame)?;
+            let first: WireFrame = read_frame(&mut reader).map_err(|e| match e {
+                FrameError::Io(io_err)
+                    if matches!(io_err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) =>
+                {
+                    RpcClientError::Handshake(format!("no HelloAck within {} millis", handshake_timeout.as_millis()))
+                }
+                other => RpcClientError::Frame(other),
+            })?;
             let server = match first {
                 WireFrame::HelloAck(HelloAck { wire_version, server }) => {
                     if wire_version != WIRE_VERSION {
@@ -353,6 +387,9 @@ mod client {
                     return Err(RpcClientError::Handshake(format!("expected HelloAck, got {other:?}")));
                 }
             };
+
+            // The sidecar's reads must block without a deadline, or an idle connection reads as an error.
+            reader.get_ref().set_read_timeout(None).map_err(RpcClientError::Connect)?;
 
             let shutdown = Arc::new(AtomicBool::new(false));
             let shutdown_for_thread = Arc::clone(&shutdown);
@@ -438,6 +475,7 @@ mod client {
         use aether_codec::frame::{read_frame, write_frame};
         use std::io::BufReader;
         use std::net::{TcpListener, TcpStream};
+        use std::sync::mpsc;
         use std::thread;
         use std::thread::JoinHandle;
         use std::time::Duration;
@@ -518,6 +556,73 @@ mod client {
                 Err(other) => panic!("expected Handshake error, got {other:?}"),
                 Ok(_) => panic!("mismatched wire_version should not yield a connection"),
             }
+        }
+
+        /// A peer that accepts TCP but never answers the handshake fails
+        /// `connect` with `RpcClientError::Handshake` once the handshake
+        /// timeout elapses, rather than blocking forever.
+        #[test]
+        fn silent_peer_fails_the_handshake_within_its_timeout() {
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let (port, server) = fake_server(move |_stream| {
+                let _ = release_rx.recv();
+            });
+
+            let (result_tx, result_rx) = mpsc::channel();
+            thread::spawn(move || {
+                let result = RpcClient::connect_within(
+                    &format!("127.0.0.1:{port}"),
+                    client_peer_kind(),
+                    || {},
+                    Duration::from_millis(200),
+                );
+                let _ = result_tx.send(result);
+            });
+
+            match result_rx.recv_timeout(Duration::from_secs(5)).expect("connect returns within 5s") {
+                Err(RpcClientError::Handshake(reason)) => {
+                    assert!(reason.contains("HelloAck"), "handshake error should mention HelloAck: {reason}");
+                }
+                Err(other) => panic!("expected Handshake error, got {other:?}"),
+                Ok(_) => panic!("a silent peer should not yield a connection"),
+            }
+
+            drop(release_tx);
+            server.join().expect("fake server thread");
+        }
+
+        /// A connection that completes the handshake keeps no read
+        /// timeout, so idling past the handshake timeout does not surface
+        /// a synthetic `Bye` from the reader sidecar.
+        #[test]
+        fn completed_handshake_clears_the_read_timeout() {
+            let (release_tx, release_rx) = mpsc::channel::<()>();
+            let (port, server) = fake_server(move |mut stream| {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
+                write_frame(
+                    &mut stream,
+                    &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: substrate_peer_kind() }),
+                )
+                .expect("write HelloAck");
+                let _ = release_rx.recv();
+            });
+
+            let conn = RpcClient::connect_within(
+                &format!("127.0.0.1:{port}"),
+                client_peer_kind(),
+                || {},
+                Duration::from_millis(200),
+            )
+            .expect("client connects");
+
+            match conn.inbound.recv_timeout(Duration::from_millis(800)) {
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                other => panic!("an idle connection should surface no frame, got {other:?}"),
+            }
+
+            drop(release_tx);
+            server.join().expect("fake server thread");
         }
 
         /// Dialing a closed port is an `RpcClientError::Connect`. Bind an
