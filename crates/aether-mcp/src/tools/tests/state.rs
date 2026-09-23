@@ -49,14 +49,14 @@ async fn resolve_and_encode_refreshes_on_field_mismatch() {
     let widened = widened_struct_schema();
 
     // The live engine's vocabulary carries the widened shape.
+    let engine = EngineId(Uuid::from_u128(0x2672_dead_beef));
     let calls = Arc::new(AtomicUsize::new(0));
-    let (_chassis, port) = boot_hub_with_route_loopback(canned_kinds_reply(name, &widened), Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_route_loopback(engine, canned_kinds_reply(name, &widened), Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     // Pre-seed the per-engine cache with the STALE narrow shape, so
     // the name is a cache hit (no unknown-kind-miss refresh) — only
     // the encode failure can drive the refresh.
-    let engine = EngineId(Uuid::from_u128(0x2672_dead_beef));
     mcp.merge_into_engine_cache(engine, vec![KindDescriptor { name: name.to_owned(), schema: narrow_struct_schema() }]);
 
     // Params carrying the new field: rejected by the narrow cached
@@ -87,12 +87,12 @@ async fn resolve_and_encode_retry_is_bounded_to_one_refresh() {
 
     // The live vocabulary is *also* narrow — the refresh changes
     // nothing, so the re-encode fails identically.
+    let engine = EngineId(Uuid::from_u128(0x2672_beef_cafe));
     let calls = Arc::new(AtomicUsize::new(0));
     let (_chassis, port) =
-        boot_hub_with_route_loopback(canned_kinds_reply(name, &narrow_struct_schema()), Arc::clone(&calls));
+        boot_hub_with_route_loopback(engine, canned_kinds_reply(name, &narrow_struct_schema()), Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
-    let engine = EngineId(Uuid::from_u128(0x2672_beef_cafe));
     mcp.merge_into_engine_cache(engine, vec![KindDescriptor { name: name.to_owned(), schema: narrow_struct_schema() }]);
 
     let params = serde_json::json!({ "button": "left" });
@@ -198,10 +198,10 @@ async fn engine_address_resolver_returns_the_engine_mailbox_without_local_foldin
     let locally_folded = mailbox_id_from_path(supplied);
     assert_ne!(engine_answer, locally_folded, "test answer must expose accidental client-side folding");
 
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, canonical, Arc::clone(&calls));
-    let mcp = connect_mcp(port);
     let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, canonical, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
 
     let resolved =
         mcp.resolve_engine_address(engine, supplied).await.expect("routed engine resolves abbreviated address");

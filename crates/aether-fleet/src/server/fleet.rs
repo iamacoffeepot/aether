@@ -1,30 +1,13 @@
-//! Fleet-runtime helpers for the engines cap: settle a routed call the
-//! cap can't satisfy, pick a free localhost RPC port, resolve the
-//! per-engine spawn-dir parent, and reclaim the per-engine dirs under it.
-//! Native-only (sockets, process env, mail pushes).
+//! Fleet-runtime helpers for the engines cap: pick a free localhost RPC
+//! port, resolve the per-engine spawn-dir parent, and reclaim the
+//! per-engine dirs under it. Native-only (sockets, process env).
 
-use aether_data::{EngineId, Kind, MailboxId, Uuid};
-use aether_rpc::CallSettled;
-use aether_substrate::Mail;
-use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::{Source, SourceAddr};
+use aether_data::{EngineId, Uuid};
 use std::env;
 use std::fs;
 use std::io;
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-
-/// Push a `CallSettled::Err` back to `target` (correlation
-/// preserved) so a routed call that the cap can't satisfy — bad
-/// `engine_id`, unknown engine — closes with a wire `ReplyEnd`
-/// instead of leaving the RPC client hanging.
-pub fn settle_err(mailer: &Arc<Mailer>, target: MailboxId, correlation: u64, error: String) {
-    mailer.push(
-        Mail::new(target, <CallSettled as Kind>::ID, CallSettled::Err { error }.encode_into_bytes(), 1)
-            .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-    );
-}
 
 /// Bind `127.0.0.1:0`, read the OS-assigned port, drop the
 /// listener. A tiny TOCTOU window exists before the substrate

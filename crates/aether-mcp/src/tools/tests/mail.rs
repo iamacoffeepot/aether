@@ -10,7 +10,7 @@ use tokio::time::timeout;
 /// `send_mail` is a best-effort batch: a bad `kind_name` and a bad
 /// `engine_id` fail locally in `deliver_one`, while a well-formed
 /// item addressed at an unknown engine round-trips to the hub and
-/// comes back a `CallSettled::Err`. Every item reports `error: ...`
+/// comes back `UnknownEngine`, since no proxy registered for it. Every item reports `error: ...`
 /// and none aborts its siblings.
 #[tokio::test]
 async fn send_mail_reports_per_item_errors() {
@@ -123,10 +123,10 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
     let supplied = "aether.test://camera";
     let canonical = "aether.test/aether.test.child:camera";
     let engine_answer = MailboxId(0x4057_0000_0000_0001);
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, canonical, Arc::clone(&calls));
-    let mcp = connect_mcp(port);
     let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, canonical, Arc::clone(&calls));
+    let mcp = connect_mcp(port);
 
     let prepared = mcp
         .prepare_direct_mail(MailSpec {
@@ -184,10 +184,11 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         }],
         settle: true,
     }])));
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_replies(engine_answer, canonical, Arc::clone(&calls), replies);
-    let mcp = connect_mcp(port);
     let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) =
+        boot_hub_with_address_route_replies(engine, engine_answer, canonical, Arc::clone(&calls), replies);
+    let mcp = connect_mcp(port);
     mcp.prefill_engine(engine);
     mcp.merge_into_engine_cache(engine, vec![reply_descriptor.clone()]);
     let request_descriptor = mcp.cache_lookup(engine, "aether.fs.list").expect("static request descriptor is cached");
@@ -242,10 +243,10 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
 #[tokio::test]
 async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
     let engine_answer = MailboxId(0x4057_0000_0000_0002);
-    let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine_answer, "aether.fs", Arc::clone(&calls));
-    let mcp = connect_mcp(port);
     let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, "aether.fs", Arc::clone(&calls));
+    let mcp = connect_mcp(port);
 
     mcp.deliver_one_fire(MailSpec {
         engine_id: Some(engine.0.to_string()),

@@ -498,7 +498,8 @@ async fn describe_component_uses_the_engine_resolved_id_and_forwards_the_supplie
         }],
         settle: true,
     }])));
-    let (_chassis, port) = boot_hub_with_address_route_replies(engine_answer, canonical, Arc::clone(&calls), replies);
+    let (_chassis, port) =
+        boot_hub_with_address_route_replies(engine, engine_answer, canonical, Arc::clone(&calls), replies);
     let mcp = connect_mcp(port);
 
     let output = mcp

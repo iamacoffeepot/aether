@@ -20,9 +20,9 @@
 //!
 //! ## Scope (issue 763 P4 vs P5)
 //!
-//! P4 is the cap itself: spawn / list / terminate. The hub RPC
-//! server's `engine = Some(_)` routing — which drives `ForwardEnvelope`
-//! at a proxy on behalf of an external RPC client — and the
+//! P4 is the cap itself: spawn / list / terminate. The cap takes no part
+//! in `engine = Some(_)` calls: each proxy registers its own engine's
+//! route with the hub RPC server, which forwards to it directly. The
 //! `describe_kinds` / `describe_component` proxy handlers land in P5
 //! alongside the `aether-mcp` extraction; they only have meaning once
 //! an out-of-process RPC client drives the hub.
@@ -45,8 +45,7 @@ use std::sync::{Arc, Mutex};
 // The engines cap's implementation, split along its seams (ADR-0121):
 // `config` (the ADR-0090 config struct + parsers), `artifacts` (the
 // content-addressed store resolution / ingestion the handlers delegate
-// to), and `fleet` (free-port allocation, routed-call settlement, and
-// spawn-dir resolution). All three are native-only — the cap forks
+// to), and `fleet` (free-port allocation and spawn-dir resolution). All three are native-only — the cap forks
 // processes and owns sockets — so they elide on wasm alongside the
 // runtime half.
 #[cfg(not(target_family = "wasm"))]
@@ -74,8 +73,7 @@ pub use config::{FleetConfig, FleetConfigLayer, FleetOverlay, RestartPolicy};
 /// `Resolver`), the per-handler `HandlesKind` markers, and the
 /// name-inventory entry, all emitted always-on by `#[actor]`. The
 /// state-bearing runtime (`runtime::FleetServerState`, which holds the
-/// supervised-fleet table + the `aether_substrate`-typed mailer + the
-/// artifact store) lives in `runtime.rs`, so the identity file never names
+/// supervised-fleet table + the artifact store) lives in `runtime.rs`, so the identity file never names
 /// `FleetServerState`.
 #[actor(singleton, root)]
 pub struct FleetServer;
@@ -241,13 +239,11 @@ mod tests {
     ) -> (FleetServerState<u64>, PathBuf) {
         let root = PathBuf::from(isolated_store_dir());
         let store = ArtifactStore::open(&root, disk_budget_bytes).expect("test lifecycle store opens");
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         (
             FleetServerState {
                 engines: HashMap::new(),
                 pending_engines: HashMap::new(),
                 next_engine_seq: 1,
-                mailer,
                 heartbeat: None,
                 connect_budget: None,
                 spawn_attempts: 1,

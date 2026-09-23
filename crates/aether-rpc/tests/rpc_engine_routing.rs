@@ -1,17 +1,21 @@
 // End-to-end test for the hub's `engine = Some(_)` RPC routing
 // (issue 763 P5a).
 //
-// Boots a "hub" chassis (forwarding `RpcServerCapability` + the
-// `aether.fleet` engines cap), connects a raw RPC client to it, and
-// drives the whole forward model through that one socket — exactly
-// the shape the out-of-process `aether-mcp` binary will take in P5d:
+// Boots a "hub" chassis (`RpcServerCapability` + the `aether.fleet`
+// engines cap), connects a raw RPC client to it, and drives the whole
+// forward model through that one socket — exactly the shape the
+// out-of-process `aether-mcp` binary takes:
 //
 //   1. An `engine = None` Call spawns a real `aether-headless`
-//      via the engines cap and yields its `engine_id`.
+//      via the engines cap and yields its `engine_id`. The spawn
+//      settles only once the new proxy has registered its route.
 //   2. An `engine = Some(engine_id)` Call is *routed* — hub RpcServer
-//      -> `aether.fleet` -> proxy -> (RPC) -> substrate -> back — and
-//      the substrate's reply streams home as `ReplyEvent` + `ReplyEnd`.
+//      -> the proxy registered for `engine_id` -> (RPC) -> substrate ->
+//      back — and the substrate's reply streams home as `ReplyEvent` +
+//      `ReplyEnd`.
 //   3. An `engine = None` `TerminateEngine` Call cleans the engine up.
+//   4. An `engine = Some(engine_id)` Call after the terminate closes with
+//      an error: the departed proxy's route is retired.
 //
 // Step 2 is the P5a proof: before this phase, `engine = Some` Calls
 // were rejected with `RpcError::UnsupportedTarget`.
@@ -43,10 +47,10 @@ use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use std::{env, fs, process};
 
-/// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
-/// (engine-addressed Calls route through `aether.fleet`), the engines
-/// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
-/// (`spawn`, `terminate`) settle and close.
+/// Boot a hub-shaped passive chassis: `RpcServerCapability` (engine-addressed
+/// Calls reach the proxy each spawned engine registers), the engines cap, and
+/// `TraceDispatchCapability` so the `RpcServer`'s local Calls (`spawn`,
+/// `terminate`) settle and close.
 fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
@@ -64,7 +68,6 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                route_target: Some(mailbox_id_from_name("aether.fleet")),
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -74,17 +77,9 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
     (chassis, port)
 }
 
-/// Fire one `Call` and read frames until its `ReplyEnd` arrives,
-/// returning the `(kind, payload)` of the single `ReplyEvent` seen in
-/// between (these calls each yield exactly one event then end). Panics
-/// on a `ReplyEnd::Err` or a missing event.
-fn call_round_trip<K: Kind>(
-    stream: &mut TcpStream,
-    cid: u64,
-    engine: Option<EngineId>,
-    mailbox_name: &str,
-    request: &K,
-) -> (aether_data::KindId, Vec<u8>) {
+/// Write one `Call` for `request` at `mailbox_name`, on `engine` when it is
+/// `Some`.
+fn write_call<K: Kind>(stream: &mut TcpStream, cid: u64, engine: Option<EngineId>, mailbox_name: &str, request: &K) {
     write_frame(
         stream,
         &WireFrame::Call {
@@ -99,6 +94,20 @@ fn call_round_trip<K: Kind>(
         },
     )
     .expect("write Call");
+}
+
+/// Fire one `Call` and read frames until its `ReplyEnd` arrives,
+/// returning the `(kind, payload)` of the single `ReplyEvent` seen in
+/// between (these calls each yield exactly one event then end). Panics
+/// on a `ReplyEnd::Err` or a missing event.
+fn call_round_trip<K: Kind>(
+    stream: &mut TcpStream,
+    cid: u64,
+    engine: Option<EngineId>,
+    mailbox_name: &str,
+    request: &K,
+) -> (aether_data::KindId, Vec<u8>) {
+    write_call(stream, cid, engine, mailbox_name, request);
 
     let mut event: Option<(aether_data::KindId, Vec<u8>)> = None;
     loop {
@@ -269,9 +278,9 @@ mod tests {
         let engine_id = EngineId(Uuid::parse_str(&engine_id).expect("engine_id parses"));
         let mut reaper = SubstrateReaper { hub_port, engine_id: Some(engine_id.0.to_string()) };
 
-        // 2. engine = Some(_): a ROUTED call. The hub forwards it through
-        //    aether.fleet -> proxy -> (RPC) -> the substrate's aether.fs
-        //    -> back. This is the P5a proof.
+        // 2. engine = Some(_): a ROUTED call. The hub forwards it to the
+        //    proxy registered for the engine -> (RPC) -> the substrate's
+        //    aether.fs -> back. This is the P5a proof.
         let (routed_kind, _routed_payload) = call_round_trip(
             &mut stream,
             2,
@@ -296,6 +305,29 @@ mod tests {
         );
         assert_eq!(term_kind, <aether_kinds::TerminateEngineResult as Kind>::ID);
         reaper.disarm();
+
+        // 4. engine = Some(_) after the terminate: the call closes with an
+        //    error rather than hanging past the read timeout. It is
+        //    `UnknownEngine` once the departed proxy's route is retired, or
+        //    the in-flight close if the proxy departs mid-call.
+        write_call(
+            &mut stream,
+            4,
+            Some(engine_id),
+            "aether.fs",
+            &List { addr: NamespaceAddr::new("save", String::new()) },
+        );
+        loop {
+            match read_frame(&mut stream).expect("read reply frame") {
+                WireFrame::ReplyEvent { cid: 4, .. } => {}
+                WireFrame::ReplyEnd { cid: got_cid, result } => {
+                    assert_eq!(got_cid, 4, "ReplyEnd cid mismatch");
+                    assert!(result.is_err(), "a call to a terminated engine must close with an error: {result:?}");
+                    break;
+                }
+                other => panic!("unexpected frame for call 4: {other:?}"),
+            }
+        }
 
         let _ = fs::remove_dir_all(&bin_store);
         let _ = fs::remove_dir_all(&root);

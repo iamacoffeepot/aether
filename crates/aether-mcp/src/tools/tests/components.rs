@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 
 /// Hub-local fleet double for pin/upload forwarding tests. Installed at
 /// `aether.fleet` so engine=None Calls land as the typed kinds themselves
-/// (an engine-routed Call would arrive as `RouteEnvelope` and these
-/// handlers would not fire). It never reads `staged_path`.
+/// (an engine-routed Call would go to a registered proxy as a
+/// `ForwardEnvelope` and these handlers would not fire). It never reads
+/// `staged_path`.
 #[derive(Clone)]
 struct FleetLocalCells {
     binary: Arc<Mutex<Vec<UploadBinary>>>,
@@ -93,7 +94,6 @@ fn boot_hub_with_fleet_local_sink(cells: FleetLocalCells) -> (PassiveChassis<Tes
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                route_target: None,
             },
             RpcServerConfig { port: Some(0) },
         )

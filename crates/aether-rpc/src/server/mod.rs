@@ -7,21 +7,31 @@
 //! through an internal mpsc; an `RpcInboundReady` wake mail tells the
 //! cap's dispatcher to drain.
 //!
-//! On `Call`, the cap dispatches the wire-borne envelope via
-//! `NativeCtx::send_envelope_detached` (fresh causal chain — the wake
-//! mail is causally unrelated to the wire-borne Call) and subscribes
+//! On `Call`, the cap proves the wire-borne recipient once at receipt
+//! and dispatches the envelope through the proof via
+//! `NativeCtx::send_envelope_detached_to` (fresh causal chain — the wake
+//! mail is causally unrelated to the wire-borne Call), then subscribes
 //! to settlement of the resulting root via
 //! `SettlementRegistry::subscribe_settlement_mail`. Any reply mail
 //! addressed back at this cap with the dispatch's correlation id
 //! gets lifted into a `ReplyEvent` and written to the originating
 //! connection; the settlement notice closes the call with a
 //! `ReplyEnd`.
+//!
+//! Engine routes: a `Call` addressed at `engine = Some(id)` goes to the
+//! proxy that registered itself for `id` with `RegisterEngineRoute`,
+//! wrapped in a `ForwardEnvelope`. The cap keeps each registrant as a
+//! proven reference and monitors it; the registrant's `MonitorNotice`
+//! retires its route and closes its in-flight calls. A call for an
+//! engine with no route closes at once with `RpcError::UnknownEngine`.
 
 // Handler-signature kinds need to be importable at file root for the
 // `#[actor]`-emitted `HandlesKind<K>` markers (always-on against the
-// identity, ADR-0122). `RpcInboundReady` is the cap's own wake-mail kind
-// (ADR-0121); `Settled` stays in `aether-kinds`.
-use crate::kinds::RpcInboundReady;
+// identity, ADR-0122). `RpcInboundReady` and `RegisterEngineRoute` are the
+// cap's own kinds (ADR-0121); `Settled` and `MonitorNotice` stay in
+// `aether-kinds`.
+use crate::kinds::{RegisterEngineRoute, RpcInboundReady};
+use aether_kinds::MonitorNotice;
 use aether_kinds::trace::Settled;
 
 // Re-export the cap's config + params at file root for chassis builders. The
@@ -74,7 +84,8 @@ pub struct RpcServerCapability;
 // `#[runtime] impl NativeActor` there, and emits the always-on identity
 // markers (`Addressable`, one `HandlesKind<K>` per handler, the
 // name-inventory entry) against this struct. The kind types those markers
-// name (`RpcInboundReady` / `Settled`) are imported at file root above.
+// name (`RpcInboundReady` / `RegisterEngineRoute` / `Settled` /
+// `MonitorNotice`) are imported at file root above.
 use aether_actor::actor;
 
 // The runtime half — the whole `aether_substrate`-typed surface (imports,

@@ -183,14 +183,13 @@ fn capability_descriptor_lookup_rejects_handler_and_config_id_mismatches() {
 #[tokio::test]
 async fn strict_refresh_rejects_a_wire_id_that_disagrees_with_its_name_and_schema() {
     let name = "aether.test.inconsistent";
+    let engine = EngineId(Uuid::from_u128(0x0047_5501));
     let mut inventory = live_inventory(name, &SchemaType::String);
     inventory.kinds[0].id = KindId(0x4755);
-    let (_chassis, port) = boot_hub_with_route_loopback(inventory, Arc::new(AtomicUsize::new(0)));
+    let (_chassis, port) = boot_hub_with_route_loopback(engine, inventory, Arc::new(AtomicUsize::new(0)));
     let mcp = connect_mcp(port);
-    let error = mcp
-        .refresh_engine_kinds_strict(EngineId(Uuid::from_u128(0x0047_5501)))
-        .await
-        .expect_err("an inconsistent live descriptor is inconclusive");
+    let error =
+        mcp.refresh_engine_kinds_strict(engine).await.expect_err("an inconsistent live descriptor is inconclusive");
     assert!(error.to_string().contains("canonically identify"));
 }
 
@@ -220,7 +219,9 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
         },
     ])));
     let inventory = ListKindsResult { kinds: Vec::new() };
-    let Ok((_chassis, port)) = try_boot_hub_with_scripted_route_loopback(inventory, Arc::clone(&calls), replies) else {
+    let Ok((_chassis, port)) =
+        try_boot_hub_with_scripted_route_loopback(&[first_engine, second_engine], &inventory, &calls, &replies)
+    else {
         return;
     };
     let output = connect_mcp(port)

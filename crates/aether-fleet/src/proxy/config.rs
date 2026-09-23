@@ -3,6 +3,7 @@
 //! is the liveness tuning the cap resolved from its `FleetConfig`.
 //! Native-only: the config owns a `std::process::Child` handle.
 
+use super::reap::terminate_child_group;
 use aether_data::EngineId;
 use std::process::Child;
 use std::time::Duration;
@@ -40,6 +41,19 @@ pub struct FleetProxyConfig {
     pub spawned: Option<Child>,
     pub heartbeat: Option<HeartbeatParams>,
     pub connect_budget: Option<Duration>,
+}
+
+impl Drop for FleetProxyConfig {
+    /// Terminate + reap a forked child `init` never took: a spawn refused
+    /// before `init` runs (a declared dependency that is not live) drops the config
+    /// with the child still in it, and nothing else owns that process.
+    /// `init` takes the child into the proxy state, so a config dropped
+    /// after a successful `init` holds nothing.
+    fn drop(&mut self) {
+        if let Some(mut child) = self.spawned.take() {
+            terminate_child_group(&mut child);
+        }
+    }
 }
 
 /// Resolved liveness-heartbeat tuning for one proxy (issue 1339).

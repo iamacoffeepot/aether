@@ -11,7 +11,10 @@
 //! - **`init`** dials the substrate's `RpcServerCapability` via
 //!   `RpcClient::connect` and spawns the reader sidecar. The
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
-//! - **`on_forward`** ([`ForwardEnvelope`](crate::kinds::ForwardEnvelope)) wraps the `mailbox`,
+//! - **`wire`** registers the proxy with the hub's RPC server as its
+//!   engine's route (`RegisterEngineRoute`), holding the spawn chain open
+//!   until **`on_route_registered`** takes the answer.
+//! - **`on_forward`** ([`ForwardEnvelope`](aether_rpc::ForwardEnvelope)) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
 //!   connection. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
@@ -25,10 +28,11 @@
 //!
 //! P3 is the bridge core: connect, forward, route replies, lifecycle.
 //! The engine-management surface — `describe_kinds` / `list` / `spawn`
-//! / `terminate` and the hub RPC server's `engine = Some(_)` routing
-//! that drives `ForwardEnvelope` at the proxy — lands in P4 with the
-//! engines cap. The cached `HelloAck` manifest the describe handler
-//! will read is already in hand on `conn.server`.
+//! / `terminate` — lands in P4 with the engines cap. The hub RPC server
+//! drives `ForwardEnvelope` at the proxy for `engine = Some(_)` calls
+//! once the proxy has registered its engine's route. The cached
+//! `HelloAck` manifest the describe handler will read is already in hand
+//! on `conn.server`.
 //!
 //! Native-only: the state owns a `TcpStream` (via `RpcConnection`)
 //! and an OS thread, so the substrate-typed runtime half lives in the
@@ -82,7 +86,13 @@ pub use connect::is_reforkable_spawn_failure;
 /// holds the `aether_substrate`-typed RPC connection + the forked child +
 /// heartbeat handle) lives in `runtime.rs`, so the identity file never names
 /// `FleetProxyState`.
-#[actor(instanced, child_of(FleetServer))]
+///
+/// It depends on the hub's
+/// [`RpcServerCapability`](aether_rpc::RpcServerCapability): the proxy
+/// registers its engine's route there from `wire` and holds its spawn open
+/// until the route is answered, so a chassis with no RPC server refuses the
+/// proxy before `init` rather than leaving that spawn unsettled.
+#[actor(instanced, child_of(FleetServer), depends(RpcServerCapability))]
 pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro
@@ -114,13 +124,12 @@ mod tests {
     use super::{
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
     };
-    use crate::kinds::ForwardEnvelope;
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
-    use aether_rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use aether_rpc::{ForwardEnvelope, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::testing::{TestChassis, fresh_substrate};
     use aether_substrate::{ReplyTarget, Subname};
@@ -133,6 +142,12 @@ mod tests {
 
     fn substrate_peer_kind() -> PeerKind {
         PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
+    }
+
+    /// Params for the unbound RPC server a test chassis composes only
+    /// because the proxy declares it as a dependency.
+    fn unbound_rpc_params() -> RpcServerParams {
+        RpcServerParams { peer_kind: substrate_peer_kind() }
     }
 
     /// Full bridge round-trip: boot an RPC server + the echo actor + a
@@ -154,7 +169,7 @@ mod tests {
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor_configured::<RpcServerCapability>(
-                RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
+                RpcServerParams { peer_kind: substrate_peer_kind() },
                 RpcServerConfig { port: Some(0) },
             )
             .build_passive()
@@ -225,8 +240,9 @@ mod tests {
     fn proxy_spawn_fails_when_substrate_unreachable() {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor_configured::<RpcServerCapability>(unbound_rpc_params(), RpcServerConfig { port: None })
             .build_passive()
-            .expect("empty chassis boots");
+            .expect("chassis with only the proxy's dependency boots");
 
         // Bind then drop a listener to get a definitely-closed port.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
@@ -311,6 +327,7 @@ mod tests {
         let cells = FleetCapCells::default();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<FleetCapSink>(cells.clone())
+            .with_actor_configured::<RpcServerCapability>(unbound_rpc_params(), RpcServerConfig { port: None })
             .build_passive()
             .expect("caps boot");
         let engine_id = EngineId(Uuid::from_u128(seed));

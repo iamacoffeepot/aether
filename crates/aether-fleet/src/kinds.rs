@@ -1,11 +1,13 @@
 //! `aether.fleet.*` mail kinds the engine capability owns (ADR-0121).
 //!
-//! The engine-internal control-plane vocabulary — proxy forwarding
-//! (`ForwardEnvelope`) and fleet liveness (`EngineHeartbeatTick` /
-//! `EngineDied` / `EngineAlive`). Each is consumed only inside this crate
-//! and embedded in no kind that stays in `aether-kinds`, so the engine cap
-//! owns it here (cap crate → kinds is the allowed dependency direction; the
-//! embedded `DeathReason` re-imports back from `aether_kinds`).
+//! The engine-internal control-plane vocabulary — fleet liveness
+//! (`EngineHeartbeatTick` / `EngineDied` / `EngineAlive`) and the restart
+//! timer (`EngineRestartDue`). Proxy forwarding (`ForwardEnvelope`) is the
+//! hub RPC server's kind and lives in `aether-rpc`. Each is consumed only
+//! inside this crate and embedded in no kind that stays in `aether-kinds`,
+//! so the engine cap owns it here (cap crate → kinds is the allowed
+//! dependency direction; the embedded `DeathReason` re-imports back from
+//! `aether_kinds`).
 //!
 //! The engine cap's request / result / descriptor kinds
 //! (`SpawnEngine`, `ListEngines`, `TerminateEngine`, the upload / resolve
@@ -13,29 +15,7 @@
 //! are the MCP harness's RPC protocol, and `aether-mcp` consumes them
 //! while being barred from depending on a cap crate.
 
-use aether_data::{KindId, MailboxId};
 use aether_kinds::DeathReason;
-
-/// `aether.fleet.forward` — hand a per-engine proxy
-/// (`aether.fleet.proxy:<id>`) one mail to relay to its substrate
-/// over the proxy's outbound RPC connection. Issue 763 P3.
-///
-/// Carries the *remote* target explicitly: a plain mail to the
-/// proxy is only `kind` + `payload` — it can't say *which mailbox
-/// on the substrate* to deliver to. `ForwardEnvelope` is that
-/// carrier. The proxy wraps `mailbox` + `kind` + the already-encoded
-/// `payload` into an RPC `Call`; the substrate's
-/// `RpcServerCapability` dispatches it into its local actor system.
-/// Any reply streams back through the proxy and routes to whoever
-/// sent this `ForwardEnvelope` — the proxy keys reply correlation
-/// off the inbound mail's `Source`.
-#[aether_data::kind(name = "aether.fleet.forward")]
-pub struct ForwardEnvelope {
-    pub mailbox: MailboxId,
-    pub kind: KindId,
-    #[serde(with = "aether_data::bytes")]
-    pub payload: Vec<u8>,
-}
 
 /// `aether.fleet.heartbeat_tick` — the per-engine proxy's own
 /// liveness timer wake (issue 1339). Internal control-plane mail,
