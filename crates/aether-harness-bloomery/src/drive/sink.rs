@@ -34,7 +34,7 @@ pub struct ReplySink {
 impl ReplySink {
     /// Forward one reply to the harness. A harness that has already dropped
     /// its receiver is tearing down, so there is no one left to tell.
-    fn forward(&self, ctx: &NativeCtx<'_>, reply: Reply) {
+    fn forward<A>(&self, ctx: &NativeCtx<'_, A>, reply: Reply) {
         let _ = self.arrivals.send((ctx.reply_target().correlation_id, reply));
     }
 }

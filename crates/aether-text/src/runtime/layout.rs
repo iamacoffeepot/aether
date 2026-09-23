@@ -6,6 +6,7 @@
 
 use std::path::Path;
 
+use aether_actor::Reaches;
 use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
 use aether_math::Rgba;
 use aether_substrate::actor::native::NativeCtx;
@@ -15,8 +16,8 @@ use aether_render::{DrawTexturedQuads, QuadBlend, RenderCapability, TexturedQuad
 use super::atlas::AtlasEntry;
 
 /// Emit the accumulated quad batch to `aether.render`.
-pub fn emit_draw(
-    ctx: &mut NativeCtx<'_>,
+pub fn emit_draw<A: Reaches<RenderCapability>>(
+    ctx: &mut NativeCtx<'_, A>,
     texture_id: u32,
     space: QuadSpace,
     clip: Option<ClipRect>,

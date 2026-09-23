@@ -260,7 +260,7 @@ impl WasmActor for BehaviorHost {
 }
 
 impl BehaviorHost {
-    fn try_prime(&mut self, ctx: &WasmCtx<'_>) {
+    fn try_prime<A>(&mut self, ctx: &WasmCtx<'_, A>) {
         let Some(child) = ctx.child(&self.config.child.subname) else {
             return;
         };
@@ -397,7 +397,7 @@ impl BehaviorHost {
     /// Offer a lifecycle sentinel to the script and drain its effects. A
     /// sentinel carries no in-flight mail, so its verdict is ignored (only
     /// effects drain). A no-op when there is no running script.
-    fn offer_sentinel(&mut self, ctx: &WasmCtx<'_>, sentinel: KindId) {
+    fn offer_sentinel<A>(&mut self, ctx: &WasmCtx<'_, A>, sentinel: KindId) {
         self.run_filter_and_drain(ctx, false, None, sentinel, &[]);
     }
 
@@ -412,9 +412,9 @@ impl BehaviorHost {
     /// suppression for the writes it emitted. Returns `true` when the script
     /// produced an output (handled), `false` on passthrough / no script so the
     /// caller forwards raw.
-    fn run_filter_and_drain(
+    fn run_filter_and_drain<A>(
         &mut self,
-        ctx: &WasmCtx<'_>,
+        ctx: &WasmCtx<'_, A>,
         is_up: bool,
         forward_kind: Option<KindId>,
         offer_kind: KindId,
@@ -447,7 +447,7 @@ impl BehaviorHost {
 
     /// Forward the in-flight mail raw (no interpreter call) along its lane —
     /// up to the parent, or down to the wrapped child.
-    fn forward_raw(&self, ctx: &WasmCtx<'_>, is_up: bool, kind: KindId, bytes: &[u8]) {
+    fn forward_raw<A>(&self, ctx: &WasmCtx<'_, A>, is_up: bool, kind: KindId, bytes: &[u8]) {
         let relative = if is_up {
             ctx.parent()
         } else {
@@ -498,13 +498,13 @@ fn try_instantiate(
 /// The ctx-backed drain sink: routes each drain event to a relative cluster
 /// handle. The in-flight forward follows the mail's lane; an effect follows its
 /// `EffectTarget` (Widget/Child down, Panel up).
-struct LaneSink<'c, 'a> {
-    ctx: &'c WasmCtx<'a>,
+struct LaneSink<'c, 'a, A> {
+    ctx: &'c WasmCtx<'a, A>,
     wrapped_subname: &'c str,
     is_up: bool,
 }
 
-impl DrainSink for LaneSink<'_, '_> {
+impl<A> DrainSink for LaneSink<'_, '_, A> {
     fn record(&mut self, event: DrainEvent) {
         let (relative, kind_id, bytes) = match event {
             DrainEvent::Forward { kind_id, bytes } => {
@@ -536,7 +536,7 @@ impl DrainSink for LaneSink<'_, '_> {
     }
 }
 
-fn resolve_child_path<'a>(ctx: &WasmCtx<'a>, path: &str) -> Option<aether_actor::RelativeMailbox<'a>> {
+fn resolve_child_path<'a, A>(ctx: &WasmCtx<'a, A>, path: &str) -> Option<aether_actor::RelativeMailbox<'a>> {
     let mut segments = path.split('/');
     let first = segments.next().filter(|segment| !segment.is_empty())?;
     segments.try_fold(ctx.child(first)?, |relative, segment| {

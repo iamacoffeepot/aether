@@ -49,7 +49,7 @@ impl Watchers {
     ///
     /// `split_off` removes the passed prefix in one step; the reply loop
     /// that follows is iterative, with no recursion.
-    pub fn wake(&mut self, ctx: &mut NativeCtx<'_>, head: u64) {
+    pub fn wake<A>(&mut self, ctx: &mut NativeCtx<'_, A>, head: u64) {
         let remaining = self.by_after.split_off(&head);
         let passed = mem::replace(&mut self.by_after, remaining);
 
