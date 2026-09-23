@@ -112,7 +112,7 @@ impl NativeActor for AddressRouteSink {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::single]
@@ -230,7 +230,7 @@ impl NativeActor for ScriptedRouteSink {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::single]
@@ -313,7 +313,7 @@ impl NativeActor for RouteInventorySink {
     }
 
     #[handler::single]
-    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
     #[handler::single]
