@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use aether_actor::Local as _;
 use aether_substrate::actor::native::{Dispatch, NativeCtx};
-use aether_substrate::actor::wasm::component::{Component, ComponentCtx};
+use aether_substrate::actor::wasm::component::{Component, ComponentCtx, CorrelationCursor};
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
@@ -61,6 +61,11 @@ pub struct WasmTrampolineState {
     /// asset load window, and refreshed on replace. Shared `Arc` — indexed,
     /// never mutated.
     pub wasm_bytes: Arc<[u8]>,
+    /// ADR-0139 §3 (#6400): the correlation cursor of the last guest to
+    /// leave this slot, which the next occupant resumes, so the mailbox's
+    /// request ids stay monotonic across replace and refill. `None` until
+    /// a guest first leaves; a fresh slot starts its counter at 1.
+    pub retired_correlations: Option<CorrelationCursor>,
 }
 
 impl WasmTrampolineState {
@@ -77,6 +82,9 @@ impl WasmTrampolineState {
             // retired alongside `WasmActor::on_drop`. Component
             // drops at end of scope, tearing down linear memory.
             component.unwire();
+            // #6400: after `unwire`, which may still send, so a later
+            // refill resumes past every id this guest minted.
+            self.retired_correlations = Some(component.correlation_cursor());
         }
         // iamacoffeepot/aether#1037: clear the trampoline's
         // capabilities — the wasm is unloaded, so the mailbox now
