@@ -17,7 +17,8 @@ use aether_actor::{
     ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_test_fixtures_kinds::{
-    CarriedReply, CarriedReplyMatched, CarriedRequest, ReleaseCarried, RunCarriedRequest, SubstrateHarnessObserver,
+    CarriedReplyMatched, CarriedRequest, CarriedRequestResult, ReleaseCarried, RunCarriedRequest,
+    SubstrateHarnessObserver,
 };
 
 #[aether_data::kind(name = "aether.test_fixtures.carried_context", no_serde)]
@@ -46,7 +47,7 @@ impl WasmActor for CarryRequester {
     }
 
     #[handler::single]
-    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedReply) {
+    fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult) {
         match ctx.take_context::<CarriedContext>() {
             Some(context) if context.tag == reply.tag => {
                 ctx.actor::<SubstrateHarnessObserver>().send(&CarriedReplyMatched);
@@ -84,7 +85,7 @@ impl WasmActor for ReplyHolder {
     #[handler::manual]
     fn on_release(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _release: ReleaseCarried) {
         for (handle, tag) in self.parked.drain(..) {
-            ctx.reply_to(handle, &CarriedReply { tag });
+            ctx.reply_to(handle, &CarriedRequestResult { tag });
         }
     }
 }

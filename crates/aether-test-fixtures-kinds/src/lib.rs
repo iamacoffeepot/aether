@@ -553,12 +553,12 @@ pub struct ReleaseCarried;
 
 /// Issue 6400: the reply holder's answer to a [`CarriedRequest`], echoing its
 /// `tag`.
-#[aether_data::kind(name = "aether.test_fixtures.carried_reply", copy)]
-pub struct CarriedReply {
+#[aether_data::kind(name = "aether.test_fixtures.carried_request_result", copy)]
+pub struct CarriedRequestResult {
     pub tag: u32,
 }
 
-/// Issue 6400: report the requester emits when a [`CarriedReply`] recovered
+/// Issue 6400: report the requester emits when a [`CarriedRequestResult`] recovered
 /// the context of the request it answers.
 #[aether_data::kind(name = "aether.test_fixtures.carried_reply_matched", default)]
 pub struct CarriedReplyMatched;
