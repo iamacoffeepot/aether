@@ -9,12 +9,13 @@ use std::fs;
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
 use aether_puppet::{
     Expression, EyeArchetype, Gaze, Idle, IdleConfig, Puppet, PuppetConfig, Turntable, TurntableConfig, Viseme,
 };
+use aether_render::HeadlessRenderCapability;
 
 const PUPPET_EXPORT: &str = <Puppet as Addressable>::NAMESPACE;
 const IDLE_EXPORT: &str = <Idle as Addressable>::NAMESPACE;
@@ -26,7 +27,14 @@ fn one_artifact_serves_all_three_explicit_exports() {
         return;
     };
     let wasm = fs::read(wasm_path).expect("read the puppet wasm");
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    // The headless render stub stands in for render as on headless (ADR-0232 §6).
+    let mut harness = SubstrateHarness::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(init_save_sandbox("puppet-module-exports")))
+        .with_actor::<HeadlessRenderCapability>(())
+        .with_component_host()
+        .build()
+        .expect("boot");
 
     let bare = harness
         .execute(vec![(

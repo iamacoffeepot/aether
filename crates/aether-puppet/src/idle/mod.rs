@@ -67,7 +67,7 @@ pub struct Idle {
     ticks: u64,
 }
 
-#[actor(depends(Puppet))]
+#[actor(depends(Puppet), depends(LifecycleCapability))]
 impl WasmActor for Idle {
     type Config = IdleConfig;
     const NAMESPACE: &'static str = "aether.puppet-idle";

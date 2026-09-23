@@ -160,9 +160,6 @@ aether-fs = { path = "../aether-fs" }
 # (`use … as _`) so the fixture kinds' descriptor entries land in each
 # test binary.
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
-# The cap-registry replace test swaps the probe wasm for aether-kit-commons's
-# camera export and asserts on `aether_kit_commons::camera::CameraCreate`.
-aether-kit-commons = { path = "../aether-kit-commons" }
 # iamacoffeepot/aether#3766: the fixture crate whose wasm these tests
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when the fixture changes, and xtask's

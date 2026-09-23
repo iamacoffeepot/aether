@@ -23,8 +23,7 @@ use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, ReplaceComponent, ReplaceResult, Tick};
-use aether_kit_commons::camera::CameraCreate;
-use aether_test_fixtures_kinds::SetRender;
+use aether_test_fixtures_kinds::{Bump, InlineProbe, SetRender};
 use std::fs;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -71,40 +70,38 @@ fn cap_registry_reports_fallback() {
     assert!(!caps.accepts_actor(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
-/// `aether.component.replace` swaps the bundle's `test.cube` export for
-/// `aether-kit-commons`'s non-entry `camera` export (a larger handler set
-/// that keeps the cube's only row, `Tick`, so the replace passes the
-/// ADR-0231 §5 contract check), exercising `ReplaceComponent.export` (#2027)
-/// — the trampoline's hosted type is `cube`, so reaching the camera handler
-/// set requires naming the export. The registry reflects the post-replace
-/// accept-set at the same mailbox id (stable across replace per ADR-0022):
-/// `CameraCreate` flips rejected→accepted and `Tick` stays accepted.
+/// `aether.component.replace` swaps the bundle's `test.contract.base` export
+/// for its `test.contract.extended` export, which keeps both of the base's
+/// rows and adds a silent `InlineProbe` handler, so the replace passes the
+/// ADR-0231 §5 contract check. It exercises `ReplaceComponent.export`
+/// (#2027): the trampoline's hosted type is the base, so reaching the
+/// extended handler set requires naming the export. The registry reflects
+/// the post-replace accept-set at the same mailbox id (stable across replace
+/// per ADR-0022): `InlineProbe` flips rejected→accepted and `Bump` stays
+/// accepted.
 #[test]
 fn cap_registry_updates_on_replace() {
     let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
-    let Some(kit_path) = require_wasm("aether_kit_commons") else {
-        return;
-    };
+    let wasm = fs::read(&bundle_path).expect("read fixture wasm");
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let cube = LoadComponent {
-        wasm: fs::read(&bundle_path).expect("read fixture wasm"),
+    let base = LoadComponent {
+        wasm: wasm.clone(),
         name: Some("swappable".to_owned()),
         config: Vec::new(),
-        export: Some("test.cube".to_owned()),
+        export: Some("test.contract.base".to_owned()),
     };
     let (swappable, path) =
-        harness.load_any(&cube).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
+        harness.load_any(&base).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
 
-    // Pre-replace: the cube accepts Tick, rejects CameraCreate.
+    // Pre-replace: the base accepts Bump, rejects InlineProbe.
     {
         let caps = harness.capability_registry();
-        assert!(caps.accepts_actor(swappable, Tick::ID));
-        assert!(!caps.accepts_actor(swappable, CameraCreate::ID));
+        assert!(caps.accepts_actor(swappable, Bump::ID));
+        assert!(!caps.accepts_actor(swappable, InlineProbe::ID));
     }
 
-    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
     let host = harness.actor_ref::<ComponentHostCapability>();
     let swapped = harness
         .execute(vec![(
@@ -113,13 +110,13 @@ fn cap_registry_updates_on_replace() {
                 &host,
                 &ReplaceComponent {
                     target: path,
-                    wasm: kit_wasm,
+                    wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
-                    // ADR-0096 / #2027: select the non-entry `aether.camera`
-                    // export from the multi-actor kit module; a bare
-                    // replace would reuse the trampoline's cube tag.
-                    export: Some("aether.kit.camera".to_owned()),
+                    // ADR-0096 / #2027: select the extended export from the
+                    // same multi-actor module; a bare replace would reuse
+                    // the trampoline's base tag.
+                    export: Some("test.contract.extended".to_owned()),
                 },
             ),
         )])
@@ -129,14 +126,14 @@ fn cap_registry_updates_on_replace() {
         ReplaceResult::Err { error } => panic!("replace_component: {error}"),
     }
 
-    // Post-replace: the camera's accept-set wins.
+    // Post-replace: the extended accept-set wins.
     let caps = harness.capability_registry();
     assert!(
-        caps.accepts_actor(swappable, CameraCreate::ID),
-        "camera should accept its declared CameraCreate handler after replace",
+        caps.accepts_actor(swappable, InlineProbe::ID),
+        "the extended export should accept its declared InlineProbe handler after replace",
     );
-    // Both components declare a Tick handler, so it survives the swap.
-    assert!(caps.accepts_actor(swappable, Tick::ID));
+    // Both exports declare a Bump handler, so it survives the swap.
+    assert!(caps.accepts_actor(swappable, Bump::ID));
 }
 
 /// `aether.component.drop` clears the dropped mailbox's caps — once

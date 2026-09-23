@@ -17,8 +17,8 @@
 //! is not a palette, and a refused palette only degrades the load to the
 //! canonical box.
 //!
-//! `SubstrateHarness` with no render capability: nothing here is drawn, and
-//! no frame is advanced.
+//! `SubstrateHarness` with the headless render stub in place of a GPU
+//! renderer: nothing here is drawn, and no frame is advanced.
 //!
 //! Fails without a pre-built component wasm (`cargo xtask build-wasm`)
 //! unless `AETHER_ALLOW_WASM_SKIP=1` takes the skip deliberately.
@@ -32,6 +32,7 @@ use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, te
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
 use aether_puppet::{Load, LoadResult, Puppet};
+use aether_render::HeadlessRenderCapability;
 
 /// A closed, consistently outward-wound solid.
 const CUBE_OBJ: &[u8] = include_bytes!("fixtures/cube.obj");
@@ -66,6 +67,8 @@ fn harness() -> Option<(SubstrateHarness, ActorRef<Puppet>, aether_data::ActorPa
         .size(64, 48)
         .namespace_roots(test_namespace_roots(save_dir))
         .settlement_cap(Some(SETTLEMENT_CAP))
+        // The headless render stub stands in for render as on headless (ADR-0232 §6).
+        .with_actor::<HeadlessRenderCapability>(())
         .with_component_host()
         .build()
         .expect("boot a harness with a component host");
