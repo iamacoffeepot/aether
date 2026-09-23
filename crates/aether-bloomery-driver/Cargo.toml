@@ -19,11 +19,12 @@ aether-substrate = { path = "../aether-substrate" }
 wasmparser = "0.246"
 
 [dev-dependencies]
-aether-component = { path = "../aether-component" }
+# The end-to-end scenarios boot the shipped bloomery chassis through its
+# harness, which depends back on this crate through the chassis — the same
+# dev cycle aether-component has with aether-harness-substrate.
+aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
-tempfile = "3"
 
 [lints]
 workspace = true
