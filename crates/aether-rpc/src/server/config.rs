@@ -1,5 +1,4 @@
 use crate::wire::PeerKind;
-use aether_data::MailboxId;
 
 /// Init config for `RpcServerCapability` (ADR-0156 §3/§4, ADR-0155 §3).
 ///
@@ -15,8 +14,8 @@ use aether_data::MailboxId;
 ///
 /// Desktop / headless leave it unset (unbound); the hub composes it explicitly
 /// with its `DEFAULT_RPC_PORT` fallback via `Builder::with_actor_configured`.
-/// The peer-identity / forward-route wiring rides [`RpcServerParams`], never
-/// here (ADR-0156 §3).
+/// The peer-identity wiring rides [`RpcServerParams`], never here
+/// (ADR-0156 §3).
 ///
 /// Before #3849 `bind_addr` was resolved from `AETHER_RPC_PORT` outside the
 /// derive path and staged programmatically through a hand `ConfigMember` bridge
@@ -37,11 +36,9 @@ pub struct RpcServerConfig {
 /// Composer-supplied construction params for `RpcServerCapability`
 /// (ADR-0156 §3). `peer_kind` identifies this server to connecting peers via
 /// the `HelloAck` reply; chassis builders supply a `PeerKind::Substrate {
-/// engine_name, .. }` for substrate / hub endpoints. `route_target` is a
-/// resolved mailbox id — by definition `Params`, never `Config`.
+/// engine_name, .. }` for substrate / hub endpoints. Engine-addressed
+/// forwarding is not configured here: each engine's proxy registers its
+/// own route with the running server (`RegisterEngineRoute`).
 pub struct RpcServerParams {
     pub peer_kind: PeerKind,
-    /// Mailbox that envelope-requested forwards (`to.engine.is_some()`) route to.
-    /// `None` on chassis that don't forward — the branch drops, as today.
-    pub route_target: Option<MailboxId>,
 }

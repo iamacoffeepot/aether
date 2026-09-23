@@ -1148,9 +1148,6 @@ pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
             engine_version: env!("CARGO_PKG_VERSION").into(),
             kinds: vec![],
         },
-        // A forked substrate peer never fields engine-addressed forwards
-        // (only the hub does), so it needs no route target.
-        route_target: None,
     })
 }
 

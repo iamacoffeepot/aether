@@ -11,20 +11,23 @@
 //! fields onto the state.
 
 use super::{FleetProxy, FleetProxyConfig};
+use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-use crate::kinds::{EngineHeartbeatTick, ForwardEnvelope};
 pub use aether_actor::root_mailbox;
 use aether_actor::runtime;
 pub use aether_data::{EngineId, Kind, MailboxId};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
-use aether_rpc::RpcInboundReady;
 pub use aether_rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
+use aether_rpc::{
+    ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult, RpcInboundReady, RpcServerCapability,
+};
 pub use aether_substrate::Mail;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::{Source, SourceAddr};
+pub use aether_substrate::runtime::trace::SettlementHold;
 pub use std::collections::HashMap;
 pub use std::process::Child;
 pub use std::sync::Arc;
@@ -42,8 +45,7 @@ pub use super::heartbeat::spawn_heartbeat;
 /// Mailbox of the engines cap (`aether.fleet`) — where a proxy
 /// reports its own liveness transitions (`EngineAlive` / `EngineDied`,
 /// issue 1339). Resolved from the cap's own root-pinned resolver, so there is
-/// no host round-trip and no second derivation beside the
-/// `RpcServerCapability`'s own route lookup.
+/// no host round-trip.
 fn fleet_cap_mailbox() -> MailboxId {
     root_mailbox::<FleetServer>()
 }
@@ -92,6 +94,12 @@ pub struct FleetProxyState {
     /// it. Held as the field's RAII guard — the leading `_` marks
     /// it as owned-for-its-Drop, not read.
     _heartbeat: Option<HeartbeatHandle>,
+    /// Holds the chain that spawned this proxy open until the hub's RPC
+    /// server answers its `RegisterEngineRoute`, so a `SpawnEngine` settles
+    /// only once the new engine is routable. `None` before `wire`, once
+    /// the answer arrives, and for a proxy no chain caused (adopted or
+    /// test-spawned).
+    pub route_hold: Option<SettlementHold>,
 }
 
 impl Drop for FleetProxyState {
@@ -264,16 +272,49 @@ impl NativeActor for FleetProxy {
             miss_limit,
             heartbeat_seq: 0,
             _heartbeat: heartbeat,
+            route_hold: None,
         })
     }
 
-    /// Fire one post-registration catch-up wake. The reader starts during
-    /// `init`, before an instanced proxy's mailbox is published, so an early
-    /// frame can enqueue successfully while its accompanying wake is dropped
-    /// as unresolved. `wire` runs after publication; this self-wake ensures
-    /// the dispatcher drains any frame stranded in that gap.
-    fn wire(_state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    /// Register this proxy as its engine's route, then fire one
+    /// post-registration catch-up wake.
+    ///
+    /// The hub's RPC server forwards every `engine = Some(engine_id)` wire
+    /// `Call` to the proxy that registered for `engine_id`. A send from
+    /// `wire` starts a fresh root, so the registration alone would not keep
+    /// the spawn open; the settlement hold on the causing chain (ADR-0168)
+    /// does, until [`Self::on_route_registered`] drops it. A chassis with no
+    /// RPC server warn-drops the registration, and the hold then lasts as
+    /// long as the proxy.
+    ///
+    /// The reader starts during `init`, before an instanced proxy's mailbox
+    /// is published, so an early frame can enqueue successfully while its
+    /// accompanying wake is dropped as unresolved. `wire` runs after
+    /// publication; the self-wake ensures the dispatcher drains any frame
+    /// stranded in that gap.
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+        state.route_hold = ctx.acquire_settlement_hold();
+        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: state.engine_id });
         ctx.self_wake::<RpcInboundReady>().wake(&RpcInboundReady::default());
+    }
+
+    /// The hub RPC server's answer to this proxy's route registration.
+    ///
+    /// # Agent
+    /// Internal — the reply to the `RegisterEngineRoute` this proxy sent
+    /// from `wire`. Releases the spawn chain's hold; an `Err` means
+    /// engine-addressed calls will not reach this proxy, and is logged.
+    #[handler::single]
+    fn on_route_registered(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: RegisterEngineRouteResult) {
+        state.route_hold = None;
+        if let RegisterEngineRouteResult::Err { error } = mail {
+            tracing::warn!(
+                target: "aether_substrate::fleet_proxy",
+                engine_id = ?state.engine_id,
+                error = %error,
+                "engine proxy: route registration refused; engine-addressed calls will not reach this engine",
+            );
+        }
     }
 
     /// Relay one mail to the substrate as an RPC `Call`.

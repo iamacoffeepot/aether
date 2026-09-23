@@ -9,7 +9,6 @@ use super::config::RestartPolicy;
 use super::restart::schedule_restart;
 use super::{FleetConfig, FleetServer};
 use crate::child_env::isolate_child_environment;
-pub use crate::kinds::ForwardEnvelope;
 use crate::kinds::{EngineAlive, EngineDied, EngineRestartDue};
 pub use crate::proxy::{FleetProxy, FleetProxyConfig, HeartbeatParams, is_reforkable_spawn_failure};
 pub use crate::store::{ArtifactStore, LAYOUT_VERSION_DIR};
@@ -25,21 +24,17 @@ pub use aether_kinds::{
     ListEnginesResult, ResolveComponentResult, SetArtifactPinnedResult, SpawnEngineResult, TerminateEngineResult,
     UploadBinaryResult, UploadComponentResult,
 };
-use aether_rpc::RouteEnvelope;
 pub use aether_substrate::Subname;
 pub use aether_substrate::actor::native::{
     DeferredReply, NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone,
 };
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::SourceAddr;
-pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::HashMap;
 pub use std::collections::VecDeque;
 use std::fs;
 use std::io;
 pub use std::path::{Path, PathBuf};
 pub use std::process::{Child, Command, Stdio};
-pub use std::sync::Arc;
 pub use std::time::{Duration, Instant};
 
 // The artifact-store + fleet helpers the handlers delegate to live in the
@@ -50,7 +45,7 @@ pub use super::artifacts::{
     bootstrap_ingest, exec_file_name, ingest_binary, ingest_component, realize_executable, resolve_component,
     resolve_selector, set_artifact_pinned,
 };
-pub use super::fleet::{engine_dir, free_local_port, resolve_fleet_store_root, settle_err, sweep_engine_dirs};
+pub use super::fleet::{engine_dir, free_local_port, resolve_fleet_store_root, sweep_engine_dirs};
 
 /// How many recently-died engines [`FleetServer`]
 /// retains for `list_engines`' `recently_died` sidecar (issue 1906). A small
@@ -222,7 +217,8 @@ fn prepare_fork_io_detail(stage: &str, hash: &str, err: &io::Error) -> String {
 /// deterministic tests stand a plain value in for the proof.
 pub struct EngineEntry<P = ActorRef<FleetProxy>> {
     /// The `aether.fleet.proxy:<id>` actor — the target for
-    /// `TerminateEngine` and every routed `ForwardEnvelope`.
+    /// `TerminateEngine`. Engine-addressed calls reach the proxy through
+    /// the route it registers with the hub's RPC server, not through here.
     pub proxy: P,
     /// The localhost RPC port the cap assigned this substrate.
     pub rpc_port: u16,
@@ -360,10 +356,6 @@ pub struct FleetServerState<P = ActorRef<FleetProxy>> {
     /// dependency. Starts at 1 (`Uuid::from_u128(0)` is the nil
     /// uuid).
     pub next_engine_seq: u128,
-    /// Cached so `settle_err` can push a `CallSettled` straight at a
-    /// routed call's originating `RpcServerCapability`, echoing the
-    /// inbound correlation.
-    pub mailer: Arc<Mailer>,
     /// Liveness-heartbeat tuning each spawned proxy is armed with
     /// (issue 1339), resolved once from `FleetConfig` at init.
     /// `None` disables the heartbeat fleet-wide.
@@ -814,7 +806,7 @@ impl NativeActor for FleetServer {
     type Config = FleetConfig;
     const NAMESPACE: &'static str = "aether.fleet";
 
-    fn init(config: FleetConfig, ctx: &mut NativeInitCtx<'_>) -> Result<FleetServerState, BootError> {
+    fn init(config: FleetConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<FleetServerState, BootError> {
         // Build the hub-scoped store from `FleetConfig` (ADR-0090): the
         // layout-dir override + disk budget ride config fields (their
         // `AETHER_BINARY_*` env keys are the config env layer), then
@@ -851,7 +843,6 @@ impl NativeActor for FleetServer {
             engines: HashMap::new(),
             pending_engines: HashMap::new(),
             next_engine_seq: 1,
-            mailer: ctx.mailer(),
             heartbeat: config.heartbeat_params(),
             connect_budget: config.connect_budget(),
             spawn_attempts: config.spawn_attempts(),
@@ -1141,62 +1132,6 @@ impl NativeActor for FleetServer {
         // is already gone.
         ctx.to(&entry.proxy).send(&mail);
         TerminateEngineResult::Ok
-    }
-
-    /// Relay one mail to a specific engine's substrate.
-    ///
-    /// # Agent
-    /// Not a user-facing tool — the hub's `RpcServerCapability`
-    /// sends this when an RPC client addresses a `Call` at
-    /// `engine = Some(_)`. The cap looks the engine up in its
-    /// table and re-emits a `ForwardEnvelope` at the matching
-    /// `aether.fleet.proxy:<id>`, propagating the inbound
-    /// reply-to verbatim so the substrate's reply (and the proxy's
-    /// terminal `CallSettled`) stream straight back to that
-    /// `RpcServerCapability`. An unknown / unparseable `engine_id`
-    /// is answered with `CallSettled::Err` so the originating wire
-    /// call closes instead of hanging.
-    #[handler::single]
-    fn on_route(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
-        let reply_to = ctx.reply_target();
-        let SourceAddr::Component(reply_target) = reply_to.addr else {
-            // A routed call always carries a Component reply-to
-            // (the originating RpcServerCapability). Without one
-            // there's nowhere to stream the reply or the
-            // CallSettled — drop rather than guess.
-            tracing::warn!(
-                target: "aether_substrate::fleet_server",
-                engine_id = %mail.engine_id,
-                "engine route: no Component reply-to; dropping",
-            );
-            return;
-        };
-        let correlation = reply_to.correlation_id;
-
-        let engine_id = match Uuid::parse_str(&mail.engine_id) {
-            Ok(uuid) => EngineId(uuid),
-            Err(e) => {
-                settle_err(
-                    &state.mailer,
-                    reply_target,
-                    correlation,
-                    format!("engine_id {:?} is not a valid UUID: {e}", mail.engine_id),
-                );
-                return;
-            }
-        };
-        let Some(entry) = state.engines.get(&engine_id) else {
-            settle_err(&state.mailer, reply_target, correlation, format!("no supervised engine {}", mail.engine_id));
-            return;
-        };
-
-        // Re-emit as a ForwardEnvelope at the proxy through the
-        // reference its spawn proved. `forward_to` keeps the inbound
-        // reply target, so the substrate's reply — and the proxy's
-        // CallSettled — route straight back to the originating
-        // RpcServerCapability. The forward joins this handler's chain.
-        let forward = ForwardEnvelope { mailbox: mail.mailbox, kind: mail.kind, payload: mail.payload };
-        ctx.forward_to(&entry.proxy, &forward);
     }
 
     /// Evict a dead engine from the table (issue 1339).

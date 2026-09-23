@@ -136,9 +136,6 @@ impl BootableChassis for HubChassis {
                     engine_version: env!("CARGO_PKG_VERSION").into(),
                     kinds: vec![],
                 },
-                // The hub wires both caps, so the RPC server's route target is the
-                // engines cap resolved from its own identity.
-                route_target: Some(aether_substrate::root_mailbox::<FleetServer>()),
             },
             RpcServerConfig { port: Some(rpc_port) },
         ))

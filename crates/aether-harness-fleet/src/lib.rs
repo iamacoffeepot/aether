@@ -1015,10 +1015,10 @@ pub fn allocate_store_root_for_test() -> PathBuf {
     isolate_store_root()
 }
 
-/// Boot a hub-shaped passive chassis: a forwarding `RpcServerCapability`
-/// (engine-addressed Calls route through `aether.fleet`), the engines
-/// cap, and `TraceDispatchCapability` so the `RpcServer`'s local Calls
-/// settle and close. Returns the chassis and the port the RPC server
+/// Boot a hub-shaped passive chassis: `RpcServerCapability` (engine-addressed
+/// Calls reach the proxy each spawned engine registers), the engines cap,
+/// and `TraceDispatchCapability` so the `RpcServer`'s local Calls settle and
+/// close. Returns the chassis and the port the RPC server
 /// bound. Mirrors the seed's `boot_hub`. `binary_store_dir` isolates the
 /// hub's content-addressed store (ADR-0115) per-harness, and
 /// `fleet_store_root` isolates the per-engine spawn-dir parent (issue
@@ -1049,7 +1049,6 @@ fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                route_target: Some(aether_data::mailbox_id_from_name("aether.fleet")),
             },
             RpcServerConfig { port: Some(0) },
         )

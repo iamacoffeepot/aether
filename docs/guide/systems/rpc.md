@@ -32,8 +32,17 @@ Per-engine operations use `Some(id)` and route through the hub's matching
 
 ```text
 engine = none     → supplied mailbox in this RPC server's local registry
-engine = some(id) → hub FleetServer → proxy for that child → child registry
+engine = some(id) → the proxy registered for id → child registry
 ```
+
+Each `FleetProxy` registers its engine with the hub's RPC server once it is
+live (`aether.rpc.register_engine_route`), and the server forwards every
+`Some(id)` call straight to that proxy. The server monitors each registrant:
+when a proxy departs, its route is retired and any call still in flight at it
+closes with an error. A call for an engine that never registered, or whose
+proxy has departed, closes at once with `RpcError::UnknownEngine`. A spawn
+settles only after the new engine's route exists, so an engine id a spawn hands
+back is already routable.
 
 Using `Some(id)` prevents a child mailbox from accidentally resolving in the
 hub registry. It also makes an unknown/dead engine distinguishable from an
@@ -67,6 +76,10 @@ can exercise.
 
 Change the wire only for a cross-process responsibility. Ordinary new actor
 kinds travel inside `MailEnvelope` and do not require a new `WireFrame` variant.
+
+`RpcError::UnknownEngine` was appended after every existing variant without a
+`WIRE_VERSION` bump: appending keeps every earlier variant's tag, only the hub's
+RPC server produces it, and `aether-mcp` ships from the same build.
 
 Wire changes need:
 

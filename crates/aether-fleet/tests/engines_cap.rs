@@ -24,6 +24,7 @@ use aether_kinds::{
     SpawnEngineResult, TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent,
     UploadComponentResult,
 };
+use aether_rpc::{PeerKind, RpcServerCapability, RpcServerConfig, RpcServerParams};
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::content_store::{ContentStore, EvictionPolicy};
@@ -136,8 +137,21 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
     let (outbound, _rx) = HubOutbound::attached_loopback();
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let cells = ReplyCells::default();
+    // Each spawned proxy registers its engine's route with the RPC server
+    // and holds the spawn open until it is answered, so a hub-shaped
+    // chassis composes one; unbound, since nothing here dials it.
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<FleetServer>((), engine_config)
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams {
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "engines-cap-test".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
+            },
+            RpcServerConfig { port: None },
+        )
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");

@@ -11,7 +11,10 @@
 //! - **`init`** dials the substrate's `RpcServerCapability` via
 //!   `RpcClient::connect` and spawns the reader sidecar. The
 //!   handshake's `HelloAck` identity is kept on `conn.server`.
-//! - **`on_forward`** ([`ForwardEnvelope`](crate::kinds::ForwardEnvelope)) wraps the `mailbox`,
+//! - **`wire`** registers the proxy with the hub's RPC server as its
+//!   engine's route (`RegisterEngineRoute`), holding the spawn chain open
+//!   until **`on_route_registered`** takes the answer.
+//! - **`on_forward`** ([`ForwardEnvelope`](aether_rpc::ForwardEnvelope)) wraps the `mailbox`,
 //!   `kind`, and `payload` into an RPC `Call` and writes it down the
 //!   connection. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
@@ -25,10 +28,11 @@
 //!
 //! P3 is the bridge core: connect, forward, route replies, lifecycle.
 //! The engine-management surface — `describe_kinds` / `list` / `spawn`
-//! / `terminate` and the hub RPC server's `engine = Some(_)` routing
-//! that drives `ForwardEnvelope` at the proxy — lands in P4 with the
-//! engines cap. The cached `HelloAck` manifest the describe handler
-//! will read is already in hand on `conn.server`.
+//! / `terminate` — lands in P4 with the engines cap. The hub RPC server
+//! drives `ForwardEnvelope` at the proxy for `engine = Some(_)` calls
+//! once the proxy has registered its engine's route. The cached
+//! `HelloAck` manifest the describe handler will read is already in hand
+//! on `conn.server`.
 //!
 //! Native-only: the state owns a `TcpStream` (via `RpcConnection`)
 //! and an OS thread, so the substrate-typed runtime half lives in the
@@ -114,13 +118,12 @@ mod tests {
     use super::{
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
     };
-    use crate::kinds::ForwardEnvelope;
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use aether_rpc::server::{RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
-    use aether_rpc::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use aether_rpc::{ForwardEnvelope, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
     use aether_substrate::Subname;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::{Mail, Source, SourceAddr};
@@ -155,7 +158,7 @@ mod tests {
             .with_actor::<TestEchoActor>(())
             .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
             .with_actor_configured::<RpcServerCapability>(
-                RpcServerParams { peer_kind: substrate_peer_kind(), route_target: None },
+                RpcServerParams { peer_kind: substrate_peer_kind() },
                 RpcServerConfig { port: Some(0) },
             )
             .build_passive()

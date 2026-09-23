@@ -31,7 +31,7 @@ in [Inspect and debug](inspect-and-debug.md).
 | Symptom | First discriminating check | Safe next action |
 |---|---|---|
 | MCP tools are absent | is the tunnel up and MCP reconnected? | start the harness as documented, then reconnect the client |
-| any old `engine_id` says “no supervised engine” | fresh `list_engines(show: "alive")` | reacquire after a hub restart; never substitute an RPC port |
+| any old `engine_id` says “no supervised engine” or `UnknownEngine` | fresh `list_engines(show: "alive")` | reacquire after a hub restart; never substitute an RPC port |
 | binary selector does not resolve | filtered `list_binaries` | `upload_binary`, then use returned hash/name |
 | component selector does not resolve | registry `list_components` | `upload_component`, then use returned hash/name |
 | spawn returns an allocated id in its error | `list_engines(show: "dead")` for that id | preserve matching `spawn_failed` detail |

@@ -29,36 +29,40 @@ use std::sync::{Arc, Mutex};
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
 use aether_actor::actor;
-use aether_rpc::{CallSettled, RouteEnvelope};
+use aether_rpc::{CallSettled, ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult};
+use aether_substrate::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 /// The canned live vocabulary a [`RouteInventorySink`] replies with, plus
-/// a counter of how many refresh RPCs it has fielded (issue 2672). Shared
-/// by value into the fixture so a test both controls the widened schema
-/// the refresh observes and asserts the refresh fired exactly once.
+/// a counter of how many refresh RPCs it has fielded (issue 2672), and the
+/// one engine the sink registers for. Shared by value into the fixture so a
+/// test both controls the widened schema the refresh observes and asserts
+/// the refresh fired exactly once.
 #[derive(Clone)]
 pub(super) struct RouteLoopbackParams {
+    pub(super) engine: EngineId,
     pub(super) reply: ListKindsResult,
     pub(super) calls: Arc<AtomicUsize>,
 }
 
-/// `#[cfg(test)]` loopback engines-cap double (issue 2672). Registers at
-/// the `aether.fleet` mailbox — the id the `RpcServerCapability` routes
-/// every `engine = Some` `Call` to via a `RouteEnvelope` — and answers the
-/// harness's `aether.inventory.kinds` refresh RPC locally with a canned
-/// [`ListKindsResult`], so the
-/// field-mismatch refresh-and-retry path in [`Mcp::resolve_and_encode`] is
-/// exercised end-to-end without forking a real substrate + proxy.
+/// `#[cfg(test)]` loopback engine-proxy double (issue 2672). Registers
+/// itself with the `RpcServerCapability` as the route for its one engine,
+/// as a real proxy does, so every `engine = Some(engine)` `Call` reaches it
+/// as a `ForwardEnvelope`, and answers the harness's
+/// `aether.inventory.kinds` refresh RPC locally with a canned
+/// [`ListKindsResult`], so the field-mismatch refresh-and-retry path in
+/// [`Mcp::resolve_and_encode`] is exercised end-to-end without forking a
+/// real substrate + proxy.
 ///
 /// Lives at file root (not nested in `mod tests`) so the `#[actor]`
 /// macro's marker emission stays addressable, mirroring the engines-cap's
-/// own `ReplySink`. It stands in for the real `FleetServer` (never
-/// co-installed with it, so the shared `aether.fleet` mailbox id is
-/// unambiguous): on a `RouteEnvelope` it pushes the reply and the
-/// `CallSettled` terminal straight back to the originating server,
+/// own `ReplySink`. On a `ForwardEnvelope` it pushes the reply and the
+/// `CallSettled` terminal straight back to the forwarding server,
 /// correlation preserved, so the forwarded wire call closes the way a
-/// proxy's `CallSettled` would.
+/// proxy's `CallSettled` would. It registers from `wire`, during the
+/// chassis wire pass, before any test connects.
 pub(super) struct RouteInventorySink {
+    engine: EngineId,
     reply: ListKindsResult,
     calls: Arc<AtomicUsize>,
     mailer: Arc<Mailer>,
@@ -66,19 +70,22 @@ pub(super) struct RouteInventorySink {
 
 #[derive(Clone)]
 pub(super) struct AddressRouteLoopbackParams {
+    pub(super) engine: EngineId,
     pub(super) mailbox_id: MailboxId,
     pub(super) canonical_path: String,
-    pub(super) calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    pub(super) calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     pub(super) replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 }
 
 /// Routed-engine double for address-boundary tests. It returns a caller-chosen
 /// mailbox id that is deliberately unrelated to the supplied path, making any
-/// accidental local fold visible in the forwarded application envelope.
+/// accidental local fold visible in the forwarded application envelope. It
+/// registers as the route for its one engine from `wire`, like a real proxy.
 pub(super) struct AddressRouteSink {
+    engine: EngineId,
     mailbox_id: MailboxId,
     canonical_path: String,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
     mailer: Arc<Mailer>,
 }
@@ -87,10 +94,11 @@ pub(super) struct AddressRouteSink {
 impl NativeActor for AddressRouteSink {
     type Config = ();
     type Params = AddressRouteLoopbackParams;
-    const NAMESPACE: &'static str = "aether.fleet";
+    const NAMESPACE: &'static str = "aether.test.address_route";
 
     fn init((): (), params: AddressRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
+            engine: params.engine,
             mailbox_id: params.mailbox_id,
             canonical_path: params.canonical_path,
             calls: params.calls,
@@ -99,9 +107,17 @@ impl NativeActor for AddressRouteSink {
         })
     }
 
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+    }
+
+    #[handler::single]
+    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
+
     #[handler::single]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
         use aether_substrate::mail::{Mail, Source, SourceAddr};
 
         self.calls.lock().expect("address-route calls mutex is never poisoned").push(mail.clone());
@@ -173,35 +189,53 @@ pub(super) struct ScriptedRouteReply {
 /// Dynamic route fixture for task-level terrain relay tests. The live
 /// descriptors come only from `inventory`; request envelopes and reply bytes
 /// remain opaque so the test never copies the kit's Rust wire vocabulary.
+/// One instance serves one engine; instances for several engines share the
+/// capture cells.
 #[derive(Clone)]
 pub(super) struct ScriptedRouteLoopbackParams {
+    engine: EngineId,
     inventory: ListKindsResult,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 }
 
 pub(super) struct ScriptedRouteSink {
+    engine: EngineId,
     inventory: ListKindsResult,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
     mailer: Arc<Mailer>,
 }
 
-#[actor(singleton, root)]
+#[actor(instanced, root)]
 impl NativeActor for ScriptedRouteSink {
     // ADR-0156 §3: the canned replies + shared capture cells are construction
     // wiring, not operator config, so they ride the `Params` channel.
     type Config = ();
     type Params = ScriptedRouteLoopbackParams;
-    const NAMESPACE: &'static str = "aether.fleet";
+    const NAMESPACE: &'static str = "aether.test.scripted_route";
 
     fn init((): (), params: ScriptedRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self { inventory: params.inventory, calls: params.calls, replies: params.replies, mailer: ctx.mailer() })
+        Ok(Self {
+            engine: params.engine,
+            inventory: params.inventory,
+            calls: params.calls,
+            replies: params.replies,
+            mailer: ctx.mailer(),
+        })
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
+    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
+
+    #[handler::single]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, mail: RouteEnvelope) {
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
         use aether_substrate::mail::{Mail, Source, SourceAddr};
 
         let reply = if mail.kind == ResolveAddress::ID {
@@ -260,27 +294,36 @@ impl NativeActor for RouteInventorySink {
     // wiring, not operator config, so they ride the `Params` channel.
     type Config = ();
     type Params = RouteLoopbackParams;
-    const NAMESPACE: &'static str = "aether.fleet";
+    const NAMESPACE: &'static str = "aether.test.route_inventory";
 
     fn init((): (), params: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
+            engine: params.engine,
             reply: params.reply,
             calls: params.calls,
-            // Cached like the real engines cap does (its `on_route`
-            // propagates the inbound reply-to, which `NativeCtx` sends
-            // would overwrite with this cap as sender).
+            // Cached like the real proxy does: its replies must reach the
+            // forwarding server under the inbound correlation, which
+            // `NativeCtx` sends would overwrite with this actor as sender.
             mailer: ctx.mailer(),
         })
     }
 
+    fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
+        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+    }
+
     #[handler::single]
-    fn on_route(&mut self, ctx: &mut NativeCtx<'_>, _mail: RouteEnvelope) {
+    #[allow(clippy::unused_self)] // A double registers once at boot and acts on no answer.
+    fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
+
+    #[handler::single]
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, _mail: ForwardEnvelope) {
         use aether_substrate::mail::{Mail, Source, SourceAddr};
 
         self.calls.fetch_add(1, Ordering::Relaxed);
         let reply_to = ctx.reply_target();
-        // A routed call always carries a Component reply-to (the
-        // originating server); without one there's nowhere to stream to.
+        // A forwarded call always carries a Component reply-to (the
+        // forwarding server); without one there's nowhere to stream to.
         let SourceAddr::Component(target) = reply_to.addr else {
             return;
         };
@@ -314,9 +357,9 @@ pub(super) fn stage_blob_file(tag: &str, bytes: &[u8]) -> PathBuf {
     path
 }
 
-/// Boot a hub-shaped passive chassis: a forwarding
-/// `RpcServerCapability` + the engines cap + `TraceObserver` (so
-/// the `RpcServer`'s local Calls settle and close). Returns the
+/// Boot a hub-shaped passive chassis: `RpcServerCapability` + the
+/// engines cap + `TraceObserver` (so the `RpcServer`'s local Calls
+/// settle and close). Returns the
 /// chassis (kept alive for its dispatcher threads) and the RPC
 /// port an `RpcSession` dials.
 pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
@@ -331,14 +374,12 @@ pub(super) fn boot_hub() -> (PassiveChassis<TestChassis>, u16) {
         .with_actor_configured::<FleetServer>((), FleetConfig::default())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: "test-hub".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
             },
-            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.fleet")),
-        },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -394,14 +435,12 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
         .with_actor::<InventoryCapability>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: "test-hub".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
             },
-            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.fleet")),
-        },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -410,17 +449,16 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     (chassis, port)
 }
 
-/// Hub-shape chassis whose `aether.fleet` mailbox is a
-/// [`RouteInventorySink`] loopback (issue 2672) rather than the real
-/// `FleetServer`, so the harness's `engine = Some`
-/// `aether.inventory.kinds` refresh RPC lands locally and returns
-/// `reply`. `calls` counts the refreshes the sink fielded, so a test
-/// can assert the refresh-and-retry fired exactly once (no loop).
-/// Unlike `boot_hub_with_inventory` this installs no `FleetServer`
-/// (which would warn/settle-err an `engine = Some` for an unregistered
-/// engine) and no `InventoryCapability` (the sink answers `ListKinds`
+/// Hub-shape chassis whose route for `engine` is a [`RouteInventorySink`]
+/// loopback (issue 2672) rather than a real proxy, so the harness's
+/// `engine = Some(engine)` `aether.inventory.kinds` refresh RPC lands
+/// locally and returns `reply`. `calls` counts the refreshes the sink
+/// fielded, so a test can assert the refresh-and-retry fired exactly once
+/// (no loop). Unlike `boot_hub_with_inventory` this installs no
+/// `FleetServer` and no `InventoryCapability` (the sink answers `ListKinds`
 /// from the canned reply directly).
 pub(super) fn boot_hub_with_route_loopback(
+    engine: EngineId,
     reply: ListKindsResult,
     calls: Arc<AtomicUsize>,
 ) -> (PassiveChassis<TestChassis>, u16) {
@@ -432,17 +470,15 @@ pub(super) fn boot_hub_with_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<RouteInventorySink>(RouteLoopbackParams { reply, calls })
+        .with_actor::<RouteInventorySink>(RouteLoopbackParams { engine, reply, calls })
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: "test-hub".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
             },
-            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.fleet")),
-        },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()
@@ -452,17 +488,25 @@ pub(super) fn boot_hub_with_route_loopback(
 }
 
 pub(super) fn boot_hub_with_address_route_loopback(
+    engine: EngineId,
     mailbox_id: MailboxId,
     canonical_path: &str,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
-    boot_hub_with_address_route_replies(mailbox_id, canonical_path, calls, Arc::new(Mutex::new(VecDeque::new())))
+    boot_hub_with_address_route_replies(
+        engine,
+        mailbox_id,
+        canonical_path,
+        calls,
+        Arc::new(Mutex::new(VecDeque::new())),
+    )
 }
 
 pub(super) fn boot_hub_with_address_route_replies(
+    engine: EngineId,
     mailbox_id: MailboxId,
     canonical_path: &str,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
+    calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
@@ -474,6 +518,7 @@ pub(super) fn boot_hub_with_address_route_replies(
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
         .with_actor::<AddressRouteSink>(AddressRouteLoopbackParams {
+            engine,
             mailbox_id,
             canonical_path: canonical_path.to_owned(),
             calls,
@@ -486,8 +531,6 @@ pub(super) fn boot_hub_with_address_route_replies(
                     engine_version: "0.1.0".into(),
                     kinds: vec![],
                 },
-                #[allow(clippy::disallowed_methods)] // test hub routes engine calls to its trusted singleton sink
-                route_target: Some(mailbox_id_from_name("aether.fleet")),
             },
             RpcServerConfig { port: Some(0) },
         )
@@ -498,11 +541,14 @@ pub(super) fn boot_hub_with_address_route_replies(
 }
 
 /// Hub-shaped route fixture serving live dynamic descriptors and a
-/// caller-controlled queue of opaque reply events.
+/// caller-controlled queue of opaque reply events. One
+/// [`ScriptedRouteSink`] is spawned per engine in `engines`, each
+/// registering its own engine's route and sharing `calls` and `replies`.
 pub(super) fn try_boot_hub_with_scripted_route_loopback(
-    inventory: ListKindsResult,
-    calls: Arc<Mutex<Vec<RouteEnvelope>>>,
-    replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
+    engines: &[EngineId],
+    inventory: &ListKindsResult,
+    calls: &Arc<Mutex<Vec<ForwardEnvelope>>>,
+    replies: &Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> Result<(PassiveChassis<TestChassis>, u16), BootError> {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
@@ -512,20 +558,31 @@ pub(super) fn try_boot_hub_with_scripted_route_loopback(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<ScriptedRouteSink>(ScriptedRouteLoopbackParams { inventory, calls, replies })
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
-            peer_kind: PeerKind::Substrate {
-                engine_name: "test-hub".into(),
-                engine_version: "0.1.0".into(),
-                kinds: vec![],
+                peer_kind: PeerKind::Substrate {
+                    engine_name: "test-hub".into(),
+                    engine_version: "0.1.0".into(),
+                    kinds: vec![],
+                },
             },
-            #[allow(clippy::disallowed_methods)] // hub-shaped fixture forwards engine-addressed calls to the well-known engines-cap mailbox
-            route_target: Some(mailbox_id_from_name("aether.fleet")),
-        },
             RpcServerConfig { port: Some(0) },
         )
         .build_passive()?;
+
+    for engine in engines {
+        let params = ScriptedRouteLoopbackParams {
+            engine: *engine,
+            inventory: inventory.clone(),
+            calls: Arc::clone(calls),
+            replies: Arc::clone(replies),
+        };
+        chassis
+            .spawn_actor_for_test::<ScriptedRouteSink>(Subname::Named(&engine.0.simple().to_string()), (), params)
+            .finish()
+            .expect("scripted route sink spawns and registers its engine");
+    }
+
     let port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
     Ok((chassis, port))
 }

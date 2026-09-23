@@ -4,14 +4,14 @@
     "actor_at::<": 10,
     "send_envelope_tracked(": 6,
     "send_envelope_tracked_with_reply_to(": 3,
-    "send_envelope_detached(": 8,
-    "mailer()": 46,
+    "send_envelope_detached(": 7,
+    "mailer()": 45,
     "registry()": 33,
-    "mailbox_id_from_name(": 112,
+    "mailbox_id_from_name(": 105,
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 55,
     "MailboxId::NONE": 55,
     "<recipient>.id() at a send": 0,
-    "clippy::disallowed_methods": 199
+    "clippy::disallowed_methods": 194
   }
 }

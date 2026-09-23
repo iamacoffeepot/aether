@@ -24,7 +24,10 @@
 // visible to it). `RpcServerConfig` is named by `init`'s signature; the cap
 // struct `RpcServerCapability` is the impl's `Self` type.
 use super::connection::{ConnId, ConnState, InboundEvent, run_reader_loop};
-use super::{PeerKind, RpcInboundReady, RpcServerCapability, RpcServerConfig, RpcServerParams, Settled};
+use super::{
+    MonitorNotice, PeerKind, RegisterEngineRoute, RpcInboundReady, RpcServerCapability, RpcServerConfig,
+    RpcServerParams, Settled,
+};
 use aether_actor::runtime;
 use aether_substrate::mail::ResolveLiveError;
 use aether_substrate::net::teardown_connect_addr;
@@ -33,16 +36,18 @@ use aether_substrate::net::teardown_connect_addr;
 // `#[actor] impl` body in `mod.rs` names; it reaches them through the
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
-pub use crate::kinds::{CallSettled, RouteEnvelope};
+pub use crate::kinds::{CallSettled, ForwardEnvelope, RegisterEngineRouteResult};
 pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
+pub use aether_actor::AnyActorRef;
 pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, MailboxId};
+pub use aether_data::{EngineId, Kind};
+pub use aether_substrate::MonitorHandle;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
-pub use std::collections::HashMap;
+pub use std::collections::{HashMap, HashSet};
 pub use std::io;
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 pub use std::sync::Arc;
@@ -72,6 +77,27 @@ pub struct RpcServerHandle {
 pub struct InFlight {
     pub conn_id: ConnId,
     pub wire_cid: u64,
+    /// The registered proxy a forwarded engine call went to, so closing
+    /// the call removes its correlation from that owner's
+    /// [`RouteOwner::calls`] with one keyed lookup. `None` for a call
+    /// dispatched into this server's local actor system.
+    pub route: Option<AnyActorRef>,
+}
+
+/// One registered engine route, keyed by its registrant in
+/// [`RpcServerState::route_owners`]: what the registrant's
+/// `MonitorNotice` must retire, reachable without a scan.
+pub struct RouteOwner {
+    /// The one engine this registrant forwards for; its key in
+    /// [`RpcServerState::engine_routes`].
+    pub engine: EngineId,
+    /// Correlations of the forwarded calls still in flight at this
+    /// registrant, so its departure closes exactly those calls.
+    pub calls: HashSet<u64>,
+    /// Keeps the registrant monitored; `Drop` deregisters. `None` for a
+    /// registrant that could not be monitored, whose route then lasts
+    /// until this server stops.
+    _monitor: Option<MonitorHandle>,
 }
 
 /// `aether.rpc.server` runtime state (ADR-0122 split). Owns one TCP
@@ -88,10 +114,14 @@ pub struct RpcServerState {
     /// `on_inbound_ready` turn drains the inbound channel. Each thread holds
     /// a clone; none holds this cap's mailbox position.
     pub wake: SelfWake<RpcInboundReady>,
-    /// Mailbox that envelope-requested forwards (`to.engine.is_some()`)
-    /// route to, from `RpcServerParams::route_target`. `None` on chassis
-    /// that don't forward — the forward branch drops, as today.
-    pub route_target: Option<MailboxId>,
+    /// Engine → the proxy registered for it: the call path's lookup for
+    /// an `engine = Some(_)` `Call`. Kept in step with
+    /// [`Self::route_owners`]; neither map is ever scanned.
+    pub engine_routes: HashMap<EngineId, AnyActorRef>,
+    /// Registrant → its route: the notice path's lookup when a registered
+    /// proxy departs, and the owner of its in-flight correlations. Kept in
+    /// step with [`Self::engine_routes`]; neither map is ever scanned.
+    pub route_owners: HashMap<AnyActorRef, RouteOwner>,
     /// Cached `Arc<Mailer>` for the `Call` dispatcher's settlement
     /// subscription: it reads the chassis settlement registry and passes
     /// the same Arc into `subscribe_settlement_mail`. Init grabs it from
@@ -116,6 +146,60 @@ pub struct RpcServerState {
 }
 
 impl RpcServerState {
+    /// Remove one in-flight call, and its correlation from the owner's
+    /// [`RouteOwner::calls`] when it was forwarded. Both are keyed
+    /// lookups.
+    pub fn take_in_flight(&mut self, correlation: u64) -> Option<InFlight> {
+        let entry = self.in_flight.remove(&correlation)?;
+        if let Some(owner) = entry.route.and_then(|route| self.route_owners.get_mut(&route)) {
+            owner.calls.remove(&correlation);
+        }
+        Some(entry)
+    }
+
+    /// Record `sender` as the route for `engine` (the five cases of
+    /// `on_register_engine_route`). Every answer is one keyed lookup in
+    /// one of the two route maps.
+    pub fn register_engine_route(
+        &mut self,
+        ctx: &mut NativeCtx<'_>,
+        sender: AnyActorRef,
+        engine: EngineId,
+    ) -> RegisterEngineRouteResult {
+        if let Some(holder) = self.engine_routes.get(&engine) {
+            if *holder == sender {
+                return RegisterEngineRouteResult::Ok;
+            }
+            return RegisterEngineRouteResult::Err {
+                error: format!("engine {} already has a registered route", engine.0),
+            };
+        }
+        if let Some(owned) = self.route_owners.get(&sender) {
+            return RegisterEngineRouteResult::Err {
+                error: format!(
+                    "cannot register engine {}: this registrant already routes engine {}",
+                    engine.0, owned.engine.0,
+                ),
+            };
+        }
+
+        let monitor = match ctx.monitor(sender) {
+            Ok(handle) => Some(handle),
+            Err(error) => {
+                tracing::warn!(
+                    target: "aether_substrate::rpc",
+                    engine = %engine.0,
+                    ?error,
+                    "engine route registrant is not monitorable; its route cannot be retired when it departs",
+                );
+                None
+            }
+        };
+        self.engine_routes.insert(engine, sender);
+        self.route_owners.insert(sender, RouteOwner { engine, calls: HashSet::new(), _monitor: monitor });
+        RegisterEngineRouteResult::Ok
+    }
+
     /// Allocate a fresh `ConnId`, store the connection's write half,
     /// spin a reader thread for the read half.
     pub fn spawn_reader_for_peer(&mut self, _ctx: &mut NativeCtx<'_>, stream: TcpStream, peer: SocketAddr) {
@@ -225,41 +309,47 @@ impl RpcServerState {
     }
 
     pub fn handle_call(&mut self, ctx: &mut NativeCtx<'_>, conn_id: ConnId, cid: Option<u64>, envelope: MailEnvelope) {
-        // The envelope requests a forward to a specific remote target
-        // (issue 763 P5a): relay to the configured `route_target`
-        // mailbox, which owns the `EngineId -> proxy` table and re-emits
-        // a `ForwardEnvelope` at the right proxy. The substrate's reply
-        // streams back here as a normal reply mail (handled by `on_any`
-        // as a `ReplyEvent`); its terminal `ReplyEnd` arrives — via the
+        // The envelope names an engine (issue 763 P5a): relay to the
+        // proxy registered for it, as a `ForwardEnvelope`. This server is
+        // the sender, so the send's default reply target is this server
+        // under the minted correlation: the substrate's reply streams back
+        // through the proxy as a normal reply mail (handled by `on_any` as
+        // a `ReplyEvent`), and its terminal `ReplyEnd` arrives — via the
         // proxy — as a `CallSettled` (also handled by `on_any`).
         //
         // Crucially this path does NOT subscribe to settlement: the
-        // local `RouteEnvelope` chain settles almost immediately,
+        // local `ForwardEnvelope` chain settles almost immediately,
         // long before the remote substrate replies, so settlement
         // would close the wire call prematurely. The terminal close
-        // comes from `CallSettled` instead.
-        //
-        // On a chassis with no `route_target` the forward drops and the
-        // call never closes — only the hub chassis wires the forwarding
-        // target, and only the hub fields forward-requesting Calls.
-        if let Some(engine_id) = envelope.to.engine {
-            let Some(target) = self.route_target else {
-                tracing::debug!(
-                    target: "aether_substrate::rpc",
-                    conn = conn_id,
-                    "rpc forward requested but no route_target configured; dropping",
+        // comes from `CallSettled`, or from the proxy's `MonitorNotice`
+        // if it departs first.
+        if let Some(engine) = envelope.to.engine {
+            let Some(route) = self.engine_routes.get(&engine).copied() else {
+                let Some(wire_cid) = cid else {
+                    tracing::debug!(
+                        target: "aether_substrate::rpc",
+                        conn = conn_id,
+                        engine = %engine.0,
+                        "rpc forward requested for an engine with no route; dropping",
+                    );
+                    return;
+                };
+                self.write_frame_to(
+                    conn_id,
+                    &WireFrame::ReplyEnd { cid: wire_cid, result: Err(RpcError::UnknownEngine { engine }) },
                 );
                 return;
             };
-            let route = RouteEnvelope {
-                engine_id: engine_id.0.to_string(),
-                mailbox: envelope.to.mailbox,
-                kind: envelope.kind,
-                payload: envelope.payload,
-            };
-            let mail_id = ctx.send_envelope_detached(target, <RouteEnvelope as Kind>::ID, &route.encode_into_bytes());
+            let forward =
+                ForwardEnvelope { mailbox: envelope.to.mailbox, kind: envelope.kind, payload: envelope.payload };
+            let mail_id =
+                ctx.send_envelope_detached_to(route, <ForwardEnvelope as Kind>::ID, &forward.encode_into_bytes());
             if let Some(wire_cid) = cid {
-                self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
+                let correlation = mail_id.correlation_id;
+                self.in_flight.insert(correlation, InFlight { conn_id, wire_cid, route: Some(route) });
+                if let Some(owner) = self.route_owners.get_mut(&route) {
+                    owner.calls.insert(correlation);
+                }
             }
             return;
         }
@@ -315,7 +405,7 @@ impl RpcServerState {
             return;
         };
         reg.subscribe_settlement_mail(mail_id, ctx.self_id(), <Settled as Kind>::ID, Arc::clone(&self.mailer));
-        self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
+        self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid, route: None });
     }
 
     pub fn close_connection(&mut self, conn_id: ConnId, reason: &str) {
@@ -330,8 +420,19 @@ impl RpcServerState {
         // JoinHandle drop detaches.
         drop(conn.reader_thread.take());
         // Clear in-flight entries pinned to this connection so we
-        // don't write ReplyEvents / ReplyEnds to a dead socket.
-        self.in_flight.retain(|_, entry| entry.conn_id != conn_id);
+        // don't write ReplyEvents / ReplyEnds to a dead socket. A dropped
+        // forwarded call also leaves its owner's `calls`, so a long-lived
+        // proxy accumulates no stale correlations.
+        let route_owners = &mut self.route_owners;
+        self.in_flight.retain(|correlation, entry| {
+            if entry.conn_id != conn_id {
+                return true;
+            }
+            if let Some(owner) = entry.route.and_then(|route| route_owners.get_mut(&route)) {
+                owner.calls.remove(correlation);
+            }
+            false
+        });
         tracing::debug!(
             target: "aether_substrate::rpc",
             conn = conn_id,
@@ -402,7 +503,8 @@ impl NativeActor for RpcServerCapability {
             return Ok(RpcServerState {
                 peer_kind: params.peer_kind,
                 wake,
-                route_target: params.route_target,
+                engine_routes: HashMap::new(),
+                route_owners: HashMap::new(),
                 mailer: ctx.mailer(),
                 bind_addr: None,
                 listener_port: 0,
@@ -464,7 +566,8 @@ impl NativeActor for RpcServerCapability {
         Ok(RpcServerState {
             peer_kind: params.peer_kind,
             wake,
-            route_target: params.route_target,
+            engine_routes: HashMap::new(),
+            route_owners: HashMap::new(),
             mailer: ctx.mailer(),
             bind_addr: Some(bind_addr),
             listener_port: port,
@@ -593,13 +696,67 @@ impl NativeActor for RpcServerCapability {
     #[handler::single]
     fn on_settled(state: &mut Self::State, _ctx: &mut NativeCtx<'_>, mail: Settled) {
         let correlation = mail.root.correlation_id;
-        let Some(entry) = state.in_flight.remove(&correlation) else {
+        let Some(entry) = state.take_in_flight(correlation) else {
             // No matching in-flight call. Either we never owned
             // this root or the connection already closed and we
             // cleared eagerly. Either way: drop silently.
             return;
         };
         state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Ok(()) });
+    }
+
+    /// Register the sending proxy as the route for one engine.
+    ///
+    /// # Agent
+    /// Internal — a per-engine proxy sends `RegisterEngineRoute {
+    /// engine_id }` from its `wire` hook, for its own engine. The
+    /// registrant is the envelope sender, so a mail with no local sender
+    /// is refused. An engine already routed to a different registrant
+    /// is refused and the holder keeps it; a registrant that already
+    /// routes a different engine is refused; the same registrant
+    /// re-registering its own engine is `Ok` and changes nothing.
+    /// Reply: `RegisterEngineRouteResult`.
+    #[handler::single]
+    fn on_register_engine_route(
+        state: &mut Self::State,
+        ctx: &mut NativeCtx<'_>,
+        mail: RegisterEngineRoute,
+    ) -> RegisterEngineRouteResult {
+        let Some(sender) = ctx.sender() else {
+            return RegisterEngineRouteResult::Err {
+                error: format!("cannot register engine {}: the registration has no local sender", mail.engine_id.0),
+            };
+        };
+        state.register_engine_route(ctx, sender, mail.engine_id)
+    }
+
+    /// Retire a departed registrant's engine route (ADR-0079 §8 amended).
+    ///
+    /// The host stamps the departed registrant as the notice's sender, so
+    /// `ctx.sender()` is the same proven reference [`RpcServerState::route_owners`]
+    /// is keyed by (ADR-0230). The work is proportional to what the notice
+    /// retires: the owner row, its engine's route, and each call still in
+    /// flight at it, which closes with `ReplyEnd` `Err`. A notice with no
+    /// sender, or from an actor that holds no route, changes nothing.
+    #[handler::single]
+    fn on_monitor_notice(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _notice: MonitorNotice) {
+        let Some(departed) = ctx.sender() else {
+            return;
+        };
+        let Some(owner) = state.route_owners.remove(&departed) else {
+            return;
+        };
+        state.engine_routes.remove(&owner.engine);
+        for correlation in owner.calls {
+            let Some(entry) = state.in_flight.remove(&correlation) else {
+                continue;
+            };
+            let reason = format!("engine {} left before the call settled", owner.engine.0);
+            state.write_frame_to(
+                entry.conn_id,
+                &WireFrame::ReplyEnd { cid: entry.wire_cid, result: Err(RpcError::Other { reason }) },
+            );
+        }
     }
 
     /// Catch-all. Any mail addressed at this cap that's not one of
@@ -637,8 +794,8 @@ impl NativeActor for RpcServerCapability {
                 Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
                 None => Err(RpcError::Other { reason: "malformed CallSettled payload".into() }),
             };
+            state.take_in_flight(correlation);
             state.write_frame_to(entry.conn_id, &WireFrame::ReplyEnd { cid: entry.wire_cid, result });
-            state.in_flight.remove(&correlation);
             return;
         }
 

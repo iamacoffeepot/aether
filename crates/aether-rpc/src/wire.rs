@@ -185,6 +185,11 @@ pub enum RpcError {
     /// Catch-all for anything else (decode failures on the envelope
     /// payload, internal errors).
     Other { reason: String },
+    /// Target carried `engine = Some(engine)`, and no proxy is registered
+    /// for that engine on this hub: it was never spawned, has departed,
+    /// or has not finished registering. Appended after every existing
+    /// variant so their tags keep their positions.
+    UnknownEngine { engine: EngineId },
 }
 
 #[cfg(not(target_family = "wasm"))]
