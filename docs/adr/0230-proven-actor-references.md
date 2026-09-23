@@ -2,7 +2,8 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-21
-- **Amended:** 2026-09-23 — §5's deleted `ctx.actor::<R>()` handle is replaced at the call site by flat ctx verbs (`ctx.send::<R>(&k)`, `ctx.subscribe::<K>()`, `ctx.send_to(&r, &k)`) proven by `#[actor(depends(R))]`, with no optional peers ([ADR-0232](0232-flat-ctx-send-verbs.md)).
+- **Amended:** 2026-09-23 — §5's deleted `ctx.actor::<R>()` handle is replaced at the call site by flat ctx verbs (`ctx.send::<R>(&k)`, `ctx.subscribe::<P, K>()`, `ctx.send_to(&r, &k)`) proven by `#[actor(depends(R))]`, with no optional peers ([ADR-0232](0232-flat-ctx-send-verbs.md)).
+- **Amended:** 2026-09-23 — §3's declared-dependency check reaches two more births: an inline-spawnable actor's dependencies are checked when its module loads, and a native dependency on a pumped slot passes the birth check on the slot's Claim-stage reservation, with the boot failing if the pump never goes `Live`.
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
@@ -162,6 +163,28 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | The envelope sender | the host stamps the origin at dispatch, so the SDK mints it from the host's value. A `MonitorNotice` is host-generated mail that carries one: the host stamps the departed actor, which `register_monitor` required to be `Live`, so the watcher's `ctx.sender()` is a reference to it. | none |
 | A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
 | An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
+
+**Amendment (2026-09-23): two births the declared-dependency check did not
+reach.** The first row checked dependencies only at component load and
+boot-plan load (wasm) and at each native birth site. Migrating call sites to
+ADR-0232's flat verbs exposed two gaps:
+
+- **Inline-spawnable actors.** A composable actor that a guest spawns inline
+  through `spawn_inline_child_by_tag` (the kit-widget types, the behavior
+  host's children) runs before the host sees it, and the trampoline stages its
+  alias only afterwards. A `depends(R)` on such an actor compiled a `DependsOn`
+  proof that nothing checked. When the host loads a module, it now also checks
+  the declared dependencies of every inline-spawnable actor in that module, with
+  the same refusal naming the dependency, before anything in the module runs.
+- **A native dependency on a pumped slot.** A pumped actor goes `Live` after
+  the passive actors' `init`: the desktop driver boots render from its
+  Claim-stage reservation, and the harness chassis leaves render to the
+  embedder after build. A passive that declares it, such as text declaring
+  render, would be refused on every such boot. A native declared dependency
+  whose target is a pumped slot reserved at the Claim stage passes the birth
+  check, and the boot fails if that pump never goes `Live`. This is the one
+  dependency accepted before its target is `Live`, and only for the length of
+  the boot: once a boot completes, every declared dependency is `Live`.
 
 An off-thread helper that only wakes its own actor — an accept loop, a socket
 reader, a timer — holds a `SelfWake<K>` from the ctx (`ctx.self_wake::<K>()`)
