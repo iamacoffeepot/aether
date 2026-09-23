@@ -128,6 +128,7 @@ impl NativeActor for WasmTrampoline {
             module: config.module,
             actor_caps: config.actor_caps,
             wasm_bytes: config.wasm_bytes,
+            retired_correlations: None,
         })
     }
 

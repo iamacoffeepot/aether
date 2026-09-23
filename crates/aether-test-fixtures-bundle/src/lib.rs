@@ -14,6 +14,7 @@
 //! here: a cross-module `replace_component` needs two distinct binaries,
 //! so each lives in its own satellite crate.
 
+mod correlation_carry;
 mod cube;
 mod dependent_probe;
 mod editor_region_probe;
@@ -31,6 +32,7 @@ mod stateful_replace;
 mod tcp_load_probe;
 mod ui_widget;
 
+pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
 pub use editor_region_probe::EditorRegionProbe;
@@ -94,6 +96,8 @@ aether_actor::export!(
     Sidecar,
     TcpLoadProbe,
     DependentProbe,
+    CarryRequester,
+    ReplyHolder,
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`
