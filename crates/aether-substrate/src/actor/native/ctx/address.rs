@@ -51,7 +51,7 @@ macro_rules! native_sender_methods {
             $reacher: Reaches<R>,
         {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(
+            NativeActorMailbox::new(
                 R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
                 self.binding,
                 parent,
@@ -69,7 +69,7 @@ macro_rules! native_sender_methods {
         #[must_use]
         pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(id.0, self.binding, parent, root)
+            NativeActorMailbox::new(id.0, self.binding, parent, root)
         }
 
         /// Send through a proven [`ActorRef`]: returns a typed [`NativeActorMailbox`]
@@ -78,7 +78,7 @@ macro_rules! native_sender_methods {
         #[must_use]
         pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> NativeActorMailbox<'_, R> {
             let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::__new_in_flight(target.id().0, self.binding, parent, root)
+            NativeActorMailbox::new(target.id().0, self.binding, parent, root)
         }
     };
 }

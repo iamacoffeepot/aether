@@ -817,7 +817,6 @@ mod tests {
     fn subscribe_via_native_mailbox_lands_calling_actor_in_stage_set() {
         use std::sync::mpsc;
 
-        use aether_substrate::actor::native::NativeActorMailbox;
         use aether_substrate::actor::native::binding::NativeBinding;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
         use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
@@ -836,7 +835,7 @@ mod tests {
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        let lifecycle_id = registry.register_inbox(
+        registry.register_inbox(
             &boot_authority(),
             <LifecycleCapability as aether_actor::Addressable>::NAMESPACE,
             handler,
@@ -845,9 +844,10 @@ mod tests {
         // The calling actor: a transport stamped with SENDER as its
         // self-mailbox, so its sends carry `Source::Component(SENDER)`.
         let sender = DataMailboxId(0x00C0_FFEE);
-        let tx_binding = NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(sender.0));
-        let lifecycle = NativeActorMailbox::<LifecycleCapability>::__new(lifecycle_id.0, &tx_binding);
-        lifecycle.subscribe::<Tick>();
+        let tx_binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(sender.0)));
+        NativeCtx::new_dispatching(&tx_binding, Source::NONE, MailId::NONE, MailId::NONE)
+            .actor::<LifecycleCapability>()
+            .subscribe::<Tick>();
         tx_binding.flush_outbound();
 
         let (kind, source, bytes) = rx.try_recv().expect("subscribe::<Tick>() emitted one mail");

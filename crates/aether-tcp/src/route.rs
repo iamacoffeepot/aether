@@ -1,7 +1,7 @@
 //! Sender-side peer-addressing facades for the `aether.tcp` cluster —
 //! the "routing" seam of the [`TcpCapability`] control plane.
 
-use aether_actor::{Addressable, WasmActorMailbox};
+use aether_actor::WasmActorMailbox;
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
 use aether_substrate::actor::native::NativeActorMailbox;
 
@@ -32,13 +32,12 @@ use super::{
 ///    addressed listener / session actor — the request kind body itself
 ///    has no name field (the addressing rides the mailbox).
 ///
-/// 2. Peer resolvers — [`listener::<R>`](Self::listener),
-///    [`session::<R>`](Self::session), and
-///    [`connect_session::<R>`](Self::connect_session). Each walks the
+/// 2. Peer resolvers — [`listener`](Self::listener),
+///    [`session`](Self::session), and
+///    [`connect_session`](Self::connect_session). Each walks the
 ///    declared [`TcpCapability`] → [`TcpListenerActor`] /
-///    [`TcpSessionActor`] edges through typed child resolution, then
-///    exposes the final physical mailbox under the caller's logical
-///    recipient type `R`.
+///    [`TcpSessionActor`] edges through typed child resolution and
+///    returns the child handle that resolution produces.
 ///
 /// All request methods are fire-and-forget. Replies arrive on the
 /// matching `*Result` kinds (see ADR-0079 + the kind definitions in
@@ -76,7 +75,7 @@ pub trait TcpWasmExt {
 
     /// Mail `aether.tcp.close` to the named `TcpListenerActor`,
     /// asking it to shut down cooperatively. Equivalent to
-    /// `self.listener::<TcpListenerActor>(listener_name).send(&Close::default())`.
+    /// `self.listener(listener_name).send(&Close::default())`.
     /// Fire-and-forget at the kind level; the close response rides via
     /// the cap's monitor on the listener, not via the `Close` kind.
     fn close(&self, listener_name: &str);
@@ -100,22 +99,17 @@ pub trait TcpWasmExt {
     /// Mail `aether.tcp.session_close` to a connect-side session.
     fn connect_session_close(&self, name: &str);
 
-    /// Resolve a typed listener-instance mailbox for the bound
-    /// listener named `name`, directly beneath [`TcpCapability`]. `R`
-    /// is the listener-side actor type (typically [`TcpListenerActor`]
-    /// itself, but the type parameter lets callers address a custom wrapper
-    /// that handles a different kind vocabulary on the same physical
-    /// mailbox).
-    fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+    /// Resolve the [`TcpListenerActor`] handle for the bound listener
+    /// named `name`, directly beneath [`TcpCapability`].
+    fn listener(&self, name: &str) -> WasmActorMailbox<'_, TcpListenerActor>;
 
-    /// Resolve a typed session-instance mailbox for the open session
-    /// named `session_name` beneath the listener named `listener_name`.
-    /// See [`Self::listener`] for the `R` parameter shape.
-    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, R>;
+    /// Resolve the [`TcpSessionActor`] handle for the open session named
+    /// `session_name` beneath the listener named `listener_name`.
+    fn session(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, TcpSessionActor>;
 
-    /// Resolve a typed connect-side session mailbox. Unlike
+    /// Resolve a connect-side [`TcpSessionActor`] handle. Unlike
     /// [`Self::session`], this folds cap → session directly.
-    fn connect_session<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R>;
+    fn connect_session(&self, name: &str) -> WasmActorMailbox<'_, TcpSessionActor>;
 }
 
 impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
@@ -132,30 +126,28 @@ impl TcpWasmExt for WasmActorMailbox<'_, TcpCapability> {
         self.send(&ListListeners::default());
     }
     fn close(&self, listener_name: &str) {
-        self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
+        self.listener(listener_name).send(&Close::default());
     }
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
+        self.session(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
-        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
+        self.session(listener_name, session_name).send(&SessionClose::default());
     }
     fn connect_session_write(&self, name: &str, bytes: &[u8]) {
-        self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
+        self.connect_session(name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn connect_session_close(&self, name: &str) {
-        self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
+        self.connect_session(name).send(&SessionClose::default());
     }
-    fn listener<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.at::<R>(self.resolve::<TcpListenerActor>(name).mailbox_id().0)
+    fn listener(&self, name: &str) -> WasmActorMailbox<'_, TcpListenerActor> {
+        self.resolve::<TcpListenerActor>(name)
     }
-    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, R> {
-        self.at::<R>(
-            self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name).mailbox_id().0,
-        )
+    fn session(&self, listener_name: &str, session_name: &str) -> WasmActorMailbox<'_, TcpSessionActor> {
+        self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name)
     }
-    fn connect_session<R: Addressable>(&self, name: &str) -> WasmActorMailbox<'_, R> {
-        self.at::<R>(self.resolve::<TcpSessionActor>(name).mailbox_id().0)
+    fn connect_session(&self, name: &str) -> WasmActorMailbox<'_, TcpSessionActor> {
+        self.resolve::<TcpSessionActor>(name)
     }
 }
 
@@ -201,20 +193,19 @@ pub trait TcpNativeExt {
     /// Mail `aether.tcp.session_close` to a connect-side session.
     fn connect_session_close(&self, name: &str);
 
-    /// Resolve a typed listener-instance mailbox. See
-    /// [`TcpWasmExt::listener`] for the addressing rationale; the
-    /// returned handle inherits the parent mailbox's `'a` binding ref
-    /// so `.send::<K>(&mail)` dispatches through the same
+    /// Resolve the [`TcpListenerActor`] handle for the bound listener
+    /// named `name`. The returned handle inherits the parent mailbox's
+    /// `'a` binding ref so `.send::<K>(&mail)` dispatches through the same
     /// `NativeBinding` without re-threading the ctx.
-    fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
+    fn listener(&self, name: &str) -> NativeActorMailbox<'_, TcpListenerActor>;
 
-    /// Resolve a typed session-instance mailbox. See
-    /// [`TcpWasmExt::session`] for the addressing rationale.
-    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R>;
+    /// Resolve the [`TcpSessionActor`] handle for the open session named
+    /// `session_name` beneath the listener named `listener_name`.
+    fn session(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, TcpSessionActor>;
 
-    /// Resolve a typed connect-side session mailbox. This folds the
+    /// Resolve a connect-side [`TcpSessionActor`] handle. This folds the
     /// session directly beneath the cap, without a listener node.
-    fn connect_session<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R>;
+    fn connect_session(&self, name: &str) -> NativeActorMailbox<'_, TcpSessionActor>;
 }
 
 #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
@@ -232,40 +223,44 @@ impl TcpNativeExt for NativeActorMailbox<'_, TcpCapability> {
         self.send(&ListListeners::default());
     }
     fn close(&self, listener_name: &str) {
-        self.listener::<TcpListenerActor>(listener_name).send(&Close::default());
+        self.listener(listener_name).send(&Close::default());
     }
     fn session_write(&self, listener_name: &str, session_name: &str, bytes: &[u8]) {
-        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
+        self.session(listener_name, session_name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn session_close(&self, listener_name: &str, session_name: &str) {
-        self.session::<TcpSessionActor>(listener_name, session_name).send(&SessionClose::default());
+        self.session(listener_name, session_name).send(&SessionClose::default());
     }
     fn connect_session_write(&self, name: &str, bytes: &[u8]) {
-        self.connect_session::<TcpSessionActor>(name).send(&SessionWrite { bytes: bytes.to_vec() });
+        self.connect_session(name).send(&SessionWrite { bytes: bytes.to_vec() });
     }
     fn connect_session_close(&self, name: &str) {
-        self.connect_session::<TcpSessionActor>(name).send(&SessionClose::default());
+        self.connect_session(name).send(&SessionClose::default());
     }
-    fn listener<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.at::<R>(self.resolve::<TcpListenerActor>(name).mailbox_id().0)
+    fn listener(&self, name: &str) -> NativeActorMailbox<'_, TcpListenerActor> {
+        self.resolve::<TcpListenerActor>(name)
     }
-    fn session<R: Addressable>(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, R> {
-        self.at::<R>(
-            self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name).mailbox_id().0,
-        )
+    fn session(&self, listener_name: &str, session_name: &str) -> NativeActorMailbox<'_, TcpSessionActor> {
+        self.resolve::<TcpListenerActor>(listener_name).resolve::<TcpSessionActor>(session_name)
     }
-    fn connect_session<R: Addressable>(&self, name: &str) -> NativeActorMailbox<'_, R> {
-        self.at::<R>(self.resolve::<TcpSessionActor>(name).mailbox_id().0)
+    fn connect_session(&self, name: &str) -> NativeActorMailbox<'_, TcpSessionActor> {
+        self.resolve::<TcpSessionActor>(name)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    use std::sync::Arc;
+
+    use aether_actor::wasm::NO_INBOUND_SOURCE;
     use aether_actor::wasm::inline::Registry;
-    use aether_actor::{Addressable, One, WasmActorMailbox};
+    use aether_actor::{Addressable, Erased, Manual, WasmCtx};
+    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
+    use aether_data::{MailId, Source};
     use aether_data::{MailboxId, mailbox_id_from_path};
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::actor::native::{NativeActorMailbox, NativeBinding};
+    use aether_substrate::actor::native::{NativeBinding, NativeCtx};
     #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
     use aether_substrate::testing::bare_substrate;
 
@@ -275,13 +270,6 @@ mod tests {
 
     const LISTENER_NAME: &str = "game";
     const SHARED_SESSION_NAME: &str = "shared";
-
-    struct RouteRecipient;
-
-    impl Addressable for RouteRecipient {
-        const NAMESPACE: &'static str = "test.tcp.route-recipient";
-        type Resolver = One;
-    }
 
     #[allow(
         clippy::disallowed_methods,
@@ -329,12 +317,13 @@ mod tests {
     #[test]
     fn wasm_facade_resolves_each_canonical_tcp_lineage() {
         let registry = Registry::new();
-        let capability = WasmActorMailbox::<TcpCapability>::__new(TcpCapability::resolve(0, ()).0, 0, &registry);
+        let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0, &registry, NO_INBOUND_SOURCE);
+        let capability = ctx.actor::<TcpCapability>();
 
         assert_canonical_route_ids(
-            capability.listener::<RouteRecipient>(LISTENER_NAME).mailbox_id(),
-            capability.session::<RouteRecipient>(LISTENER_NAME, SHARED_SESSION_NAME).mailbox_id(),
-            capability.connect_session::<RouteRecipient>(SHARED_SESSION_NAME).mailbox_id(),
+            capability.listener(LISTENER_NAME).mailbox_id(),
+            capability.session(LISTENER_NAME, SHARED_SESSION_NAME).mailbox_id(),
+            capability.connect_session(SHARED_SESSION_NAME).mailbox_id(),
         );
     }
 
@@ -342,13 +331,14 @@ mod tests {
     #[test]
     fn native_facade_resolves_each_canonical_tcp_lineage() {
         let (_, mailer) = bare_substrate();
-        let binding = NativeBinding::new_for_test(mailer, MailboxId(0x4055));
-        let capability = NativeActorMailbox::<TcpCapability>::__new(TcpCapability::resolve(0, ()).0, &binding);
+        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0x4055)));
+        let ctx = NativeCtx::new_dispatching(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let capability = ctx.actor::<TcpCapability>();
 
         assert_canonical_route_ids(
-            capability.listener::<RouteRecipient>(LISTENER_NAME).mailbox_id(),
-            capability.session::<RouteRecipient>(LISTENER_NAME, SHARED_SESSION_NAME).mailbox_id(),
-            capability.connect_session::<RouteRecipient>(SHARED_SESSION_NAME).mailbox_id(),
+            capability.listener(LISTENER_NAME).mailbox_id(),
+            capability.session(LISTENER_NAME, SHARED_SESSION_NAME).mailbox_id(),
+            capability.connect_session(SHARED_SESSION_NAME).mailbox_id(),
         );
     }
 }

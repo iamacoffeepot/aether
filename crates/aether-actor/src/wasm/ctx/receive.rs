@@ -320,7 +320,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// resolver-selected root/current/parent routing scope.
     #[must_use]
     pub(crate) fn singleton_handle<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(
+        WasmActorMailbox::new(
             R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
             self.mailbox,
             self.inline,
@@ -332,7 +332,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// `from` and a borrow of the inline registry the send routes through.
     #[must_use]
     pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(target.id().0, self.mailbox, self.inline)
+        WasmActorMailbox::new(target.id().0, self.mailbox, self.inline)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.

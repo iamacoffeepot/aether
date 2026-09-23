@@ -85,7 +85,7 @@ fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
 /// `to` on the ctx and on its `sends()` view both send through a
 /// proven reference — each routes to the reference's id stamped with the
 /// sending actor's own id. The two `u64` arguments of
-/// `WasmActorMailbox::__new` are the recipient and the sender in that order,
+/// `WasmActorMailbox::new` are the recipient and the sender in that order,
 /// so a transposition routes to the sender's own id (no dispatch here) and
 /// stamps the target as the source; either half fails this test. Synthetic
 /// ids keep the fixture off the name fold, so the test needs no suppression.
