@@ -252,7 +252,9 @@ in it.
 The grammar is enforced as a test, not as a lint or a macro:
 `crates/aether-kinds/tests/kind_name_grammar.rs` scans every
 `#[kind(name = "…")]` declaration in `crates/` and checks the four mechanical
-rules above (family segment, segment casing, reply suffix, config suffix).
+rules above (family segment, segment casing, reply suffix, config suffix). It
+runs on every pull request that changes a crate, whether or not that crate is
+related to `aether-kinds` in the dependency graph.
 Names that predate the grammar are listed in
 `crates/aether-kinds/tests/kind_name_allow_list.txt`; the test fails on a
 violator that is not on that list **and** on a list entry that is no longer a

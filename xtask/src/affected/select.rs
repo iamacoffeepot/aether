@@ -1,6 +1,7 @@
 //! The graph analysis: map changed paths onto the workspace package graph,
 //! take the reverse-dependency closure, and inject the wasm runtime coupling
-//! cargo's own graph cannot see.
+//! and the workspace-scanning test packages, two couplings cargo's own graph
+//! cannot see.
 
 use std::collections::BTreeSet;
 
@@ -35,6 +36,13 @@ use crate::affected::test_targets;
 pub(super) const DIST_RESOLVING_HARNESSES: &[&str] =
     &["aether-harness-fleet", "aether-harness-substrate", "aether-harness-substrate-capture"];
 
+/// The packages whose tests read every crate's source, so a change to any
+/// crate can fail them though no dependency edge leads back to them:
+/// `aether-kinds`' `kind_name_grammar` test checks every
+/// `#[kind(name = …)]` declaration under `crates/` (issue #6408). Every
+/// narrowed selection that names at least one package also names these.
+pub(super) const WORKSPACE_SCANNING_PACKAGES: &[&str] = &["aether-kinds"];
+
 /// The computed test selection.
 pub struct Selection {
     /// `Some(reason)` when the whole workspace suite must run.
@@ -48,7 +56,8 @@ pub struct Selection {
 }
 
 /// Map changed paths onto the package graph and take the
-/// reverse-dependency closure, then inject the wasm runtime coupling.
+/// reverse-dependency closure, then inject the
+/// [`WORKSPACE_SCANNING_PACKAGES`] and the wasm runtime coupling.
 ///
 /// The same graph is passed as determinator's old and new state: its
 /// dual-graph analysis exists to catch manifest reshapes, and every path
@@ -80,6 +89,9 @@ pub(super) fn select(
         .map(|package| package.name().to_string())
         .collect();
     packages.extend(split.test_target_packages);
+    if !packages.is_empty() {
+        packages.extend(WORKSPACE_SCANNING_PACKAGES.iter().map(|name| (*name).to_string()));
+    }
 
     if packages.len() == graph.workspace().iter().count() {
         return Ok(Selection {
@@ -210,6 +222,10 @@ mod tests {
         assert!(leaf.run_all.is_none(), "leaf change must not run everything");
         assert!(leaf.packages.contains("aether-mcp"), "changed crate must be selected");
         assert!(!leaf.packages.contains("aether-substrate"), "a leaf's own dependency is not its dependent");
+        assert!(
+            leaf.packages.contains("aether-kinds"),
+            "a crate aether-kinds does not depend on still runs the workspace-wide kind-name scan"
+        );
 
         // A path matching no package and no rule must fall back to the
         // whole workspace — silent deselection of unknown inputs is the
@@ -233,8 +249,8 @@ mod tests {
         .expect("select over test-only change");
         assert_eq!(
             test_only.packages,
-            string_set(&["aether-component"]),
-            "a test-only change selects its own package alone"
+            string_set(&["aether-component", "aether-kinds"]),
+            "a test-only change selects its own package and the workspace scanners alone"
         );
 
         let library =
@@ -244,5 +260,12 @@ mod tests {
             library.packages.len() > test_only.packages.len(),
             "a library change in the same package keeps its reverse-dependency closure"
         );
+
+        // A change outside `crates/` cannot break a workspace scan, so an
+        // empty selection stays empty rather than gaining the scanners.
+        let docs_only = select(&graph, &strings(&["docs/guide/testing.md"]), &no_wasm_sources, &no_wasm_consumers)
+            .expect("select over docs-only change");
+        assert!(docs_only.run_all.is_none(), "a docs-only change must not run everything");
+        assert!(docs_only.packages.is_empty(), "a docs-only change selects no package");
     }
 }

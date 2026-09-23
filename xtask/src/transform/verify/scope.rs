@@ -816,7 +816,11 @@ mod tests {
         let packages = tool.packages().expect("a tool change narrows");
         assert!(packages.contains(&"xtask".to_owned()), "the tool's own crate is compiled: {packages:?}");
         assert!(packages.contains(&SMOKE_PACKAGE.to_owned()), "and one real crate is run through each gate");
-        assert_eq!(packages.len(), 2, "and nothing else: {packages:?}");
+        assert!(
+            packages.contains(&"aether-kinds".to_owned()),
+            "and the workspace-scanning package every narrowed selection carries (#6408): {packages:?}"
+        );
+        assert_eq!(packages.len(), 3, "and nothing else: {packages:?}");
         assert!(tool.receipt().contains("smoke check:"), "the receipt accounts for it: {}", tool.receipt());
 
         let gate = Scope::over_changed(&strings(&["xtask/src/transform/verify/scope.rs"]))
