@@ -89,7 +89,7 @@ What the conventions buy you here:
   Every engine-taking tool resolves it the same way, so an auto-resolved answer
   says which engine produced it.
 - **The recipient argument is `address`.** One spelling across the whole tool
-  surface, accepting a canonical lineage, an ADR-0166 abbreviation, or a tagged
+  surface, accepting a canonical lineage, an ADR-0166 short path, or a tagged
   `mbx-…` id.
 - **`Option` + `#[serde(default)]` for every optional field**, with the doc
   comment stating what omitting it means. The agent reads the schema; spell the

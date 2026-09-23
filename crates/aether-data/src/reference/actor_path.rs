@@ -2,11 +2,11 @@
 //! address in the ADR-0166 grammar.
 //!
 //! The text is checked when the value is built or decoded and is then stored
-//! exactly as written. An abbreviation is never expanded here: expansion needs
-//! the engine's linked root and child declarations, which a client process does
-//! not share (ADR-0166 §5). The value claims nothing about existence or
-//! placement, and it becomes a position only through the host registry's
-//! `resolve_address` (ADR-0230 §3).
+//! exactly as written. A short path's holes are never filled here: expansion
+//! needs the engine's linked root and child declarations, which a client
+//! process does not share (ADR-0166 §5). The value claims nothing about
+//! existence or placement, and it becomes a position only through the host
+//! registry's `resolve_address` (ADR-0230 §3).
 
 use alloc::boxed::Box;
 use alloc::string::String;
@@ -23,55 +23,57 @@ use crate::schema::{LabelNode, SchemaType};
 use crate::wire::{Error as WireError, WireDecode, WireEncode};
 use crate::{CastEligible, Schema};
 
-/// The separator between an abbreviated address's root and its relative path.
-const ABBREVIATION: &str = "://";
+/// The retired separator of the old short form, refused wherever it appears.
+const RETIRED_SHORT_FORM: &str = "://";
 
 /// A fully qualified actor address, canonical
-/// (`aether.component/aether.embedded:probe`) or abbreviated
-/// (`aether.component://probe`), valid by construction on every path in:
+/// (`aether.component/aether.embedded:probe`) or short
+/// (`aether.component/:probe`), valid by construction on every path in:
 /// [`new`](Self::new), wire decode, and `Deserialize` all run the same check.
 ///
-/// Equality is textual. An abbreviation and its canonical expansion are
-/// unequal values, because only the engine can tell that they name the same
-/// actor.
+/// Equality is textual. A short path and its canonical expansion are unequal
+/// values, because only the engine can tell that they name the same actor.
 #[derive(Clone, PartialEq, Eq, Hash, Debug)]
 pub struct ActorPath(Box<str>);
 
 /// How an [`ActorPath`] is written.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActorPathForm<'a> {
-    /// A canonical `/`-rendered lineage path.
+    /// A canonical `/`-rendered lineage path: no step is a hole.
     Canonical(&'a str),
-    /// An ADR-0166 abbreviation: a bare root namespace and the relative
-    /// segments written after `://`, which may be none.
-    Abbreviated { root: &'a str, relative: Vec<PathSegment<'a>> },
+    /// An ADR-0166 short path: at least one step is a hole, and the root is a
+    /// bare namespace. `steps` are the steps written after the root.
+    Short { root: &'a str, steps: Vec<PathSegment<'a>> },
 }
 
-/// One relative segment of an abbreviated [`ActorPath`], as written.
+/// One step of a short [`ActorPath`] after its root, as written.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PathSegment<'a> {
-    /// A segment with no `:`. The registry decides whether it names a
-    /// singleton child or elides an instanced child's namespace.
+    /// A step with no `:`: always a singleton child.
     Bare(&'a str),
     /// An explicit instanced child, `namespace:discriminator`.
     Qualified { namespace: &'a str, discriminator: &'a str },
+    /// A hole, `:discriminator`: an instance of the one instanced child
+    /// declared under the current actor.
+    Hole { discriminator: &'a str },
 }
 
 impl ActorPath {
     /// Validate `text` against the ADR-0166 address grammar.
     ///
-    /// The whole text is at most [`MAX_SCOPE_PATH_BYTES`] bytes. Text holding
-    /// `://` is abbreviated: its root is one bare segment and the rest is
-    /// empty or `/`-separated relative segments. Other text is canonical:
-    /// `/`-separated segments, at least one. The depth, counting an
-    /// abbreviation's root, is at most [`MAX_SCOPE_PATH_DEPTH`]. Every segment
-    /// is `namespace` or `namespace:discriminator`, and each part follows the
-    /// namespace-segment grammar.
+    /// The whole text is at most [`MAX_SCOPE_PATH_BYTES`] bytes and never
+    /// holds `://`. It is `/`-separated steps, at least one and at most
+    /// [`MAX_SCOPE_PATH_DEPTH`]. The first step is `namespace` or
+    /// `namespace:discriminator`; each later step is `namespace`,
+    /// `namespace:discriminator`, or a hole `:discriminator`. A path with a
+    /// hole is short, and its first step must be a bare namespace. Each part
+    /// follows the namespace-segment grammar.
     ///
     /// # Errors
     ///
-    /// Returns [`ActorPathError`] naming the breached cap, or the written
-    /// segment and the rule it broke.
+    /// Returns [`ActorPathError`] naming the breached cap, the retired `://`
+    /// form, a short path whose first step is an instance, or the written
+    /// step and the rule it broke.
     pub fn new(text: &str) -> Result<Self, ActorPathError> {
         check_path(text)?;
         Ok(Self(text.into()))
@@ -81,11 +83,13 @@ impl ActorPath {
     /// validated on the way in.
     #[must_use]
     pub fn form(&self) -> ActorPathForm<'_> {
-        match self.0.split_once(ABBREVIATION) {
-            None => ActorPathForm::Canonical(&self.0),
-            Some((root, relative)) => {
-                ActorPathForm::Abbreviated { root, relative: relative_segments(relative).map(parse_segment).collect() }
-            }
+        let mut steps = self.0.split('/');
+        let root = steps.next().unwrap_or_default();
+        let steps: Vec<_> = steps.map(parse_segment).collect();
+        if steps.iter().any(|step| matches!(step, PathSegment::Hole { .. })) {
+            ActorPathForm::Short { root, steps }
+        } else {
+            ActorPathForm::Canonical(&self.0)
         }
     }
 }
@@ -101,6 +105,7 @@ impl fmt::Display for PathSegment<'_> {
         match self {
             Self::Bare(segment) => f.write_str(segment),
             Self::Qualified { namespace, discriminator } => write!(f, "{namespace}:{discriminator}"),
+            Self::Hole { discriminator } => write!(f, ":{discriminator}"),
         }
     }
 }
@@ -108,11 +113,17 @@ impl fmt::Display for PathSegment<'_> {
 /// [`ActorPath::new`] rejection.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ActorPathError {
-    /// The written segment at `index` (0-based; an abbreviation's root is 0)
-    /// broke `fault`.
+    /// The written step at `index` (0-based; the root is 0) broke `fault`.
     Segment { index: usize, fault: SegmentFault },
     /// The path breaches the depth or byte cap.
     Scope(ScopePathError),
+    /// The text holds `://`, the retired short form. A short path names the
+    /// one instanced child with a hole instead.
+    RetiredShortForm,
+    /// The path has a hole but its first step is an instance, qualified
+    /// (`swarm:3/:x`) or itself a hole (`:a/b`). A short path is expanded
+    /// from a root's declarations, so it must start at a bare root namespace.
+    ShortPathFromInstance,
 }
 
 impl fmt::Display for ActorPathError {
@@ -125,6 +136,14 @@ impl fmt::Display for ActorPathError {
             Self::Scope(ScopePathError::TooLong { limit }) => {
                 write!(f, "invalid actor path: exceeds the {limit}-byte path limit")
             }
+            Self::RetiredShortForm => f.write_str(
+                "invalid actor path: `://` was removed; name the one instanced child with a hole, \
+                 e.g. `aether.component/:camera`",
+            ),
+            Self::ShortPathFromInstance => f.write_str(
+                "invalid actor path: a short path must start at a root namespace, not an instance; start it at \
+                 the root (e.g. `aether.component/:camera`) or spell every step canonically",
+            ),
         }
     }
 }
@@ -135,45 +154,38 @@ fn check_path(text: &str) -> Result<(), ActorPathError> {
     if text.len() > MAX_SCOPE_PATH_BYTES {
         return Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }));
     }
-    let abbreviated = text.split_once(ABBREVIATION);
-    let depth = match abbreviated {
-        Some((_, relative)) => relative_segments(relative).count() + 1,
-        None => text.split('/').count(),
-    };
-    if depth > MAX_SCOPE_PATH_DEPTH {
+    if text.contains(RETIRED_SHORT_FORM) {
+        return Err(ActorPathError::RetiredShortForm);
+    }
+    let steps: Vec<_> = text.split('/').map(parse_segment).collect();
+    if steps.len() > MAX_SCOPE_PATH_DEPTH {
         return Err(ActorPathError::Scope(ScopePathError::TooDeep { limit: MAX_SCOPE_PATH_DEPTH }));
     }
-    match abbreviated {
-        Some((root, relative)) => check_segment(root.as_bytes())
-            .map_err(|fault| ActorPathError::Segment { index: 0, fault })
-            .and_then(|()| check_segments(relative_segments(relative), 1)),
-        None => check_segments(text.split('/'), 0),
-    }
-}
 
-/// Check each written segment, numbering them from `first`.
-fn check_segments<'a>(segments: impl Iterator<Item = &'a str>, first: usize) -> Result<(), ActorPathError> {
-    segments.enumerate().try_for_each(|(offset, segment)| {
-        let parts = match parse_segment(segment) {
-            PathSegment::Bare(segment) => check_segment(segment.as_bytes()),
+    let short = steps.iter().any(|step| matches!(step, PathSegment::Hole { .. }));
+    if short && !matches!(steps.first(), Some(PathSegment::Bare(_))) {
+        return Err(ActorPathError::ShortPathFromInstance);
+    }
+
+    steps.into_iter().enumerate().try_for_each(|(index, step)| {
+        let parts = match step {
+            PathSegment::Bare(namespace) => check_segment(namespace.as_bytes()),
             PathSegment::Qualified { namespace, discriminator } => {
                 check_segment(namespace.as_bytes()).and_then(|()| check_segment(discriminator.as_bytes()))
             }
+            PathSegment::Hole { discriminator } => check_segment(discriminator.as_bytes()),
         };
-        parts.map_err(|fault| ActorPathError::Segment { index: first + offset, fault })
+        parts.map_err(|fault| ActorPathError::Segment { index, fault })
     })
 }
 
-/// The relative segments after `://`: none when the relative path is empty.
-fn relative_segments(relative: &str) -> impl Iterator<Item = &str> {
-    relative.split('/').filter(move |_| !relative.is_empty())
-}
-
-/// Split a written segment at its first `:`. A second `:` stays in the
-/// discriminator, where the segment check rejects it as a separator.
+/// Split a written step at its first `:`. An empty namespace is a hole. A
+/// second `:` stays in the discriminator, where the segment check rejects it
+/// as a separator.
 fn parse_segment(segment: &str) -> PathSegment<'_> {
     match segment.split_once(':') {
         None => PathSegment::Bare(segment),
+        Some(("", discriminator)) => PathSegment::Hole { discriminator },
         Some((namespace, discriminator)) => PathSegment::Qualified { namespace, discriminator },
     }
 }
@@ -227,10 +239,12 @@ mod tests {
         let segment = |index, fault| Err(ActorPathError::Segment { index, fault });
         assert_eq!(ActorPath::new("a//b"), segment(1, SegmentFault::Empty));
         assert_eq!(ActorPath::new("a/"), segment(1, SegmentFault::Empty));
-        assert_eq!(ActorPath::new("root://worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
-        assert_eq!(ActorPath::new("a:b://c"), segment(0, SegmentFault::ContainsSeparator));
+        assert_eq!(ActorPath::new("root/worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
+        assert_eq!(ActorPath::new("a:b/:c"), Err(ActorPathError::ShortPathFromInstance));
+        assert_eq!(ActorPath::new(":a/b"), Err(ActorPathError::ShortPathFromInstance));
         assert_eq!(ActorPath::new("a b"), segment(0, SegmentFault::ContainsControlOrWhitespace));
         assert_eq!(ActorPath::new(""), segment(0, SegmentFault::Empty));
+        assert_eq!(ActorPath::new("aether.component://camera"), Err(ActorPathError::RetiredShortForm));
     }
 
     #[test]
@@ -240,14 +254,29 @@ mod tests {
         assert!(ActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH)).is_ok());
         assert_eq!(ActorPath::new(&canonical(MAX_SCOPE_PATH_DEPTH + 1)), too_deep);
 
-        let abbreviated = |relative| format!("root://{}", vec!["seg"; relative].join("/"));
-        assert!(ActorPath::new(&abbreviated(MAX_SCOPE_PATH_DEPTH - 1)).is_ok());
-        assert_eq!(ActorPath::new(&abbreviated(MAX_SCOPE_PATH_DEPTH)), too_deep);
+        let short = |holes| format!("root/{}", vec![":seg"; holes].join("/"));
+        assert!(ActorPath::new(&short(MAX_SCOPE_PATH_DEPTH - 1)).is_ok());
+        assert_eq!(ActorPath::new(&short(MAX_SCOPE_PATH_DEPTH)), too_deep);
 
         assert_eq!(
             ActorPath::new(&"a".repeat(MAX_SCOPE_PATH_BYTES + 1)),
             Err(ActorPathError::Scope(ScopePathError::TooLong { limit: MAX_SCOPE_PATH_BYTES }))
         );
+    }
+
+    #[test]
+    fn form_reports_a_hole_path_as_short() {
+        let short = ActorPath::new("root/manager/:camera").expect("a short path");
+        assert_eq!(
+            short.form(),
+            ActorPathForm::Short {
+                root: "root",
+                steps: vec![PathSegment::Bare("manager"), PathSegment::Hole { discriminator: "camera" }],
+            }
+        );
+
+        let canonical = ActorPath::new("root/manager/worker:camera").expect("a canonical path");
+        assert_eq!(canonical.form(), ActorPathForm::Canonical("root/manager/worker:camera"));
     }
 
     #[test]

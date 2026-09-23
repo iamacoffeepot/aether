@@ -242,10 +242,10 @@ from the previous step supplies the canonical lineage and identity fold.
 
 Rust actor code continues to resolve peers by type. String-addressed
 boundaries such as MCP, configuration, and harness calls may additionally use
-an ADR-0166 abbreviation rooted in an actor namespace:
+an ADR-0166 short path rooted in an actor namespace:
 
 ```text
-aether.component://camera
+aether.component/:camera
 ```
 
 The substrate expands that spelling from the generated `Root` and `ChildOf`
@@ -256,20 +256,18 @@ component host's one instanced child family, the address above expands to:
 aether.component/aether.embedded:camera
 ```
 
-An explicit child namespace is always accepted when the declared edge and
-cardinality match:
+A path is `/`-separated steps. After the root, a bare step always names a
+singleton child, `namespace:discriminator` names an instance of that instanced
+child, and `:discriminator` is a hole naming an instance of the one instanced
+child declared under the current actor. A path with no hole is canonical and
+never consults the declarations; a path with a hole is short, and its first
+step must be a bare root namespace. A hole resolves only when the current actor
+has exactly one logical instanced-child namespace. If several are possible,
+resolution returns a deterministic ambiguity error listing the explicit
+`namespace:discriminator` steps the caller can use. The older `://` spelling
+is refused with an error naming the hole form.
 
-```text
-aether.component://aether.embedded:camera
-```
-
-A bare discriminator is allowed only when the current actor has exactly one
-logical instanced-child namespace. If several instanced child namespaces are
-possible, resolution returns a deterministic ambiguity error listing the
-explicit segments the caller can use. Exact singleton child namespaces take
-precedence over discriminator elision.
-
-Abbreviations are boundary input, never actor identity. The registry expands
+Short paths are boundary input, never actor identity. The registry expands
 them before hashing and stores, lists, and reverse-reports only the canonical
 path. Unknown roots, illegal segments, ambiguous children, path-limit
 violations, and a valid expansion with no live mailbox remain distinct
@@ -277,9 +275,9 @@ resolution errors.
 
 At the boundary the text becomes an `aether_data::ActorPath`. Its grammar is
 checked when it is built or decoded, so a malformed address fails there rather
-than in the engine; it is stored as written, abbreviation included; and it
-becomes a position only in the engine's `resolve_address`, which expands
-abbreviations and checks liveness.
+than in the engine; it is stored as written, holes included; and it becomes a
+position only in the engine's `resolve_address`, which fills holes and checks
+liveness.
 
 ## Reply classes
 

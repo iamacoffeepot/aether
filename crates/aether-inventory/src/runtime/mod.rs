@@ -165,7 +165,7 @@ impl NativeActor for InventoryCapability {
     }
 
     /// Resolve one external actor address through the selected engine's
-    /// registry. ADR-0166 abbreviation expansion, canonical validation, and
+    /// registry. ADR-0166 short-path expansion, canonical validation, and
     /// liveness all remain engine-owned; the wire deliberately projects
     /// failures as diagnostic text instead of exposing the substrate error
     /// enum.
@@ -480,7 +480,7 @@ mod tests {
 
     #[test]
     #[allow(clippy::disallowed_methods)] // boundary-real fixture registers the canonical lineage-fold id
-    fn resolve_address_serves_canonical_short_explicit_and_engine_errors() {
+    fn resolve_address_serves_canonical_short_and_engine_errors() {
         let name = "camera";
         let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
         let mailbox_id = aether_data::mailbox_id_from_path(&canonical);
@@ -490,11 +490,7 @@ mod tests {
             .expect("register canonical child mailbox");
         let mut ctx = session_ctx(&fix.transport);
 
-        for address in [
-            canonical.clone(),
-            format!("{ADDRESS_TEST_ROOT}://{name}"),
-            format!("{ADDRESS_TEST_ROOT}://{ADDRESS_TEST_CHILD}:{name}"),
-        ] {
+        for address in [canonical.clone(), format!("{ADDRESS_TEST_ROOT}/:{name}")] {
             assert_eq!(
                 InventoryCapability::on_resolve_address(&mut fix.state, &mut ctx, ResolveAddress { address },),
                 ResolveAddressResult::Ok { mailbox_id, canonical_path: canonical.clone() },
@@ -503,7 +499,7 @@ mod tests {
         let missing = InventoryCapability::on_resolve_address(
             &mut fix.state,
             &mut ctx,
-            ResolveAddress { address: format!("{ADDRESS_TEST_ROOT}://missing") },
+            ResolveAddress { address: format!("{ADDRESS_TEST_ROOT}/:missing") },
         );
         match missing {
             ResolveAddressResult::Err { error } => {
@@ -518,7 +514,7 @@ mod tests {
         let ambiguous = InventoryCapability::on_resolve_address(
             &mut fix.state,
             &mut ctx,
-            ResolveAddress { address: format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}://camera") },
+            ResolveAddress { address: format!("{AMBIGUOUS_ADDRESS_TEST_ROOT}/:camera") },
         );
         match ambiguous {
             ResolveAddressResult::Err { error } => {

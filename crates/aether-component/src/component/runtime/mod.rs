@@ -451,7 +451,7 @@ impl NativeActor for ComponentHostCapability {
         _ctx: &mut NativeCtx<'_>,
         payload: DescribeComponent,
     ) -> DescribeComponentResult {
-        // `resolve_address`, not `lookup`: an abbreviated name that is
+        // `resolve_address`, not `lookup`: a short path that is
         // ambiguous rather than absent reports its candidate spellings instead
         // of collapsing to "nothing registered" (ADR-0166 §5, issue 4125).
         let resolved = ActorPath::new(&payload.name)

@@ -657,7 +657,7 @@ mod tests {
         };
 
         let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
-        let main = format!("{}://main", WindowCapability::NAMESPACE);
+        let main = format!("{}/:main", WindowCapability::NAMESPACE);
         let report = harness
             .execute(vec![
                 (

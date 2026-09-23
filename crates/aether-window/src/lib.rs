@@ -295,14 +295,14 @@ mod tests {
             .try_register_inbox_with_id(&boot_authority(), typed, canonical, noop_handler())
             .expect("register canonical live window mailbox");
 
-        for address in [canonical, "aether.window://main", "aether.window://aether.window.instance:main"] {
+        for address in [canonical, "aether.window/:main"] {
             let address = aether_data::ActorPath::new(address).expect("fixture is a well-formed actor path");
             let resolved = registry.resolve_address(&address).expect("resolve live window address");
             assert_eq!(resolved.mailbox_id, typed);
             assert_eq!(resolved.canonical_path, canonical);
         }
         assert_eq!(registry.mailbox_name(typed).as_deref(), Some(canonical));
-        assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("://")));
+        assert!(registry.list_mailbox_descriptors().iter().all(|descriptor| !descriptor.name.contains("/:")));
         let template_facts = template_entries()
             .filter(|entry| entry.prefix == super::WINDOW_INSTANCE_NAMESPACE)
             .map(|entry| (entry.domain, entry.template, matches!(&entry.param, ParamKind::Dynamic)))

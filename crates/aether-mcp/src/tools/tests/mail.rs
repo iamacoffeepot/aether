@@ -120,7 +120,7 @@ async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
 
 #[tokio::test]
 async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution() {
-    let supplied = "aether.test://camera";
+    let supplied = "aether.test/:camera";
     let canonical = "aether.test/aether.test.child:camera";
     let engine_answer = MailboxId(0x4057_0000_0000_0001);
     let engine = EngineId(Uuid::from_u128(0x4057));
@@ -165,7 +165,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
 
 #[tokio::test]
 async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved_mailbox() {
-    let supplied = "aether.test://declared-reply";
+    let supplied = "aether.test/:declared-reply";
     let canonical = "aether.test/aether.test.child:declared-reply";
     let engine_answer = MailboxId(0x4057_0000_0000_0003);
     #[allow(clippy::disallowed_methods)]

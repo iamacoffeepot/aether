@@ -976,9 +976,9 @@ mod control_plane {
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone)]
     pub struct NamedMail {
         /// The recipient: a validated but unresolved ADR-0166 address,
-        /// canonical or abbreviated. The receiving capability proves it
+        /// canonical or short. The receiving capability proves it
         /// once through `accept_bundle`, before any item of the bundle
-        /// moves: `Registry::resolve_address` expands an abbreviation, and
+        /// moves: `Registry::resolve_address` expands a short path, and
         /// the position it answers must hold a live route.
         pub recipient: aether_data::ActorPath,
         pub kind_name: String,

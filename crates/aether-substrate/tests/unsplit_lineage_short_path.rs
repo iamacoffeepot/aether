@@ -52,7 +52,7 @@ impl NativeActor for UnsplitRoot {
 }
 
 /// Un-split instanced child of the fixture root — the one instanced namespace
-/// beneath it, which is what lets a bare discriminator elide the child segment.
+/// beneath it, which is what lets a hole name one of its instances.
 struct UnsplitChild;
 
 #[actor(instanced, child_of(UnsplitRoot))]
@@ -78,26 +78,22 @@ fn register(registry: &Registry, canonical: &str) -> ResolvedAddress {
     ResolvedAddress { mailbox_id, canonical_path: canonical.to_owned() }
 }
 
-/// Tripwire: both abbreviations below are computed from link-time `#[actor]`
-/// output, and each fails unless the *cardinality* half of one declaration is
-/// present alongside its placement half. Reinstating any gate that emits a
-/// `RootEntry` / `ChildEntry` without the matching singleton / instanced fact
-/// excludes that namespace from the address index, so the root stops anchoring
-/// (`HalfDeclaredRoot`) and the child edge stops eliding — both assertions go
-/// red. The exclusion is per-namespace, so this watches these two fixtures and
-/// not, as it once did, every other namespace in the binary.
+/// Tripwire: the short path below is expanded from link-time `#[actor]`
+/// output, and it resolves only when the *cardinality* half of both
+/// declarations is present alongside its placement half: the root's singleton
+/// fact to anchor the path, and the child's instanced fact to fill the hole.
+/// Reinstating any gate that emits a `RootEntry` / `ChildEntry` without the
+/// matching singleton / instanced fact excludes that namespace from the address
+/// index, so the root stops anchoring (`HalfDeclaredRoot`) or the child edge
+/// stops filling the hole — either way the assertion goes red. The exclusion is
+/// per-namespace, so this watches these two fixtures and not, as it once did,
+/// every other namespace in the binary.
 #[test]
 fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
     let registry = Registry::new();
-    let root = register(&registry, UnsplitRoot::NAMESPACE);
     let child = register(&registry, &format!("{}/{}:one", UnsplitRoot::NAMESPACE, UnsplitChild::NAMESPACE));
 
-    // Anchoring the prefix at all needs the root's singleton fact: an instanced
-    // or absent one keeps the namespace out of the root table.
-    let path = |text: String| ActorPath::new(&text).expect("fixture is a well-formed actor path");
-    assert_eq!(registry.resolve_address(&path(format!("{}://", UnsplitRoot::NAMESPACE))), Ok(root));
-
-    // Eliding the child namespace needs the child's instanced fact: a bare
-    // discriminator only resolves against an instanced child edge.
-    assert_eq!(registry.resolve_address(&path(format!("{}://one", UnsplitRoot::NAMESPACE))), Ok(child));
+    let path =
+        ActorPath::new(&format!("{}/:one", UnsplitRoot::NAMESPACE)).expect("fixture is a well-formed actor path");
+    assert_eq!(registry.resolve_address(&path), Ok(child));
 }

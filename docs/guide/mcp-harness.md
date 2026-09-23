@@ -107,7 +107,7 @@ not for hub artifact-store or MCP-local queries.
 the **kind** to deliver, and the structured params, which the tool schema-encodes to
 wire bytes against that kind's descriptor. A textual `address` may be a
 canonical lineage (`aether.component/aether.embedded:camera`) or an ADR-0166
-abbreviation (`aether.component://camera`). The selected engine resolves either
+short path (`aether.component/:camera`). The selected engine resolves either
 spelling to the same live mailbox id and canonical path before dispatch;
 aether-mcp does not hash operator strings or keep an alias cache. A tagged
 `mbx-…` remains direct on tools that accept it. By default each item *blocks* until its
@@ -158,7 +158,7 @@ need their nested `SchemaType`. `names` cannot combine with `families` or
 `prefix`, and a bare unfiltered `detail: "schema"` call is refused so schema output
 stays bounded. `describe_component` reports a loaded component's handler kinds,
 their docs, whether it has a fallback, and its boot-config kind, addressed by
-the component's loaded lineage name or an unambiguous ADR-0166 abbreviation.
+the component's loaded lineage name or an unambiguous ADR-0166 short path.
 `load_component` returns the canonical
 `aether.component/aether.embedded:NAME` address. For a boot load, retain the
 configured name from the component spec or derive the expected lineage from
@@ -239,7 +239,7 @@ one handler.
   `mbx-…`, `knd-…`, `hdl-…` — hand them back verbatim, don't reformat or parse them.
   See [The type system](foundations/type-system.md).
 - **The engine resolves textual actor addresses.** Canonical paths and
-  `root.namespace://relative` abbreviations are checked against the selected
+  short paths such as `root/:name` are checked against the selected
   engine's declared topology and live registry. Do not derive a mailbox id
   from the spelling.
 - **`send_mail` blocks and projects replies by default.** It waits for settlement
@@ -253,12 +253,12 @@ one handler.
   desktop chassis; the headless chassis replies with an error rather than hanging.
   Before reading back a backgrounded or minimized window, mail
   `aether.window.focus` to a named child recipient such as
-  `aether.window://main` (canonical
+  `aether.window/:main` (canonical
   `aether.window/aether.window.instance:main`). Success acknowledges the focus
   request; the OS may decline it or apply it asynchronously, so it does not
   prove the window is already foregrounded. See [Window](systems/window.md).
 - **`describe_component` resolves names before consulting its cache.** Address
-  it by the lineage returned by `load_component`, an unambiguous abbreviation,
+  it by the lineage returned by `load_component`, an unambiguous short path,
   or a retained boot-spec lineage. The selected engine first returns the live
   mailbox id and canonical path; aether-mcp then checks capabilities cached
   under that real id and asks the component host only on a cache miss. A tagged

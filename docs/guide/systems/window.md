@@ -82,11 +82,11 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
 Typed Rust code should resolve through the actor identities rather than copy
 the root namespace. At string-addressed boundaries such as MCP and harness
 operations, the same live child may be named by either its canonical or
-abbreviated recipient:
+short recipient:
 
 ```text
 aether.window/aether.window.instance:main
-aether.window://main
+aether.window/:main
 ```
 
 The request/reply families are:
@@ -382,7 +382,7 @@ let subscribe = HarnessOp::actor::<SyntheticWindowCapability>().send(
     },
 );
 
-let main = format!("{}://main", WindowCapability::NAMESPACE);
+let main = format!("{}/:main", WindowCapability::NAMESPACE);
 let title = HarnessOp::send_and_await_reply(
     main,
     &SetWindowTitle { title: "Inspector".to_owned() },

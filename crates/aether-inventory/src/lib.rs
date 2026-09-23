@@ -21,7 +21,7 @@
 //!   `thread_name::resolve_runtime`). `None` on a miss so the client
 //!   falls back to rendering the ADR-0064 tagged-id string itself.
 //! - [`ResolveAddress`] → [`ResolveAddressResult`]: engine-owned
-//!   canonical/ADR-0166 abbreviated address resolution to one live mailbox id
+//!   canonical/ADR-0166 short address resolution to one live mailbox id
 //!   and canonical path.
 //! - [`ListKinds`] → [`ListKindsResult`] (ADR-0091): every
 //!   [`KindId`](aether_data::KindId) currently registered in the

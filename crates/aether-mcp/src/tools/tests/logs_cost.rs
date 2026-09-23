@@ -132,7 +132,7 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
 
     mcp.actor_logs(Parameters(ActorLogsArgs {
         engine_id: Some(engine_id.clone()),
-        address: "aether.test://probe".to_owned(),
+        address: "aether.test/:probe".to_owned(),
         max: None,
         level: None,
         since: None,
@@ -142,7 +142,7 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
     .expect("actor logs resolves and returns");
     mcp.actor_cost(Parameters(ActorCostArgs {
         engine_id: Some(engine_id),
-        address: "aether.test://probe".to_owned(),
+        address: "aether.test/:probe".to_owned(),
         kind_id: None,
     }))
     .await

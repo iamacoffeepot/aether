@@ -1,12 +1,12 @@
-//! Gate the abbreviated addresses that the hub binary can resolve (issue #4484).
+//! Gate the short paths that the hub binary can resolve (issue #4484).
 //!
 //! Ambiguity is a property of the linked declaration graph: a placement added
-//! by one of the hub's dependencies can silently collapse an abbreviation that
+//! by one of the hub's dependencies can silently collapse a short path that
 //! an operator, manifest, or MCP client already uses. This integration test
 //! reads the link-time inventory rather than scanning source declarations.
 
 use aether_chassis_hub::{Chassis, HubChassis};
-use aether_substrate::mail::registry::{AmbiguousAbbreviation, ambiguous_abbreviations};
+use aether_substrate::mail::registry::{AmbiguousHole, ambiguous_holes};
 use std::error::Error;
 
 /// Read ambiguity points after retaining the inventory linked by the hub chassis.
@@ -15,12 +15,12 @@ use std::error::Error;
 /// a public hub symbol references them. Naming `HubChassis` ensures this is a
 /// gate over the actual hub binary's declaration graph rather than an empty,
 /// vacuously passing test fixture.
-fn ambiguity_over_the_hub_link_set() -> Result<Vec<AmbiguousAbbreviation>, Box<dyn Error>> {
+fn ambiguity_over_the_hub_link_set() -> Result<Vec<AmbiguousHole>, Box<dyn Error>> {
     assert_eq!(HubChassis::PROFILE, "hub", "the fixture must name the chassis this gate claims to cover");
-    Ok(ambiguous_abbreviations()?)
+    Ok(ambiguous_holes()?)
 }
 
-/// Parents whose bare child discriminator is already ambiguous by design.
+/// Parents whose hole is already ambiguous by design.
 ///
 /// A new entry is an address-compatibility decision: callers must spell the
 /// child namespace explicitly, and the baseline records that trade in review.
@@ -28,11 +28,11 @@ const KNOWN_AMBIGUOUS: &[(&str, &[&str])] =
     &[("aether.tcp", &["aether.tcp.listener", "aether.tcp.session"] as &[&str])];
 
 #[test]
-fn no_new_parent_loses_its_bare_discriminator() -> Result<(), Box<dyn Error>> {
+fn no_new_parent_loses_its_hole() -> Result<(), Box<dyn Error>> {
     let observed = ambiguity_over_the_hub_link_set()?;
     let expected = KNOWN_AMBIGUOUS
         .iter()
-        .map(|(parent, children)| AmbiguousAbbreviation {
+        .map(|(parent, children)| AmbiguousHole {
             parent_namespace: (*parent).to_owned(),
             child_namespaces: children.iter().map(|child| (*child).to_owned()).collect(),
         })
@@ -40,20 +40,20 @@ fn no_new_parent_loses_its_bare_discriminator() -> Result<(), Box<dyn Error>> {
 
     assert_eq!(
         observed, expected,
-        "the set of hub parents with an ambiguous bare discriminator changed.\n\
-         A new entry means a `child_of(...)` collapsed an abbreviation that used to resolve — \
+        "the set of hub parents with an ambiguous hole changed.\n\
+         A new entry means a `child_of(...)` collapsed a short path that used to resolve — \
          address those children as `namespace:discriminator`, and record the trade here.\n\
-         A removed entry means an abbreviation became available again; drop it from KNOWN_AMBIGUOUS."
+         A removed entry means a short path became available again; drop it from KNOWN_AMBIGUOUS."
     );
     Ok(())
 }
 
 #[test]
-fn fleet_keeps_its_bare_discriminator() -> Result<(), Box<dyn Error>> {
+fn fleet_keeps_its_hole() -> Result<(), Box<dyn Error>> {
     let observed = ambiguity_over_the_hub_link_set()?;
     assert!(
         !observed.iter().any(|point| point.parent_namespace == "aether.fleet"),
-        "aether.fleet gained a second instanced child, so `aether.fleet://name` no longer resolves: {observed:?}"
+        "aether.fleet gained a second instanced child, so `aether.fleet/:name` no longer resolves: {observed:?}"
     );
     Ok(())
 }

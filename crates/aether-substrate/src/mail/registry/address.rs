@@ -81,12 +81,11 @@ impl fmt::Display for AddressResolutionError {
             Self::InvalidInventory(error) => write!(formatter, "actor address inventory is invalid: {error}"),
             Self::UnknownRoot { root } => write!(formatter, "unknown actor root `{root}`"),
             Self::InstancedRoot { root } => {
-                write!(formatter, "actor root `{root}` is instanced, so it cannot anchor an abbreviated address")
+                write!(formatter, "actor root `{root}` is instanced, so it cannot root a short path")
             }
             Self::HalfDeclaredRoot { root, defect } => write!(
                 formatter,
-                "actor root `{root}` {defect}, so it cannot anchor an abbreviated address until its declaration is \
-                 completed"
+                "actor root `{root}` {defect}, so it cannot root a short path until its declaration is completed"
             ),
             Self::IllegalSegment { parent, segment } => {
                 write!(formatter, "actor address segment `{segment}` is not legal beneath `{parent}`")
@@ -128,37 +127,47 @@ enum Cardinality {
     Instanced,
 }
 
-#[derive(Clone, Debug)]
-struct ChildNode {
-    actor: ActorId,
-    namespace: String,
-    cardinality: Cardinality,
+/// The declared children beneath one parent, keyed by namespace and split by
+/// cardinality, so each step kind is one keyed lookup: a bare step reads
+/// `singletons`, a `namespace:discriminator` step reads `instanced`, and a
+/// hole reads `instanced`'s size. A namespace sits in at most one map, because
+/// a namespace with contradicting cardinality facts is excluded at build.
+struct Children {
+    /// The parent's own namespace, which the `ActorId` key does not spell.
+    parent_namespace: String,
+    singletons: HashMap<String, ActorId>,
+    instanced: HashMap<String, ActorId>,
+}
+
+impl Children {
+    /// The instanced child namespaces, sorted: the candidates an ambiguous
+    /// hole lists. Only error and gate paths read this.
+    fn instanced_namespaces(&self) -> Vec<&str> {
+        let mut namespaces = self.instanced.keys().map(String::as_str).collect::<Vec<_>>();
+        namespaces.sort_unstable();
+        namespaces
+    }
 }
 
 pub(super) struct AddressIndex {
     roots: HashMap<String, ActorId>,
     /// Declared roots excluded from `roots` because their namespace is
-    /// instanced (ADR-0166 §5). Retained so a `://` prefix naming one
+    /// instanced (ADR-0166 §5). Retained so a short path rooted at one
     /// reports why it cannot anchor rather than reading as unknown.
     instanced_roots: BTreeSet<String>,
     /// Declared roots excluded from `roots` because their namespace carries no
     /// usable cardinality fact, with the defect that excluded each. Retained
-    /// for the same reason as `instanced_roots`: a `://` prefix naming one
+    /// for the same reason as `instanced_roots`: a short path rooted at one
     /// reports the half-declaration rather than reading as unknown.
     half_declared_roots: BTreeMap<String, CardinalityDefect>,
-    children: HashMap<ActorId, Vec<ChildNode>>,
-    /// Namespace of every actor that appears as a parent in `children`. The
-    /// child nodes carry their own namespace; this recovers the parent's, which
-    /// the `ActorId` key alone does not spell. Total over `children`'s keys by
-    /// construction — both maps are filled from the same edge.
-    parent_namespaces: HashMap<ActorId, String>,
+    children: HashMap<ActorId, Children>,
 }
 
-/// Every parent in *this binary's* linked actor inventory beneath which a bare
-/// discriminator is ambiguous (ADR-0166 §5), sorted by parent namespace.
+/// Every parent in *this binary's* linked actor inventory beneath which a
+/// hole is ambiguous (ADR-0166 §5), sorted by parent namespace.
 ///
-/// The linkage is the point. A `child_of(...)` in one crate can collapse an
-/// abbreviation that another crate's callers depend on, and the collapse is
+/// The linkage is the point. A `child_of(...)` in one crate can collapse a
+/// short path that another crate's callers depend on, and the collapse is
 /// only visible to a binary that links both — so a gate over this reads the
 /// same link-time facts the resolver does rather than scanning source
 /// (iamacoffeepot/aether#4127).
@@ -169,21 +178,21 @@ pub(super) struct AddressIndex {
 /// malformed — a namespace that is not a legal segment, or an actor tag
 /// disagreeing with the namespace it claims. Those stay fatal to the whole
 /// index, because such a fact cannot be trusted to name what it says it names.
-pub fn ambiguous_abbreviations() -> Result<Vec<AmbiguousAbbreviation>, ActorAddressInventoryError> {
-    Ok(AddressIndex::from_inventory()?.ambiguous_abbreviations())
+pub fn ambiguous_holes() -> Result<Vec<AmbiguousHole>, ActorAddressInventoryError> {
+    Ok(AddressIndex::from_inventory()?.ambiguous_holes())
 }
 
-/// A point in the linked declaration graph where a bare discriminator cannot
-/// elide: more than one instanced child namespace is declared beneath the same
-/// parent, so `parent://name` names no single child (ADR-0166 §5).
+/// A point in the linked declaration graph where a hole cannot be filled: more
+/// than one instanced child namespace is declared beneath the same parent, so
+/// `parent/:name` names no single child (ADR-0166 §5).
 ///
 /// Ambiguity is a property of the declaration graph rather than of any one
 /// actor, and a `child_of(...)` added in an unrelated crate can create it — so
 /// the shape exists to be enumerated and gated, not only reported at the moment
 /// an address fails to resolve (iamacoffeepot/aether#4127).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct AmbiguousAbbreviation {
-    /// The parent whose bare discriminators cannot elide.
+pub struct AmbiguousHole {
+    /// The parent whose holes cannot be filled.
     pub parent_namespace: String,
     /// The competing instanced child namespaces, sorted. A caller addressing
     /// this parent must name one of these explicitly as `namespace:discriminator`.
@@ -278,7 +287,7 @@ impl AddressIndex {
         // A namespace whose placement fact carries no matching cardinality fact
         // — or two contradicting ones — is excluded from the index alone, on
         // the same argument the instanced-root exclusion below rests on:
-        // rejecting the whole index would disable abbreviated addressing
+        // rejecting the whole index would disable short paths
         // process-wide over one unrelated declaration, and the error would name
         // a namespace the caller was not addressing.
         let mut resolved_cardinalities = BTreeMap::new();
@@ -311,20 +320,20 @@ impl AddressIndex {
         let mut instanced_roots = BTreeSet::new();
         let mut half_declared_roots = BTreeMap::new();
         for fact in root_facts {
-            // Retain an excluded root's reason so a `://` prefix naming one
+            // Retain an excluded root's reason so a short path rooted at one
             // reports why it cannot anchor rather than reading as unknown.
             if let Some(defect) = half_declared.get(fact.namespace) {
                 half_declared_roots.insert(fact.namespace.to_owned(), *defect);
                 continue;
             }
-            // ADR-0166 §5: a `://` prefix is the exact NAMESPACE of a declared
-            // root, so an instanced namespace identifies no single actor and
-            // cannot anchor one.
+            // ADR-0166 §5: a short path's root is the exact NAMESPACE of a
+            // declared root, so an instanced namespace identifies no single
+            // actor and cannot anchor one.
             if resolved_cardinalities[&fact.namespace] == Cardinality::Instanced {
                 if instanced_roots.insert(fact.namespace.to_owned()) {
                     tracing::warn!(
                         namespace = fact.namespace,
-                        "declared root is instanced; excluded as an abbreviated-address anchor"
+                        "declared root is instanced; excluded as a short-path root"
                     );
                 }
                 continue;
@@ -333,9 +342,10 @@ impl AddressIndex {
         }
 
         // An edge touching an excluded namespace is dropped rather than walked:
-        // the child's cardinality decides how a segment elides, so an edge with
-        // no cardinality has no defined traversal. Sibling edges are unaffected.
-        let mut logical_edges = BTreeSet::new();
+        // the child's cardinality decides which step reaches it, so an edge
+        // with no cardinality has no defined traversal. Sibling edges are unaffected.
+        // Duplicate records of one logical edge collapse into the same key.
+        let mut children = HashMap::<ActorId, Children>::new();
         for fact in child_facts {
             if half_declared.contains_key(fact.parent_namespace) {
                 continue;
@@ -343,62 +353,49 @@ impl AddressIndex {
             let Some(cardinality) = resolved_cardinalities.get(fact.child_namespace) else {
                 continue;
             };
-            logical_edges.insert((fact.parent, fact.parent_namespace, fact.child, fact.child_namespace, *cardinality));
-        }
-
-        let mut children = HashMap::<ActorId, Vec<ChildNode>>::new();
-        let mut parent_namespaces = HashMap::new();
-        for (parent, parent_namespace, child, child_namespace, cardinality) in logical_edges {
-            children.entry(parent).or_default().push(ChildNode {
-                actor: child,
-                namespace: child_namespace.to_owned(),
-                cardinality,
+            let parent = children.entry(fact.parent).or_insert_with(|| Children {
+                parent_namespace: fact.parent_namespace.to_owned(),
+                singletons: HashMap::new(),
+                instanced: HashMap::new(),
             });
-            parent_namespaces.insert(parent, parent_namespace.to_owned());
-        }
-        for nodes in children.values_mut() {
-            nodes.sort_by(|left, right| left.namespace.cmp(&right.namespace).then(left.actor.cmp(&right.actor)));
+            let table = match cardinality {
+                Cardinality::Singleton => &mut parent.singletons,
+                Cardinality::Instanced => &mut parent.instanced,
+            };
+            table.insert(fact.child_namespace.to_owned(), fact.child);
         }
 
-        Ok(Self { roots, instanced_roots, half_declared_roots, children, parent_namespaces })
+        Ok(Self { roots, instanced_roots, half_declared_roots, children })
     }
 
-    /// Every parent beneath which a bare discriminator is ambiguous, sorted by
-    /// parent namespace. Reads the same resolved edges `expand_segment` walks,
+    /// Every parent beneath which a hole is ambiguous, sorted by parent
+    /// namespace. Reads the same resolved edges `expand_segment` walks,
     /// so what this reports and what a caller hits at resolution time cannot
     /// disagree.
-    pub(super) fn ambiguous_abbreviations(&self) -> Vec<AmbiguousAbbreviation> {
+    pub(super) fn ambiguous_holes(&self) -> Vec<AmbiguousHole> {
+        // One instanced child fills a hole; none leaves nothing to fill it.
         let mut points = self
             .children
-            .iter()
-            .filter_map(|(parent, nodes)| {
-                let child_namespaces = nodes
-                    .iter()
-                    .filter(|node| node.cardinality == Cardinality::Instanced)
-                    .map(|node| node.namespace.clone())
-                    .collect::<Vec<_>>();
-                // One instanced child elides; none leaves nothing to elide into.
-                if child_namespaces.len() < 2 {
-                    return None;
-                }
-                let parent_namespace = self.parent_namespaces.get(parent)?.clone();
-                Some(AmbiguousAbbreviation { parent_namespace, child_namespaces })
+            .values()
+            .filter(|children| children.instanced.len() >= 2)
+            .map(|children| AmbiguousHole {
+                parent_namespace: children.parent_namespace.clone(),
+                child_namespaces: children.instanced_namespaces().into_iter().map(str::to_owned).collect(),
             })
             .collect::<Vec<_>>();
         points.sort();
         points
     }
 
-    /// Expand an abbreviation's parsed root and relative segments to its
-    /// canonical path. The segments come from an `ActorPath`, so their
-    /// grammar and the written caps already hold; the caps are rechecked as
-    /// the path grows, because a bare segment expands into
-    /// `namespace:discriminator`.
-    pub(super) fn expand(&self, root: &str, relative: &[PathSegment<'_>]) -> Result<String, AddressResolutionError> {
+    /// Expand a short path's parsed root and steps to its canonical path. The
+    /// steps come from an `ActorPath`, so their grammar and the written caps
+    /// already hold; the byte cap is rechecked as the path grows, because a
+    /// hole expands into `namespace:discriminator`.
+    pub(super) fn expand(&self, root: &str, steps: &[PathSegment<'_>]) -> Result<String, AddressResolutionError> {
         let mut current = *self.roots.get(root).ok_or_else(|| self.unanchored_root(root))?;
         let mut canonical_segments = vec![root.to_owned()];
 
-        for segment in relative {
+        for segment in steps {
             let parent = canonical_segments.join("/");
             current = self.expand_segment(current, &parent, segment, &mut canonical_segments)?;
             validate_owned_scope_path(&canonical_segments)?;
@@ -428,45 +425,37 @@ impl AddressIndex {
         segment: &PathSegment<'_>,
         canonical_segments: &mut Vec<String>,
     ) -> Result<ActorId, AddressResolutionError> {
-        let children = self.children.get(&current).map(Vec::as_slice).unwrap_or_default();
-        let segment = match *segment {
+        let illegal =
+            || AddressResolutionError::IllegalSegment { parent: parent.to_owned(), segment: segment.to_string() };
+        let children = self.children.get(&current).ok_or_else(illegal)?;
+        match *segment {
             PathSegment::Qualified { namespace, discriminator } => {
-                let Some(child) = children
-                    .iter()
-                    .find(|child| child.namespace == namespace && child.cardinality == Cardinality::Instanced)
-                else {
-                    return Err(AddressResolutionError::IllegalSegment {
-                        parent: parent.to_owned(),
-                        segment: segment.to_string(),
-                    });
-                };
-                canonical_segments.push(format!("{}:{discriminator}", child.namespace));
-                return Ok(child.actor);
+                let child = *children.instanced.get(namespace).ok_or_else(illegal)?;
+                canonical_segments.push(format!("{namespace}:{discriminator}"));
+                Ok(child)
             }
-            PathSegment::Bare(segment) => segment,
-        };
-
-        if let Some(child) =
-            children.iter().find(|child| child.namespace == segment && child.cardinality == Cardinality::Singleton)
-        {
-            canonical_segments.push(child.namespace.clone());
-            return Ok(child.actor);
-        }
-
-        let instanced = children.iter().filter(|child| child.cardinality == Cardinality::Instanced).collect::<Vec<_>>();
-        match instanced.as_slice() {
-            [] => {
-                Err(AddressResolutionError::IllegalSegment { parent: parent.to_owned(), segment: segment.to_owned() })
+            PathSegment::Bare(namespace) => {
+                let child = *children.singletons.get(namespace).ok_or_else(illegal)?;
+                canonical_segments.push(namespace.to_owned());
+                Ok(child)
             }
-            [child] => {
-                canonical_segments.push(format!("{}:{segment}", child.namespace));
-                Ok(child.actor)
-            }
-            _ => Err(AddressResolutionError::AmbiguousSegment {
-                parent: parent.to_owned(),
-                segment: segment.to_owned(),
-                candidates: instanced.iter().map(|child| format!("{}:{segment}", child.namespace)).collect(),
-            }),
+            PathSegment::Hole { discriminator } => match children.instanced.len() {
+                0 => Err(illegal()),
+                1 => {
+                    let (namespace, child) = children.instanced.iter().next().ok_or_else(illegal)?;
+                    canonical_segments.push(format!("{namespace}:{discriminator}"));
+                    Ok(*child)
+                }
+                _ => Err(AddressResolutionError::AmbiguousSegment {
+                    parent: parent.to_owned(),
+                    segment: segment.to_string(),
+                    candidates: children
+                        .instanced_namespaces()
+                        .into_iter()
+                        .map(|namespace| format!("{namespace}:{discriminator}"))
+                        .collect(),
+                }),
+            },
         }
     }
 }
@@ -503,14 +492,14 @@ mod tests {
 
     use super::*;
 
-    /// Parse `text` as an abbreviated `ActorPath` and expand it, as
+    /// Parse `text` as a short `ActorPath` and expand it, as
     /// `Registry::resolve_address` does.
     fn expand(index: &AddressIndex, text: &str) -> Result<String, AddressResolutionError> {
         let path = ActorPath::new(text).expect("fixture is a well-formed actor path");
-        let ActorPathForm::Abbreviated { root, relative } = path.form() else {
-            panic!("fixture `{text}` is not abbreviated");
+        let ActorPathForm::Short { root, steps } = path.form() else {
+            panic!("fixture `{text}` is not a short path");
         };
-        index.expand(root, &relative)
+        index.expand(root, &steps)
     }
 
     fn root(namespace: &str) -> RootFact<'_> {
@@ -543,8 +532,7 @@ mod tests {
         )
         .expect("valid topology");
 
-        assert_eq!(expand(&index, "root://manager/camera"), Ok("root/manager/worker:camera".to_owned()));
-        assert_eq!(expand(&index, "root://manager/worker:camera"), Ok("root/manager/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root/manager/:camera"), Ok("root/manager/worker:camera".to_owned()));
     }
 
     #[test]
@@ -557,14 +545,13 @@ mod tests {
         .expect("valid topology");
 
         assert_eq!(
-            expand(&index, "root://main"),
+            expand(&index, "root/:main"),
             Err(AddressResolutionError::AmbiguousSegment {
                 parent: "root".to_owned(),
-                segment: "main".to_owned(),
+                segment: ":main".to_owned(),
                 candidates: vec!["camera:main".to_owned(), "microphone:main".to_owned()],
             })
         );
-        assert_eq!(expand(&index, "root://camera:main"), Ok("root/camera:main".to_owned()));
     }
 
     #[test]
@@ -576,7 +563,7 @@ mod tests {
         )
         .expect("duplicate logical records deduplicate");
 
-        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root/:camera"), Ok("root/worker:camera".to_owned()));
     }
 
     #[test]
@@ -588,12 +575,12 @@ mod tests {
         )
         .expect("valid diamond");
 
-        assert_eq!(expand(&index, "root://left/one"), Ok("root/left/leaf:one".to_owned()));
-        assert_eq!(expand(&index, "root://right/one"), Ok("root/right/leaf:one".to_owned()));
+        assert_eq!(expand(&index, "root/left/:one"), Ok("root/left/leaf:one".to_owned()));
+        assert_eq!(expand(&index, "root/right/:one"), Ok("root/right/leaf:one".to_owned()));
     }
 
     #[test]
-    fn singleton_exact_match_precedes_bare_instanced_elision() {
+    fn a_bare_step_is_a_singleton_and_a_hole_is_an_instance() {
         let index = AddressIndex::build(
             [root("root")],
             [child("root", "status"), child("root", "worker")],
@@ -601,8 +588,15 @@ mod tests {
         )
         .expect("valid topology");
 
-        assert_eq!(expand(&index, "root://status"), Ok("root/status".to_owned()));
-        assert_eq!(expand(&index, "root://worker:status"), Ok("root/worker:status".to_owned()));
+        assert_eq!(expand(&index, "root/:status"), Ok("root/worker:status".to_owned()));
+        assert_eq!(
+            expand(&index, "root/camera/:x"),
+            Err(AddressResolutionError::IllegalSegment { parent: "root".to_owned(), segment: "camera".to_owned() })
+        );
+        assert_eq!(
+            expand(&index, "root/status/:x"),
+            Err(AddressResolutionError::IllegalSegment { parent: "root/status".to_owned(), segment: ":x".to_owned() })
+        );
     }
 
     #[test]
@@ -612,7 +606,7 @@ mod tests {
                 .expect("valid topology");
 
         assert_eq!(
-            expand(&index, "missing://one"),
+            expand(&index, "missing/:one"),
             Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
         );
     }
@@ -626,14 +620,13 @@ mod tests {
         )
         .expect("an instanced root excludes itself rather than failing the index");
 
-        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
-        assert_eq!(expand(&index, "root://"), Ok("root".to_owned()));
+        assert_eq!(expand(&index, "root/:camera"), Ok("root/worker:camera".to_owned()));
         assert_eq!(
-            expand(&index, "swarm://camera"),
+            expand(&index, "swarm/:camera"),
             Err(AddressResolutionError::InstancedRoot { root: "swarm".to_owned() })
         );
         assert_eq!(
-            expand(&index, "missing://camera"),
+            expand(&index, "missing/:camera"),
             Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
         );
     }
@@ -654,7 +647,7 @@ mod tests {
     #[test]
     fn a_half_declared_root_is_excluded_without_disabling_the_rest_of_the_index() {
         // #4138's blast radius, inverted: a half-declared namespace used to
-        // return InvalidInventory for *every* abbreviated address, including
+        // return InvalidInventory for *every* short path, including
         // roots from other crates whose facts are entirely healthy.
         for (defect, cardinality_facts) in [
             (CardinalityDefect::Missing, vec![singleton("root"), instanced("worker")]),
@@ -667,13 +660,13 @@ mod tests {
                 AddressIndex::build([root("root"), root("swarm")], [child("root", "worker")], cardinality_facts)
                     .expect("a half-declared namespace excludes itself rather than failing the index");
 
-            assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
+            assert_eq!(expand(&index, "root/:camera"), Ok("root/worker:camera".to_owned()));
             assert_eq!(
-                expand(&index, "swarm://camera"),
+                expand(&index, "swarm/:camera"),
                 Err(AddressResolutionError::HalfDeclaredRoot { root: "swarm".to_owned(), defect })
             );
             assert_eq!(
-                expand(&index, "missing://camera"),
+                expand(&index, "missing/:camera"),
                 Err(AddressResolutionError::UnknownRoot { root: "missing".to_owned() })
             );
         }
@@ -681,7 +674,7 @@ mod tests {
 
     #[test]
     fn only_the_edges_touching_a_half_declared_namespace_are_dropped() {
-        // A child namespace with no cardinality fact has no defined elision, so
+        // A child namespace with no cardinality fact has no defined step, so
         // its edge cannot be walked — but its siblings under the same parent
         // still resolve, and the parent itself still anchors.
         let index = AddressIndex::build(
@@ -691,12 +684,11 @@ mod tests {
         )
         .expect("a half-declared child excludes its own edge");
 
-        assert_eq!(expand(&index, "root://camera"), Ok("root/worker:camera".to_owned()));
-        assert_eq!(expand(&index, "root://worker:camera"), Ok("root/worker:camera".to_owned()));
+        assert_eq!(expand(&index, "root/:camera"), Ok("root/worker:camera".to_owned()));
         assert_eq!(
-            expand(&index, "root://status"),
-            Ok("root/worker:status".to_owned()),
-            "with `status` excluded, a bare segment elides through the one remaining instanced child"
+            expand(&index, "root/status/:x"),
+            Err(AddressResolutionError::IllegalSegment { parent: "root".to_owned(), segment: "status".to_owned() }),
+            "with `status` excluded, its edge is not walked"
         );
     }
 }

@@ -255,7 +255,7 @@ address from the manager identity rather than copying its namespace literal:
 ```rust
 use aether_actor::Addressable;
 
-let main = format!("{}://main", WindowCapability::NAMESPACE);
+let main = format!("{}/:main", WindowCapability::NAMESPACE);
 
 HarnessOp::send_and_await_reply(
     main,
