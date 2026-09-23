@@ -4,24 +4,25 @@
 //! journal's reference in [`DriverParams`]. `init` builds the [`ProgramCore`] and
 //! keeps its first commands; `wire` performs them once the mailbox is live.
 //! Commands go to the journal owner (reads, appends, and the watch), the
-//! component host (loads) and bundle roots. Inbound [`Call`]
+//! component host (loads) and bundle roots. The core names a loaded bundle by
+//! its digest; the shell keeps each root's proven reference, taken from its
+//! load reply's stamped sender (ADR-0230 §3), keyed by that digest, and sends
+//! to it with the command's ticket as the request context. Inbound [`Call`]
 //! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and
 //! appends the reply to a parked list tagged with its [`CallerId`]; each
 //! reply kind recovers its ticket from the request context and feeds the
 //! matching core continuation. Dropping the actor abandons every parked reply.
 
 mod perform;
-mod root;
 
-pub use root::BundleRoot;
-
+use std::collections::{BTreeMap, HashMap};
 use std::mem;
 
-use aether_actor::{ActorRef, Manual, actor};
+use aether_actor::{ActorRef, ErasedActorRef, Manual, actor};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Evaluated, Invoked, ReadArtifactResult, ReadClosureResult,
-    ReadEventsResult, Status, Warmed, WatchHeadResult,
+    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifactResult,
+    ReadClosureResult, ReadEventsResult, Status, Warmed, WatchHeadResult,
 };
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
@@ -60,6 +61,10 @@ pub struct BundleDriver {
     journal: ActorRef<JournalActor>,
     startup: Vec<Command>,
     callers: Vec<(CallerId, DeferredReply)>,
+    /// The digest each in-flight load was issued for, keyed by its ticket.
+    loading: BTreeMap<LoadTicket, Digest>,
+    /// Each loaded bundle's root, the stamped sender of its load reply.
+    roots: HashMap<Digest, ErasedActorRef>,
 }
 
 #[actor(instanced, root)]
@@ -71,7 +76,7 @@ impl NativeActor for BundleDriver {
     fn init(limit: ClosureLimit, params: DriverParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let DriverParams { journal } = params;
         let (core, startup) = ProgramCore::start(limit);
-        Ok(Self { core, journal, startup, callers: Vec::new() })
+        Ok(Self { core, journal, startup, callers: Vec::new(), loading: BTreeMap::new(), roots: HashMap::new() })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -140,9 +145,21 @@ impl NativeActor for BundleDriver {
         let Some(ticket) = ctx.take_context::<LoadTicket>() else {
             return;
         };
-        let outcome = match result {
-            LoadResult::Ok { mailbox_id, .. } => LoadOutcome::Loaded { root: mailbox_id },
-            LoadResult::Err { error } => LoadOutcome::Failed { error },
+        // ADR-0230 §3: the loaded root sends its own load reply, so the
+        // stamped sender is the reference the driver keeps for the digest.
+        let bundle = self.loading.remove(&ticket);
+        let outcome = match (result, ctx.sender(), bundle) {
+            (LoadResult::Ok { .. }, Some(root), Some(bundle)) => {
+                self.roots.insert(bundle, root);
+                LoadOutcome::Loaded
+            }
+            (LoadResult::Ok { path, .. }, None, _) => {
+                LoadOutcome::Failed { error: format!("load reply for {path} carried no sender") }
+            }
+            (LoadResult::Ok { path, .. }, Some(_), None) => {
+                LoadOutcome::Failed { error: format!("load reply for {path} matched no issued load") }
+            }
+            (LoadResult::Err { error }, ..) => LoadOutcome::Failed { error },
         };
         let commands = self.core.on_loaded(ticket, outcome);
         self.perform(ctx, commands);

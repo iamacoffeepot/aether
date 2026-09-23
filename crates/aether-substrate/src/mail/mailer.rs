@@ -449,7 +449,12 @@ impl Mailer {
         match sender.addr {
             SourceAddr::None => false,
             SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
-                self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply(sender, result))
+                // The replier minted `reply_id` in its own id space, so its
+                // sender half is the replying actor: stamped on the session
+                // reply for an embedder to read (ADR-0230 §3).
+                let stamp =
+                    (reply_id != aether_data::MailId::NONE).then(|| Registry::structural_erased(reply_id.sender));
+                self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply_stamped(sender, result, stamp))
             }
             SourceAddr::Component(mailbox) => {
                 // ADR-0100: encode the reply through the kind's declared

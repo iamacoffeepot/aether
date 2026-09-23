@@ -66,7 +66,7 @@ fn load_root(harness: &mut SubstrateHarness, wasm: Vec<u8>, digest: &str) -> Str
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => name,
+        LoadResult::Ok { path: name, .. } => name.to_string(),
         LoadResult::Err { error } => panic!("load_component({digest}): {error}"),
     }
 }

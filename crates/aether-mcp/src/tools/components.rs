@@ -514,18 +514,15 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
             .await
             .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?} replica {index}"), e))?;
         match LoadResult::decode_from_bytes(&reply.payload) {
-            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => {
+            Some(LoadResult::Ok { path, capabilities }) => {
+                instances.push(serde_json::json!({ "address": path.to_string() }));
                 mcp.components
                     .lock()
                     .expect("component cache mutex is never poisoned")
-                    .insert((engine, mailbox_id), capabilities.clone());
+                    .insert((engine, path), capabilities.clone());
                 if shared_caps.is_none() {
                     shared_caps = Some(capabilities);
                 }
-                instances.push(serde_json::json!({
-                    "mailbox_id": mailbox_id,
-                    "name": name,
-                }));
             }
             Some(LoadResult::Err { error }) => {
                 return Err(internal_msg(&format!(
@@ -567,17 +564,13 @@ async fn load_single_component(
         .await
         .map_err(|e| frame_size_aware_error(&format!("load_component {selector:?}"), e))?;
     match LoadResult::decode_from_bytes(&reply.payload) {
-        Some(LoadResult::Ok { mailbox_id, name, capabilities }) => {
+        Some(LoadResult::Ok { path, capabilities }) => {
+            let address = path.to_string();
             mcp.components
                 .lock()
                 .expect("component cache mutex is never poisoned")
-                .insert((engine, mailbox_id), capabilities.clone());
-            json(&serde_json::json!({
-                "engine_id": engine_id,
-                "mailbox_id": mailbox_id,
-                "name": name,
-                "capabilities": project_capabilities(&capabilities, full),
-            }))
+                .insert((engine, path), capabilities.clone());
+            component_reply(engine_id, &address, &capabilities, full)
         }
         Some(LoadResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable LoadResult")),
@@ -586,10 +579,10 @@ async fn load_single_component(
 
 pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
-    // The one tool that used to demand a raw `mbx-…` id now goes through
-    // the same address resolver as its siblings, so a lineage name works
-    // here too (issue 5715). A tagged id stays the local fast path.
-    let mailbox_id = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?.0;
+    // The engine resolves the operator's spelling to the canonical lineage,
+    // which is both the replace target the component host proves and the
+    // cache key; a tagged `mbx-…` id is refused.
+    let target = mcp.resolve_component_path(engine, &args.address, "replace_component").await?;
     let selector = selector_with_explicit_export(&args.selector, args.export.as_deref());
     // ADR-0116: resolve the selector hub-local to the replacement wasm
     // bytes (hash-primary, so a hash pins/rolls to an exact build).
@@ -615,17 +608,18 @@ pub(super) async fn replace_component(mcp: &Mcp, args: ReplaceComponentArgs) -> 
             // reads (post-ADR-0038 the splice is structural). The tool no
             // longer accepts it; the wire kind still carries it, so it is
             // pinned to `None` here until the kind itself drops it.
-            &ReplaceComponent { mailbox_id, wasm: resolved.wasm, drain_timeout_ms: None, config, export },
+            &ReplaceComponent { target: target.clone(), wasm: resolved.wasm, drain_timeout_ms: None, config, export },
         ))
         .await
         .map_err(|e| frame_size_aware_error(&format!("replace_component {selector:?}"), e))?;
     match ReplaceResult::decode_from_bytes(&reply.payload) {
         Some(ReplaceResult::Ok { capabilities }) => {
+            let address = target.to_string();
             mcp.components
                 .lock()
                 .expect("component cache mutex is never poisoned")
-                .insert((engine, mailbox_id), capabilities.clone());
-            component_reply(&engine_id, &args.address, &capabilities, args.full)
+                .insert((engine, target), capabilities.clone());
+            component_reply(&engine_id, &address, &capabilities, args.full)
         }
         Some(ReplaceResult::Err { error }) => Err(internal_msg(&error)),
         None => Err(internal_msg("undecodable ReplaceResult")),

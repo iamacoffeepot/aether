@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use aether_data::{EngineId, Kind, MailId};
+use aether_data::{ActorPath, EngineId, Kind, MailId};
 use aether_kinds::trace::{DescribeTreeResult, DispatchTraced, TRACE_MAILBOX_NAME, TraceTail, TraceTailResult};
 use aether_trace::walk::TreeWalk;
 use rmcp::ErrorData as McpError;
@@ -50,12 +50,12 @@ pub(super) async fn settle_mail_item(
     let mut timed_out = false;
     let status = match mcp.deliver_one(spec).await {
         Ok(delivered) => {
-            // The prepared direct path carries the engine's resolved mailbox
-            // id forward, so a short-path spelling consults the same
+            // The prepared direct path carries the engine's canonical lineage
+            // forward, so a short-path spelling consults the same
             // component-capability cache entry as its canonical spelling.
-            let declared_reply = {
+            let declared_reply = ActorPath::new(&delivered.canonical_recipient).ok().and_then(|canonical| {
                 let cache = mcp.components.lock().expect("component cache mutex is never poisoned");
-                cache.get(&(delivered.engine, delivered.resolved_mailbox_id)).and_then(|caps| {
+                cache.get(&(delivered.engine, canonical)).and_then(|caps| {
                     caps.handlers.iter().find(|handler| handler.name == delivered.kind_name).and_then(|handler| {
                         match handler.reply {
                             aether_data::ReplyContract::One(id) | aether_data::ReplyContract::Multi(id) => Some(id),
@@ -63,7 +63,7 @@ pub(super) async fn settle_mail_item(
                         }
                     })
                 })
-            };
+            });
             let engine_kinds = mcp.snapshot_engine_kinds(delivered.engine);
             replies = project_replies(
                 decode_reply_events(&delivered.events, &engine_kinds, declared_reply),

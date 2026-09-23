@@ -31,18 +31,19 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
-use aether_data::{Kind, KindId, SessionToken, Uuid};
+use aether_component::ComponentHostCapability;
+use aether_data::{ActorPath, Kind, KindId, SessionToken, Uuid};
 #[cfg(test)]
 use aether_kinds::trace::{DescribeTreeResult, TraceTail, TraceTailResult};
 use aether_kinds::{Advance, AdvanceResult, CaptureFrame, CaptureFrameResult};
-use aether_kinds::{LogTail, LogTailResult, Tick};
+use aether_kinds::{LoadComponent, LoadResult, LogTail, LogTailResult, Tick};
 #[cfg(test)]
 use aether_trace::walk::TreeWalk;
 // The driver sends encode each kind through the descriptor-aware
 // `Kind::encode_into_bytes` (cast or structured per the kind's shape).
 use crate::poll_config::PollConfig;
 use crate::pump_stats::PumpStats;
-use aether_actor::{ActorRef, Root};
+use aether_actor::{ActorRef, Addressable, ErasedActorRef, Root};
 use aether_fs::NamespaceRoots;
 use aether_substrate::config::{ConfigMember, SettlementConfig};
 use aether_substrate::{
@@ -165,6 +166,9 @@ pub enum SubstrateHarnessError {
     Advance(String),
     Capture(String),
     UnknownMailbox(String),
+    /// A component load the harness drove itself ([`SubstrateHarness::load`])
+    /// was refused, or its reply could not be adopted as the loaded actor.
+    Load(String),
     SettlementTimeout {
         recipient: String,
         kind_name: &'static str,
@@ -187,6 +191,7 @@ impl fmt::Display for SubstrateHarnessError {
             Self::Advance(e) => write!(f, "advance failed: {e}"),
             Self::Capture(e) => write!(f, "capture failed: {e}"),
             Self::UnknownMailbox(name) => write!(f, "unknown mailbox: {name}"),
+            Self::Load(e) => write!(f, "component load failed: {e}"),
             Self::SettlementTimeout { recipient, kind_name, pending } => write!(
                 f,
                 "send to {recipient:?} ({kind_name}) did not settle before the patience backstop — a genuine deadlock/livelock in the chain (a healthy chain never reaches this cap); pending roots: {pending}",
@@ -844,11 +849,11 @@ impl SubstrateHarness {
 
     /// Borrow the substrate's queryable [`CapabilityRegistry`]
     /// (iamacoffeepot/aether#1037). The harness shares the same `Mailer`
-    /// every cap registers against, so `accepts(MailboxId, KindId)` /
-    /// `has_fallback(MailboxId)` here reflect the post-load /
-    /// post-replace / post-drop dispatchability surface. Surfaced for
-    /// integration tests that exercise the registry through a real
-    /// component-load lifecycle.
+    /// every cap registers against, so `accepts_actor(reference, KindId)`
+    /// here reflects the post-load / post-replace / post-drop
+    /// dispatchability surface, for the reference [`Self::load_any`]
+    /// returns. Surfaced for integration tests that exercise the registry
+    /// through a real component-load lifecycle.
     #[must_use]
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         self.queue.capability_registry()
@@ -856,13 +861,78 @@ impl SubstrateHarness {
 
     /// Borrow the substrate's per-handler [`CostTable`]
     /// (iamacoffeepot/aether#1128). Shares the same `Mailer` the dispatch
-    /// fold writes through, so `tail(MailboxId, …)` here reflects the
-    /// cells seeded at component construction (and any folded samples).
+    /// fold writes through, so `tail(reference, …)` here reflects the
+    /// cells seeded at component construction (and any folded samples),
+    /// for the reference [`Self::load_any`] returns.
     /// Surfaced for integration tests that exercise the cost table
     /// through a real component-load lifecycle.
     #[must_use]
     pub fn cost_table(&self) -> &Arc<CostTable> {
         self.queue.cost_table()
+    }
+
+    /// Load the component export `R` and return its proven reference and
+    /// canonical lineage path (ADR-0230 §3).
+    ///
+    /// Sets `component.export` to `R::NAMESPACE`, sends the load to the
+    /// component host with this harness's session as the reply target, and
+    /// types the successful reply's stamped sender — the loaded trampoline,
+    /// which answers the load itself — as `R`. Needs
+    /// [`SubstrateHarnessBuilder::with_component_host`].
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Load`] when the host refuses the load or the
+    /// reply's sender is not the loaded component; the pump's timeout and
+    /// decode errors otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness composed no component host.
+    pub fn load<R: Addressable>(
+        &mut self,
+        mut component: LoadComponent,
+    ) -> Result<(ActorRef<R>, ActorPath), SubstrateHarnessError> {
+        component.export = Some(R::NAMESPACE.to_owned());
+        let (sender, path) = self.load_any(&component)?;
+        let actor =
+            self.passive.adopt_load::<R>(sender).map_err(|error| SubstrateHarnessError::Load(error.to_string()))?;
+
+        Ok((actor, path))
+    }
+
+    /// [`Self::load`] for a component whose actor type the test cannot name,
+    /// such as a fixture that ships only as wasm: the loaded actor's erased
+    /// reference, read off the reply's stamped sender, and its canonical
+    /// lineage path. `component` is sent as given.
+    ///
+    /// # Errors
+    ///
+    /// [`SubstrateHarnessError::Load`] when the host refuses the load or the
+    /// reply carries no sender; the pump's timeout and decode errors
+    /// otherwise.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the harness composed no component host.
+    pub fn load_any(
+        &mut self,
+        component: &LoadComponent,
+    ) -> Result<(ErasedActorRef, ActorPath), SubstrateHarnessError> {
+        let host = self.passive.actor_ref::<ComponentHostCapability>().erase();
+        let cid = self.fresh_correlation_id();
+        self.passive.send_for_reply(host, LoadComponent::ID, component.encode_into_bytes(), self.session_reply(cid));
+
+        let EgressEvent::ToSession { payload, sender, .. } = self.pump_until_event(cid, LoadResult::NAME, None)? else {
+            return Err(SubstrateHarnessError::Decode("expected a session-targeted LoadResult".to_owned()));
+        };
+        match LoadResult::decode_from_bytes(&payload) {
+            Some(LoadResult::Ok { path, .. }) => sender
+                .map(|sender| (sender, path))
+                .ok_or_else(|| SubstrateHarnessError::Load("the load reply carried no sender stamp".to_owned())),
+            Some(LoadResult::Err { error }) => Err(SubstrateHarnessError::Load(error)),
+            None => Err(SubstrateHarnessError::Decode("LoadResult decode failed".to_owned())),
+        }
     }
 
     /// Bytes-level settlement-gated send: resolve `recipient_name` in

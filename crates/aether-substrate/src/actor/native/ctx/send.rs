@@ -18,7 +18,7 @@ use aether_actor::{
     Addressable, CallerAddressable, CallerScoped, Emit, ErasedActorRef, HandlesKind, MailSender, Manual, Multi,
     OutboundReply, ReplyMode, Singleton,
 };
-use aether_data::{Kind, KindId, MailId, MailboxId};
+use aether_data::{Kind, KindId, MailId, MailboxId, RequestId};
 
 use crate::mail::{BoundaryMail, Source};
 
@@ -216,6 +216,57 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
+    }
+
+    /// Send `payload` to the actor `target` proves and store `context` under
+    /// the minted correlation, for the reply handler to take back with
+    /// [`Self::take_context`](super::NativeCtx::take_context).
+    ///
+    /// The erased form of `ctx.to(&actor_ref).with_context(&context).send(&payload)`:
+    /// it inherits this handler's causal chain the same way and returns the
+    /// minted [`MailId`]. No `HandlesKind` bound checks `payload` against the
+    /// target, which ADR-0230 §2 allows for an erased reference — the caller
+    /// holds a proof of a live actor whose type it cannot name.
+    ///
+    /// Its consumers are the bloomery driver's four bundle-root sends
+    /// (`Invoke`, `Warm`, `Evaluate`, and `StatusQuery`, to the root it kept
+    /// from its load reply's stamped sender) and the chassis-bloomery boot
+    /// probe's `AwaitProcessed`.
+    #[must_use]
+    pub fn send_with_context<K: Kind, C: Kind>(&self, target: &ErasedActorRef, payload: &K, context: &C) -> MailId {
+        let bytes = payload.encode_into_bytes();
+        let mail_id = self.binding.push_envelope_buffered(
+            target.id().0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+        );
+        self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
+        mail_id
+    }
+
+    /// Push `payload` to `target` on behalf of an owed reply: the mail's
+    /// reply target is pinned to `reply_to`, the caller still waiting, and its
+    /// lineage is `root`, the chain the owed reply's hold keeps open (a fresh
+    /// chain when `root` is [`MailId::NONE`]). The push's settlement count is
+    /// taken eagerly, so the hold may be released as soon as this returns.
+    ///
+    /// The body of [`TaskDone::hand_off`](crate::actor::native::TaskDone::hand_off),
+    /// which owns the hold and the reply target this reads.
+    pub(crate) fn push_handed_off<K: Kind>(&self, target: ErasedActorRef, payload: &K, root: MailId, reply_to: Source) {
+        let bytes = payload.encode_into_bytes();
+        let root = (root != MailId::NONE).then_some(root);
+        let _ = self.binding.push_envelope_buffered_with_reply_to(
+            target.id().0,
+            K::ID.0,
+            &bytes,
+            1,
+            None,
+            root,
+            Some(reply_to),
+        );
     }
 
     /// Deliver a proven boundary bundle item on a fresh causal chain, as

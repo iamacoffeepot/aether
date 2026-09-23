@@ -3,7 +3,7 @@
 //!
 //! Each test boots a `SubstrateHarness`, loads (and where relevant replaces /
 //! drops) a component, and asks the substrate's `CapabilityRegistry`
-//! whether a mailbox `accepts(kind)` and `has_fallback`. The registry
+//! whether the loaded actor `accepts_actor(kind)`. The registry
 //! is the prerequisite for the DAG validator's dispatchability check
 //! (iamacoffeepot/aether#975 Phase 2). The surface is input-side only —
 //! handler kinds + fallback presence; there is deliberately no
@@ -20,13 +20,13 @@
 
 use std::path::Path;
 
-use aether_actor::Addressable;
+use aether_actor::{Addressable, ErasedActorRef};
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, KindId, MailboxId, mailbox_id_from_name};
+use aether_data::{ActorPath, Kind, KindId, mailbox_id_from_name};
 use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult, Ping, ReplaceComponent, ReplaceResult, Tick};
+use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, ReplaceComponent, ReplaceResult, Tick};
 use aether_kit_commons::camera::CameraCreate;
 use aether_test_fixtures_kinds::SetRender;
 use std::fs;
@@ -36,21 +36,11 @@ use std::fs;
 #[allow(unused_imports)]
 use aether_test_fixtures_kinds as _;
 
-fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (ErasedActorRef, ActorPath) {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
-    let loaded = harness
-        .execute(vec![(
-            "load",
-            HarnessOp::send_and_await_reply(
-                ComponentHostCapability::NAMESPACE,
-                &LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None },
-            ),
-        )])
-        .expect("load sequence");
-    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
-        LoadResult::Err { error } => panic!("load_component({name}): {error}"),
-    }
+    harness
+        .load_any(&LoadComponent { wasm, name: Some(name.to_owned()), config: Vec::new(), export: None })
+        .unwrap_or_else(|error| panic!("load_component({name}): {error}"))
 }
 
 /// A freshly-loaded probe's trampoline mailbox accepts the kinds the
@@ -62,30 +52,27 @@ fn cap_registry_reports_accepted_kinds() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut harness, &wasm_path, "probe");
+    let (probe, _) = load_named(&mut harness, &wasm_path, "probe");
     let caps = harness.capability_registry();
 
-    assert!(caps.accepts(mbox, Tick::ID), "probe should accept its declared Tick handler");
-    assert!(caps.accepts(mbox, SetRender::ID), "probe should accept its declared SetRender handler");
-    assert!(!caps.accepts(mbox, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
+    assert!(caps.accepts_actor(probe, Tick::ID), "probe should accept its declared Tick handler");
+    assert!(caps.accepts_actor(probe, SetRender::ID), "probe should accept its declared SetRender handler");
+    assert!(!caps.accepts_actor(probe, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
 }
 
-/// The probe is a strict receiver — no `#[fallback]`. Its trampoline
-/// mailbox reports `has_fallback == false`, and a kind it doesn't
-/// handle is rejected. (The fallback==true arm of the surface is unit-
-/// tested in `aether_substrate::mail::capability`.)
+/// The probe is a strict receiver — no `#[fallback]` — so a kind it doesn't
+/// handle is rejected rather than swallowed. (The fallback==true arm of the
+/// surface is unit-tested in `aether_substrate::mail::capability`.)
 #[test]
 fn cap_registry_reports_fallback() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut harness, &wasm_path, "strict");
+    let (strict, _) = load_named(&mut harness, &wasm_path, "strict");
     let caps = harness.capability_registry();
 
-    assert!(!caps.has_fallback(mbox), "probe is a strict receiver; has_fallback must be false");
-    // No fallback ⇒ unknown kinds are rejected, not swallowed.
-    assert!(!caps.accepts(mbox, Ping::ID));
+    assert!(!caps.accepts_actor(strict, Ping::ID), "a strict receiver rejects an undeclared kind");
 }
 
 /// `aether.component.replace` swaps the probe wasm for `aether-kit-commons`'s
@@ -104,13 +91,13 @@ fn cap_registry_updates_on_replace() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut harness, &probe_path, "swappable");
+    let (swappable, path) = load_named(&mut harness, &probe_path, "swappable");
 
     // Pre-replace: probe accepts SetRender, rejects CameraCreate.
     {
         let caps = harness.capability_registry();
-        assert!(caps.accepts(mbox, SetRender::ID));
-        assert!(!caps.accepts(mbox, CameraCreate::ID));
+        assert!(caps.accepts_actor(swappable, SetRender::ID));
+        assert!(!caps.accepts_actor(swappable, CameraCreate::ID));
     }
 
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
@@ -120,7 +107,7 @@ fn cap_registry_updates_on_replace() {
             HarnessOp::send_and_await_reply(
                 ComponentHostCapability::NAMESPACE,
                 &ReplaceComponent {
-                    mailbox_id: mbox,
+                    target: path,
                     wasm: kit_wasm,
                     drain_timeout_ms: None,
                     config: Vec::new(),
@@ -140,15 +127,15 @@ fn cap_registry_updates_on_replace() {
     // Post-replace: the camera's accept-set wins.
     let caps = harness.capability_registry();
     assert!(
-        caps.accepts(mbox, CameraCreate::ID),
+        caps.accepts_actor(swappable, CameraCreate::ID),
         "camera should accept its declared CameraCreate handler after replace",
     );
     assert!(
-        !caps.accepts(mbox, SetRender::ID),
+        !caps.accepts_actor(swappable, SetRender::ID),
         "the probe's SetRender handler must be gone after replacing with the camera",
     );
     // Both components declare a Tick handler, so it survives the swap.
-    assert!(caps.accepts(mbox, Tick::ID));
+    assert!(caps.accepts_actor(swappable, Tick::ID));
 }
 
 /// `aether.component.drop` clears the dropped mailbox's caps — once
@@ -159,13 +146,16 @@ fn cap_registry_clears_on_drop() {
         return;
     };
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
-    let mbox = load_named(&mut harness, &wasm_path, "victim");
-    assert!(harness.capability_registry().accepts(mbox, Tick::ID), "sanity: loaded probe accepts Tick before drop");
+    let (victim, path) = load_named(&mut harness, &wasm_path, "victim");
+    assert!(
+        harness.capability_registry().accepts_actor(victim, Tick::ID),
+        "sanity: loaded probe accepts Tick before drop"
+    );
 
     let dropped = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id: mbox }),
+            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { target: path }),
         )])
         .expect("drop sequence");
     match dropped.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -174,8 +164,7 @@ fn cap_registry_clears_on_drop() {
     }
 
     let caps = harness.capability_registry();
-    assert!(!caps.accepts(mbox, Tick::ID), "dropped component's mailbox must accept nothing");
-    assert!(!caps.has_fallback(mbox));
+    assert!(!caps.accepts_actor(victim, Tick::ID), "dropped component's mailbox must accept nothing");
 }
 
 /// The native+wasm unification guard: a native cap (`aether.fs`)

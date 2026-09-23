@@ -68,7 +68,7 @@ use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
     AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender,
-    SubstrateHarnessObserver, TextInputObserved, TickObserved,
+    SubstrateHarnessObserver, TextInputObserved, TickObserved, UnsubscribeKeys,
 };
 use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
 
@@ -149,6 +149,17 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
         ctx.actor::<SubstrateHarnessObserver>().send(&KeyObserved { code: key.code });
+    }
+
+    /// Unsubscribe this probe from `Key` on every window, the self-addressed
+    /// counterpart of the `wire` subscribe.
+    ///
+    /// # Agent
+    /// Send `aether.test_fixtures.unsubscribe_keys` to the probe; later key
+    /// presses stop producing `key_observed` from it.
+    #[handler::single]
+    fn on_unsubscribe_keys(&mut self, ctx: &mut WasmCtx<'_>, _: UnsubscribeKeys) {
+        ctx.actor::<WindowCapability>().unsubscribe::<Key>(WindowSelector::All);
     }
 
     /// Broadcasts a `text_input_observed` for each `TextInput` dispatch,

@@ -18,8 +18,7 @@ mod tests {
     use aether_data::{EngineId, Kind};
     use aether_kinds::{CostRow, CostTail, CostTailResult};
     use aether_tcp::{
-        BindListener, BindListenerResult, ListListeners, ListListenersResult, SessionDataReady, SessionWrite,
-        UnbindListener, UnbindListenerResult,
+        ListListeners, ListListenersResult, SessionDataReady, SessionWrite, UnbindListener, UnbindListenerResult,
     };
     use aether_test_fixtures_kinds::{
         CollectTcpLoadSnapshot, ConfigureTcpLoadProbe, StartTcpConnectLoad, TcpLoadSessionSnapshot, TcpLoadSnapshot,
@@ -592,29 +591,6 @@ mod tests {
         );
     }
 
-    fn bind_listener(harness: &mut FleetHarness, engine: EngineId, consumer: aether_data::MailboxId) -> u16 {
-        let replies = harness.send(
-            engine,
-            "aether.tcp",
-            &BindListener {
-                addr: "127.0.0.1:0".to_owned(),
-                name: Some(LISTENER_NAME.to_owned()),
-                consumer: Some(consumer),
-            },
-        );
-        let reply = match replies.as_slice() {
-            [reply] => reply,
-            other => panic!("BindListener expected one reply, got {}", other.len()),
-        };
-        match BindListenerResult::decode_from_bytes(&reply.payload).expect("decode BindListenerResult") {
-            BindListenerResult::Ok { listener_name, local_port, .. } => {
-                assert_eq!(listener_name, LISTENER_NAME);
-                local_port
-            }
-            BindListenerResult::Err { error, .. } => panic!("BindListener failed: {error}"),
-        }
-    }
-
     fn list_listeners(harness: &mut FleetHarness, engine: EngineId) -> ListListenersResult {
         let replies = harness.send(engine, "aether.tcp", &ListListeners::default());
         let reply = match replies.as_slice() {
@@ -672,9 +648,11 @@ mod tests {
                 .is_empty(),
             "probe configuration is fire-and-settle",
         );
-        let local_port = bind_listener(&mut harness, engine, probe.mailbox_id);
-
         let accepted_baseline = snapshot(&mut harness, engine, &probe.addr);
+        let local_port = accepted_baseline.local_port.unwrap_or_else(|| {
+            panic!("probe bound its listener during configure: {:?}", accepted_baseline.connect_failures)
+        });
+
         let accepted_before = session_names(&accepted_baseline, TcpLoadTopology::Accepted);
         let accepted_first_index = next_accepted_index(&accepted_baseline);
         let accepted_started = Instant::now();

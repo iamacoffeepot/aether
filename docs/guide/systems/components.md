@@ -117,14 +117,29 @@ mailbox:
 |---|---|---|
 | `aether.component.load` | compile + instantiate the wasm, register its kinds, publish a mailbox | `LoadResult` |
 | `aether.component.drop` | tear down the guest and clear its capabilities; leave the trampoline slot empty | `DropResult` |
-| `aether.component.replace` | hot-swap the wasm behind a stable mailbox id | `ReplaceResult` |
+| `aether.component.replace` | hot-swap the wasm behind a stable mailbox | `ReplaceResult` |
 
-`LoadResult::Ok` carries the assigned `mailbox_id`, the **resolved name** (so a
-caller that omitted `name` learns the substrate-defaulted one), and the parsed
+`LoadResult::Ok` carries the component's canonical **`path`** (so a caller that
+omitted `name` learns the substrate-defaulted one) and the parsed
 `ComponentCapabilities` (handlers, fallback, doc, config) read from the manifest.
-A loaded component registers at **`aether.component/aether.embedded:NAME`** — that full
-string is the address you send subsequent mail to. Bare names (`"player"`) are
-*not* registered and warn-drop; always use the name from `LoadResult`.
+It carries no mailbox id. A loaded component registers at
+**`aether.component/aether.embedded:NAME`** — that full string is the address you
+send subsequent mail to, and `aether.component/:NAME` is its short path. Bare
+names (`"player"`) are *not* registered and warn-drop; always use the path from
+`LoadResult`.
+
+The successful reply is sent by the loaded component itself: the component host
+hands its owed reply to the trampoline it just spawned (as
+`aether.component.load_delivered`), and the trampoline answers the requester in
+its own name. An actor that loaded a component therefore keeps `ctx.sender()`
+from the reply as its proven reference; an embedder reads the stamped sender off
+the reply event
+([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
+`LoadResult::Err` comes from the host, since no actor was loaded.
+
+`aether.component.drop` and `aether.component.replace` name their component by
+`target`, a canonical or short actor path; the host parses and proves it once at
+receipt, and an address with no live component answers `Err` naming it.
 
 For a multi-actor module, the load also chooses **which exported type** to
 instantiate: `aether.component.load` takes an optional **export selector** — the
@@ -238,9 +253,9 @@ let nested_load = HarnessOp::load_component_under(
 
 The component host resolves `parent_name` through the live registry before it
 stages the ordinary component-loader path. The existing `LoadResult` is the
-reply: `Ok.name` carries the canonical nested address
+reply: `Ok.path` carries the canonical nested address
 `PARENT/aether.embedded:worker`, while a missing or non-live parent returns
-`LoadResult::Err`. Loading another component beneath that returned name builds
+`LoadResult::Err`. Loading another component beneath that returned path builds
 another lineage generation. Because typed addressing seeds resolution from the
 caller's runtime parent, identical component types can then route to the peers
 in their own explicit or nested scope.

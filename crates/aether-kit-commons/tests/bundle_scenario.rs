@@ -25,7 +25,7 @@
 //! and returns `None` when both are absent). CI builds the wasm before
 //! `cargo test`.
 
-use aether_data::MailboxId;
+use aether_data::ActorPath;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
 use aether_harness_substrate_capture::test_helpers::require_runtime;
@@ -50,7 +50,7 @@ const COMPONENT_NAME: &str = "tile";
 /// the loaded component's mailbox id so a test can drop it. The bundle
 /// takes no config. Panics on load failure so the test surfaces the
 /// error message.
-fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
+fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
     let wasm = fs::read(wasm_path).expect("read kit wasm");
     let loaded = harness
         .execute(vec![(
@@ -67,7 +67,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> MailboxId {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("load_component: {error}"),
     }
 }
@@ -133,7 +133,7 @@ fn bundle_unwire_destroys_the_resident_tile() {
 
     let mut harness =
         SubstrateHarness::builder().with_render().with_component_host().size(64, 48).build().expect("boot");
-    let mailbox_id = load_bundle(&mut harness, &wasm_path);
+    let path = load_bundle(&mut harness, &wasm_path);
 
     harness.execute(vec![("establish", HarnessOp::advance(6))]).expect("advance to residency");
     assert!(
@@ -149,7 +149,7 @@ fn bundle_unwire_destroys_the_resident_tile() {
 
     let dropped = harness
         .execute(vec![
-            ("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { mailbox_id })),
+            ("drop", HarnessOp::send_and_await_reply("aether.component", &DropComponent { target: path })),
             ("settle", HarnessOp::advance(1)),
         ])
         .expect("drop sequence");

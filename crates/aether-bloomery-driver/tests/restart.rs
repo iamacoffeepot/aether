@@ -7,7 +7,7 @@ use aether_bloomery_driver::{Command, ProgramCore};
 use aether_bloomery_kinds::{
     Digest, Evaluated, OpaqueBytes, ReactorIntent, ReactorName, RecordedHead, RecordedHeadMove, Ref, RuleName, SetHead,
 };
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
 use support::{World, digest, program_head};
 
@@ -49,7 +49,7 @@ fn restart_warms_through_the_watermark_and_redelivers_nothing_below_it() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
+    let bundle_a = world.store_reactor(b"reactor-a");
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
@@ -100,7 +100,7 @@ fn restart_after_an_activation_only_batch_records_nothing_twice() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
+    let bundle_a = world.store_reactor(b"reactor-a");
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: Vec::new() });
@@ -128,7 +128,7 @@ fn restart_rejects_a_live_head_whose_bundle_no_longer_loads() {
     let (mut world, commands) = World::open();
     let set = reactor_set(&["a"]);
     let set_digest = world.store_set(&set);
-    let bundle_a = world.store_reactor(b"reactor-a", MailboxId(101));
+    let bundle_a = world.store_reactor(b"reactor-a");
     world.seed_set_root(set_digest);
     world.seed_move("a", bundle_a);
     world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents: Vec::new() });

@@ -5,16 +5,11 @@
 //! `ctx.actor::<R>()` send proves the runtime parent selected during explicit
 //! placement is what embedded resolution consumes.
 
-#![allow(
-    clippy::disallowed_methods,
-    reason = "the canonical-path assertion independently folds the returned address as its reference value"
-)]
-
 use std::fs;
 
 use aether_actor::{Addressable, EMBEDDED_SCOPE};
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId, mailbox_id_from_path};
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -24,11 +19,6 @@ const PROBE_EXPORT: &str = "test.probe";
 const CALLER_EXPORT: &str = "test.parent_peer.caller";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
 
-struct Loaded {
-    mailbox_id: MailboxId,
-    name: String,
-}
-
 fn load(
     harness: &mut SubstrateHarness,
     wasm: &[u8],
@@ -36,7 +26,7 @@ fn load(
     parent: Option<&str>,
     name: Option<&str>,
     export: &str,
-) -> Loaded {
+) -> String {
     let component = LoadComponent {
         wasm: wasm.to_vec(),
         name: name.map(str::to_owned),
@@ -50,19 +40,14 @@ fn load(
     let result = harness.execute(vec![(label, operation)]).expect("component load operation");
 
     match result.reply::<LoadResult>(label).expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name, .. } => Loaded { mailbox_id, name },
+        LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("load {export} beneath {parent:?} failed: {error}"),
     }
 }
 
-fn assert_child_identity(loaded: &Loaded, parent: &str, subname: &str) {
+fn assert_child_identity(loaded: &str, parent: &str, subname: &str) {
     let expected = format!("{parent}/{EMBEDDED_SCOPE}:{subname}");
-    assert_eq!(loaded.name, expected, "LoadResult must return the registry-canonical child path");
-    assert_eq!(
-        loaded.mailbox_id,
-        mailbox_id_from_path(&expected),
-        "LoadResult mailbox id must be the lineage fold of its canonical path",
-    );
+    assert_eq!(loaded, expected, "LoadResult must return the registry-canonical child path");
 }
 
 #[test]
@@ -74,23 +59,23 @@ fn explicit_and_nested_parents_scope_live_peer_delivery() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
 
     let outer = load(&mut harness, &wasm, "outer", None, Some("outer"), PROBE_EXPORT);
-    let outer_target = load(&mut harness, &wasm, "outer-target", Some(&outer.name), None, TARGET_EXPORT);
-    let outer_caller = load(&mut harness, &wasm, "outer-caller", Some(&outer.name), None, CALLER_EXPORT);
-    assert_child_identity(&outer_target, &outer.name, TARGET_EXPORT);
-    assert_child_identity(&outer_caller, &outer.name, CALLER_EXPORT);
+    let outer_target = load(&mut harness, &wasm, "outer-target", Some(&outer), None, TARGET_EXPORT);
+    let outer_caller = load(&mut harness, &wasm, "outer-caller", Some(&outer), None, CALLER_EXPORT);
+    assert_child_identity(&outer_target, &outer, TARGET_EXPORT);
+    assert_child_identity(&outer_caller, &outer, CALLER_EXPORT);
 
-    let nested = load(&mut harness, &wasm, "nested", Some(&outer.name), Some("nested"), PROBE_EXPORT);
-    assert_child_identity(&nested, &outer.name, "nested");
-    let nested_target = load(&mut harness, &wasm, "nested-target", Some(&nested.name), None, TARGET_EXPORT);
-    let nested_caller = load(&mut harness, &wasm, "nested-caller", Some(&nested.name), None, CALLER_EXPORT);
-    assert_child_identity(&nested_target, &nested.name, TARGET_EXPORT);
-    assert_child_identity(&nested_caller, &nested.name, CALLER_EXPORT);
+    let nested = load(&mut harness, &wasm, "nested", Some(&outer), Some("nested"), PROBE_EXPORT);
+    assert_child_identity(&nested, &outer, "nested");
+    let nested_target = load(&mut harness, &wasm, "nested-target", Some(&nested), None, TARGET_EXPORT);
+    let nested_caller = load(&mut harness, &wasm, "nested-caller", Some(&nested), None, CALLER_EXPORT);
+    assert_child_identity(&nested_target, &nested, TARGET_EXPORT);
+    assert_child_identity(&nested_caller, &nested, CALLER_EXPORT);
 
     let baseline = harness.count_observed(TickObserved::NAME);
     harness
         .execute(vec![
-            ("outer-peer", HarnessOp::send_and_settle(&outer_caller.name, &Bump)),
-            ("nested-peer", HarnessOp::send_and_settle(&nested_caller.name, &Bump)),
+            ("outer-peer", HarnessOp::send_and_settle(&outer_caller, &Bump)),
+            ("nested-peer", HarnessOp::send_and_settle(&nested_caller, &Bump)),
         ])
         .expect("both parent-relative peer sends settle");
     assert_eq!(

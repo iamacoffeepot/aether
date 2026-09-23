@@ -13,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use aether_actor::ErasedActorRef;
+use aether_actor::{ActorRef, ErasedActorRef};
 use aether_data::ActorPath;
 use crossbeam_channel::Receiver;
 
@@ -21,7 +21,7 @@ use crate::actor::registry::ActorRegistry;
 use crate::chassis::builder::ReplyTarget;
 use crate::config::RingCapacities;
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::{AddressResolutionError, BootAuthority, Registry, ResolvedAddress};
+use crate::mail::registry::{AddressResolutionError, AdoptRefused, BootAuthority, Registry, ResolvedAddress};
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::runtime::lifecycle::FatalAborter;
 use crate::scheduler::{Drainable, WakeHandle, WakeSink};
@@ -215,6 +215,13 @@ impl Spawner {
     /// forwards here.
     pub(crate) fn resolve_address(&self, address: &ActorPath) -> Result<ResolvedAddress, AddressResolutionError> {
         self.registry.resolve_address(address)
+    }
+
+    /// Type a load reply's stamped sender as the loaded actor `R`, keeping
+    /// the registry itself behind the spawner. The chassis handle's
+    /// `adopt_load` forwards here.
+    pub(crate) fn adopt_loaded<R>(&self, sender: ErasedActorRef) -> Result<ActorRef<R>, AdoptRefused> {
+        self.registry.loaded::<R>(sender)
     }
 
     /// Body of the chassis handle's `send_tracked`: push `payload` to the

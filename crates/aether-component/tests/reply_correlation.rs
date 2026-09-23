@@ -18,7 +18,7 @@ use std::fs;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, LoadResult};
@@ -26,7 +26,7 @@ use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsConte
 
 const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
 
-fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (MailboxId, String) {
+fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> String {
     let loaded = harness
         .execute(vec![(
             "load",
@@ -43,7 +43,7 @@ fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> (
         .expect("load fs_demux");
 
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, name: full_name, .. } => (mailbox_id, full_name),
+        LoadResult::Ok { path, .. } => path.to_string(),
         LoadResult::Err { error } => panic!("load_component {name}: {error}"),
     }
 }
@@ -66,7 +66,7 @@ fn same_payload_fs_replies_demux_by_request_id() {
 
     let path = write_fixture("same-payload.txt", b"same path, same reply payload");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let (_, fixture_addr) = load_fs_demux(&mut harness, wasm, "fs-demux");
+    let fixture_addr = load_fs_demux(&mut harness, wasm, "fs-demux");
     let baseline = harness.count_observed(FsDemuxReport::NAME);
 
     harness
@@ -100,7 +100,7 @@ fn typed_fs_replies_demux_by_context_kind_probe_then_take() {
 
     let path = write_fixture("typed-context.txt", b"same path, distinct typed contexts");
     let wasm = fs::read(&wasm_path).expect("read fs_demux wasm");
-    let (_, fixture_addr) = load_fs_demux(&mut harness, wasm, "fs-context-demux");
+    let fixture_addr = load_fs_demux(&mut harness, wasm, "fs-context-demux");
     let baseline = harness.count_observed(FsContextDemuxReport::NAME);
     let raw_baseline = harness.count_observed(FsDemuxReport::NAME);
 

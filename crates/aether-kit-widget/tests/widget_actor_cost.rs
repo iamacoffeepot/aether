@@ -69,12 +69,11 @@ use std::env;
 use std::fs;
 use std::time::Instant;
 
-use aether_actor::Addressable;
-use aether_component::ComponentHostCapability;
-use aether_data::{Kind, MailboxId};
+use aether_actor::ErasedActorRef;
+use aether_data::Kind;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::test_helpers::require_runtime;
-use aether_kinds::{CostTail, CostTailResult, LoadComponent, LoadResult, Tick};
+use aether_kinds::{CostTail, CostTailResult, LoadComponent, Tick};
 use aether_test_fixtures_kinds::UiWidgetConfig;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries land
@@ -91,7 +90,7 @@ const FRAME_BUDGET_NANOS: u64 = 16_666_667;
 const FIT_WIDGET_COUNT: usize = 4;
 
 /// Load `count` instances of the `ui_widget` fixture under one profile,
-/// returning their mailbox ids. Each load carries a distinct name so the
+/// returning their references. Each load carries a distinct name so the
 /// instances register as separate mailboxes with their own cost cells.
 fn load_widgets(
     harness: &mut SubstrateHarness,
@@ -99,45 +98,34 @@ fn load_widgets(
     count: usize,
     redraw_each_tick: bool,
     quad_count: u32,
-) -> Vec<MailboxId> {
+) -> Vec<ErasedActorRef> {
     let config = UiWidgetConfig { redraw_each_tick, quad_count }.encode_into_bytes();
-    let mut ids = Vec::with_capacity(count);
-    for i in 0..count {
-        let report = harness
-            .execute(vec![(
-                "load",
-                HarnessOp::send_and_await_reply(
-                    ComponentHostCapability::NAMESPACE,
-                    &LoadComponent {
-                        wasm: wasm.to_vec(),
-                        name: Some(format!("ui-widget-{i}")),
-                        config: config.clone(),
-                        // `UiWidget` is a non-entry actor in the bundle.
-                        export: Some("test.ui_widget".to_owned()),
-                    },
-                ),
-            )])
-            .expect("load sequence");
-        match report.reply::<LoadResult>("load").expect("decode LoadResult") {
-            LoadResult::Ok { mailbox_id, .. } => ids.push(mailbox_id),
-            LoadResult::Err { error } => panic!("load ui-widget-{i}: {error}"),
-        }
-    }
-    ids
+    (0..count)
+        .map(|i| {
+            let widget = LoadComponent {
+                wasm: wasm.to_vec(),
+                name: Some(format!("ui-widget-{i}")),
+                config: config.clone(),
+                // `UiWidget` is a non-entry actor in the bundle.
+                export: Some("test.ui_widget".to_owned()),
+            };
+            harness.load_any(&widget).map_or_else(|error| panic!("load ui-widget-{i}: {error}"), |(widget, _)| widget)
+        })
+        .collect()
 }
 
 /// The EWMA mean execution time of one widget's `Tick` handler, in
 /// nanoseconds — its per-frame cost. Zero if the cell is missing (it should
 /// always be seeded at load).
-fn tick_mean_nanos(harness: &SubstrateHarness, mbox: MailboxId) -> u64 {
-    let CostTailResult::Ok { rows } = harness.cost_table().tail(mbox, &CostTail { kind: None }) else {
+fn tick_mean_nanos(harness: &SubstrateHarness, widget: ErasedActorRef) -> u64 {
+    let CostTailResult::Ok { rows } = harness.cost_table().tail(widget, &CostTail { kind: None }) else {
         panic!("cost tail for widget mailbox");
     };
     rows.iter().find(|r| r.kind_id == Tick::ID).map_or(0, |r| r.mean_nanos)
 }
 
 /// Mean per-widget `Tick` cost across a set of loaded widgets, in nanoseconds.
-fn widget_mean_nanos(harness: &SubstrateHarness, ids: &[MailboxId]) -> u64 {
+fn widget_mean_nanos(harness: &SubstrateHarness, ids: &[ErasedActorRef]) -> u64 {
     let loaded = u64::try_from(ids.len()).unwrap_or(0);
     let total: u64 = ids.iter().map(|&m| tick_mean_nanos(harness, m)).sum();
     total.checked_div(loaded).unwrap_or(0)

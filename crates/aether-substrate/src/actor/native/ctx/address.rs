@@ -31,7 +31,7 @@ use super::NativeCtx;
 
 /// The receiver-addressing methods shared verbatim by [`NativeCtx`] and
 /// [`NativeInitCtx`](super::NativeInitCtx): both hold the same `binding`, so `actor` /
-/// `actor_at` resolve identically. Emitting them from
+/// `to` resolve identically. Emitting them from
 /// one source keeps the two ctxs from drifting and means the bodies are
 /// not a `DuplicatedCode` clone (ADR-0099 §5 / issue 1431).
 ///
@@ -57,19 +57,6 @@ macro_rules! native_sender_methods {
                 parent,
                 root,
             )
-        }
-
-        /// Address an actor by a [`MailboxId`] already in hand, with no proof
-        /// behind it. ADR-0099 §3: a hosted / nested actor's id is the lineage
-        /// fold, not `hash(name)`, so it cannot be re-derived from a name.
-        /// A spawned child is not a use: its staged birth completes with an
-        /// [`ActorRef`] on the `SpawnOutcome`'s `Ok` arm, which a supervisor
-        /// keeps and sends through [`Self::to`]. Captures the in-flight lineage
-        /// like [`Self::actor`].
-        #[must_use]
-        pub fn actor_at<R: Addressable>(&self, id: MailboxId) -> NativeActorMailbox<'_, R> {
-            let (parent, root) = self.outbound_lineage();
-            NativeActorMailbox::new(id.0, self.binding, parent, root)
         }
 
         /// Send through a proven [`ActorRef`]: returns a typed [`NativeActorMailbox`]

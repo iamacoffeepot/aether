@@ -110,10 +110,22 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// [`aether_kinds::MonitorNotice`] is stamped with the departed actor, so
     /// a watcher reads which actor it lost from here. Needs no actor type,
     /// so it exists on the erased ctx too.
+    ///
+    /// A reply carries no reply target of its own (its source is
+    /// `SourceAddr::None` with the answered correlation), so its sender is the
+    /// actor that replied: the replier minted the reply's mail id in its own
+    /// id space, and that id's sender half is the stamp. This is how a load
+    /// requester keeps the loaded actor, whose trampoline sends the
+    /// successful `LoadResult` itself (ADR-0230 §3). A reply sent with no
+    /// handler chain (`Mailer::send_reply_unchained`) carries no mail id and
+    /// so no sender.
     #[must_use]
     pub fn sender(&self) -> Option<ErasedActorRef> {
         match self.source.addr {
             SourceAddr::Component(id) => Some(Registry::structural_erased(id)),
+            SourceAddr::None if self.in_reply_to().is_some() && self.in_flight_mail_id != MailId::NONE => {
+                Some(Registry::structural_erased(self.in_flight_mail_id.sender))
+            }
             _ => None,
         }
     }

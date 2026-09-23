@@ -25,14 +25,15 @@ on one engine, or into several engines.
 | `pin_artifact` | durable explicit pin by exact stored content hash |
 | `unpin_artifact` | drop only the explicit pin; a name still protects |
 | `load_component` | instantiate stored wasm in one engine |
-| `replace_component` | splice stored wasm behind one live mailbox id |
+| `replace_component` | splice stored wasm behind one live component address |
 | `describe_component` | inspect a live component's receive surface |
 | `describe_kinds` | inspect its config, input, and reply schemas in the engine's live vocabulary |
 | `send_mail` | drive a component, including the generic `aether.component.drop` lifecycle mail |
 
 There is no dedicated `drop_component` MCP tool. Dropping is nevertheless a
 current engine operation: use `send_mail` to the `aether.component` mailbox with
-kind `aether.component.drop` and the exact `mailbox_id` returned by the load.
+kind `aether.component.drop` and `target` set to the exact `address` returned by
+the load.
 Inspect that kind with `describe_kinds` before constructing params. Await its
 `aether.component.drop_result`; do not fire-and-forget cleanup.
 
@@ -106,12 +107,11 @@ schema.
 `load_component` resolves the selector at the hub, sends the bytes to the target
 engine's `aether.component` cap, and waits for `LoadResult`.
 
-On a single load, record all three outputs:
+On a single load, record both outputs:
 
-- `mailbox_id`: the tagged id the `aether.component.drop` kind takes, and one
-  accepted spelling of `replace_component.address`.
-- `name`: the full lineage address used as `send_mail.address` and by live
-  `describe_component`.
+- `address`: the full lineage address used as `send_mail.address`, the
+  `aether.component.drop` kind's `target`, `replace_component.address`, and by
+  live `describe_component`.
 - `capabilities`: handled kinds, reply contracts, fallback, docs, and config
   kind for the selected actor type.
 
@@ -138,11 +138,11 @@ block and an `instances` list of ids/names.
 
 A replica fan-out is not transactional. If replica K fails, instances before K
 remain live and the error says how many loaded. The failed call does not return
-the successful prefix's `instances` records or mailbox ids. Their lineage names
-follow the deterministic naming rule, but the current public listing surface
-does not recover their ids. On a task-owned engine, terminate and start clean.
-On a shared engine, stop and report the partial prefix rather than guessing ids
-or retrying into occupied names.
+the successful prefix's `instances` records. Their lineage names follow the
+deterministic naming rule; `aether.component.list` reports which are live. On a
+task-owned engine, terminate and start clean. On a shared engine, stop and
+report the partial prefix rather than guessing names or retrying into occupied
+ones.
 
 Boot-time replicas use the same naming rule. `spawn_substrate` waits until every
 expected lineage string is present, but the current check neither deduplicates
@@ -151,7 +151,7 @@ Require unique derived names, then describe and safely probe every boot lineage.
 
 ## Live introspection
 
-`describe_component` should normally receive the lineage `name`. On a cache
+`describe_component` should normally receive the lineage `address`. On a cache
 miss, `aether-mcp` forwards that name to the substrate, whose registry owns the
 live answer. This works for boot-loaded components, after an `aether-mcp`
 restart, and after a successful in-place replacement.
@@ -163,14 +163,13 @@ return pre-drop capabilities. The successful `drop_result` is the unload proof;
 only a later name lookup after a cache reset is guaranteed to miss the cleared
 substrate capability registry.
 
-The cache key has no hub-epoch component. After a hub restart reuses an
-`engine_id`, a boot-loaded component whose deterministic mailbox id also matches
-can collide with an earlier capability entry. Use live probes or reset/reconnect
-`aether-mcp` when an exact clean-epoch description is required.
+The cache is keyed by engine and canonical path, with no hub-epoch component.
+After a hub restart reuses an `engine_id`, a boot-loaded component at the same
+lineage can collide with an earlier capability entry. Use live probes or
+reset/reconnect `aether-mcp` when an exact clean-epoch description is required.
 
-A `mbx-…` argument has no live fallback at all: it is only a local MCP cache
-fast path. If that cache was never populated or was lost on process restart, the
-id alone cannot drive the live name query. Keep the lineage name as the durable
+A `mbx-…` argument is refused by `describe_component` and `replace_component`,
+with a pointer to the lineage address. Keep the lineage address as the durable
 observation handle for the life of the engine.
 
 The live kind vocabulary is also substrate-owned. Loading registers the wasm's
@@ -189,8 +188,9 @@ engine reachability matters.
 
 Use `replace_component` with the current engine id, the component's `address`,
 and a previously uploaded selector. The address is the same spelling every other
-tool takes: a canonical ADR-0099 lineage, an unambiguous ADR-0166 short path,
-or the tagged `mbx-…` id the load returned. Prefer a content hash for the
+tool takes: a canonical ADR-0099 lineage or an unambiguous ADR-0166 short path
+(`aether.component/:NAME`); a tagged `mbx-…` id is refused. Prefer a content
+hash for the
 selector so the replacement is unambiguous.
 
 On success the trampoline mailbox stays stable and the returned capabilities

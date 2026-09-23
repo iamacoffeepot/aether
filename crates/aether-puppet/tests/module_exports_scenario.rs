@@ -42,7 +42,7 @@ fn one_artifact_serves_all_three_explicit_exports() {
                 assert!(error.contains(export), "defaultless load error must name {export}; got {error}");
             }
         }
-        LoadResult::Ok { name, .. } => panic!("the defaultless module unexpectedly loaded {name}"),
+        LoadResult::Ok { path: name, .. } => panic!("the defaultless module unexpectedly loaded {name}"),
     }
 
     for (label, export, config) in [
@@ -65,8 +65,8 @@ fn one_artifact_serves_all_three_explicit_exports() {
             )])
             .expect("selected load sequence");
         match loaded.reply::<LoadResult>(label).expect("decode selected LoadResult") {
-            LoadResult::Ok { name, capabilities, .. } => {
-                assert!(name.ends_with(&format!(":{export}")), "selector {export} registered as {name}");
+            LoadResult::Ok { path: name, capabilities, .. } => {
+                assert!(name.to_string().ends_with(&format!(":{export}")), "selector {export} registered as {name}");
                 assert!(!capabilities.handlers.is_empty(), "selector {export} exposed no handlers");
                 if export == PUPPET_EXPORT {
                     for (kind, id) in [

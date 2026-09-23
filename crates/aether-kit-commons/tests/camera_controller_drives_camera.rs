@@ -79,8 +79,11 @@ fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, na
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name: addr, .. } => {
-            assert!(addr.ends_with(&format!(":{name}")), "export {export} should register under :{name}; got {addr}");
+        LoadResult::Ok { path: addr, .. } => {
+            assert!(
+                addr.to_string().ends_with(&format!(":{name}")),
+                "export {export} should register under :{name}; got {addr}"
+            );
         }
         LoadResult::Err { error } => panic!("load {export}: {error}"),
     }

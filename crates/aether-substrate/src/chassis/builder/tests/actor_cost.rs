@@ -109,7 +109,8 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
         .finish_commit()
         .expect("spawn pre-seeding probe");
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(DeclaredPing::ID) }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(DeclaredPing::ID) })
+    else {
         panic!("pre-seeding actor cost tail succeeds");
     };
     assert_eq!(
@@ -119,7 +120,8 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
          without it the handler runs unmeasured and cost-aware recruitment falls back to the width gate",
     );
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(PreSeededPing::ID) }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(PreSeededPing::ID) })
+    else {
         panic!("pre-seeding actor cost tail succeeds for the staged kind");
     };
     assert_eq!(
@@ -229,7 +231,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         .finish_commit()
         .expect("spawn cost probe");
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(CostPing::ID) }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) }) else {
         panic!("spawned actor cost tail succeeds");
     };
     assert_eq!(rows.len(), 1, "declared handler has one construction-time neutral row");
@@ -245,7 +247,8 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
 
     let deadline = Instant::now() + Duration::from_millis(500);
     while Instant::now() < deadline {
-        let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(CostPing::ID) }) else {
+        let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) })
+        else {
             panic!("spawned actor cost tail succeeds while awaiting dispatch");
         };
         if rows.iter().any(|row| row.samples > 0) {
@@ -255,14 +258,14 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     }
     assert_eq!(ping_count.load(AtomicOrdering::SeqCst), 1, "declared handler dispatches exactly once");
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(CostPing::ID) }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostPing::ID) }) else {
         panic!("spawned actor cost tail succeeds after dispatch");
     };
     assert_eq!(rows.len(), 1, "filtered tail returns only the declared handler row");
     assert!(rows[0].samples > 0, "declared handler folds a nonzero sample count");
     assert!(rows[0].mean_nanos > 0, "declared handler folds a nonzero execution cost");
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: Some(CostTail::ID) }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: Some(CostTail::ID) }) else {
         panic!("framework-kind cost tail succeeds");
     };
     assert!(rows.is_empty(), "framework-handled CostTail never creates a handler-cost row");
@@ -275,7 +278,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
     }
     assert!(!chassis.actor_registry().is_live_at(id), "quit finalizes the spawned mailbox");
 
-    let CostTailResult::Ok { rows } = mailer.cost_table().tail(id, &CostTail { kind: None }) else {
+    let CostTailResult::Ok { rows } = mailer.cost_table().tail_at(id, &CostTail { kind: None }) else {
         panic!("finalized actor cost tail succeeds");
     };
     assert!(rows.is_empty(), "finalization removes every global cost row for the spawned mailbox");

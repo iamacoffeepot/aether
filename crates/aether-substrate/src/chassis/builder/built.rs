@@ -4,7 +4,7 @@ use std::io;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, ErasedActorRef, Root};
+use aether_actor::{ActorRef, Addressable, ErasedActorRef, Root};
 use aether_data::{KindId, SessionToken};
 use crossbeam_channel::Receiver;
 
@@ -18,7 +18,7 @@ use crate::chassis::error::BootError;
 use crate::chassis::inbox::SettlingInbox;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::registry::effect::RegistryEffectError;
-use crate::mail::registry::{AddressResolutionError, Registry, ResolvedAddress};
+use crate::mail::registry::{AddressResolutionError, AdoptRefused, Registry, ResolvedAddress};
 use crate::runtime::effect_chain::Uncaused;
 
 macro_rules! chassis_accessors {
@@ -265,6 +265,22 @@ impl<C: Chassis> PassiveChassis<C> {
     /// routed to `reply` — a hub session or another proven actor.
     pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
         self.booted.spawner.push_for_reply(to, kind, payload, reply);
+    }
+
+    /// Type the stamped sender of a successful load reply as the loaded actor
+    /// `R` (ADR-0230 §3). A load reply is sent by the loaded actor itself, so
+    /// the embedder reads its erased reference off the reply event; this
+    /// narrows it once the registry confirms the sender is a live component
+    /// trampoline. `R` is the export the embedder named in its load.
+    ///
+    /// Its consumer is the substrate harness's `load::<R>`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AdoptRefused`] when the sender is no longer live or is not
+    /// a loaded component.
+    pub fn adopt_load<R: Addressable>(&self, sender: ErasedActorRef) -> Result<ActorRef<R>, AdoptRefused> {
+        self.booted.spawner.adopt_loaded::<R>(sender)
     }
 
     /// Place an instanced `A` at the chassis root **for a test**, without

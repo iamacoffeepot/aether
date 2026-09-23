@@ -52,7 +52,7 @@ use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::ActorPath;
-use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
+use aether_data::{EngineId, Kind, KindId, MailId, Uuid, mailbox_id_from_path};
 use aether_fleet::{FleetConfig, FleetServer};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
@@ -247,14 +247,13 @@ enum DistComponentRequirement {
     StemMissing,
 }
 
-/// The three `LoadResult::Ok` fields a loaded component exposes:
-/// the assigned trampoline `mailbox_id` (the [`replace`](FleetHarness::replace)
-/// target), the rendered ADR-0099 lineage `addr`, and the advertised
-/// receive-side `capabilities`. Returned by
-/// [`load_full`](FleetHarness::load_full) for the lifecycle rows that need
-/// the mailbox id the thin [`load`](FleetHarness::load) delegate discards.
+/// The two `LoadResult::Ok` fields a loaded component exposes: the rendered
+/// ADR-0099 lineage `addr` (the [`replace`](FleetHarness::replace) target and
+/// every later recipient), and the advertised receive-side `capabilities`.
+/// Returned by [`load_full`](FleetHarness::load_full) for the lifecycle rows
+/// that need the capabilities the thin [`load`](FleetHarness::load) delegate
+/// discards.
 pub struct Loaded {
-    pub mailbox_id: MailboxId,
     pub addr: String,
     pub capabilities: ComponentCapabilities,
 }
@@ -463,8 +462,8 @@ impl FleetHarness {
     /// 1956), mirroring aether-mcp's resolve-then-forward: resolve the
     /// selector hub-local to the wasm bytes + `@actor` export, then forward
     /// `LoadComponent { wasm, export }` to the engine's `aether.component`
-    /// mailbox. Returns the loaded component's [`Loaded`] (mailbox id,
-    /// lineage address, capabilities). Panics on a resolve / load error.
+    /// mailbox. Returns the loaded component's [`Loaded`] (lineage address,
+    /// capabilities). Panics on a resolve / load error.
     pub fn load_by_selector(&mut self, engine: EngineId, selector: &str) -> Loaded {
         let resolved = self.resolve_component(ComponentSelector {
             query: Some(selector.to_owned()),
@@ -484,7 +483,7 @@ impl FleetHarness {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
+            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
             Some(LoadResult::Err { error }) => {
                 panic!("load by selector {selector:?} failed: {error}")
             }
@@ -492,16 +491,11 @@ impl FleetHarness {
         }
     }
 
-    /// Replace the component bound to `mailbox_id` on `engine` with a build
+    /// Replace the component at `address` on `engine` with a build
     /// resolved from a registry selector (ADR-0116, issue 1956) — the
     /// resolve-then-forward twin of [`replace`](Self::replace), which loads
     /// by dist stem. Returns the swapped binary's advertised capabilities.
-    pub fn replace_by_selector(
-        &mut self,
-        engine: EngineId,
-        mailbox_id: MailboxId,
-        selector: &str,
-    ) -> ComponentCapabilities {
+    pub fn replace_by_selector(&mut self, engine: EngineId, address: &str, selector: &str) -> ComponentCapabilities {
         let resolved = self.resolve_component(ComponentSelector {
             query: Some(selector.to_owned()),
             namespace: None,
@@ -517,7 +511,7 @@ impl FleetHarness {
             Some(engine),
             "aether.component",
             &ReplaceComponent {
-                mailbox_id,
+                target: replace_target(address),
                 wasm,
                 drain_timeout_ms: None,
                 config: Vec::new(),
@@ -549,12 +543,10 @@ impl FleetHarness {
         self.load_full(engine, stem).addr
     }
 
-    /// Load the `<stem>` component and surface all three `LoadResult::Ok`
-    /// fields as a [`Loaded`]: the assigned trampoline `mailbox_id` (the
-    /// [`replace`](Self::replace) target), the rendered lineage `addr`,
-    /// and the advertised `capabilities`. The lifecycle rows that drive a
-    /// replace or re-address the loaded mailbox need the mailbox id the
-    /// thin [`load`](Self::load) delegate drops.
+    /// Load the `<stem>` component and surface both `LoadResult::Ok` fields
+    /// as a [`Loaded`]: the rendered lineage `addr` (the
+    /// [`replace`](Self::replace) target) and the advertised `capabilities`,
+    /// which the thin [`load`](Self::load) delegate drops.
     pub fn load_full(&mut self, engine: EngineId, stem: &str) -> Loaded {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
@@ -564,7 +556,7 @@ impl FleetHarness {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
+            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
             Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
             None => panic!("undecodable LoadResult"),
         }
@@ -572,7 +564,7 @@ impl FleetHarness {
 
     /// Like [`load_full`](Self::load_full) but selects a specific actor type
     /// from a multi-actor bundle via `export` (ADR-0096, issue 1994). The
-    /// `export` string is the actor's `NAMESPACE` const. Returns all three
+    /// `export` string is the actor's `NAMESPACE` const. Returns both
     /// `LoadResult::Ok` fields as a [`Loaded`].
     pub fn load_full_export(&mut self, engine: EngineId, stem: &str, export: &str) -> Loaded {
         let wasm = read_component_wasm(stem);
@@ -583,7 +575,7 @@ impl FleetHarness {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { mailbox_id, name, capabilities }) => Loaded { mailbox_id, addr: name, capabilities },
+            Some(LoadResult::Ok { path, capabilities }) => Loaded { addr: path.to_string(), capabilities },
             Some(LoadResult::Err { error }) => {
                 panic!("load of {stem:?}@{export:?} failed: {error}")
             }
@@ -612,18 +604,18 @@ impl FleetHarness {
         self.spawned.retain(|e| *e != engine);
     }
 
-    /// Replace the component bound to `mailbox_id` on `engine` with the
-    /// `<stem>` wasm (ADR-0022 in-place swap) and return the swapped
-    /// binary's advertised capabilities. The trampoline keeps its
-    /// load-time name across replace, so targeting the captured
-    /// `mailbox_id` rebinds the same lineage address to the new instance.
-    pub fn replace(&mut self, engine: EngineId, mailbox_id: MailboxId, stem: &str) -> ComponentCapabilities {
+    /// Replace the component at `address` on `engine` with the `<stem>` wasm
+    /// (ADR-0022 in-place swap) and return the swapped binary's advertised
+    /// capabilities. The trampoline keeps its load-time name across replace,
+    /// so targeting the captured lineage address rebinds it to the new
+    /// instance.
+    pub fn replace(&mut self, engine: EngineId, address: &str, stem: &str) -> ComponentCapabilities {
         let wasm = read_component_wasm(stem);
         let replies = self.call(
             Some(engine),
             "aether.component",
             &ReplaceComponent {
-                mailbox_id,
+                target: replace_target(address),
                 wasm,
                 drain_timeout_ms: None,
                 config: Vec::new(),
@@ -649,7 +641,7 @@ impl FleetHarness {
     pub fn replace_export(
         &mut self,
         engine: EngineId,
-        mailbox_id: MailboxId,
+        address: &str,
         stem: &str,
         export: &str,
     ) -> ComponentCapabilities {
@@ -658,7 +650,7 @@ impl FleetHarness {
             Some(engine),
             "aether.component",
             &ReplaceComponent {
-                mailbox_id,
+                target: replace_target(address),
                 wasm,
                 drain_timeout_ms: None,
                 config: Vec::new(),
@@ -900,7 +892,7 @@ impl FleetHarness {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { name, .. }) => name,
+            Some(LoadResult::Ok { path, .. }) => path.to_string(),
             Some(LoadResult::Err { error }) => panic!("load of {stem:?} failed: {error}"),
             None => panic!("undecodable LoadResult"),
         }
@@ -923,7 +915,7 @@ impl FleetHarness {
         );
         let payload = single_reply(&replies, "LoadComponent");
         match LoadResult::decode_from_bytes(&payload) {
-            Some(LoadResult::Ok { name, .. }) => name,
+            Some(LoadResult::Ok { path, .. }) => path.to_string(),
             Some(LoadResult::Err { error }) => {
                 panic!("load of {stem:?}@{export:?} failed: {error}")
             }
@@ -1060,6 +1052,12 @@ fn boot_hub(binary_store_dir: &Path, fleet_store_root: &Path) -> (PassiveChassis
 
 /// Exactly one `ReplyEvent` payload, panicking if a call that should
 /// yield a single reply yielded zero or many.
+/// The `ReplaceComponent.target` for a scenario-supplied component address.
+/// A malformed address is a scenario bug, so it panics naming the text.
+fn replace_target(address: &str) -> ActorPath {
+    ActorPath::new(address).unwrap_or_else(|error| panic!("replace target {address:?} is not an actor path: {error}"))
+}
+
 fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
     match replies {
         [one] => one.payload.clone(),

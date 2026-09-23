@@ -129,8 +129,8 @@ where the built artifact has the same absolute path visible to that host,
 because `upload_component.staged_path` is read there.
 
 Without an existing instance, the first successful pass uploads and loads the
-component. The command prints and retains both the canonical loaded name and
-the `mailbox_id`; later passes upload and replace that same mailbox. For a
+component. The command prints and retains the loaded component's canonical
+`address`; later passes upload and replace the component at that address. For a
 defaultless multi-actor module, select the actor namespace on that first load:
 
 ```sh
@@ -141,23 +141,20 @@ cargo xtask dev-component \
 ```
 
 `--export` applies only to the initial load. Later replacements reuse the actor
-already hosted by the mailbox. To replace an existing instance from the first
-pass, supply the exact current public replacement selector returned by
-`load_component`:
+already hosted by the component. To replace an existing instance from the first
+pass, supply its address as `load_component` returned it:
 
 ```sh
 cargo xtask dev-component \
   --package my-component \
   --engine-id <engine UUID> \
-  --mailbox-id mbx-...
+  --address aether.component/aether.embedded:example.echo
 ```
 
-The flag takes a tagged id only: `dev-component` does not hash or infer a
-mailbox id from a name, and a malformed id is rejected before the watcher
-starts. (The `replace_component` tool itself is wider — its `address` accepts a
-canonical lineage, an ADR-0166 short path, or the tagged id — but the flag
-stays narrow so the watcher never guesses.) `--mailbox-id` and `--export`
-conflict because replace-first mode already has a hosted actor to reuse.
+The flag takes an actor path, which `replace_component` resolves on the engine;
+a malformed path is rejected before the watcher starts, and a tagged `mbx-…` id
+is not accepted. `--address` and `--export` conflict because replace-first mode
+already has a hosted actor to reuse.
 
 The package root is watched recursively and generated target output is ignored.
 Edits are debounced, rebuilds are serialized, and edits arriving during a pass
@@ -183,14 +180,14 @@ spawn_substrate()
   → { engine_id, ... }
 
 load_component(engine_id, selector = "<returned hash or name>")
-  → { mailbox_id, name, capabilities, ... }
+  → { engine_id, address, capabilities }
 ```
 
 `upload_component` is the only step above that takes a host wasm path.
 `load_component` resolves a registry selector. For a defaultless module, select
 an export (for example `module@actor`) as described by the live tool schema.
 
-Record the returned loaded `name`, normally a full lineage such as
+Record the returned `address`, normally a full lineage such as
 `aether.component/aether.embedded:example.echo`. Do not send to the bare Rust
 namespace and do not substitute the registry artifact name for the live mailbox.
 
@@ -207,7 +204,7 @@ current parameter shape.
 ```text
 send_mail({
   engine_id,
-  address: "<LoadResult.name>",
+  address: "<load_component address>",
   kind_name: "aether.ping",
   params: { "seq": 7 }
 })
@@ -228,7 +225,7 @@ upload_component(staged_path = ".../my_component.wasm", name = "my-component-dev
 
 replace_component(
   engine_id,
-  address = "<LoadResult.name or LoadResult.mailbox_id>",
+  address = "<load_component address>",
   selector = "<new_hash>"
 )
 ```

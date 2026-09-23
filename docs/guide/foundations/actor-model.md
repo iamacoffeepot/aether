@@ -534,7 +534,7 @@ actor runs under its runtime parent. With the root component host as parent,
 the lineage is `aether.component` followed by the component as an instance
 under the embedding-host class (`aether.embedded`), rendered with one `/` per
 node as `aether.component/aether.embedded:<name>` — the canonical rendered
-address `LoadResult.name` hands back. A nested host contributes its own lineage
+address `LoadResult.path` hands back. A nested host contributes its own lineage
 instead. The string is a display rendering of the lineage; the `MailboxId` is
 the fold over the nodes (`mailbox_id_from_path` on the string side), never a
 hash of the joined string.
@@ -552,13 +552,13 @@ bare-type spelling reaches it when the base is the type's own namespace; a
 component loaded under any other name is reached through the reference its load
 proved, never by folding the name at the send site.
 
-`LoadResult.name` is a boundary string an `ActorPath` can be built from: the
-host's `resolve_address` parser, at the MCP, RPC, and harness boundary, is the
-one place an `ActorPath` becomes a position
+`LoadResult.path` is an `ActorPath`: the host's `resolve_address` parser, at
+the MCP, RPC, and harness boundary, is the one place an `ActorPath` becomes a
+position
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
-`LoadResult.mailbox_id` is the position beside it; a native receiver proves it
-once at receipt through `ctx.resolve_live` and sends through the resulting
-reference.
+The reply carries no position. A successful load reply is sent by the loaded
+actor itself, so a native requester keeps `ctx.sender()` as its reference and
+an embedder types the reply event's stamped sender.
 
 Because the lineage is the address, two actors collide exactly when they would
 occupy the same position — same parent, same name. The substrate enforces one

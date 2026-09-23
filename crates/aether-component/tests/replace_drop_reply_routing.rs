@@ -32,16 +32,15 @@ mod tests {
         let engine = harness.spawn_headless();
         let wasm = read_component_wasm("aether_test_fixtures_bundle");
 
-        // Load the probe and read its mailbox id off the LoadResult —
-        // the harness `load` helper returns only the registered name,
-        // and the forwarded ops address the trampoline by id.
+        // Load the probe and read its actor path off the LoadResult; the
+        // forwarded ops address the trampoline by that path.
         let load_replies = harness.send::<LoadComponent>(
             engine,
             "aether.component",
             &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
         );
-        let mailbox_id = match decode_reply::<LoadResult>(&load_replies) {
-            LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        let path = match decode_reply::<LoadResult>(&load_replies) {
+            LoadResult::Ok { path, .. } => path,
             LoadResult::Err { error } => panic!("probe load failed: {error}"),
         };
 
@@ -50,7 +49,7 @@ mod tests {
         let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
-            &ReplaceComponent { mailbox_id, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+            &ReplaceComponent { target: path.clone(), wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
         );
         assert!(
             !replace_replies.is_empty(),
@@ -62,8 +61,8 @@ mod tests {
         }
 
         // Drop shares the forwarded path — assert it routes its reply
-        // too. The mailbox id is stable across the replace (ADR-0022).
-        let drop_replies = harness.send::<DropComponent>(engine, "aether.component", &DropComponent { mailbox_id });
+        // too. The address is stable across the replace (ADR-0022).
+        let drop_replies = harness.send::<DropComponent>(engine, "aether.component", &DropComponent { target: path });
         assert!(
             !drop_replies.is_empty(),
             "DropComponent drew zero reply events — the forwarded reply settled before the trampoline replied (issue 1466)",

@@ -20,12 +20,11 @@ use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::{Kind, KindId, MailboxId};
+use aether_data::{ActorPath, Kind};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, Key, LoadComponent, LoadResult, TextInput, WindowId};
-use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved};
-use aether_window::{SyntheticWindowCapability, UnsubscribeWindow, WindowSelector};
+use aether_test_fixtures_kinds::{KeyObserved, TextInputObserved, UnsubscribeKeys};
 
 /// Arbitrary key code for the synthetic `Key` events these tests inject.
 const KEY_CODE: u32 = 65;
@@ -35,7 +34,7 @@ fn boot_bench() -> SubstrateHarness {
     SubstrateHarness::builder().with_component_host().build().expect("boot")
 }
 
-fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> MailboxId {
+fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> ActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     let loaded = harness
         .execute(vec![(
@@ -47,7 +46,7 @@ fn load_probe_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { mailbox_id, .. } => mailbox_id,
+        LoadResult::Ok { path, .. } => path,
         LoadResult::Err { error } => panic!("load_component({name}): {error}"),
     }
 }
@@ -66,24 +65,18 @@ fn send_keys(harness: &mut SubstrateHarness, count: usize) {
     harness.execute(steps).expect("key send sequence");
 }
 
-fn unsubscribe(harness: &mut SubstrateHarness, kind: KindId, mailbox: MailboxId) {
+/// Have the probe at `probe` unsubscribe itself from `Key` on every window.
+fn unsubscribe_keys(harness: &mut SubstrateHarness, probe: &ActorPath) {
     harness
-        .execute(vec![(
-            "unsub",
-            HarnessOp::actor::<SyntheticWindowCapability>().send(&UnsubscribeWindow {
-                selector: WindowSelector::All,
-                kind,
-                mailbox,
-            }),
-        )])
+        .execute(vec![("unsub", HarnessOp::send_and_settle(probe.to_string(), &UnsubscribeKeys))])
         .expect("unsubscribe sequence");
 }
 
-fn drop_component(harness: &mut SubstrateHarness, mailbox_id: MailboxId) {
+fn drop_component(harness: &mut SubstrateHarness, path: ActorPath) {
     let result = harness
         .execute(vec![(
             "drop",
-            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { mailbox_id }),
+            HarnessOp::send_and_await_reply(ComponentHostCapability::NAMESPACE, &DropComponent { target: path }),
         )])
         .expect("drop sequence");
     match result.reply::<DropResult>("drop").expect("decode DropResult") {
@@ -121,7 +114,7 @@ fn subscribed_component_receives_published_text_input() {
         return;
     };
     let mut harness = boot_bench();
-    let _mbox = load_probe_named(&mut harness, &wasm_path, "typist");
+    let _probe = load_probe_named(&mut harness, &wasm_path, "typist");
     let baseline = harness.count_observed(TextInputObserved::NAME);
 
     harness
@@ -142,7 +135,7 @@ fn subscribed_component_receives_published_keys() {
         return;
     };
     let mut harness = boot_bench();
-    let _mbox = load_probe_named(&mut harness, &wasm_path, "listener");
+    let _probe = load_probe_named(&mut harness, &wasm_path, "listener");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 3);
@@ -159,8 +152,8 @@ fn two_subscribers_each_receive_every_key() {
         return;
     };
     let mut harness = boot_bench();
-    let _mbox_a = load_probe_named(&mut harness, &wasm_path, "a");
-    let _mbox_b = load_probe_named(&mut harness, &wasm_path, "b");
+    let _probe_a = load_probe_named(&mut harness, &wasm_path, "a");
+    let _probe_b = load_probe_named(&mut harness, &wasm_path, "b");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 2);
@@ -173,7 +166,7 @@ fn two_subscribers_each_receive_every_key() {
     );
 }
 
-/// Explicit all-window unsubscribe removes the mailbox from the `Key`
+/// The probe's own all-window unsubscribe removes it from the `Key`
 /// subscriber set; subsequent key events stop producing broadcasts from
 /// that probe.
 #[test]
@@ -182,7 +175,7 @@ fn unsubscribe_stops_delivery() {
         return;
     };
     let mut harness = boot_bench();
-    let mbox = load_probe_named(&mut harness, &wasm_path, "listener");
+    let probe = load_probe_named(&mut harness, &wasm_path, "listener");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -194,7 +187,7 @@ fn unsubscribe_stops_delivery() {
     );
     let pre_unsub = harness.count_observed(KeyObserved::NAME);
 
-    unsubscribe(&mut harness, Key::ID, mbox);
+    unsubscribe_keys(&mut harness, &probe);
     send_keys(&mut harness, 2);
     assert_eq!(
         harness.count_observed(KeyObserved::NAME),
@@ -214,7 +207,7 @@ fn drop_clears_subscriptions() {
         return;
     };
     let mut harness = boot_bench();
-    let mbox = load_probe_named(&mut harness, &wasm_path, "victim");
+    let probe = load_probe_named(&mut harness, &wasm_path, "victim");
     let baseline = harness.count_observed(KeyObserved::NAME);
 
     send_keys(&mut harness, 1);
@@ -226,7 +219,7 @@ fn drop_clears_subscriptions() {
     );
     let pre_drop = harness.count_observed(KeyObserved::NAME);
 
-    drop_component(&mut harness, mbox);
+    drop_component(&mut harness, probe);
     send_keys(&mut harness, 2);
     assert_eq!(
         harness.count_observed(KeyObserved::NAME),

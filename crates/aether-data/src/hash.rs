@@ -127,7 +127,7 @@ const fn has_path_separator(name: &str) -> bool {
 /// host-fn resolve.
 ///
 /// This hashes `name` as **one atom**. A `/`-rendered lineage path (the
-/// form `LoadResult.name` returns for a hosted actor, e.g.
+/// form `LoadResult.path` carries for a hosted actor, e.g.
 /// `aether.component/aether.embedded:NAME`) must resolve through
 /// [`mailbox_id_from_path`] instead — that folds over the path's nodes,
 /// whereas hashing the joined string here yields an id the registry

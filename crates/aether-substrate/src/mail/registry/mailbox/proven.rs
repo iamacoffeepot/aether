@@ -1,5 +1,5 @@
 //! The registry's liveness reads, [`Registry::is_live`] over a reference and
-//! the crate-private position form beside it, and the four mints beside
+//! the crate-private position form beside it, and the five mints beside
 //! them.
 //!
 //! The callers of the gated mint outside the SDK itself. Three mint with no
@@ -10,16 +10,44 @@
 //! route, whether the birth was a staged child, an embedder spawn, or a
 //! chassis-composed capability. The fourth, `Registry::resolve_live`, is the
 //! only one that answers the liveness question itself, because the position
-//! it is handed arrived in a payload and nothing upstream proved it.
+//! it is handed arrived in a payload and nothing upstream proved it. The
+//! fifth, `Registry::loaded`, types a reference the caller already holds.
 
 use core::fmt;
+use std::error::Error;
 
 use aether_actor::{__mint_actor_ref, __mint_erased_actor_ref, ActorRef, ErasedActorRef};
+use aether_data::MailboxCategory;
 
+use crate::mail::registry::names::categorise_mailbox_name;
 use crate::mail::{KindId, MailboxId};
 
 use super::resolve::{ResolvedRoute, resolve_route};
 use super::{CapturedDisposition, Registry};
+
+/// Why an embedder could not type a load reply's sender as the loaded actor
+/// (`PassiveChassis::adopt_load`). Carries no position: the embedder already
+/// holds the erased reference it asked about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdoptRefused {
+    /// The sender's route is not `Live` now: the component was dropped
+    /// before the embedder adopted its reply.
+    NotLive,
+    /// The sender is live but is not a loaded component's trampoline, so the
+    /// reply did not come from a load.
+    NotComponent,
+}
+
+impl fmt::Display for AdoptRefused {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotLive => formatter.write_str("the load reply's sender is no longer live"),
+            Self::NotComponent => formatter.write_str("the load reply's sender is not a loaded component"),
+        }
+    }
+}
+
+impl Error for AdoptRefused {}
 
 /// Why a position that arrived in a payload could not be proven
 /// (ADR-0230 section 3).
@@ -120,14 +148,45 @@ impl Registry {
     /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender),
     /// discharges the obligation the stamped dispatch source already
     /// answers: the host stamped this position at dispatch, so the answer is
-    /// already known.
+    /// already known. For a reply it mints the replier, the sender half of
+    /// the mail id the replying actor minted in its own id space.
     ///
     /// Its second is the `host_turn` self-mail test in
     /// `crate::actor::native::slot::pumped`, which names the position it
     /// booted the probe at: a host turn has no sender, so
     /// `NativeCtx::sender` cannot serve.
+    ///
+    /// Its third is the session arm of `Mailer::send_reply` (and the wasm
+    /// guest's `reply_mail_p32` session arm), which stamps the replying
+    /// actor's own position on the egressed reply event: the reply was
+    /// minted in that actor's id space, so the answer is already known.
     pub(crate) fn structural_erased(position: MailboxId) -> ErasedActorRef {
         __mint_erased_actor_ref(position)
+    }
+
+    /// Type the stamped sender of a load reply as the loaded actor `R`
+    /// (ADR-0230 section 3's spawned-or-loaded door, for an embedder).
+    ///
+    /// A successful load reply is sent by the loaded actor itself, so the
+    /// embedder already holds its erased reference from the reply event's
+    /// stamped sender; this narrows it after checking the claim the typing
+    /// adds: the sender's route is `Live` and is a component trampoline, the
+    /// only actor the component host hands a load to. `R` is the export the
+    /// embedder named in its load, which the host instantiated.
+    ///
+    /// Its one caller is
+    /// [`PassiveChassis::adopt_load`](crate::chassis::builder::PassiveChassis::adopt_load),
+    /// through the spawner that holds the chassis registry.
+    pub(crate) fn loaded<R>(&self, sender: ErasedActorRef) -> Result<ActorRef<R>, AdoptRefused> {
+        let position = sender.id();
+        if !self.is_live_at(position) {
+            return Err(AdoptRefused::NotLive);
+        }
+        let category = self.mailbox_name(position).as_deref().and_then(categorise_mailbox_name);
+        if category != Some(MailboxCategory::Trampoline) {
+            return Err(AdoptRefused::NotComponent);
+        }
+        Ok(__mint_actor_ref(position))
     }
 
     /// Prove a `position` that arrived in a payload (ADR-0230 section 3's
@@ -210,5 +269,28 @@ mod tests {
             registry.resolve_live(MailboxId(0xdead_beef)),
             Err(ResolveLiveError::Unknown(MailboxId(0xdead_beef))),
         );
+    }
+
+    // A typed adoption over an arbitrary live actor would hand an embedder
+    // an `ActorRef<R>` for something that never loaded as `R`; the refusal
+    // is what keeps `adopt_load` a load door rather than a generic mint.
+    #[test]
+    fn loaded_refuses_a_live_actor_that_is_not_a_component() {
+        let registry = Registry::new();
+        let authority = boot_authority();
+        let cap = registry.register_inbox(&authority, "aether.test.not-a-component", noop_handler());
+        // A trampoline's id is its lineage fold; any id serves this test, which
+        // reads only the canonical name the route carries.
+        let trampoline = registry
+            .try_register_inbox_with_id(
+                &authority,
+                MailboxId(0x7A11_0001),
+                "aether.component/aether.embedded:probe",
+                noop_handler(),
+            )
+            .expect("register a trampoline-named route");
+
+        assert_eq!(registry.loaded::<()>(Registry::structural_erased(cap)), Err(AdoptRefused::NotComponent));
+        assert!(registry.loaded::<()>(Registry::structural_erased(trampoline)).is_ok());
     }
 }

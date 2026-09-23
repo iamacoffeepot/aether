@@ -76,13 +76,13 @@ impl ProgramCore {
 
     /// Send `entry` to `digest`'s live root.
     pub(crate) fn deliver(&mut self, digest: Digest, delivery: Delivery, entry: JournalEntry, out: &mut Vec<Command>) {
-        let Some(root) = self.live_root(digest) else {
+        if !self.live_ready(digest) {
             self.abort(format!("event {} for digest {digest}, which has no ready root", entry.seq), out);
             return;
-        };
+        }
         let ticket = self.mint(EvaluateTicket::mint);
         self.routing.deliveries.insert(ticket, delivery);
-        out.push(Command::Evaluate { ticket, root, request: Event::new(entry) });
+        out.push(Command::Evaluate { ticket, bundle: digest, request: Event::new(entry) });
     }
 
     /// Plan one live reply to `Event(N)`.
@@ -97,13 +97,13 @@ impl ProgramCore {
                 return;
             }
             Evaluated::OutOfSequence { .. } => {
-                let Some(root) = self.live_root(digest) else {
+                if !self.live_ready(digest) {
                     self.abort(format!("out-of-sequence from digest {digest}, which has no ready root"), out);
                     return;
-                };
+                }
                 let ticket = self.mint(StatusTicket::mint);
                 self.routing.statuses.insert(ticket, digest);
-                out.push(Command::QueryStatus { ticket, root });
+                out.push(Command::QueryStatus { ticket, bundle: digest });
                 return;
             }
         };

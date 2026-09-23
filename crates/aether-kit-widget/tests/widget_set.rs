@@ -88,9 +88,9 @@ fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8]) -> String {
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
-            name
+        LoadResult::Ok { path: name, .. } => {
+            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
+            name.to_string()
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }
@@ -190,7 +190,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     );
 }
 
-/// The `LoadResult.name` returned at the public component boundary is the
+/// The `LoadResult.path` returned at the public component boundary is the
 /// prefix for first-class inline-child names. Appending the built-in slot's
 /// `aether.embedded:button` node must let an external name-addressed sender
 /// change that live Button's state; a blocked then enabled click is the
@@ -318,8 +318,8 @@ fn load_panel_with(harness: &mut SubstrateHarness, wasm: &[u8], children: Vec<Wi
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name, .. } => {
-            assert!(name.ends_with(":panel"), "the panel root should register under :panel; got {name}");
+        LoadResult::Ok { path: name, .. } => {
+            assert!(name.to_string().ends_with(":panel"), "the panel root should register under :panel; got {name}");
         }
         LoadResult::Err { error } => panic!("load WidgetPanel root: {error}"),
     }

@@ -156,9 +156,10 @@ pub struct PendingReplace {
     pub boot_operation: u64,
 }
 
-/// ADR-0147: one module's boot singleton. `mailbox_id` addresses the boot
-/// trampoline (spawned through the same `WasmTrampoline` path as any export);
-/// `refcount` counts the module's live **non-boot** actors — boot never counts
+/// ADR-0147: one module's boot singleton. `actor` is the boot trampoline's
+/// proven reference, taken from its spawn outcome (spawned through the same
+/// `WasmTrampoline` path as any export), and `path` its canonical lineage,
+/// which the orphan drop names as its target; `refcount` counts the module's live **non-boot** actors — boot never counts
 /// itself, so its own drop could never be the one that zeroes the count. The
 /// `pending_requests` counts requested actors whose trampoline birth has been
 /// accepted but has not yet promoted or rejected. The boot is torn down only
@@ -166,7 +167,8 @@ pub struct PendingReplace {
 /// zero-refcount boot alive, and its later rejection performs the final
 /// orphan check.
 pub struct BootEntry {
-    pub mailbox_id: MailboxId,
+    pub actor: ErasedActorRef,
+    pub path: ActorPath,
     pub refcount: u32,
     pub pending_requests: u32,
 }
@@ -250,11 +252,13 @@ impl NativeActor for ComponentHostCapability {
     /// section, picks a final name (caller value > wasm's
     /// `aether.namespace` > `component_N`), spawns a
     /// [`WasmTrampoline`] under
-    /// `aether.embedded:NAME`, and replies `LoadResult::Ok { mailbox_id,
-    /// name, capabilities }` where `name` is the full trampoline
-    /// address — agents send subsequent mail to that name.
+    /// `aether.embedded:NAME`, and hands the trampoline the owed reply: the
+    /// loaded trampoline itself replies `LoadResult::Ok { path, capabilities }`,
+    /// where `path` is its full lineage address — agents send subsequent mail
+    /// to that address, and an actor requester keeps the reply's stamped
+    /// sender as its reference.
     /// Errors (bad wire bytes, kind conflict, name conflict,
-    /// invalid wasm, instantiation trap) come back as
+    /// invalid wasm, instantiation trap) come back from the host as
     /// `LoadResult::Err`.
     #[handler::manual]
     fn on_load_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LoadComponent) {
@@ -305,7 +309,7 @@ impl NativeActor for ComponentHostCapability {
         state.refresh_registry_inventory();
     }
 
-    /// Drop a component by its mailbox id. Forwards
+    /// Drop a component by its actor path. Forwards
     /// [`DropComponent`] mail to the addressed trampoline; the
     /// trampoline's `WasmTrampoline::on_drop_component` handler
     /// replies `DropResult::Ok` and vacates its mailbox (ADR-0079 §8
@@ -315,49 +319,56 @@ impl NativeActor for ComponentHostCapability {
     /// the host mails no cap anything at drop time.
     ///
     /// # Agent
-    /// `DropComponent { mailbox_id }`. The `mailbox_id` is the
-    /// trampoline's id from the `LoadResult.mailbox_id` field.
+    /// `DropComponent { target }`. The `target` is the component's actor
+    /// path, canonical (`LoadResult.path`) or short (`aether.component/:NAME`).
     #[handler::manual]
     fn on_drop_component(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: DropComponent) {
+        // ADR-0230: parse the address with the host's boundary parser and
+        // prove the answer at once. An address with no live route has no
+        // trampoline to drop, so it answers `Err` now rather than forwarding
+        // into nothing; the position is never kept.
+        let proven =
+            state.registry.resolve_address(&payload.target).map_err(|error| error.to_string()).and_then(|resolved| {
+                ctx.resolve_live(resolved.mailbox_id)
+                    .map(|actor| (actor, resolved.mailbox_id))
+                    .map_err(|error| error.to_string())
+            });
+        let (actor, position) = match proven {
+            Ok(proven) => proven,
+            Err(error) => {
+                ctx.reply(&DropResult::Err { error: format!("no component to drop at {}: {error}", payload.target) });
+                return;
+            }
+        };
         // ADR-0147 non-droppability guard: the boot actor is unconditional and
         // refcounted against its module's non-boot actors, so an external drop
-        // addressed straight at a boot mailbox must be rejected — letting it
+        // addressed straight at a boot actor must be rejected — letting it
         // through would tear the boot down out from under the refcount and leave
         // a dangling `boot_registry` entry. The boot is torn down automatically
         // (internally, through `release_boot_ref`) when its last non-boot actor
         // unloads; that internal path is not routed through this handler, so the
         // guard never blocks it.
-        if state.boot_registry.values().any(|entry| entry.mailbox_id == payload.mailbox_id) {
+        if state.boot_registry.values().any(|entry| entry.actor == actor) {
             ctx.reply(&DropResult::Err {
                 error: format!(
-                    "mailbox {} is a module boot actor (ADR-0147): the boot singleton is unconditional \
+                    "{} is a module boot actor (ADR-0147): the boot singleton is unconditional \
                      and refcounted against its module's non-boot actors, so it cannot be dropped directly — \
                      drop the module's non-boot actors and the boot is torn down when the last one unloads",
-                    payload.mailbox_id
+                    payload.target
                 ),
             });
             return;
         }
-        // ADR-0230: prove the wire position once, at receipt. A position with
-        // no live route has no trampoline to drop, so it answers `Err` now
-        // rather than forwarding into nothing.
-        let actor = match ctx.resolve_live(payload.mailbox_id) {
-            Ok(actor) => actor,
-            Err(error) => {
-                ctx.reply(&DropResult::Err { error: error.to_string() });
-                return;
-            }
-        };
         // ADR-0147: account this actor's departure against its module's boot
         // singleton before forwarding the drop — the last non-boot actor from a
         // boot-bearing module tears the boot down here (the boot trampoline's
         // own `DropComponent` handler vacates its registrations).
         state.invalidate_replacement_boot_operation(actor);
         state.release_boot_ref(ctx, actor);
-        forward_to_trampoline(ctx, payload.mailbox_id, DropComponent::ID, &payload);
+        forward_to_trampoline(ctx, position, DropComponent::ID, &payload);
     }
 
-    /// Replace the component at `mailbox_id` with a fresh wasm
+    /// Replace the component at `target` with a fresh wasm
     /// binary. Forwards [`ReplaceComponent`] to the trampoline;
     /// the trampoline's `WasmTrampoline::on_replace_component`
     /// handler swaps `Component` internally and replies
@@ -366,7 +377,8 @@ impl NativeActor for ComponentHostCapability {
     /// `NativeBinding`, which outlives the swap.
     ///
     /// # Agent
-    /// `ReplaceComponent { mailbox_id, wasm, drain_timeout_ms, config, export }`.
+    /// `ReplaceComponent { target, wasm, drain_timeout_ms, config, export }`,
+    /// where `target` is the component's canonical or short actor path.
     /// `drain_timeout_ms` is accepted for wire compatibility but
     /// ignored under the trampoline's binding-stable replace.
     /// `export` (ADR-0096) names which exported actor type of the
@@ -439,7 +451,7 @@ impl NativeActor for ComponentHostCapability {
     ///
     /// # Agent
     /// `DescribeComponent { name }` to the `aether.component` mailbox, where
-    /// `name` is the lineage address `ListComponents` / `LoadResult.name`
+    /// `name` is the lineage address `ListComponents` / `LoadResult.path`
     /// hand back (`aether.embedded:NAME`). Reply `DescribeComponentResult::Ok
     /// { capabilities }` carries the full handler kinds, docs, fallback, and
     /// config kind; `Err { error }` means nothing is registered at that name.

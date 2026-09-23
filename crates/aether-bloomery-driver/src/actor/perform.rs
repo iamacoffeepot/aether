@@ -1,22 +1,24 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
 use aether_actor::ReplyMode;
-use aether_bloomery_kinds::{BUNDLE_NAMESPACE, StatusQuery};
+use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
 use aether_component::ComponentHostCapability;
+use aether_data::Kind;
 use aether_kinds::LoadComponent;
 use aether_substrate::actor::native::{DeferredReply, NativeCtx};
 
-use super::{BundleDriver, BundleRoot};
+use super::BundleDriver;
 use crate::{CallerId, Command};
 
 impl BundleDriver {
     /// Perform each [`Command`] in order, then return.
     ///
     /// Journal reads and appends go to the handed-over journal reference, loads go
-    /// to the component host under the bundle's digest name, invokes go to
-    /// the loaded root's handed-over id, and answers release the parked
-    /// reply. Every send carries its ticket as the request context, so the
-    /// reply routes back to the core continuation that issued it.
+    /// to the component host under the bundle's digest name, root commands go
+    /// to the reference the digest's load reply was stamped with, and answers
+    /// release the parked reply. Every send carries its ticket as the request
+    /// context, so the reply routes back to the core continuation that issued
+    /// it.
     pub(crate) fn perform<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, commands: Vec<Command>) {
         for command in commands {
             match command {
@@ -33,6 +35,7 @@ impl BundleDriver {
                     let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
                 Command::Load { ticket, bundle, wasm } => {
+                    self.loading.insert(ticket, bundle);
                     let _ = ctx.erase().actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
                         wasm,
                         name: Some(bundle.to_string()),
@@ -40,21 +43,13 @@ impl BundleDriver {
                         export: Some(BUNDLE_NAMESPACE.to_owned()),
                     });
                 }
-                Command::Invoke { ticket, root, request } => {
-                    let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&request);
-                }
+                Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
                 Command::WatchHead { ticket, request } => {
                     let _ = ctx.to(&self.journal).with_context(&ticket).send(&request);
                 }
-                Command::Warm { ticket, root, request } => {
-                    let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&request);
-                }
-                Command::Evaluate { ticket, root, request } => {
-                    let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&request);
-                }
-                Command::QueryStatus { ticket, root } => {
-                    let _ = ctx.actor_at::<BundleRoot>(root).with_context(&ticket).send(&StatusQuery);
-                }
+                Command::Warm { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
+                Command::Evaluate { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
+                Command::QueryStatus { ticket, bundle } => self.send_to_root(ctx, bundle, &StatusQuery, &ticket),
                 Command::Answer { caller, outcome } => {
                     // A second answer for one caller drops: the caller already
                     // holds its exactly-once outcome, so no reply is owed.
@@ -70,6 +65,22 @@ impl BundleDriver {
                 Command::Abort { reason } => ctx.fatal_abort(reason),
             }
         }
+    }
+
+    /// Send `request` to `bundle`'s loaded root with `ticket` as the request
+    /// context. The core addresses only a digest it saw load, so a digest
+    /// with no kept root is a broken invariant and aborts (ADR-0063).
+    fn send_to_root<M: ReplyMode, A, K: Kind, C: Kind>(
+        &self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        bundle: Digest,
+        request: &K,
+        ticket: &C,
+    ) {
+        let Some(root) = self.roots.get(&bundle) else {
+            ctx.fatal_abort(format!("the core addressed bundle {bundle}, whose root the driver never kept"));
+        };
+        let _ = ctx.send_with_context(root, request, ticket);
     }
 
     /// Take the parked reply tagged with `caller`, if one is still parked.

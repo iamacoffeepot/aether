@@ -29,7 +29,7 @@ use std::sync::{Arc, RwLock, RwLockReadGuard};
 
 use core::sync::atomic::{AtomicU64, Ordering};
 
-use aether_actor::Local;
+use aether_actor::{ErasedActorRef, Local};
 use aether_kinds::{CostRow, CostTail, CostTailResult};
 
 use crate::mail::registry::effect::ActivationToken;
@@ -352,16 +352,30 @@ impl CostTable {
         CostLookup { cells: self.cells.read().expect("cost table lock poisoned") }
     }
 
-    /// Dump `mailbox`'s cost rows, filtered to `request.kind` when set.
-    /// `kind_name` is left `None` here — the table holds ids, not names;
-    /// the `cost.tail` dispatch arm (or the MCP layer) resolves names
-    /// against the registry on the cold render path. Cold path — read
-    /// lock.
+    /// Dump the cost rows of the actor `actor` proves, filtered to
+    /// `request.kind` when set. `kind_name` is left `None` here — the table
+    /// holds ids, not names; the `cost.tail` dispatch arm (or the MCP layer)
+    /// resolves names against the registry on the cold render path. Cold
+    /// path — read lock.
+    ///
+    /// The public form takes a proof (ADR-0230): an embedder or test asks
+    /// about an actor it holds a reference to, such as the one a load reply
+    /// was stamped with.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::seed`]).
     #[must_use]
-    pub fn tail(&self, mailbox: MailboxId, request: &CostTail) -> CostTailResult {
+    pub fn tail(&self, actor: ErasedActorRef, request: &CostTail) -> CostTailResult {
+        self.tail_at(actor.id(), request)
+    }
+
+    /// [`Self::tail`] by position, for the framework's `cost.tail` arm, which
+    /// answers for its own mailbox, and the crate's unit tests.
+    ///
+    /// # Panics
+    /// Panics if the internal lock is poisoned (see [`Self::seed`]).
+    #[must_use]
+    pub(crate) fn tail_at(&self, mailbox: MailboxId, request: &CostTail) -> CostTailResult {
         let guard = self.cells.read().expect("cost table lock poisoned");
         let rows = guard
             .iter()
@@ -511,7 +525,7 @@ mod tests {
             assert_eq!(cell.samples(), 0, "neutral seed");
         }
 
-        let CostTailResult::Ok { rows } = table.tail(mbx, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = table.tail_at(mbx, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 2);
@@ -525,7 +539,7 @@ mod tests {
         let handed = table.seed(mbx, &[KindId(10)]);
         handed[0].1.fold(2_000);
 
-        let CostTailResult::Ok { rows } = table.tail(mbx, &CostTail { kind: Some(KindId(10)) }) else {
+        let CostTailResult::Ok { rows } = table.tail_at(mbx, &CostTail { kind: Some(KindId(10)) }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1);
@@ -552,7 +566,7 @@ mod tests {
         let table = CostTable::new();
         let mbx = MailboxId(7);
         table.seed(mbx, &[KindId(10), KindId(20)]);
-        let CostTailResult::Ok { rows } = table.tail(mbx, &CostTail { kind: Some(KindId(10)) }) else {
+        let CostTailResult::Ok { rows } = table.tail_at(mbx, &CostTail { kind: Some(KindId(10)) }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1);
@@ -568,11 +582,11 @@ mod tests {
         table.seed(b, &[KindId(10)]);
         table.drop_mailbox(a);
 
-        let CostTailResult::Ok { rows } = table.tail(a, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = table.tail_at(a, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         assert!(rows.is_empty(), "dropped mailbox's cells gone");
-        let CostTailResult::Ok { rows } = table.tail(b, &CostTail { kind: None }) else {
+        let CostTailResult::Ok { rows } = table.tail_at(b, &CostTail { kind: None }) else {
             panic!("expected Ok");
         };
         assert_eq!(rows.len(), 1, "sibling mailbox's cells survive");

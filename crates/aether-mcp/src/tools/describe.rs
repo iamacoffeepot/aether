@@ -11,7 +11,7 @@ use crate::args::{
 };
 
 use super::envelope::engine_envelope;
-use super::ids::{parse_mailbox_id, static_kind_name};
+use super::ids::static_kind_name;
 use super::render::{internal, internal_msg, json, project_capabilities, render_shape};
 use super::{COMPONENT_CAP, INVENTORY_CAP, Mcp};
 
@@ -91,44 +91,30 @@ pub(super) fn describe_transforms() -> Result<String, McpError> {
 
 pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -> Result<String, McpError> {
     let (engine, engine_id) = mcp.resolve_engine(args.engine_id.as_deref()).await?;
-    // A tagged id remains a local cache-only fast path. Every textual
-    // address is resolved by the selected engine, which returns both the
-    // real mailbox id used as the cache key and its canonical path. The
-    // component host still receives the operator's original spelling so its
-    // own engine-atomic name handling remains the forwarding contract.
-    let (mailbox_id, forward_name) = if args.address.starts_with("mbx-") {
-        (parse_mailbox_id(&args.address)?, None)
-    } else {
-        let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
-        (mailbox_id, Some(args.address.clone()))
-    };
+    // Every address is resolved by the selected engine, which returns the
+    // canonical path used as the cache key; a tagged `mbx-…` id is refused.
+    // The component host still receives the operator's original spelling so
+    // its own engine-atomic name handling remains the forwarding contract.
+    let canonical = mcp.resolve_component_path(engine, &args.address, "describe_component").await?;
 
     // Cache fast-path: populated by load_component / replace_component or
-    // a prior name-resolved describe.
-    let cached =
-        mcp.components.lock().expect("component cache mutex is never poisoned").get(&(engine, mailbox_id)).cloned();
+    // a prior describe.
+    let cached = mcp
+        .components
+        .lock()
+        .expect("component cache mutex is never poisoned")
+        .get(&(engine, canonical.clone()))
+        .cloned();
     if let Some(caps) = cached {
         return component_reply(&engine_id, &args.address, &caps, args.full);
     }
 
-    // Cache miss. With a lineage name, ask the substrate live — this is
-    // the load-bearing half: the cache is empty for a boot-loaded
-    // component, but the substrate always holds the live loaded set. With
-    // only a `mbx-` id there is no name to forward, so the cache was the
-    // only source.
-    let Some(name) = forward_name else {
-        return Err(McpError::invalid_params(
-            format!(
-                "no component cached at {} on engine {engine_id} — address by lineage name to resolve \
-                     live, or load_component / replace_component to populate this cache",
-                args.address
-            ),
-            None,
-        ));
-    };
+    // Cache miss: ask the substrate live — the cache is empty for a
+    // boot-loaded component, but the substrate always holds the live
+    // loaded set.
     let reply = mcp
         .session
-        .call_one(engine_envelope(engine, COMPONENT_CAP, &DescribeComponent { name: name.clone() }))
+        .call_one(engine_envelope(engine, COMPONENT_CAP, &DescribeComponent { name: args.address.clone() }))
         .await
         .map_err(internal)?;
     match DescribeComponentResult::decode_from_bytes(&reply.payload) {
@@ -136,7 +122,7 @@ pub(super) async fn describe_component(mcp: &Mcp, args: DescribeComponentArgs) -
             mcp.components
                 .lock()
                 .expect("component cache mutex is never poisoned")
-                .insert((engine, mailbox_id), capabilities.clone());
+                .insert((engine, canonical), capabilities.clone());
             component_reply(&engine_id, &args.address, &capabilities, args.full)
         }
         Some(DescribeComponentResult::Err { error }) => Err(internal_msg(&error)),

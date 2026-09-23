@@ -7,12 +7,9 @@ use aether_bloomery_kinds::{
     Call, ClosureArtifact, Digest, Fault, FaultReason, Invoked, NativeOrigin, OpaqueBytes, ProgramName, ProgramRef,
     RequestSource, Requested, Transition,
 };
-use aether_data::{Kind, MailboxId};
+use aether_data::Kind;
 
 use crate::support::{World, program_head};
-
-/// Default mailbox a stored bundle loads as.
-pub const ROOT: MailboxId = MailboxId(7);
 
 /// One validated program name.
 ///
@@ -63,11 +60,11 @@ pub fn fault(bundle: Digest, name: &str, input: Digest, reason: FaultReason) -> 
 }
 
 impl World {
-    /// Store one program wasm bundle, answering its load as a program root.
+    /// Store one program wasm bundle, answering its load.
     #[must_use]
     pub fn store_bundle(&mut self, wasm: &[u8]) -> Digest {
         let digest = self.store(OpaqueBytes::ID, wasm);
-        self.loads.insert(digest, Ok(ROOT));
+        self.loads.insert(digest, Ok(()));
         digest
     }
 

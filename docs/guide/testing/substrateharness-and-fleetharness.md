@@ -158,12 +158,35 @@ let loaded = result.reply::<LoadResult>("load-worker")?;
 
 The component host resolves `parent_name` through the live registry, uses its
 canonical path as the new actor's lineage, and returns the ordinary
-`LoadResult`. On success, `LoadResult::Ok.name` is the canonical child address,
+`LoadResult`. On success, `LoadResult::Ok.path` is the canonical child address,
 for example `PARENT/aether.embedded:worker`; an unknown parent produces
 `LoadResult::Err`. This makes parent-relative typed addressing testable across
 explicit and nested component scopes.
 Ordinary `LoadComponent` mail still loads beneath `aether.component`, and this
 harness constructor does not add an MCP or production-hub load mode.
+
+A load reply carries the component's path and no position: the loaded
+trampoline sends the successful reply itself, so the reference to the loaded
+actor is the reply's stamped sender. When a test needs that reference — to ask
+the `capability_registry()` through `accepts_actor`, or the `cost_table()`
+through `tail` — load through the harness directly instead of through an
+operation:
+
+```rust,ignore
+let (panel, path) = harness.load::<WidgetPanel>(LoadComponent {
+    wasm,
+    name: Some("panel".to_owned()),
+    config: Vec::new(),
+    export: None,
+})?;
+```
+
+`load::<R>` sets the export to `R::NAMESPACE` and returns `(ActorRef<R>,
+ActorPath)`; `load_any` sends the load as given and returns the erased
+reference, for a fixture actor the test cannot name. Drop and replace take the
+path: `DropComponent { target: path }`, `ReplaceComponent { target: path, … }`.
+FleetHarness returns the same path as text — `Loaded { addr, capabilities }` —
+and its `replace` / `replace_export` / `replace_by_selector` take that address.
 
 Use `CaptureWithMails` when geometry must land in the same frame as readback;
 separate send/capture steps describe a different temporal contract.
@@ -245,7 +268,7 @@ scenario sends to derived from the identity instead of rebuilt as
 `format!("aether.component/aether.embedded:{name}")` per test file, where
 writing the bare namespace by mistake costs an unknown-recipient drop at run
 time. For the surfaces that take a name rather than an operation — `log_tail`,
-a `CaptureWithMails` bundle recipient, an assertion against `LoadResult::Ok.name`
+a `CaptureWithMails` bundle recipient, an assertion against `LoadResult::Ok.path`
 — read the same string off the sender with `address()`.
 
 Once a root `CreateWindow` operation has

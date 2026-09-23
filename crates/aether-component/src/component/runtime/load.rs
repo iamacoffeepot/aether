@@ -20,8 +20,8 @@ use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
 use super::dependencies::{dependency_refusal, missing_dependency, replacement_refusal};
-use crate::component::ComponentHostCapability;
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
+use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::trampoline::{WasmTrampoline, WasmTrampolineConfig};
 
 fn content_hash_hex(wasm: &[u8]) -> String {
@@ -33,6 +33,15 @@ fn content_hash_hex(wasm: &[u8]) -> String {
         let _ = write!(out, "{byte:02x}");
     }
     out
+}
+
+/// A spawn outcome's canonical lineage as an [`ActorPath`]. The registry
+/// accepted the name, so a refusal here means the lineage and the address
+/// grammar disagree; the load reports it rather than handing out an
+/// unaddressable component.
+fn canonical_path(canonical_name: &str) -> Result<ActorPath, String> {
+    ActorPath::new(canonical_name)
+        .map_err(|error| format!("loaded component's lineage {canonical_name:?} is not an actor path: {error}"))
 }
 
 pub(super) struct PreparedLoad {
@@ -443,14 +452,19 @@ impl ComponentHostCapabilityState {
         first: BootSuccessor,
     ) {
         let outcome = done.output();
-        let booted = outcome.result.as_ref().map(|_| outcome.mailbox_id).map_err(|error| format!("{error:?}"));
+        let booted = outcome
+            .result
+            .as_ref()
+            .map_err(|error| format!("{error:?}"))
+            .and_then(|actor| Ok((actor.erase(), canonical_path(&outcome.canonical_name)?)));
+        let mailbox_id = outcome.mailbox_id;
         let mut pending =
             self.pending_boots.remove(&plan.hash).expect("module boot retains its actor-local reservation");
         match booted {
-            Ok(mailbox_id) => {
+            Ok((actor, path)) => {
                 self.mailer.capability_registry().register(mailbox_id, &plan.capabilities);
                 self.boot_registry
-                    .insert(plan.hash.clone(), BootEntry { mailbox_id, refcount: 0, pending_requests: 0 });
+                    .insert(plan.hash.clone(), BootEntry { actor, path, refcount: 0, pending_requests: 0 });
                 self.finish_boot_successor(ctx, done.into_deferred_reply(), first, &plan.hash);
                 for waiter in pending.waiters.drain(..) {
                     self.finish_boot_successor(ctx, waiter.owed, waiter.successor, &plan.hash);
@@ -517,9 +531,8 @@ impl ComponentHostCapabilityState {
         boot_hash: Option<String>,
     ) {
         let mailbox_id = done.output().mailbox_id;
-        let name = done.output().canonical_name.to_string();
         let child = match &done.output().result {
-            Ok(child) => child.erase(),
+            Ok(child) => *child,
             Err(error) => {
                 let error = format!("trampoline spawn failed: {error:?}");
                 if let Some(hash) = &boot_hash {
@@ -531,11 +544,20 @@ impl ComponentHostCapabilityState {
         };
 
         if let Some(hash) = &boot_hash {
-            self.settle_boot_request(ctx, hash, Some(child));
+            self.settle_boot_request(ctx, hash, Some(child.erase()));
         }
         self.mailer.capability_registry().register(mailbox_id, &load.capabilities);
-        let capabilities = load.capabilities.clone();
-        done.resolve_with(ctx, move |_, _| LoadResult::Ok { mailbox_id, name, capabilities });
+        let path = canonical_path(&done.output().canonical_name);
+        match path {
+            // ADR-0230 §3: the loaded trampoline answers the requester itself,
+            // so the reply's stamped sender is the reference the requester
+            // keeps; the host hands it the owed reply rather than replying.
+            Ok(path) => {
+                let capabilities = load.capabilities.clone();
+                done.hand_off(ctx, &child, &LoadDelivered { path, capabilities });
+            }
+            Err(error) => done.resolve_with(ctx, move |_, _| LoadResult::Err { error }),
+        }
     }
 
     fn drop_orphan_boot<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, hash: &str) {
@@ -543,8 +565,8 @@ impl ComponentHostCapabilityState {
             self.boot_registry.get(hash).is_some_and(|entry| entry.refcount == 0 && entry.pending_requests == 0);
         if removable {
             let entry = self.boot_registry.remove(hash).expect("orphan boot remains present");
-            let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
-            let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
+            let bytes = DropComponent { target: entry.path }.encode_into_bytes();
+            let _ = ctx.send_envelope_detached_to(entry.actor, DropComponent::ID, &bytes);
         }
     }
 
@@ -581,33 +603,36 @@ impl ComponentHostCapabilityState {
         };
         if remove {
             let entry = self.boot_registry.remove(&hash).expect("zero-ref boot remains present");
-            let bytes = DropComponent { mailbox_id: entry.mailbox_id }.encode_into_bytes();
-            let _ = ctx.send_envelope_detached(entry.mailbox_id, DropComponent::ID, &bytes);
+            let bytes = DropComponent { target: entry.path }.encode_into_bytes();
+            let _ = ctx.send_envelope_detached_to(entry.actor, DropComponent::ID, &bytes);
         }
     }
 
     pub fn begin_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
-        // ADR-0230: prove the wire position once, at receipt. A dropped
-        // trampoline keeps its `Live` route (vacate, not close), so a replace
-        // that refills it still proves; a position with no live route answers
-        // `Err` here instead of parking a forward nothing will answer.
-        let actor = match ctx.resolve_live(payload.mailbox_id) {
-            Ok(actor) => actor,
+        // ADR-0230: parse the target address with the host's boundary parser
+        // and prove the answer at once. A dropped trampoline keeps its `Live`
+        // route (vacate, not close), so a replace that refills it still
+        // proves; an address with no live route answers `Err` here instead of
+        // parking a forward nothing will answer.
+        let proven =
+            self.registry.resolve_address(&payload.target).map_err(|error| error.to_string()).and_then(|resolved| {
+                ctx.resolve_live(resolved.mailbox_id)
+                    .map(|actor| (actor, resolved.mailbox_id))
+                    .map_err(|error| error.to_string())
+            });
+        let (actor, position) = match proven {
+            Ok(proven) => proven,
             Err(error) => {
-                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error: error.to_string() });
+                let error = format!("no component to replace at {}: {error}", payload.target);
+                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
                 return;
             }
         };
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
             && let Ok(boot) = kind_manifest::read_boot_namespace_from_bytes(&payload.wasm)
-            && let Some(error) = replacement_refusal(
-                &self.registry,
-                payload.mailbox_id,
-                &actors,
-                payload.export.as_deref(),
-                boot.as_deref(),
-            )
+            && let Some(error) =
+                replacement_refusal(&self.registry, position, &actors, payload.export.as_deref(), boot.as_deref())
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
@@ -775,15 +800,30 @@ mod tests {
         ctx.resolve_live(position).expect("a freshly registered inbox proves")
     }
 
+    /// A boot entry over a test-local inbox registered under `name`, proven
+    /// like the boot spawn outcome's reference.
+    fn boot_entry(
+        state: &ComponentHostCapabilityState,
+        ctx: &NativeCtx<'_>,
+        name: &str,
+        refcount: u32,
+        pending_requests: u32,
+    ) -> BootEntry {
+        let actor = proven_actor(state, ctx, name);
+        let path = ActorPath::new(name).expect("test boot names are actor paths");
+
+        BootEntry { actor, path, refcount, pending_requests }
+    }
+
     #[test]
     fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
         let mut state = state();
         let binding = binding(&state);
         let hash = "boot-with-one-pending-request".to_owned();
-        let boot = MailboxId(0xB001);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let live_actor = proven_actor(&state, &ctx, "test.component.live-actor");
-        state.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot, refcount: 1, pending_requests: 1 });
+        let boot = boot_entry(&state, &ctx, "test.component.boot-pending", 1, 1);
+        state.boot_registry.insert(hash.clone(), boot);
         state.boot_hash_by_actor.insert(live_actor, hash.clone());
 
         // Manual state-machine proof: the last Live actor drops while another
@@ -808,12 +848,10 @@ mod tests {
         assert!(state.accept_successful_boot_operation(actor, old_operation));
         let new_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, new_operation));
-        state
-            .boot_registry
-            .insert(old_hash.clone(), BootEntry { mailbox_id: MailboxId(0xB002), refcount: 0, pending_requests: 0 });
-        state
-            .boot_registry
-            .insert(new_hash.clone(), BootEntry { mailbox_id: MailboxId(0xB003), refcount: 0, pending_requests: 0 });
+        let old_boot = boot_entry(&state, &ctx, "test.component.boot-n1", 0, 0);
+        let new_boot = boot_entry(&state, &ctx, "test.component.boot-n2", 0, 0);
+        state.boot_registry.insert(old_hash.clone(), old_boot);
+        state.boot_registry.insert(new_hash.clone(), new_boot);
 
         // Manual state-machine proof: N2's absent boot promotes first, then
         // N1's different boot promotes late. This is not a scheduler-order
@@ -855,9 +893,8 @@ mod tests {
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
-        state
-            .boot_registry
-            .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB004), refcount: 0, pending_requests: 0 });
+        let boot = boot_entry(&state, &ctx, "test.component.boot-after-drop", 0, 0);
+        state.boot_registry.insert(hash.clone(), boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor
         // before its boot completion arrives. This deliberately proves the

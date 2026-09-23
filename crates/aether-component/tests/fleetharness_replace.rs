@@ -19,7 +19,7 @@ mod tests {
     /// it with `aether-kit-commons`'s non-entry `aether.camera` export (selector
     /// `aether_kit_commons@aether.kit.camera`; handlers `CameraCreate` + `Tick` + the
     /// camera-driver kinds) targeting the captured trampoline
-    /// `mailbox_id` — exercising `ReplaceComponent.export` (#2027)
+    /// address — exercising `ReplaceComponent.export` (#2027)
     /// end-to-end over the wire. The returned
     /// `ReplaceResult::Ok.capabilities` must carry the camera
     /// handler set and not the probe's, with `Tick` surviving the
@@ -53,7 +53,7 @@ mod tests {
         let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
         assert_eq!(loaded.addr, expected, "probe should load at its ADR-0099 lineage address");
 
-        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_kit_commons", "aether.kit.camera");
+        let caps = harness.replace_export(engine, &loaded.addr, "aether_kit_commons", "aether.kit.camera");
 
         // Post-replace: the camera handler set is active, the probe's
         // is gone, and Tick (declared by both) survives the swap.
@@ -86,7 +86,7 @@ mod tests {
     /// the `multi_actor` module's **entry** actor (`RootManager`, a
     /// strict receiver — no `#[fallback]`), then replace it with the
     /// non-entry export `test.ui.panel` (`Panel`, which carries a
-    /// `#[fallback]`) at the same trampoline `mailbox_id`. The
+    /// `#[fallback]`) at the same trampoline address. The
     /// post-replace capabilities must be `Panel`'s — `fallback`
     /// flips from `None` to `Some` — proving the new `export` field
     /// survived the real `Call` wire and drove the trampoline's
@@ -122,7 +122,7 @@ mod tests {
 
         // Replace into the non-entry export `test.ui.panel`, at the same
         // mailbox id, carrying the export over the wire.
-        let caps = harness.replace_export(engine, loaded.mailbox_id, "aether_test_fixtures_bundle", "test.ui.panel");
+        let caps = harness.replace_export(engine, &loaded.addr, "aether_test_fixtures_bundle", "test.ui.panel");
 
         // Post-replace: Panel's capability group is active — still a
         // Ping handler, but now with a fallback, the observable

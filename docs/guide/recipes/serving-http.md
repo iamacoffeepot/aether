@@ -172,10 +172,9 @@ Then load it by selector over the MCP harness once the substrate is up:
 }
 ```
 
-`load_component` replies `LoadResult.Ok` with the registered mailbox name
-(`aether.component/aether.embedded:web`) and that mailbox's `mailbox_id`,
-rendered as a tagged `mbx-…` string. After that, any inbound HTTP request on
-the bound port routes to your handler.
+`load_component` replies with the component's registered address
+(`aether.component/aether.embedded:web`). After that, any inbound HTTP request
+on the bound port routes to your handler.
 
 ## 5. Send a request
 
@@ -248,14 +247,15 @@ form instead — `register_route` / `unregister_route`, which take the target
 request `KindId`), `mailbox` (the handler's `MailboxId`), and `shared` (the
 ADR-0136 member-set flag — `false` claims the prefix exclusively, `true` joins
 the round-robin set on it). Over the MCP
-wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…` — so
-the values below come from `describe_kinds` (the `kind` for
-`aether.http.server.request`, or a route-specific kind's own id) and from
-`load_component`'s reply, which returns the handler's `mailbox_id` in exactly
-the tagged form this field wants. Reach for the id rather than the
-`LoadResult.name` beside it: the name is a rendered lineage path, and the
-field is an id, so hashing the path yourself lands on a mailbox that was never
-registered:
+wire both tagged ids render as ADR-0064 strings — `knd-…` and `mbx-…`. The
+`kind` comes from `describe_kinds` (the `kind` for
+`aether.http.server.request`, or a route-specific kind's own id). The
+`mailbox` has no documented operator source today: `load_component` returns
+the handler's lineage address and no mailbox id, and the field is an id, so
+hashing the address yourself lands on a mailbox that was never registered. A
+component registers its own routes with `register_route_self` (or the typed
+surface below); the named form remains for a caller that already holds the
+handler's tagged id:
 
 ```jsonc
 // send_mail → aether.http.server  (kind: aether.http.server.register_route)
@@ -263,7 +263,7 @@ registered:
   "prefix": "/api",
   "method": "Get",
   "kind": "knd-…",     // aether.http.server.request's id, from describe_kinds
-  "mailbox": "mbx-…",  // the handler's mailbox_id, from load_component's reply
+  "mailbox": "mbx-…",  // the handler's tagged mailbox id
   "shared": false
 }
 ```

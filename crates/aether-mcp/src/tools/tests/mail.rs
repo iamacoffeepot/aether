@@ -140,7 +140,6 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
         .await
         .expect("direct mail prepares through the engine resolver");
     assert_eq!(prepared.envelope.to.mailbox, engine_answer);
-    assert_eq!(prepared.resolved_mailbox_id, engine_answer);
     assert_eq!(prepared.canonical_recipient, canonical);
     assert_eq!(calls.lock().expect("address-route calls mutex is never poisoned").len(), 1);
 
@@ -164,7 +163,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
 }
 
 #[tokio::test]
-async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved_mailbox() {
+async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved_path() {
     let supplied = "aether.test/:declared-reply";
     let canonical = "aether.test/aether.test.child:declared-reply";
     let engine_answer = MailboxId(0x4057_0000_0000_0003);
@@ -194,7 +193,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     let request_descriptor = mcp.cache_lookup(engine, "aether.fs.list").expect("static request descriptor is cached");
     let request_kind_id = KindId(kind_id_from_parts(&request_descriptor.name, &request_descriptor.schema));
     mcp.components.lock().expect("component cache mutex is never poisoned").insert(
-        (engine, engine_answer),
+        (engine, ActorPath::new(canonical).expect("fixture is an actor path")),
         ComponentCapabilities {
             handlers: vec![HandlerCapability {
                 id: request_kind_id,
@@ -209,8 +208,8 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
         !mcp.components
             .lock()
             .expect("component cache mutex is never poisoned")
-            .contains_key(&(engine, locally_folded)),
-        "only the engine-returned mailbox id owns the handler contract"
+            .contains_key(&(engine, ActorPath::new(supplied).expect("fixture is an actor path"))),
+        "only the engine-returned canonical path owns the handler contract"
     );
 
     let status = settle_mail_item(

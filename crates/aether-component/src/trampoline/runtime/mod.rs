@@ -29,9 +29,10 @@ pub use std::io;
 pub use std::sync::Arc;
 
 use super::WasmTrampoline;
+use crate::component::LoadDelivered;
 pub use aether_actor::Local;
-use aether_actor::{Single, runtime};
-pub use aether_kinds::{DropComponent, DropResult, ReplaceComponent, ReplaceResult};
+use aether_actor::{Manual, OutboundReply, Single, runtime};
+pub use aether_kinds::{DropComponent, DropResult, LoadResult, ReplaceComponent, ReplaceResult};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{
     Dispatch, NativeActor, NativeCtx, NativeInitCtx, RegistryBatchResult, SpawnOutcome, TaskDone,
@@ -227,6 +228,25 @@ impl NativeActor for WasmTrampoline {
         payload: ReplaceComponent,
     ) -> ReplaceResult {
         state.handle_replace(ctx, payload)
+    }
+
+    /// Answer the requester of the load that produced this trampoline, in the
+    /// trampoline's own name (ADR-0230 §3).
+    ///
+    /// The component host hands its owed load reply here once this
+    /// trampoline's birth completes (`TaskDone::hand_off`), so the mail's
+    /// reply target is the original requester and the reply's stamped sender
+    /// is this trampoline — the reference the requester keeps.
+    ///
+    /// The hand-off pins the reply target, and the reply target is the mail's
+    /// sender, so the handler cannot tell a host hand-off from any other
+    /// delivery by its sender. It needs no such check: it answers only the
+    /// mail's own reply target, so a delivery from anyone else reaches only
+    /// the actor that sent it.
+    #[handler::manual]
+    fn on_load_delivered(_state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: LoadDelivered) {
+        let LoadDelivered { path, capabilities } = payload;
+        ctx.reply(&LoadResult::Ok { path, capabilities });
     }
 
     #[handler(task)]

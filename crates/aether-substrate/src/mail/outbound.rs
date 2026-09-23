@@ -19,6 +19,7 @@
 use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 
+use aether_actor::ErasedActorRef;
 use aether_data::{EngineId, KindDescriptor, KindId, MailboxDescriptor, MailboxId, SessionToken};
 
 use crate::mail::{Source, SourceAddr};
@@ -54,7 +55,10 @@ pub trait EgressBackend: Send + Sync {
     /// Reply or push mail addressed at a specific Claude session
     /// (ADR-0008). `kind_name` is the kind's wire name; `origin` is
     /// the substrate-local emitting mailbox name (`None` for
-    /// substrate-generated mail with no source mailbox).
+    /// substrate-generated mail with no source mailbox). `sender` is the
+    /// replying actor's proven reference when the reply came from an actor's
+    /// handler, the stamp an in-process embedder reads a load reply's loaded
+    /// actor from (ADR-0230 §3); it is memory-only, so a wire backend drops it.
     fn egress_to_session(
         &self,
         session: SessionToken,
@@ -62,6 +66,7 @@ pub trait EgressBackend: Send + Sync {
         payload: Vec<u8>,
         origin: Option<String>,
         correlation_id: u64,
+        sender: Option<ErasedActorRef>,
     );
 
     /// Reply or push mail addressed at a specific component on
@@ -118,6 +123,7 @@ impl EgressBackend for DroppingBackend {
         _payload: Vec<u8>,
         _origin: Option<String>,
         _correlation_id: u64,
+        _sender: Option<ErasedActorRef>,
     ) {
     }
     fn egress_to_engine_mailbox(
@@ -158,6 +164,9 @@ pub enum EgressEvent {
         payload: Vec<u8>,
         origin: Option<String>,
         correlation_id: u64,
+        /// The replying actor, stamped when an actor's handler sent the
+        /// reply; `None` for a reply the embedder or a chassis sent itself.
+        sender: Option<ErasedActorRef>,
     },
     ToEngineMailbox {
         engine_id: EngineId,
@@ -211,6 +220,7 @@ impl EgressBackend for RecordingBackend {
         payload: Vec<u8>,
         origin: Option<String>,
         correlation_id: u64,
+        sender: Option<ErasedActorRef>,
     ) {
         let _ = self.tx.send(EgressEvent::ToSession {
             session,
@@ -218,6 +228,7 @@ impl EgressBackend for RecordingBackend {
             payload,
             origin,
             correlation_id,
+            sender,
         });
     }
 
@@ -313,7 +324,8 @@ impl HubOutbound {
         self.backend.get().is_some_and(|b| b.is_connected())
     }
 
-    /// Reply or push mail addressed at a Claude session.
+    /// Reply or push mail addressed at a Claude session. `sender` is the
+    /// replying actor's stamp, `None` when no actor's handler sent it.
     pub fn egress_to_session(
         &self,
         session: SessionToken,
@@ -321,9 +333,10 @@ impl HubOutbound {
         payload: Vec<u8>,
         origin: Option<String>,
         correlation_id: u64,
+        sender: Option<ErasedActorRef>,
     ) {
         if let Some(b) = self.backend.get() {
-            b.egress_to_session(session, kind_name, payload, origin, correlation_id);
+            b.egress_to_session(session, kind_name, payload, origin, correlation_id, sender);
         }
     }
 
@@ -394,15 +407,26 @@ impl HubOutbound {
     /// routes through `egress_to_engine_mailbox`; `None` and `Component`
     /// are silent no-ops (the latter is handled by `Mailer::send_reply`
     /// rather than the hub). Returns `true` when a backend method was
-    /// called; `false` on a non-hub-routed target.
+    /// called; `false` on a non-hub-routed target. The reply carries no
+    /// actor stamp: the caller is an embedder or a chassis, not an actor.
     pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
+    where
+        K: aether_data::Kind,
+    {
+        self.send_reply_stamped(sender, result, None)
+    }
+
+    /// [`Self::send_reply`] with the replying actor's `stamp`, which rides a
+    /// session reply's [`EgressEvent::ToSession`] `sender`. Its caller is
+    /// `Mailer::send_reply`, which stamps the actor whose handler replied.
+    pub(crate) fn send_reply_stamped<K>(&self, sender: Source, result: &K, stamp: Option<ErasedActorRef>) -> bool
     where
         K: aether_data::Kind,
     {
         let payload = result.encode_into_bytes();
         match sender.addr {
             SourceAddr::Session(token) => {
-                self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id);
+                self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id, stamp);
                 true
             }
             SourceAddr::EngineMailbox { engine_id, mailbox_id } => {

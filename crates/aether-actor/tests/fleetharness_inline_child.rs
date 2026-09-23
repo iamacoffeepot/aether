@@ -130,12 +130,7 @@ mod tests {
         // Same-stem in-place replace (ADR-0022): the common in-place
         // rebuild where both sides are the same SDK build (per issue
         // 2690's design notes on the composite bundle's transience).
-        harness.replace_export(
-            engine,
-            parent.mailbox_id,
-            "aether_test_fixtures_bundle",
-            "test.inline.configured_parent",
-        );
+        harness.replace_export(engine, &parent.addr, "aether_test_fixtures_bundle", "test.inline.configured_parent");
 
         // The moved state — not the config default, not the spawn
         // config's initial value, not silently dropped — survives the
@@ -165,7 +160,7 @@ mod tests {
         }
         assert_eq!(count(&mut harness, engine, &child_addr), BUMPS, "the child holds moved state before replacement");
 
-        harness.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.tag_parent");
+        harness.replace_export(engine, &parent.addr, "aether_test_fixtures_bundle", "test.inline.tag_parent");
 
         assert_eq!(
             count(&mut harness, engine, &child_addr),
@@ -195,7 +190,7 @@ mod tests {
             "the exact-placement child is resident before replacement",
         );
 
-        harness.replace_export(engine, parent.mailbox_id, "aether_test_fixtures_bundle", "test.inline.tag_parent");
+        harness.replace_export(engine, &parent.addr, "aether_test_fixtures_bundle", "test.inline.tag_parent");
 
         let child_replies = harness.send(engine, &child_addr, &CountQuery);
         assert!(child_replies.is_empty(), "a child forbidden beneath the replacement entry actor must stay absent");

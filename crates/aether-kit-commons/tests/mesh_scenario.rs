@@ -51,7 +51,7 @@ const OUTLINE_WINDOW_ID: WindowId = WindowId(1);
 
 /// Typed sender for the loaded viewer. `HarnessOp::loaded` renders the
 /// `/`-joined lineage the substrate registers the trampoline under
-/// (ADR-0099 §4) — exactly what `LoadResult.name` reports — from the
+/// (ADR-0099 §4) — exactly what `LoadResult.path` reports — from the
 /// component identity, so mail cannot go to the bare `COMPONENT_NAME`,
 /// which warn-drops as unknown.
 fn viewer() -> HarnessActor<MeshViewer> {
@@ -90,9 +90,9 @@ fn load_kit_export(harness: &mut SubstrateHarness, wasm: &[u8], export: &str, na
         )])
         .expect("load sequence");
     match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
-        LoadResult::Ok { name: address, .. } => {
+        LoadResult::Ok { path: address, .. } => {
             assert!(
-                address.ends_with(&format!(":{name}")),
+                address.to_string().ends_with(&format!(":{name}")),
                 "export {export} should register under :{name}; got {address}"
             );
         }

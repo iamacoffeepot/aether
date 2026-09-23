@@ -40,7 +40,6 @@ use aether_chassis::boot::{
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
 use aether_data::ActorPath;
-use aether_data::MailboxId;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
 use aether_http::{HttpServerConfig, HttpServerHandle};
@@ -85,16 +84,16 @@ const ROUTED_STREAM_HANDLER_NAMESPACE: &str = "test.web_stream_routed";
 const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 
 /// Poll the chassis's boundary address parser until the handler loaded under
-/// `name` resolves to its trampoline, answering its position. Panics after 30s
-/// with the address and the parser's last answer.
-fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> MailboxId {
+/// `name` resolves to its trampoline, answering its canonical address. Panics
+/// after 30s with the address and the parser's last answer.
+fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> ActorPath {
     let address = ActorPath::new(&format!("aether.component/aether.embedded:{name}"))
         .expect("a loaded handler name forms a well-formed actor path");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let resolved = built.resolve_address(&address);
-        if let Ok(live) = &resolved {
-            return live.mailbox_id;
+        if resolved.is_ok() {
+            return address;
         }
         assert!(
             Instant::now() < deadline,
@@ -844,7 +843,7 @@ mod tests {
     /// `unregister_routes_all` fan-out) purges the route, so the same
     /// request falls back to the `test.web` fixture's `/` catch-all. The
     /// drop is injected through the routed guest itself — the request
-    /// body names the trampoline mailbox id to drop — since the built
+    /// body names the component's address to drop — since the built
     /// chassis exposes no direct mail surface to the test.
     #[test]
     #[allow(clippy::too_many_lines)]
@@ -912,7 +911,7 @@ mod tests {
         let built = HeadlessChassis::build(env).expect("build headless chassis with http server");
 
         // Wait for both trampolines (fallback + routed guest).
-        let routed_mailbox = await_live_trampoline(&built, ROUTED_NAMESPACE);
+        let routed_address = await_live_trampoline(&built, ROUTED_NAMESPACE);
         await_live_trampoline(&built, HANDLER_NAMESPACE);
 
         let port =
@@ -928,16 +927,16 @@ mod tests {
         // `/routed/drop` is a second exact route (#3697) with its own async
         // registration — confirm it live before the destructive POST so that
         // request cannot race its registration. An empty body is a clean 400
-        // ("decimal mailbox id"), so this probe drops nothing.
+        // ("component actor path"), so this probe drops nothing.
         poll_body_contains(
             port,
             b"GET /routed/drop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n",
-            "decimal mailbox id",
+            "component actor path",
         );
 
         // Drop the routed component through the guest bridge: the body
-        // carries the trampoline mailbox id to drop.
-        let drop_body = routed_mailbox.0.to_string();
+        // carries the component's address.
+        let drop_body = routed_address.to_string();
         let drop_request = format!(
             "POST /routed/drop HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\
              Content-Length: {}\r\n\r\n{}",

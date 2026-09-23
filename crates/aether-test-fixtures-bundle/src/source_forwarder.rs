@@ -8,7 +8,8 @@
 //! address in the mail, which is why [`SendSourceQuery`] is fieldless.
 //!
 //! The forward makes this actor the component origin, so the observer's
-//! `ctx.sender()` reads the forwarder's own `MailboxId` — the property
+//! `ctx.sender()` proves the forwarder, and the observer's report sent through
+//! that reference lands back here, where it is logged — the property
 //! `aether-component`'s source-attribution scenario asserts.
 //!
 //! A second actor rather than a self-dependency: the observer is loaded twice
@@ -20,7 +21,7 @@
 #![allow(clippy::unused_self)] // aether-suppression-request: the ADR-0033 dispatch ABI fixes the handler signature at `&mut self`, and this forwarder is stateless — the same allow `source_observer` and `matrix_sweep` already carry
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery};
+use aether_test_fixtures_kinds::{SendSourceQuery, SourceQuery, SourceReport};
 
 use super::source_observer::SourceObserver;
 
@@ -41,5 +42,13 @@ impl WasmActor for SourceForwarder {
     fn on_send_source_query(&mut self, ctx: &mut WasmCtx<'_, SourceForwarder>, _msg: SendSourceQuery) {
         let observer = ctx.actor_ref::<SourceObserver>();
         ctx.to(&observer).send(&SourceQuery);
+    }
+
+    /// Log the observer's report, which it sent through the reference its
+    /// `ctx.sender()` proved: the arrival here is what shows that sender was
+    /// this forwarder.
+    #[handler::single]
+    fn on_source_report(&mut self, _ctx: &mut WasmCtx<'_>, _report: SourceReport) {
+        tracing::info!(target: "test.source_forwarder", "source_report_received");
     }
 }

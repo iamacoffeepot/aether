@@ -2,9 +2,9 @@
 //!
 //! `on_source_query` (manual) handles `SourceQuery`, reads
 //! `ctx.sender()`, logs its id, broadcasts `SourceReport { mailbox_id }`
-//! to the substrate-harness observer mailbox, and replies it directly.
-//! `mailbox_id` is `0` when `sender()` returns `None` (Session /
-//! no-sender origin).
+//! to the substrate-harness observer mailbox, and answers the query: through
+//! the proven sender when there is one, else by reply. `mailbox_id` is `0`
+//! when `sender()` returns `None` (Session / no-sender origin).
 //!
 //! Integration test pattern:
 //! - Session case: the harness sends `SourceQuery` via `send_and_await_reply`; the
@@ -14,9 +14,9 @@
 //!   declares this actor as a dependency. The harness sends the fieldless
 //!   `SendSourceQuery` (via `send_and_settle`) to the forwarder; the forwarder
 //!   sends `SourceQuery` through its minted reference (component-origin mail);
-//!   this actor reads `sender()` → `Some(forwarder_mailbox)` → logs
-//!   `"source_mailbox={forwarder_mailbox.0}"`. The test uses `log_tail` on this
-//!   actor's address to verify the logged value equals the forwarder's id.
+//!   this actor reads `sender()` → `Some(forwarder)` and sends its report
+//!   through that reference. The forwarder logs the report's arrival, and the
+//!   test reads that log with `log_tail` on the forwarder's address.
 
 // `#[handler::manual]` and `#[handler]` methods take `&mut self` to match
 // the dispatch ABI even when the actor carries no state.
@@ -35,19 +35,20 @@ impl WasmActor for SourceObserver {
         Ok(SourceObserver)
     }
 
-    /// Read `sender()` from the inbound `SourceQuery`, log its id
-    /// (so `log_tail` can retrieve the exact raw id in the integration test),
-    /// broadcast `SourceReport { mailbox_id }` to the observer, and reply to
-    /// the direct sender with the same report.
+    /// Read `sender()` from the inbound `SourceQuery`, log its id,
+    /// broadcast `SourceReport { mailbox_id }` to the observer, and answer:
+    /// a component sender gets the report sent through its proven reference,
+    /// and a session sender (no reference) gets it as a reply.
     #[handler::manual]
     fn on_source_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: SourceQuery) {
-        let mailbox_id = ctx.sender().map_or(0, |sender| sender.id().0);
-        // Log the raw value so the SubstrateHarness integration test can verify it
-        // with `log_tail` without relying on broadcast payload access.
+        let sender = ctx.sender();
+        let mailbox_id = sender.map_or(0, |sender| sender.id().0);
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");
         // Broadcast to the observer for count-based assertions.
         ctx.actor::<SubstrateHarnessObserver>().send(&SourceReport { mailbox_id });
-        // Reply to the harness when it sent `SourceQuery` directly (Session case).
-        ctx.reply(&SourceReport { mailbox_id });
+        match sender {
+            Some(sender) => ctx.send_to(sender, &SourceReport { mailbox_id }),
+            None => ctx.reply(&SourceReport { mailbox_id }),
+        }
     }
 }

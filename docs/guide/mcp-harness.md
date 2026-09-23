@@ -82,7 +82,7 @@ Per-engine work is keyed by `engine_id`. A session has a recognizable arc:
 2. **Set it up.** Stage the wasm into the hub's component registry with
    `upload_component(staged_path)` — it returns `{hash, name}` — then
    `load_component(engine_id, selector)` resolves that selector and loads the
-   component, returning its `mailbox_id`, resolved `name`, and advertised
+   component, returning its canonical lineage `address` and advertised
    capabilities.
 3. **Drive it.** `send_mail(…)` delivers a kind to a mailbox. By default it blocks
    until the dispatch chain settles and hands you the correlated reply.
@@ -186,8 +186,12 @@ path to a JSON file; they are mutually exclusive. The harness schema-encodes the
 JSON to the Config kind that `describe_component` identifies; `describe_kinds`
 shows its schema. `config_path` does not contain pre-encoded wire bytes.
 `load_component` with `replicas: N` returns one shared `capabilities` block plus
-`instances: [{mailbox_id, name}, …]` rather than repeating capabilities per
+`instances: [{address}, …]` rather than repeating capabilities per
 replica; docs on that block also follow the summary-vs-`full` projection.
+`replace_component` names its target by lineage address (canonical or short),
+sends it to the engine as the `aether.component.replace` target, and prints the
+address back; a tagged `mbx-…` address is refused with a pointer to the lineage
+address.
 
 `list_binaries` and registry `list_components` return
 `{entries, total_matched, shown, truncated, notice}` in stable newest-first
@@ -260,12 +264,10 @@ one handler.
 - **`describe_component` resolves names before consulting its cache.** Address
   it by the lineage returned by `load_component`, an unambiguous short path,
   or a retained boot-spec lineage. The selected engine first returns the live
-  mailbox id and canonical path; aether-mcp then checks capabilities cached
-  under that real id and asks the component host only on a cache miss. A tagged
-  `mbx-` id remains cache-only, so that form alone does not prove liveness.
-  Registry `list_components`
-  rows are stored artifacts, not lineage names. A `mbx-` id is only a local
-  cache fast-path and needs a prior `load_component` / `replace_component`.
+  canonical path; aether-mcp then checks capabilities cached under that engine
+  and path and asks the component host only on a cache miss. A tagged `mbx-`
+  address is refused with a pointer to the lineage address. Registry
+  `list_components` rows are stored artifacts, not lineage names.
 
 ## Where to read more
 

@@ -679,15 +679,18 @@ mod control_plane {
         pub load: LoadComponent,
     }
 
-    /// Reply to `LoadComponent`. `Ok` carries the assigned mailbox id,
-    /// the resolved name (so callers that omitted `name` learn the
-    /// substrate-defaulted one), and the component's advertised
-    /// receive-side capabilities parsed from `aether.kinds.inputs`
-    /// (ADR-0033). `Err` carries the failure reason — kind-descriptor
-    /// conflict, invalid WASM, name conflict, etc.
+    /// Reply to `LoadComponent`. `Ok` is sent by the newly loaded actor
+    /// itself, so a requester takes its proven reference from the reply's
+    /// stamped sender (ADR-0230 §3), never from a field. It carries the
+    /// component's canonical lineage `path` (so external clients, and
+    /// callers that omitted `name`, learn where the component landed) and
+    /// its advertised receive-side capabilities parsed from
+    /// `aether.kinds.inputs` (ADR-0033). `Err` comes from the component
+    /// host and carries the failure reason — kind-descriptor conflict,
+    /// invalid WASM, name conflict, etc.
     #[aether_data::kind(name = "aether.component.load_result")]
     pub enum LoadResult {
-        Ok { mailbox_id: aether_data::MailboxId, name: String, capabilities: ComponentCapabilities },
+        Ok { path: aether_data::ActorPath, capabilities: ComponentCapabilities },
         Err { error: String },
     }
 
@@ -789,29 +792,32 @@ mod control_plane {
         pub name: String,
     }
 
-    /// `aether.component.drop` — remove a component from the
-    /// substrate and invalidate its mailbox id. Reply: `DropResult`.
+    /// `aether.component.drop` — unload the component at `target`, its
+    /// canonical or short actor path. The component host proves the path
+    /// once at receipt. Reply: `DropResult`.
     #[aether_data::kind(name = "aether.component.drop")]
     pub struct DropComponent {
-        pub mailbox_id: aether_data::MailboxId,
+        pub target: aether_data::ActorPath,
     }
 
     /// Reply to `DropComponent`. `Ok` on success; `Err` if the
-    /// mailbox was unknown, wasn't a component, or already dropped.
+    /// address named nothing live, wasn't a component, or was already
+    /// dropped.
     #[aether_data::kind(name = "aether.component.drop_result")]
     pub enum DropResult {
         Ok,
         Err { error: String },
     }
 
-    /// `aether.component.replace` — atomically rebind a target
-    /// mailbox id to a freshly instantiated component. Post-ADR-0038 the
-    /// splice is structural: there is no drain phase and no drain
-    /// timeout. Kind vocabulary rides in the wasm's `aether.kinds`
-    /// custom section (ADR-0028). Reply: `ReplaceResult`.
+    /// `aether.component.replace` — atomically rebind the component at
+    /// `target`, its canonical or short actor path, to a freshly
+    /// instantiated component. The component host proves the path once at
+    /// receipt. Post-ADR-0038 the splice is structural: there is no drain
+    /// phase and no drain timeout. Kind vocabulary rides in the wasm's
+    /// `aether.kinds` custom section (ADR-0028). Reply: `ReplaceResult`.
     #[aether_data::kind(name = "aether.component.replace")]
     pub struct ReplaceComponent {
-        pub mailbox_id: aether_data::MailboxId,
+        pub target: aether_data::ActorPath,
         #[serde(with = "aether_data::bytes")]
         pub wasm: Vec<u8>,
         /// Vestigial. ADR-0022 sized a drain phase this field capped;
@@ -876,16 +882,16 @@ mod control_plane {
     /// ADR-0033 receive-side `ComponentCapabilities` (handler kinds, docs,
     /// fallback, config kind), addressed to its `aether.component` mailbox
     /// by lineage `name` (the `aether.component/<name>` address that
-    /// `ListComponents` / `LoadResult.name` hand back; iamacoffeepot/aether#2421).
+    /// `ListComponents` / `LoadResult.path` hand back; iamacoffeepot/aether#2421).
     /// Name-addressed because a boot-manifest-loaded component never returns
-    /// a mailbox id to its spawner — the substrate is the only process that
+    /// a load reply to its spawner — the substrate is the only process that
     /// always holds the live loaded set, so it owns the answer. Reply:
     /// `DescribeComponentResult`.
     #[aether_data::kind(name = "aether.component.describe")]
     pub struct DescribeComponent {
         /// The component's ADR-0099 lineage name (e.g.
         /// `aether.embedded:aether.camera`), as returned by
-        /// `ListComponentsResult.names` or `LoadResult.name`.
+        /// `ListComponentsResult.names` or `LoadResult.path`.
         pub name: String,
     }
 
