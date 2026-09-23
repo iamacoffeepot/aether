@@ -127,7 +127,11 @@ impl Registry {
                 tracing::warn!(name, ?error, "scope path over cap; resolution miss");
                 return None;
             }
-            Err(ActorPathError::Segment { .. } | ActorPathError::RetiredShortForm) => return None,
+            Err(
+                ActorPathError::Segment { .. }
+                | ActorPathError::RetiredShortForm
+                | ActorPathError::ShortPathFromInstance,
+            ) => return None,
         };
         match self.resolve_address(&address) {
             Ok(resolved) => Some(resolved.mailbox_id),

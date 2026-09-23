@@ -72,7 +72,8 @@ impl ActorPath {
     /// # Errors
     ///
     /// Returns [`ActorPathError`] naming the breached cap, the retired `://`
-    /// form, or the written step and the rule it broke.
+    /// form, a short path whose first step is an instance, or the written
+    /// step and the rule it broke.
     pub fn new(text: &str) -> Result<Self, ActorPathError> {
         check_path(text)?;
         Ok(Self(text.into()))
@@ -119,6 +120,10 @@ pub enum ActorPathError {
     /// The text holds `://`, the retired short form. A short path names the
     /// one instanced child with a hole instead.
     RetiredShortForm,
+    /// The path has a hole but its first step is an instance, qualified
+    /// (`swarm:3/:x`) or itself a hole (`:a/b`). A short path is expanded
+    /// from a root's declarations, so it must start at a bare root namespace.
+    ShortPathFromInstance,
 }
 
 impl fmt::Display for ActorPathError {
@@ -134,6 +139,10 @@ impl fmt::Display for ActorPathError {
             Self::RetiredShortForm => f.write_str(
                 "invalid actor path: `://` was removed; name the one instanced child with a hole, \
                  e.g. `aether.component/:camera`",
+            ),
+            Self::ShortPathFromInstance => f.write_str(
+                "invalid actor path: a short path must start at a root namespace, not an instance; start it at \
+                 the root (e.g. `aether.component/:camera`) or spell every step canonically",
             ),
         }
     }
@@ -154,10 +163,12 @@ fn check_path(text: &str) -> Result<(), ActorPathError> {
     }
 
     let short = steps.iter().any(|step| matches!(step, PathSegment::Hole { .. }));
+    if short && !matches!(steps.first(), Some(PathSegment::Bare(_))) {
+        return Err(ActorPathError::ShortPathFromInstance);
+    }
+
     steps.into_iter().enumerate().try_for_each(|(index, step)| {
         let parts = match step {
-            PathSegment::Hole { .. } if index == 0 => Err(SegmentFault::Empty),
-            PathSegment::Qualified { .. } if index == 0 && short => Err(SegmentFault::ContainsSeparator),
             PathSegment::Bare(namespace) => check_segment(namespace.as_bytes()),
             PathSegment::Qualified { namespace, discriminator } => {
                 check_segment(namespace.as_bytes()).and_then(|()| check_segment(discriminator.as_bytes()))
@@ -229,8 +240,8 @@ mod tests {
         assert_eq!(ActorPath::new("a//b"), segment(1, SegmentFault::Empty));
         assert_eq!(ActorPath::new("a/"), segment(1, SegmentFault::Empty));
         assert_eq!(ActorPath::new("root/worker:bad:key"), segment(1, SegmentFault::ContainsSeparator));
-        assert_eq!(ActorPath::new("a:b/:c"), segment(0, SegmentFault::ContainsSeparator));
-        assert_eq!(ActorPath::new(":a/b"), segment(0, SegmentFault::Empty));
+        assert_eq!(ActorPath::new("a:b/:c"), Err(ActorPathError::ShortPathFromInstance));
+        assert_eq!(ActorPath::new(":a/b"), Err(ActorPathError::ShortPathFromInstance));
         assert_eq!(ActorPath::new("a b"), segment(0, SegmentFault::ContainsControlOrWhitespace));
         assert_eq!(ActorPath::new(""), segment(0, SegmentFault::Empty));
         assert_eq!(ActorPath::new("aether.component://camera"), Err(ActorPathError::RetiredShortForm));

@@ -320,9 +320,10 @@ exactly `address`, and the engine's resolver expands only an `ActorPath`.
 A path with no hole is canonical and resolves by the lineage fold. A path with
 at least one hole is short: its first step is the exact bare `NAMESPACE` of a
 declared singleton `Root`, and the engine's declarations fill each hole. A
-short path's first step never carries `:`, so a path starting at an instanced
-root (`swarm:3/:x`) is refused at parse time; a canonical path may still start
-at one. A hole expands to exactly one segment, so written depth equals expanded
+short path's first step never carries `:`, so a short path starting at an
+instance (`swarm:3/:x`, or a hole as in `:a/b`) is refused at parse time with
+an error saying a short path must start at a root namespace; a canonical path
+may still start at an instanced root. A hole expands to exactly one segment, so written depth equals expanded
 depth. Each step has one meaning:
 
 - A bare `namespace` step is always a singleton child. It never elides an

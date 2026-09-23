@@ -127,11 +127,26 @@ enum Cardinality {
     Instanced,
 }
 
-#[derive(Clone, Debug)]
-struct ChildNode {
-    actor: ActorId,
-    namespace: String,
-    cardinality: Cardinality,
+/// The declared children beneath one parent, keyed by namespace and split by
+/// cardinality, so each step kind is one keyed lookup: a bare step reads
+/// `singletons`, a `namespace:discriminator` step reads `instanced`, and a
+/// hole reads `instanced`'s size. A namespace sits in at most one map, because
+/// a namespace with contradicting cardinality facts is excluded at build.
+struct Children {
+    /// The parent's own namespace, which the `ActorId` key does not spell.
+    parent_namespace: String,
+    singletons: HashMap<String, ActorId>,
+    instanced: HashMap<String, ActorId>,
+}
+
+impl Children {
+    /// The instanced child namespaces, sorted: the candidates an ambiguous
+    /// hole lists. Only error and gate paths read this.
+    fn instanced_namespaces(&self) -> Vec<&str> {
+        let mut namespaces = self.instanced.keys().map(String::as_str).collect::<Vec<_>>();
+        namespaces.sort_unstable();
+        namespaces
+    }
 }
 
 pub(super) struct AddressIndex {
@@ -145,12 +160,7 @@ pub(super) struct AddressIndex {
     /// for the same reason as `instanced_roots`: a short path rooted at one
     /// reports the half-declaration rather than reading as unknown.
     half_declared_roots: BTreeMap<String, CardinalityDefect>,
-    children: HashMap<ActorId, Vec<ChildNode>>,
-    /// Namespace of every actor that appears as a parent in `children`. The
-    /// child nodes carry their own namespace; this recovers the parent's, which
-    /// the `ActorId` key alone does not spell. Total over `children`'s keys by
-    /// construction — both maps are filled from the same edge.
-    parent_namespaces: HashMap<ActorId, String>,
+    children: HashMap<ActorId, Children>,
 }
 
 /// Every parent in *this binary's* linked actor inventory beneath which a
@@ -334,7 +344,8 @@ impl AddressIndex {
         // An edge touching an excluded namespace is dropped rather than walked:
         // the child's cardinality decides which step reaches it, so an edge
         // with no cardinality has no defined traversal. Sibling edges are unaffected.
-        let mut logical_edges = BTreeSet::new();
+        // Duplicate records of one logical edge collapse into the same key.
+        let mut children = HashMap::<ActorId, Children>::new();
         for fact in child_facts {
             if half_declared.contains_key(fact.parent_namespace) {
                 continue;
@@ -342,24 +353,19 @@ impl AddressIndex {
             let Some(cardinality) = resolved_cardinalities.get(fact.child_namespace) else {
                 continue;
             };
-            logical_edges.insert((fact.parent, fact.parent_namespace, fact.child, fact.child_namespace, *cardinality));
-        }
-
-        let mut children = HashMap::<ActorId, Vec<ChildNode>>::new();
-        let mut parent_namespaces = HashMap::new();
-        for (parent, parent_namespace, child, child_namespace, cardinality) in logical_edges {
-            children.entry(parent).or_default().push(ChildNode {
-                actor: child,
-                namespace: child_namespace.to_owned(),
-                cardinality,
+            let parent = children.entry(fact.parent).or_insert_with(|| Children {
+                parent_namespace: fact.parent_namespace.to_owned(),
+                singletons: HashMap::new(),
+                instanced: HashMap::new(),
             });
-            parent_namespaces.insert(parent, parent_namespace.to_owned());
-        }
-        for nodes in children.values_mut() {
-            nodes.sort_by(|left, right| left.namespace.cmp(&right.namespace).then(left.actor.cmp(&right.actor)));
+            let table = match cardinality {
+                Cardinality::Singleton => &mut parent.singletons,
+                Cardinality::Instanced => &mut parent.instanced,
+            };
+            table.insert(fact.child_namespace.to_owned(), fact.child);
         }
 
-        Ok(Self { roots, instanced_roots, half_declared_roots, children, parent_namespaces })
+        Ok(Self { roots, instanced_roots, half_declared_roots, children })
     }
 
     /// Every parent beneath which a hole is ambiguous, sorted by parent
@@ -367,21 +373,14 @@ impl AddressIndex {
     /// so what this reports and what a caller hits at resolution time cannot
     /// disagree.
     pub(super) fn ambiguous_holes(&self) -> Vec<AmbiguousHole> {
+        // One instanced child fills a hole; none leaves nothing to fill it.
         let mut points = self
             .children
-            .iter()
-            .filter_map(|(parent, nodes)| {
-                let child_namespaces = nodes
-                    .iter()
-                    .filter(|node| node.cardinality == Cardinality::Instanced)
-                    .map(|node| node.namespace.clone())
-                    .collect::<Vec<_>>();
-                // One instanced child fills a hole; none leaves nothing to fill it.
-                if child_namespaces.len() < 2 {
-                    return None;
-                }
-                let parent_namespace = self.parent_namespaces.get(parent)?.clone();
-                Some(AmbiguousHole { parent_namespace, child_namespaces })
+            .values()
+            .filter(|children| children.instanced.len() >= 2)
+            .map(|children| AmbiguousHole {
+                parent_namespace: children.parent_namespace.clone(),
+                child_namespaces: children.instanced_namespaces().into_iter().map(str::to_owned).collect(),
             })
             .collect::<Vec<_>>();
         points.sort();
@@ -426,45 +425,37 @@ impl AddressIndex {
         segment: &PathSegment<'_>,
         canonical_segments: &mut Vec<String>,
     ) -> Result<ActorId, AddressResolutionError> {
-        let children = self.children.get(&current).map(Vec::as_slice).unwrap_or_default();
         let illegal =
             || AddressResolutionError::IllegalSegment { parent: parent.to_owned(), segment: segment.to_string() };
+        let children = self.children.get(&current).ok_or_else(illegal)?;
         match *segment {
             PathSegment::Qualified { namespace, discriminator } => {
-                let child = children
-                    .iter()
-                    .find(|child| child.namespace == namespace && child.cardinality == Cardinality::Instanced)
-                    .ok_or_else(illegal)?;
-                canonical_segments.push(format!("{}:{discriminator}", child.namespace));
-                Ok(child.actor)
+                let child = *children.instanced.get(namespace).ok_or_else(illegal)?;
+                canonical_segments.push(format!("{namespace}:{discriminator}"));
+                Ok(child)
             }
             PathSegment::Bare(namespace) => {
-                let child = children
-                    .iter()
-                    .find(|child| child.namespace == namespace && child.cardinality == Cardinality::Singleton)
-                    .ok_or_else(illegal)?;
-                canonical_segments.push(child.namespace.clone());
-                Ok(child.actor)
+                let child = *children.singletons.get(namespace).ok_or_else(illegal)?;
+                canonical_segments.push(namespace.to_owned());
+                Ok(child)
             }
-            PathSegment::Hole { discriminator } => {
-                let instanced =
-                    children.iter().filter(|child| child.cardinality == Cardinality::Instanced).collect::<Vec<_>>();
-                match instanced.as_slice() {
-                    [] => Err(illegal()),
-                    [child] => {
-                        canonical_segments.push(format!("{}:{discriminator}", child.namespace));
-                        Ok(child.actor)
-                    }
-                    _ => Err(AddressResolutionError::AmbiguousSegment {
-                        parent: parent.to_owned(),
-                        segment: segment.to_string(),
-                        candidates: instanced
-                            .iter()
-                            .map(|child| format!("{}:{discriminator}", child.namespace))
-                            .collect(),
-                    }),
+            PathSegment::Hole { discriminator } => match children.instanced.len() {
+                0 => Err(illegal()),
+                1 => {
+                    let (namespace, child) = children.instanced.iter().next().ok_or_else(illegal)?;
+                    canonical_segments.push(format!("{namespace}:{discriminator}"));
+                    Ok(*child)
                 }
-            }
+                _ => Err(AddressResolutionError::AmbiguousSegment {
+                    parent: parent.to_owned(),
+                    segment: segment.to_string(),
+                    candidates: children
+                        .instanced_namespaces()
+                        .into_iter()
+                        .map(|namespace| format!("{namespace}:{discriminator}"))
+                        .collect(),
+                }),
+            },
         }
     }
 }
