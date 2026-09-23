@@ -47,8 +47,8 @@ inventory = { workspace = true }
 
 [dev-dependencies]
 # The `runtime` module's `on_dispatch_traced` tests boot the
-# `aether_substrate` `NativeBinding::new_for_test` / `HubOutbound`
-# loopback fixtures, enabled by the substrate `test-support` feature.
+# `aether_substrate::testing` binding fixtures (`unrouted_binding`) over a
+# `HubOutbound` loopback, enabled by the substrate `test-support` feature.
 aether-substrate = { path = "../aether-substrate", features = ["test-support"] }
 
 [lints]

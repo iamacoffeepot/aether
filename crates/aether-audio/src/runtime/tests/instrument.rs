@@ -3,7 +3,7 @@ use super::*;
 // ADR-0103 sampled instrument banks (#1679). The synth-side tests
 // drive `Synth` directly (registry + sample-voice kernel); the
 // cap-handler tests drive `on_load_instrument` / `on_read_result` /
-// `on_instrument_assembled` through a `new_for_test` binding, the
+// `on_instrument_assembled` through an `unrouted_binding`, the
 // same pattern as the track tests above.
 
 fn test_region(lokey: u8, hikey: u8, lovel: u8, hivel: u8, pitch_keycenter: u8, pcm: Vec<f32>) -> SampleRegion {
@@ -303,7 +303,7 @@ fn sample_voices_count_against_max_voices() {
 fn load_instrument_happy_path_replies_ok_and_registers() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
 
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
@@ -369,7 +369,7 @@ sample=c5.wav lokey=72 hikey=83 pitch_keycenter=72
 fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
     let (mut cap, _queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let first_session = SessionToken(Uuid::from_u128(1));
     let second_session = SessionToken(Uuid::from_u128(2));
 
@@ -450,7 +450,7 @@ fn same_wav_path_bank_loads_fill_their_own_sample_slots() {
 fn interleaved_track_and_instrument_reads_demux_by_request_context() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let track_session = SessionToken(Uuid::from_u128(3));
     let instrument_session = SessionToken(Uuid::from_u128(4));
 
@@ -534,7 +534,7 @@ fn interleaved_track_and_instrument_reads_demux_by_request_context() {
 fn load_instrument_missing_sample_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
@@ -570,7 +570,7 @@ fn load_instrument_missing_sample_replies_err() {
 fn load_instrument_malformed_sfz_replies_err() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,
@@ -602,7 +602,7 @@ fn load_instrument_malformed_sfz_replies_err() {
 fn load_instrument_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = manual_ctx(&transport);
     AudioCapability::on_load_instrument(
         &mut cap,

@@ -3,7 +3,7 @@ use super::*;
 // ADR-0103 track lane. The synth-side tests drive `Synth` directly
 // (the same pattern as the note tests); the cap-handler tests drive
 // the `on_play_track` / `on_read_result` / `on_track_decoded` /
-// `on_stop_track` arms through a `new_for_test` binding.
+// `on_stop_track` arms through an `unrouted_binding`.
 
 /// A short ramp track at the device rate — long enough to span a
 /// few `fill` blocks but cheap to play to completion.
@@ -171,7 +171,7 @@ fn same_sender_and_lane_replays_single_track() {
 fn play_track_happy_path_replies_ok_and_starts_a_track() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
 
     let root = MailId::new(MailboxId(0xC0), 1);
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
@@ -222,7 +222,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
 fn play_track_echoes_lane_through_result_and_track_start() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
 
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
@@ -263,7 +263,7 @@ fn play_track_echoes_lane_through_result_and_track_start() {
 fn play_track_missing_file_replies_err_with_fs_error() {
     let (mut cap, queue) = live_cap();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
 
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
@@ -299,7 +299,7 @@ fn play_track_missing_file_replies_err_with_fs_error() {
 fn play_track_on_nop_chassis_replies_err() {
     let mut cap = AudioCapabilityState::nop();
     let (mailer, rx) = test_mailer_and_rx();
-    let transport = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+    let transport = unrouted_binding(&mailer);
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_play_track(
         &mut cap,

@@ -80,7 +80,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///   closed: a reference claims the actor reached `Live`, never that it is
     ///   `Live` now (ADR-0230 §1).
     /// - [`MonitorError::Unsupported`] for a caller whose transport has no
-    ///   spawner wired ([`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test)),
+    ///   spawner wired (a test binding such as `testing::unrouted_binding`),
     ///   so there is no monitor index at all — a property of the caller's
     ///   binding, not of the target. Handlers that monitor their registrants
     ///   treat it as "not monitorable" and stay drivable under test bindings.
@@ -124,8 +124,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// The notice mail is pushed root-shaped (no parent chain),
     /// mirroring the close fan-out. A transport with no spawner wired
-    /// ([`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test)) has no monitor index to
-    /// drain, so the call is a no-op.
+    /// (a test binding such as `testing::unrouted_binding`) has no monitor
+    /// index to drain, so the call is a no-op.
     pub fn vacate(&self) {
         let Some(spawner) = self.binding.spawner() else {
             return;
@@ -147,7 +147,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// alias that is folded onto its own mailbox, so a caller cannot reach a
     /// peer's inline children. An alias that is not this actor's is a no-op
     /// `false`, as is a transport with no spawner wired
-    /// ([`NativeBinding::new_for_test`](crate::actor::native::binding::NativeBinding::new_for_test)) — there is no monitor index to drain.
+    /// (a test binding such as `testing::unrouted_binding`) — there is no
+    /// monitor index to drain.
     ///
     /// Retiring the route itself is a separate, owner-staged step: the notice
     /// goes out from the despawning actor's own turn, while the route change

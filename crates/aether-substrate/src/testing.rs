@@ -49,7 +49,7 @@ use crate::mail::MailRef;
 use crate::mail::mailer::Mailer;
 use crate::mail::outbound::{EgressEvent, HubOutbound};
 use crate::mail::registry::OwnedDispatch;
-use crate::mail::registry::{BootAuthority, Registry};
+use crate::mail::registry::{BootAuthority, InboxHandler, Registry};
 
 /// Canonical test chassis. `build()` is unreachable — every consumer
 /// drives the chassis through `Builder::<TestChassis>::new(...)` directly
@@ -80,7 +80,7 @@ pub fn boot_authority() -> BootAuthority {
 }
 
 /// Build the `(Arc<Registry>, Arc<Mailer>)` seed substrate-internal tests
-/// feed to `Builder::<...>::new` and `NativeBinding::new_for_test`.
+/// feed to `Builder::<...>::new` and [`unrouted_binding`].
 /// Intentionally narrower than [`fresh_substrate`]: no kind descriptors
 /// registered, no outbound wired — substrate-internal tests don't exercise
 /// descriptor lookup or the unknown-mailbox bubble-up path (ADR-0037).
@@ -117,6 +117,42 @@ pub fn fresh_substrate_and_rx() -> (Arc<Registry>, Arc<Mailer>, Receiver<EgressE
 pub fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
     let (registry, mailer, _rx) = fresh_substrate_and_rx();
     (registry, mailer)
+}
+
+/// A spawner-less binding over `mailer` whose own mailbox is never
+/// registered — the stand-in caller a cap test hands a `NativeCtx` when it
+/// drives a handler directly over its `State`.
+///
+/// The binding's own id is the one the registry refuses to register, so
+/// mail addressed to it — an ADR-0093 completion wake, a self-send — never
+/// lands in an inbox: it bubbles to the mailer's outbound, where
+/// [`drive_task_completion`] and the egress drains read it. Reach for
+/// [`registered_binding`] when that mail must reach a handler instead.
+pub fn unrouted_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
+    Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), MailboxId(0)))
+}
+
+/// A spawner-less binding over `mailer` whose own mailbox is `handler`,
+/// registered in `registry` under `name`.
+///
+/// Mail to the binding's own mailbox — a worker's completion wake, a
+/// coalesced self-wake — lands in `handler`, and the binding stamps the
+/// registered mailbox as the source of what it sends, so a test that
+/// asserts that source reads the expected address back through
+/// [`Registry::lookup`]. `registry` must be the one `mailer` routes
+/// through; it is taken explicitly, the way [`boot_test_chassis_with`]
+/// takes it.
+///
+/// # Panics
+/// Panics if `name` is already registered.
+pub fn registered_binding(
+    registry: &Registry,
+    mailer: &Arc<Mailer>,
+    name: &str,
+    handler: Arc<dyn InboxHandler>,
+) -> Arc<NativeBinding> {
+    let mailbox = registry.register_inbox(&boot_authority(), name, handler);
+    Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), mailbox))
 }
 
 /// Boot a `TestChassis` carrying exactly one cap `A` with `config`. The
@@ -160,7 +196,7 @@ pub fn test_mailer_and_rx() -> (Arc<Mailer>, Receiver<EgressEvent>) {
 /// `TaskQueue::submit` → `ctx.dispatch_blocking`, which spawns a real
 /// worker thread that runs the closure (the stub adapter + staging) and
 /// pushes a [`TaskCompletionWake`] at the cap's own mailbox. Under
-/// `new_for_test` that mailbox is unregistered, so the wake bubbles to the
+/// [`unrouted_binding`] that mailbox is unregistered, so the wake bubbles to the
 /// loopback outbound as an [`EgressEvent::UnresolvedMail`]. This helper
 /// drains egress until that wake lands, then routes it through
 /// `cap.__aether_dispatch_envelope(TaskCompletionWake::ID, payload)` — the
@@ -199,8 +235,8 @@ where
 /// Drain egress until a `ToSession` reply of kind `K` arrives, decoding
 /// it via the kind codec. Skips non-`ToSession` events and replies of other
 /// kinds — the content-gen caps spawn a real ephemeral dispatch thread
-/// whose loopback mail (to an unregistered stand-in mailbox in
-/// `new_for_test`) bubbles up as a non-`ToSession` egress, so a cap
+/// whose loopback mail (to the unregistered own mailbox of an
+/// [`unrouted_binding`]) bubbles up as a non-`ToSession` egress, so a cap
 /// test that drives the actual re-reply via `on_*_result` reads past
 /// the bubble-up to the `ToSession` re-reply. Shared by the
 /// `aether.anthropic` / `aether.gemini` test modules.
@@ -279,11 +315,7 @@ pub fn fs_reply_source(correlation_id: u64) -> Source {
 /// that answers a `SourceAddr::Component` sender (the hub outbound does
 /// not), a cap test without this fixture can only assert the session
 /// shape and passes while the wire shape is broken.
-pub fn manual_dispatch_ctx<A>(
-    binding: &Arc<NativeBinding>,
-    sender: Source,
-    self_mailbox: MailboxId,
-) -> NativeCtx<'_, A, Manual> {
+pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_, A, Manual> {
     NativeCtx::with_inbound(
         binding,
         sender,
@@ -300,7 +332,7 @@ pub fn manual_dispatch_ctx<A>(
             None,
             Nanos(0),
             0,
-            self_mailbox,
+            binding.self_mailbox(),
         ),
     )
 }

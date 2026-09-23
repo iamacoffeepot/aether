@@ -1332,7 +1332,7 @@ mod tests {
     use aether_substrate::mail::registry::{MailDispatch, OwnedDispatch};
     use aether_substrate::mail::{EgressEvent, MailRef};
     use aether_substrate::testing::{
-        boot_authority, decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx,
+        boot_authority, decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx, unrouted_binding,
     };
     use std::sync::mpsc;
 
@@ -1458,7 +1458,7 @@ mod tests {
     }
 
     fn ctx_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
-        Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), MailboxId(0)))
+        unrouted_binding(mailer)
     }
 
     fn capture_err(rx: &mpsc::Receiver<EgressEvent>) -> String {
@@ -1626,7 +1626,7 @@ mod tests {
         assert_eq!(state.textures.entries[&3].pixels, vec![7; 16], "fire-and-forget updates are dropped");
         assert!(state.frame_vertices.is_empty(), "fire-and-forget draws are dropped");
 
-        let mut ctx = manual_dispatch_ctx(&binding, session_sender(), MailboxId(0));
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
         RenderCapability::on_capture_frame(
             &mut state,
             &mut ctx,
@@ -1651,7 +1651,7 @@ mod tests {
         state.offscreen_size = Some((64, 48));
         state.pending_capture = Some(parked_capture(&mailer, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
-        let mut ctx = manual_dispatch_ctx(&binding, session_sender(), MailboxId(0));
+        let mut ctx = manual_dispatch_ctx(&binding, session_sender());
 
         RenderCapability::on_capture_frame(
             &mut state,

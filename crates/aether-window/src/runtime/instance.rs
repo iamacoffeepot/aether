@@ -287,12 +287,12 @@ impl NativeActor for HeadlessWindowInstance {
 mod tests {
     use std::sync::Arc;
 
-    use aether_data::{Kind, MailboxId};
+    use aether_data::Kind;
     use aether_substrate::Registry;
-    use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::{Dispatch, NativeCtx};
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::unrouted_binding;
 
     use super::super::HeadlessWindowCapabilityState;
     use super::{HeadlessWindowInstanceState, SetWindowCursor, SetWindowCursorResult, SetWindowMenu};
@@ -312,7 +312,7 @@ mod tests {
     #[test]
     fn headless_refuses_the_native_chrome_ops_at_both_identities_rather_than_dropping_them() {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(1)));
+        let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         for advertised in [

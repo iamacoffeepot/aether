@@ -180,20 +180,20 @@ impl WindowSubscribers {
 mod tests {
     use std::sync::Arc;
 
-    use aether_data::{Kind, MailboxId, SessionToken, Uuid};
+    use aether_data::{Kind, SessionToken, Uuid};
     use aether_kinds::{Key, MouseMove};
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::MailDispatch;
     use aether_substrate::mail::{MailId, Source, SourceAddr};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, unrouted_binding};
 
     use super::*;
 
     fn fixture() -> (WindowSubscribers, Arc<NativeBinding>, Arc<Mailer>) {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0)));
+        let binding = unrouted_binding(&mailer);
 
         (WindowSubscribers::new(), binding, mailer)
     }
@@ -216,8 +216,7 @@ mod tests {
     #[test]
     fn reflexive_subscribe_rejects_a_non_component_source_without_touching_routes() {
         let mut subscribers = WindowSubscribers::new();
-        let transport =
-            Arc::new(NativeBinding::new_for_test(Arc::new(Mailer::new(Arc::new(Registry::new()))), MailboxId(0)));
+        let transport = unrouted_binding(&Arc::new(Mailer::new(Arc::new(Registry::new()))));
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
         let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
 

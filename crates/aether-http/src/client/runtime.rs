@@ -484,8 +484,6 @@ mod tests {
     use super::{FetchRequest, FetchResponse, HttpAdapter, HttpCapabilityState, UreqHttpAdapter, build_http_adapter};
     use crate::client::{DEFAULT_MAX_BODY_BYTES, HttpCapability, HttpConfig};
     use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
-    use aether_data::MailboxId;
-    use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::Source;
     use std::collections::HashSet;
@@ -532,7 +530,9 @@ mod tests {
         Source::to(SourceAddr::Session(SessionToken(Uuid::nil())))
     }
 
-    use aether_substrate::testing::{decode_session_reply, drive_task_completion, test_mailer_and_rx};
+    use aether_substrate::testing::{
+        decode_session_reply, drive_task_completion, test_mailer_and_rx, unrouted_binding,
+    };
 
     #[test]
     fn allowlist_empty_rejects_every_host() {
@@ -615,7 +615,7 @@ mod tests {
         }));
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx =
             NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
@@ -652,7 +652,7 @@ mod tests {
             StubAdapter::with(Err(HttpError::Timeout)) as Arc<dyn HttpAdapter>,
             HttpConfig::default().default_timeout,
         );
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx =
             NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
@@ -685,7 +685,7 @@ mod tests {
         let stub_clone = Arc::clone(&stub);
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
-        let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(0)));
+        let transport = unrouted_binding(&mailer);
         let mut ctx =
             NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
         HttpCapability::on_fetch(
