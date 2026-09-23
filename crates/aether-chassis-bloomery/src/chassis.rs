@@ -13,7 +13,7 @@ use std::mem;
 use std::sync::Arc;
 
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, RegistryQueueConfig, RpcBind, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
 };
 use aether_chassis::cli::ChassisCli;
@@ -163,7 +163,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params), RpcBind::Held)
+        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params))
             .declare_config_member::<BloomeryConfig>())
     }
 }

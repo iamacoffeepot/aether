@@ -35,7 +35,7 @@ in [Inspect and debug](inspect-and-debug.md).
 | binary selector does not resolve | filtered `list_binaries` | `upload_binary`, then use returned hash/name |
 | component selector does not resolve | registry `list_components` | `upload_component`, then use returned hash/name |
 | spawn returns an allocated id in its error | `list_engines(show: "dead")` for that id | preserve matching `spawn_failed` detail |
-| spawn boot readiness fails | diff live fleet against the pre-spawn snapshot | terminate only the attributable new engine; inspect reachable logs and substrate stderr |
+| spawn fails on a boot component | the `spawn_failed` row for the returned id | read the substrate stderr it carries for the failing component and host error; nothing to terminate |
 | heartbeat age climbs | confirm heartbeat is enabled, then repeat one read-only check | stop mutations, collect evidence, terminate only if owned |
 | engine disappears | recently-dead reason/detail | branch on terminated/crashed/evicted/spawn_failed |
 | “unknown kind” or param encode error | explicit-engine `describe_kinds` for the exact name | correct schema, engine, or component load state |
@@ -90,11 +90,11 @@ If an error includes an allocated `engine_id`, correlate it with the
 `spawn_failed` recently-dead row. The proxy kills a child it could not bring up,
 so the record is evidence, not a still-live engine handle.
 
-Boot-component readiness is later: the proxy can be alive while one requested
-lineage never registers. Keep a pre-spawn fleet snapshot. On a readiness error,
-diff the current live set, inspect only attributable new engines, and terminate
-the new id when ownership is unambiguous. In a busy shared fleet, ambiguity is a
-reason to stop and ask—not to kill the newest-looking row.
+Boot components load before the substrate binds its RPC port, so a boot
+component that fails to load is a startup failure, not a half-booted engine: the
+substrate exits nonzero naming the component and the host's error, and the
+spawn fails with a `spawn_failed` entry whose detail carries that stderr. The
+child is already gone, so there is nothing to terminate.
 
 Check common boot causes in this order:
 
@@ -102,7 +102,8 @@ Check common boot causes in this order:
 2. selected module has the requested/default actor export;
 3. config JSON matches the selected actor's Config schema;
 4. derived replica/name lineages do not conflict;
-5. substrate stderr reports wasm parse, compile, init, or registration failure.
+5. the `spawn_failed` detail's substrate stderr names the failing boot
+   component and its wasm parse, compile, init, or registration error.
 
 ## Live engine slow or gone
 

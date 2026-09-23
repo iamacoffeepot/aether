@@ -4,25 +4,31 @@
 //! Two channels populate a chassis env's `autoload` field: the package depot
 //! boot (`crate::package::package_autoload`, decoding a content-addressed
 //! `pack/manifest`) and the JSON boot-manifest reader below (the hub's
-//! `spawn_substrate` path). Each chassis's `Chassis::build` drains the list
-//! into `aether.component.load` mail right after `.build()`, so the components
-//! come up with no follow-up load call. The mail targets the generic
-//! `aether.component` mailbox — the same address the hub's `load_component`
-//! and the substrate harness load through — which is what makes the mechanism
-//! chassis-agnostic.
+//! `spawn_substrate` path). `boot_standard` loads the list right after
+//! `.build()`, one component at a time in list order, and waits for each to
+//! answer its load before the RPC server binds (issue #6413), so an engine a
+//! caller can reach already has every boot component live. The loads target
+//! the generic `aether.component` mailbox — the same address the hub's
+//! `load_component` and the substrate harness load through — which is what
+//! makes the mechanism chassis-agnostic.
+
+mod loader;
 
 use std::io;
 use std::path::Path;
+use std::sync::mpsc;
 
-use aether_actor::root_mailbox;
-use aether_component::ComponentHostCapability;
-use aether_data::Kind as _;
 use aether_kinds::{LoadComponent, replica_load_name};
-use aether_substrate::Mail;
+use aether_substrate::Subname;
 use aether_substrate::actor::wasm::kind_manifest;
+use aether_substrate::chassis::Chassis;
+use aether_substrate::chassis::builder::BuiltChassis;
+use aether_substrate::chassis::error::BootError;
 use aether_substrate::config::ConfigError;
 
 use crate::boot_manifest::{self, PackedComponent};
+
+use loader::{Autoloader, AutoloaderParams};
 
 /// A component to auto-load on boot — its wasm bytes, optional init-config
 /// bytes (ADR-0090; empty for none), and the optional load name / export
@@ -36,6 +42,14 @@ pub struct AutoloadComponent {
     pub export: Option<String>,
 }
 
+impl AutoloadComponent {
+    /// The `aether.component.load` request that loads this component — the
+    /// same request the hub's `load_component` and the substrate harness send.
+    fn load_request(self) -> LoadComponent {
+        LoadComponent { wasm: self.wasm, name: self.name, config: self.config, export: self.export }
+    }
+}
+
 impl From<PackedComponent> for AutoloadComponent {
     fn from(packed: PackedComponent) -> Self {
         Self { wasm: packed.wasm, config: packed.config, name: packed.name, export: packed.export }
@@ -46,13 +60,13 @@ impl From<PackedComponent> for AutoloadComponent {
 /// the chassis env's `autoload` field carries — the JSON-path-manifest twin
 /// of the content-addressed package depot boot (`crate::package`). Both feed
 /// the same `env.autoload` (one from a manifest of file paths, one from a
-/// `pack/manifest` of hash-referenced objects), which `Chassis::build` drains
-/// into `aether.component.load`.
+/// `pack/manifest` of hash-referenced objects), which `boot_standard` loads in
+/// order after the build.
 ///
 /// Reached from `CommonEnv::resolve` (the shared desktop / headless resolver)
 /// when `AETHER_BOOT_MANIFEST` (or `--boot-manifest`) is set; the engines
 /// cap injects that env var at the fork so a `spawn_substrate` carrying a
-/// component list comes up with those components already loading.
+/// component list binds its RPC port only once those components are live.
 ///
 /// # Errors
 ///
@@ -140,45 +154,54 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
         .collect())
 }
 
-/// Build the `aether.component.load` mail that auto-loads `component`,
-/// addressed to the `aether.component` mailbox the same way the hub's
-/// `load_component` and the substrate harness do.
-#[must_use]
-pub fn autoload_mail(component: AutoloadComponent) -> Mail {
-    let payload = LoadComponent {
-        wasm: component.wasm,
-        name: component.name,
-        config: component.config,
-        export: component.export,
+/// Load every boot component in list order and wait until each has answered
+/// its load `Ok` (issue #6413).
+///
+/// With an empty list this returns at once. Otherwise it spawns the loader at
+/// the chassis root, handing it the list and the sending half of a channel,
+/// and blocks the calling (chassis) thread on the receiving half. The loader
+/// sends one load at a time, so the components come up in manifest order and
+/// a failure names its entry with no correlation map.
+///
+/// # Errors
+///
+/// Returns [`BootError::Other`] when the loader cannot be spawned, when a boot
+/// component fails to load (naming the entry and the component host's error),
+/// or when the loader stops before every component has answered.
+pub(crate) fn load_boot_components<C: Chassis>(
+    built: &BuiltChassis<C>,
+    components: Vec<AutoloadComponent>,
+) -> Result<(), BootError> {
+    if components.is_empty() {
+        return Ok(());
     }
-    .encode_into_bytes();
-    Mail::new(
-        // The same component-host address the hub and substrate harness load
-        // through, resolved from a ctx-less free fn.
-        root_mailbox::<ComponentHostCapability>(),
-        LoadComponent::ID,
-        payload,
-        1,
-    )
+
+    let (report, outcome) = mpsc::channel();
+    built
+        .spawn_actor::<Autoloader>(Subname::Named("boot"), (), AutoloaderParams { components, report })
+        .finish()
+        .map_err(|error| boot_failed(format!("spawning the boot loader: {error:?}")))?;
+
+    match outcome.recv() {
+        Ok(Ok(loaded)) => {
+            tracing::info!(loaded, "every boot component answered its load");
+            Ok(())
+        }
+        Ok(Err(message)) => Err(boot_failed(message)),
+        Err(mpsc::RecvError) => {
+            Err(boot_failed("the boot loader stopped before every boot component answered".to_owned()))
+        }
+    }
+}
+
+/// Box a boot-load failure message into [`BootError::Other`].
+fn boot_failed(message: String) -> BootError {
+    BootError::Other(Box::new(io::Error::other(message)))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn autoload_mail_addresses_the_component_host() {
-        // The autoload mail must target the component host's mailbox with the
-        // load kind — the same address the hub and substrate harness load through.
-        let mail = autoload_mail(AutoloadComponent {
-            wasm: vec![0, 1, 2, 3],
-            config: Vec::new(),
-            name: Some("loco-motion".to_owned()),
-            export: None,
-        });
-        assert_eq!(mail.recipient, root_mailbox::<ComponentHostCapability>());
-        assert_eq!(mail.kind, LoadComponent::ID);
-    }
 
     fn packed(replicas: Option<u32>) -> PackedComponent {
         PackedComponent {

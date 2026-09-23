@@ -7,8 +7,7 @@ use super::{
     MailNodeWire, MailSpec, MailboxAddress, MailboxId, Manifest, ManifestResult, Mcp, McpError, NamedMail, Resolve,
     ResolveAddress, ResolveAddressResult, ResolveComponent, ResolveComponentResult, ResolveResult, SchemaType,
     component_config_bytes, descriptors, engine_envelope, frame_size_aware_error, internal_msg, local_envelope,
-    max_frame_size, reject_zero_replicas, replica_base_name, replica_names, selector_with_explicit_export, tagged_id,
-    wire,
+    max_frame_size, reject_zero_replicas, selector_with_explicit_export, tagged_id, wire,
 };
 use aether_data::ActorPath;
 use aether_data::canonical::kind_id_from_parts;
@@ -260,9 +259,7 @@ impl Mcp {
         let mut wasm_paths: Vec<PathBuf> = Vec::with_capacity(components.len());
         let mut config_paths: Vec<PathBuf> = Vec::new();
         match self.stage_boot_files(components, &mut wasm_paths, &mut config_paths).await {
-            Ok((manifest_path, expected_names)) => {
-                Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths, expected_names })
-            }
+            Ok(manifest_path) => Ok(StagedBootManifest { manifest_path, wasm_paths, config_paths }),
             Err(e) => {
                 // No StagedBootManifest reaches the caller on this path, so
                 // nothing else will ever clean these up — best-effort remove
@@ -283,14 +280,13 @@ impl Mcp {
         components: &[ComponentSpec],
         wasm_paths: &mut Vec<PathBuf>,
         config_paths: &mut Vec<PathBuf>,
-    ) -> Result<(PathBuf, Vec<String>), McpError> {
+    ) -> Result<PathBuf, McpError> {
         use std::env;
         use std::process;
         use std::sync::atomic::{AtomicU64, Ordering};
         static SEQ: AtomicU64 = AtomicU64::new(0);
 
         let mut entries: Vec<serde_json::Value> = Vec::with_capacity(components.len());
-        let mut expected_names: Vec<String> = Vec::with_capacity(components.len());
         for spec in components {
             reject_zero_replicas(spec.replicas, &spec.selector)?;
             let resolve_selector = selector_with_explicit_export(&spec.selector, spec.export.as_deref());
@@ -331,28 +327,6 @@ impl Mcp {
             if let Some(replicas) = spec.replicas {
                 entry["replicas"] = serde_json::json!(replicas);
             }
-            // Derive the expected registered name(s) in the same precedence
-            // order the engine applies: caller-supplied name > export
-            // namespace > default actor namespace. Fail loud if none is
-            // determinable: a spawn that can't name what it's waiting for is
-            // a bug to surface at stage time.
-            let ns = replica_base_name(spec.name.as_deref(), export.as_deref(), resolved.default_namespace.as_deref())
-                .ok_or_else(|| {
-                    internal_msg(&format!(
-                        "component {:?}: cannot determine expected registered name \
-                     (no `name`, `export`, or default actor namespace in the wasm manifest); \
-                     set `name` or `export` on the ComponentSpec",
-                        spec.selector,
-                    ))
-                })?;
-            match spec.replicas {
-                Some(replicas) => expected_names.extend(
-                    replica_names(&ns, replicas)
-                        .into_iter()
-                        .map(|name| format!("aether.component/aether.embedded:{name}")),
-                ),
-                None => expected_names.push(format!("aether.component/aether.embedded:{ns}")),
-            }
             entries.push(entry);
         }
 
@@ -366,7 +340,7 @@ impl Mcp {
             let _ = fs::remove_file(&manifest_path).await;
             return Err(internal_msg(&format!("staging boot manifest: {e}")));
         }
-        Ok((manifest_path, expected_names))
+        Ok(manifest_path)
     }
 
     /// Resolve a `MailSpec` against the per-engine merged kind view

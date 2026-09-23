@@ -144,10 +144,11 @@ task-owned engine, terminate and start clean. On a shared engine, stop and
 report the partial prefix rather than guessing names or retrying into occupied
 ones.
 
-Boot-time replicas use the same naming rule. `spawn_substrate` waits until every
-expected lineage string is present, but the current check neither deduplicates
-colliding expectations nor proves the loaded bytes match each requested spec.
-Require unique derived names, then describe and safely probe every boot lineage.
+Boot-time replicas use the same naming rule. The substrate binds only after
+every boot instance has answered its load, so a successful `spawn_substrate`
+means every instance is live. A derived name that collides with another boot
+instance fails that load, which fails the spawn with a `spawn_failed` entry
+rather than reporting the engine ready.
 
 ## Live introspection
 
