@@ -50,9 +50,7 @@ use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
 use aether_substrate::Manual;
 use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::helpers::resolve_bundle;
 use aether_substrate::mail::mailer::Mailer;
-use aether_substrate::mail::registry::Registry;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
@@ -208,7 +206,6 @@ pub struct RenderCapabilityState {
 
     pending_capture: Option<PendingCapture>,
 
-    registry: Arc<Registry>,
     mailer: Arc<Mailer>,
     assets_dir: Option<PathBuf>,
     /// Harness observer inbox for dispatch witnesses (issue 5965). `Some`
@@ -484,7 +481,7 @@ impl RenderCapabilityState {
     /// canonical desktop target map are built off to the side; registry
     /// realizations are then switched in the same actor-owned commit. A
     /// failed device or surface acquisition is terminal.
-    fn recover_gpu_if_needed(&mut self) -> Result<(), String> {
+    fn recover_gpu_if_needed<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>) -> Result<(), String> {
         self.device_recovery.refresh();
         if let Some(error) = self.device_recovery.unusable_error() {
             return Err(error);
@@ -501,7 +498,7 @@ impl RenderCapabilityState {
         } = match self.build_replacement_gpu() {
             Ok(replacement) => replacement,
             Err(reason) => {
-                self.finish_failed_replacement(ticket, reason.clone());
+                self.finish_failed_replacement(ctx, ticket, reason.clone());
                 return Err(reason);
             }
         };
@@ -522,12 +519,17 @@ impl RenderCapabilityState {
         Ok(())
     }
 
-    fn finish_failed_replacement(&mut self, ticket: device::ReplacementTicket, reason: String) {
+    fn finish_failed_replacement<M: ReplyMode, A>(
+        &mut self,
+        ctx: &NativeCtx<'_, A, M>,
+        ticket: device::ReplacementTicket,
+        reason: String,
+    ) {
         self.last_submission = None;
         self.wire_pipeline = None;
         self.gpu = None;
         self.device_recovery.fail_replacement(ticket, reason.clone());
-        self.fail_pending_capture_for_device(format!("capture_frame failed: {reason}"));
+        self.fail_pending_capture_for_device(ctx, format!("capture_frame failed: {reason}"));
     }
 
     /// Reject request/reply GPU work while loss is pending or terminal.
@@ -552,12 +554,12 @@ impl RenderCapabilityState {
         true
     }
 
-    fn fail_pending_capture_for_device(&mut self, error: String) {
+    fn fail_pending_capture_for_device<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>, error: String) {
         let Some(pending) = self.pending_capture.take() else {
             return;
         };
-        for mail in pending.after_mails {
-            self.mailer.push(mail);
+        for item in pending.after_mails {
+            let _ = ctx.deliver_detached(item);
         }
         pending.reply.reply(&CaptureFrameResult::Err { error });
     }
@@ -705,10 +707,10 @@ impl RenderCapabilityState {
         Ok(capture_meta)
     }
 
-    fn complete_capture(&mut self, meta: CaptureMeta) {
+    fn complete_capture<M: ReplyMode, A>(&mut self, ctx: &NativeCtx<'_, A, M>, meta: CaptureMeta) {
         let pending = self.pending_capture.take().expect("capture metadata requires a pending capture");
-        for mail in pending.after_mails {
-            self.mailer.push(mail);
+        for item in pending.after_mails {
+            let _ = ctx.deliver_detached(item);
         }
         let gpu = self.gpu.as_ref().expect("capture metadata requires a booted GPU");
         let readback = {
@@ -775,7 +777,6 @@ impl NativeActor for RenderCapability {
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
         let mailer = ctx.mailer();
-        let registry = Arc::clone(mailer.registry());
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -807,7 +808,6 @@ impl NativeActor for RenderCapability {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
-            registry,
             mailer,
             assets_dir: params.assets_dir,
             observer: params.observed_kinds,
@@ -1098,7 +1098,7 @@ impl NativeActor for RenderCapability {
         }
 
         state.ensure_offscreen_gpu_booted();
-        if state.recover_gpu_if_needed().is_err() {
+        if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
         let Some(gpu) = state.gpu.as_ref() else {
@@ -1123,7 +1123,7 @@ impl NativeActor for RenderCapability {
         // The poll may itself deliver the callback. A pending capture has
         // not begun recording this frame, so it may survive a successful
         // transaction and record exactly once below.
-        if state.recover_gpu_if_needed().is_err() {
+        if state.recover_gpu_if_needed(ctx).is_err() {
             return;
         }
         state.commit_scene(replay_cache_when_idle);
@@ -1162,7 +1162,7 @@ impl NativeActor for RenderCapability {
                 }
             };
             if let Some(meta) = meta {
-                state.complete_capture(meta);
+                state.complete_capture(ctx, meta);
             }
         }
 
@@ -1179,7 +1179,7 @@ impl NativeActor for RenderCapability {
                 Err(RenderError::VertexBufferOverflow { .. }) => return,
             };
             if let Some(meta) = meta {
-                state.complete_capture(meta);
+                state.complete_capture(ctx, meta);
             }
         }
     }
@@ -1220,14 +1220,17 @@ impl NativeActor for RenderCapability {
             return;
         }
 
-        let pre = match resolve_bundle(&state.registry, &mail.mails, "capture bundle") {
+        // Prove both bundles before either moves (ADR-0230 §3), so an
+        // unprovable recipient in the after bundle aborts before any
+        // pre-mail is sent.
+        let pre = match ctx.accept_bundle(mail.mails, "capture bundle") {
             Ok(bundle) => bundle,
             Err(error) => {
                 reply.reply(&CaptureFrameResult::Err { error });
                 return;
             }
         };
-        let after = match resolve_bundle(&state.registry, &mail.after_mails, "capture after bundle") {
+        let after = match ctx.accept_bundle(mail.after_mails, "capture after bundle") {
             Ok(bundle) => bundle,
             Err(error) => {
                 reply.reply(&CaptureFrameResult::Err { error });
@@ -1251,8 +1254,8 @@ impl NativeActor for RenderCapability {
         let settlement_registry = state.mailer.settlement_registry().cloned();
         let self_id = ctx.self_id();
         let mut pre_remaining = 0usize;
-        for envelope in pre {
-            let mail_id = ctx.send_envelope_detached(envelope.recipient, envelope.kind, envelope.payload.bytes());
+        for item in pre {
+            let mail_id = ctx.deliver_detached(item);
             pre_remaining += 1;
             if let Some(registry) = settlement_registry.as_deref() {
                 registry.subscribe_settlement_mail(
@@ -1392,7 +1395,6 @@ mod tests {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
-            registry: Arc::clone(mailer.registry()),
             mailer: Arc::clone(mailer),
             assets_dir: None,
             observer: None,
