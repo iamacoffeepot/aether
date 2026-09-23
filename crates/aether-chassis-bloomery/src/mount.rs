@@ -20,7 +20,7 @@ use aether_substrate::chassis::error::BootError;
 
 use crate::chassis::BloomeryChassis;
 
-/// The proven references [`mount`] took back from its two spawns: the journal
+/// The proven references `mount` took back from its two spawns: the journal
 /// owner and the bundle driver it wired to that journal. An embedder that
 /// drives the mounted engine in process addresses both through these rather
 /// than resolving either by path.

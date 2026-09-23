@@ -81,16 +81,6 @@ macro_rules! chassis_accessors {
         pub fn handle<H: Any + Send + Sync + Clone + 'static>(&self) -> Option<H> {
             handle::<H>(&self.booted)
         }
-
-        /// Push `payload` to the actor `to` proves, untracked, with its reply
-        /// routed to `reply` — a hub session or another proven actor.
-        ///
-        /// Shared by both chassis shapes: the substrate harness sends through
-        /// a passive chassis, and the bloomery harness through the driven
-        /// chassis it builds but never runs.
-        pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
-            self.booted.spawner.push_for_reply(to, kind, payload, reply);
-        }
     };
 }
 
@@ -127,6 +117,22 @@ impl<C: Chassis> BuiltChassis<C> {
         // is bound keeps shutdown ordering deterministic.
         drop(booted);
         result
+    }
+
+    /// Push `payload` to the actor `to` proves, untracked, with its reply
+    /// routed to `reply` — the embedder's **test-scoped** push for a driven
+    /// chassis that is built but never [`run`](Self::run).
+    ///
+    /// [`PassiveChassis::send_for_reply`] is the same push for a chassis with
+    /// no driver. A production chassis drives itself and takes its mail over
+    /// its own capabilities, so it gets no embedder send door: this method is
+    /// gated on the `test-support` feature, and no production chassis can
+    /// reach it. The bloomery harness is the motivating caller — it builds the
+    /// shipped bloomery chassis, holds the references its mount took back, and
+    /// drives the journal owner and the bundle driver in process.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+        self.booted.spawner.push_for_reply(to, kind, payload, reply);
     }
 }
 
@@ -271,6 +277,12 @@ impl<C: Chassis> PassiveChassis<C> {
         self.booted.spawner.push_tracked(to, kind, payload, correlation, reply)
     }
 
+    /// Push `payload` to the actor `to` proves, untracked, with its reply
+    /// routed to `reply` — a hub session or another proven actor.
+    pub fn send_for_reply(&self, to: ErasedActorRef, kind: KindId, payload: Vec<u8>, reply: ReplyTarget) {
+        self.booted.spawner.push_for_reply(to, kind, payload, reply);
+    }
+
     /// Type the stamped sender of a successful load reply as the loaded actor
     /// `R` (ADR-0230 §3). A load reply is sent by the loaded actor itself, so
     /// the embedder reads its erased reference off the reply event; this
@@ -323,8 +335,8 @@ impl<C: Chassis> PassiveChassis<C> {
 }
 
 /// Where an embedder push ([`PassiveChassis::send_tracked`] or
-/// [`PassiveChassis::send_for_reply`] / [`BuiltChassis::send_for_reply`])
-/// routes the reply its recipient sends.
+/// [`PassiveChassis::send_for_reply`], and the test-scoped
+/// `BuiltChassis::send_for_reply`) routes the reply its recipient sends.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ReplyTarget {
     /// A hub session, correlated by `correlation` — the shape a harness

@@ -18,10 +18,10 @@
 //! with the fold code the driver runs, so a bug in a fold cannot move both
 //! sides together.
 //!
-//! The harness boots [`BloomeryChassis`](aether_chassis_bloomery::BloomeryChassis)
-//! through `build_mounted`, the composition the `aether-bloomery` binary runs,
-//! and addresses the journal owner and the driver through the proven
-//! references the mount took back — never by path. It never resolves a dist
+//! The harness boots [`BloomeryChassis`] through `build_mounted`, the
+//! composition the `aether-bloomery` binary runs, and addresses the journal
+//! owner and the driver through the proven references the mount took back —
+//! never by path. It never resolves a dist
 //! artifact: a scenario that needs fixture wasm reads it through
 //! `aether_harness_substrate::test_helpers::require_wasm` and stages the
 //! bytes itself.
