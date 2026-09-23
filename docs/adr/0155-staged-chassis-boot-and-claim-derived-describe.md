@@ -2,6 +2,7 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-20
+- **Amended (#6413):** 2026-09-23 — §3's resolved port gates whether a socket binds, and on the desktop and headless chassis it now also waits: the RPC server is composed held, and `boot_standard` opens its bind gate only after every boot component has answered its load `Ok`, so a dial before then is refused and a reachable engine has its boot components live. A boot component that fails to load aborts the boot with an error naming it.
 
 ## Context
 

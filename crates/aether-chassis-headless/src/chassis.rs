@@ -39,8 +39,8 @@ use aether_chassis::{TickConfig, apply_manifest_tick_settings};
 
 use super::driver::HeadlessTimerDriverCapability;
 use aether_chassis::boot::{
-    ChassisBase, CommonEnv, RpcBind, boot_standard, chassis_residual_knobs, tick_only_lifecycle_params,
-    with_full_stack_caps, with_rpc_server,
+    ChassisBase, CommonEnv, boot_standard, chassis_residual_knobs, tick_only_lifecycle_params, with_full_stack_caps,
+    with_rpc_server,
 };
 use aether_substrate::config::{ConfigError, KnobRecord};
 
@@ -132,7 +132,9 @@ impl BootableChassis for HeadlessChassis {
     /// so the manifest roster can never drift from what boots. Composes the
     /// common caps plus the headless render / audio / clipboard / window /
     /// substrate-harness / lifecycle caps and the always-claim RPC + HTTP servers
-    /// (ADR-0155 §3). Returns the composed builder before the driver is installed:
+    /// (ADR-0155 §3). The RPC server is composed held: `boot_standard` binds it
+    /// only after every boot component has loaded (issue #6413). Returns the
+    /// composed builder before the driver is installed:
     /// [`Chassis::build`] adds the timer driver and starts, while the describe /
     /// config helpers read the claim / config terminals off it.
     ///
@@ -164,7 +166,7 @@ impl BootableChassis for HeadlessChassis {
             .with_actor::<HeadlessWindowCapability>(())
             .with_actor::<UnsupportedSubstrateHarnessCapability>(())
             .with_actor::<LifecycleCapability>(tick_only_lifecycle_params());
-        Ok(with_rpc_server(builder, RpcBind::Boot).with_actor::<HttpServerCapability>(()))
+        Ok(with_rpc_server(builder).with_actor::<HttpServerCapability>(()))
     }
 }
 
