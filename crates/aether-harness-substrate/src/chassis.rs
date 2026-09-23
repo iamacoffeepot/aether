@@ -33,6 +33,8 @@ use aether_substrate::mail::registry::MailDispatch;
 use aether_substrate_harness_cap::{SubstrateHarnessCapParams, SubstrateHarnessCapability, events::EventSender};
 use std::io;
 
+use crate::HookFactory;
+
 /// Wire-stable `EngineInfo.workers` value (ADR-0038: post actor-per-
 /// component, the scheduler doesn't read this — it's retained on the
 /// hub-protocol wire for compatibility).
@@ -169,10 +171,10 @@ pub trait FrameHook {
     fn as_any(&self) -> &dyn Any;
 }
 
-/// The render wiring the [`HookFactory`](crate::HookFactory) needs to boot
-/// the pumped render slot after `build_passive` (ADR-0161). The pumped path
-/// composes no build-time render cap — the hook claims the `aether.render`
-/// slot post-boot via
+/// The render wiring the [`HookFactory`] needs to boot the pumped render slot
+/// in the build's start (ADR-0161). The pumped path composes no build-time
+/// render cap — the chassis reserves the `aether.render` slot at the Claim
+/// stage and the hook boots it from that reservation via
 /// [`PassiveChassis::boot_pumped_actor`](aether_substrate::chassis::builder::PassiveChassis::boot_pumped_actor)
 /// — so the non-knob render wiring is handed straight to the hook factory,
 /// which threads it into the pumped actor's `RenderParams`.
@@ -252,6 +254,15 @@ pub struct SubstrateHarnessEnv {
     /// `SubstrateHarness::settlement_cap` override), so a scenario's teardown
     /// gate uses the same patience as its settlement gates.
     pub teardown_budget: Duration,
+    /// The frame-hook factory that boots the reserved pumped render slot in
+    /// the build's start (ADR-0161 R4). `None` boots no render slot; `compose`
+    /// then carries no render reservation either.
+    pub render_hook: Option<HookFactory>,
+    /// Offscreen `(width, height)` handed to [`Self::render_hook`].
+    pub render_size: (u32, u32),
+    /// Resolved `"assets"` root handed to [`Self::render_hook`] for
+    /// `capture_frame` similarity references.
+    pub render_assets_dir: Option<PathBuf>,
 }
 
 /// Output of [`SubstrateHarnessChassis::build_passive`]. Bundles the
@@ -273,6 +284,10 @@ pub struct SubstrateHarnessBuild {
     pub passive: PassiveChassis<SubstrateHarnessChassis>,
     pub boot: SubstrateBoot,
     pub kind_tick: KindId,
+    /// The frame hook [`SubstrateHarnessEnv::render_hook`] built in the
+    /// build's start, draining the pumped render slot. `None` without a
+    /// render hook.
+    pub hook: Option<Box<dyn FrameHook>>,
 }
 
 impl SubstrateHarnessChassis {
@@ -304,6 +319,9 @@ impl SubstrateHarnessChassis {
             component_host,
             compose,
             teardown_budget,
+            render_hook,
+            render_size: (width, height),
+            render_assets_dir,
         } = env;
 
         let mut boot = SubstrateBoot::build()?;
@@ -432,8 +450,9 @@ impl SubstrateHarnessChassis {
             });
         }
         // ADR-0161 R4/R5: the pumped render path composes no build-time
-        // render cap — the frame hook claims the `aether.render` slot
-        // post-`build_passive` via `PassiveChassis::boot_pumped_actor`.
+        // render cap — the render hook's compose closure reserves the
+        // `aether.render` slot, and the build's start below boots it via
+        // `PassiveChassis::boot_pumped_actor`.
         for apply in compose {
             builder = apply(builder);
         }
@@ -445,13 +464,29 @@ impl SubstrateHarnessChassis {
         if let Some(roots) = io_roots {
             builder = builder.with_actor_configured::<FsCapability>((), roots);
         }
-        let passive = builder.build_passive()?;
+        // ADR-0161 slice R4: the render extension's frame hook boots the
+        // reserved pumped `aether.render` slot on this thread at the builder's
+        // offscreen size, threading the render wiring the pumped path does not
+        // compose at build time.
+        let (passive, hook) = builder.build_passive_with_start(|passive| {
+            render_hook
+                .map(|factory| {
+                    let wiring = RenderHookWiring {
+                        mailer: Arc::clone(&boot.queue),
+                        observed_kinds: Some(substrate_harness_observer_mailbox()),
+                        assets_dir: render_assets_dir,
+                    };
+                    factory(passive, wiring, width, height)
+                })
+                .transpose()
+                .map_err(|e| BootError::Other(e.into()))
+        })?;
 
         // The cap config already cloned `events_tx`; dropping the
         // local copy lets the receiver hang up cleanly once every
         // sender is released.
         drop(events_tx);
 
-        Ok(SubstrateHarnessBuild { passive, boot, kind_tick })
+        Ok(SubstrateHarnessBuild { passive, boot, kind_tick, hook })
     }
 }
