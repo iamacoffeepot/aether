@@ -4,7 +4,8 @@
 //! item names its recipient as an [`ActorPath`](aether_data::ActorPath), an
 //! address and nothing more. ADR-0230 section 3 makes the receiving engine
 //! prove that address once and send only through the proof, so a bundle is
-//! the same boundary inside a payload. [`accept`] proves every recipient
+//! the same boundary inside a payload.
+//! [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) proves every recipient
 //! before any item moves and hands back [`BoundaryMail`]s, which a holder can
 //! only deliver — through
 //! [`NativeCtx::deliver_detached`](crate::actor::native::NativeCtx::deliver_detached)
@@ -23,7 +24,8 @@ use crate::mail::registry::Registry;
 /// boundary named, and the bytes the boundary encoded.
 ///
 /// No public constructor, no accessor, no `Clone`, and no serde, wire, or
-/// `Schema` impl: [`accept`] is the only way to make one, and delivering it is
+/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) is the only way to
+/// make one, and delivering it is
 /// the only thing a holder can do with it.
 #[derive(Debug)]
 pub struct BoundaryMail {
@@ -75,7 +77,7 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
 #[cfg(test)]
 // The fixtures register their own canonical mailboxes: the fold of an expanded
 // path is the reference value under test, not a sibling-cap address.
-#[allow(clippy::disallowed_methods)]
+#[allow(clippy::disallowed_methods)] // aether-suppression-request: moved test; fixtures fold their own canonical paths
 mod tests {
     use aether_actor::Addressable;
     use aether_data::{ActorPath, Kind, mailbox_id_from_path};
@@ -104,7 +106,7 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // actor handler ABI always receives state
+        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
@@ -123,7 +125,7 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // actor handler ABI always receives state
+        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
@@ -141,7 +143,7 @@ mod tests {
             Ok(Self)
         }
 
-        #[allow(clippy::unused_self)] // actor handler ABI always receives state
+        #[allow(clippy::unused_self)] // aether-suppression-request: moved test fixture; handler ABI takes self
         #[handler::single]
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
