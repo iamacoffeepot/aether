@@ -1,6 +1,6 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
-use aether_actor::ReplyMode;
+use aether_actor::{Reaches, ReplyMode};
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
@@ -21,7 +21,11 @@ impl BundleDriver {
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
     /// wait.
-    pub(crate) fn perform<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, commands: Vec<Command>) {
+    pub(crate) fn perform<M: ReplyMode, A: Reaches<ComponentHostCapability>>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A, M>,
+        commands: Vec<Command>,
+    ) {
         for command in commands {
             match command {
                 Command::ReadEvents { ticket, request } => {
@@ -38,7 +42,7 @@ impl BundleDriver {
                 }
                 Command::Load { ticket, bundle, wasm } => {
                     self.loading.insert(ticket, bundle);
-                    let _ = ctx.erase().actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
+                    let _ = ctx.actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
                         wasm,
                         name: Some(bundle.to_string()),
                         config: Vec::new(),

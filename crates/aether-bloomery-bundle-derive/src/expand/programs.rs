@@ -204,9 +204,9 @@ fn expand_invocation(
         impl #invocation {
             #send_pending
 
-            fn reply_invoked<M: ::aether_actor::ReplyMode>(
+            fn reply_invoked<A, M: ::aether_actor::ReplyMode>(
                 &self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, M>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, A, M>,
                 invoked: &#program::Invoked,
             ) {
                 if let Some(parent) = self.parent {
@@ -239,11 +239,13 @@ fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
 fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenStream2 {
     let resume = resume_after_poll(program);
     quote! {
-        fn send_pending<M: ::aether_actor::ReplyMode>(
+        fn send_pending<A, M: ::aether_actor::ReplyMode>(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, M>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, A, M>,
             pending: #program::__macro_internals::Pending,
-        ) {
+        ) where
+            A: ::aether_actor::Reaches<#program::__macro_internals::JournalRoot>,
+        {
             use ::aether_actor::MailSender;
             match pending {
                 #program::__macro_internals::Pending::Artifact(pending) => {
@@ -265,7 +267,7 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
                         }
                         return;
                     }
-                    pending.dispatch(&mut ctx.sends());
+                    pending.dispatch(ctx);
                     let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
                     self.waiting.insert(request, #program::__macro_internals::Pending::Send(pending));
                 }
