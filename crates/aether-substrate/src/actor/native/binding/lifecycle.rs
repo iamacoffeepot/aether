@@ -146,7 +146,7 @@ impl NativeBinding {
     /// Panics if called more than once — fail-fast per ADR-0063: the
     /// inbox slot is single-claim, so a second install indicates a
     /// chassis-wiring bug.
-    pub fn install_inbox(&self, inbox: Receiver<Envelope>) {
+    pub(crate) fn install_inbox(&self, inbox: Receiver<Envelope>) {
         let settling = SettlingInbox::new_with_lineage(
             self.self_mailbox(),
             inbox,
@@ -251,7 +251,7 @@ impl NativeBinding {
     /// dispatches still process incoming mail, but
     /// `should_shutdown` reports `true` so the trampoline can drain
     /// the inbox synchronously, run `unwire`, and exit. Idempotent.
-    pub fn signal_shutdown(&self) {
+    pub(crate) fn signal_shutdown(&self) {
         self.shutdown_flag.store(true, Ordering::Release);
     }
 
@@ -272,7 +272,7 @@ impl NativeBinding {
     /// (channel-disconnect) flows through the same drain path without
     /// setting this flag, so the trampoline takes either signal as a
     /// trigger to wind down.
-    pub fn should_shutdown(&self) -> bool {
+    pub(crate) fn should_shutdown(&self) -> bool {
         self.shutdown_flag.load(Ordering::Acquire)
     }
 

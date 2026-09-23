@@ -24,7 +24,7 @@ use alloc::vec::Vec;
 use aether_data::{Kind, KindId, RequestId, Source};
 
 /// Default per-actor cap on remembered request contexts.
-pub const REQUEST_CONTEXT_CAPACITY: usize = 1024;
+const REQUEST_CONTEXT_CAPACITY: usize = 1024;
 
 const ENVELOPE_VERSION: u32 = 0xAEC0_0001;
 const ENVELOPE_MAGIC: &[u8; 8] = b"AECTX001";
@@ -159,7 +159,7 @@ impl Default for RequestContextTable {
 /// Compose the SDK request-context snapshot with the user/inline-child state
 /// bundle that already occupies the single `save_state` slot.
 #[must_use]
-pub fn compose_state_envelope(
+pub(crate) fn compose_state_envelope(
     table: &RequestContextTable,
     user_state: Option<(u32, Vec<u8>)>,
 ) -> Option<(u32, Vec<u8>)> {
