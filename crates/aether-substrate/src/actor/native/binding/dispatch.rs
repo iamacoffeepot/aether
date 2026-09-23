@@ -6,7 +6,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use super::NativeBinding;
-use crate::mail::{Mail, Source};
+use crate::mail::{KindId, Mail, Source};
 use crate::runtime::trace::SettlementHold;
 use aether_data::Kind;
 
@@ -73,13 +73,20 @@ impl NativeBinding {
             .dispatch_fill_output(id, Box::new(output))
             == super::offload::blocking::FillOutcome::Filled
         {
-            self.mailer.push(Mail::new(
-                self.self_mailbox(),
+            self.wake_self(
                 super::offload::blocking::TaskCompletionWake::ID,
                 super::offload::blocking::TaskCompletionWake { dispatch_id: id.0 }.encode_into_bytes(),
-                1,
-            ));
+            );
         }
+    }
+
+    /// Push one already-encoded mail to this actor's own mailbox as an
+    /// unchained loopback wake: no parent, no root, the default reply
+    /// target. The deferred-completion tail wakes through it, and so does
+    /// [`SelfWake`](super::offload::self_wake::SelfWake), the handle an
+    /// off-thread helper holds in place of a position plus a mailer.
+    pub(crate) fn wake_self(&self, kind: KindId, bytes: Vec<u8>) {
+        self.mailer.push(Mail::new(self.self_mailbox(), kind, bytes, 1));
     }
 
     /// Remove the named dispatch entry and rebuild its

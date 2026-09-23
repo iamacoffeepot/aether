@@ -12,7 +12,7 @@
 //! what it does fails to unify rather than lying in its manifest.
 
 use aether_actor::{
-    Addressable, AnyActorRef, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi,
+    ActorRef, Addressable, AnyActorRef, CallerAddressable, CallerScoped, Emit, HandlesKind, MailSender, Manual, Multi,
     OutboundReply, ReplyMode, Singleton,
 };
 use aether_data::{Kind, KindId, MailId, MailboxId};
@@ -213,6 +213,34 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn send_envelope_detached_to(&self, target: AnyActorRef, kind: KindId, bytes: &[u8]) -> MailId {
         self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
+    }
+
+    /// Forward the call this handler is serving to a proven `target`, so the
+    /// recipient's reply goes to whoever sent the inbound mail rather than to
+    /// this actor: the forwarded mail's reply target is pinned to the inbound
+    /// one internally, and it inherits this handler's chain.
+    ///
+    /// The typed, proven form of [`Self::send_envelope_tracked_with_reply_to`]:
+    /// `R: HandlesKind<K>` is checked at compile time, the recipient is the
+    /// [`ActorRef`] the caller holds, and no position or reply handle crosses
+    /// the call (ADR-0230). Its consumer is the fleet server's `on_route`,
+    /// which forwards a routed envelope to the engine proxy it spawned while
+    /// the substrate's reply still lands at the rpc server that asked.
+    pub fn forward_to<R, K>(&self, target: &ActorRef<R>, payload: &K)
+    where
+        R: HandlesKind<K>,
+        K: Kind,
+    {
+        let bytes = payload.encode_into_bytes();
+        self.binding.push_envelope_buffered_with_reply_to(
+            target.id().0,
+            K::ID.0,
+            &bytes,
+            1,
+            self.outbound_parent(),
+            self.outbound_root(),
+            Some(self.source),
+        );
     }
 }
 

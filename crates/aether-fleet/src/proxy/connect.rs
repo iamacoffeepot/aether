@@ -3,21 +3,17 @@
 //! freshly-forked substrate comes up. Native-only (owns the outbound
 //! `RpcConnection`).
 
-use aether_data::{Kind, KindId, MailboxId};
-use aether_rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection, RpcInboundReady};
-use aether_substrate::Mail;
+use aether_rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection};
 use aether_substrate::actor::native::SpawnError;
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::mailer::Mailer;
 #[cfg(test)]
 use std::cell::Cell;
 use std::error::Error as StdError;
 use std::fmt;
 use std::io::ErrorKind;
 use std::process::{Child, ExitStatus};
-use std::sync::Arc;
 #[cfg(test)]
-use std::sync::{Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -78,8 +74,9 @@ impl StdError for ProxyConnectError {
     }
 }
 
-/// Dial the substrate's `RpcServerCapability`, building a fresh
-/// `on_frame` wake closure per attempt. When `retry` is set, a
+/// Dial the substrate's `RpcServerCapability`, handing each attempt a
+/// clone of the `on_frame` wake closure the reader sidecar fires after
+/// every inbound frame. When `retry` is set, a
 /// connection-refused / reset error is retried (after a short
 /// pause) until the connect `budget` elapses — a freshly-forked
 /// substrate may not have bound its port yet. `budget` of `None` is
@@ -95,9 +92,7 @@ impl StdError for ProxyConnectError {
 /// port. `None` for an adopted substrate (no child to watch).
 pub fn connect_proxy(
     addr: &str,
-    mailer: &Arc<Mailer>,
-    self_mailbox: MailboxId,
-    wake_kind: KindId,
+    on_frame: impl Fn() + Clone + Send + 'static,
     retry: bool,
     budget: Option<Duration>,
     mut child: Option<&mut Child>,
@@ -108,16 +103,15 @@ pub fn connect_proxy(
     #[cfg(test)]
     let reader_wake = WAIT_FOR_READER_WAKE.replace(false).then(|| Arc::new((Mutex::new(false), Condvar::new())));
     loop {
-        // The reader sidecar fires `RpcInboundReady` at the proxy's
-        // own mailbox after every inbound frame so
-        // `on_inbound_ready` drains `conn.inbound` on the
-        // dispatcher thread. `RpcClient::connect` consumes the
-        // closure, so a retry needs a fresh one.
-        let wake_mailer = Arc::clone(mailer);
+        // The reader sidecar wakes the proxy after every inbound frame
+        // so `on_inbound_ready` drains `conn.inbound` on the dispatcher
+        // thread. `RpcClient::connect` consumes the closure, so a retry
+        // needs a fresh clone.
+        let wake = on_frame.clone();
         #[cfg(test)]
         let reader_wake_for_frame = reader_wake.as_ref().map(Arc::clone);
         let on_frame = move || {
-            wake_mailer.push(Mail::new(self_mailbox, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+            wake();
             #[cfg(test)]
             if let Some(reader_wake) = &reader_wake_for_frame {
                 let (seen, wake) = &**reader_wake;
@@ -199,7 +193,6 @@ fn is_transient_connect_error(e: &RpcClientError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use aether_substrate::mail::registry::Registry;
     use std::process::Command;
 
     /// A child that exits immediately must fast-fail the startup dial
@@ -213,10 +206,6 @@ mod tests {
     /// small fraction of the budget is what the fast-fail guarantees.
     #[test]
     fn child_exit_fast_fails_well_under_budget() {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let self_mailbox = MailboxId(1);
-        let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
-
         // A child that exits immediately. The dial targets a port
         // nothing is listening on, so every attempt refuses — the only
         // way out under a long budget is the child-exit fast-fail.
@@ -228,7 +217,7 @@ mod tests {
         let budget = Duration::from_secs(30);
 
         let start = Instant::now();
-        let result = connect_proxy(addr, &mailer, self_mailbox, wake_kind, true, Some(budget), Some(&mut child));
+        let result = connect_proxy(addr, || {}, true, Some(budget), Some(&mut child));
         let elapsed = start.elapsed();
 
         let _ = child.wait();

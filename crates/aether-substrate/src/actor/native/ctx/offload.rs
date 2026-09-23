@@ -14,6 +14,7 @@ use aether_actor::{Addressable, ReplyMode, Singleton};
 use aether_data::Kind;
 
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
+use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
 use crate::actor::native::{InheritCtx, RootCtx};
 use crate::mail::Source;
@@ -67,6 +68,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         F: FnOnce(RootCtx<W>) + Send + 'static,
     {
         thread::spawn_detached::<W, F>(Arc::clone(self.binding), f)
+    }
+
+    /// A [`SelfWake<K>`] for the rare dedicated thread a cap runs itself —
+    /// a socket reader, a heartbeat, a backoff timer — to wake this actor
+    /// with one `K` when it has staged work. The thread holds the handle in
+    /// place of a stored mailbox id plus a mailer: it names no position and
+    /// can send only that one wake (ADR-0230).
+    #[must_use]
+    pub fn self_wake<K: Kind>(&self) -> SelfWake<K> {
+        SelfWake::new(self.binding)
     }
 
     /// ADR-0093 hold-until-resolve dispatch: run the blocking closure

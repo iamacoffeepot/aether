@@ -8,10 +8,9 @@
 //!
 //! The accept thread (spawned in `init`) and the per-connection reader
 //! threads (spawned in [`RpcServerState::spawn_reader_for_peer`]) capture
-//! only cloned channel / `Arc<Mailer>` / `MailboxId` handles built in
-//! `init` or cloned out of the state — never the `RpcServerState` value —
-//! so the thread spawn / wake-mail / settlement-subscription / shutdown
-//! path transfers from the pre-split cap struct unchanged.
+//! only cloned channels and a [`SelfWake`] handle built in `init` or cloned
+//! out of the state — never the `RpcServerState` value, and never a mailbox
+//! position (ADR-0230). The handle wakes the cap and can send nothing else.
 
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
@@ -37,10 +36,9 @@ use aether_substrate::net::teardown_connect_addr;
 pub use crate::kinds::{CallSettled, RouteEnvelope};
 pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_codec::frame::{FrameError, write_frame};
-pub use aether_data::{Kind, KindId, MailboxId};
-pub use aether_substrate::Mail;
+pub use aether_data::{Kind, MailboxId};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake};
 pub use aether_substrate::chassis::error::BootError;
 pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
@@ -86,18 +84,19 @@ pub struct InFlight {
 /// `pub` so the parent's handlers / `init` / `unwire` reach them.
 pub struct RpcServerState {
     pub peer_kind: PeerKind,
-    pub self_mailbox: MailboxId,
+    /// Wakes this cap from the accept and reader threads so the next
+    /// `on_inbound_ready` turn drains the inbound channel. Each thread holds
+    /// a clone; none holds this cap's mailbox position.
+    pub wake: SelfWake<RpcInboundReady>,
     /// Mailbox that envelope-requested forwards (`to.engine.is_some()`)
     /// route to, from `RpcServerParams::route_target`. `None` on chassis
     /// that don't forward — the forward branch drops, as today.
     pub route_target: Option<MailboxId>,
-    /// Cached `Arc<Mailer>` so per-handler ctxs (`NativeCtx`,
-    /// which doesn't expose `mailer()`) can fire wake mails into
-    /// the cap from internal helpers — and so the `Call`
-    /// dispatcher can pass the same Arc into
-    /// `subscribe_settlement_mail`. Init grabs it from
-    /// `NativeInitCtx::mailer()`; the cap is single-threaded
-    /// post-ADR-0038 so direct storage is fine.
+    /// Cached `Arc<Mailer>` for the `Call` dispatcher's settlement
+    /// subscription: it reads the chassis settlement registry and passes
+    /// the same Arc into `subscribe_settlement_mail`. Init grabs it from
+    /// `NativeInitCtx::mailer()`; the cap is single-threaded post-ADR-0038
+    /// so direct storage is fine.
     pub mailer: Arc<Mailer>,
     /// The bound address, or `None` when the cap was composed disabled
     /// (ADR-0155 §3): a disabled server claims its mailbox but never
@@ -139,16 +138,14 @@ impl RpcServerState {
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_for_thread = Arc::clone(&shutdown);
 
-        let mailer: Arc<Mailer> = Arc::clone(&self.mailer);
-        let self_id = self.self_mailbox;
-        let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
+        let wake = self.wake.clone();
         let inbound_tx = self.inbound_tx.clone();
 
         // Per-connection transport reader below the mail layer — carries inbound
         // mail in; no inbound chain to inherit, no settlement umbrella.
         #[allow(clippy::disallowed_methods)]
         let thread = match thread::Builder::new().name(format!("aether-rpc-reader-{conn_id}")).spawn(move || {
-            run_reader_loop(read_half, conn_id, &shutdown_for_thread, &inbound_tx, &mailer, self_id, wake_kind);
+            run_reader_loop(read_half, conn_id, &shutdown_for_thread, &inbound_tx, &wake);
         }) {
             Ok(t) => t,
             Err(e) => {
@@ -317,7 +314,7 @@ impl RpcServerState {
             );
             return;
         };
-        reg.subscribe_settlement_mail(mail_id, self.self_mailbox, <Settled as Kind>::ID, Arc::clone(&self.mailer));
+        reg.subscribe_settlement_mail(mail_id, ctx.self_id(), <Settled as Kind>::ID, Arc::clone(&self.mailer));
         self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid });
     }
 
@@ -387,7 +384,7 @@ impl NativeActor for RpcServerCapability {
         params: RpcServerParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RpcServerState, BootError> {
-        let self_id = ctx.self_id();
+        let wake = ctx.self_wake::<RpcInboundReady>();
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
 
         // ADR-0155 §3: the cap is always composed and always claims its
@@ -404,7 +401,7 @@ impl NativeActor for RpcServerCapability {
             );
             return Ok(RpcServerState {
                 peer_kind: params.peer_kind,
-                self_mailbox: self_id,
+                wake,
                 route_target: params.route_target,
                 mailer: ctx.mailer(),
                 bind_addr: None,
@@ -430,8 +427,7 @@ impl NativeActor for RpcServerCapability {
 
         let inbound_tx_for_thread = inbound_tx.clone();
 
-        let mailer: Arc<Mailer> = ctx.mailer();
-        let wake_kind = KindId(<RpcInboundReady as Kind>::ID.0);
+        let wake_for_thread = wake.clone();
 
         // Transport thread below the mail layer — it accepts sockets that carry
         // inbound mail in; no inbound chain to inherit, no settlement umbrella.
@@ -448,7 +444,7 @@ impl NativeActor for RpcServerCapability {
                         if inbound_tx_for_thread.send(InboundEvent::PeerAccepted { stream, peer }).is_err() {
                             break;
                         }
-                        mailer.push(Mail::new(self_id, wake_kind, RpcInboundReady::default().encode_into_bytes(), 1));
+                        wake_for_thread.wake(&RpcInboundReady::default());
                     } else if accept_shutdown_for_thread.load(Ordering::Acquire) {
                         break;
                     }
@@ -467,7 +463,7 @@ impl NativeActor for RpcServerCapability {
 
         Ok(RpcServerState {
             peer_kind: params.peer_kind,
-            self_mailbox: self_id,
+            wake,
             route_target: params.route_target,
             mailer: ctx.mailer(),
             bind_addr: Some(bind_addr),
@@ -647,7 +643,7 @@ impl NativeActor for RpcServerCapability {
         }
 
         let envelope = MailEnvelope {
-            to: MailboxAddress::local(state.self_mailbox),
+            to: MailboxAddress::local(ctx.self_id()),
             from: match env.sender.addr {
                 SourceAddr::Component(id) => Some(MailboxAddress::local(id)),
                 _ => None,

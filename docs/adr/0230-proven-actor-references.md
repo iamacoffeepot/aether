@@ -156,6 +156,11 @@ reference rather than a raw id: `ctx.to(&actor_ref).send(&kind)` replaces
 | A position that arrived in mail, config, saved state, or from another process | the ctx verb `resolve_live`, over the host's liveness read of the published route view: `Live` mints, `Dropped` and `Unknown` refuse by name, and `Starting` reads as unknown (section 1). Minted once, at receipt, in the handler that received the field — never at the send. The registry method behind it is crate-private, so the verb is the only spelling a capability has. | one published-route read per proof; no lock, no allocation |
 | An `Address<R>` that arrived in mail, config, saved state, or from another process | not yet provided: no door turns a foreign address into a reference. It lands against the first migrated site that holds one. The first such site — the editor shell's `RegionSpec.target`, issue #6306 — dropped the field instead, so the region announces itself and the shell keeps the envelope sender; the door stays unprovided. | — |
 
+An off-thread helper that only wakes its own actor — an accept loop, a socket
+reader, a timer — holds a `SelfWake<K>` from the ctx (`ctx.self_wake::<K>()`)
+rather than any of these: it names no position, carries no reference, and can
+send only that one wake.
+
 What arrived stays a position. The payload-borne door changes nothing about
 the wire: `SubscribeWindow.mailbox` is still a `MailboxId` and still decodes
 as one, because a proof cannot cross a boundary (section 1). The proof it
