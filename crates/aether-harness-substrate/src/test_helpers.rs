@@ -48,7 +48,7 @@
 //! from a pass, and the whole point of running the scenario is to learn
 //! which of the two happened.
 
-use aether_data::Kind;
+use aether_data::{ActorPath, Kind};
 use aether_kinds::NamedMail;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -268,9 +268,14 @@ pub fn write_fixture(name: &str, bytes: &[u8]) -> String {
 /// Every scenario crate that drives a `SubstrateHarness` needs this and had
 /// been carrying its own byte-identical copy (issue 4131); the dependency edge
 /// that lets them share it already existed in all ten.
+///
+/// # Panics
+///
+/// Panics when `recipient` is not a well-formed actor path: a scenario's
+/// recipient is a fixture.
 pub fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
     NamedMail {
-        recipient_name: recipient.to_owned(),
+        recipient: ActorPath::new(recipient).expect("envelope recipient is a well-formed actor path"),
         kind_name: K::NAME.to_owned(),
         payload: mail.encode_into_bytes(),
         count: 1,

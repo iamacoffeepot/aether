@@ -128,7 +128,8 @@ pub struct AnyActorRef { id: MailboxId }
 |---|---|---|---|
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
-| `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()`, the boundary parser | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
+| `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()` | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
+| `ActorPath` | the text is a well-formed ADR-0166 address, canonical or abbreviated; nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`), compared, displayed; become a position only through the host's `resolve_address` |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
 | `AnyActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
@@ -136,8 +137,8 @@ pub struct AnyActorRef { id: MailboxId }
 `ActorRef::id()` is free and total. There is no function from a `MailboxId`
 to anything sendable outside the registry.
 
-`Address<R>` is the typed form of ADR-0166's grammar, and which constructor
-exists is decided by `R`'s placement facts (`Root`, `ChildOf<P>`,
+`ActorPath` is the text form of ADR-0166's grammar, and `Address<R>` is its
+typed description. Which `Address<R>` constructor exists is decided by `R`'s placement facts (`Root`, `ChildOf<P>`,
 `Singleton`, `Instanced`): a child address needs a proven parent. A loaded
 component's key is its load name, a validated `LoadName`; a window's is its
 window id. There is one addressing system and this is its value type.
@@ -179,9 +180,10 @@ host call and no mail. Persisted state stores an `Address` for the same
 reason, and this is enforced by the types having no codec rather than by
 convention.
 
-Strings exist in exactly one place: the host's `resolve_address` parser
-behind the MCP, RPC, and harness boundary. It answers with a position, not an
-`Address`: the boundary holds no actor type, so there is no `R` to type one
+Strings exist in exactly one place: text crosses the MCP, RPC, and harness
+boundary as an `ActorPath`, validated on construction and decode, and the
+host's `resolve_address` parser is the one place an `ActorPath` becomes a
+position. It answers with a position, not an `Address`: the boundary holds no actor type, so there is no `R` to type one
 with, and the position crosses the wire as the `MailEnvelope` recipient. The
 engine that receives the `Call` proves that position once, through the
 payload-borne door above, and sends only through the proof. A position that
@@ -198,7 +200,7 @@ fine in a log and useless as an address. The registry renders canonical
 names from the macro-emitted inventory records, which never pass through the
 type.
 
-`Namespace`, `LoadName`, and `Address<R>` live in `aether-data`, because kinds
+`Namespace`, `LoadName`, `Address<R>`, and `ActorPath` live in `aether-data`, because kinds
 in `aether-kinds` carry addresses and `aether-actor` depends on that crate.
 The proven types live beside `Addressable` in `aether-actor` with
 crate-private constructors: nothing serializable names them, so no kind crate

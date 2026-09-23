@@ -17,6 +17,7 @@ use aether_bloomery_kinds::{
 use aether_chassis::boot::{ChassisBase, RuntimeConfig};
 use aether_chassis_bloomery::BloomeryConfig;
 use aether_chassis_bloomery::chassis::{BloomeryChassis, BloomeryEnv};
+use aether_data::ActorPath;
 use aether_data::MailboxId;
 use aether_substrate::Chassis;
 use aether_substrate::Subname;
@@ -28,8 +29,8 @@ use aether_substrate::config::ConfigSources;
 /// Await `Processed` through the mounted driver: resolve the driver's born id,
 /// spawn a probe that sends one `AwaitProcessed`, and wait thirty seconds.
 fn await_processed(built: &BuiltChassis<BloomeryChassis>, through: u64) -> Processed {
-    let driver =
-        built.resolve_address("aether.bloomery.driver:driver").expect("the driver is spawned at mount").mailbox_id;
+    let address = ActorPath::new("aether.bloomery.driver:driver").expect("a well-formed actor path");
+    let driver = built.resolve_address(&address).expect("the driver is spawned at mount").mailbox_id;
     let (sink, rx) = mpsc::channel();
     built
         .spawn_actor::<Probe>(Subname::Named("probe"), (), ProbeParams { driver, through, sink })

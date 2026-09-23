@@ -39,6 +39,7 @@ use aether_chassis::boot::{
 };
 use aether_chassis::boot_manifest::ChassisSettings;
 use aether_chassis_headless::HeadlessChassis;
+use aether_data::ActorPath;
 use aether_data::MailboxId;
 use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, locate_component_wasm, test_namespace_roots};
 use aether_http::HttpConfig;
@@ -87,7 +88,8 @@ const WS_HANDLER_NAMESPACE: &str = "test.web_socket";
 /// `name` has a live trampoline, answering its position. Panics after 30s with
 /// the address and the parser's last answer.
 fn await_live_trampoline(built: &BuiltChassis<HeadlessChassis>, name: &str) -> MailboxId {
-    let address = format!("aether.component://aether.embedded:{name}");
+    let address = ActorPath::new(&format!("aether.component://aether.embedded:{name}"))
+        .expect("a loaded handler name forms a well-formed actor path");
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         let resolved = built.resolve_address(&address);

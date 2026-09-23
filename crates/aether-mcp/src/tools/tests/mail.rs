@@ -156,7 +156,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
         )
         .await
         .expect("NamedMail bundle encodes without recipient pre-resolution");
-    assert_eq!(bundle[0].recipient_name, supplied);
+    assert_eq!(bundle[0].recipient.to_string(), supplied);
     assert!(
         calls.lock().expect("address-route calls mutex is never poisoned").is_empty(),
         "NamedMail remains engine-atomic and never calls the pre-resolver"

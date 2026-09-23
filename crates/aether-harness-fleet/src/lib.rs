@@ -51,6 +51,7 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
+use aether_data::ActorPath;
 use aether_data::{EngineId, Kind, KindId, MailId, MailboxId, Uuid, mailbox_id_from_path};
 use aether_fleet::{FleetConfig, FleetServer};
 use aether_kinds::NamedMail;
@@ -952,7 +953,7 @@ impl FleetHarness {
     {
         let batch = DispatchTraced {
             mails: vec![NamedMail {
-                recipient_name: recipient.to_owned(),
+                recipient: ActorPath::new(recipient).expect("send_traced recipient is a well-formed actor path"),
                 kind_name: K::NAME.to_owned(),
                 payload: mail.encode_into_bytes(),
                 count: 1,

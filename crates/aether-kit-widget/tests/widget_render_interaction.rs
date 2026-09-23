@@ -51,7 +51,7 @@ use aether_fs::NamespaceRoots;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::{
     ArtifactGuard,
-    test_helpers::{init_save_sandbox, require_runtime},
+    test_helpers::{envelope, init_save_sandbox, require_runtime},
     visual::{Image, decode_png},
 };
 use aether_kinds::keycode::{
@@ -395,12 +395,7 @@ fn warm_panel(harness: &mut SubstrateHarness) {
 /// as a capture's `mails` so the panel redraws with its current widget state the
 /// same frame the substrate reads back.
 fn tick_to_panel() -> NamedMail {
-    NamedMail {
-        recipient_name: panel_address(),
-        kind_name: Tick::NAME.to_owned(),
-        payload: Tick::default().encode_into_bytes(),
-        count: 1,
-    }
+    envelope(&panel_address(), &Tick::default())
 }
 
 /// A left mouse-button press at `(x, y)`.

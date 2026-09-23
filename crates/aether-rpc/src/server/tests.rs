@@ -436,6 +436,7 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
     use crate::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
     use crate::{MailEnvelope, MailboxAddress};
     use aether_actor::Addressable;
+    use aether_data::ActorPath;
     use aether_data::{Kind, mailbox_id_from_name};
     use aether_kinds::NamedMail;
     use aether_kinds::trace::DispatchTraced;
@@ -446,16 +447,19 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
     // Build a batched DispatchTraced with two DeferredEchoRequest
     // envelopes, addressed at the deferred-echo actor by name (the
     // trace cap resolves names through the registry).
+    let recipient = || {
+        ActorPath::new(<DeferredEchoActor as Addressable>::NAMESPACE).expect("a namespace is a well-formed actor path")
+    };
     let batch = DispatchTraced {
         mails: vec![
             NamedMail {
-                recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
+                recipient: recipient(),
                 kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                 payload: DeferredEchoRequest { value: 11 }.encode_into_bytes(),
                 count: 1,
             },
             NamedMail {
-                recipient_name: <DeferredEchoActor as Addressable>::NAMESPACE.into(),
+                recipient: recipient(),
                 kind_name: <DeferredEchoRequest as Kind>::NAME.into(),
                 payload: DeferredEchoRequest { value: 22 }.encode_into_bytes(),
                 count: 1,

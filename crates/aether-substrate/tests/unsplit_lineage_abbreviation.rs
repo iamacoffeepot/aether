@@ -20,7 +20,7 @@
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::{Addressable, actor};
-use aether_data::mailbox_id_from_path;
+use aether_data::{ActorPath, mailbox_id_from_path};
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
 use aether_substrate::mail::registry::noop_handler;
@@ -94,9 +94,10 @@ fn an_unsplit_declaration_is_not_gated_out_of_its_cardinality_fact() {
 
     // Anchoring the prefix at all needs the root's singleton fact: an instanced
     // or absent one keeps the namespace out of the root table.
-    assert_eq!(registry.resolve_address(&format!("{}://", UnsplitRoot::NAMESPACE)), Ok(root));
+    let path = |text: String| ActorPath::new(&text).expect("fixture is a well-formed actor path");
+    assert_eq!(registry.resolve_address(&path(format!("{}://", UnsplitRoot::NAMESPACE))), Ok(root));
 
     // Eliding the child namespace needs the child's instanced fact: a bare
     // discriminator only resolves against an instanced child edge.
-    assert_eq!(registry.resolve_address(&format!("{}://one", UnsplitRoot::NAMESPACE)), Ok(child));
+    assert_eq!(registry.resolve_address(&path(format!("{}://one", UnsplitRoot::NAMESPACE))), Ok(child));
 }

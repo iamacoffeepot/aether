@@ -3,6 +3,7 @@
 //! module boot actor, or the replacement replies its operation's `Err`
 //! naming the actor and the missing namespace, before `init` runs.
 
+use aether_data::ActorPath;
 use aether_substrate::actor::wasm::kind_manifest::{ActorInputs, Dependency};
 use aether_substrate::mail::MailboxId;
 use aether_substrate::mail::registry::Registry;
@@ -62,7 +63,8 @@ pub(super) fn replacement_refusal(
     // refuses closed.
     let parent = canonical
         .rsplit_once('/')
-        .and_then(|(path, _)| registry.resolve_address(path).ok())
+        .and_then(|(path, _)| ActorPath::new(path).ok())
+        .and_then(|path| registry.resolve_address(&path).ok())
         .map_or(MailboxId::NONE, |resolved| resolved.mailbox_id);
     missing_dependency(registry, parent, &group.dependencies).map(|namespace| dependency_refusal(&canonical, namespace))
 }
