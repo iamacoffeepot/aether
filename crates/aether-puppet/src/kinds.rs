@@ -12,6 +12,12 @@ pub const DEFAULT_MATERIAL_FIELD_PADDING: f32 = 0.12;
 /// (`save`, `assets`, `config`). The load is asynchronous; the cached
 /// drawing is replaced atomically when the bytes arrive, so a failed load
 /// leaves the previous subject on screen rather than blanking it.
+///
+/// Every load is answered with exactly one [`LoadResult`]. A newer load that
+/// arrives while this one is still reading supersedes it: this caller is
+/// answered [`LoadResult::Err`] and this load's late reads are dropped. A
+/// load in flight across `replace_component` is completed by the
+/// replacement and answered with the real result.
 #[aether_data::kind(name = "aether.puppet.load", partial_eq)]
 pub struct Load {
     pub namespace: String,
@@ -72,8 +78,16 @@ impl Default for Load {
 /// caller rather than only in the log.
 #[aether_data::kind(name = "aether.puppet.load_result", eq)]
 pub enum LoadResult {
-    Ok { vertices: u32, faces: u32, bones: u32 },
-    Err { reason: String },
+    Ok {
+        vertices: u32,
+        faces: u32,
+        bones: u32,
+    },
+    /// The load failed, or a newer load superseded it before its reads
+    /// finished — `reason` says which.
+    Err {
+        reason: String,
+    },
 }
 
 /// Retune the hatching — the whole of the shading style, in one mail.

@@ -67,7 +67,11 @@
 //!    or [`PuppetConfig::subject`] names the same load at instantiation,
 //!    which is how a shipped package comes up with a subject on screen
 //!    and no operator in the room.
-//! 2. The component fires `aether.fs.read` and waits.
+//! 2. The component fires `aether.fs.read` and waits. A newer load that
+//!    arrives before those reads settle supersedes this one: its caller is
+//!    answered `Err`, and the reads still in flight are dropped as they
+//!    land. A load in flight across `replace_component` is carried into
+//!    the replacement, which reads it again and answers its caller.
 //! 3. On reply the mesh is parsed, the view-independent passes run, and
 //!    the cache is replaced atomically. A failed load leaves the previous
 //!    subject on screen rather than blanking it.
@@ -106,7 +110,8 @@ pub use labels::MaterialField;
 pub use turntable::*;
 
 use aether_actor::{
-    ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Erased, Manual, OutboundReply, PriorState, ReplyHandle, WasmActor, WasmCtx, WasmDropCtx,
+    WasmInitCtx, actor,
 };
 use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
@@ -149,14 +154,35 @@ const DOLLY_PER_NOTCH: f32 = 0.08;
 const MIN_DOLLY_DISTANCE: f32 = 0.6;
 const MAX_DOLLY_DISTANCE: f32 = 40.0;
 
+/// One fs read of one load, bound to the read as its request context.
+///
+/// Every read a load issues carries that load's `sequence`, so a read that
+/// lands after its load was superseded, settled early, or left behind by a
+/// replaced instance is recognised and dropped instead of being filed
+/// against whichever load is staging now.
 #[aether_data::kind(name = "aether.puppet.load_context", default, partial_eq)]
 struct LoadContext {
-    /// Only the mesh read carries one. The field read is a dependency of
-    /// the same request, not a request of its own, so it must not answer.
-    reply: Option<ReplyHandle>,
+    sequence: u64,
     namespace: String,
     path: String,
 }
+
+/// The load in flight when the puppet is replaced, carried from the old
+/// instance's `on_dehydrate` to the replacement's `on_rehydrate` — its one
+/// use. The staged bytes are not carried: the replacement reads the files
+/// again.
+#[aether_data::kind(name = "aether.puppet.carried_load", default, partial_eq)]
+struct CarriedLoad {
+    /// The old instance's last staged sequence, so no read it left in
+    /// flight can match a load the replacement stages.
+    sequence: u64,
+    pending: Option<Load>,
+    owed: Option<ReplyHandle>,
+}
+
+/// Why a load that a newer one replaced before its reads finished is
+/// refused.
+const SUPERSEDED: &str = "superseded by a newer aether.puppet.load before its reads finished";
 
 /// Diagnostic tap on the wash's inputs: bake the planes a develop at the
 /// current view would paint from and write them raw — `dims.txt`
@@ -240,9 +266,20 @@ pub struct Puppet {
     /// re-cast every occlusion ray to arrive at the identical answer.
     volatile: Vec<Curve3>,
     drawn_from: Option<Frame>,
-    /// Held until extraction runs, because the answer is not known until
-    /// both assets have landed.
+    /// The caller `pending` answers, held until extraction runs, because
+    /// the answer is not known until every asset has landed. `None` for a
+    /// load nobody asked for, which is the [`PuppetConfig::subject`] one.
     owed: Option<ReplyHandle>,
+    /// The sequence of the most recently staged load. Every read carries
+    /// its load's sequence (`LoadContext`), and only a read of this one
+    /// is filed.
+    load_sequence: u64,
+    /// The load now staging, and `None` once it has settled either way.
+    pending: Option<Load>,
+    /// The mesh path the staging load still owes. The subject a read
+    /// replaces is decided by this, never by "a path nothing else
+    /// claimed", and extraction waits on it like any other asset.
+    awaiting_subject: Option<String>,
     /// The view-independent drawing: hatch and crease, welded, kept from
     /// load. Rebuilt only when the subject changes, which is what lets
     /// its packed field points stay resident on the GPU across an orbit
@@ -505,7 +542,21 @@ impl Puppet {
     /// that names no palette paints out of the canonical box, and one that
     /// names a box it cannot read falls back to the same rather than
     /// painting out of the last subject's.
-    fn stage(&mut self, mail: &Load) -> Vec<String> {
+    ///
+    /// Staging starts a new load: it takes the next sequence, which every
+    /// returned read carries, and clears whatever an earlier load still
+    /// owed, so a superseded load's outstanding reads cannot hold this one
+    /// open.
+    fn stage(&mut self, mail: &Load) -> Vec<LoadContext> {
+        self.load_sequence = self.load_sequence.wrapping_add(1);
+        self.pending = Some(mail.clone());
+        self.awaiting_palette = None;
+        self.awaiting_labels = None;
+        self.staged_labels = None;
+        self.rig.awaiting_weights = None;
+        self.rig.awaiting_descriptor = None;
+        self.awaiting_subject = Some(mail.path.clone());
+
         self.material_field_padding = mail.material_field_padding;
         self.palette = Palette::canonical();
 
@@ -531,6 +582,9 @@ impl Puppet {
         reads.push(mail.path.clone());
 
         reads
+            .into_iter()
+            .map(|path| LoadContext { sequence: self.load_sequence, namespace: mail.namespace.clone(), path })
+            .collect()
     }
 
     /// The charted face, planted on `subject`. Empty without a material
@@ -750,6 +804,9 @@ impl WasmActor for Puppet {
             volatile: Vec::new(),
             drawn_from: None,
             owed: None,
+            load_sequence: 0,
+            pending: None,
+            awaiting_subject: None,
             surface: Vec::new(),
             skin: None,
             rig: Rig::default(),
@@ -789,8 +846,39 @@ impl WasmActor for Puppet {
         // no sender — so a failure reports itself the way the handler's does
         // when the caller was fire-and-forget: in the actor log.
         if let Some(subject) = self.subject_at_boot.take() {
-            for path in self.stage(&subject) {
-                let context = LoadContext { reply: None, namespace: subject.namespace.clone(), path };
+            for context in self.stage(&subject) {
+                ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+            }
+        }
+    }
+
+    /// Carry the load in flight, if any, into the replacement.
+    ///
+    /// The sequence is saved even when nothing is pending, so a straggler
+    /// read of a load that already settled cannot match the replacement's
+    /// first load.
+    fn on_dehydrate(&mut self, ctx: &mut WasmDropCtx<'_>) {
+        let carried =
+            CarriedLoad { sequence: self.load_sequence, pending: self.pending.take(), owed: self.owed.take() };
+        ctx.save_state_kind::<CarriedLoad>(0, &carried);
+    }
+
+    /// Resume the load the replaced instance left in flight: stage it
+    /// again, answer the carried caller from here, and read its files
+    /// again. The old instance's reads land here with its sequence and
+    /// are dropped.
+    ///
+    /// Replace re-runs `init` but not `wire`, so this is the only place an
+    /// in-flight load resumes.
+    fn on_rehydrate(&mut self, ctx: &mut WasmCtx<'_>, prior: PriorState<'_>) {
+        let Some(carried) = prior.decode_kind::<CarriedLoad>() else {
+            return;
+        };
+
+        self.load_sequence = carried.sequence;
+        if let Some(load) = carried.pending {
+            self.owed = carried.owed;
+            for context in self.stage(&load) {
                 ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
             }
         }
@@ -871,14 +959,21 @@ impl WasmActor for Puppet {
             .clamp(MIN_DOLLY_DISTANCE, MAX_DOLLY_DISTANCE);
     }
 
-    /// Point her at a subject. Asynchronous — the reply target is carried
-    /// in the fs context so the eventual `LoadResult` reaches whoever asked.
+    /// Point her at a subject. Asynchronous — the reply target is held
+    /// until every read has settled, so the eventual `LoadResult` reaches
+    /// whoever asked.
+    ///
+    /// A load still reading when this one arrives is superseded: its
+    /// caller is answered `Err` now, and its reads are dropped as they
+    /// land.
     #[handler::manual]
     fn on_load(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: Load) {
+        if let Some(superseded) = self.owed.take() {
+            ctx.reply_to(superseded, &LoadResult::Err { reason: SUPERSEDED.to_owned() });
+        }
         self.owed = ctx.reply_target();
 
-        for path in self.stage(&mail) {
-            let context = LoadContext { reply: None, namespace: mail.namespace.clone(), path };
+        for context in self.stage(&mail) {
             ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
         }
     }
@@ -889,6 +984,7 @@ impl WasmActor for Puppet {
     /// proved it: a mesh that overran the mail bound reported `delivered`
     /// to the caller and left the reason only in the actor log.
     fn settle(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: &LoadResult) {
+        self.pending = None;
         if let Some(sender) = self.owed.take() {
             ctx.reply_to(sender, result);
         }
@@ -927,7 +1023,8 @@ impl WasmActor for Puppet {
             // the lattice is placed against need have settled yet.
             self.awaiting_labels = None;
             self.staged_labels = Some(bytes);
-        } else {
+        } else if self.awaiting_subject.as_deref() == Some(path) {
+            self.awaiting_subject = None;
             match Mesh::from_file_bytes(path, &bytes, self.settings.relaxation) {
                 Ok(subject) => self.subject = Some(subject),
                 Err(reason) => {
@@ -940,6 +1037,8 @@ impl WasmActor for Puppet {
                     return Err(format!("{path} {reason}"));
                 }
             }
+        } else {
+            tracing::warn!(target: "aether_puppet", path = %path, "a read no staged asset owes; ignored");
         }
 
         Ok(())
@@ -947,8 +1046,22 @@ impl WasmActor for Puppet {
 
     /// The bytes arrived. Parse, run the view-independent passes, and swap
     /// the cache in one go.
+    ///
+    /// Only a read of the load now staging counts. One from a superseded
+    /// load, from the instance a replace retired, or landing after its
+    /// load already settled is dropped before it can touch the subject.
     #[handler::manual]
     fn on_read(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: ReadResult) {
+        let context = ctx.take_context::<LoadContext>();
+        if self.pending.is_none() || context.as_ref().is_none_or(|context| context.sequence != self.load_sequence) {
+            tracing::debug!(
+                target: "aether_puppet",
+                path = ?context.map(|context| context.path),
+                "a read of a load no longer staging; dropped",
+            );
+            return;
+        }
+
         let path = match mail {
             ReadResult::Ok { ref addr, .. } => addr.path.clone(),
             ReadResult::Err { ref addr, ref error, .. } => {
@@ -971,12 +1084,16 @@ impl WasmActor for Puppet {
         // Extraction needs the mesh, and the field if one was asked for —
         // the lattice is placed against the mesh's own bounds, so a field
         // that lands first has to be re-placed once the mesh arrives.
+        if self.awaiting_subject.is_some()
+            || self.awaiting_labels.is_some()
+            || self.awaiting_palette.is_some()
+            || self.rig.outstanding()
+        {
+            return;
+        }
         let Some(subject) = self.subject.as_ref() else {
             return;
         };
-        if self.awaiting_labels.is_some() || self.awaiting_palette.is_some() || self.rig.outstanding() {
-            return;
-        }
 
         // Everything is in, so the field can finally be read: against the
         // box's vocabulary, which says what its cells name, and against

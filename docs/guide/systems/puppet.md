@@ -53,6 +53,15 @@ and remains `Load::default()`'s value. The decoded
 world-space origin and spacing, and ordered class vocabulary in memory; the
 on-disk asset remains a NumPy 1.0 `|u1`, C-order cube.
 
+Every load is answered with exactly one `aether.puppet.load_result`: `Ok` with
+the vertex, face and bone counts of the load's own mesh, or `Err` with a
+reason. A newer load that arrives while an earlier one is still reading its
+files supersedes it; the earlier caller is answered `Err` with a reason that
+says it was superseded, and its reads are dropped as they land, so they never
+change the subject. A load still reading when the puppet is replaced
+(`replace_component`) is completed by the replacement, which reads the files
+again and answers the original caller with the real result.
+
 ## Load a subject at instantiation
 
 The same load can be named as init-config instead of mail, which is how a
