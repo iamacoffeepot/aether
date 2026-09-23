@@ -87,7 +87,7 @@ use crate::handler_parse::{
     parse_handler_variant, reject_duplicate_handler_kinds,
 };
 use crate::manifest::build_handler_set_manifest_const;
-use crate::reply_markers::{ReplyMarkerSite, reply_marker_impl};
+use crate::reply_markers::{ReplyMarkerSite, native_reply_contract, reply_marker_impl};
 
 /// Which actor transport a set's handlers are written against, read off the
 /// ctx parameter's type name the same way `expand_handlers` reads the trait
@@ -389,13 +389,14 @@ fn build_native_capability_rows(handlers: &[HandlerFn]) -> TokenStream2 {
     let rows = handlers.iter().map(|h| {
         let kind_ty = &h.kind_ty;
         let cfgs = &h.cfgs;
+        let reply = native_reply_contract(h.class, &h.reply);
         quote! {
             #(#cfgs)*
             __aether_handlers.push(::aether_substrate::actor::native::HandlerCapability {
                 id: <#kind_ty as ::aether_data::Kind>::ID,
                 name: <#kind_ty as ::aether_data::Kind>::NAME.to_owned(),
                 doc: ::core::option::Option::None,
-                reply: ::aether_data::ReplyContract::None,
+                reply: #reply,
             });
         }
     });
@@ -472,11 +473,7 @@ fn build_native_marker_bridge(set_ident: &syn::Ident, handlers: &[HandlerFn]) ->
     });
     let inventory = handlers.iter().zip(&gate_idents).map(|(h, gate)| {
         let kind_ty = &h.kind_ty;
-        let reply_expr = if let Some(reply_ty) = h.reply.manifest_kind() {
-            quote! { ::core::option::Option::Some(<#reply_ty as ::aether_data::Kind>::ID) }
-        } else {
-            quote! { ::core::option::Option::None }
-        };
+        let reply_expr = native_reply_contract(h.class, &h.reply);
         wrap_in_gate(
             gate.as_ref(),
             quote! {

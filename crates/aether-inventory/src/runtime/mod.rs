@@ -190,7 +190,7 @@ impl NativeActor for InventoryCapability {
     /// Reply with the native handler manifest (ADR-0109 §5): every
     /// `#[handler]` across every native actor linked into the
     /// substrate, each carrying its owning `namespace`, input kind
-    /// (id + name), and declared reply kind id. Read from the
+    /// (id + name), and reply contract. Read from the
     /// process-global link-time
     /// [`HandlerEntry`](aether_data::name_inventory::HandlerEntry)
     /// inventory the `#[actor]` macro populates — the native
@@ -198,8 +198,9 @@ impl NativeActor for InventoryCapability {
     ///
     /// # Agent
     /// Reply: `HandlersResult`. One `HandlerEntryWire` per native
-    /// handler; `reply` is the kind a `-> R` handler answers with
-    /// (`None` for a fire-and-forget `-> ()` handler). Fold per
+    /// handler; `reply` is its reply contract — `One(R)` for a `-> R`
+    /// handler, `Manual` for a manual handler that replies at run time
+    /// with no declared kind, `None` for a silent `-> ()` handler. Fold per
     /// `namespace` to read each native cap (`aether.fs`,
     /// `aether.render`, …) as a `describe_component`-style
     /// `In -> Out` handler list.
@@ -583,7 +584,7 @@ mod tests {
             namespace: "aether.test.window_dedup",
             id: KindId(0x0D1D_0000_0000_0001),
             name: "aether.test.window_dedup.set_mode",
-            reply: Some(KindId(0x0D1D_0000_0000_0002)),
+            reply: aether_data::ReplyContract::One(KindId(0x0D1D_0000_0000_0002)),
         }
     }
     inventory::submit! {
@@ -591,7 +592,7 @@ mod tests {
             namespace: "aether.test.window_dedup",
             id: KindId(0x0D1D_0000_0000_0001),
             name: "aether.test.window_dedup.set_mode",
-            reply: Some(KindId(0x0D1D_0000_0000_0002)),
+            reply: aether_data::ReplyContract::One(KindId(0x0D1D_0000_0000_0002)),
         }
     }
 

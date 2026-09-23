@@ -741,9 +741,9 @@ mod control_plane {
         /// for a single-class handler (the ADR-0109 return-type contract),
         /// `Manual` for a manual-class handler that replies by hand. Lets
         /// `describe_component` report the real `In -> Out` so a caller reads
-        /// what a call returns before issuing it. Native chassis caps report
-        /// `None` until the native handler manifest lands (ADR-0109 §5, a
-        /// follow-on).
+        /// what a call returns before issuing it. Native chassis cap rows
+        /// come from the same `#[actor]` mapping that fills the native
+        /// handler manifest (ADR-0109 §5, ADR-0231 §4).
         pub reply: aether_data::ReplyContract,
     }
 
