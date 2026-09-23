@@ -26,6 +26,11 @@
 //! `#[http::router(shared)]` registers them all `shared: true` instead
 //! (ADR-0136), the opt-in for a component built to run as N interchangeable
 //! instances of one round-robin member set.
+//!
+//! The actor must declare `depends(HttpServerCapability)` on its `#[actor]`
+//! attribute (or on the struct of a `#[runtime]`-split cap), because the
+//! injected `wire` registration mails the server. A missing declaration is a
+//! compile error at `#[http::router]`.
 
 #![forbid(unsafe_code)]
 
@@ -33,7 +38,7 @@ use std::cmp::Reverse;
 
 use proc_macro::TokenStream;
 use proc_macro2::{Span, TokenStream as TokenStream2};
-use quote::{format_ident, quote, quote_spanned};
+use quote::{ToTokens, format_ident, quote, quote_spanned};
 use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
@@ -81,7 +86,11 @@ pub fn reply(_args: TokenStream, item: TokenStream) -> TokenStream {
 /// `#[actor]`. Takes no arguments (today's exclusive registration) or the
 /// bare ident `shared` (ADR-0136 joint opt-in — every route on the impl
 /// registers `shared: true`, so N instances of the component join one
-/// round-robin member set).
+/// round-robin member set). The actor must declare
+/// `depends(HttpServerCapability)` on its `#[actor]` attribute (or on the
+/// struct of a `#[runtime]`-split cap), because the injected `wire`
+/// registration mails the server; a missing declaration is a compile error
+/// at `#[http::router]`.
 #[proc_macro_attribute]
 pub fn router(args: TokenStream, item: TokenStream) -> TokenStream {
     let item = parse_macro_input!(item as ItemImpl);
@@ -383,10 +392,37 @@ fn expand_router(mut item: ItemImpl, shared: bool) -> syn::Result<TokenStream2> 
 
     inject_registration(&mut item, &groups, shared)?;
 
+    let depends_check = emit_depends_check(&item.self_ty);
+
     Ok(quote! {
+        #depends_check
         #(#minted)*
         #item
     })
+}
+
+/// A compile-time check that the router actor declares
+/// `depends(HttpServerCapability)`: the injected `wire` registration mails the
+/// server, so the declaration is required. The self type is respanned to the
+/// attribute too, so a missing declaration reports E0277 on `#[http::router]`,
+/// naming the helper whose name says what to write. Emits no runtime code.
+fn emit_depends_check(self_ty: &Type) -> TokenStream2 {
+    let self_ty = self_ty
+        .to_token_stream()
+        .into_iter()
+        .map(|mut token| {
+            token.set_span(Span::call_site());
+            token
+        })
+        .collect::<TokenStream2>();
+    quote_spanned! { Span::call_site() =>
+        const _: fn() = {
+            fn router_actor_must_declare_depends_http_server_capability<
+                A: ::aether_actor::DependsOn<::aether_http::HttpServerCapability>,
+            >() {}
+            router_actor_must_declare_depends_http_server_capability::<#self_ty>
+        };
+    }
 }
 
 /// Read the required `const NAMESPACE: &'static str = "…"` literal.

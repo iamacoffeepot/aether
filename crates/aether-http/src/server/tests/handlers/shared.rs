@@ -21,7 +21,7 @@ macro_rules! shared_routed_handler {
         pub struct $ty;
         pub struct $state;
 
-        #[actor(singleton, root)]
+        #[actor(singleton, root, depends(HttpServerCapability))]
         impl NativeActor for $ty {
             type State = $state;
             type Config = ();
@@ -97,7 +97,7 @@ pub struct SharedMacroPoolHandlerState {
 }
 
 #[http::router(shared)]
-#[actor(instanced, root)]
+#[actor(instanced, root, depends(HttpServerCapability))]
 impl NativeActor for SharedMacroPoolHandler {
     type State = SharedMacroPoolHandlerState;
     type Config = &'static [u8];
@@ -141,7 +141,7 @@ pub struct ExclusiveMacroPoolHandlerState {
 }
 
 #[http::router]
-#[actor(instanced, root)]
+#[actor(instanced, root, depends(HttpServerCapability))]
 impl NativeActor for ExclusiveMacroPoolHandler {
     type State = ExclusiveMacroPoolHandlerState;
     type Config = &'static [u8];

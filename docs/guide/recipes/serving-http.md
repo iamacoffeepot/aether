@@ -87,7 +87,7 @@ use aether_data::Kind as _;
 
 pub struct Web;
 
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for Web {
     const NAMESPACE: &'static str = "web";
 
@@ -296,14 +296,17 @@ route's request-shaped kind, inject the `register_route_self` send into `wire`,
 and turn the method into the route's `#[handler::single]`. A routed method takes an
 `http::Ctx<'_, C>` — the transport ctx (`WasmCtx` here) plus the request and
 matched route, dereffing to the ctx so mail sends read as usual — and returns
-`HttpServerResponse`:
+`HttpServerResponse`. The actor must declare `depends(HttpServerCapability)`
+on its `#[actor]` attribute, because the injected registration mails the
+server; without it, the actor fails to compile at `#[http::router]`:
 
 ```rust
 use aether_http as http;
+use aether_http::HttpServerCapability;
 use aether_http::kinds::{HttpServerRequest, HttpServerResponse};
 
 #[http::router]
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for ApiHandler {
     const NAMESPACE: &'static str = "api";
 

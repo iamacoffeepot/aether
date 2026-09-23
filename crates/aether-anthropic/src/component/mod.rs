@@ -72,7 +72,7 @@ pub struct AnthropicComponent {
 /// matching `_result` reply. The Messages backend needs `aether.http` egress to
 /// the Messages API host allowlisted; the CLI backend needs `claude`
 /// allowlisted on `aether.process`.
-#[actor]
+#[actor(depends(HttpCapability), depends(ProcessCapability))]
 impl WasmActor for AnthropicComponent {
     type Config = AnthropicComponentConfig;
     const NAMESPACE: &'static str = "aether.anthropic";

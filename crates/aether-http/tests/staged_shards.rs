@@ -18,7 +18,7 @@ use std::time::Duration;
 struct ColdHttpHandler;
 struct ColdHttpHandlerState;
 
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for ColdHttpHandler {
     type State = ColdHttpHandlerState;
     type Config = ();

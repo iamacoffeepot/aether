@@ -31,7 +31,7 @@ use std::fs;
 
 use aether_actor::{ActorRef, ChildOf, Instanced};
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{
     KEY_A, KEY_DOWN, KEY_ENTER, KEY_HOME, KEY_PAGE_DOWN, KEY_RIGHT, KEY_SPACE, KEY_TAB, KEY_UP,
@@ -1512,7 +1512,12 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
         return;
     };
     let wasm = fs::read(&wasm_path).expect("read kit wasm");
-    let mut harness = SubstrateHarness::builder().size(240, 180).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .size(240, 180)
+        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-set")))
+        .with_component_host()
+        .build()
+        .expect("boot");
     let panel = load_panel_with(
         &mut harness,
         &wasm,

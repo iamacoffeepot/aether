@@ -58,7 +58,10 @@ Shared and exclusive claimants cannot silently mix for the same key. Dead
 members are removed; lifecycle cleanup is part of route ownership, not a caller
 convention.
 
-`#[http::router]` derives registration from typed `#[route]` methods.
+`#[http::router]` derives registration from typed `#[route]` methods. The
+actor must declare `depends(HttpServerCapability)`, because the injected `wire`
+registration mails the server; without it, the actor fails to compile at
+`#[http::router]`.
 `#[http::router(shared)]` opts every generated claim into the shared set. Use
 shared routes with replicated instances only when handler state and external
 effects tolerate per-request distribution.

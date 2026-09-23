@@ -22,7 +22,7 @@ pub struct ApiRouteHandler;
 pub struct ApiRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for ApiRouteHandler {
     type State = ApiRouteHandlerState;
     type Config = ();
@@ -67,7 +67,7 @@ pub struct ExtractRouteHandler;
 pub struct ExtractRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for ExtractRouteHandler {
     type State = ExtractRouteHandlerState;
     type Config = ();
@@ -99,7 +99,7 @@ pub struct TmpRouteHandler;
 pub struct TmpRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for TmpRouteHandler {
     type State = TmpRouteHandlerState;
     type Config = ();
@@ -126,7 +126,7 @@ pub struct WiredRouteHandler;
 pub struct WiredRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for WiredRouteHandler {
     type State = WiredRouteHandlerState;
     type Config = ();
@@ -170,7 +170,7 @@ pub struct BookRouteHandler;
 pub struct BookRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability))]
 impl NativeActor for BookRouteHandler {
     type State = BookRouteHandlerState;
     type Config = ();
@@ -281,7 +281,7 @@ pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root)]
+#[actor(singleton, root, depends(HttpServerCapability), depends(EchoPeer), depends(SilentPeer))]
 impl NativeActor for DeferRouteHandler {
     type State = DeferRouteHandlerState;
     type Config = ();
@@ -356,7 +356,7 @@ macro_rules! routed_handler {
         pub struct $state;
 
         #[http::router]
-        #[actor(singleton, root)]
+        #[actor(singleton, root, depends(HttpServerCapability))]
         impl NativeActor for $ty {
             type State = $state;
             type Config = ();

@@ -343,7 +343,7 @@ impl WasmActor for WebSocketHandler {
 pub struct RoutedHttpHandler;
 
 #[http::router]
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for RoutedHttpHandler {
     const NAMESPACE: &'static str = "test.routed_web";
 

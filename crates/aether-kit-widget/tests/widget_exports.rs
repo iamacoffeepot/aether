@@ -24,7 +24,7 @@ use std::fs;
 use aether_actor::ActorRef;
 use aether_component::ComponentHostCapability;
 use aether_data::{Kind, LoadName};
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_RIGHT};
 use aether_kinds::mouse_button::LEFT;
@@ -189,7 +189,12 @@ fn panel_config() -> PanelConfig {
 /// ADR-0138: a bare load of this grab-bag must error and name every omitted
 /// actor, while each of those seven NAMESPACEs must resolve as a named export.
 fn assert_selectors(wasm: &[u8], stem: &str) {
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .size(64, 48)
+        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-exports")))
+        .with_component_host()
+        .build()
+        .expect("boot");
 
     let bare = harness
         .execute(vec![(
@@ -253,7 +258,12 @@ fn assert_selectors(wasm: &[u8], stem: &str) {
 fn assert_panel_children_reconstruct(wasm: &[u8], stem: &str) {
     let config = panel_config();
     let config_bytes = config.encode_into_bytes();
-    let mut harness = SubstrateHarness::builder().size(240, 220).with_component_host().build().expect("boot");
+    let mut harness = SubstrateHarness::builder()
+        .size(240, 220)
+        .namespace_roots(test_namespace_roots(init_save_sandbox("kit-widget-exports")))
+        .with_component_host()
+        .build()
+        .expect("boot");
 
     let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {
