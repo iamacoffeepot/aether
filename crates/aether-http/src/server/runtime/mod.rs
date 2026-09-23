@@ -13,8 +13,9 @@
 //! table) and, in the concern submodules, the whole per-connection machine
 //! the dispatch shards run — [`HttpShardState`] and its reader/writer
 //! sidecars, parse/render, streaming, and websocket support. The sidecar
-//! threads capture only `Arc` / channel / id clones — never an actor struct —
-//! so the supervisor/shard split does not change what any thread captures.
+//! threads capture only `Arc` / channel / self-wake clones — never an actor
+//! struct, a mailbox position, or a mailer — so the supervisor/shard split
+//! does not change what any thread captures.
 
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
@@ -25,7 +26,7 @@
 // `init`'s signature, `HttpServerCapability` is the impl's `Self` type, and
 // `HttpServerHandle` is the boot artifact `init` publishes.
 use super::{HttpDispatchShard, HttpInboundReady, HttpServerCapability, HttpServerConfig, HttpServerHandle};
-use aether_actor::{Single, runtime};
+use aether_actor::{AnyActorRef, MailSender, ReplyMode, Single, runtime};
 
 pub use std::collections::{HashMap, HashSet, VecDeque};
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -36,11 +37,11 @@ pub use std::time::Duration;
 
 pub use aether_data::{Kind, KindId, MailboxId};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
+pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::MailId;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::registry::{MailboxEntry, Registry};
+pub use aether_substrate::mail::{CapabilityRegistry, MailId};
 
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind
 // vocabulary its moved handler bodies name through this module's glob, so
@@ -62,7 +63,6 @@ use aether_substrate::net::teardown_connect_addr;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 
-pub use aether_substrate::Mail;
 use std::io::{self, Read, Write};
 use std::mem;
 use std::str::from_utf8;
@@ -139,12 +139,8 @@ impl NativeActor for HttpServerCapability {
         let accept_shutdown_for_thread = Arc::clone(&accept_shutdown);
 
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
-        let self_id = ctx.self_id();
-        let wake_kind = <HttpInboundReady as Kind>::ID;
-
         let wake_dirty = Arc::new(AtomicBool::new(false));
-        let accept_sink =
-            WakeSink { inbound_tx, mailer: Arc::clone(&mailer), self_id, wake_kind, dirty: Arc::clone(&wake_dirty) };
+        let accept_sink = WakeSink { inbound_tx, wake: ctx.self_wake(), dirty: Arc::clone(&wake_dirty) };
 
         // Transport thread below the mail layer — it accepts sockets
         // that carry inbound mail in; no inbound chain to inherit, no
@@ -200,7 +196,6 @@ impl NativeActor for HttpServerCapability {
             accept_thread: Some(accept_thread),
             inbound_rx,
             wake_dirty,
-            self_mailbox: self_id,
             shard_startup: ShardStartup::Idle,
             next_stream_id: Arc::new(AtomicU64::new(0)),
             monitors: HashMap::new(),
@@ -283,18 +278,16 @@ impl NativeActor for HttpServerCapability {
     #[handler(task)]
     fn on_shard_spawn_done(
         state: &mut Self::State,
-        _ctx: &mut NativeCtx<'_>,
+        ctx: &mut NativeCtx<'_>,
         done: TaskDone<SpawnOutcome<HttpDispatchShard>, ShardSpawnContext>,
     ) {
         let index = done.context().index;
         let subname = done.context().subname.clone();
         let sink = match &done.output().result {
-            Ok(_) => Some(WakeSink {
+            Ok(shard) => Some(ShardSink {
                 inbound_tx: done.context().inbound_tx.clone(),
-                mailer: Arc::clone(&state.mailer),
-                self_id: done.output().mailbox_id,
-                wake_kind: KindId(<HttpInboundReady as Kind>::ID.0),
                 dirty: Arc::clone(&done.context().wake_dirty),
+                shard: shard.erase(),
             }),
             Err(error) => {
                 tracing::warn!(
@@ -309,7 +302,7 @@ impl NativeActor for HttpServerCapability {
         done.release_no_reply();
 
         let settlement = state.finish_shard_spawn(index, sink);
-        state.apply_shard_settlement(settlement);
+        state.apply_shard_settlement(ctx, settlement);
     }
 
     /// Claim a route for an explicitly named mailbox (ADR-0130).

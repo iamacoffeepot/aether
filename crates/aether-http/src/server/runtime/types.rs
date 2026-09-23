@@ -15,12 +15,17 @@ pub type ConnId = u64;
 pub type SharedRoutes = Arc<RwLock<Vec<Route>>>;
 
 /// Read-mostly state a reader thread consults to make the fast-path
-/// decision itself (ADR-0135 §2): the shared route table and the
-/// connection's peer string (captured once at adoption; every request's
-/// `peer_addr` clones it on the reader thread rather than the shard).
+/// decision itself (ADR-0135 §2): the shared route table, the connection's
+/// peer string (captured once at adoption; every request's `peer_addr`
+/// clones it on the reader thread rather than the shard), and the two
+/// registries route resolution reads — the routing registry that validates
+/// a matched member and the capability registry that answers whether it
+/// takes the streamed body path.
 pub struct ReaderShared {
     pub routes: SharedRoutes,
     pub peer: String,
+    pub registry: Arc<Registry>,
+    pub capabilities: Arc<CapabilityRegistry>,
 }
 
 /// Boot config the supervisor builds for each dispatch shard it spawns
@@ -345,7 +350,8 @@ pub struct RequestStreamState {
 
 /// Wake sink shared with the accept + reader sidecar threads: push an
 /// [`InboundEvent`] over the mpsc, then fire an [`HttpInboundReady`]
-/// wake mail at the cap so the dispatcher drains.
+/// self-wake at the actor that drains it. The thread holds a
+/// [`SelfWake`], never a position or a mailer (ADR-0230).
 ///
 /// The wake mail coalesces behind `dirty` (ADR-0135 §4): every sink
 /// targeting one drain loop shares the same flag, a post only fires the
@@ -357,9 +363,9 @@ pub struct RequestStreamState {
 /// send-before-swap order is the load-bearing part of that guarantee.
 pub struct WakeSink {
     pub inbound_tx: mpsc::Sender<InboundEvent>,
-    pub mailer: Arc<Mailer>,
-    pub self_id: MailboxId,
-    pub wake_kind: KindId,
+    /// Wakes the drain actor — the supervisor for the accept sink, the
+    /// owning shard for every reader and writer sink.
+    pub wake: SelfWake<HttpInboundReady>,
     /// Shared per-drain-target coalescing flag: `true` while a fired
     /// wake mail has not yet begun its drain.
     pub dirty: Arc<AtomicBool>,
@@ -374,12 +380,7 @@ impl WakeSink {
             return false;
         }
         if !self.dirty.swap(true, Ordering::AcqRel) {
-            self.mailer.push(Mail::new(
-                self.self_id,
-                self.wake_kind,
-                HttpInboundReady::default().encode_into_bytes(),
-                1,
-            ));
+            self.wake.wake(&HttpInboundReady::default());
         }
         true
     }
@@ -390,5 +391,34 @@ impl WakeSink {
     /// the channel this drain is about to empty.
     pub fn arm_for_drain(dirty: &AtomicBool) {
         dirty.store(false, Ordering::Release);
+    }
+}
+
+/// The supervisor's sink into one dispatch shard (ADR-0135): push an
+/// [`InboundEvent`] over the shard's mpsc, then wake the shard through the
+/// proof its spawn returned. Shares [`WakeSink`]'s coalescing contract — the
+/// shard's readers and this sink swap the same `dirty` flag, the shard clears
+/// it before draining, and a post only wakes on the clear → set flip.
+pub struct ShardSink {
+    pub inbound_tx: mpsc::Sender<InboundEvent>,
+    /// The shard's wake-coalescing flag, shared with its own sidecar sinks.
+    pub dirty: Arc<AtomicBool>,
+    /// The shard, proven by its `SpawnOutcome`.
+    pub shard: AnyActorRef,
+}
+
+impl ShardSink {
+    /// Post one event, waking the shard only if no wake is already pending
+    /// for it. The wake is a fresh-root detached send, flushed when the
+    /// calling handler ends. Returns `false` when the shard's receiver is
+    /// gone (teardown in progress).
+    pub fn post<A, M: ReplyMode>(&self, ctx: &mut NativeCtx<'_, A, M>, event: InboundEvent) -> bool {
+        if self.inbound_tx.send(event).is_err() {
+            return false;
+        }
+        if !self.dirty.swap(true, Ordering::AcqRel) {
+            ctx.send_detached_to(self.shard, &HttpInboundReady::default());
+        }
+        true
     }
 }

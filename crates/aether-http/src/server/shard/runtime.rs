@@ -44,6 +44,7 @@ impl NativeActor for HttpDispatchShard {
             keep_alive_timeout: seed.keep_alive_timeout,
             self_mailbox: ctx.self_id(),
             mailer: ctx.mailer(),
+            wake: ctx.self_wake(),
             inbound_rx,
             inbound_tx: seed.inbound_tx,
             wake_dirty: seed.wake_dirty,

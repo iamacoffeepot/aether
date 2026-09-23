@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Manual, OutboundReply, ReplyMode, Single};
+use aether_actor::{AnyActorRef, Manual, OutboundReply, ReplyMode, Single};
 use aether_data::{Kind, KindDescriptor};
 use aether_kinds::{
     ComponentCapabilities, DropComponent, LoadComponent, LoadComponentUnder, ReplaceComponent, ReplaceResult,
@@ -350,7 +350,7 @@ impl ComponentHostCapabilityState {
                 BootSuccessor::Replacement { pending, result } => {
                     tracing::warn!(
                         target: "aether_component",
-                        actor = %pending.actor_mailbox,
+                        actor = ?pending.actor,
                         %error,
                         "replace succeeded but the replacement module boot failed",
                     );
@@ -475,7 +475,7 @@ impl ComponentHostCapabilityState {
                 self.stage_requested_actor(ctx, owed, load, Some(hash.to_owned()));
             }
             BootSuccessor::Replacement { pending, result } => {
-                self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(hash.to_owned()));
+                self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(hash.to_owned()));
                 owed.reply(ctx, &result);
             }
         }
@@ -497,7 +497,7 @@ impl ComponentHostCapabilityState {
             BootSuccessor::Replacement { pending, result } => {
                 tracing::warn!(
                     target: "aether_component",
-                    actor = %pending.actor_mailbox,
+                    actor = ?pending.actor,
                     %error,
                     "replace succeeded but the replacement module boot failed",
                 );
@@ -515,18 +515,20 @@ impl ComponentHostCapabilityState {
     ) {
         let mailbox_id = done.output().mailbox_id;
         let name = done.output().canonical_name.to_string();
-        let failure = done.output().result.as_ref().err().map(|error| format!("trampoline spawn failed: {error:?}"));
-
-        if let Some(error) = failure {
-            if let Some(hash) = &boot_hash {
-                self.settle_boot_request(ctx, hash, None);
+        let child = match &done.output().result {
+            Ok(child) => child.erase(),
+            Err(error) => {
+                let error = format!("trampoline spawn failed: {error:?}");
+                if let Some(hash) = &boot_hash {
+                    self.settle_boot_request(ctx, hash, None);
+                }
+                done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
+                return;
             }
-            done.resolve_with(ctx, move |_, _| LoadResult::Err { error });
-            return;
-        }
+        };
 
         if let Some(hash) = &boot_hash {
-            self.settle_boot_request(ctx, hash, Some(mailbox_id));
+            self.settle_boot_request(ctx, hash, Some(child));
         }
         self.mailer.capability_registry().register(mailbox_id, &load.capabilities);
         let capabilities = load.capabilities.clone();
@@ -547,22 +549,22 @@ impl ComponentHostCapabilityState {
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         hash: &str,
-        live_actor: Option<MailboxId>,
+        live_actor: Option<AnyActorRef>,
     ) {
         let entry = self.boot_registry.get_mut(hash).expect("requested actor's Live boot remains registered");
         entry.pending_requests = entry
             .pending_requests
             .checked_sub(1)
             .expect("each accepted requested actor settles its boot pending count exactly once");
-        if let Some(actor_mailbox) = live_actor {
+        if let Some(actor) = live_actor {
             entry.refcount = entry.refcount.checked_add(1).expect("module boot reference count cannot overflow");
-            self.boot_hash_by_actor.insert(actor_mailbox, hash.to_owned());
+            self.boot_hash_by_actor.insert(actor, hash.to_owned());
         }
         self.drop_orphan_boot(ctx, hash);
     }
 
-    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, actor_mailbox: MailboxId) {
-        let Some(hash) = self.boot_hash_by_actor.remove(&actor_mailbox) else {
+    pub fn release_boot_ref<M: ReplyMode, A>(&mut self, ctx: &mut NativeCtx<'_, A, M>, actor: AnyActorRef) {
+        let Some(hash) = self.boot_hash_by_actor.remove(&actor) else {
             return;
         };
         let remove = if let Some(entry) = self.boot_registry.get_mut(&hash) {
@@ -583,21 +585,36 @@ impl ComponentHostCapabilityState {
 
     pub fn begin_replace(&mut self, ctx: &mut NativeCtx<'_>, payload: ReplaceComponent) {
         let source = ctx.reply_target();
-        let actor_mailbox = payload.mailbox_id;
+        // ADR-0230: prove the wire position once, at receipt. A dropped
+        // trampoline keeps its `Live` route (vacate, not close), so a replace
+        // that refills it still proves; a position with no live route answers
+        // `Err` here instead of parking a forward nothing will answer.
+        let actor = match ctx.resolve_live(payload.mailbox_id) {
+            Ok(actor) => actor,
+            Err(error) => {
+                ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error: error.to_string() });
+                return;
+            }
+        };
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
             && let Ok(boot) = kind_manifest::read_boot_namespace_from_bytes(&payload.wasm)
-            && let Some(error) =
-                replacement_refusal(&self.registry, actor_mailbox, &actors, payload.export.as_deref(), boot.as_deref())
+            && let Some(error) = replacement_refusal(
+                &self.registry,
+                payload.mailbox_id,
+                &actors,
+                payload.export.as_deref(),
+                boot.as_deref(),
+            )
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;
         }
-        let boot_operation = self.next_boot_operation(actor_mailbox);
+        let boot_operation = self.next_boot_operation(actor);
         let bytes = payload.encode_into_bytes();
-        let mail_id = ctx.send_envelope_tracked(actor_mailbox, ReplaceComponent::ID, &bytes);
+        let mail_id = ctx.send_envelope_tracked_to(actor, ReplaceComponent::ID, &bytes);
         self.pending_replace.insert(
             mail_id.correlation_id,
-            PendingReplace { source, actor_mailbox, new_wasm: Arc::from(payload.wasm), boot_operation },
+            PendingReplace { source, actor, new_wasm: Arc::from(payload.wasm), boot_operation },
         );
     }
 
@@ -612,7 +629,7 @@ impl ComponentHostCapabilityState {
             ctx.reply_to(pending.source, &result);
             return;
         }
-        if !self.accept_successful_boot_operation(pending.actor_mailbox, pending.boot_operation) {
+        if !self.accept_successful_boot_operation(pending.actor, pending.boot_operation) {
             ctx.reply_to(pending.source, &result);
             return;
         }
@@ -620,23 +637,23 @@ impl ComponentHostCapabilityState {
         let plan = match self.prepare_replacement_boot(&pending.new_wasm) {
             Ok(plan) => plan,
             Err(error) => {
-                tracing::warn!(target: "aether_component", actor = %pending.actor_mailbox, %error, "replacement boot metadata could not be prepared");
+                tracing::warn!(target: "aether_component", actor = ?pending.actor, %error, "replacement boot metadata could not be prepared");
                 ctx.reply_to(pending.source, &result);
                 return;
             }
         };
         let new_hash = plan.as_ref().map(|plan| plan.hash.clone());
-        if self.boot_hash_by_actor.get(&pending.actor_mailbox) == new_hash.as_ref() {
+        if self.boot_hash_by_actor.get(&pending.actor) == new_hash.as_ref() {
             ctx.reply_to(pending.source, &result);
             return;
         }
         let Some(plan) = plan else {
-            self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, None);
+            self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, None);
             ctx.reply_to(pending.source, &result);
             return;
         };
         if self.boot_registry.contains_key(&plan.hash) {
-            self.commit_replacement_boot(ctx, pending.actor_mailbox, pending.boot_operation, Some(plan.hash));
+            self.commit_replacement_boot(ctx, pending.actor, pending.boot_operation, Some(plan.hash));
             ctx.reply_to(pending.source, &result);
             return;
         }
@@ -666,30 +683,30 @@ impl ComponentHostCapabilityState {
     fn commit_replacement_boot<M: ReplyMode, A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
-        actor_mailbox: MailboxId,
+        actor: AnyActorRef,
         boot_operation: u64,
         new_hash: Option<String>,
     ) {
-        if self.dominant_boot_operation_by_actor.get(&actor_mailbox) != Some(&boot_operation) {
+        if self.dominant_boot_operation_by_actor.get(&actor) != Some(&boot_operation) {
             return;
         }
-        self.release_boot_ref(ctx, actor_mailbox);
+        self.release_boot_ref(ctx, actor);
         if let Some(hash) = new_hash {
             let entry =
                 self.boot_registry.get_mut(&hash).expect("replacement boot is Live before its reference commits");
             entry.refcount = entry.refcount.checked_add(1).expect("module boot reference count cannot overflow");
-            self.boot_hash_by_actor.insert(actor_mailbox, hash);
+            self.boot_hash_by_actor.insert(actor, hash);
         }
     }
 
-    fn next_boot_operation(&mut self, actor_mailbox: MailboxId) -> u64 {
-        let sequence = self.boot_operation_sequence_by_actor.entry(actor_mailbox).or_default();
+    fn next_boot_operation(&mut self, actor: AnyActorRef) -> u64 {
+        let sequence = self.boot_operation_sequence_by_actor.entry(actor).or_default();
         *sequence = sequence.checked_add(1).expect("an actor's boot-operation sequence cannot overflow");
         *sequence
     }
 
-    fn accept_successful_boot_operation(&mut self, actor_mailbox: MailboxId, boot_operation: u64) -> bool {
-        let dominant = self.dominant_boot_operation_by_actor.entry(actor_mailbox).or_default();
+    fn accept_successful_boot_operation(&mut self, actor: AnyActorRef, boot_operation: u64) -> bool {
+        let dominant = self.dominant_boot_operation_by_actor.entry(actor).or_default();
         if boot_operation < *dominant {
             return false;
         }
@@ -697,9 +714,9 @@ impl ComponentHostCapabilityState {
         true
     }
 
-    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor_mailbox: MailboxId) {
-        let boot_operation = self.next_boot_operation(actor_mailbox);
-        self.dominant_boot_operation_by_actor.insert(actor_mailbox, boot_operation);
+    pub(super) fn invalidate_replacement_boot_operation(&mut self, actor: AnyActorRef) {
+        let boot_operation = self.next_boot_operation(actor);
+        self.dominant_boot_operation_by_actor.insert(actor, boot_operation);
     }
 }
 
@@ -712,7 +729,8 @@ mod tests {
     use aether_substrate::mail::MailId;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
-    use aether_substrate::mail::registry::Registry;
+    use aether_substrate::mail::registry::{Registry, noop_handler};
+    use aether_substrate::testing::boot_authority;
     use wasmtime::{Engine, Linker};
 
     use super::*;
@@ -746,16 +764,24 @@ mod tests {
         Arc::new(NativeBinding::new_for_test(Arc::clone(&state.mailer), MailboxId(0xC065)))
     }
 
+    /// Register a test-local inbox under `name` and prove it the way a drop or
+    /// replace receipt does.
+    fn proven_actor(state: &ComponentHostCapabilityState, ctx: &NativeCtx<'_>, name: &str) -> AnyActorRef {
+        let position = state.registry.register_inbox(&boot_authority(), name, noop_handler());
+
+        ctx.resolve_live(position).expect("a freshly registered inbox proves")
+    }
+
     #[test]
     fn manual_interleaving_last_live_drop_then_pending_rejection_drops_boot() {
         let mut state = state();
         let binding = binding(&state);
         let hash = "boot-with-one-pending-request".to_owned();
         let boot = MailboxId(0xB001);
-        let live_actor = MailboxId(0xA001);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let live_actor = proven_actor(&state, &ctx, "test.component.live-actor");
         state.boot_registry.insert(hash.clone(), BootEntry { mailbox_id: boot, refcount: 1, pending_requests: 1 });
         state.boot_hash_by_actor.insert(live_actor, hash.clone());
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         // Manual state-machine proof: the last Live actor drops while another
         // requested actor is still pending, then that pending birth rejects.
@@ -771,7 +797,8 @@ mod tests {
     fn manual_interleaving_reverse_replacement_boot_completion_keeps_newest_epoch() {
         let mut state = state();
         let binding = binding(&state);
-        let actor = MailboxId(0xA002);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let actor = proven_actor(&state, &ctx, "test.component.reverse-replacement");
         let old_hash = "replacement-n1".to_owned();
         let new_hash = "replacement-n2".to_owned();
         let old_operation = state.next_boot_operation(actor);
@@ -784,7 +811,6 @@ mod tests {
         state
             .boot_registry
             .insert(new_hash.clone(), BootEntry { mailbox_id: MailboxId(0xB003), refcount: 0, pending_requests: 0 });
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         // Manual state-machine proof: N2's absent boot promotes first, then
         // N1's different boot promotes late. This is not a scheduler-order
@@ -802,7 +828,9 @@ mod tests {
     #[test]
     fn later_failed_replacement_does_not_dominate_earlier_success() {
         let mut state = state();
-        let actor = MailboxId(0xA004);
+        let binding = binding(&state);
+        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let actor = proven_actor(&state, &ctx, "test.component.later-failure");
         let earlier_success = state.next_boot_operation(actor);
         let later_failure = state.next_boot_operation(actor);
 
@@ -818,7 +846,8 @@ mod tests {
     fn manual_interleaving_drop_before_replacement_boot_completion_cannot_resurrect_ref() {
         let mut state = state();
         let binding = binding(&state);
-        let actor = MailboxId(0xA003);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let actor = proven_actor(&state, &ctx, "test.component.drop-before-completion");
         let hash = "replacement-completes-after-drop".to_owned();
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
@@ -826,7 +855,6 @@ mod tests {
         state
             .boot_registry
             .insert(hash.clone(), BootEntry { mailbox_id: MailboxId(0xB004), refcount: 0, pending_requests: 0 });
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         // Manual state-machine proof: DropComponent invalidates the actor
         // before its boot completion arrives. This deliberately proves the
