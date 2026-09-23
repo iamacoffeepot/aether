@@ -39,7 +39,7 @@ use aether_test_fixtures_kinds::{BootObserved, BootTornDown, SubstrateHarnessObs
 /// and instantiated exactly once per loaded module content hash.
 pub struct Boot;
 
-#[actor]
+#[actor(depends(SubstrateHarnessObserver))]
 impl WasmActor for Boot {
     const NAMESPACE: &'static str = "aether.test.boot.boot";
 

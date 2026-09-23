@@ -29,9 +29,10 @@ use alloc::vec::Vec;
 /// FFI build.
 ///
 /// The blanket `HandlesKind<K>` is honest: the harness registers the observer
-/// as an inline closure that records every kind it receives. On a chassis that
-/// registers no observer (headless, `FleetHarness`) the send warn-drops, which
-/// is why the fixtures do not declare it as a dependency.
+/// as an inline closure that records every kind it receives. A fixture that
+/// reports here declares `depends(SubstrateHarnessObserver)`, so it loads only
+/// where the observer is registered: the substrate harness. Headless and
+/// `FleetHarness` register none, so a load of such a fixture there is refused.
 pub struct SubstrateHarnessObserver;
 
 impl aether_actor::Addressable for SubstrateHarnessObserver {

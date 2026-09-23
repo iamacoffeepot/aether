@@ -14,13 +14,14 @@
 use std::fs;
 use std::path::Path;
 
+use aether_actor::ActorRef;
 use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{ActorPath, LoadName};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{
-    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, Ping, ReplaceComponent,
-    ReplaceResult,
+    DropComponent, DropResult, ListComponents, ListComponentsResult, LoadComponent, LoadResult, LogTailResult, Ping,
+    ReplaceComponent, ReplaceResult,
 };
 use aether_test_fixtures_bundle::{Panel, RootManager};
 use aether_test_fixtures_kinds::{Bump, CountQuery, CountReport};
@@ -52,6 +53,15 @@ fn key(text: &str) -> LoadName {
 
 /// The kind the probe broadcasts to the harness observer once per tick.
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
+
+/// How many `panel_ping` entries a spawned `Panel` has logged. `send_and_settle`
+/// returns once the ping's chain drains, so the entry is already in the ring.
+fn panel_pings(harness: &mut SubstrateHarness, panel: ActorRef<Panel>) -> usize {
+    match harness.log_tail(panel.erase(), None, Some("panel_ping".to_owned())) {
+        LogTailResult::Ok { entries, .. } => entries.len(),
+        LogTailResult::Err { error } => panic!("log_tail on the spawned Panel failed: {error}"),
+    }
+}
 
 /// Load the probe into the harness via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
@@ -326,11 +336,10 @@ fn defaultless_multi_actor_bare_load_errors_named_load_ok() {
 /// via `ctx.spawn_child::<RootManager, Panel>`. Pinging `RootManager` triggers the
 /// spawn; the spawned `Panel` registers at
 /// `aether.embedded:0` (Counter discriminator — a flat segment, no type
-/// prefix), and pinging *it* makes it broadcast a `TickObserved` to the
-/// harness observer — proving the spawned sibling is addressable and
-/// dispatches. The `send_and_settle` send blocks until the whole tree
-/// (including the spawned trampoline's init) drains, so the panel is
-/// registered before the second send routes.
+/// prefix), and pinging *it* makes it log `panel_ping` — proving the
+/// spawned sibling is addressable and dispatches. The `send_and_settle`
+/// send blocks until the whole tree (including the spawned trampoline's
+/// init) drains, so the panel is registered before the second send routes.
 #[test]
 fn multi_actor_sibling_spawn() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
@@ -358,19 +367,13 @@ fn multi_actor_sibling_spawn() {
 
     // ADR-0099 §3/§4: a spawned sibling nests under its spawner, keyed by
     // its Counter discriminator — a flat segment ("0"), no type prefix. The
-    // spawned Panel broadcasts TickObserved when pinged.
+    // spawned Panel logs panel_ping when pinged.
     let panel = harness.child::<RootManager, Panel>(&root, key("0")).expect("the spawned Panel is live");
     harness
         .execute(vec![("ping_panel", HarnessOp::send_and_settle::<Ping>(&panel, &Ping { seq: 1 }))])
         .expect("ping sequence");
 
-    assert_eq!(
-        harness.count_observed(TICK_OBSERVED),
-        1,
-        "the spawned Panel (0) should have dispatched its ping and broadcast once; \
-         observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
+    assert_eq!(panel_pings(&mut harness, panel), 1, "the spawned Panel (0) should have dispatched its ping once");
 }
 
 /// Issue iamacoffeepot/aether#2503: `RootManager` spawns two `Panel`
@@ -380,8 +383,7 @@ fn multi_actor_sibling_spawn() {
 /// `Option<PendingSpawn>` and a second stage overwrote the first, so
 /// only the last-staged sibling (Counter `1`) ever actually spawned:
 /// pinging Counter `0`'s predicted `MailboxId` warn-dropped with no
-/// broadcast, and this scenario observed `TICK_OBSERVED == 1` instead
-/// of `2`.
+/// log entry, and only Counter `1` logged `panel_ping`.
 #[test]
 fn multi_actor_sibling_spawn_twice_in_one_receive() {
     let Some(wasm_path) = require_wasm("aether_test_fixtures_bundle") else {
@@ -416,13 +418,8 @@ fn multi_actor_sibling_spawn_twice_in_one_receive() {
         ])
         .expect("ping-both sequence");
 
-    assert_eq!(
-        harness.count_observed(TICK_OBSERVED),
-        2,
-        "both siblings staged in the one receive should have spawned and broadcast; \
-         observed kinds: {:?}",
-        harness.observed_kinds(),
-    );
+    assert_eq!(panel_pings(&mut harness, panel_0), 1, "Panel 0, staged first in the one receive, should have spawned");
+    assert_eq!(panel_pings(&mut harness, panel_1), 1, "Panel 1, staged second in the one receive, should have spawned");
 }
 
 /// Dropping the probe stops further `tick_observed` broadcasts.

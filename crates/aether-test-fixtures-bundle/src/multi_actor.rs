@@ -13,9 +13,12 @@
 //! `Ping` handler, no fallback); `Panel` adds a `#[fallback]`. On `Ping`,
 //! `RootManager` spawns `Ping.seq.max(1)` `Panel` siblings — from a
 //! single `receive` when `seq > 1`, covering issue iamacoffeepot/aether#2503's
-//! multi-spawn-per-receive path — and each spawned `Panel` broadcasts a
-//! `TickObserved` to the substrate-harness observer, so a scenario can confirm
-//! every spawned sibling is addressable and live.
+//! multi-spawn-per-receive path — and each spawned `Panel` logs `panel_ping`
+//! when pinged, so a scenario can confirm every spawned sibling is addressable
+//! and live. `Panel` logs rather than reporting to the substrate-harness
+//! observer because it is spawnable inline: a declared dependency would be
+//! checked on every load of the bundle, headless included, where no observer
+//! is registered.
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
 // dispatch ABI even when stateless.
@@ -23,7 +26,6 @@
 
 use aether_actor::{ActorInitError, Mail, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Ping;
-use aether_test_fixtures_kinds::{SubstrateHarnessObserver, TickObserved};
 
 /// Entry export — the first type in the `export!` list. An unmodified
 /// host instantiates this one. Strict receiver: no `#[fallback]`.
@@ -68,12 +70,14 @@ impl WasmActor for Panel {
         Ok(Panel)
     }
 
-    /// On `Ping`, broadcast a `TickObserved` to the substrate-harness observer
-    /// so a scenario can confirm a spawned `Panel` is addressable and
-    /// dispatches mail.
+    /// On `Ping`, log `panel_ping` so a scenario can confirm a spawned `Panel`
+    /// is addressable and dispatches mail, by reading this actor's log ring.
+    /// It does not report to the substrate-harness observer: `Panel` is
+    /// spawnable inline, so a declared dependency would be checked on every
+    /// bundle load, headless included.
     #[handler::single]
-    fn on_ping(&mut self, ctx: &mut WasmCtx<'_>, _ping: Ping) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: 1 });
+    fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {
+        tracing::info!(target: "test.ui.panel", "panel_ping");
     }
 
     #[fallback]

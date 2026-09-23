@@ -52,7 +52,7 @@ fn bind_catch_all<A: Reaches<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
 
 pub struct HttpHandler;
 
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for HttpHandler {
     const NAMESPACE: &'static str = "test.web";
 
@@ -176,7 +176,7 @@ pub struct StreamingHttpHandler {
     progress: StreamProgress,
 }
 
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for StreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream";
 
@@ -236,7 +236,7 @@ pub struct WebSocketHandler {
     connections: BTreeMap<u64, WebSocketStream>,
 }
 
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for WebSocketHandler {
     const NAMESPACE: &'static str = "test.web_socket";
 
@@ -343,7 +343,7 @@ impl WasmActor for WebSocketHandler {
 pub struct RoutedHttpHandler;
 
 #[http::router]
-#[actor(depends(HttpServerCapability))]
+#[actor(depends(HttpServerCapability), depends(ComponentHostCapability))]
 impl WasmActor for RoutedHttpHandler {
     const NAMESPACE: &'static str = "test.routed_web";
 
@@ -401,7 +401,7 @@ pub struct RoutedStreamingHttpHandler {
     progress: StreamProgress,
 }
 
-#[actor]
+#[actor(depends(HttpServerCapability))]
 impl WasmActor for RoutedStreamingHttpHandler {
     const NAMESPACE: &'static str = "test.web_stream_routed";
 

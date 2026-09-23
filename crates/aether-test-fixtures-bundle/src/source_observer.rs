@@ -1,8 +1,7 @@
 //! Issue 1958: `ctx.sender()` end-to-end fixture — the reading half.
 //!
 //! `on_source_query` (manual) handles `SourceQuery`, reads
-//! `ctx.sender()`, logs its id, broadcasts `SourceReport { mailbox_id }`
-//! to the substrate-harness observer mailbox, and answers the query: through
+//! `ctx.sender()`, logs its id, and answers the query: through
 //! the proven sender when there is one, else by reply. `mailbox_id` is `0`
 //! when `sender()` returns `None` (Session / no-sender origin).
 //!
@@ -23,7 +22,7 @@
 #![allow(clippy::unused_self)]
 
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_test_fixtures_kinds::{SourceQuery, SourceReport, SubstrateHarnessObserver};
+use aether_test_fixtures_kinds::{SourceQuery, SourceReport};
 
 pub struct SourceObserver;
 
@@ -35,8 +34,7 @@ impl WasmActor for SourceObserver {
         Ok(SourceObserver)
     }
 
-    /// Read `sender()` from the inbound `SourceQuery`, log its id,
-    /// broadcast `SourceReport { mailbox_id }` to the observer, and answer:
+    /// Read `sender()` from the inbound `SourceQuery`, log its id, and answer:
     /// a component sender gets the report sent through its proven reference,
     /// and a session sender (no reference) gets it as a reply.
     #[handler::manual]
@@ -44,8 +42,6 @@ impl WasmActor for SourceObserver {
         let sender = ctx.sender();
         let mailbox_id = sender.map_or(0, |sender| sender.id().0);
         tracing::info!(target: "test.source_observer", "source_mailbox={mailbox_id}");
-        // Broadcast to the observer for count-based assertions.
-        ctx.actor::<SubstrateHarnessObserver>().send(&SourceReport { mailbox_id });
         match sender {
             Some(sender) => ctx.send_to(sender, &SourceReport { mailbox_id }),
             None => ctx.reply(&SourceReport { mailbox_id }),
