@@ -140,16 +140,14 @@ pub enum WindowHostEffect {
     LastWindowClosed,
 }
 
+/// A create still waiting on its native window, render attachment, or staged
+/// birth. The window it belongs to stays `Attaching` — absent from
+/// `ListWindows`, the frame set, and every publication — until the
+/// authoritative [`SpawnOutcome`] lands.
 struct PendingCreate {
     spec: WindowSpec,
     reply: Option<Box<InboundMail>>,
     shutdown_on_failure: bool,
-    /// The reserved child, once [`DesktopWindowCapabilityState::finish_window_attachment`]
-    /// has staged its birth. `None` while the create is still waiting on the
-    /// native window and render attachment. The window it belongs to stays
-    /// `Attaching` — absent from `ListWindows`, the frame set, and every
-    /// publication — until the authoritative [`SpawnOutcome`] lands.
-    staged: Option<MailboxId>,
 }
 
 /// A window child that reached `Live`: the reference its spawn outcome proved,
@@ -328,7 +326,6 @@ impl DesktopWindowCapabilityState {
                     return self.rollback_attached_create(id, &mut pending, error);
                 }
 
-                pending.staged = Some(receipt.mailbox_id);
                 self.pending_creates.insert(id, pending);
                 Vec::new()
             }
@@ -761,7 +758,7 @@ impl DesktopWindowCapabilityState {
         }
         let id = predicted_window_id(&spec.name);
         self.pending_host_actions.push_back(WindowHostAction::Create { id, spec: spec.clone() });
-        self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure, staged: None });
+        self.pending_creates.insert(id, PendingCreate { spec, reply, shutdown_on_failure });
         Ok(id)
     }
 
@@ -860,13 +857,12 @@ impl NativeActor for DesktopWindowCapability {
         })
     }
 
-    fn unwire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
+    /// Answer every pending create and close with the shutdown error. It
+    /// retires no staged window child: this pumped slot closes only at the end
+    /// of `DesktopDriverRunning::run`, right before chassis teardown, which
+    /// cancels every staged birth and closes every window child.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
         for (_, mut pending) in state.pending_creates.drain() {
-            // A staged child may not have been applied yet, so the retirement
-            // rides the ordered tail its reserved route already parks.
-            if let Some(staged) = &pending.staged {
-                ctx.actor_at::<DesktopWindowInstance>(*staged).send(&RetireWindow);
-            }
             if let Some(reply) = pending.reply.take() {
                 reply.reply(&CreateWindowResult::Err { error: "window manager shutting down".to_owned() });
             }
@@ -1202,7 +1198,6 @@ mod tests {
         assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");
         insert_window(&mut state, id, "tools", false);
         state.windows.get_mut(&id).expect("attaching window").lifecycle = DesktopWindowLifecycle::Attaching;
-        state.pending_creates.get_mut(&id).expect("pending create").staged = Some(MailboxId(id.0));
 
         let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
         else {
