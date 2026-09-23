@@ -13,11 +13,12 @@ use std::mem;
 use std::sync::Arc;
 
 use aether_chassis::boot::{
-    ActorRingConfig, ChassisBase, RegistryQueueConfig, RpcBind, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
+    ActorRingConfig, ChassisBase, RegistryQueueConfig, RuntimeConfig, SchedulerTuningConfig, SettlementConfig,
     chassis_residual_knobs, install_frame_size, with_rpc_server,
 };
 use aether_chassis::cli::ChassisCli;
 use aether_chassis::entry::ChassisEnv;
+use aether_chassis::signal_driver::SignalDriverCapability;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_rpc::RpcBindGate;
 use aether_substrate::chassis::BootableChassis;
@@ -30,7 +31,6 @@ use aether_substrate::{Chassis, SubstrateBoot};
 
 use crate::cli::BloomeryCli;
 use crate::config::BloomeryConfig;
-use crate::driver::BloomeryDriverCapability;
 use crate::mount::{self, Mounted};
 
 /// Marker type for the bloomery chassis. Carries no fields — the
@@ -41,7 +41,7 @@ pub struct BloomeryChassis;
 
 impl Chassis for BloomeryChassis {
     const PROFILE: &'static str = "bloomery";
-    type Driver = BloomeryDriverCapability;
+    type Driver = SignalDriverCapability<Self>;
     type Env = BloomeryEnv;
 
     /// Build the bloomery chassis through [`BloomeryChassis::build_mounted`],
@@ -84,7 +84,7 @@ impl BloomeryChassis {
         let base = mem::take(&mut env.base);
         let builder = composed::<Self>(&mut boot, base, env)?;
         validate_env(&builder.config_manifest().known_keys(&chassis_residual_knobs()))?;
-        let built = builder.driver(BloomeryDriverCapability { boot }).build()?;
+        let built = builder.driver(SignalDriverCapability::new(boot)).build()?;
         let mounted = mount::mount(&built, &journal, limit)?;
         if let Some(gate) = built.handle::<RpcBindGate>() {
             gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
@@ -163,7 +163,7 @@ impl BootableChassis for BloomeryChassis {
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params), RpcBind::Held)
+        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params))
             .declare_config_member::<BloomeryConfig>())
     }
 }

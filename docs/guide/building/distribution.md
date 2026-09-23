@@ -168,8 +168,9 @@ the persisted package manifest above:
 - The package manifest (`crate::package`) references bytes by content hash and
   is what a shipped depot boots from.
 
-Both drain into the same `env.autoload` list, which each chassis's
-`Chassis::build` turns into `aether.component.load` mail. The runtime boot
+Both drain into the same `env.autoload` list, which `boot_standard` loads in
+list order after the build, waiting for every component to answer its load
+before the RPC server binds. The runtime boot
 manifest can expand a configured `replicas` count into named instances; the
 package manifest carries the same `replicas` field.
 
@@ -307,7 +308,7 @@ Validate a change at the boundary it touches:
 - Discovery and commands: `xtask/src/{main,inventory}.rs`
 - Version bump + lockfile regeneration: `xtask/src/bump.rs`
 - Published chassis-binary inventory: `xtask/src/bins.rs`
-- Autoload: `crates/aether-chassis/src/autoload.rs`
+- Autoload: `crates/aether-chassis/src/autoload/`
 - Boot manifest schema: `crates/aether-chassis/src/boot_manifest.rs`
 - Package manifest + store-backed boot: `crates/aether-chassis/src/package.rs`
 - JSON init-config encoding: `crates/aether-chassis/src/component_config.rs`

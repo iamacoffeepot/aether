@@ -40,14 +40,6 @@ clap = { workspace = true }
 confique = { workspace = true }
 tracing = { workspace = true, features = ["std", "attributes"] }
 
-# The signal-blocking driver: signal-hook on Unix, the `ctrlc` Ctrl-C
-# fallback on Windows.
-[target.'cfg(unix)'.dependencies]
-signal-hook = "0.4"
-
-[target.'cfg(windows)'.dependencies]
-ctrlc = "3"
-
 [dev-dependencies]
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
 # The crash scenario forks the `aether-bloomery` binary through the hub, SIGKILLs it, and reads the restarted engine over the wire.

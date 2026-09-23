@@ -27,6 +27,9 @@
 //!   [`PackedComponent`](boot_manifest::PackedComponent) /
 //!   [`ChassisSettings`](boot_manifest::ChassisSettings) autoload types the
 //!   package depot ([`package`]) shares.
+//! - [`signal_driver`] — the signal-blocking driver capability the hub and
+//!   the Bloomery share: it blocks the main thread until SIGINT/SIGTERM, then
+//!   drops the boot.
 //! - [`WindowConfig`] / [`TickConfig`] — the desktop window and headless tick boot
 //!   knobs, declared here because the fleet-wide registry and the CLI
 //!   roots name their derived layers/overlays.
@@ -49,6 +52,7 @@ pub mod cli;
 pub mod component_config;
 pub mod entry;
 pub mod package;
+pub mod signal_driver;
 pub mod tick;
 pub mod window;
 

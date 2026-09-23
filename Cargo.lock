@@ -298,8 +298,10 @@ dependencies = [
  "anyhow",
  "clap",
  "confique",
+ "ctrlc",
  "serde",
  "serde_json",
+ "signal-hook",
  "toml 0.9.12+spec-1.1.0",
  "tracing",
 ]
@@ -323,8 +325,6 @@ dependencies = [
  "aether-substrate",
  "clap",
  "confique",
- "ctrlc",
- "signal-hook",
  "tracing",
 ]
 
@@ -415,9 +415,6 @@ dependencies = [
  "aether-rpc",
  "aether-substrate",
  "clap",
- "ctrlc",
- "signal-hook",
- "tracing",
 ]
 
 [[package]]

@@ -291,60 +291,6 @@ async fn component_config_field_mismatch_is_invalid_params() {
     assert!(err.to_string().contains("does not match"), "unexpected error: {err}");
 }
 
-/// `components_all_loaded` checks membership, not count. The wrong-set
-/// false positive: `actual` has one name (satisfying a count-`>= 1` check)
-/// but it is NOT the name in `want` — membership returns false. This is the
-/// regression the count-based `wait_for_loaded_components` would silently
-/// pass: a non-requested trampoline (B) registers while the requested
-/// component (A) stalls, and the count hits the threshold before A is up.
-/// After the identity-based fix, only A's presence in `actual` satisfies
-/// the check.
-#[test]
-fn components_all_loaded_wrong_set_is_not_ready() {
-    let want = vec!["aether.component/aether.embedded:wanted".to_owned()];
-    let actual = vec!["aether.component/aether.embedded:other".to_owned()];
-    assert!(
-        !components_all_loaded(&want, &actual),
-        "a non-requested trampoline present while the requested one is absent \
-         must not satisfy the identity check (count-based would pass)",
-    );
-}
-
-/// `components_all_loaded` returns true once every wanted name is present,
-/// and handles the empty-want case (no components requested → trivially
-/// ready).
-#[test]
-fn components_all_loaded_exact_match_is_ready() {
-    let want =
-        vec!["aether.component/aether.embedded:alpha".to_owned(), "aether.component/aether.embedded:beta".to_owned()];
-    let actual = vec![
-        "aether.component/aether.embedded:baseline".to_owned(),
-        "aether.component/aether.embedded:alpha".to_owned(),
-        "aether.component/aether.embedded:beta".to_owned(),
-    ];
-    assert!(
-        components_all_loaded(&want, &actual),
-        "both wanted names present (alongside an extra baseline) should be ready",
-    );
-    assert!(components_all_loaded(&[], &[]), "empty want is trivially ready");
-}
-
-/// `components_all_loaded` is false when only a subset of the wanted names
-/// is present — a stalled-requested case where one component comes up but
-/// another does not.
-#[test]
-fn components_all_loaded_partial_match_is_not_ready() {
-    let want = vec![
-        "aether.component/aether.embedded:alpha".to_owned(),
-        "aether.component/aether.embedded:stalled".to_owned(),
-    ];
-    let actual = vec!["aether.component/aether.embedded:alpha".to_owned()];
-    assert!(
-        !components_all_loaded(&want, &actual),
-        "only one of two wanted names present means the engine is not yet ready",
-    );
-}
-
 /// `replica_base_name` follows the same precedence the component host
 /// applies at load: caller `name` wins over `export`, which wins over
 /// the default actor namespace — the bug this catches is a fan-out base

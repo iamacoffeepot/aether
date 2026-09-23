@@ -133,8 +133,8 @@ fn spawn_cap() -> Duration {
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
 /// Default in-test poll budget (seconds): how long a registration /
-/// liveness wait — a forked engine appearing in `ListEngines`, a
-/// boot-manifest component registering, a log entry surfacing — is
+/// liveness wait — a forked engine appearing in `ListEngines`, a log entry
+/// surfacing — is
 /// given before it is called a failure. Generous over a debug-build
 /// cold start under a saturated `nextest --workspace` run, the same
 /// CPU-pressure regime [`DEFAULT_SPAWN_CAP_SECS`] covers, so a
@@ -336,10 +336,10 @@ impl FleetHarness {
 
     /// Fork a real `aether-headless` with a `--boot-manifest`
     /// pointing at `boot_manifest_path` (ADR-0116, issue 1956; the hub
-    /// addresses it via argv per ADR-0162), so the
-    /// engine comes up with the manifest's components already loading — the
-    /// path a `spawn_substrate` carrying a component list drives. Records
-    /// the engine for teardown.
+    /// addresses it via argv per ADR-0162), so the engine comes up with the
+    /// manifest's components already live, since the engine binds only after
+    /// they answer `Ok` (issue #6413) — the path a `spawn_substrate` carrying
+    /// a component list drives. Records the engine for teardown.
     pub fn spawn_headless_with_boot_manifest(&mut self, boot_manifest_path: &Path) -> EngineId {
         self.spawn_headless_inner(Some(boot_manifest_path.to_string_lossy().into_owned()))
     }
@@ -510,9 +510,7 @@ impl FleetHarness {
     /// Enumerate the components an `engine` has actually loaded and
     /// registered, by ADR-0099 lineage name (issue 2020). Engine-local —
     /// addressed at the engine's own `aether.component` mailbox, a definitive
-    /// snapshot of the live trampoline set. Poll this after a boot-manifest
-    /// spawn to learn deterministically when a requested component is loaded,
-    /// rather than inferring liveness from a log-ring side channel.
+    /// snapshot of the live trampoline set.
     pub fn list_components(&mut self, engine: EngineId) -> Vec<String> {
         let replies = self.call(Some(engine), "aether.component", &ListComponents {});
         let payload = single_reply(&replies, "ListComponents");

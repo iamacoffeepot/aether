@@ -3,10 +3,10 @@
 //!
 //! The hub is now a thin coordinator:
 //!
-//! - [`HubChassis`] / [`HubServerDriverCapability`] — Chassis marker +
-//!   driver capability. The hub stands up `TraceDispatchCapability` +
-//!   `FleetServer` + `RpcServerCapability` and blocks on SIGINT /
-//!   SIGTERM. The out-of-process `aether-mcp` crate dials the
+//! - [`HubChassis`] — the Chassis marker. The hub stands up
+//!   `TraceDispatchCapability` + `FleetServer` + `RpcServerCapability` and
+//!   blocks on SIGINT / SIGTERM through the shared
+//!   `aether_chassis::signal_driver::SignalDriverCapability`. The out-of-process `aether-mcp` crate dials the
 //!   `aether.rpc.server` bind.
 //!
 //! Issue 774 retired the substrate-side `EngineToHub` client residue
@@ -21,7 +21,7 @@ mod chassis;
 pub mod cli;
 
 pub use aether_substrate::Chassis;
-pub use chassis::{HubChassis, HubServerDriverCapability, HubServerDriverRunning};
+pub use chassis::HubChassis;
 pub use cli::HubCli;
 
 /// Default port the hub binds its `aether.rpc.server` on (issue 763).

@@ -15,7 +15,6 @@ use std::env;
 use std::fs;
 use std::mem;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use aether_actor::log::DEFAULT_RING_CAP;
@@ -28,7 +27,9 @@ use aether_inventory::InventoryCapability;
 use aether_kinds::{Shutdown, Tick};
 use aether_lifecycle::{LifecycleGraphData, LifecycleParams};
 use aether_process::{ProcessCapability, ProcessParams};
-use aether_rpc::{FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcServerCapability, RpcServerParams};
+use aether_rpc::{
+    FrameSizeConfig, FrameSizeOverlay, PeerKind, RpcBind, RpcBindGate, RpcServerCapability, RpcServerParams,
+};
 use aether_substrate::SubstrateBoot;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
 use aether_substrate::chassis::error::BootError;
@@ -46,7 +47,7 @@ use aether_tcp::TcpCapability;
 use aether_text::TextCapability;
 use aether_trace::TraceDispatchCapability;
 
-use crate::autoload::{AutoloadComponent, autoload_mail, boot_manifest_autoload};
+use crate::autoload::{AutoloadComponent, boot_manifest_autoload, load_boot_components};
 use crate::boot_manifest::ChassisSettings;
 use crate::cli::{ChassisCli, ChassisMeta};
 use crate::package::{package_assets_root, package_autoload};
@@ -364,10 +365,6 @@ impl SchedulerTuningConfig {
 // knobs; the teardown resolution below and the fleet-wide config registry
 // both read it through this re-export.
 pub use aether_substrate::config::{SettlementConfig, SettlementConfigLayer};
-
-// The bind mode [`with_rpc_server`] takes, re-exported so a chassis names it
-// through the composition layer it already depends on.
-pub use aether_rpc::RpcBind;
 
 /// Issue #2509: resolve the instanced-actor teardown close-done gate's
 /// cumulative-patience budget from the shared `AETHER_SETTLEMENT_CAP_SECS`
@@ -842,9 +839,9 @@ pub struct CommonEnv {
     pub chassis_boot: ChassisBootConfig,
     /// Components to auto-load on boot, in order. Resolved off the boot manifest
     /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest`; a bundled standalone
-    /// build pushes its embedded pack's components here instead. Each chassis's
-    /// `Chassis::build` drains it into `aether.component.load` after the pool is
-    /// up.
+    /// build pushes its embedded pack's components here instead.
+    /// [`boot_standard`] loads it in order after the build and waits for every
+    /// component to answer before the RPC server binds.
     pub autoload: Vec<AutoloadComponent>,
     /// The chassis settings carried by a depot package (`--package` /
     /// `AETHER_PACKAGE`) manifest (issue 4001). Default (all-`None`) for the
@@ -1025,8 +1022,15 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// line-for-line: stand up the substrate, re-apply the resolved log filter,
 /// resolve the chassis's own driver config, lift the base stratum and the
 /// autoload list out of the env, compose through [`composed`], sweep the
-/// process env against the composed known-key set, install the driver, and
-/// drain the autoload list onto the mailer once the pool is up.
+/// process env against the composed known-key set, and install the driver.
+///
+/// The order after that is build, load, bind (issue #6413): once the chain is
+/// built, every boot component is loaded in list order and each must answer
+/// its load `Ok` before the next is sent; only then does the RPC server's
+/// bind gate open. Until it opens a dial is refused, so a caller that reaches
+/// the engine can address every boot component. With no boot components the
+/// gate opens straight after the build, and a chassis with no RPC port
+/// publishes no gate and binds nothing.
 ///
 /// The one genuinely per-chassis seam is the driver, and it straddles
 /// composition: a driver's config resolves off `env.base.sources` *before*
@@ -1043,7 +1047,9 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// Returns [`BootError`] when the substrate fails to boot, when `plan_driver`
 /// fails (a driver config member that will not parse, ADR-0090 §4), when the
 /// chassis's `compose` delta fails, when an unknown `AETHER_*` key fails the
-/// sweep, or when the builder fails to boot the composed chain.
+/// sweep, when the builder fails to boot the composed chain, when a boot
+/// component fails to load (naming the component and the host's error), or
+/// when the RPC port cannot be bound.
 pub fn boot_standard<C, P, D>(mut env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
 where
     C: BootableChassis<Base = ChassisBase, Env = CommonEnv>,
@@ -1056,14 +1062,13 @@ where
     // fully-resolved `AETHER_LOG_FILTER` directive (env > `[runtime]` file >
     // `info`) now so a filter set only in the config file takes effect.
     apply_filter(&env.runtime.log_filter);
-    let mailer = Arc::clone(&boot.queue);
 
     // ADR-0162 §config-at-its-seam: the driver's own knobs resolve here, off
     // the base's source stack, at the seam that constructs the driver — never
     // pre-resolved into a per-chassis env bag.
     let install_driver = plan_driver(&mut env)?;
 
-    // The autoload list is drained after build; lift the base stratum out so
+    // The autoload list is loaded after build; lift the base stratum out so
     // the framework mints the builder and installs the aborter + base ahead of
     // `compose` (the leftover default `env.base` is never re-read).
     let autoload = mem::take(&mut env.autoload);
@@ -1078,13 +1083,9 @@ where
 
     // `boot` moves into the driver, after `compose` finished borrowing it.
     let built = builder.driver(install_driver(boot)).build()?;
-
-    // Auto-load any bundled components, in order, before the run loop starts.
-    // Fire-and-forward: the component host dispatches each load off the worker
-    // pool (already up after `build`), so the components are live shortly after
-    // `run` begins — no hub required.
-    for component in autoload {
-        mailer.push(autoload_mail(component));
+    load_boot_components(&built, autoload)?;
+    if let Some(gate) = built.handle::<RpcBindGate>() {
+        gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
     }
     Ok(built)
 }
@@ -1145,21 +1146,21 @@ pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<Pr
 /// `DEFAULT_RPC_PORT` fallback, via `with_actor_configured` at its own compose
 /// site.
 ///
-/// `bind` decides when a resolved port binds (issue #6399). A chassis whose
-/// callers address actors it spawns after `build` passes [`RpcBind::Held`] and
-/// opens the published [`RpcBindGate`](aether_rpc::RpcBindGate) once those
-/// actors are live, so a dial before then is refused and reachable means
-/// ready; the bloomery does, after mounting its journal owner and driver.
-/// Every other chassis passes [`RpcBind::Boot`] and binds during `build`.
+/// The server is always composed [`RpcBind::Held`] (issues #6399 and #6413):
+/// a resolved port does not bind during `build`, and the composer owns opening
+/// the published [`RpcBindGate`] once everything a caller may address is live,
+/// so a dial before then is refused and reachable means ready.
+/// [`boot_standard`] opens it after the boot components have loaded, and the
+/// Bloomery's `build_mounted` after mounting its journal owner and driver.
 #[must_use]
-pub fn with_rpc_server<C: Chassis>(builder: Builder<C>, bind: RpcBind) -> Builder<C> {
+pub fn with_rpc_server<C: Chassis>(builder: Builder<C>) -> Builder<C> {
     builder.with_actor::<RpcServerCapability>(RpcServerParams {
         peer_kind: PeerKind::Substrate {
             engine_name: aether_substrate::engine_name::<C>(),
             engine_version: env!("CARGO_PKG_VERSION").into(),
             kinds: vec![],
         },
-        bind,
+        bind: RpcBind::Held,
     })
 }
 

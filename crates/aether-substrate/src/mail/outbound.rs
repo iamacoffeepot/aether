@@ -288,9 +288,10 @@ impl EgressBackend for RecordingBackend {
 /// implementation is `aether-hub::HubProtocolBackend`, which serialises
 /// to `EngineToHub` frames and writes them to a TCP socket).
 ///
-/// `send_reply<K>` is a substrate-side encoding convenience — it does
-/// the wire encoding and dispatches based on `SourceAddr`. Sinks
-/// and capture handlers call it without caring which backend is wired.
+/// The crate-private `send_reply` / `send_reply_stamped` pair encodes a
+/// reply for a `Session` / `EngineMailbox` sender and hands it to the
+/// wired backend. Callers reach it through `Mailer::send_reply`, the
+/// complete reply router.
 pub struct HubOutbound {
     backend: OnceLock<Arc<dyn EgressBackend>>,
 }
@@ -408,8 +409,10 @@ impl HubOutbound {
     /// are silent no-ops (the latter is handled by `Mailer::send_reply`
     /// rather than the hub). Returns `true` when a backend method was
     /// called; `false` on a non-hub-routed target. The reply carries no
-    /// actor stamp: the caller is an embedder or a chassis, not an actor.
-    pub fn send_reply<K>(&self, sender: Source, result: &K) -> bool
+    /// actor stamp. Its sole caller is the chassis-host `TraceTail` arm of
+    /// `route_mail`; handler replies go through `Mailer::send_reply`, the
+    /// complete router.
+    pub(crate) fn send_reply<K>(&self, sender: Source, result: &K) -> bool
     where
         K: aether_data::Kind,
     {

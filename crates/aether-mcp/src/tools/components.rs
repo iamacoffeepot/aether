@@ -26,8 +26,8 @@ use tokio::fs;
 /// the boot-manifest pre-resolution. `export` is the `module@actor`
 /// selector's actor half, threaded into the forwarded `LoadComponent.export`.
 /// `default_namespace` is the first actor's `Actor::NAMESPACE` from the wasm
-/// manifest (per `export!` order), used by `stage_boot_manifest` to derive the
-/// expected registered name when neither `spec.name` nor an export is set.
+/// manifest (per `export!` order), which `load_component` falls back to as the
+/// base of a `replicas` fan-out when neither `name` nor an export is set.
 pub(super) struct ResolvedComponent {
     pub(super) wasm: Vec<u8>,
     pub(super) export: Option<String>,
@@ -40,14 +40,10 @@ pub(super) struct ResolvedComponent {
 /// staged component `.wasm` files it points at. The substrate reads them
 /// at boot, before the spawn reply returns; the spawn caller
 /// [`cleanup`](StagedBootManifest::cleanup)s them once it has.
-/// `expected_names` carries the full `aether.component/aether.embedded:{ns}`
-/// lineage address computed for each spec, used by `spawn_substrate` to poll
-/// readiness by identity rather than count.
 pub(super) struct StagedBootManifest {
     pub(super) manifest_path: PathBuf,
     pub(super) wasm_paths: Vec<PathBuf>,
     pub(super) config_paths: Vec<PathBuf>,
-    pub(super) expected_names: Vec<String>,
 }
 
 impl StagedBootManifest {
@@ -122,15 +118,6 @@ pub(super) async fn component_config_bytes(
     Ok(Some(bytes))
 }
 
-/// Return `true` once every name in `want` is present in `actual`.
-/// Used by `wait_for_loaded_components` to drive identity-based readiness
-/// polling: the count variant (`actual.len() >= want.len()`) is insufficient
-/// because a baseline trampoline or an unrequested component can satisfy a
-/// count while a requested component is still absent.
-pub(super) fn components_all_loaded(want: &[String], actual: &[String]) -> bool {
-    want.iter().all(|w| actual.iter().any(|a| a == w))
-}
-
 /// Fold an explicit `export` argument into the hub-local component resolve
 /// selector so the resolve reply's config descriptor matches the actor type
 /// that will instantiate. If the selector already carries `module@actor`, the
@@ -147,10 +134,9 @@ pub(super) fn selector_with_explicit_export(selector: &str, export: Option<&str>
 /// from (issue 2626), using the same precedence the component host
 /// itself applies at load: caller `name` > `export` > default actor
 /// namespace. `None` when none of the three is available — the caller
-/// turns that into a clean tool error naming what to set. Shared by
-/// `stage_boot_manifest` (deriving `expected_names` to poll) and
-/// `load_component` (deriving each replica's load name), so both sides of
-/// a replicated load agree on what the components register as.
+/// turns that into a clean tool error naming what to set. `load_component`
+/// derives each replica's load name from it, so a replicated load registers
+/// under the names the component host itself would resolve.
 pub(super) fn replica_base_name(
     name: Option<&str>,
     export: Option<&str>,
@@ -479,8 +465,8 @@ pub(super) async fn load_component(mcp: &Mcp, args: LoadComponentArgs) -> Result
     };
 
     // issue 2626: loop the single-load dispatch N times, one shared
-    // wasm/config, naming each instance in the same precedence order
-    // `stage_boot_manifest` derives `expected_names` in.
+    // wasm/config, naming each instance in the component host's own
+    // `name > export > default namespace` precedence.
     let base = replica_base_name(args.name.as_deref(), export.as_deref(), resolved.default_namespace.as_deref())
         .ok_or_else(|| {
             McpError::invalid_params(
