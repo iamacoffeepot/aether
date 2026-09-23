@@ -23,14 +23,14 @@
 
 use aether_actor::__macro_internals::WasmPlacementFacts;
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Addressable, DependencyResolver, DependsOn, Embedded, Erased, Manual, One, WasmActor,
-    WasmCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, Addressable, Contract, Contracts, DependencyResolver, DependsOn, Embedded, Erased,
+    Manual, One, ReplyShape, Silent, Undeclared, WasmActor, WasmCtx, WasmInitCtx, actor, handler_set,
 };
 use aether_data::Kind;
 use aether_data::{
-    ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, ReplyContract,
-    actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, wire, write_actor_lineage_child,
-    write_actor_lineage_module_child, write_actor_lineage_root,
+    ACTOR_LINEAGE_SECTION_VERSION, ActorId, ActorLineageRecord, INPUTS_SECTION_VERSION, InputsRecord, KindId,
+    ReplyContract, actor_lineage_child_len, actor_lineage_module_child_len, actor_lineage_root_len, wire,
+    write_actor_lineage_child, write_actor_lineage_module_child, write_actor_lineage_root,
 };
 
 #[repr(C)]
@@ -134,6 +134,66 @@ impl WasmActor for ComposableProbe {
     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 }
 
+/// ADR-0231: the contract-row probe. A test build sets `cfg(test)`, so
+/// `on_present` and its kind survive while `on_stripped` and its kind are gone;
+/// the adopted set adds one silent and one manual handler.
+#[repr(C)]
+#[aether_data::kind(name = "test.contract.present", pod)]
+struct Present {
+    seq: u32,
+}
+
+#[cfg(not(test))]
+#[repr(C)]
+#[aether_data::kind(name = "test.contract.stripped", pod)]
+struct Stripped {
+    seq: u32,
+}
+
+#[repr(C)]
+#[aether_data::kind(name = "test.contract.set_silent", pod)]
+struct SetSilent {
+    seq: u32,
+}
+
+#[repr(C)]
+#[aether_data::kind(name = "test.contract.set_manual", pod)]
+struct SetManual {
+    seq: u32,
+}
+
+#[handler_set]
+trait ContractSet {
+    #[handler::single]
+    fn on_set_silent(&mut self, _ctx: &mut WasmCtx<'_>, _mail: SetSilent) {}
+
+    #[handler::manual]
+    fn on_set_manual(&mut self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: SetManual) {}
+}
+
+struct ContractProbe;
+
+impl ContractSet for ContractProbe {}
+
+#[actor(handler_set(ContractSet))]
+impl WasmActor for ContractProbe {
+    const NAMESPACE: &'static str = "manifest.contract";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[handler::single]
+    #[cfg(test)]
+    fn on_present(&mut self, _ctx: &mut WasmCtx<'_>, present: Present) -> Pong {
+        Pong { seq: present.seq }
+    }
+
+    #[handler::single]
+    #[cfg(not(test))]
+    fn on_stripped(&mut self, _ctx: &mut WasmCtx<'_>, _stripped: Stripped) {}
+}
+
 struct DependentProbe;
 
 #[actor(depends(FirstParent), depends(EmbeddedPeer))]
@@ -187,6 +247,54 @@ fn parse_section(bytes: &[u8]) -> Vec<InputsRecord> {
 }
 
 fn assert_replies<T: aether_actor::Replies<Ping, Reply = Pong>>() {}
+
+fn assert_row<T: Contract<K, Reply = R>, K: Kind, R: ReplyShape>() {}
+
+/// Sort `(kind, reply)` rows by kind so two emissions compare as sets. An
+/// actor handles each kind once, so the kind alone orders them.
+fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
+    rows.sort_by_key(|(id, _)| *id);
+    rows
+}
+
+/// The `(kind, reply)` pairs of the handler records in an inputs manifest.
+fn manifest_rows(bytes: &[u8]) -> Vec<(KindId, ReplyContract)> {
+    parse_section(bytes)
+        .into_iter()
+        .filter_map(|record| match record {
+            InputsRecord::Handler { id, reply, .. } => Some((id, reply)),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn every_handler_emits_its_contract_row() {
+    assert_row::<ManifestProbe, Tick, Silent>();
+    assert_row::<ManifestProbe, Ping, Pong>();
+    assert_row::<ManifestProbe, Poke, Undeclared>();
+    assert_row::<ContractProbe, Present, Pong>();
+}
+
+/// ADR-0231 §4: `CONTRACTS` and the inputs manifest are produced by separate
+/// code, so this pins them to the same rows: a reply mapped differently on
+/// either side, or an adopted set's rows missing from either. A
+/// `#[cfg]`-stripped handler's row names a kind absent from this build, so
+/// keeping it fails compilation instead.
+#[test]
+fn contracts_match_inputs_manifest() {
+    assert_eq!(
+        sorted(ManifestProbe::CONTRACTS.to_vec()),
+        sorted(manifest_rows(&ManifestProbe::__AETHER_INPUTS_MANIFEST)),
+        "ManifestProbe's CONTRACTS must match its inputs manifest",
+    );
+    assert_eq!(
+        sorted(ContractProbe::CONTRACTS.to_vec()),
+        sorted(manifest_rows(&ContractProbe::__AETHER_INPUTS_MANIFEST)),
+        "ContractProbe's CONTRACTS must match its inputs manifest, set rows included",
+    );
+    assert_eq!(ContractProbe::CONTRACTS.len(), 3, "one surviving local row plus the set's two");
+}
 
 #[test]
 fn handler_return_type_emits_replies_marker() {

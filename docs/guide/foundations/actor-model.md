@@ -294,6 +294,16 @@ A bounded many-item answer is one reply whose kind carries a list, as the log,
 trace, and cost tails do. Incremental or unbounded delivery publishes to
 subscribers (`Publishes<K>` / `subscribe`).
 
+`#[actor]` records each handler's answer as a type-level **contract row**,
+`impl Contract<K> for A { type Reply = … }`: the reply kind `O` for `-> O` or
+`-> Pending<O>`, `Silent` for `-> ()`, and `Undeclared` for a manual handler. It
+also emits `Contracts::CONTRACTS`, the same rows as `(KindId, ReplyContract)`
+pairs in the vocabulary the inputs manifest and the native handler inventory
+report, with an adopted handler set's rows appended. A `#[fallback]`
+contributes neither. The reply checks
+[ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md)
+specifies are built on them.
+
 ### Helpers that only send
 
 The class marker rides on the context type — `WasmCtx<'_>` is

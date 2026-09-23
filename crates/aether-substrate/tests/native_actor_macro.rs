@@ -1335,3 +1335,50 @@ fn manual_handler_replies_through_ctx() {
     let ack = ManualAck::decode_from_bytes(reply.payload.bytes()).expect("the reply decodes");
     assert_eq!(ack, ManualAck { seq: 9 }, "the manual reply carries the ping seq");
 }
+
+fn assert_row<T: aether_actor::Contract<K, Reply = R>, K: Kind, R: aether_actor::ReplyShape>() {}
+
+/// ADR-0231 §1: every native handler yields one `Contract<K>` row — the
+/// deferred `-> Pending<O>` reads `O`, a manual handler reads `Undeclared`, a
+/// silent one reads `Silent`, and an adopted set's handler arrives through the
+/// set's bridge.
+#[test]
+fn every_native_handler_emits_its_contract_row() {
+    assert_row::<DeferredReplyCap, KickP, EchoReply>();
+    assert_row::<ManualReplyCap, ManualPing, aether_actor::Undeclared>();
+    assert_row::<InstancedChildCap, Greet, aether_actor::Silent>();
+    assert_row::<CfgGatedSetAdopter, SetCfgKept, aether_actor::Silent>();
+}
+
+/// ADR-0231 §4: an actor's `CONTRACTS` and its link-time `HandlerEntry` rows
+/// are produced by separate code, so this pins them to the same rows on the
+/// impl-hosted and handler-set paths: a reply mapped differently on either side,
+/// or an adopted set's rows missing from either.
+#[test]
+fn native_contracts_match_handler_entries() {
+    use aether_actor::Contracts;
+    use aether_data::name_inventory::handler_entries;
+    use aether_data::{KindId, ReplyContract};
+
+    fn sorted(mut rows: Vec<(KindId, ReplyContract)>) -> Vec<(KindId, ReplyContract)> {
+        rows.sort_by_key(|(id, _)| *id);
+        rows
+    }
+
+    fn check<A: Addressable + Contracts>() {
+        let entries = handler_entries().filter(|e| e.namespace == A::NAMESPACE).map(|e| (e.id, e.reply)).collect();
+        assert_eq!(
+            sorted(A::CONTRACTS.to_vec()),
+            sorted(entries),
+            "{}: CONTRACTS must match its HandlerEntry rows",
+            A::NAMESPACE,
+        );
+    }
+
+    check::<ReplyMacroCap>();
+    check::<DeferredReplyCap>();
+    check::<ManualReplyCap>();
+    check::<CfgGatedCap>();
+    check::<CfgGatedSetAdopter>();
+    assert_eq!(CfgGatedSetAdopter::CONTRACTS.len(), 2, "the adopter's rows are the set's two surviving handlers");
+}
