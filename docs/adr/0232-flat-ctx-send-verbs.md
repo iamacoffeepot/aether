@@ -2,6 +2,8 @@
 
 - **Status:** Accepted
 - **Date:** 2026-09-23
+- **Amended:** 2026-09-23 — §3's flat subscribe names its publisher: `ctx.subscribe::<LifecycleCapability, Tick>()`, both type parameters caller-chosen and checked by the existing `Publishes<K>` marker, because the `PublishedBy` link cannot be implemented under Rust's orphan rule. Window events subscribe every window by default.
+- **Amended:** 2026-09-23 — typed flat sends take the payload as `&impl SendableTo<R>`, so the turbofish names only `R`; the native ctx's erased `send_with_context` is renamed, and the held-reference context verbs are `send_to_with_context` / `send_detached_to_with_context`; the ctx for `unwire` and `on_rehydrate` is typed by `Self` too; the per-cap handle facades and `MailboxForward` are deleted.
 
 Amends [ADR-0230](0230-proven-actor-references.md) §5 (what replaces the
 deleted `ctx.actor::<R>()` handle at the call site),
@@ -74,6 +76,14 @@ ADR-0231 §3; it is flat, and there is no `ctx.to(&r)` handle. An
 publishing. `ctx.actor_ref::<R>()` keeps its name and mints a proof for a
 declared dependency, for code that stores the reference.
 
+*(Amended 2026-09-23: the context-carrying sends follow the same split. The
+typed verb is `ctx.send_with_context::<R>(&k, &c)`, and a held reference sends
+with a context through `ctx.send_to_with_context(&r, &k, &c)` and
+`ctx.send_detached_to_with_context(&r, &k, &c)`, matching `send_to`. The native
+ctx's inherent erased `send_with_context(&ErasedActorRef, &K, &C)` and its
+detached twin are renamed into that family, which frees the name for the typed
+verb.)*
+
 ### 2. The proof is the declaration
 
 ```rust
@@ -94,6 +104,13 @@ impl<A, M> WasmCtx<'_, A, M> {
     { /* the existing send path */ }
 }
 ```
+
+*(Amended 2026-09-23: this sketch cannot be called as §1 writes it. Rust has
+no partial turbofish, so `send<R, K>` would be spelled `ctx.send::<R, _>`, and
+a turbofish never carries `_` (§1). Every typed flat send takes its payload as
+`payload: &impl SendableTo<R>`, a blanket over `K: Kind` where `R` handles `K`,
+so the turbofish names only `R`. The bounds are unchanged: `A: DependsOn<R>`
+and ADR-0231 §1's reply bound.)*
 
 A declared dependency is checked `Live` before `init`, so a flat send to it is
 infallible at the call site: no `Option`, no `Result`. The handler ctx is typed
@@ -119,6 +136,31 @@ trait has one associated type, so a second publisher cannot be named, and
 The call carries ADR-0231 §8's bound (the subscriber's row for `K` is silent)
 and requires `Self: DependsOn<K::Publisher>`, the same proof as a send.
 
+**Amendment (2026-09-23): the verb names the publisher.** The form above cannot
+be written. `impl PublishedBy for Tick { type Publisher = LifecycleCapability; }`
+names a kind and a publisher that live in different crates: the event kinds are
+in `aether-kinds`, which `aether-actor` depends on, and the publishers are in
+cap crates above `aether-actor`. In every crate that can see both, the impl is
+a foreign trait on a foreign type, which Rust's orphan rule refuses, and moving
+either side creates a dependency cycle. The two call lines above also ask one
+method to take no argument for one kind and a selector for another, which a
+single Rust method cannot do.
+
+```rust
+ctx.subscribe::<LifecycleCapability, Tick>();
+ctx.subscribe::<WindowCapability, Key>();
+```
+
+Both type parameters are chosen by the caller, so the turbofish rule (§1)
+holds. The pair is checked by the existing `P: Publishes<K>` marker, together
+with ADR-0231 §8's silent-handler bound and `Self: DependsOn<P>`, so a
+publisher that does not publish `K`, a subscriber that answers `K`, and an
+undeclared publisher are each a compile error at the call. Window events
+subscribe every window: each window subscribe in the tree passes
+`WindowSelector::All`, so the verb takes no selector. A per-window filter, if
+one is ever needed, is its own window verb. The `PublishedBy` trait is not
+added.
+
 ### 4. A dependency that dies after load
 
 A send to a declared dependency that has since died drops quietly. Mail is best
@@ -135,7 +177,10 @@ chassis composer at boot. The declaration is the same `#[actor(depends(R))]`
 record, which the builder already checks `Live` before `init` at every native
 birth site (ADR-0230 §3), and the composer hands the capability its proof. The
 native flat verbs therefore carry the same `DependsOn<R>` bound and the same
-infallibility as the wasm ones.
+infallibility as the wasm ones. *(Amended 2026-09-23: a dependency on a pumped
+slot, such as render on desktop and the harness chassis, is checked against
+the slot's Claim-stage reservation, and the boot fails if the pump never goes
+`Live`; see ADR-0230 §3.)*
 
 ### 6. No optional peers
 
@@ -154,6 +199,17 @@ chain, and the `Reaches<R>` bound that let the erased ctx reach any actor.
 Facade traits that hang verbs off the handle (`LifecycleMailboxExt`, the window
 facade's `subscribe`) move to flat ctx verbs.
 
+*(Amended 2026-09-23: the per-cap facades do not move; they are deleted, along
+with `MailboxForward`, the trait they forward through. That covers
+`FsMailboxExt`, `ClipboardMailboxExt`, `HttpMailboxExt`,
+`WindowManagerMailboxExt`, `WindowMailboxExt`, and `LifecycleMailboxExt`. Their
+bodies are one-line kind literals, so a call site sends the kind directly
+through a flat verb:
+`ctx.send::<FsCapability>(&Read { addr: NamespaceAddr::new(ns, path) })`. The
+only flat verb that replaces a facade method is §3's subscribe and its
+unsubscribe twin. Keeping the facades as extension traits on the ctx would
+leave a second way to send per cap.)*
+
 ## Consequences
 
 - An undeclared target is a compile error at the call site, and a declared one
@@ -170,6 +226,8 @@ facade's `subscribe`) move to flat ctx verbs.
   dependency. The stub rule (§6) makes that a composition error to fix once,
   not a run-time branch in every caller.
 - Every event kind gains a `PublishedBy` impl beside its `#[kind]` declaration.
+  *(Amended 2026-09-23: no `PublishedBy` impl is added; the publisher is named
+  at the subscribe call and checked by the existing `Publishes<K>` impls, §3.)*
 - The names above close the naming pass issue #6355 asks for.
 
 ## Alternatives considered
@@ -190,6 +248,19 @@ facade's `subscribe`) move to flat ctx verbs.
 - **A multi-publisher subscribe** (`ctx.subscribe::<R, K>()`). Rejected: no
   event kind has two publishers, so the second parameter only restates the
   first, and a `PublishedBy` link keeps it that way by construction.
+  *(Amended 2026-09-23: adopted. The `PublishedBy` link cannot be implemented
+  under the orphan rule (§3), so the publisher parameter is the only place the
+  publisher can be named. It is checked by `Publishes<K>` rather than restated
+  unchecked.)*
+- **One subscribe verb per publisher** (`ctx.subscribe_lifecycle::<Tick>()`,
+  `ctx.subscribe_window::<Key>()`), each added to the ctx by its cap's crate.
+  Considered on 2026-09-23 when §3's first form proved unwritable. Not adopted:
+  `ctx.subscribe::<P, K>()` declares both types in one verb, and per-cap verbs
+  would add a name per publisher.
+- **Moving the event kinds and their publishers into one crate above
+  `aether-actor`**, which would let the `PublishedBy` impls compile. Rejected:
+  a large restructure, and it conflicts with ADR-0122's rule that a cap's
+  identity lives in its own crate.
 
 ## Amendments
 
@@ -203,3 +274,7 @@ facade's `subscribe`) move to flat ctx verbs.
   `ctx.send_to(r, &k)`. §7's ctx typing is what makes the `DependsOn` bound
   checkable, and it supersedes issue #6355's note that no actor-typed ctx
   migration is needed.
+- **ADR-0231 §7 (2026-09-23).** The ctx typing extends past handlers and
+  `wire`: `unwire` and `on_rehydrate` also receive a ctx typed by `Self`, so a
+  send from either hook carries the same `DependsOn` bound. `on_rehydrate`'s
+  fixed `WasmCtx<'_>` parameter becomes `WasmCtx<'_, Self>`.
