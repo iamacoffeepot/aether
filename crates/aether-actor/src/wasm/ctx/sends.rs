@@ -84,7 +84,7 @@ impl Sends<'_> {
     /// receiver actor `R`, carrying this actor's id as the send's `from`.
     #[must_use]
     pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(self.resolve_singleton::<R>(), self.mailbox, self.inline)
+        WasmActorMailbox::new(self.resolve_singleton::<R>(), self.mailbox, self.inline)
     }
 
     /// Send through a proven [`ActorRef`], identical to [`WasmCtx::to`]: a
@@ -92,7 +92,7 @@ impl Sends<'_> {
     /// would have sent through.
     #[must_use]
     pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::__new(target.id().0, self.mailbox, self.inline)
+        WasmActorMailbox::new(target.id().0, self.mailbox, self.inline)
     }
 
     /// Send `payload` through a stored [`Mailbox<K>`] addressing token,

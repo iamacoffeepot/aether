@@ -86,13 +86,12 @@ impl<R, C: Kind> Clone for WasmActorMailboxWithContext<'_, '_, R, C> {
 }
 
 impl<'a, R> WasmActorMailbox<'a, R> {
-    /// Not part of the public API; the ctx-level constructors go
-    /// through here so the fields stay private. `sender` is the
-    /// resolving actor's own id (the "from" half); `inline` is the ctx's
-    /// per-component inline registry the send routes through.
-    #[doc(hidden)]
+    /// The ctx-level constructors go through here so the fields stay
+    /// private. `sender` is the resolving actor's own id (the "from"
+    /// half); `inline` is the ctx's per-component inline registry the send
+    /// routes through.
     #[must_use]
-    pub fn __new(mailbox: u64, sender: u64, inline: &'a Registry) -> Self {
+    pub(crate) fn new(mailbox: u64, sender: u64, inline: &'a Registry) -> Self {
         Self { mailbox, sender, inline, _r: PhantomData }
     }
 
@@ -115,16 +114,6 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         WasmActorMailboxWithContext { mailbox: *self, context }
     }
 
-    /// Rewrap this physical `mailbox` id as another recipient type while
-    /// inheriting this handle's ctx binding (`sender` + inline registry), so
-    /// the rewrapped handle's sends stamp the same origin and route the same
-    /// way. Use this after a typed [`Self::resolve`] chain when the physical
-    /// actor hosts a different logical recipient interface.
-    #[must_use]
-    pub fn at<Peer>(&self, mailbox: u64) -> WasmActorMailbox<'a, Peer> {
-        WasmActorMailbox::__new(mailbox, self.sender, self.inline)
-    }
-
     /// Resolve the instanced child actor `Child` named `name` directly
     /// beneath this actor.
     ///
@@ -137,7 +126,7 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         R: Addressable,
         Child: ChildOf<R> + Instanced,
     {
-        self.at(Child::resolve(self.mailbox_id().0, name).0)
+        WasmActorMailbox::new(Child::resolve(self.mailbox, name).0, self.sender, self.inline)
     }
 }
 
@@ -294,7 +283,7 @@ mod tests {
     #[test]
     fn resolve_uses_the_child_resolver_and_retains_context() {
         let inline = Registry::new();
-        let parent = WasmActorMailbox::<Parent>::__new(0xCA11_AB1E, 0x5EED, &inline);
+        let parent = WasmActorMailbox::<Parent>::new(0xCA11_AB1E, 0x5EED, &inline);
 
         let child = parent.resolve::<Child>("camera");
 

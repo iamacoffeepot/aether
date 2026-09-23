@@ -17,7 +17,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced, MailboxForward};
+use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced, MailboxForward, Singleton};
 use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -38,8 +38,8 @@ pub struct NativeActorMailbox<'a, R> {
     /// construction (`ctx.actor::<R>()` time), so a `send` from the
     /// handle inherits the caller's causal chain without re-threading
     /// the ctx. `None`/`None` is the chassis-root / no-inbound shape —
-    /// a fresh chain — which is also what [`Self::__new`] (the detached
-    /// base constructor) and [`Self::send_detached`] produce.
+    /// a fresh chain — which is also what [`Self::send_detached`]
+    /// produces.
     parent: Option<MailId>,
     root: Option<MailId>,
     _r: PhantomData<fn() -> R>,
@@ -71,31 +71,12 @@ impl<R, C: Kind> Clone for NativeActorMailboxWithContext<'_, '_, R, C> {
 }
 
 impl<'a, R> NativeActorMailbox<'a, R> {
-    /// Not part of the public API; external cap-owned ext facades that
-    /// hold only a binding (no in-flight ctx) build a **detached**
-    /// handle through here — `send` from it mints a fresh causal chain.
-    /// The per-handler ctx constructors go through
-    /// [`Self::__new_in_flight`] instead so the everyday
-    /// `ctx.actor::<R>().send()` inherits the handler's chain.
-    #[doc(hidden)]
-    pub fn __new(mailbox: u64, binding: &'a NativeBinding) -> Self {
-        Self { mailbox, binding, parent: None, root: None, _r: PhantomData }
-    }
-
-    /// Not part of the public API; the per-handler
-    /// [`NativeCtx`](crate::actor::native::ctx::NativeCtx)
-    /// constructors (`actor` / `to` / `actor_at`) go through
-    /// here, capturing the handler's in-flight `parent` / `root` so a
-    /// `send` from the returned handle inherits the caller's causal
-    /// chain (ADR-0080 §7). `None`/`None` collapses to the same fresh-
-    /// chain shape as [`Self::__new`].
-    #[doc(hidden)]
-    pub fn __new_in_flight(
-        mailbox: u64,
-        binding: &'a NativeBinding,
-        parent: Option<MailId>,
-        root: Option<MailId>,
-    ) -> Self {
+    /// The per-handler [`NativeCtx`](crate::actor::native::ctx::NativeCtx)
+    /// constructors (`actor` / `to` / `actor_at`) go through here,
+    /// capturing the handler's in-flight `parent` / `root` so a `send` from
+    /// the returned handle inherits the caller's causal chain (ADR-0080 §7).
+    /// `None`/`None` is the fresh-chain shape.
+    pub(crate) fn new(mailbox: u64, binding: &'a NativeBinding, parent: Option<MailId>, root: Option<MailId>) -> Self {
         Self { mailbox, binding, parent, root, _r: PhantomData }
     }
 
@@ -118,15 +99,6 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         NativeActorMailboxWithContext { mailbox: *self, context }
     }
 
-    /// Rewrap this physical `mailbox` id as another recipient type while
-    /// retaining this handle's binding and in-flight causal context. Use this
-    /// after a typed [`Self::resolve`] chain when the physical actor hosts a
-    /// different logical recipient interface.
-    #[must_use]
-    pub fn at<Recipient>(&self, mailbox: u64) -> NativeActorMailbox<'a, Recipient> {
-        NativeActorMailbox::__new_in_flight(mailbox, self.binding, self.parent, self.root)
-    }
-
     /// Resolve the instanced child actor `Child` named `name` directly
     /// beneath this actor.
     ///
@@ -140,7 +112,26 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         R: Addressable,
         Child: ChildOf<R> + Instanced,
     {
-        self.at(Child::resolve(self.mailbox_id().0, name).0)
+        NativeActorMailbox::new(Child::resolve(self.mailbox, name).0, self.binding, self.parent, self.root)
+    }
+
+    /// Resolve the singleton `Peer` hosted beneath this actor: `Peer`'s
+    /// resolver folds with this handle's actor as the carry.
+    ///
+    /// The fold is the one `ctx.actor::<Peer>()` computes, except that the
+    /// carry is this handle's actor rather than the caller's. A root
+    /// capability's [`One`](aether_actor::One) resolver ignores the carry;
+    /// an embedded component's [`Embedded`](aether_actor::Embedded) resolver
+    /// folds it beneath the host (ADR-0154). `aether-http`'s deferred route
+    /// resolves its recipient through the component host's handle this way.
+    /// The returned handle retains this mailbox's binding and in-flight
+    /// causal context.
+    #[must_use]
+    pub fn hosted<Peer: Singleton>(&self) -> NativeActorMailbox<'a, Peer>
+    where
+        R: Addressable,
+    {
+        NativeActorMailbox::new(Peer::resolve(self.mailbox, ()).0, self.binding, self.parent, self.root)
     }
 }
 
@@ -335,8 +326,7 @@ mod tests {
         let binding = NativeBinding::new_for_test(mailer, MailboxId(0xCA11_AB1E));
         let parent_mail = MailId::new(MailboxId(0x5EED), 7);
         let root_mail = MailId::new(MailboxId(0x600D), 3);
-        let parent =
-            NativeActorMailbox::<Parent>::__new_in_flight(0xCA11_AB1E, &binding, Some(parent_mail), Some(root_mail));
+        let parent = NativeActorMailbox::<Parent>::new(0xCA11_AB1E, &binding, Some(parent_mail), Some(root_mail));
 
         let child = parent.resolve::<Child>("camera");
 

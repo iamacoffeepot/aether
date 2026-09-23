@@ -7,7 +7,7 @@
     "send_envelope_detached(": 6,
     "mailer()": 45,
     "registry()": 31,
-    "mailbox_id_from_name(": 102,
+    "mailbox_id_from_name(": 100,
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 55,
     "<recipient>.id() at a send": 0,

@@ -79,8 +79,8 @@ pub use session::TcpSessionActor;
 // only by the runtime halves (`runtime.rs`, `listener/runtime.rs`,
 // `session/runtime.rs`), so `config` rides the `feature = "runtime"`
 // gate. The actor markers themselves (above) are always-on so wasm
-// callers can name them in [`TcpWasmExt::listener`] /
-// [`TcpWasmExt::session`] type parameters.
+// callers can name the handles [`TcpWasmExt::listener`] /
+// [`TcpWasmExt::session`] return.
 #[cfg(feature = "runtime")]
 pub use config::{TcpListenerConfig, TcpSessionConfig};
 

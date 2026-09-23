@@ -191,7 +191,7 @@ fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     install_inline_child::<SucceedingChild>(&registry, child, 0, String::from("widget"), false, root, Vec::new(), ())
         .expect("install inline child");
 
-    let mailbox = WasmActorMailbox::<SucceedingChild>::__new(child.0, root, &registry);
+    let mailbox = WasmActorMailbox::<SucceedingChild>::new(child.0, root, &registry);
     let request = mailbox.send_tracked(&());
     assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");
