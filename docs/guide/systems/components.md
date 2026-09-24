@@ -356,8 +356,10 @@ A load, a module boot actor, or a replacement whose declared dependency has no
 `Live` route is refused before `init` — the operation replies its `Err` naming
 the actor and the missing namespace (`"<actor> depends on <namespace>, which is
 not live"`), and a refused replacement keeps the running module. There is no
-ordering, retry, or wait: two actors that declare each other both refuse, and
-one of them takes the fallible path instead.
+ordering, retry, or wait: two actors that declare each other both refuse. For
+two actors that mail each other both ways, one declares the other and the other
+keeps the envelope sender of its announcement; see
+[Addressing a peer you cannot depend on](../recipes/addressing-a-peer-you-cannot-depend-on.md).
 
 Loading or replacing a module also checks the dependencies of every actor in it
 that can be spawned inline — a `composable` actor, or a `child_of` a type in the
