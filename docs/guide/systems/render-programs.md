@@ -614,9 +614,9 @@ lifecycle over mail has its own scenario in
 ## The worked consumer: the wash
 
 The watercolour easel in
-[`aether-puppet/src/easel/program/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-puppet/src/easel/program)
-is the large-scale consumer and the best reference for program authoring at
-scale. Its develop is one registered program of several hundred passes laid
+[`aether-puppet/src/easel/program/`](https://github.com/iamacoffeepot/aether/tree/archive/aether-puppet/crates/aether-puppet/src/easel/program)
+is archived on the `archive/aether-puppet` tag, and it is the large-scale
+consumer and the best reference for program authoring at scale. Its develop is one registered program of several hundred passes laid
 statically from the palette — coverage masks, separable blurs, thresholds,
 rims, granulation, flow smears, coat absorption, and a final composite into
 an `Rgba8` sheet binding — over a dozen `R32Float` data-plane bindings.

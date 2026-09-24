@@ -866,29 +866,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-puppet"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-codec",
- "aether-component",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-lifecycle",
- "aether-math",
- "aether-mesh",
- "aether-render",
- "aether-window",
- "inventory",
- "serde",
- "serde_json",
- "tracing",
-]
-
-[[package]]
 name = "aether-render"
 version = "0.3.0-alpha"
 dependencies = [

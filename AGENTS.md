@@ -22,7 +22,7 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 
 ## Commands
 
-- Build: `cargo build` (the root `default-members` leaves out `xtask`, `aether-puppet`, and the `aether-test-fixtures-*` wasm crates; add `--workspace` for every member)
+- Build: `cargo build` (the root `default-members` leaves out `xtask`, `aether-demo`, and the `aether-test-fixtures-*` wasm crates; add `--workspace` for every member)
 - Release build: `cargo build --release`
 - Run a crate: `cargo run -p <crate>`
 - Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`

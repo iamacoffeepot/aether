@@ -8,9 +8,8 @@ evidence without linking into the runtime.
 
 The subject of this book is that engine: the actor SDK, the capability crates,
 the chassis profiles, and the test harnesses. Several applications built on it
-also live in this workspace — the puppet mascot, the widget kit's example
-screens — and they appear here as consumers of the engine surfaces, not
-as part of them.
+also live in this workspace, the release demo among them, and they appear here
+as consumers of the engine surfaces, not as part of them.
 
 The operator is often an agent, but the architecture is not a private dialect
 for one model or harness. The same explicit, discoverable surfaces should make

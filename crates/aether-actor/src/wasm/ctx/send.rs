@@ -39,8 +39,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// has no flat send. The recipient is the position [`Self::actor_ref`]
     /// folds for `R`.
     ///
-    /// Its consumers are the puppet motors' pose sends (`aether.puppet-idle`,
-    /// `aether.puppet-turntable`) and the cube fixture's camera send.
+    /// Its consumers include the cube fixture's camera send.
     pub fn send<R: Singleton + CallerAddressable>(&mut self, payload: &impl SendableTo<R>)
     where
         A: DependsOn<R>,

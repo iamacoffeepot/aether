@@ -12,7 +12,7 @@ process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
-reusable guest actors shipped with the engine        aether-kit, aether-kit-widget, aether-puppet
+reusable guest actors shipped with the engine        aether-kit, aether-kit-widget
 journal-driven programs and reactors (bloomery)      aether-bloomery-*
 ```
 
@@ -83,7 +83,6 @@ server.
 | `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-demo` | the release demo: its bring-up component (`aether.demo`, which sends the kit mesh viewer its load at boot), depot spec, boot manifest, and controller config |
-| `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
 `aether-kit` and `aether-kit-widget` crates are actor code hosted by the same

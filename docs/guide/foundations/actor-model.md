@@ -573,9 +573,7 @@ shared prefix.
 A dash in a namespace is a naming convention, not addressing grammar. Use it
 only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera-controller` is the controller actor beside the bare
-`aether.kit.camera` actor, and `aether.puppet-idle` and
-`aether.puppet-turntable` sit beside `aether.puppet`. The dash has no addressing
-semantics — it makes neither actor a child of the other, and the full
+`aether.kit.camera` actor. The dash has no addressing semantics — it makes neither actor a child of the other, and the full
 `NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
 not use a dash merely to spell a multi-word segment; that is what an underscore
 is for, as in `aether.kit.widget.menu_bar` and `aether.kit.widget.text_field`.

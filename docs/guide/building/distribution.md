@@ -95,9 +95,13 @@ For a real product, name the chassis and the components:
 cargo xtask package \
   --profile release \
   --chassis desktop \
-  --components aether-puppet \
+  --components my-game \
   --title aether
 ```
+
+`my-game` stands for a component crate whose module declares a default export.
+A defaultless multi-actor module such as `aether-kit` needs the `--spec` form
+described below, and `crates/aether-demo/demo.json` is the worked spec.
 
 `--chassis` selects `desktop` or `headless`. Component order is autoload order.
 Repeated `--config` flags pair by position with `--components`; trailing
