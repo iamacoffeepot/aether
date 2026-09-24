@@ -473,7 +473,7 @@ dependencies = [
  "aether-harness-fleet",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit-commons",
+ "aether-kit",
  "aether-rpc",
  "aether-substrate",
  "aether-test-fixtures-boot",
@@ -719,7 +719,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-kit-commons"
+name = "aether-kit"
 version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",

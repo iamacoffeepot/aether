@@ -142,7 +142,7 @@ proptest.workspace = true
 # cost_table, substrate_harness_logs) rehomed here from
 # aether-substrate-bundle. They boot the in-process `SubstrateHarness`
 # harness (issue #3765) — a dev-dep cycle (the harness depends on
-# aether-substrate), which cargo allows; aether-kit-commons's bundle dev-dep
+# aether-substrate), which cargo allows; aether-kit's bundle dev-dep
 # was the standing precedent.
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # iamacoffeepot/aether#3781: the fleet actor-log tail test

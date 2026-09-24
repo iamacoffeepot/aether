@@ -5393,7 +5393,7 @@ error: could not compile `aether-actor` (test \"asset_sections\") due to 1 previ
     /// Ten failing tests — past [`STORM_TRIAGE_THRESHOLD`], so the triage
     /// re-runs the member once instead of opening with ten serial replays.
     fn storm() -> Vec<String> {
-        (0..10).map(|index| format!("aether-kit-commons::scenario_{index}")).collect()
+        (0..10).map(|index| format!("aether-kit::scenario_{index}")).collect()
     }
 
     #[test]

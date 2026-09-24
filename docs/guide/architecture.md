@@ -74,7 +74,7 @@ project replies.
 | Operator bridge | `aether-mcp` | live tools, JSON/schema adaptation, hub RPC and caches |
 | Test harnesses | `aether-harness-*` | in-process substrate, real-process fleet, capture, and perf drivers |
 | Build tooling | `xtask`, fixtures, `fuzz/` | artifact discovery, package depots, compatibility fixtures, fuzz targets |
-| Guest actors shipped with the engine | `aether-kit-commons`, `aether-kit-widget`, `aether-mesh`, `aether-puppet` | camera and camera-controller, mesh viewer, the widget set, geometry authoring, mascot rendering |
+| Guest actors shipped with the engine | `aether-kit`, `aether-kit-widget`, `aether-mesh`, `aether-puppet` | camera and camera-controller, mesh viewer, the widget set, geometry authoring, mascot rendering |
 
 The [repository map](orientation/repository-map.md) routes changes across the
 full workspace. Capability messages such as render/audio/filesystem kinds live
