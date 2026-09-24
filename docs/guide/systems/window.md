@@ -63,6 +63,7 @@ use aether_window::{
     WindowSelector, WindowSizeRequest, WindowSpec,
 };
 
+// In an `#[actor(depends(WindowCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let windows = ctx.actor::<WindowCapability>();
 
@@ -166,6 +167,7 @@ kind carries a `WindowId`. A subscriber chooses one window or all current and
 future windows:
 
 ```rust
+// In an `#[actor(depends(WindowCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let windows = ctx.actor::<WindowCapability>();
     windows.subscribe::<WindowOpened>(WindowSelector::All);

@@ -124,7 +124,7 @@ block, and each **`#[handler::<class>]`** method *is* a handler — the macro in
 the kind it handles from the method's **third parameter**:
 
 ```rust
-#[actor]
+#[actor(depends(LifecycleCapability), depends(RenderCapability))]
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 
@@ -298,14 +298,15 @@ specifies are built on them.
 
 ### Helpers that only send
 
-The class marker rides on the context type — `WasmCtx<'_>` is
-`WasmCtx<'_, Erased, Single>` and a manual handler holds
-`WasmCtx<'_, Erased, Manual>` — which is what makes a stray `ctx.reply` in a
-single handler a compile error. A handler may spell its actor instead of the
-default — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
-actor; `Erased` names no actor. The actor is the first parameter, the reply
-mode the second (`WasmCtx<'_, Self, Manual>`). One call deeper the class buys
-nothing: a helper you factor out of a handler to *send* something never
+The class marker rides on the context type — a single handler's `WasmCtx<'_>`
+is `WasmCtx<'_, Self, Single>` and a manual handler holds
+`WasmCtx<'_, Self, Manual>` — which is what makes a stray `ctx.reply` in a
+single handler a compile error. The actor is the first parameter, the reply
+mode the second, and a ctx that omits its actor is typed by it: `#[actor]`
+fills in `Self`, so the ctx reaches only the actors the handler's actor
+declares with `depends(R)`. Spelling `Erased` in that slot
+(`WasmCtx<'_, Erased>`) asks for the untyped view. One call deeper the class
+buys nothing: a helper you factor out of a handler to *send* something never
 touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
@@ -327,7 +328,7 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 }
 
 #[handler::manual]
-fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _r: Redraw) {
+fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _r: Redraw) {
     announce(&mut ctx.sends(), &self.frame);        // Manual — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
@@ -398,6 +399,16 @@ A member that differs for one adopter is **overridden the ordinary Rust way** �
 by implementing that trait method — which keeps the kind owned by the set: one
 dispatch arm, one manifest record. Re-declaring the same kind as a local
 `#[handler]` instead is a coherence error, not a second definition.
+
+A set member's ctx is typed by the adopting actor: `WasmCtx<'_>` in a set reads
+as `WasmCtx<'_, Self>`, where `Self` is whichever actor adopts the set. A
+default body that reaches another actor therefore states that reach on the
+trait, as a supertrait — the real `WidgetDefaults` is
+`pub trait WidgetDefaults: WidgetChrome + DependsOn<TextCapability>`, because
+its theme handler measures fonts through the text capability — and every
+adopter must declare the dependency. `#[handler_set]` adds `Sized` to the
+supertraits as well. An override is a plain trait-method impl that no macro
+rewrites, so it spells the typed signature itself: `WasmCtx<'_, Self>`.
 
 Set handlers reach the `aether.kinds.inputs` manifest exactly as local ones do,
 so `describe_component` reports an adopter's full receive surface and input

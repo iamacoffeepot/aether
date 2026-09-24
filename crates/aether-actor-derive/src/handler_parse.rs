@@ -1,4 +1,6 @@
+use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
+use syn::spanned::Spanned;
 use syn::{Attribute, Expr, FnArg, GenericArgument, Meta, PathArguments, ReturnType, Signature, Type};
 
 /// The `#[cfg(...)]` attributes a handler method carries, cloned at collection
@@ -196,12 +198,58 @@ fn ctx_type_args(sig: &Signature) -> Option<Vec<&Type>> {
     )
 }
 
+/// ADR-0231 §7 (#6533): type a ctx that omits its actor by `Self`. When the
+/// second parameter is a reference to a `WasmCtx`, `NativeCtx` or `WireCtx`
+/// path carrying no type argument, insert `Self` after its lifetimes, so
+/// `WasmCtx<'_>` becomes `WasmCtx<'_, Self>` and a bare `NativeCtx` becomes
+/// `NativeCtx<Self>` with its lifetime elided. A ctx that already names a type
+/// argument — `Self`, another actor, or `Erased` — is left alone, and so is any
+/// other parameter shape. The inserted `Self` is spanned at the ctx type, so an
+/// error it causes points at the author's parameter.
+///
+/// It runs once, as each method is collected, and rewrites the author's own
+/// signature: the method body then type-checks against the typed ctx, and every
+/// forwarder that reads the signature through [`ctx_names_actor`] takes its
+/// typed path.
+pub fn fill_ctx_actor(sig: &mut Signature) {
+    let Some(FnArg::Typed(pt)) = sig.inputs.iter_mut().nth(1) else {
+        return;
+    };
+    let Type::Reference(ctx_ref) = &mut *pt.ty else {
+        return;
+    };
+    let span = ctx_ref.elem.span();
+    let Type::Path(ctx_path) = &mut *ctx_ref.elem else {
+        return;
+    };
+    let Some(last) = ctx_path.path.segments.last_mut() else {
+        return;
+    };
+    if !matches!(last.ident.to_string().as_str(), "WasmCtx" | "NativeCtx" | "WireCtx") {
+        return;
+    }
+    let self_ty: Type = syn::parse_quote_spanned!(span=> Self);
+    match &mut last.arguments {
+        PathArguments::None => {
+            last.arguments = PathArguments::AngleBracketed(syn::parse_quote_spanned!(span=> <#self_ty>));
+        }
+        PathArguments::AngleBracketed(args) => {
+            if args.args.iter().any(|a| matches!(a, GenericArgument::Type(_))) {
+                return;
+            }
+            args.args.push(GenericArgument::Type(self_ty));
+        }
+        PathArguments::Parenthesized(_) => {}
+    }
+}
+
 /// Whether a handler's (or lifecycle hook's) ctx signature names the actor it
 /// dispatches for (issues 4158 + 6279). That is the *first* type argument on
 /// both transports, as in `WasmCtx<'_, Self>` — unless it spells the `Erased`
-/// marker, which names no actor. Only a signature that asks receives the typed
-/// ctx; every other arm is handed the erased view, so a handler cannot receive
-/// a ctx typed by an actor other than the one being dispatched.
+/// marker, which names no actor. After [`fill_ctx_actor`] every ctx names its
+/// actor except one that spells `Erased`, so only a method that asks for the
+/// erased view receives it; none receives a ctx typed by an actor other than
+/// the one being dispatched.
 pub fn ctx_names_actor(sig: &Signature) -> bool {
     ctx_type_args(sig).is_some_and(|args| args.first().is_some_and(|ty| !type_is_erased(ty)))
 }
@@ -512,18 +560,36 @@ pub fn validate_addressable_consts<'a>(
         .ok_or_else(|| syn::Error::new_spanned(self_ty, "internal: NAMESPACE confirmed above but not found"))
 }
 
-/// Rename `wire` → `__aether_wire` and `unwire` → `__aether_unwire` in the
-/// given method slice, pushing `#[allow(clippy::unused_self)]` onto each
-/// renamed method. Returns `(has_wire, has_unwire)`.
+/// The trailing `.erase()` a native forwarder appends when the callee's ctx
+/// signature does not name the actor — empty when it does. After
+/// [`fill_ctx_actor`] that is only a method spelling `Erased`, so the typed ctx
+/// reaches every other handler, task completion, `#[fallback]`, `wire` /
+/// `unwire` hook and handler-set member. Mirrors the existing `as_single()`
+/// downgrade: capability is only ever removed, so a method cannot name a parent
+/// other than the actor being dispatched (issue 4158).
+pub fn erase_unless_ctx_names_actor(sig: &Signature) -> TokenStream2 {
+    if ctx_names_actor(sig) {
+        quote!()
+    } else {
+        quote!(.erase())
+    }
+}
+
+/// Rename `wire` → `__aether_wire`, `unwire` → `__aether_unwire` and
+/// `on_rehydrate` → `__aether_on_rehydrate` in the given method slice, pushing
+/// `#[allow(clippy::unused_self)]` onto each renamed method. Returns
+/// `(has_wire, has_unwire, has_rehydrate)`; native never collects an
+/// `on_rehydrate`, so its third flag is always `false`.
 ///
 /// The safe `else { continue; }` form is used so the helper is correct over a
 /// mixed-content slice (e.g. the native expander's full `lifecycle_methods`)
 /// as well as a pre-partitioned slice (the wasm expander's `boot_hooks`, which
-/// by construction contains only `wire`/`unwire` methods — the `else { continue;
-/// }` branch is never reached there, preserving the existing output exactly).
-pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
+/// by construction contains only the renamed hooks — the `else { continue; }`
+/// branch is never reached there, preserving the existing output exactly).
+pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool, bool) {
     let mut has_wire = false;
     let mut has_unwire = false;
+    let mut has_rehydrate = false;
     for m in methods {
         if m.sig.ident == "wire" {
             has_wire = true;
@@ -531,6 +597,14 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
         } else if m.sig.ident == "unwire" {
             has_unwire = true;
             m.sig.ident = syn::Ident::new("__aether_unwire", m.sig.ident.span());
+        } else if m.sig.ident == "on_rehydrate" {
+            has_rehydrate = true;
+            m.sig.ident = syn::Ident::new("__aether_on_rehydrate", m.sig.ident.span());
+            // #6533: the by-value `PriorState` is the `WasmActor::on_rehydrate`
+            // signature the forwarder passes through, so a body that only reads
+            // it trips `clippy::needless_pass_by_value` on the now-inherent
+            // copy, as the trait-impl method never did.
+            m.attrs.push(syn::parse_quote!(#[allow(clippy::needless_pass_by_value)]));
         } else {
             continue;
         }
@@ -541,7 +615,7 @@ pub fn rename_lifecycle_hooks(methods: &mut [syn::ImplItemFn]) -> (bool, bool) {
         // the required ABI, so suppress it on the generated copy.
         m.attrs.push(syn::parse_quote!(#[allow(clippy::unused_self)]));
     }
-    (has_wire, has_unwire)
+    (has_wire, has_unwire, has_rehydrate)
 }
 
 /// Issue 576: native-side `#[fallback]` collected on a

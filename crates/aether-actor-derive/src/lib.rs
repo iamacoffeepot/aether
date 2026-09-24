@@ -229,6 +229,14 @@ pub fn fallback(_attr: TokenStream, _item: TokenStream) -> TokenStream {
 /// The set is wasm or native throughout (read off the handlers' ctx type) and
 /// uses one authoring shape throughout (a `self` receiver, or the split
 /// `state: &mut Self::State` first parameter).
+///
+/// A member is typed by its adopter (ADR-0231 §7): a ctx that omits its actor
+/// reads as `WasmCtx<'_, Self>`, where `Self` is the adopting actor, and only a
+/// member spelling `Erased` gets the erased view. So the set states what its
+/// default bodies reach as supertraits — the real `WidgetDefaults` is
+/// `WidgetChrome + DependsOn<TextCapability>` — and the macro adds `Sized` to
+/// them. An override is a plain trait-method impl the macro never rewrites, so
+/// it spells the typed signature: `WasmCtx<'_, Self>`.
 #[proc_macro_attribute]
 pub fn handler_set(attr: TokenStream, item: TokenStream) -> TokenStream {
     if !attr.is_empty() {

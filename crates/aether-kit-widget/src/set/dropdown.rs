@@ -544,7 +544,7 @@ impl WidgetDefaults for DropdownWidget {
     /// Restyle: adopt the fanned theme and request metrics for its font. The
     /// dropdown declares this rather than adopting the shared default, because
     /// a new font or type size invalidates every option it measured.
-    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_>, set: SetTheme) {
+    fn on_set_theme(&mut self, ctx: &mut WasmCtx<'_, Self>, set: SetTheme) {
         apply_text_theme(ctx, &mut self.font_metrics, &mut self.theme, set.theme);
         self.forget_measurements();
     }
@@ -552,7 +552,7 @@ impl WidgetDefaults for DropdownWidget {
     /// Focus loss closes the list. Overrides the shared default because
     /// `cancel_activation` cannot report the close, and an unreported close
     /// would leave the root holding a grab for a list nobody can see.
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: FocusLost) {
         self.state.lose_focus();
         self.arms.clear();
         self.dismiss().emit(ctx);
@@ -563,7 +563,7 @@ impl WidgetDefaults for DropdownWidget {
     /// Overrides the shared default because that one keeps only the
     /// widget-wide hover fact, which says nothing about *which* option the
     /// reader was resting on.
-    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.pointer_window = None;
         self.settle_hovered_option(ctx);
