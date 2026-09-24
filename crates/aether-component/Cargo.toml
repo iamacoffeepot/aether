@@ -98,8 +98,8 @@ aether-test-fixtures-kinds = { path = "../aether-test-fixtures-kinds" }
 # load, declared so the source→consumer coupling is cargo-visible —
 # determinator re-runs these tests when a fixture changes, and xtask's
 # wasm-consumer rule fires the dist pre-build. The tests locate the
-# built wasm by stem; only the bundle is also imported, for the actor types
-# its loads and child lookups name.
+# built wasm by stem; only the bundle and the fs-demux fixture are also
+# imported, for the actor types their loads and child lookups name.
 aether-test-fixtures-bundle = { path = "../aether-test-fixtures-bundle" }
 aether-test-fixtures-boot = { path = "../aether-test-fixtures-boot" }
 aether-test-fixtures-defaultless = { path = "../aether-test-fixtures-defaultless" }
@@ -107,6 +107,7 @@ aether-test-fixtures-stateful-typed = { path = "../aether-test-fixtures-stateful
 aether-test-fixtures-stateful-reshaped = { path = "../aether-test-fixtures-stateful-reshaped" }
 aether-test-fixtures-carry-reshaped = { path = "../aether-test-fixtures-carry-reshaped" }
 aether-test-fixtures-inline-dependency = { path = "../aether-test-fixtures-inline-dependency" }
+aether-test-fixtures-fs-demux = { path = "../aether-test-fixtures-fs-demux" }
 # `harness_inline_dependencies` composes the in-memory clipboard to satisfy
 # the inline-dependency fixture's declared `ClipboardCapability`.
 aether-clipboard = { path = "../aether-clipboard" }

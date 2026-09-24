@@ -480,6 +480,7 @@ dependencies = [
  "aether-test-fixtures-bundle",
  "aether-test-fixtures-carry-reshaped",
  "aether-test-fixtures-defaultless",
+ "aether-test-fixtures-fs-demux",
  "aether-test-fixtures-inline-dependency",
  "aether-test-fixtures-kinds",
  "aether-test-fixtures-stateful-reshaped",
@@ -1024,7 +1025,6 @@ dependencies = [
  "aether-actor",
  "aether-component",
  "aether-data",
- "aether-fs",
  "aether-http",
  "aether-kinds",
  "aether-kit-widget",
@@ -1053,6 +1053,17 @@ version = "0.3.0-alpha"
 dependencies = [
  "aether-actor",
  "aether-kinds",
+]
+
+[[package]]
+name = "aether-test-fixtures-fs-demux"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-data",
+ "aether-fs",
+ "aether-test-fixtures-kinds",
+ "tracing",
 ]
 
 [[package]]

@@ -8,19 +8,19 @@
 //! `export: Some("<NAMESPACE>")`.
 //!
 //! The `InlineChild` / `InlineDespawnChild` inline children ride in
-//! `inline_child`, and `InlineFsDemuxChild` in `fs_demux`, under the
-//! `export!` list's `private = [..]` slot: each parent constructs its child
-//! in-process and a replace rebuilds it, but the host never instantiates it
-//! by selector (issue 6136). The typed↔reshaped replace pair is *not*
-//! here: a cross-module `replace_component` needs two distinct binaries,
-//! so each lives in its own satellite crate.
+//! `inline_child` under the `export!` list's `private = [..]` slot: each
+//! parent constructs its child in-process and a replace rebuilds it, but the
+//! host never instantiates it by selector (issue 6136). The typed↔reshaped
+//! replace pair is *not* here: a cross-module `replace_component` needs two
+//! distinct binaries, so each lives in its own satellite crate. Neither is
+//! the fs-demux pair: its private child declares dependencies the host checks
+//! at every load of its module, so it lives in `aether-test-fixtures-fs-demux`.
 
 mod contract_replace;
 mod correlation_carry;
 mod cube;
 mod dependent_probe;
 mod editor_region_probe;
-mod fs_demux;
 mod http_handler;
 mod inline_child;
 mod mat4_source;
@@ -41,7 +41,6 @@ pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
 pub use editor_region_probe::EditorRegionProbe;
-pub use fs_demux::{FsDemux, InlineFsDemuxChild, InlineFsDemuxParent};
 pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
@@ -78,8 +77,6 @@ aether_actor::export!(
     ParentPeerTarget,
     Cube,
     EditorRegionProbe,
-    FsDemux,
-    InlineFsDemuxParent,
     MatSource,
     UiWidget,
     HttpHandler,
@@ -113,7 +110,7 @@ aether_actor::export!(
     ContractDropped,
     ContractChanged,
     ContractExtended,
-    private = [InlineChild, InlineDespawnChild, InlineFsDemuxChild],
+    private = [InlineChild, InlineDespawnChild],
 );
 
 // ADR-0163 §2: embed a small asset in the `aether.asset.asset_fixture.txt`

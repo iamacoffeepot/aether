@@ -25,7 +25,7 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::LoadComponent;
 use aether_test_fixtures_kinds::{FsContextDemuxReport, FsDemuxReport, RunFsContextDemux, RunFsDemux};
 
-const FIXTURE_CRATE: &str = "aether_test_fixtures_bundle";
+const FIXTURE_CRATE: &str = "aether_test_fixtures_fs_demux";
 
 fn load_fs_demux(harness: &mut SubstrateHarness, wasm: Vec<u8>, name: &str) -> ErasedActorRef {
     harness

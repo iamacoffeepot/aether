@@ -7,6 +7,12 @@
 //! is a `LoadResult::Err` naming `Needy`, and the same load is `Ok` once the
 //! in-memory clipboard is composed. A replace toward the module is refused the
 //! same way, and the replaced victim keeps serving.
+//!
+//! A private inline child (issue 6590) is checked the same way. The fs-demux
+//! fixture's `InlineFsDemuxParent` declares no dependency, but its private
+//! child `InlineFsDemuxChild` declares `depends(FsCapability, …)`, which the
+//! host reads from the module's `aether.kinds.inputs.private` section: a load
+//! of the parent on a harness without fs roots is refused naming the child.
 
 use std::fs;
 
@@ -22,6 +28,8 @@ const HOLDER_EXPORT: &str = "test.inline_dependency.holder";
 const TARGET_EXPORT: &str = "test.parent_peer.target";
 const REFUSAL: &str = "test.inline_dependency.needy depends on aether.clipboard, which is not live";
 const TICK_OBSERVED: &str = "aether.test_fixture.tick_observed";
+const FS_DEMUX_PARENT_EXPORT: &str = "test.inline.fs_demux_parent";
+const PRIVATE_REFUSAL: &str = "test.inline.fs_demux_child depends on aether.fs, which is not live";
 
 fn load_result(harness: &mut SubstrateHarness, wasm: &[u8], label: &str, name: &str, export: &str) -> LoadResult {
     let component = LoadComponent {
@@ -71,6 +79,28 @@ fn an_inline_child_dependency_refuses_its_module_load() {
         LoadResult::Ok { .. } => {}
         LoadResult::Err { error } => panic!("a module whose inline child's dependency is live must load: {error}"),
     }
+}
+
+/// The satisfied path is `inline_child_matches_host_replies_to_its_own_requests`
+/// in `inline_child.rs`, which loads the same export with fs roots composed.
+#[test]
+fn a_private_inline_child_dependency_refuses_its_module_load() {
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_fs_demux") else {
+        return;
+    };
+    let wasm = fs::read(wasm_path).expect("read fs-demux fixture wasm");
+
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "absent", "fs-demux", FS_DEMUX_PARENT_EXPORT)
+    else {
+        panic!("a module whose private inline child's dependency is not live must be refused");
+    };
+    assert_eq!(error, PRIVATE_REFUSAL, "the refusal names the private child and the missing namespace");
+
+    // Refusal happens before creation: no trampoline stands under the name.
+    let host = harness.actor_ref::<ComponentHostCapability>();
+    let unserved = harness.child::<ComponentHostCapability, WasmTrampoline>(&host, key("fs-demux"));
+    assert!(unserved.is_err(), "the refused load must not have created anything: {unserved:?}");
 }
 
 #[test]
