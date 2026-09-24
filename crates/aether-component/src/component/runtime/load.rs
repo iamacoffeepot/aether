@@ -789,7 +789,7 @@ mod tests {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, unrouted_binding};
+    use aether_substrate::testing::{registered_ref, unrouted_binding};
     use wasmtime::{Engine, Linker};
 
     use super::*;
@@ -824,24 +824,17 @@ mod tests {
         unrouted_binding(&state.mailer)
     }
 
-    /// Register a test-local inbox under `name` and prove it the way a drop or
-    /// replace receipt does.
-    fn proven_actor(state: &ComponentHostCapabilityState, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
-        let position = state.registry.register_inbox(&boot_authority(), name, noop_handler());
-
-        ctx.resolve_live(position).expect("a freshly registered inbox proves")
+    /// Register a test-local inbox under `name` and take its reference from
+    /// the test-support `registered_ref`, proven by the same registry read a
+    /// drop or replace receipt takes.
+    fn proven_actor(state: &ComponentHostCapabilityState, name: &str) -> ErasedActorRef {
+        registered_ref(&state.registry, name, noop_handler())
     }
 
     /// A boot entry over a test-local inbox registered under `name`, proven
     /// like the boot spawn outcome's reference.
-    fn boot_entry(
-        state: &ComponentHostCapabilityState,
-        ctx: &NativeCtx<'_>,
-        name: &str,
-        refcount: u32,
-        pending_requests: u32,
-    ) -> BootEntry {
-        BootEntry { boot: proven_actor(state, ctx, name), refcount, pending_requests }
+    fn boot_entry(state: &ComponentHostCapabilityState, name: &str, refcount: u32, pending_requests: u32) -> BootEntry {
+        BootEntry { boot: proven_actor(state, name), refcount, pending_requests }
     }
 
     #[test]
@@ -850,8 +843,8 @@ mod tests {
         let binding = binding(&state);
         let hash = "boot-with-one-pending-request".to_owned();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let live_actor = proven_actor(&state, &ctx, "test.component.live-actor");
-        let boot = boot_entry(&state, &ctx, "test.component.boot-pending", 1, 1);
+        let live_actor = proven_actor(&state, "test.component.live-actor");
+        let boot = boot_entry(&state, "test.component.boot-pending", 1, 1);
         state.register_boot(hash.clone(), boot);
         state.boot_hash_by_actor.insert(live_actor, hash.clone());
 
@@ -870,15 +863,15 @@ mod tests {
         let mut state = state();
         let binding = binding(&state);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let actor = proven_actor(&state, &ctx, "test.component.reverse-replacement");
+        let actor = proven_actor(&state, "test.component.reverse-replacement");
         let old_hash = "replacement-n1".to_owned();
         let new_hash = "replacement-n2".to_owned();
         let old_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, old_operation));
         let new_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, new_operation));
-        let old_boot = boot_entry(&state, &ctx, "test.component.boot-n1", 0, 0);
-        let new_boot = boot_entry(&state, &ctx, "test.component.boot-n2", 0, 0);
+        let old_boot = boot_entry(&state, "test.component.boot-n1", 0, 0);
+        let new_boot = boot_entry(&state, "test.component.boot-n2", 0, 0);
         state.register_boot(old_hash.clone(), old_boot);
         state.register_boot(new_hash.clone(), new_boot);
 
@@ -898,9 +891,7 @@ mod tests {
     #[test]
     fn later_failed_replacement_does_not_dominate_earlier_success() {
         let mut state = state();
-        let binding = binding(&state);
-        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let actor = proven_actor(&state, &ctx, "test.component.later-failure");
+        let actor = proven_actor(&state, "test.component.later-failure");
         let earlier_success = state.next_boot_operation(actor);
         let later_failure = state.next_boot_operation(actor);
 
@@ -917,12 +908,12 @@ mod tests {
         let mut state = state();
         let binding = binding(&state);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let actor = proven_actor(&state, &ctx, "test.component.drop-before-completion");
+        let actor = proven_actor(&state, "test.component.drop-before-completion");
         let hash = "replacement-completes-after-drop".to_owned();
         let replacement_operation = state.next_boot_operation(actor);
         assert!(state.accept_successful_boot_operation(actor, replacement_operation));
         state.invalidate_replacement_boot_operation(actor);
-        let boot = boot_entry(&state, &ctx, "test.component.boot-after-drop", 0, 0);
+        let boot = boot_entry(&state, "test.component.boot-after-drop", 0, 0);
         state.register_boot(hash.clone(), boot);
 
         // Manual state-machine proof: DropComponent invalidates the actor
