@@ -19,7 +19,8 @@ use serde::{Deserialize, Serialize};
 /// — v1 ships a fixed set; future patch-based instruments (Phase 2
 /// follow-up) will extend the id space without a wire change. The
 /// substrate allocates a new voice per `NoteOn`, keyed by
-/// `(sender_mailbox, instrument_id, pitch)` — several voices can share
+/// `(sender, instrument_id, pitch)` with the sender taken from the mail
+/// envelope — several voices can share
 /// a key, so two concurrent same-pitch notes from one sender each sound
 /// independently instead of one stealing the other's voice. `pan` places
 /// the voice in the stereo image (ADR-0127): bipolar `i8` with `0` center
@@ -37,7 +38,7 @@ pub struct NoteOn {
 }
 
 /// Release a note previously started with `NoteOn`. The substrate
-/// matches on `(sender_mailbox, instrument_id, pitch)` — the sender
+/// matches on `(sender, instrument_id, pitch)` — the sender
 /// is taken from the mail envelope, not carried in the payload. When
 /// several voices share that key (concurrent same-pitch notes from one
 /// sender), `NoteOff` releases the oldest one still sounding, pairing

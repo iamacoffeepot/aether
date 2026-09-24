@@ -26,12 +26,14 @@ There are three lanes in one mixer:
 - **Master processing** adds a fixed-character reverb return, applies master
   gain, then soft-clips each output channel with `tanh`.
 
-The sender in the mail envelope is part of audio state. Synth voices are keyed
-by `(sender mailbox, instrument id, pitch)`, sender gain is keyed by sender
-mailbox, and tracks are keyed by `(sender mailbox, lane, namespace, path)`.
-Component senders therefore isolate one another without carrying a sender id in
-the payload. Non-component sources collapse to mailbox id `0`; callers such as
-MCP sessions should use distinct track `lane` strings when sharing a path.
+The sender in the mail envelope is part of audio state. The audio cap keys it
+on the proven envelope sender (`ctx.sender()`, ADR-0230): synth voices are keyed
+by `(sender, instrument id, pitch)`, sender gain by sender, and tracks by
+`(sender, lane, namespace, path)`. Each local component is its own sender, so
+components isolate one another without carrying a sender id in the payload.
+Session mail shares one key, and MCP mail shares the key of the RPC server that
+forwards it; callers that share a key should use distinct track `lane` strings
+when sharing a path.
 
 `AudioCapability` is also an addressing marker available with the lightweight
 `audio` feature. Native state, cpal, WAV decode, and the worker thread require

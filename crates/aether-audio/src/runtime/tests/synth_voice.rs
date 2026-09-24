@@ -116,9 +116,7 @@ fn partial_bank_voice_frees_itself_when_silent() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
     // id 5 is piano; high pitch rings out quickly.
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 96, velocity: 100, instrument_id: 5, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 96, velocity: 100, instrument_id: 5, pan: 0 }).unwrap();
     let mut buf = vec![0.0f32; 4_800];
     for _ in 0..200 {
         synth.fill(&mut buf, 1);
@@ -166,14 +164,14 @@ fn zero_crossings(samples: &[f32]) -> usize {
 
 #[test]
 fn noise_is_bounded_and_nonzero() {
-    let samples = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, voice_seed(MailboxId(1), 9, 60), 4_000);
+    let samples = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, voice_seed(None, 9, 60), 4_000);
     assert!(samples.iter().all(|s| s.abs() <= 1.0 + f32::EPSILON), "noise sample escaped [-1, 1]");
     assert!(samples.iter().any(|s| s.abs() > 0.0), "noise produced silence");
 }
 
 #[test]
 fn noise_is_deterministic_for_a_fixed_voice_key() {
-    let seed = voice_seed(MailboxId(7), 9, 64);
+    let seed = voice_seed(None, 9, 64);
     let wave = Wave::Noise { lowpass: 0.8, tone_mix: 0.0 };
     let first = collect_osc(wave, 1.0, seed, 2_000);
     let second = collect_osc(wave, 1.0, seed, 2_000);
@@ -182,7 +180,7 @@ fn noise_is_deterministic_for_a_fixed_voice_key() {
 
 #[test]
 fn lowpass_reduces_sample_to_sample_delta() {
-    let seed = voice_seed(MailboxId(1), 9, 60);
+    let seed = voice_seed(None, 9, 60);
     let unfiltered = collect_osc(Wave::Noise { lowpass: 1.0, tone_mix: 0.0 }, 1.0, seed, 8_000);
     let filtered = collect_osc(Wave::Noise { lowpass: 0.15, tone_mix: 0.0 }, 1.0, seed, 8_000);
     let mean_delta = |s: &[f32]| -> f32 {
@@ -210,15 +208,13 @@ fn pitch_sweep_zero_crossing_rate_falls_toward_base() {
 fn note_on_off_lifecycle() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1);
     assert!(buf.iter().any(|s| s.abs() > 0.0));
 
-    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
+    sender.push(AudioEvent::NoteOff { sender: None, pitch: 60, instrument_id: 0 }).unwrap();
     // Compile-time constant; trivially exact for usize.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let release_samples = (0.5 * 48_000.0) as usize;
@@ -240,9 +236,7 @@ fn note_on_off_lifecycle() {
 fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     assert_eq!(synth.reverb_send(), 0.0, "reverb send must default to fully dry");
 
     let mut buf = vec![0.0f32; 480];
@@ -253,7 +247,7 @@ fn reverb_send_zero_matches_pre_reverb_dry_mix_bit_for_bit() {
     // stepped and mixed the same way `fill` does (master_gain at
     // its 1.0 default), never touching the reverb.
     let def = BUILTINS.iter().find(|d| d.name == "sine_lead").expect("sine_lead is builtin id 0");
-    let mut kernel = build_builtin_kernel(MailboxId(1), 0, 60, 100, def, TEST_RATE);
+    let mut kernel = build_builtin_kernel(None, 0, 60, 100, def, TEST_RATE);
     let dt = 1.0 / TEST_RATE;
     let expected: Vec<f32> = (0..480)
         .map(|_| {
@@ -273,14 +267,12 @@ fn reverb_tail_persists_after_the_note_ends() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     sender.push(AudioEvent::SetReverbSend { send: 1.0 }).unwrap();
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     let mut buf = vec![0.0f32; 480];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.reverb_send(), 1.0);
 
-    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
+    sender.push(AudioEvent::NoteOff { sender: None, pitch: 60, instrument_id: 0 }).unwrap();
     // Drive well past the release so the voice fully frees.
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let release_samples = (0.5 * TEST_RATE) as usize;
@@ -307,7 +299,7 @@ fn scheduled_note_fires_at_its_exact_frame() {
     // 1 ms at 48 kHz is exactly 48 frames.
     sender
         .push(AudioEvent::Schedule {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             events: vec![ScheduledEvent {
                 at_millis: 1,
                 event: ScheduledNote::On { pitch: 60, velocity: 100, instrument_id: 0, pan: 0 },
@@ -337,7 +329,7 @@ fn simultaneous_scheduled_events_stay_a_chord() {
     // they fire on the same frame — a chord stays a chord.
     sender
         .push(AudioEvent::Schedule {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
@@ -366,7 +358,7 @@ fn scheduled_note_off_releases_after_its_note_on() {
     // instrument + pitch).
     sender
         .push(AudioEvent::Schedule {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             events: vec![
                 ScheduledEvent {
                     at_millis: 0,
@@ -399,7 +391,7 @@ fn schedule_offset_spans_block_boundaries() {
     // second block, never the first.
     sender
         .push(AudioEvent::Schedule {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             events: vec![ScheduledEvent {
                 at_millis: 2,
                 event: ScheduledNote::On { pitch: 72, velocity: 100, instrument_id: 0, pan: 0 },
@@ -413,7 +405,7 @@ fn schedule_offset_spans_block_boundaries() {
     assert_eq!(synth.voice_count(), 1, "note never fired in its block");
 }
 
-/// Tripwire: two concurrent note-ons sharing a `(sender_mailbox,
+/// Tripwire: two concurrent note-ons sharing a `(sender,
 /// instrument_id, pitch)` key must each allocate their own voice —
 /// the second must not steal the first's slot (issue 2524).
 #[test]
@@ -421,15 +413,7 @@ fn same_key_note_ons_stack_voices() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
     for _ in 0..2 {
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            })
-            .unwrap();
+        sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     }
     let mut buf = vec![0.0f32; 128];
     synth.fill(&mut buf, 1);
@@ -445,21 +429,13 @@ fn note_off_releases_oldest_unreleased_voice_on_shared_key() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
     for _ in 0..2 {
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            })
-            .unwrap();
+        sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 2, "setup: both note-ons must sound");
 
-    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
+    sender.push(AudioEvent::NoteOff { sender: None, pitch: 60, instrument_id: 0 }).unwrap();
     // instrument 0 (sine_lead) releases in 0.18s; run well past that
     // so the released voice finishes its release ramp and is pruned,
     // while its never-released sibling (held in Sustain) stays
@@ -469,29 +445,9 @@ fn note_off_releases_oldest_unreleased_voice_on_shared_key() {
     assert_eq!(synth.voice_count(), 1, "note-off must release exactly the oldest voice, leaving its sibling sounding");
     assert!(synth.has_voice_with_pitch(60), "the un-released sibling must still be sounding");
 
-    sender.push(AudioEvent::NoteOff { sender_mailbox: MailboxId(1), pitch: 60, instrument_id: 0 }).unwrap();
+    sender.push(AudioEvent::NoteOff { sender: None, pitch: 60, instrument_id: 0 }).unwrap();
     synth.fill(&mut tail, 1);
     assert_eq!(synth.voice_count(), 0, "second note-off must release the surviving voice");
-}
-
-#[test]
-fn different_senders_get_independent_voices() {
-    let (sender, queue) = new_event_channel();
-    let mut synth = Synth::new(queue, 48_000.0);
-    for mailbox in 1..=3 {
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(mailbox),
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            })
-            .unwrap();
-    }
-    let mut buf = vec![0.0f32; 128];
-    synth.fill(&mut buf, 1);
-    assert_eq!(synth.voice_count(), 3);
 }
 
 #[test]
@@ -531,15 +487,7 @@ fn channel_energy(buffer: &[f32], channels: usize) -> Vec<f32> {
 fn hard_left_note_puts_energy_in_the_left_channel() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
-    sender
-        .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
-            pitch: 60,
-            velocity: 127,
-            instrument_id: 0,
-            pan: -128,
-        })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 127, instrument_id: 0, pan: -128 }).unwrap();
     let mut buf = vec![0.0f32; 480 * 2];
     synth.fill(&mut buf, 2);
     let energy = channel_energy(&buf, 2);
@@ -560,11 +508,11 @@ fn set_sender_gain_scales_voice_contribution() {
         let (sender, queue) = new_event_channel();
         let mut synth = Synth::new(queue, TEST_RATE);
         if let Some(g) = gain {
-            sender.push(AudioEvent::SetSenderGain { sender_mailbox: MailboxId(1), gain: g }).unwrap();
+            sender.push(AudioEvent::SetSenderGain { sender: None, gain: g }).unwrap();
         }
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(1),
+                sender: None,
                 pitch: 60,
                 // A modest velocity keeps the summed level well inside
                 // the near-linear region of the tanh soft clip, so the
@@ -591,16 +539,14 @@ fn set_sender_gain_scales_voice_contribution() {
 fn set_sender_gain_ducks_a_sounding_voice() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 0, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     let mut buf = vec![0.0f32; 256 * 2];
     // Warm past the attack, then measure a steady block at unity.
     synth.fill(&mut buf, 2);
     synth.fill(&mut buf, 2);
     let unity_energy: f32 = buf.iter().map(|s| s.abs()).sum();
     // Duck the already-sounding voice; the next block must drop.
-    sender.push(AudioEvent::SetSenderGain { sender_mailbox: MailboxId(1), gain: 0.25 }).unwrap();
+    sender.push(AudioEvent::SetSenderGain { sender: None, gain: 0.25 }).unwrap();
     synth.fill(&mut buf, 2);
     let ducked_energy: f32 = buf.iter().map(|s| s.abs()).sum();
     assert!(
@@ -609,13 +555,74 @@ fn set_sender_gain_ducks_a_sounding_voice() {
     );
 }
 
+/// Register a sender under `name` and return the `Source` a real envelope
+/// from it carries: the sender mails its own reference once, and its inbox
+/// hands back the dispatch the binding stamped.
+fn stamped_source(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> Source {
+    let (dispatch_tx, dispatch_rx) = mpsc::channel::<OwnedDispatch>();
+    let (binding, reference) = registered_binding(
+        registry,
+        mailer,
+        name,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // ADR-0094: terminal consumer — discharge before forwarding.
+            dispatch.discharge();
+            let _ = dispatch_tx.send(dispatch);
+        }) as Arc<dyn InboxHandler>,
+    );
+
+    NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE).send_to(reference, &SetMasterGain { gain: 1.0 });
+    dispatch_rx.recv_timeout(Duration::from_secs(2)).expect("the sender's own mail reached its inbox").sender
+}
+
+/// The handler ctx for an inbound whose envelope carried `source`.
+fn sender_ctx(transport: &Arc<NativeBinding>, source: Source) -> NativeCtx<'_> {
+    NativeCtx::new(transport, source, MailId::NONE, MailId::NONE)
+}
+
+// Regression (issue 6522): two local components are two senders. A
+// `set_sender_gain` of zero from the left one silences only its own voice,
+// and the right one keeps sounding at unity — the sender key must not
+// collapse distinct components onto one entry.
+#[test]
+fn set_sender_gain_leaves_another_component_at_unity() {
+    let (mut cap, queue) = live_cap();
+    let (registry, mailer) = fresh_substrate();
+    let transport = unrouted_binding(&mailer);
+    let left = stamped_source(&registry, &mailer, "test.audio.sender.left");
+    let right = stamped_source(&registry, &mailer, "test.audio.sender.right");
+
+    AudioCapability::on_note_on(
+        &mut cap,
+        &mut sender_ctx(&transport, left),
+        NoteOn { pitch: 60, velocity: 100, instrument_id: 0, pan: -128 },
+    );
+    AudioCapability::on_note_on(
+        &mut cap,
+        &mut sender_ctx(&transport, right),
+        NoteOn { pitch: 60, velocity: 100, instrument_id: 0, pan: 127 },
+    );
+    let _ =
+        AudioCapability::on_set_sender_gain(&mut cap, &mut sender_ctx(&transport, left), SetSenderGain { gain: 0.0 });
+
+    let mut synth = Synth::new(queue, TEST_RATE);
+    let mut buf = vec![0.0f32; 480 * 2];
+    synth.fill(&mut buf, 2);
+    let energy = channel_energy(&buf, 2);
+    assert!(energy[1] > 0.0, "the right component's voice went silent under the left one's gain");
+    assert!(
+        energy[0] < energy[1] * 1.0e-3,
+        "the left component's zero gain left its voice sounding: L={}, R={}",
+        energy[0],
+        energy[1],
+    );
+}
+
 #[test]
 fn unknown_instrument_id_drops_note() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: 99, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 99, pan: 0 }).unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 0);
@@ -625,16 +632,8 @@ fn unknown_instrument_id_drops_note() {
 fn voice_steal_caps_at_max_voices() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, 48_000.0);
-    for i in 0..(MAX_VOICES as u64 + 10) {
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(i + 1),
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            })
-            .unwrap();
+    for _ in 0..MAX_VOICES + 10 {
+        sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
@@ -669,9 +668,7 @@ fn voice_steal_evicts_quietest_note() {
         } else {
             127
         };
-        sender
-            .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch, velocity, instrument_id: 0, pan: 0 })
-            .unwrap();
+        sender.push(AudioEvent::NoteOn { sender: None, pitch, velocity, instrument_id: 0, pan: 0 }).unwrap();
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
@@ -679,9 +676,7 @@ fn voice_steal_evicts_quietest_note() {
     assert!(synth.has_voice_with_pitch(QUIET_PITCH));
 
     // One more note saturates the pool — steal fires.
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 200, velocity: 100, instrument_id: 0, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 200, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     synth.fill(&mut buf, 1);
 
     // The active pool stays exactly at the cap — the stolen voice
