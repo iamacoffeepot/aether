@@ -189,8 +189,10 @@ pub trait Dispatch<S> {
 /// ([`Addressable`]) and composes the boot lifecycle and per-kind dispatch
 /// parameterised by its runtime [`State`](NativeActor::State): the shared
 /// [`Lifecycle<Self::State>`](Lifecycle) (`InitError` pinned to
-/// the chassis [`BootError`], the ctx GATs to `NativeInitCtx` / `NativeCtx`) and
-/// the native [`Dispatch<Self::State>`](Dispatch). The state is **plain data**
+/// the chassis [`BootError`], the ctx GATs to `NativeInitCtx` / `NativeCtx<'a, Self>`)
+/// and the native [`Dispatch<Self::State>`](Dispatch). The lifecycle ctx is typed
+/// by the actor, so a `wire` / `unwire` hook that spells `NativeCtx<'_, Self>`
+/// reaches the flat verbs its declared dependencies allow. The state is **plain data**
 /// — bounded only by `Send + 'static`, it implements no behaviour trait.
 ///
 /// `State` defaults to `Self` for every un-split cap (the identity IS its own
@@ -205,8 +207,12 @@ pub trait Dispatch<S> {
 /// composed traits: `<A as Lifecycle<_>>::init` / `<A as Dispatch<_>>::dispatch`.
 pub trait NativeActor:
     Addressable
-    + for<'a> Lifecycle<Self::State, InitError = BootError, InitCtx<'a> = NativeInitCtx<'a>, Ctx<'a> = NativeCtx<'a>>
-    + Dispatch<Self::State>
+    + for<'a> Lifecycle<
+        Self::State,
+        InitError = BootError,
+        InitCtx<'a> = NativeInitCtx<'a>,
+        Ctx<'a> = NativeCtx<'a, Self>,
+    > + Dispatch<Self::State>
 {
     /// The runtime state this identity boots into — **plain data**, bounded
     /// only by `Send + 'static`.

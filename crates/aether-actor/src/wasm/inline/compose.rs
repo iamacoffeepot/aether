@@ -729,7 +729,7 @@ mod tests {
         type Params = ();
         type InitError = ActorInitError;
         type InitCtx<'a> = WasmInitCtx<'a>;
-        type Ctx<'a> = WasmCtx<'a>;
+        type Ctx<'a> = WasmCtx<'a, Self>;
 
         fn init(config: TypedConfig, _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
             Ok(Self { observed: config.0 })

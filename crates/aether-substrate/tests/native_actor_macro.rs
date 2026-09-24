@@ -1026,6 +1026,57 @@ fn macro_emits_native_dependency_inventory_from_actor_types() {
     assert_eq!(entry.namespace, DependsDepCap::NAMESPACE);
 }
 
+/// A root actor whose `wire` and `unwire` hooks name their actor. The
+/// lifecycle ctx is typed by the actor, so both reach the flat verbs its
+/// declared dependency allows.
+struct TypedWireCap;
+
+#[aether_actor::actor(root, depends(MacroProbeCap))]
+impl NativeActor for TypedWireCap {
+    const NAMESPACE: &'static str = "test.macro_native_actor.typed_wire";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+        ctx.send_detached::<MacroProbeCap>(&Greet { tag: 13 });
+    }
+
+    fn unwire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+        let _ = ctx.actor_ref::<MacroProbeCap>();
+    }
+
+    #[aether_actor::handler::single]
+    fn on_ping(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Ping) {
+        let _ = self;
+    }
+}
+
+#[test]
+fn a_wire_hook_that_names_its_actor_receives_the_typed_ctx() {
+    let (registry, mailer) = bare_substrate();
+    let greet_total = Arc::new(AtomicU32::new(0));
+    let ping_total = Arc::new(AtomicU32::new(0));
+
+    let chassis: PassiveChassis<TestChassis> = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor::<MacroProbeCap>(ProbeParams {
+            greet_total: Arc::clone(&greet_total),
+            ping_total: Arc::clone(&ping_total),
+        })
+        .with_actor::<TypedWireCap>(())
+        .build_passive()
+        .expect("an actor with typed lifecycle hooks boots");
+
+    assert!(
+        wait_for(13, &greet_total, Duration::from_millis(500)),
+        "the typed wire hook's flat send should reach its declared dependency within budget"
+    );
+
+    drop(chassis);
+}
+
 #[test]
 fn macro_emits_native_instanced_child_inventory_from_actor_types() {
     use aether_data::ActorId;

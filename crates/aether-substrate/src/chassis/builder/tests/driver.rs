@@ -96,7 +96,7 @@ fn claim_namespaces_reports_all_contributors_and_skips_init() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             params.fetch_add(1, AtomicOrdering::SeqCst);
             Ok(Self { _init_count: params })
