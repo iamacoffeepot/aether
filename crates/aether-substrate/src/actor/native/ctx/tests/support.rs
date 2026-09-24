@@ -30,7 +30,7 @@ impl aether_actor::Lifecycle<Self> for StubActor {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init((): (), _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { boots: AtomicU32::new(0) })
     }

@@ -7,9 +7,9 @@ use super::{
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use aether_actor::ErasedActorRef;
-use aether_substrate::mail::registry::MailDispatch;
+use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::mail::{MailId, Source};
-use aether_substrate::testing::{boot_authority, fresh_substrate, unrouted_binding};
+use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
 use std::time::{Duration, UNIX_EPOCH};
 
 /// Run `body` against a fresh substrate — its registry and mailer — and a
@@ -23,12 +23,9 @@ fn with_test_ctx<T>(body: impl FnOnce(&Registry, &Arc<Mailer>, &mut NativeCtx<'_
     body(&registry, &mailer, &mut ctx)
 }
 
-/// Register a named inline mailbox and prove it through the ctx verb — this
-/// crate cannot construct a reference any other way.
-fn proven(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
-    let position = registry.register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
-
-    ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
+/// Register a named test-local mailbox and return its proven reference.
+fn proven(registry: &Registry, name: &str) -> ErasedActorRef {
+    registered_ref(registry, name, noop_handler())
 }
 
 fn conn_header(value: &str) -> Vec<HttpHeader> {
@@ -366,9 +363,7 @@ mod route_registration {
 
     /// Two proven route holders.
     fn holders() -> (ErasedActorRef, ErasedActorRef) {
-        with_test_ctx(|registry, _, ctx| {
-            (proven(registry, ctx, "test.http.route.a"), proven(registry, ctx, "test.http.route.b"))
-        })
+        with_test_ctx(|registry, _, _| (proven(registry, "test.http.route.a"), proven(registry, "test.http.route.b")))
     }
 
     #[track_caller]
@@ -548,7 +543,7 @@ mod shard_startup {
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::{boot_authority, registered_binding, unrouted_binding};
+    use aether_substrate::testing::{registered_binding, registered_ref, unrouted_binding};
     use std::collections::VecDeque;
     use std::io::Read;
     use std::iter::once;
@@ -571,15 +566,14 @@ mod shard_startup {
 
     /// A binding for the supervisor's handler ctx, over a test-local inbox.
     fn binding(registry: &Registry, mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
-        registered_binding(registry, mailer, "test.http.supervisor", discharging())
+        registered_binding(registry, mailer, "test.http.supervisor", discharging()).0
     }
 
     /// A shard sink over a test-local inbox, proven the way the shard's
     /// `SpawnOutcome` hands the supervisor its proof.
-    fn sink(registry: &Registry, ctx: &NativeCtx<'_>, name: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
+    fn sink(registry: &Registry, name: &str) -> (ShardSink, mpsc::Receiver<InboundEvent>) {
         let (inbound_tx, inbound_rx) = mpsc::channel();
-        let position = registry.register_inbox(&boot_authority(), name, discharging());
-        let shard = ctx.resolve_live(position).expect("a freshly registered inbox proves");
+        let shard = registered_ref(registry, name, discharging());
 
         (ShardSink { inbound_tx, dirty: Arc::new(AtomicBool::new(false)), shard }, inbound_rx)
     }
@@ -621,8 +615,8 @@ mod shard_startup {
         let (registry, mut state) = starting_state(3, pending_peers);
         let binding = binding(&registry, &state.mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let (sink_zero, rx_zero) = sink(&registry, &ctx, "test.http.shard-zero");
-        let (sink_two, rx_two) = sink(&registry, &ctx, "test.http.shard-two");
+        let (sink_zero, rx_zero) = sink(&registry, "test.http.shard-zero");
+        let (sink_two, rx_two) = sink(&registry, "test.http.shard-two");
 
         assert!(matches!(state.finish_shard_spawn(2, Some(sink_two)), ShardSettlement::Pending));
         assert!(rx_zero.try_recv().is_err());
@@ -648,9 +642,7 @@ mod shard_startup {
     #[test]
     fn duplicate_completion_cannot_finish_startup_twice() {
         let (registry, mut state) = starting_state(2, VecDeque::new());
-        let binding = binding(&registry, &state.mailer);
-        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let (sink_zero, _rx_zero) = sink(&registry, &ctx, "test.http.duplicate-zero");
+        let (sink_zero, _rx_zero) = sink(&registry, "test.http.duplicate-zero");
 
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
         assert!(matches!(state.finish_shard_spawn(0, None), ShardSettlement::Stale));
@@ -753,7 +745,7 @@ mod wake_coalescing {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let counter = Arc::new(CountingInbox(AtomicUsize::new(0)));
-        let binding =
+        let (binding, _) =
             registered_binding(&registry, &mailer, "test.wake_target", Arc::clone(&counter) as Arc<dyn InboxHandler>);
         let wake = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE).self_wake();
         let (inbound_tx, inbound_rx) = mpsc::channel();
@@ -814,7 +806,7 @@ mod monitor_collapse {
     fn watch_remembers_unmonitorable_mailbox() {
         with_test_ctx(|registry, mailer, ctx| {
             let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(mailer));
-            let target = proven(registry, ctx, "test.http.watch.target");
+            let target = proven(registry, "test.http.watch.target");
 
             assert!(!state.monitors.contains_key(&target));
             assert!(!state.unmonitorable.contains(&target));
@@ -827,7 +819,7 @@ mod monitor_collapse {
             state.watch(ctx, target);
             assert_eq!(state.unmonitorable.len(), after_first, "second watch for same mailbox stays collapsed");
 
-            let other = proven(registry, ctx, "test.http.watch.other");
+            let other = proven(registry, "test.http.watch.other");
             state.watch(ctx, other);
             assert!(state.unmonitorable.contains(&other), "different mailbox still warns");
             assert_eq!(state.unmonitorable.len(), after_first + 1);

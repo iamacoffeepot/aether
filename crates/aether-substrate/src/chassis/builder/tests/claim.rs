@@ -101,7 +101,7 @@ fn failed_singleton_init_releases_namespace_and_sink() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Err(BootError::Other(Box::new(io::Error::other("intentional init failure for Phase 7 cleanup test"))))
         }

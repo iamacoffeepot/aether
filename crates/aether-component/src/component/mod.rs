@@ -53,6 +53,10 @@
 // re-export sources `ComponentHostParams` through `runtime`.
 #[cfg(feature = "runtime")]
 pub use runtime::ComponentHostParams;
+// The trampoline's replace path checks its hosted type's dependencies
+// through the host's shared refusal wording.
+#[cfg(feature = "runtime")]
+pub(crate) use runtime::replacement_refusal;
 
 // `LoadResult` is named by the runtime half's own code, not by the emitted
 // markers, so it keeps the runtime gate the rest of that half rides.

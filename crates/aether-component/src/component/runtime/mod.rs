@@ -29,6 +29,8 @@ use crate::trampoline::WasmTrampoline;
 // `ComponentHostParams` rides up to the cap root through this `pub use`: the
 // cap-root `pub use runtime::ComponentHostParams;` re-export sources it here.
 pub use self::config::ComponentHostParams;
+// The trampoline checks a replacement's hosted type through this re-export.
+pub use self::dependencies::replacement_refusal;
 
 use aether_kinds::{
     DescribeComponent, DescribeComponentResult, DropComponent, DropResult, ListComponents, ListComponentsResult,

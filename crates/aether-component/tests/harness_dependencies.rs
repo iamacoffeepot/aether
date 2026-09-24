@@ -174,12 +174,13 @@ fn replace_with_unmet_dependency_keeps_running_module() {
         ReplaceResult::Err { error } => panic!("a replace whose declared dependency is live must succeed: {error}"),
     }
 
-    // A bare replace reuses the hosted type, which the host does not track,
-    // so it checks the entry group's dependencies: the entry probe's declared
-    // dependencies, lifecycle, window and the harness observer, are all
-    // registered by the harness, and the replace proceeds.
+    // A bare replace checks the hosted type, which the satisfied replace just
+    // made the dependent probe: its declared dependencies, the target loaded
+    // above and the harness observer, are live, and the replace proceeds.
     match replace(&mut harness, "replace-bare", None) {
         ReplaceResult::Ok { .. } => {}
-        ReplaceResult::Err { error } => panic!("a bare replace past a satisfied entry must succeed: {error}"),
+        ReplaceResult::Err { error } => {
+            panic!("a bare replace whose hosted type has live dependencies must succeed: {error}")
+        }
     }
 }

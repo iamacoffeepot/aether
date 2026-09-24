@@ -12,6 +12,8 @@
 //! parks the reply keyed by its [`CallerId`]; each reply kind recovers its
 //! ticket from the request context and feeds the matching core
 //! continuation. Dropping the actor abandons every parked reply.
+//! A bundle root's fetch-on-miss `ReadArtifact` is forwarded to the journal
+//! owner with its reply pinned to the root, so the core never sees it.
 
 mod perform;
 
@@ -21,8 +23,8 @@ use std::mem;
 use aether_actor::{ActorRef, ErasedActorRef, Manual, actor};
 use aether_bloomery_journal::{JournalActor, MAX_READ_EVENTS};
 use aether_bloomery_kinds::{
-    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifactResult,
-    ReadClosureResult, ReadEventsResult, Status, Warmed, WatchHeadResult,
+    AppendRecordsResult, AwaitProcessed, Call, ClosureLimit, Digest, Evaluated, Invoked, ReadArtifact,
+    ReadArtifactResult, ReadClosureResult, ReadEventsResult, Status, Warmed, WatchHeadResult,
 };
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadResult;
@@ -121,6 +123,14 @@ impl NativeActor for BundleDriver {
         };
         let commands = self.core.on_artifact(ticket, result);
         self.perform(ctx, commands);
+    }
+
+    /// Serves a bundle root's fetch-on-miss: forwards the `ReadArtifact` to the
+    /// journal owner, which replies to the root directly with the root's
+    /// correlation. The core does not see it and the driver keeps no state.
+    #[handler::manual]
+    fn on_fetch_artifact(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, request: ReadArtifact) {
+        ctx.forward_to(&self.journal.erase(), &request);
     }
 
     #[handler::single]

@@ -44,7 +44,7 @@ impl crate::Lifecycle<Self> for FailingChild {
     type Params = ();
     type InitError = ActorInitError;
     type InitCtx<'a> = WasmInitCtx<'a>;
-    type Ctx<'a> = WasmCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
 
     fn init(_config: (), _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Err(ActorInitError::new("inline child init deliberately fails"))
@@ -99,7 +99,7 @@ impl crate::Lifecycle<Self> for SucceedingChild {
     type Params = ();
     type InitError = ActorInitError;
     type InitCtx<'a> = WasmInitCtx<'a>;
-    type Ctx<'a> = WasmCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
 
     fn init(_config: (), _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
@@ -175,7 +175,7 @@ impl crate::Lifecycle<Self> for StubChild {
     type Params = ();
     type InitError = ActorInitError;
     type InitCtx<'a> = WasmInitCtx<'a>;
-    type Ctx<'a> = WasmCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
 
     fn init(config: StubConfig, _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         STUB_INIT_CONFIG.set(Some(config.value));
@@ -286,7 +286,7 @@ impl crate::Lifecycle<Self> for LifecycleProbe {
     type Params = ();
     type InitError = ActorInitError;
     type InitCtx<'a> = WasmInitCtx<'a>;
-    type Ctx<'a> = WasmCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
 
     fn init(_config: (), _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)
@@ -339,7 +339,7 @@ impl crate::Lifecycle<Self> for NestingParent {
     type Params = ();
     type InitError = ActorInitError;
     type InitCtx<'a> = WasmInitCtx<'a>;
-    type Ctx<'a> = WasmCtx<'a>;
+    type Ctx<'a> = WasmCtx<'a, Self>;
 
     fn init(_config: (), _params: (), _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         Ok(Self)

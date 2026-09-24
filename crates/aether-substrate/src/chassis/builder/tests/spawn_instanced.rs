@@ -63,7 +63,7 @@ fn instanced_can_spawn_grandchild() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: params })
         }
@@ -103,7 +103,7 @@ fn instanced_can_spawn_grandchild() {
         type Params = (Arc<AtomicU32>, Arc<Mutex<Option<(MailboxId, String)>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init(
             (): (),
             (grandchild_received, spawned_name): Self::Params,
@@ -254,7 +254,7 @@ fn spawn_finish_with_name_returns_the_registered_top_level_name() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)

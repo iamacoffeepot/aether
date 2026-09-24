@@ -228,7 +228,7 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
+    use aether_substrate::testing::{fresh_substrate, registered_binding, registered_ref};
     use std::sync::Arc;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces. Hand-rolled `Kind`
@@ -263,17 +263,14 @@ mod tests {
     /// comes back too, so a test can register and prove its senders.
     fn harness(tag: &str) -> (Arc<Registry>, Arc<NativeBinding>) {
         let (registry, mailer) = fresh_substrate();
-        let binding = registered_binding(&registry, &mailer, tag, noop_handler());
+        let (binding, _) = registered_binding(&registry, &mailer, tag, noop_handler());
         (registry, binding)
     }
 
     /// Register a test-local sender inbox under `name` and prove it the way
     /// `ctx.sender()` hands the cap a local component's proof.
-    fn sender(registry: &Registry, binding: &Arc<NativeBinding>, name: &str) -> ErasedActorRef {
-        let position = registry.register_inbox(&boot_authority(), name, noop_handler());
-        let ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
-
-        ctx.resolve_live(position).expect("a freshly registered inbox proves")
+    fn sender(registry: &Registry, name: &str) -> ErasedActorRef {
+        registered_ref(registry, name, noop_handler())
     }
 
     fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>, cid: u64) {
@@ -298,7 +295,7 @@ mod tests {
     #[test]
     fn over_per_sender_budget_queues() {
         let (registry, binding) = harness("test.egress.per_sender");
-        let sender = Some(sender(&registry, &binding, "test.egress.per_sender.sender"));
+        let sender = Some(sender(&registry, "test.egress.per_sender.sender"));
         let mut q = PerSenderEgress::new(2, 32);
         for cid in 1..=3 {
             submit(&mut q, &binding, sender, cid);
@@ -313,7 +310,7 @@ mod tests {
     #[test]
     fn on_complete_drains_the_queue() {
         let (registry, binding) = harness("test.egress.drain");
-        let sender = Some(sender(&registry, &binding, "test.egress.drain.sender"));
+        let sender = Some(sender(&registry, "test.egress.drain.sender"));
         let mut q = PerSenderEgress::new(1, 32);
         submit(&mut q, &binding, sender, 1);
         submit(&mut q, &binding, sender, 2);
@@ -330,8 +327,8 @@ mod tests {
     #[test]
     fn per_sender_isolation() {
         let (registry, binding) = harness("test.egress.isolation");
-        let a = Some(sender(&registry, &binding, "test.egress.isolation.a"));
-        let b = Some(sender(&registry, &binding, "test.egress.isolation.b"));
+        let a = Some(sender(&registry, "test.egress.isolation.a"));
+        let b = Some(sender(&registry, "test.egress.isolation.b"));
         let mut q = PerSenderEgress::new(2, 32);
         // A fills and overruns its budget.
         for cid in 1..=3 {
@@ -352,8 +349,8 @@ mod tests {
     #[test]
     fn global_ceiling_gates_under_per_sender_budget() {
         let (registry, binding) = harness("test.egress.global");
-        let a = Some(sender(&registry, &binding, "test.egress.global.a"));
-        let b = Some(sender(&registry, &binding, "test.egress.global.b"));
+        let a = Some(sender(&registry, "test.egress.global.a"));
+        let b = Some(sender(&registry, "test.egress.global.b"));
         let mut q = PerSenderEgress::new(4, 2);
         submit(&mut q, &binding, a, 1);
         submit(&mut q, &binding, b, 2);
@@ -372,8 +369,8 @@ mod tests {
     #[test]
     fn drain_rotates_across_senders_at_the_ceiling() {
         let (registry, binding) = harness("test.egress.rotate");
-        let a = Some(sender(&registry, &binding, "test.egress.rotate.a"));
-        let b = Some(sender(&registry, &binding, "test.egress.rotate.b"));
+        let a = Some(sender(&registry, "test.egress.rotate.a"));
+        let b = Some(sender(&registry, "test.egress.rotate.b"));
         // Per-sender budget 4 (never the binding constraint here), global 2.
         let mut q = PerSenderEgress::new(4, 2);
         submit(&mut q, &binding, a, 1); // A in flight
@@ -402,7 +399,7 @@ mod tests {
     #[test]
     fn idle_entry_reclaims() {
         let (registry, binding) = harness("test.egress.reclaim");
-        let sender = Some(sender(&registry, &binding, "test.egress.reclaim.sender"));
+        let sender = Some(sender(&registry, "test.egress.reclaim.sender"));
         let mut q = PerSenderEgress::new(2, 32);
         submit(&mut q, &binding, sender, 1);
         assert_eq!(q.tracked_senders(), 1, "the entry is created lazily on first submit");
@@ -420,9 +417,9 @@ mod tests {
     fn queued_fetch_holds_its_chain_until_reply() {
         let (registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
-        let binding = registered_binding(&registry, &mailer, "test.egress.hold", noop_handler());
+        let (binding, _) = registered_binding(&registry, &mailer, "test.egress.hold", noop_handler());
 
-        let sender = Some(sender(&registry, &binding, "test.egress.hold.sender"));
+        let sender = Some(sender(&registry, "test.egress.hold.sender"));
         let mut q = PerSenderEgress::new(1, 32);
         let root_a = root_id(1);
         let root_b = root_id(2);

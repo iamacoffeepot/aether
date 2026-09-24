@@ -810,7 +810,7 @@ mod tests {
         use std::sync::mpsc;
 
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-        use aether_substrate::mail::{MailId, Source, SourceAddr};
+        use aether_substrate::mail::{MailId, Source};
 
         use crate::LifecycleMailboxExt;
         use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
@@ -835,8 +835,7 @@ mod tests {
         // The calling actor: a transport over a registered inbox, so its
         // sends carry `Source::Component` of that inbox's mailbox.
         let caller = "test.lifecycle.caller";
-        let tx_binding = registered_binding(&registry, &mailer, caller, noop_handler());
-        let sender = registry.lookup(caller).expect("test setup: the calling actor is registered");
+        let (tx_binding, sender) = registered_binding(&registry, &mailer, caller, noop_handler());
         NativeCtx::new_dispatching(&tx_binding, Source::NONE, MailId::NONE, MailId::NONE)
             .actor::<LifecycleCapability>()
             .subscribe::<Tick>();
@@ -844,7 +843,6 @@ mod tests {
 
         let (kind, source, bytes) = rx.try_recv().expect("subscribe::<Tick>() emitted one mail");
         assert_eq!(kind, <LifecycleSubscribeSelf as Kind>::ID, "the SDK self-subscribe sends LifecycleSubscribeSelf");
-        assert_eq!(source.addr, SourceAddr::Component(sender), "the host stamps the calling actor as the Source");
         let decoded =
             LifecycleSubscribeSelf::decode_from_bytes(&bytes).expect("payload decodes as LifecycleSubscribeSelf");
         assert_eq!(decoded.stage, <Tick as Kind>::ID.0, "the payload carries the Tick stage id");
@@ -855,8 +853,12 @@ mod tests {
         let mut cap = tick_start_graph_cap();
         let cap_transport = unrouted_binding(&cap.mailer);
         let mut ctx = NativeCtx::new(&cap_transport, source, MailId::NONE, MailId::NONE);
+        assert_eq!(ctx.sender(), Some(sender), "the host stamps the calling actor as the Source");
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);
 
-        assert!(subscribed(&cap, <Tick as Kind>::ID, sender), "the calling actor lands in the Tick stage set");
+        assert!(
+            cap.subscribers[&<Tick as Kind>::ID].contains(&sender),
+            "the calling actor lands in the Tick stage set"
+        );
     }
 }

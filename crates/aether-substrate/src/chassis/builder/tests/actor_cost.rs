@@ -53,7 +53,7 @@ fn a_pre_seeded_actor_still_gets_cells_for_its_declared_kinds() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // The trampoline's move: stage cells for a set known only at
@@ -165,7 +165,7 @@ fn spawned_actor_costs_seed_fold_filter_and_drop_on_finalization() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), ping_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { ping_count })

@@ -254,8 +254,12 @@ where
     /// the close hook resolves to this actor's slots.
     fn run_close_hook(&self, actor: &mut Box<A::State>) {
         local::with_stamped(&self.slots, || {
-            let mut close_ctx =
-                NativeCtx::new(&self.binding, Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+            let mut close_ctx = NativeCtx::new_for_actor(
+                &self.binding,
+                Source::NONE,
+                aether_data::MailId::NONE,
+                aether_data::MailId::NONE,
+            );
             A::unwire(actor.as_mut(), &mut close_ctx);
         });
     }

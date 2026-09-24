@@ -74,7 +74,7 @@ impl aether_actor::Lifecycle<Self> for Spawned {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init((): Self::Config, (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
@@ -178,7 +178,7 @@ fn post_seal_pumped_boot_publishes_the_endpoint_the_caller_wired() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): Self::Config, params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { seen: params })
         }

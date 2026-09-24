@@ -5,11 +5,12 @@
 //! self-unregistration.
 
 use aether_actor::Addressable;
+use aether_component::{ComponentHostCapability, ComponentHostParams};
 use aether_data::Kind as KindTrait;
 use aether_data::KindId;
-use aether_substrate::Mail;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
+use aether_substrate::{Mail, SubstrateBoot};
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -119,10 +120,26 @@ fn path_template_routes_dispatch_and_capture() {
 /// inherited `send_with_context` that keeps the request's chain open — and
 /// the reply route answers on the peer's `EchoSay`. `GET /blackhole` forwards
 /// to a peer that settles without replying, so the request's chain settles
-/// response-less and the server's own `502` net answers.
+/// response-less and the server's own `502` net answers. The chassis
+/// composes the component host ahead of the handlers, because the typed
+/// `ctx.defer(..)` resolves its recipient through the host.
 #[test]
 fn deferred_route_forwards_and_answers_on_reply() {
-    let chassis = routed_chassis!(DeferRouteHandler, EchoPeer, SilentPeer);
+    let boot = SubstrateBoot::build().expect("substrate boot");
+    let host = ComponentHostParams {
+        engine: Arc::clone(&boot.engine),
+        linker: Arc::clone(&boot.linker),
+        hub_outbound: Arc::clone(&boot.outbound),
+    };
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&boot.registry), Arc::clone(&boot.queue))
+        .with_actor_configured::<HttpServerCapability>((), config_for(1024))
+        .with_actor::<FixedBodyHttpHandler>(())
+        .with_actor::<ComponentHostCapability>(host)
+        .with_actor::<DeferRouteHandler>(())
+        .with_actor::<EchoPeer>(())
+        .with_actor::<SilentPeer>(())
+        .build_passive()
+        .expect("caps boot");
     let port = port_of(&chassis);
 
     // The reply arrives from the peer and the reply route answers the held
