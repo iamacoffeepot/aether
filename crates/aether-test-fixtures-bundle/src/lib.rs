@@ -58,7 +58,7 @@ pub use probe::{Probe, ProbeWithConfig};
 pub use quiet_probe::QuietProbe;
 pub use source_forwarder::SourceForwarder;
 pub use source_observer::SourceObserver;
-pub use stateful_replace::{Counter, Sidecar};
+pub use stateful_replace::{Counter, RehydrateTrap, Sidecar};
 pub use tcp_load_probe::TcpLoadProbe;
 pub use ui_widget::UiWidget;
 
@@ -103,6 +103,7 @@ aether_actor::export!(
     InlineTagParent,
     Counter,
     Sidecar,
+    RehydrateTrap,
     TcpLoadProbe,
     DependentProbe,
     CarryRequester,

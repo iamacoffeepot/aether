@@ -298,8 +298,8 @@ mod tests {
     // site — ADR-0122 split: handlers are associated fns on the identity
     // taking `state: &mut FsCapabilityState`, called as
     // `FsCapability::on_x(&mut fix.state, &mut ctx, mail)`.
-    fn make_ctx(transport: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_> {
-        NativeCtx::new(transport, sender, aether_data::MailId::NONE, aether_data::MailId::NONE)
+    fn make_ctx<A>(transport: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_, A> {
+        NativeCtx::new_for_actor(transport, sender, aether_data::MailId::NONE, aether_data::MailId::NONE)
     }
 
     fn scratch_root(tag: &str) -> PathBuf {

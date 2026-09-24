@@ -1469,7 +1469,7 @@ mod tests {
         state.pending_capture = Some(parked_capture(&mailer, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
 
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: MailId::NONE });
         assert_eq!(state.pending_capture.as_ref().expect("still pending").pre_remaining, 1);
         RenderCapability::on_pre_settled(&mut state, &mut ctx, PreSettled { mail_id: MailId::NONE });
@@ -1491,7 +1491,7 @@ mod tests {
         let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
         state.pending_capture = Some(parked_capture(&mailer, None, 3, past));
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         RenderCapability::on_frame(&mut state, &mut ctx, Frame { replay_cache_when_idle: false, windows: Vec::new() });
 
@@ -1580,7 +1580,7 @@ mod tests {
         let binding = ctx_binding(&mailer);
 
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
             RenderCapability::on_frame(
                 &mut state,
                 &mut ctx,
@@ -1669,7 +1669,7 @@ mod tests {
         let texture_id = 7;
         state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
         // The witness buffers in the ctx and routes on handler-end flush.
@@ -1696,7 +1696,7 @@ mod tests {
         state.textures.entries.insert(user_texture_id, test_staged_texture(vec![1; 16]));
         state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         for texture_id in [99, WHITE_TEXTURE_ID] {
             RenderCapability::on_destroy_texture(&mut state, &mut ctx, DestroyTexture { texture_id });
@@ -1720,7 +1720,7 @@ mod tests {
         let mut state = headless_state(&mailer);
         state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         RenderCapability::on_update_texture(
             &mut state,
@@ -1747,7 +1747,7 @@ mod tests {
         let mut state = headless_state(&mailer);
         let observed = observe_via_mail(&registry, &mut state);
         let binding = ctx_binding(&mailer);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let corner = |x: f32, y: f32| ScreenVertex { x, y, color: Rgba::WHITE };
         let shape = Shape {
             x: 10.0,

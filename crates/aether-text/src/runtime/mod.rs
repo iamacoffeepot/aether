@@ -693,7 +693,7 @@ mod tests {
         size_pixels: f32,
         origin: [f32; 2],
     ) {
-        let mut ctx = NativeCtx::new(binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_draw_text(
             state,
             &mut ctx,
@@ -710,7 +710,7 @@ mod tests {
     }
 
     fn draw_batch(state: &mut TextCapabilityState, binding: &Arc<NativeBinding>, items: Vec<DrawText>) {
-        let mut ctx = NativeCtx::new(binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), MailId::NONE, MailId::NONE);
         TextCapability::on_draw_batch(state, &mut ctx, DrawTextBatch { items });
     }
 
@@ -928,7 +928,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 7 });
         }
         assert_eq!(state.atlas_texture_id, Some(7));
@@ -947,7 +947,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 3 });
         }
         assert_eq!(state.atlas_texture_id, Some(3));
@@ -1064,7 +1064,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 1 });
         }
         assert_eq!(state.atlas_texture_id, Some(1));
