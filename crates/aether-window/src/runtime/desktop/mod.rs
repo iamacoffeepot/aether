@@ -1341,8 +1341,8 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let (binding, manager) = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
         let mut state = test_state();
-        let root = MailId::new(MailboxId(0x100), 7);
-        let parent = MailId::new(MailboxId(0x200), 9);
+        let root = MailId { correlation_id: 7, ..MailId::NONE };
+        let parent = MailId { correlation_id: 9, ..MailId::NONE };
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
