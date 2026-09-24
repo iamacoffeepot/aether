@@ -146,6 +146,12 @@ fn mesh_into_polygons(out: &mut Vec<LoopPolygon>, node: &Node, offset: Vec3) -> 
         Node::Mirror { axis, child } => {
             let mut local = Vec::new();
             mesh_into_polygons(&mut local, child, Vec3::ZERO)?;
+            // `mirror` keeps the child and adds its reflection: originals first, then reflected copies.
+            for poly in &local {
+                if let Some(translated) = transform_polygon(poly, |v| v + offset)? {
+                    out.push(translated);
+                }
+            }
             for poly in &local {
                 if let Some(mirrored) = mirror_polygon(poly, *axis, offset)? {
                     out.push(mirrored);
@@ -241,9 +247,10 @@ fn derive_plane_robust(verts: &[Point3]) -> Option<Plane3> {
     None
 }
 
-/// Mirror `poly` across `axis`, then translate by `offset`. Reflection
+/// Build the reflected copy of `poly` across `axis`, then translate by
+/// `offset`; the caller emits the original separately. Reflection
 /// inverts winding; reverse the vertex list and re-derive the plane so
-/// downstream classification still treats the polygon as outward-CCW.
+/// downstream classification still treats the copy as outward-CCW.
 fn mirror_polygon(poly: &LoopPolygon, axis: Axis, offset: Vec3) -> Result<Option<LoopPolygon>, MeshError> {
     let mut new_verts = Vec::with_capacity(poly.vertices.len());
     for v in &poly.vertices {

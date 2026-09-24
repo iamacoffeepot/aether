@@ -87,7 +87,8 @@ wrong arity, dotted lists, missing color, malformed vectors/profiles, and
 trailing forms are parse errors. `composition` may contain any number of
 children. Vectors are ordered `(x y z)`. Rotation uses an axis vector and an
 angle passed to the math layer in radians. `mirror` accepts only the symbols
-`x`, `y`, or `z`.
+`x`, `y`, or `z`, and emits its child plus the child's reflection across that
+axis-plane through the local origin.
 
 `sweep` takes a 2D profile and a 3D waypoint path. Optional `:scales` must have
 exactly one scalar per waypoint. It is capped by default; `:open true` omits
@@ -176,8 +177,8 @@ the shared reply type is in
   outside that asset-local range returns `MeshError::OutOfRange`; put
   world-scale placement outside the authored mesh. See
   [`fixed.rs`](https://github.com/iamacoffeepot/aether/blob/main/crates/aether-mesh/src/fixed.rs).
-- Primitive faces are wound CCW from outside. Mirroring reverses vertices to
-  preserve outward winding. Degenerate faces can collapse and be skipped
+- Primitive faces are wound CCW from outside. Mirroring reverses the
+  reflected copy's vertices to preserve outward winding. Degenerate faces can collapse and be skipped
   rather than producing an error.
 - N-gon outer loops are CCW and holes are CW around `plane_normal`. Convert
   `Point3` to float only at the render/upload boundary when topology matters.

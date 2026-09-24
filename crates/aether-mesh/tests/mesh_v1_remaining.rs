@@ -228,30 +228,34 @@ fn extrude_with_under_three_profile_points_emits_nothing() {
 // mirror
 
 #[test]
-fn mirror_x_reflects_box_across_yz_plane() {
-    // Box centered at (5, 0, 0), mirrored across YZ plane → centered
-    // at (-5, 0, 0).
+fn mirror_x_emits_box_and_its_reflection() {
+    // Box centered at (5, 0, 0), mirrored across the YZ plane: the
+    // original stays at (5, 0, 0) and its reflection lands at (-5, 0, 0).
     let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
-    assert_eq!(tris.len(), 12);
-    for tri in &tris {
-        for v in tri.vertices {
-            assert!(v.x >= -5.51 && v.x <= -4.49, "mirror-x vertex x out of range: {v:?}");
-        }
-    }
+    assert_eq!(tris.len(), 24);
+    let original = tris.iter().filter(|tri| tri.vertices.iter().all(|v| v.x >= 4.49 && v.x <= 5.51)).count();
+    let reflected = tris.iter().filter(|tri| tri.vertices.iter().all(|v| v.x >= -5.51 && v.x <= -4.49)).count();
+    assert_eq!(original, 12, "original box triangles");
+    assert_eq!(reflected, 12, "reflected box triangles");
 }
 
 #[test]
 fn mirror_preserves_outward_winding() {
-    // After reflection + winding swap, normals should still point
-    // outward of the reflected box (toward the new centroid at -5).
+    // Both copies stay outward-wound: each triangle's normal points
+    // away from the center of the box it belongs to — (5, 0, 0) for the
+    // original, (-5, 0, 0) for the re-wound reflection.
     let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
-        // Reflected box center is at (-5, 0, 0); outward = c - center.
-        let outward = [c.x + 5.0, c.y, c.z];
+        let center_x = if c.x > 0.0 {
+            5.0
+        } else {
+            -5.0
+        };
+        let outward = [c.x - center_x, c.y, c.z];
         let dot = n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
         assert!(dot > 0.0, "mirror face normal points inward for triangle {tri:?}");
     }
