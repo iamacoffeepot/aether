@@ -4,6 +4,7 @@
 //! macro-authored precedence handlers the routing tests drive.
 
 use aether_actor::{Manual, actor};
+use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -92,9 +93,9 @@ impl NativeActor for ExtractRouteHandler {
 /// Claims `/tmp` through the macro surface; on any request the routed
 /// method releases its own route via the raw `unregister_route_self`
 /// (a protocol op the typed surface leaves to the body), so the next
-/// request to `/tmp` falls back to the default handler. `ctx` derefs
-/// to `NativeCtx`, so the raw send reads exactly as an ordinary
-/// handler's.
+/// request to `/tmp` falls back to the default handler. The router types
+/// the route's ctx by this actor, so the route reaches the server through
+/// the proven reference its typed ctx mints for the declared dependency.
 pub struct TmpRouteHandler;
 pub struct TmpRouteHandlerState;
 
@@ -111,8 +112,9 @@ impl NativeActor for TmpRouteHandler {
 
     /// Release `/tmp`, then reply the `tmp` tag.
     #[http::route(any, "/tmp")]
-    fn on_tmp(_state: &mut TmpRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
-        ctx.actor::<HttpServerCapability>().send(&UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None });
+    fn on_tmp(_state: &mut TmpRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_>>) -> HttpServerResponse {
+        let server = ctx.actor_ref::<HttpServerCapability>();
+        ctx.send_to(server, &UnregisterRouteSelf { prefix: "/tmp".to_string(), method: None });
         HttpServerResponse { status: 200, headers: Vec::new(), body: b"tmp".to_vec() }
     }
 }
@@ -276,12 +278,21 @@ impl NativeActor for SilentPeer {
 /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
 /// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
 /// forwards to [`SilentPeer`] and is answered `502` by the settlement
-/// net when that chain settles without a reply.
+/// net when that chain settles without a reply. `ctx.defer(..)` resolves
+/// its recipient through the component host, hence the dependency on
+/// [`ComponentHostCapability`].
 pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root, depends(HttpServerCapability), depends(EchoPeer), depends(SilentPeer))]
+#[actor(
+    singleton,
+    root,
+    depends(HttpServerCapability),
+    depends(EchoPeer),
+    depends(SilentPeer),
+    depends(ComponentHostCapability)
+)]
 impl NativeActor for DeferRouteHandler {
     type State = DeferRouteHandlerState;
     type Config = ();
@@ -294,7 +305,7 @@ impl NativeActor for DeferRouteHandler {
     /// `GET /echo` — forward to the echo peer by type, answer on its
     /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
     #[http::route(Get, "/echo")]
-    fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Erased, Manual>>) -> http::Outcome {
+    fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
@@ -303,7 +314,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::route(Get, "/blackhole")]
     fn blackhole(
         _state: &mut DeferRouteHandlerState,
-        ctx: http::Ctx<'_, NativeCtx<'_, Erased, Manual>>,
+        ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>,
     ) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
     }
@@ -320,7 +331,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::reply]
     fn on_say(
         _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Erased, Manual>,
+        _ctx: &mut NativeCtx<'_, Self, Manual>,
         say: EchoSay,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: format!("echoed:{}", say.text).into_bytes() }
@@ -338,7 +349,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::reply]
     fn on_gated_out(
         _state: &mut DeferRouteHandlerState,
-        _ctx: &mut NativeCtx<'_, Erased, Manual>,
+        _ctx: &mut NativeCtx<'_, Self, Manual>,
         _reply: GatedOutReply,
     ) -> HttpServerResponse {
         HttpServerResponse { status: 200, headers: Vec::new(), body: Vec::new() }
