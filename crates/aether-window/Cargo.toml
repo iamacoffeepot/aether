@@ -21,8 +21,8 @@ publish = false
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity + `HandlesKind` markers compile always-on; the
 # `aether_substrate`-typed runtime half is gated so a marker-only wasm
-# guest can address `ctx.actor::<WindowCapability>()` without
-# dragging the substrate through.
+# guest can declare `#[actor(depends(WindowCapability))]` and mail it with
+# `ctx.send::<WindowCapability>(..)` without dragging the substrate through.
 
 [features]
 default = ["runtime"]

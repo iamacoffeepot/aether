@@ -45,7 +45,7 @@ pub const WORKERS: usize = 2;
 /// `aether.test_fixture.tick_observed`, for example) target this
 /// mailbox through the typed
 /// `aether_test_fixtures_kinds::SubstrateHarnessObserver` marker
-/// (`ctx.actor::<SubstrateHarnessObserver>().send(&k)`); the pumped
+/// (`ctx.send::<SubstrateHarnessObserver>(&k)`); the pumped
 /// `aether.render` dispatch witnesses every kind it delivers here by mail
 /// (issue 5965); the substrate-harness chassis registers
 /// a synchronous-handler closure under this namespace via

@@ -14,6 +14,7 @@
 use std::env;
 use std::fs;
 use std::mem;
+use std::num::NonZeroU64;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -389,7 +390,7 @@ pub fn resolve_teardown_budget() -> Duration {
 /// `env_prefix = "AETHER"` joins the field env keys; explicit
 /// `cli_long` overrides pin the historical flag names so existing
 /// scripts and operators are unaffected.
-#[derive(Clone, Debug, Default, aether_substrate::Config)]
+#[derive(Clone, Debug, aether_substrate::Config)]
 #[config(env_prefix = "AETHER", cli_prefix = "chassis")]
 pub struct ChassisBootConfig {
     /// Worker-pool thread count; unset uses one fewer than the available cores.
@@ -418,9 +419,36 @@ pub struct ChassisBootConfig {
     /// precedence when both are set. `Option<String>` filters empty → `None`.
     #[config(cli_long = "package")]
     pub package: Option<String>,
+    /// Seconds each boot component's load may take to answer before boot aborts.
+    ///
+    /// Bounds each load separately rather than the whole boot list, so a
+    /// long list needs no larger budget. When a load does not answer in time
+    /// the boot fails naming that component and how many loaded before it,
+    /// and the substrate exits nonzero before its RPC server binds (issue
+    /// #6637). Default 20 seconds. A `0` is refused at resolution: every boot
+    /// load has a deadline.
+    #[config(cli_long = "boot-load-budget-secs", default = 20)]
+    pub boot_load_budget_secs: NonZeroU64,
+}
+
+/// The default [`ChassisBootConfig::boot_load_budget_secs`]. It sits below the
+/// hub's default proxy connect budget (30 s), so a stuck boot load is reported
+/// by the substrate, naming the component, before the hub gives up on the dial.
+const DEFAULT_BOOT_LOAD_BUDGET_SECS: NonZeroU64 = NonZeroU64::new(20).expect("20 is nonzero");
+
+impl Default for ChassisBootConfig {
+    fn default() -> Self {
+        Self { workers: None, boot_manifest: None, package: None, boot_load_budget_secs: DEFAULT_BOOT_LOAD_BUDGET_SECS }
+    }
 }
 
 impl ChassisBootConfig {
+    /// How long each boot component's load may take to answer.
+    #[must_use]
+    pub fn boot_load_budget(&self) -> Duration {
+        Duration::from_secs(self.boot_load_budget_secs.get())
+    }
+
     /// Lower the resolved `workers` knob to the pool-size `Option<usize>`
     /// the chassis builder's `with_workers` takes. The 0→1 clamp is the
     /// only piece of logic this crate owns (the rest is pure field reads):
@@ -841,7 +869,8 @@ pub struct CommonEnv {
     /// named by `AETHER_BOOT_MANIFEST` / `--boot-manifest`; a bundled standalone
     /// build pushes its embedded pack's components here instead.
     /// [`boot_standard`] loads it in order after the build and waits for every
-    /// component to answer before the RPC server binds.
+    /// component to answer before the RPC server binds, each load for at most
+    /// [`ChassisBootConfig::boot_load_budget`].
     pub autoload: Vec<AutoloadComponent>,
     /// The chassis settings carried by a depot package (`--package` /
     /// `AETHER_PACKAGE`) manifest (issue 4001). Default (all-`None`) for the
@@ -1048,8 +1077,10 @@ pub fn with_full_stack_caps<C: Chassis>(builder: Builder<C>, boot: CommonBoot) -
 /// fails (a driver config member that will not parse, ADR-0090 §4), when the
 /// chassis's `compose` delta fails, when an unknown `AETHER_*` key fails the
 /// sweep, when the builder fails to boot the composed chain, when a boot
-/// component fails to load (naming the component and the host's error), or
-/// when the RPC port cannot be bound.
+/// component fails to load (naming the component and the host's error), when
+/// a boot component's load does not answer within
+/// [`ChassisBootConfig::boot_load_budget`] (naming the component and how many
+/// loaded before it), or when the RPC port cannot be bound.
 pub fn boot_standard<C, P, D>(mut env: CommonEnv, plan_driver: P) -> Result<BuiltChassis<C>, BootError>
 where
     C: BootableChassis<Base = ChassisBase, Env = CommonEnv>,
@@ -1072,6 +1103,7 @@ where
     // the framework mints the builder and installs the aborter + base ahead of
     // `compose` (the leftover default `env.base` is never re-read).
     let autoload = mem::take(&mut env.autoload);
+    let load_budget = env.chassis_boot.boot_load_budget();
     let base = mem::take(&mut env.base);
 
     let builder = composed::<C>(&mut boot, base, env)?;
@@ -1083,7 +1115,7 @@ where
 
     // `boot` moves into the driver, after `compose` finished borrowing it.
     let built = builder.driver(install_driver(boot)).build()?;
-    load_boot_components(&built, autoload)?;
+    let built = load_boot_components(built, autoload, load_budget)?;
     if let Some(gate) = built.handle::<RpcBindGate>() {
         gate.open().map_err(|error| BootError::Other(Box::new(error)))?;
     }

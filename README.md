@@ -27,7 +27,7 @@ linking into the runtime.
 The project is a Rust 2024 workspace and is still moving. Current code defines
 what ships; Accepted Architecture Decision Records under `docs/adr/` preserve
 the load-bearing design and its rejected alternatives. A few applications built
-on the engine live in this tree today, the puppet mascot among them; they
+on the engine live in this tree today, the release demo among them; they
 consume the library rather than belong to it. The
 engine is written with an AI coding agent as a deliberate bet, under recorded
 decisions and CI gates; [How this is built](#how-this-is-built) says exactly
@@ -256,7 +256,7 @@ See [Writing a component](docs/guide/recipes/writing-a-component.md) and
 | Runtime | `aether-substrate` | registry, mail, scheduler, native/wasm hosts, settlement |
 | Native services | `aether-render`, `aether-audio`, `aether-fs` and the rest of `aether-<cap>` | one crate per capability mailbox: render, text, audio, clipboard, window, FS, HTTP, TCP, process, RPC, component, lifecycle, fleet, inventory, trace |
 | Chassis and harnesses | `aether-chassis` + `aether-chassis-*` | per-chassis crates over a shared composition layer; harnesses in `aether-harness-*` |
-| Guest actors | `aether-kit`, `aether-kit-widget`, `aether-mesh`, `aether-puppet`, `aether-anthropic` | camera and mesh viewer; the widget tree; the geometry DSL library; the pen-plotter line-art mascot; the model-provider component |
+| Guest actors | `aether-kit`, `aether-kit-widget`, `aether-mesh`, `aether-demo`, `aether-anthropic` | camera and mesh viewer; the widget tree; the geometry DSL library; the release demo's bring-up component; the model-provider component |
 | Operator bridge | `aether-mcp` | MCP tools, live schemas, RPC and bounded evidence projection |
 | Tooling | `xtask`, fixture crates, excluded `fuzz/` | dist/bundle discovery, compatibility artifacts, nightly fuzz targets |
 

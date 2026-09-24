@@ -127,8 +127,9 @@ Namespace operations echo `addr`, while `copy` echoes `from` and `to`,
 preserving readable domain context. Per
 [ADR-0139](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0139-guest-reply-correlation-and-request-contexts.md),
 those fields are informational rather than a duplicate-safe demultiplexing key.
-Bind a typed context with `.with_context(&context)` before sending and recover it
-once with `ctx.take_context::<Context>()` in the reply handler. For `write` and
+Bind a typed context by sending with
+`ctx.send_with_context::<FsCapability>(&request, &context)` and recover it once
+with `ctx.take_context::<Context>()` in the reply handler. For `write` and
 `delete`, whose `Ok` arms add nothing else, the echo still describes what landed
 or was removed. The one deliberate omission is the write bytes — a `write` reply
 doesn't echo them back, so persisting a megabyte still produces a small reply.

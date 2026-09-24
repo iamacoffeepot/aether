@@ -59,7 +59,6 @@
     - [Content-generation capabilities](systems/content-generation.md)
   - [Media, interaction, and product tools](systems/media-and-tools.md)
     - [Rendering and camera](systems/rendering.md)
-    - [Puppet controls](systems/puppet.md)
     - [Authored render programs](systems/render-programs.md)
     - [Text](systems/text.md)
     - [Mesh authoring and the DSL](systems/mesh-authoring.md)

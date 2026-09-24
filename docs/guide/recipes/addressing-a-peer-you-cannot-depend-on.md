@@ -20,8 +20,7 @@ Three things close the obvious routes.
   makes the load refuse unless `R` holds a `Live` route, with
   `"<actor> depends on <namespace>, which is not live"`. There is no ordering,
   retry, or wait, so two actors that declare each other both refuse. The
-  bounds behind it are `DependsOn` and `Reaches` in
-  `crates/aether-actor/src/model/mod.rs`.
+  bound behind it is `DependsOn` in `crates/aether-actor/src/model/mod.rs`.
 - **Cargo refuses a crate cycle.** Addressing by type needs the other actor's
   type, so if each crate took the other as a normal dependency, the build
   fails.
@@ -210,7 +209,7 @@ authority that nothing checks against the real actor.
 - [Declared dependencies](../systems/components.md#declared-dependencies) — the
   load-time refusal and what `depends` accepts.
 - [Mail and kinds](../systems/mail-and-kinds.md) — sends, replies, and the
-  typed handles.
+  proven references.
 - [ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)
   — proven references and the doors that mint them.
 - [ADR-0232](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0232-flat-ctx-send-verbs.md)

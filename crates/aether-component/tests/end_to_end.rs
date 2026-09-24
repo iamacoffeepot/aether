@@ -2,11 +2,10 @@
 //! routing path. Boots a [`SubstrateHarness`], loads `aether-test-fixtures`'s `probe`
 //! into it via the same `aether.component` mail surface a hub-driven
 //! session uses, and asserts the wasm host-fn call chain
-//! (`ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved)`)
-//! reaches the harness's loopback observation queue. Issue 775 retired
-//! the previous `ctx.actor::<BroadcastCapability>().send(...)` shape;
-//! the substrate-harness observer mailbox replaced the broadcast cap for
-//! scenario observation.
+//! (`ctx.send::<SubstrateHarnessObserver>(&TickObserved)`) reaches the
+//! harness's loopback observation queue. Issue 775 retired the previous
+//! broadcast-capability send; the substrate-harness observer mailbox
+//! replaced the broadcast cap for scenario observation.
 //!
 //! Replaces the pre-Phase-4 WAT-driven harness which drove a hand-built
 //! `Component` past the cap's dispatcher infrastructure via the retired
@@ -45,7 +44,7 @@ fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) {
 }
 
 /// Tick fanout reaches a freshly-loaded wasm component, the
-/// component's `ctx.actor::<SubstrateHarnessObserver>().send(&...)`
+/// component's `ctx.send::<SubstrateHarnessObserver>(&...)`
 /// host call lands the kind on the harness's loopback observation
 /// queue, and `count_observed` sees it. End-to-end proof of host-fn
 /// linking, trampoline dispatch, `wire`-time input subscription, and

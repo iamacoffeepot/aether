@@ -33,8 +33,9 @@ publish = false
 # reply-kind references) compile always-on; the `aether_substrate`-typed
 # runtime half (the state struct holding the shared `Arc<Registry>`, the
 # `#[runtime] impl`, and the wire-projection helpers) is gated so a marker-only
-# wasm guest can address `ctx.actor::<InventoryCapability>()` without dragging
-# the substrate through.
+# wasm guest can declare `#[actor(depends(InventoryCapability))]` and mail it
+# with `ctx.send::<InventoryCapability>(..)` without dragging the substrate
+# through.
 
 [features]
 default = ["runtime"]

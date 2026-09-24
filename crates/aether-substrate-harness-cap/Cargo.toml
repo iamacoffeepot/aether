@@ -25,8 +25,9 @@ publish = false
 # `HandlesKind` markers compile always-on; the `aether_substrate`-typed runtime
 # halves (the `NativeActor` impls, the embedder event channel whose `Advance`
 # carries an `InboundMail` reply guard) are gated, so a marker-only guest can
-# address `ctx.actor::<SubstrateHarnessCapability>()` without dragging the
-# substrate through.
+# declare `#[actor(depends(SubstrateHarnessCapability))]` and mail it with
+# `ctx.send::<SubstrateHarnessCapability>(..)` without dragging the substrate
+# through.
 [features]
 default = ["runtime"]
 runtime = ["dep:aether-substrate"]

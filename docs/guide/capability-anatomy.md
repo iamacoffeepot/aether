@@ -62,8 +62,8 @@ pub struct ExampleCapability;
 ```
 
 The macro emits addressability, handled-kind markers, and inventory entries.
-Guest code can name `ctx.actor::<ExampleCapability>()` without linking native
-adapter state.
+Guest code that declares `depends(ExampleCapability)` can mail it with
+`ctx.send::<ExampleCapability>(..)` without linking native adapter state.
 
 Use `singleton` for one chassis mailbox and `instanced` for a family whose
 runtime discriminator/subname is part of identity. An unsupported chassis may
@@ -90,7 +90,7 @@ pub struct SyntheticWindowCapability;
 
 The concrete headless, desktop, and synthetic window identities all claim one
 crate-owned namespace constant. `WindowCapability` remains the neutral alias
-that consumers name through `ctx.actor::<WindowCapability>()`; runtime
+that consumers name through `ctx.send::<WindowCapability>(..)`; runtime
 variants must not repeat a namespace literal in their declarations or leak
 platform identity into callers. The headless implementation lives in the
 default `runtime/mod.rs`; keyed alternatives live in `runtime/desktop/` and

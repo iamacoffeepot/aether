@@ -1,11 +1,13 @@
 //! The boot loader: sends the boot components' loads one at a time and
-//! reports the outcome to the chassis thread that spawned it (issue #6413).
+//! reports each answer to the chassis thread that spawned it (issues #6413,
+//! #6637).
 //!
 //! `load_boot_components` spawns [`Autoloader`] at the chassis root after the
-//! build and blocks on the channel whose sending half rides in
-//! [`AutoloaderParams`]. The loader holds nothing else: the chassis thread
-//! keeps the RPC bind gate and opens it only after the loader reports
-//! success.
+//! build and waits on the channel whose sending half rides in
+//! [`AutoloaderParams`], one answer per load, each within the boot-load
+//! budget. The loader holds nothing else: the chassis thread keeps the
+//! components' labels and the RPC bind gate, names any failure or timeout, and
+//! opens the gate only after every load has answered `Ok`.
 
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
@@ -18,31 +20,25 @@ use aether_substrate::chassis::error::BootError;
 
 use super::AutoloadComponent;
 
-/// What the loader reports: the count of components loaded, or the failing
-/// entry's message.
-pub type LoadReport = Result<usize, String>;
+/// One load's answer: `Ok` when it loaded, or the component host's error.
+pub type LoadAnswer = Result<(), String>;
 
 /// Composer-supplied construction input: the boot components, in load order,
-/// and the channel the outcome is reported on.
+/// and the channel each answer is reported on.
 pub struct AutoloaderParams {
     /// The components to load, in manifest order.
     pub components: Vec<AutoloadComponent>,
     /// The sending half the chassis thread waits on.
-    pub report: Sender<LoadReport>,
+    pub report: Sender<LoadAnswer>,
 }
 
 /// Loads the boot components sequentially: one load in flight, the next sent
-/// on the previous `Ok`, and the first `Err` reported and final.
+/// on the previous `Ok`, and nothing sent after the first `Err`.
 pub struct Autoloader {
     /// The components not yet sent, in load order.
     remaining: VecDeque<AutoloadComponent>,
-    /// The label of the load in flight: its `name`, else `export`, else
-    /// `#<index>` for its manifest position.
-    in_flight: String,
-    /// How many components have answered `Ok`.
-    loaded: usize,
-    /// The report channel, dropped once the outcome is sent.
-    report: Option<Sender<LoadReport>>,
+    /// The channel each load's answer is reported on.
+    report: Sender<LoadAnswer>,
 }
 
 #[actor(instanced, root, depends(ComponentHostCapability))]
@@ -53,7 +49,7 @@ impl NativeActor for Autoloader {
 
     fn init((): (), params: AutoloaderParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let AutoloaderParams { components, report } = params;
-        Ok(Self { remaining: components.into(), in_flight: String::new(), loaded: 0, report: Some(report) })
+        Ok(Self { remaining: components.into(), report })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -65,33 +61,22 @@ impl NativeActor for Autoloader {
         match result {
             LoadResult::Ok { path, .. } => {
                 tracing::info!(%path, "boot component loaded");
-                self.loaded += 1;
+                let _ = self.report.send(Ok(()));
                 self.send_next(ctx);
             }
             LoadResult::Err { error } => {
                 self.remaining.clear();
-                self.finish(Err(format!("boot component {}: {error}", self.in_flight)));
+                let _ = self.report.send(Err(error));
             }
         }
     }
 }
 
 impl Autoloader {
-    /// Send the next component's load, or report success once none remain.
+    /// Send the next component's load, if any remain.
     fn send_next<A: DependsOn<ComponentHostCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
-        let Some(component) = self.remaining.pop_front() else {
-            self.finish(Ok(self.loaded));
-            return;
-        };
-        self.in_flight =
-            component.name.clone().or_else(|| component.export.clone()).unwrap_or_else(|| format!("#{}", self.loaded));
-        ctx.send::<ComponentHostCapability>(&component.load_request());
-    }
-
-    /// Send the outcome and drop the sender, so the report is sent once.
-    fn finish(&mut self, outcome: LoadReport) {
-        if let Some(report) = self.report.take() {
-            let _ = report.send(outcome);
+        if let Some(component) = self.remaining.pop_front() {
+            ctx.send::<ComponentHostCapability>(&component.load_request());
         }
     }
 }

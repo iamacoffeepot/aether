@@ -46,8 +46,9 @@ straight up to `aether.lifecycle`'s broadcast of the stage.
 **One mailbox, a graph of stages.** Everything addresses `aether.lifecycle`, owned
 by the `LifecycleCapability` actor — the sole owner of the compiled graph, the
 subscriber table (`KindId → set of proven subscriber references`), the fan-out,
-and the settlement gating. The cap is a bridged singleton, so a wasm guest names it by type:
-`ctx.actor::<LifecycleCapability>()`.
+and the settlement gating. The cap is a bridged singleton, so a wasm guest that
+declares `depends(LifecycleCapability)` names it by type:
+`ctx.subscribe::<LifecycleCapability, Tick>()`.
 
 **Stages are signals; `Tick` carries elapsed time.** `Tick` has one
 `delta_micros: u32` field supplied by the chassis cadence source. A subscriber

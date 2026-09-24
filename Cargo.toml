@@ -38,7 +38,6 @@ members = [
     "crates/aether-inventory",
     "crates/aether-mesh",
     "crates/aether-kit",
-    "crates/aether-puppet",
     "crates/aether-demo",
     "crates/aether-kit-widget",
     "crates/aether-rpc",
@@ -93,9 +92,8 @@ members = [
 # there for.
 #
 # The split is by role, not by dependency: the members left out are the build
-# pipeline (`xtask`), the `aether-puppet` lane driver, the `aether-demo`
-# release-demo component, and the `aether-test-fixtures-*` wasm crates
-# `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
+# pipeline (`xtask`), the `aether-demo` release-demo component, and the
+# `aether-test-fixtures-*` wasm crates `cargo xtask dist` cross-builds by `-p`. Nothing below depends on any of
 # them, so leaving them out narrows the build rather than deferring it.
 #
 # Every gate that must still see the whole tree says so in its own argv —

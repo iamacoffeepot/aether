@@ -43,8 +43,8 @@ in [`text/runtime/mod.rs`][runtime]; the owned kinds in
 
 A capability's mailbox name is its `NAMESPACE` const. Chassis-owned
 mailboxes live under the `aether.<name>` prefix — `aether.text`,
-`aether.audio`, `aether.fs`. Peers address the cap by type —
-`ctx.actor::<TextCapability>().send(&kind)` — which resolves to a
+`aether.audio`, `aether.fs`. Peers that declare `depends(TextCapability)`
+address the cap by type — `ctx.send::<TextCapability>(&kind)` — which resolves to a
 compile-time-const mailbox id derived from `NAMESPACE`, so there's no
 host round-trip for addressing. Pick a name that isn't already claimed;
 the builder rejects a collision at boot
@@ -130,7 +130,8 @@ The pieces:
 - **The identity ZST** — `pub struct TextCapability;` carries no state.
   `#[actor(singleton)]` emits its always-on `Addressable` + `HandlesKind<K>`
   markers, so a wasm guest writing
-  `ctx.actor::<TextCapability>().send(&kind)` compile-checks even on a
+  `ctx.send::<TextCapability>(&kind)` under `depends(TextCapability)`
+  compile-checks even on a
   build where the runtime half is gated out.
 - **`#[actor(singleton)]`** declares the cardinality — `singleton` for a
   chassis cap; `instanced` is the counterpart for per-instance actors (the

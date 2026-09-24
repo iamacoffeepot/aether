@@ -86,7 +86,7 @@ pub use headless::HeadlessRenderCapability;
 /// ZST carrying only the addressing — `Addressable`, the per-handler
 /// `HandlesKind` markers, and the name-inventory entry, all emitted
 /// always-on by `#[actor]` so a wasm guest on the marker-only `render`
-/// feature can `ctx.actor::<RenderCapability>().send(&triangle)` without
+/// feature can `ctx.send::<RenderCapability>(&triangle)` without
 /// dragging the GPU stack.
 ///
 /// The state-bearing runtime is the pumped, driver-thread `aether.render`
