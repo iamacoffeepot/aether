@@ -30,7 +30,7 @@ name = "aether-tunnel"
 path = "src/bin/aether-tunnel.rs"
 
 [dependencies]
-# ADR-0124: the wire vocabulary (`MailEnvelope`, `MailboxAddress`,
+# ADR-0124: the wire vocabulary (`MailEnvelope`, `Recipient`,
 # `RpcClient`, `WireFrame`, …) — the coordinator's entire production surface.
 aether-rpc = { path = "../aether-rpc" }
 # The engines-cap config + server the test-support chassis boots

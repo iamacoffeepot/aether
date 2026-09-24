@@ -21,7 +21,9 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use aether_codec::frame::FrameError;
-use aether_rpc::{MailEnvelope, PeerKind, RpcClient, RpcClientError, RpcConnection, RpcReaderHandle, WireFrame};
+use aether_rpc::{
+    MailEnvelope, PeerKind, ReplyEnvelope, RpcClient, RpcClientError, RpcConnection, RpcReaderHandle, WireFrame,
+};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -267,7 +269,7 @@ impl RpcSession {
     /// router closing this call's channel after a `Bye` — re-dial the
     /// hub and retry the call once. A still-down hub surfaces a clean
     /// error after the bounded re-dial attempts rather than hanging.
-    pub async fn call(&self, envelope: MailEnvelope) -> anyhow::Result<Vec<MailEnvelope>> {
+    pub async fn call(&self, envelope: MailEnvelope) -> anyhow::Result<Vec<ReplyEnvelope>> {
         match self.call_once(&envelope).await {
             Ok(events) => Ok(events),
             Err(CallError::Transport { generation, source }) => {
@@ -291,7 +293,7 @@ impl RpcSession {
     /// (carrying the generation seen, so the re-dial is single-flight);
     /// a `ReplyEnd { Err }` is a clean call failure that must not
     /// trigger a re-dial.
-    async fn call_once(&self, envelope: &MailEnvelope) -> Result<Vec<MailEnvelope>, CallError> {
+    async fn call_once(&self, envelope: &MailEnvelope) -> Result<Vec<ReplyEnvelope>, CallError> {
         // Read the generation *before* snapshotting the connection: if a
         // re-dial races in between, `conn` is the fresher one and the
         // stale generation makes a later `reconnect` a no-op (the caller
@@ -329,18 +331,18 @@ impl RpcSession {
 
     /// [`Self::call`], expecting exactly one `ReplyEvent` — the shape
     /// of the engines-cap result kinds (`ListEnginesResult`, etc.).
-    pub async fn call_one(&self, envelope: MailEnvelope) -> anyhow::Result<MailEnvelope> {
+    pub async fn call_one(&self, envelope: MailEnvelope) -> anyhow::Result<ReplyEnvelope> {
         let kind = envelope.kind;
-        let mailbox = envelope.to.mailbox;
+        let path = envelope.to.path.clone();
         let mut events = self.call(envelope).await?;
         match events.len() {
             1 => Ok(events.pop().expect("len checked")),
             0 => Err(anyhow::anyhow!(
-                "recipient settled without a reply event (kind {kind}, mailbox {mailbox}); \
+                "recipient settled without a reply event (kind {kind}, path {path}); \
                  this usually means the capability is unavailable on that engine \
                  (e.g. frame capture on a windowless/headless substrate emits no frame)"
             )),
-            n => Err(anyhow::anyhow!("expected exactly one reply event, got {n} (kind {kind}, mailbox {mailbox})")),
+            n => Err(anyhow::anyhow!("expected exactly one reply event, got {n} (kind {kind}, path {path})")),
         }
     }
 
@@ -364,7 +366,7 @@ impl RpcSession {
         &self,
         envelope: MailEnvelope,
         timeout: Duration,
-    ) -> anyhow::Result<(Vec<MailEnvelope>, bool)> {
+    ) -> anyhow::Result<(Vec<ReplyEnvelope>, bool)> {
         match self.call_collecting_once(&envelope, timeout).await {
             Ok(outcome) => Ok(outcome),
             Err(CallError::Transport { generation, source }) => {
@@ -387,7 +389,7 @@ impl RpcSession {
         &self,
         envelope: &MailEnvelope,
         timeout: Duration,
-    ) -> Result<(Vec<MailEnvelope>, bool), CallError> {
+    ) -> Result<(Vec<ReplyEnvelope>, bool), CallError> {
         let generation = self.generation.load(Ordering::Acquire);
         let conn = self.live();
 
@@ -537,8 +539,8 @@ fn register_call(
 mod tests {
     use super::RpcSession;
     use aether_codec::frame::{read_frame, write_frame};
-    use aether_data::{KindId, MailboxId};
-    use aether_rpc::{HelloAck, MailEnvelope, MailboxAddress, PeerKind, WIRE_VERSION, WireFrame};
+    use aether_data::{ActorPath, KindId};
+    use aether_rpc::{HelloAck, MailEnvelope, PeerKind, Recipient, ReplyEnvelope, WIRE_VERSION, WireFrame};
     use std::io::{BufReader, ErrorKind};
     use std::net::{Shutdown, TcpListener, TcpStream};
     use std::sync::atomic::{AtomicBool, Ordering};
@@ -680,8 +682,9 @@ mod tests {
                     Err(_) => return,
                 };
                 if let WireFrame::Call { cid: Some(cid), envelope } = frame {
+                    let echo = ReplyEnvelope { kind: envelope.kind, payload: envelope.payload };
                     for _ in 0..mode.reply_events {
-                        write_frame(&mut write_half, &WireFrame::ReplyEvent { cid, envelope: envelope.clone() })
+                        write_frame(&mut write_half, &WireFrame::ReplyEvent { cid, envelope: echo.clone() })
                             .expect("write ReplyEvent");
                     }
                     if mode.send_end {
@@ -717,14 +720,12 @@ mod tests {
         }
     }
 
-    /// A throwaway envelope to a local mailbox — the fake hub echoes it
-    /// back verbatim, so the contents don't matter.
+    /// A throwaway envelope to a local path — the fake hub echoes its kind
+    /// and bytes back, so the contents don't matter.
     fn probe_envelope() -> MailEnvelope {
         MailEnvelope {
-            to: MailboxAddress::local(MailboxId(1)),
-            from: None,
+            to: Recipient::local(ActorPath::new("test.probe").expect("the probe path is a path")),
             kind: KindId(1),
-            correlation_id: None,
             payload: vec![1, 2, 3],
         }
     }
@@ -905,7 +906,7 @@ mod tests {
 
     /// `call_one` against a hub that settles with zero reply events
     /// returns an actionable zero-reply error (issue 1934), naming the
-    /// kind and mailbox so the caller can correlate the diagnostic.
+    /// kind and path so the caller can correlate the diagnostic.
     #[tokio::test]
     async fn call_one_zero_replies_is_actionable_error() {
         let (hub, port) = FakeHub::serve_with(0, ServeMode { reply_events: 0, send_end: true });
@@ -931,7 +932,7 @@ mod tests {
 
     /// `call_one` against a hub that emits two reply events returns
     /// an error that distinguishes the multi-reply condition from the
-    /// zero-reply case (issue 1934) and names the kind and mailbox.
+    /// zero-reply case (issue 1934) and names the kind and path.
     #[tokio::test]
     async fn call_one_multi_reply_is_protocol_error() {
         let (hub, port) = FakeHub::serve_with(0, ServeMode { reply_events: 2, send_end: true });

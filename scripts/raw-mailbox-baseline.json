@@ -3,13 +3,13 @@
   "patterns": {
     "mailer()": 35,
     "registry()": 26,
-    "mailbox_id_from_name(": 76,
+    "mailbox_id_from_name(": 62,
     "mailbox_id_from_name_pair(": 9,
-    "mailbox_id_from_path(": 53,
+    "mailbox_id_from_path(": 50,
     "<recipient>.id() at a send": 0,
-    "clippy::disallowed_methods": 172,
+    "clippy::disallowed_methods": 168,
     ".actor::<": 46,
     ".to(&": 7,
-    "ctx.self_id()": 5
+    "ctx.self_id()": 4
   }
 }

@@ -20,20 +20,20 @@
 // Step 2 is the P5a proof: before this phase, `engine = Some` Calls
 // were rejected with `RpcError::UnsupportedTarget`.
 
-// Integration test routes a wire Call by runtime mailbox name — runtime-name
-// routing, not sibling-cap addressing.
+// The hub chassis is deliberately built bare with `Builder::new`, not through
+// the based boot path.
 #![allow(clippy::disallowed_methods)]
 
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+use aether_data::{ActorPath, EngineId, Kind, Uuid};
 use aether_fleet::{FleetConfig, FleetServer};
 use aether_fs::{List, ListResult, NamespaceAddr};
 use aether_kinds::descriptors;
 use aether_kinds::{BinarySelector, SpawnEngine, SpawnEngineResult, TerminateEngine};
 use aether_rpc::RpcServerHandle;
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcBind, RpcServerCapability, RpcServerConfig,
-    RpcServerParams, WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, PeerKind, Recipient, RpcBind, RpcServerCapability, RpcServerConfig, RpcServerParams,
+    WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -78,18 +78,17 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
     (chassis, port)
 }
 
-/// Write one `Call` for `request` at `mailbox_name`, on `engine` when it is
-/// `Some`.
-fn write_call<K: Kind>(stream: &mut TcpStream, cid: u64, engine: Option<EngineId>, mailbox_name: &str, request: &K) {
+/// Write one `Call` for `request` at the actor path `recipient`, on `engine`
+/// when it is `Some`.
+fn write_call<K: Kind>(stream: &mut TcpStream, cid: u64, engine: Option<EngineId>, recipient: &str, request: &K) {
+    let path = ActorPath::new(recipient).expect("the recipient is an actor path");
     write_frame(
         stream,
         &WireFrame::Call {
             cid: Some(cid),
             envelope: MailEnvelope {
-                to: MailboxAddress { engine, mailbox: mailbox_id_from_name(mailbox_name) },
-                from: None,
+                to: Recipient { engine, path },
                 kind: K::ID,
-                correlation_id: None,
                 payload: request.encode_into_bytes(),
             },
         },
@@ -178,10 +177,8 @@ impl Drop for SubstrateReaper {
             &WireFrame::Call {
                 cid: Some(99),
                 envelope: MailEnvelope {
-                    to: MailboxAddress { engine: None, mailbox: mailbox_id_from_name("aether.fleet") },
-                    from: None,
+                    to: Recipient::local(ActorPath::new("aether.fleet").expect("the fleet namespace is a path")),
                     kind: TerminateEngine::ID,
-                    correlation_id: None,
                     payload: req.encode_into_bytes(),
                 },
             },
