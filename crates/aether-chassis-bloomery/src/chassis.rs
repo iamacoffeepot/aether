@@ -5,9 +5,14 @@
 //! (issue #6399), so an engine a caller can reach can already take driver
 //! calls.
 //!
-//! The composition is deliberately narrow: no egress, exec, TCP, or
-//! HTTP-serving capability rides this engine (the zero-external-integration
-//! rule), while the RPC server keeps it drivable over MCP (ADR-0155 §3).
+//! The composition is deliberately narrow. Its one integration is HTTP
+//! egress for Sampled programs (ADR-0234 decision 7), composed with the
+//! capability's own deny-by-default allowlist, so a fetch reaches only the
+//! hosts an operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST`
+//! and every other fetch is answered with a refusal. No exec, TCP,
+//! HTTP-serving, or fs capability rides this engine (the
+//! zero-external-integration rule), while the RPC server keeps it drivable
+//! over MCP (ADR-0155 §3).
 
 use std::mem;
 use std::sync::Arc;
@@ -20,6 +25,7 @@ use aether_chassis::cli::ChassisCli;
 use aether_chassis::entry::ChassisEnv;
 use aether_chassis::signal_driver::SignalDriverCapability;
 use aether_component::{ComponentHostCapability, ComponentHostParams};
+use aether_http::HttpCapability;
 use aether_rpc::RpcBindGate;
 use aether_substrate::chassis::BootableChassis;
 use aether_substrate::chassis::builder::{Builder, BuiltChassis};
@@ -56,7 +62,7 @@ impl BloomeryChassis {
     /// Build the bloomery chassis: the hub's prologue with headless's lift —
     /// lower the bloomery knobs, stand up the substrate, re-apply the resolved
     /// log filter, lift the base out of the env, compose the shared stratum
-    /// plus the component host and the held RPC server, sweep for unknown env
+    /// plus the component host, HTTP egress, and the held RPC server, sweep for unknown env
     /// keys, install the signal-blocking driver, mount the journal owner and
     /// the bundle driver, and only then open the RPC server's bind gate. The
     /// order is build, mount, bind: until the gate opens a dial is refused, so
@@ -153,18 +159,28 @@ impl BootableChassis for BloomeryChassis {
     /// Compose the bloomery capability delta — the single claim/build path
     /// (ADR-0155) both [`Chassis::build`] and the describe / config helpers run,
     /// so the manifest roster can never drift from what boots. Adds only the
-    /// component host (which the driver's `Command::Load` targets), the RPC
-    /// server (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`]
-    /// binds it after the mount, and the bloomery config declaration; the env
+    /// component host (which the driver's `Command::Load` targets), HTTP
+    /// egress for Sampled programs (ADR-0234 decision 7), the RPC server
+    /// (ADR-0155 §3) composed held so [`BloomeryChassis::build_mounted`] binds
+    /// it after the mount, and the bloomery config declaration; the env
     /// carries values the delta resolves nothing from, so it takes no part.
+    ///
+    /// HTTP resolves `HttpConfig` off the source stack with no chassis-side
+    /// override, so its compiled defaults hold: an empty allowlist answers
+    /// every fetch `AllowlistDenied` before any connection. Composing it
+    /// unconditionally is what makes a program's fetch always answered on the
+    /// one engine that runs programs; no exec, TCP, HTTP-serving, or fs
+    /// capability is composed.
     fn compose(builder: Builder<Self>, boot: &SubstrateBoot, _env: Self::Env) -> Result<Builder<Self>, BootError> {
         let component_host_params = ComponentHostParams {
             engine: Arc::clone(&boot.engine),
             linker: Arc::clone(&boot.linker),
             hub_outbound: Arc::clone(&boot.outbound),
         };
-        Ok(with_rpc_server(builder.with_actor::<ComponentHostCapability>(component_host_params))
-            .declare_config_member::<BloomeryConfig>())
+        Ok(with_rpc_server(
+            builder.with_actor::<ComponentHostCapability>(component_host_params).with_actor::<HttpCapability>(()),
+        )
+        .declare_config_member::<BloomeryConfig>())
     }
 }
 
@@ -175,11 +191,13 @@ mod config_manifest_tests {
     use aether_substrate::chassis::config_manifest;
 
     #[test]
-    fn bloomery_known_keys_claim_its_knobs_and_no_integration_caps() {
+    fn bloomery_known_keys_claim_its_knobs_and_only_http_egress() {
         // The aggregate is derived from what the bloomery actually composes: it
-        // must claim its own two knobs plus the RPC port, and must not claim any
-        // egress/exec/serving knob. Catches a later edit that composes
-        // `with_full_stack_caps`, which would reintroduce egress/exec, and a
+        // must claim its own two knobs, the RPC port, and the HTTP egress knobs,
+        // and must not claim any exec/serving/fs knob. Catches a dropped HTTP
+        // compose, which would bring back the unanswered-fetch hang and make an
+        // operator's allowlist key an unknown-env boot error; a later edit that
+        // composes `with_full_stack_caps`, which would add exec and fs; and a
         // dropped `declare_config_member` that would make the journal knob warn
         // as unknown.
         let manifest = config_manifest::<BloomeryChassis>().expect("bloomery config manifest");
@@ -187,10 +205,8 @@ mod config_manifest_tests {
         assert!(known.contains("AETHER_BLOOMERY_JOURNAL"), "bloomery must claim its journal knob");
         assert!(known.contains("AETHER_BLOOMERY_CLOSURE_LIMIT_BYTES"), "bloomery must claim its closure-limit knob");
         assert!(known.contains("AETHER_RPC_PORT"), "bloomery must claim the RPC port via the composed RpcServerConfig");
-        assert!(
-            !known.contains("AETHER_HTTP_DISABLE"),
-            "bloomery composes no http egress, so it must not claim the http knob"
-        );
+        assert!(known.contains("AETHER_HTTP_ALLOWLIST"), "bloomery must claim the http egress allowlist knob");
+        assert!(known.contains("AETHER_HTTP_DISABLE"), "bloomery must claim the http egress disable knob");
         assert!(
             !known.contains("AETHER_PROCESS_ALLOWLIST"),
             "bloomery composes no subprocess exec, so it must not claim the process knob"

@@ -24,7 +24,9 @@
 //! The harness boots [`BloomeryChassis`] through `build_mounted`, the
 //! composition the `aether-bloomery` binary runs, and addresses the journal
 //! owner and the driver through the proven references the mount took back —
-//! never by path. It never resolves a dist
+//! never by path. Config resolves hermetically, never from the process
+//! environment, so HTTP egress stays deny-all unless a scenario opens hosts
+//! with [`BloomeryHarness::start_allowing`]. It never resolves a dist
 //! artifact: a scenario that needs fixture wasm reads it through
 //! `aether_harness_substrate::test_helpers::require_wasm` and stages the
 //! bytes itself.
@@ -53,7 +55,8 @@ pub use seed::SeededJournal;
 /// A booted bloomery chassis over a seeded scratch journal, with one reply
 /// sink every request names as its reply target.
 ///
-/// Built by [`BloomeryHarness::start`], or by [`SeededJournal::boot`] when a
+/// Built by [`BloomeryHarness::start`] (or [`BloomeryHarness::start_allowing`]
+/// when the scenario opens HTTP egress), or by [`SeededJournal::boot`] when a
 /// scenario must observe the journal file before boot. Dropping the harness
 /// tears the chassis down before the scratch directory is removed.
 pub struct BloomeryHarness {

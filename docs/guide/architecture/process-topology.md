@@ -32,7 +32,7 @@ table as intent rather than a hardcoded manifest.
 | Headless | `aether-headless` | timer-driven engine without a desktop event loop |
 | Hub | `aether-hub` | supervise child engines, store artifacts, and route RPC |
 | Substrate harness | `aether-substrate-harness` | deterministic in-process operations and test evidence |
-| Bloomery | `aether-bloomery` | journal-driven engine: the bundle driver over one journal file |
+| Bloomery | `aether-bloomery` | journal-driven engine: the bundle driver over one journal file, with deny-by-default HTTP egress |
 
 Their builders live under
 `crates/aether-chassis-{desktop,headless,hub,harness,bloomery}`. Shared runtime mechanism

@@ -332,6 +332,7 @@ dependencies = [
  "aether-bloomery-driver",
  "aether-bloomery-journal",
  "aether-bloomery-kinds",
+ "aether-bloomery-muse",
  "aether-chassis",
  "aether-component",
  "aether-data",
@@ -339,10 +340,12 @@ dependencies = [
  "aether-harness-bloomery",
  "aether-harness-fleet",
  "aether-harness-substrate",
+ "aether-http",
  "aether-rpc",
  "aether-substrate",
  "clap",
  "confique",
+ "serde_json",
  "tracing",
 ]
 
@@ -577,6 +580,7 @@ dependencies = [
  "aether-chassis",
  "aether-chassis-bloomery",
  "aether-data",
+ "aether-http",
  "aether-substrate",
  "tempfile",
 ]
