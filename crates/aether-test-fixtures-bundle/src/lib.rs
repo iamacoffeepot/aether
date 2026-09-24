@@ -8,9 +8,9 @@
 //! `export: Some("<NAMESPACE>")`.
 //!
 //! The `InlineChild` / `InlineDespawnChild` inline children ride in
-//! `inline_child` as types but are absent from the `export!` list — an
-//! inline child is constructed in-process by its parent, never
-//! instantiated by the host. The typed↔reshaped replace pair is *not*
+//! `inline_child`, and `InlineFsDemuxChild` in `fs_demux`, as types but are
+//! absent from the `export!` list — an inline child is constructed
+//! in-process by its parent, never instantiated by the host. The typed↔reshaped replace pair is *not*
 //! here: a cross-module `replace_component` needs two distinct binaries,
 //! so each lives in its own satellite crate.
 
@@ -40,7 +40,7 @@ pub use correlation_carry::{CarryRequester, ReplyHolder};
 pub use cube::Cube;
 pub use dependent_probe::DependentProbe;
 pub use editor_region_probe::EditorRegionProbe;
-pub use fs_demux::FsDemux;
+pub use fs_demux::{FsDemux, InlineFsDemuxChild, InlineFsDemuxParent};
 pub use http_handler::{
     HttpHandler, RoutedHttpHandler, RoutedStreamingHttpHandler, StreamingHttpHandler, WebSocketHandler,
 };
@@ -78,6 +78,7 @@ aether_actor::export!(
     Cube,
     EditorRegionProbe,
     FsDemux,
+    InlineFsDemuxParent,
     MatSource,
     UiWidget,
     HttpHandler,

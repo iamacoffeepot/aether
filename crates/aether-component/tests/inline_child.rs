@@ -1,7 +1,8 @@
 //! ADR-0114 inline-child scenarios (rehomed per issue #3769): a wasm
 //! parent's inline children carry state across `replace_component`
 //! (typed reconstruct + by-tag spawn, issue 2692) and surrender their
-//! address on a mid-life despawn (#1939, #4228). The children ride
+//! address on a mid-life despawn (#1939, #4228), and match the host replies
+//! to their own requests by request id (#6530). The children ride
 //! aether-actor's inline-child machinery, but the component host is what
 //! boots and replaces the hosting module, so the scenarios live here.
 //!
@@ -15,17 +16,18 @@ use std::time::{Duration, Instant};
 
 use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_component::{ComponentHostCapability, WasmTrampoline};
-use aether_data::LoadName;
-use aether_harness_substrate::test_helpers::require_wasm;
+use aether_data::{Kind, LoadName};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_bundle::{
-    InlineDespawnChild, InlineDespawnParent, InlineStatefulChild, InlineStatefulParent, InlineTagParent,
-    NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf, NestedLineageParent,
+    InlineDespawnChild, InlineDespawnParent, InlineFsDemuxChild, InlineFsDemuxParent, InlineStatefulChild,
+    InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf,
+    NestedLineageParent,
 };
 use aether_test_fixtures_kinds::{
-    Bump, CountQuery, CountReport, DespawnChild, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho, InlineProbe,
-    SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
+    Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
+    InlineProbe, RunFsDemux, SpawnNestedDetached, TagSpawnQuery, TagSpawnReport,
 };
 
 // Pin the fixture rlib so its `inventory::submit!` `KindDescriptor`
@@ -496,5 +498,53 @@ fn settled_load_covers_the_inline_child_alias_publication() {
         reached.reply::<InlineEcho>("probe").expect("decode InlineEcho"),
         InlineEcho { who: INLINE_WHO_CHILD },
         "the probe reaches the live child, so the alias was published inside the load's settlement",
+    );
+}
+
+/// Issue 6530: an inline child matches the host replies to its own requests.
+/// The child sends two identical `aether.fs.read` requests with `send_tracked`;
+/// the replies carry indistinguishable payloads and arrive as host dispatches
+/// to the child's alias, so the child reports only when `in_reply_to()` hands
+/// it each reply's request id. A membrane that built the child a cluster ctx
+/// for that dispatch left the child reading `None`, and it never reported.
+#[test]
+fn inline_child_matches_host_replies_to_its_own_requests() {
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FIXTURE_NAME: &str = "inline_child_reply";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder()
+        .size(64, 48)
+        .with_component_host()
+        .namespace_roots(test_namespace_roots(init_save_sandbox("inline-child-reply")))
+        .build()
+        .expect("boot");
+    let path = write_fixture("inline-child-reply.txt", b"same path, same reply payload");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let (parent, _path) = harness
+        .load::<InlineFsDemuxParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.fs_demux_parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_reply load failed: {error}"));
+    let child = await_child::<InlineFsDemuxParent, InlineFsDemuxChild>(&harness, parent, "demux");
+
+    let baseline = harness.count_observed(FsDemuxReport::NAME);
+    harness
+        .execute(vec![(
+            "trigger",
+            HarnessOp::send_and_settle(&child, &RunFsDemux { namespace: "save".to_owned(), path }),
+        )])
+        .expect("RunFsDemux to the inline child");
+    assert_eq!(
+        harness.count_observed(FsDemuxReport::NAME) - baseline,
+        1,
+        "the inline child did not match both fs replies by request id; observed kinds: {:?}",
+        harness.observed_kinds(),
     );
 }
