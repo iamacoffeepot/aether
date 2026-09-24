@@ -409,7 +409,7 @@ mod tests {
             Some(Arc::clone(&fx.spawner)),
         ));
         if settling {
-            let inbox = SettlingInbox::new(self_id, rx, Arc::clone(&fx.mailer));
+            let inbox = SettlingInbox::new_at(self_id, rx, Arc::clone(&fx.mailer));
             binding.install_settling_inbox(inbox.relineage(binding.reply_lineage()));
         } else {
             binding.install_inbox(rx);

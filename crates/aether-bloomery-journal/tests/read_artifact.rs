@@ -56,7 +56,8 @@ fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<OwnedDi
 }
 
 fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: MailboxId, correlation: u64, mail: &K) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target.erase()).expect("actor mailbox registered") else {
+    let target = target.erase();
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(
@@ -70,7 +71,7 @@ fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mailbox
         None,
         Nanos(0),
         0,
-        MailboxId(0),
+        target,
     ));
 }
 

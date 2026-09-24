@@ -17,7 +17,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced, MailboxForward, Singleton};
+use aether_actor::{Addressable, HandlesKind, MailboxForward, Singleton};
 use aether_data::{Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -97,22 +97,6 @@ impl<'a, R> NativeActorMailbox<'a, R> {
         context: &'context C,
     ) -> NativeActorMailboxWithContext<'a, 'context, R, C> {
         NativeActorMailboxWithContext { mailbox: *self, context }
-    }
-
-    /// Resolve the instanced child actor `Child` named `name` directly
-    /// beneath this actor.
-    ///
-    /// The declared [`ChildOf<R>`] relationship proves the placement is
-    /// legal, while `Child`'s resolver owns the address construction. The
-    /// returned handle retains this mailbox's binding and in-flight causal
-    /// context.
-    #[must_use]
-    pub fn resolve<Child>(&self, name: &str) -> NativeActorMailbox<'a, Child>
-    where
-        R: Addressable,
-        Child: ChildOf<R> + Instanced,
-    {
-        NativeActorMailbox::new(Child::resolve(self.mailbox, name).0, self.binding, self.parent, self.root)
     }
 
     /// Resolve the singleton `Peer` hosted beneath this actor: `Peer`'s
@@ -294,47 +278,5 @@ impl<R: Addressable, C: Kind> MailboxForward<R> for NativeActorMailboxWithContex
         K: Kind,
     {
         let _ = self.send(payload);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_actor::{Many, One};
-    use aether_data::MailboxId;
-    use core::ptr;
-
-    use crate::testing::bare_substrate;
-
-    struct Parent;
-
-    impl Addressable for Parent {
-        const NAMESPACE: &'static str = "test.parent";
-        type Resolver = One;
-    }
-
-    struct Child;
-
-    impl Addressable for Child {
-        const NAMESPACE: &'static str = "test.child";
-        type Resolver = Many;
-    }
-
-    impl ChildOf<Parent> for Child {}
-
-    #[test]
-    fn resolve_uses_the_child_resolver_and_retains_context() {
-        let (_, mailer) = bare_substrate();
-        let binding = NativeBinding::new_for_test(mailer, MailboxId(0xCA11_AB1E));
-        let parent_mail = MailId::new(MailboxId(0x5EED), 7);
-        let root_mail = MailId::new(MailboxId(0x600D), 3);
-        let parent = NativeActorMailbox::<Parent>::new(0xCA11_AB1E, &binding, Some(parent_mail), Some(root_mail));
-
-        let child = parent.resolve::<Child>("camera");
-
-        assert_eq!(child.mailbox_id(), Child::resolve(parent.mailbox_id().0, "camera"));
-        assert!(ptr::eq(child.binding, parent.binding));
-        assert_eq!(child.parent, parent.parent);
-        assert_eq!(child.root, parent.root);
     }
 }
