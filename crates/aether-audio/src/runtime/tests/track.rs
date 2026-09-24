@@ -318,9 +318,10 @@ fn play_track_on_nop_chassis_replies_err() {
     }
     assert!(rx.try_recv().is_err(), "nop chassis must not forward a read");
     // stop_track on a nop chassis is a silent no-op (no panic).
+    let mut stop_ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
     AudioCapability::on_stop_track(
         &mut cap,
-        ctx.as_single(),
+        &mut stop_ctx,
         StopTrack { namespace: "assets".to_owned(), path: "track.wav".to_owned(), lane: None },
     );
 }

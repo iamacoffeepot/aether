@@ -55,8 +55,8 @@ fn ramp(len: usize) -> Vec<f32> {
     #[allow(clippy::cast_precision_loss)]
     (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
 }
-fn load_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_> {
-    NativeCtx::new(transport, session_sender(), MailId::NONE, MailId::NONE)
+fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
+    NativeCtx::new_for_actor(transport, session_sender(), MailId::NONE, MailId::NONE)
 }
 
 /// ADR-0112: a `Manual` ctx for directly calling `#[handler::manual]`

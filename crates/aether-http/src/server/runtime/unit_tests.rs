@@ -42,21 +42,16 @@ fn disabled_http_server_err_replies_to_register_route() {
     use super::{HttpServerCapability, HttpServerConfig, HttpSupervisorState};
     use crate::kinds::RegisterRoute;
 
-    let result = with_test_ctx(|_, mailer, ctx| {
-        let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(mailer));
+    let (_registry, mailer) = fresh_substrate();
+    let binding = unrouted_binding(&mailer);
+    let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
 
-        HttpServerCapability::on_register_route(
-            &mut state,
-            ctx,
-            RegisterRoute {
-                prefix: "/".to_string(),
-                method: None,
-                kind: KindId(0),
-                mailbox: MailboxId(1),
-                shared: false,
-            },
-        )
-    });
+    let result = HttpServerCapability::on_register_route(
+        &mut state,
+        &mut ctx,
+        RegisterRoute { prefix: "/".to_string(), method: None, kind: KindId(0), mailbox: MailboxId(1), shared: false },
+    );
     assert!(
         matches!(result, RegisterRouteResult::Err { .. }),
         "a disabled http server must fail fast on register_route, got {result:?}",
