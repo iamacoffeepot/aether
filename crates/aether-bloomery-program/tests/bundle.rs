@@ -12,6 +12,7 @@ use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Cites, Kind, LoadName, Storage};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_http::{HttpCapability, HttpConfig};
 use aether_kinds::LoadComponent;
 use wasmparser::{Parser, Payload};
 
@@ -50,12 +51,11 @@ fn program_name(name: &str) -> ProgramName {
 
 fn assert_fixture_section(wasm: &[u8]) {
     let decoded = declarations(&section_bytes(wasm)).expect("aether.bloomery.programs decodes");
-    assert_eq!(decoded.len(), 6, "the custom section lists every exported program");
+    assert_eq!(decoded.len(), 5, "the custom section lists every exported program");
     let names: Vec<&str> = decoded.iter().map(|program| program.name.as_str()).collect();
     assert!(names.contains(&"test.program.summarize"), "{names:?}");
     assert!(names.contains(&"test.program.refuse"), "{names:?}");
     assert!(names.contains(&"test.program.fetch_body"), "{names:?}");
-    assert!(names.contains(&"test.program.exec"), "{names:?}");
     assert!(names.contains(&"test.program.stall"), "{names:?}");
     assert!(names.contains(&"test.program.read_uncited"), "{names:?}");
     let summarize = decoded
@@ -74,8 +74,6 @@ fn assert_fixture_section(wasm: &[u8]) {
         .find(|program| program.name.as_str() == "test.program.fetch_body")
         .expect("fetch_body declaration");
     assert_eq!(fetch_body.mode, Mode::Sampled);
-    let exec = decoded.iter().find(|program| program.name.as_str() == "test.program.exec").expect("exec declaration");
-    assert_eq!(exec.mode, Mode::Sampled);
 }
 
 fn section_bytes(wasm: &[u8]) -> Vec<u8> {
@@ -101,7 +99,13 @@ fn bundle_root_invokes_named_programs_and_retires_the_seq_child() -> Result<(), 
 
     assert_fixture_section(&wasm);
 
-    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    // The bundle's `fetch_body` declares `HttpCapability`, so the load needs it live.
+    let mut harness = SubstrateHarness::builder()
+        .size(64, 48)
+        .with_component_host()
+        .with_actor_configured::<HttpCapability>((), HttpConfig::default())
+        .build()
+        .expect("boot");
     let (root, path) = harness
         .load_any(&LoadComponent {
             wasm,

@@ -30,7 +30,7 @@ pub use aether_bloomery_program_derive::program;
 pub use declare::Program;
 #[doc(hidden)]
 pub use declare::{AsyncProgram, SyncProgram};
-pub use env::{Async, Binding, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync};
+pub use env::{Async, Env, Http, InjectedApi, Pending, PendingArtifact, PendingCall, Process, Sync};
 pub use invoke::{AsyncSession, PollResult, Started, invoke, start_async, unreachable_staged};
 pub use root::{Admission, ProgramEntry, ProgramTable, Root, dispatch, start_invocation};
 pub use section::{DeclarationsError, declarations};
@@ -47,6 +47,22 @@ pub mod __macro_internals {
     pub use crate::invoke::{PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
     pub use crate::section::{MODE_PURE, MODE_SAMPLED, program_record_len, write_program_record};
+
+    /// The target capability of each program API, by the name `#[program]`
+    /// accepts. The bundle generator declares these as the invocation's
+    /// dependencies: an alias is expanded before coherence, so two APIs are
+    /// two concrete `DependsOn` impls rather than overlapping projections.
+    pub mod api_target {
+        /// Target of [`crate::Http`].
+        pub type Http = aether_http::HttpCapability;
+        /// Target of [`crate::Process`].
+        pub type Process = aether_process::ProcessCapability;
+    }
+
+    /// Compiles only when `Api`'s [`InjectedApi::Target`] is `T`. `#[program]`
+    /// emits one per trailing binding, pairing the author's type with the
+    /// [`api_target`] row its name selects.
+    pub const fn check_target<Api: InjectedApi<Target = T>, T>() {}
 
     pub struct RejectSampledOnPure<const SAMPLED: bool>;
 

@@ -200,9 +200,21 @@ fn expand_invocation(
     programs: &[ProgramEntry],
 ) -> TokenStream2 {
     let namespace = format!("{BUNDLE_NAMESPACE}.invocation");
-    let api_tys: Vec<_> = programs.iter().flat_map(|entry| entry.meta.apis.iter()).collect();
+    let mut names: Vec<&Ident> = Vec::new();
+    for name in programs.iter().flat_map(|entry| entry.meta.apis.iter()) {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    let targets: Vec<TokenStream2> =
+        names.iter().map(|name| quote! { #program::__macro_internals::api_target::#name }).collect();
+    let depends = if targets.is_empty() {
+        quote! {}
+    } else {
+        quote! { , depends(#(#targets),*) }
+    };
     let resume = resume_after_poll(program);
-    let send_pending = expand_send_pending(program, api_tys.as_slice());
+    let send_pending = expand_send_pending(program, &targets);
     let fetch_reply = expand_fetch_reply(program);
     quote! {
         struct #invocation {
@@ -218,7 +230,7 @@ fn expand_invocation(
             >,
         }
 
-        #[::aether_actor::actor(instanced, child_of(#root))]
+        #[::aether_actor::actor(instanced, child_of(#root) #depends)]
         impl ::aether_actor::WasmActor for #invocation {
             const NAMESPACE: &'static str = #namespace;
 
@@ -236,7 +248,7 @@ fn expand_invocation(
             #[handler::manual]
             fn on_invoke(
                 &mut self,
-                ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+                ctx: &mut ::aether_actor::WasmCtx<'_, Self, ::aether_actor::Manual>,
                 invoke: #program::Invoke,
             ) {
                 self.parent = ctx.sender();
@@ -344,12 +356,16 @@ fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
     }
 }
 
-fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenStream2 {
+/// The invocation's pump for one pending wait. A captured call is sent only
+/// through a proof minted from the invocation's declared dependency on the
+/// call's target, one arm per declared target; a call to any other mailbox is
+/// refused.
+fn expand_send_pending(program: &TokenStream2, targets: &[TokenStream2]) -> TokenStream2 {
     let resume = resume_after_poll(program);
     quote! {
-        fn send_pending<A, M: ::aether_actor::ReplyMode>(
+        fn send_pending<M: ::aether_actor::ReplyMode>(
             &mut self,
-            ctx: &mut ::aether_actor::WasmCtx<'_, A, M>,
+            ctx: &mut ::aether_actor::WasmCtx<'_, Self, M>,
             pending: #program::__macro_internals::Pending,
         ) {
             use ::aether_actor::MailSender;
@@ -371,10 +387,14 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
                     self.fetching.insert(pending.digest, pending);
                 }
                 #program::__macro_internals::Pending::Send(pending) => {
-                    const ALLOWED: &[&str] = &[
-                        #(<<#api_tys as #program::InjectedApi>::Target as ::aether_actor::Addressable>::NAMESPACE),*
-                    ];
-                    if !ALLOWED.iter().copied().any(|name| name == pending.mailbox) {
+                    let target = #(
+                        if pending.mailbox == <#targets as ::aether_actor::Addressable>::NAMESPACE {
+                            ::core::option::Option::Some(ctx.actor_ref::<#targets>().erase())
+                        } else
+                    )* {
+                        ::core::option::Option::None
+                    };
+                    let ::core::option::Option::Some(target) = target else {
                         if let Some(session) = self.session.as_mut() {
                             session.reject_send(#program::Refusal::Refused {
                                 reason: #program::kinds::Detail::new("mailbox is not in the program allowlist"),
@@ -382,8 +402,8 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
                             #resume
                         }
                         return;
-                    }
-                    pending.dispatch(ctx);
+                    };
+                    pending.dispatch(ctx, target);
                     let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
                     self.waiting.insert(request, pending);
                 }

@@ -1,6 +1,6 @@
 //! Signature restrictions owned by `#[program]`.
 
-use syn::{FnArg, GenericArgument, PathArguments, Signature, Type};
+use syn::{FnArg, GenericArgument, Ident, PathArguments, Signature, Type};
 
 pub enum EnvMarker {
     Sync,
@@ -30,7 +30,19 @@ pub fn reject_run_receiver(sig: &Signature) -> syn::Result<()> {
     Ok(())
 }
 
-pub fn trailing_apis(sig: &Signature, async_run: bool) -> syn::Result<Vec<(syn::Ident, Type)>> {
+/// Names `#[program]` accepts for a trailing binding: the closed set of program
+/// APIs, each a row in `aether_bloomery_program::__macro_internals::api_target`.
+const API_NAMES: [&str; 2] = ["Http", "Process"];
+
+/// One trailing binding: the parameter, the type the author wrote, and the
+/// canonical API name that type ends in.
+pub struct ApiBinding {
+    pub ident: Ident,
+    pub ty: Type,
+    pub name: Ident,
+}
+
+pub fn trailing_apis(sig: &Signature, async_run: bool) -> syn::Result<Vec<ApiBinding>> {
     let extra = sig.inputs.iter().skip(2);
     if !async_run && extra.clone().next().is_some() {
         return Err(syn::Error::new_spanned(
@@ -49,9 +61,28 @@ pub fn trailing_apis(sig: &Signature, async_run: bool) -> syn::Result<Vec<(syn::
                 "#[program] trailing cap bindings must be ident parameters",
             ));
         };
-        apis.push((ident.ident.clone(), (*typed.ty).clone()));
+        apis.push(ApiBinding { ident: ident.ident.clone(), ty: (*typed.ty).clone(), name: api_name(&typed.ty)? });
     }
     Ok(apis)
+}
+
+/// The canonical API name a binding's type ends in, in whatever path the author
+/// wrote it.
+fn api_name(ty: &Type) -> syn::Result<Ident> {
+    let not_an_api = || syn::Error::new_spanned(ty, "#[program] cap bindings are `Http` or `Process`");
+    let Type::Path(path) = peel(ty) else {
+        return Err(not_an_api());
+    };
+    if path.qself.is_some() {
+        return Err(not_an_api());
+    }
+    let Some(last) = path.path.segments.last() else {
+        return Err(not_an_api());
+    };
+    if !matches!(last.arguments, PathArguments::None) || !API_NAMES.iter().any(|name| last.ident == name) {
+        return Err(not_an_api());
+    }
+    Ok(last.ident.clone())
 }
 
 fn env_arg_type(sig: &Signature) -> syn::Result<&Type> {
