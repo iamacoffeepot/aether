@@ -22,7 +22,11 @@
 //!
 //! Control plane (mailed to `aether.tcp`):
 //! - `Connect { addr, name?, consumer? }` → `ConnectResult`
+//! - `ConnectSelf { addr, name? }` → `ConnectResult` (the sender is the
+//!   consumer)
 //! - `BindListener { addr, name?, consumer? }` → `BindListenerResult`
+//! - `BindListenerSelf { addr, name? }` → `BindListenerResult` (the sender
+//!   is the consumer)
 //! - `UnbindListener { listener_name }` → `UnbindListenerResult`
 //!   (asynchronous reply: the cap monitors the listener at spawn time
 //!   and replies only after `MonitorNotice` arrives)
@@ -45,15 +49,17 @@
 //! (iamacoffeepot/aether#3751) as a per-cap crate.
 //! Owns the whole three-tier lineage — [`TcpCapability`],
 //! [`TcpListenerActor`], [`TcpSessionActor`] — plus the cap's own
-//! `aether.tcp.*` mail kinds ([`kinds`]), the listener / session init
-//! configs (`config`), and the send-side [`TcpWasmExt`] / [`TcpNativeExt`]
-//! facades (`route`).
+//! `aether.tcp.*` mail kinds ([`kinds`]) and the listener / session init
+//! configs (`config`).
 //!
 //! A consumer tier (the shelved `aether-game` player tier was the in-repo
-//! example) names these types directly — a gateway as a listener consumer,
-//! sessions writing framed bytes through [`TcpNativeExt`]. That is a downward
-//! leaf→leaf dependency, not a facade: a downstream crate that wants TCP
-//! deps here directly, and pulls in nothing else.
+//! example) names these types directly: it sends the cap-root kinds with
+//! `ctx.send::<TcpCapability>`, binds or dials itself as consumer with a
+//! `_self` kind, and writes framed bytes to a session through the
+//! host-stamped sender of the [`SessionData`] it receives (`ctx.sender()`,
+//! then `ctx.send_to`). That is a downward leaf→leaf dependency, not a
+//! facade: a downstream crate that wants TCP deps here directly, and pulls
+//! in nothing else.
 
 #![forbid(unsafe_code)]
 // `#[handler]` methods take their decoded payload by value per the
@@ -65,22 +71,17 @@
 mod config;
 pub mod kinds;
 mod listener;
-mod route;
 mod session;
 
 pub use kinds::*;
 pub use listener::TcpListenerActor;
-#[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-pub use route::TcpNativeExt;
-pub use route::TcpWasmExt;
 pub use session::TcpSessionActor;
 // `TcpListenerConfig` and `TcpSessionConfig` are child-actor init
 // bundles holding raw `TcpListener` / `TcpStream` handles, consumed
 // only by the runtime halves (`runtime.rs`, `listener/runtime.rs`,
 // `session/runtime.rs`), so `config` rides the `feature = "runtime"`
-// gate. The actor markers themselves (above) are always-on so wasm
-// callers can name the handles [`TcpWasmExt::listener`] /
-// [`TcpWasmExt::session`] return.
+// gate. The actor markers themselves (above) are always-on so consumers
+// can name them in `ctx.sender()`-driven code and in harness child lookups.
 #[cfg(feature = "runtime")]
 pub use config::{TcpListenerConfig, TcpSessionConfig};
 
