@@ -139,7 +139,7 @@ mod tests {
     }
 
     fn effect(target: EffectTarget, kind_id: u64) -> Effect {
-        Effect { target, kind_id, bytes: vec![kind_id as u8] }
+        Effect { target, kind_id, bytes: vec![u8::try_from(kind_id).expect("test setup: fixture kind ids fit a byte")] }
     }
 
     // Tripwire: the in-flight forward is recorded before any effect — the

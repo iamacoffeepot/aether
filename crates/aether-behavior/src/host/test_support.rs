@@ -8,6 +8,7 @@ use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::fmt::Write;
 
 use aether_data::KindId;
 
@@ -16,7 +17,7 @@ use crate::manifest;
 
 /// A module whose `filter` always traps (`unreachable`), declaring `handled`
 /// in its exports section. Drives the fail-open trap counter.
-pub(crate) fn trapping_wasm(handled: KindId) -> Vec<u8> {
+pub fn trapping_wasm(handled: KindId) -> Vec<u8> {
     module(
         r#"(func (export "filter") (param i64 i32 i32) (result i64)
              unreachable)"#,
@@ -26,7 +27,7 @@ pub(crate) fn trapping_wasm(handled: KindId) -> Vec<u8> {
 }
 
 /// A module whose `filter` spins until the host fuel budget traps it.
-pub(crate) fn fuel_exhausting_wasm(handled: KindId) -> Vec<u8> {
+pub fn fuel_exhausting_wasm(handled: KindId) -> Vec<u8> {
     module(
         r#"(func (export "filter") (param i64 i32 i32) (result i64)
              (loop $spin
@@ -39,7 +40,7 @@ pub(crate) fn fuel_exhausting_wasm(handled: KindId) -> Vec<u8> {
 
 /// A module whose `filter` returns an empty packed buffer. The host rejects
 /// this as undecodable output and records a fail-open trap.
-pub(crate) fn empty_return_wasm(handled: KindId) -> Vec<u8> {
+pub fn empty_return_wasm(handled: KindId) -> Vec<u8> {
     module(
         r#"(func (export "filter") (param i64 i32 i32) (result i64)
              (i64.const 0))"#,
@@ -49,32 +50,32 @@ pub(crate) fn empty_return_wasm(handled: KindId) -> Vec<u8> {
 }
 
 /// A module whose `filter` returns a packed pointer outside linear memory.
-pub(crate) fn out_of_bounds_return_wasm(handled: KindId) -> Vec<u8> {
+pub fn out_of_bounds_return_wasm(handled: KindId) -> Vec<u8> {
     let packed = (70_000u64 << 32) | 1;
     let body = format!(
         r#"(func (export "filter") (param i64 i32 i32) (result i64)
              (i64.const {packed}))"#,
-        packed = packed as i64,
+        packed = packed.cast_signed(),
     );
     module(&body, None, &[handled])
 }
 
 /// A module whose `filter` returns a fixed, pre-encoded [`FilterOutput`] baked
 /// into a data segment (ignoring its inputs). A clean, counter-resetting call.
-pub(crate) fn fixed_output_wasm(handled: KindId, output: &FilterOutput) -> Vec<u8> {
+pub fn fixed_output_wasm(handled: KindId, output: &FilterOutput) -> Vec<u8> {
     let encoded = envelope::encode(output);
     let packed = (2048u64 << 32) | (encoded.len() as u64);
     let body = format!(
         r#"(func (export "filter") (param i64 i32 i32) (result i64)
              (i64.const {packed}))"#,
-        packed = packed as i64,
+        packed = packed.cast_signed(),
     );
     module(&body, Some((2048, &encoded)), &[handled])
 }
 
 /// A module whose `filter` traps on `trap_kind` and otherwise returns a fixed,
 /// pre-encoded [`FilterOutput`]. Lets tests witness a trap before a clean call.
-pub(crate) fn conditional_trap_wasm(handled: KindId, trap_kind: KindId, output: &FilterOutput) -> Vec<u8> {
+pub fn conditional_trap_wasm(handled: KindId, trap_kind: KindId, output: &FilterOutput) -> Vec<u8> {
     let encoded = envelope::encode(output);
     let packed = (2048u64 << 32) | (encoded.len() as u64);
     let body = format!(
@@ -83,8 +84,8 @@ pub(crate) fn conditional_trap_wasm(handled: KindId, trap_kind: KindId, output: 
                (i64.eq (local.get 0) (i64.const {trap_kind}))
                (then unreachable)
                (else (i64.const {packed}))))"#,
-        trap_kind = trap_kind.0 as i64,
-        packed = packed as i64,
+        trap_kind = trap_kind.0.cast_signed(),
+        packed = packed.cast_signed(),
     );
     module(&body, Some((2048, &encoded)), &[handled, trap_kind])
 }
@@ -92,7 +93,7 @@ pub(crate) fn conditional_trap_wasm(handled: KindId, trap_kind: KindId, output: 
 /// A module whose `state_load` remembers the offered `(ptr, len)` region and
 /// whose `state_save` returns that region packed, or a baked default when no
 /// prior state was offered yet.
-pub(crate) fn stateful_wasm(handled: KindId, default_state: &[u8]) -> Vec<u8> {
+pub fn stateful_wasm(handled: KindId, default_state: &[u8]) -> Vec<u8> {
     let filter_output = envelope::encode(&forward_output(b"stateful"));
     let filter_packed = (3072u64 << 32) | (filter_output.len() as u64);
     let body = format!(
@@ -109,24 +110,21 @@ pub(crate) fn stateful_wasm(handled: KindId, default_state: &[u8]) -> Vec<u8> {
                (i64.shl (i64.extend_i32_u (global.get $state_ptr)) (i64.const 32))
                (i64.extend_i32_u (global.get $state_len))))"#,
         default_len = default_state.len(),
-        filter_packed = filter_packed as i64,
+        filter_packed = filter_packed.cast_signed(),
     );
     module_with_data(&body, &[(2048, default_state), (3072, &filter_output)], &[handled])
 }
 
 /// A `Forward`-the-inbound `FilterOutput` for `bytes` — a passthrough script's
 /// output.
-pub(crate) fn forward_output(bytes: &[u8]) -> FilterOutput {
+pub fn forward_output(bytes: &[u8]) -> FilterOutput {
     FilterOutput { verdict: Verdict::Forward(bytes.to_vec()), effects: Vec::new() }
 }
 
 /// Assemble a module: a memory + bump allocator, the caller's `filter`, an
 /// optional data segment, and the exports custom section for `kinds`.
 fn module(filter_body: &str, data: Option<(u32, &[u8])>, kinds: &[KindId]) -> Vec<u8> {
-    match data {
-        Some(data) => module_with_data(filter_body, &[data], kinds),
-        None => module_with_data(filter_body, &[], kinds),
-    }
+    module_with_data(filter_body, data.as_slice(), kinds)
 }
 
 fn module_with_data(filter_body: &str, data: &[(u32, &[u8])], kinds: &[KindId]) -> Vec<u8> {
@@ -161,10 +159,13 @@ fn exports_section(kinds: &[KindId]) -> Vec<u8> {
 }
 
 fn custom_section_wat(bytes: &[u8]) -> String {
-    format!("(@custom \"{name}\" \"{hex}\")", name = manifest::EXPORTS_SECTION, hex = byte_string(bytes),)
+    format!("(@custom \"{name}\" \"{hex}\")", name = manifest::EXPORTS_SECTION, hex = byte_string(bytes))
 }
 
 /// Render bytes as a WAT string literal's `\xx` escapes.
 fn byte_string(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("\\{b:02x}")).collect()
+    bytes.iter().fold(String::new(), |mut out, b| {
+        write!(out, "\\{b:02x}").expect("test setup: writing to a String cannot fail");
+        out
+    })
 }

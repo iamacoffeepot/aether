@@ -431,7 +431,7 @@ mod tests {
         // A clean call returns the baked output and resets the counter to 0.
         match slot.filter(clean_kind, b"in") {
             FilterOutcome::Output(out) => {
-                assert_eq!(out.verdict, Verdict::Forward(b"clean".to_vec()))
+                assert_eq!(out.verdict, Verdict::Forward(b"clean".to_vec()));
             }
             FilterOutcome::Passthrough => panic!("clean script should produce an output"),
         }
@@ -536,7 +536,7 @@ mod tests {
 
         match slot.filter(handled, b"in") {
             FilterOutcome::Output(out) => {
-                assert_eq!(out.verdict, Verdict::Forward(b"still running".to_vec()))
+                assert_eq!(out.verdict, Verdict::Forward(b"still running".to_vec()));
             }
             FilterOutcome::Passthrough => panic!("missing state_load should stay fail-open"),
         }
