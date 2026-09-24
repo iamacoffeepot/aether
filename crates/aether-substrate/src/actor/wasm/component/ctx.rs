@@ -262,6 +262,12 @@ impl ComponentCtx {
         self.pending_aliases.iter().any(|pending| pending.alias == alias && pending.target_parent == self.sender)
     }
 
+    /// The component's canonical name for a diagnostic, falling back to its
+    /// tagged id when the registry has no name for it.
+    pub(crate) fn actor_name(&self) -> String {
+        self.registry.mailbox_name(self.sender).unwrap_or_else(|| self.sender.to_string())
+    }
+
     /// Rendered identity for a validated actor in this component cluster.
     /// A nested child may spawn from its immediate `wire` before the registry
     /// owner publishes that child's alias, so consult locally prepared routes

@@ -4,7 +4,7 @@
 //! actor turn, so it rides the same ADR-0093 ledger every other deferred
 //! producer does rather than taking the registry's locks mid-turn (ADR-0165).
 
-use aether_actor::ReplyMode;
+use aether_actor::{ErasedActorRef, ReplyMode};
 use aether_data::{ActorPath, KindDescriptor, KindId};
 
 use crate::actor::native::offload::blocking::DispatchId;
@@ -66,6 +66,33 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Consumer: the `aether.inventory` cap's `ResolveAddress` handler.
     pub fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
         self.binding.canonical_path(address)
+    }
+
+    /// The canonical path of the actor `reference` proves, read from the
+    /// published route table, for naming that actor in log and diagnostic
+    /// text. The answer is path text in the ADR-0166 grammar, never a mailbox
+    /// position: it reaches a position again only through the registry's
+    /// address resolution. A typed holder passes `reference.erase()`.
+    ///
+    /// It still answers after the actor departs, because a route keeps its
+    /// name through `Dropped`, and it cannot fail for a reference the
+    /// registry minted: the route's name was proven against the ADR-0166
+    /// grammar when the route was first published.
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference`. The registry
+    /// mints a reference only for a route that reached `Live`, and removes a
+    /// route only when its birth fails (a cancelled `Starting` reservation, or
+    /// a boot or spawn unwound before the actor was handed out), so this is a
+    /// broken invariant, not an answer (ADR-0063).
+    ///
+    /// Consumers: the http server's unmonitorable route-holder warning, the
+    /// component host's replacement-boot warnings, and the lifecycle cap's
+    /// stuck-advance warning, which names each subscriber still owed.
+    #[must_use]
+    pub fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+        self.binding.actor_path(reference)
     }
 
     /// Stage a typed registry-owner batch from the current handler. The batch

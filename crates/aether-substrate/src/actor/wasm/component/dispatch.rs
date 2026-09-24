@@ -5,7 +5,7 @@ use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 use crate::mail::{Mail, SourceAddr};
 
 use super::instantiate::Placement;
-use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
+use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
 
 /// Sentinel the ADR-0033 `#[actor]` dispatcher returns from
 /// `receive_p32` when mail arrives with a kind id the component has
@@ -174,24 +174,18 @@ impl Component {
         let Some(handle) = ctx.reply_table.allocate(entry) else {
             return Err(wasmtime::Error::msg(format!(
                 "component {} holds 1,048,576 unanswered reply handles, the most its reply table addresses",
-                Self::actor_name(ctx),
+                ctx.actor_name(),
             )));
         };
         if let Some(live) = ctx.reply_table.high_water() {
             tracing::warn!(
                 target: "aether_substrate::component",
-                actor = %Self::actor_name(ctx),
+                actor = %ctx.actor_name(),
                 live,
                 "reply table grew past its preallocated slots; a request this component keeps and never answers holds its slot",
             );
         }
         Ok(handle)
-    }
-
-    /// The component's canonical name for a diagnostic, falling back to its
-    /// tagged id when the registry has no name for it.
-    fn actor_name(ctx: &ComponentCtx) -> String {
-        ctx.registry.mailbox_name(ctx.sender).unwrap_or_else(|| ctx.sender.to_string())
     }
 
     /// Loudly log an inbound mail dropped by `deliver` because its payload

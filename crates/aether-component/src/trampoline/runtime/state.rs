@@ -76,6 +76,12 @@ pub struct WasmTrampolineState {
 }
 
 impl WasmTrampolineState {
+    /// The trampoline's canonical name for a diagnostic, falling back to its
+    /// tagged id when the registry has no name for it.
+    pub(super) fn own_name(&self) -> String {
+        self.registry.mailbox_name(self.mailbox).unwrap_or_else(|| self.mailbox.to_string())
+    }
+
     /// Unload the **wasm component**: run the guest's `unwire` pre-shutdown
     /// hook, drop the `Component`, clear the mailbox's accept-set, re-seed the
     /// trampoline's own framework cost cells, and vacate the mailbox. The

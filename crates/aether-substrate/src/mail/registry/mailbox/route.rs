@@ -9,15 +9,20 @@
 
 use std::sync::Arc;
 
+use aether_data::ActorPath;
+
 use crate::mail::MailboxId;
 use crate::mail::registry::effect::ActivationToken;
 use crate::mail::registry::handlers::{InboxHandler, InlineHandler};
 
 use super::{MailboxEntry, SeizeCell};
 
+/// A route's name is proven against the ADR-0166 grammar once, when a writer
+/// in [`super::apply`] first publishes it, so reading one back for a
+/// reference (`Mailer::actor_path`) has no failure to report.
 #[derive(Clone)]
 pub(super) struct RouteRecord {
-    pub(super) canonical_name: String,
+    pub(super) canonical_name: ActorPath,
     pub(super) lifecycle: RouteLifecycle,
 }
 

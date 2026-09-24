@@ -31,13 +31,10 @@ impl WasmTrampolineState {
     /// Publish the logical inline-child routes a guest call staged. The
     /// owner batch is reserved admission; completion is a later no-reply
     /// actor turn so rejection cannot silently lose the originating chain.
-    pub fn stage_inline_aliases<A>(&self, ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<PreparedAliasRoute>) {
+    pub fn stage_inline_aliases<A>(ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<PreparedAliasRoute>) {
         for alias in aliases {
-            let alias_id = alias.alias;
-            let _ = ctx.stage_registry_batch(
-                RegistryBatch::publish_alias(alias),
-                InlineAliasContext { parent: self.mailbox, alias: alias_id },
-            );
+            let context = InlineAliasContext { alias: Arc::clone(&alias.rendered_name) };
+            let _ = ctx.stage_registry_batch(RegistryBatch::publish_alias(alias), context);
         }
     }
 
@@ -49,9 +46,10 @@ impl WasmTrampolineState {
     pub fn stage_inline_alias_retirements<A>(&self, ctx: &mut NativeCtx<'_, A, Single>, aliases: Vec<MailboxId>) {
         for alias in aliases {
             ctx.vacate_alias(alias);
+            let name = self.registry.mailbox_name(alias).unwrap_or_else(|| alias.to_string());
             let _ = ctx.stage_registry_batch(
                 RegistryBatch::retire_alias(alias),
-                InlineAliasContext { parent: self.mailbox, alias },
+                InlineAliasContext { alias: Arc::from(name) },
             );
         }
     }
@@ -60,7 +58,6 @@ impl WasmTrampolineState {
         if let Err(error) = done.output() {
             tracing::warn!(
                 target: "aether_component",
-                parent = %done.context().parent,
                 alias = %done.context().alias,
                 "inline-child alias registry batch failed after owner staging: {error}",
             );
@@ -112,11 +109,15 @@ impl WasmTrampolineState {
                 config,
                 (),
             )
-            .stage_with(SiblingSpawnContext { parent: pending.parent, subname: pending.subname.clone(), capabilities })
+            .stage_with(SiblingSpawnContext {
+                parent_name: pending.parent_name.clone(),
+                subname: pending.subname.clone(),
+                capabilities,
+            })
         {
             tracing::warn!(
                 target: "aether_component",
-                parent = %pending.parent,
+                parent = %pending.parent_name,
                 subname = %pending.subname,
                 "sibling spawn failed: {e:?}",
             );
@@ -131,7 +132,7 @@ impl WasmTrampolineState {
             Err(error) => {
                 tracing::warn!(
                     target: "aether_component",
-                    parent = %done.context().parent,
+                    parent = %done.context().parent_name,
                     subname = %done.context().subname,
                     "sibling spawn failed after owner staging: {error:?}",
                 );
@@ -461,7 +462,7 @@ impl WasmTrampolineState {
         let (aliases, retired) =
             (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
         self.component = Some(new_component);
-        self.stage_inline_aliases(ctx, aliases);
+        Self::stage_inline_aliases(ctx, aliases);
         self.stage_inline_alias_retirements(ctx, retired);
 
         // iamacoffeepot/aether#1037: re-register the trampoline's
@@ -511,13 +512,12 @@ fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
 
 #[derive(Clone)]
 pub(super) struct SiblingSpawnContext {
-    parent: MailboxId,
+    parent_name: String,
     subname: String,
     capabilities: ComponentCapabilities,
 }
 
 #[derive(Clone)]
 pub(super) struct InlineAliasContext {
-    parent: MailboxId,
-    alias: MailboxId,
+    alias: Arc<str>,
 }

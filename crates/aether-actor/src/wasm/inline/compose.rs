@@ -188,8 +188,7 @@ pub fn reconstruct_inline_children(
                 // becomes resident.
                 tracing::warn!(
                     target = "aether_actor::inline",
-                    alias = to_reconstruct.alias.0,
-                    parent = parent.0,
+                    subname = to_reconstruct.full_subname,
                     type_tag = to_reconstruct.type_tag,
                     "inline child not reconstructed across replace_component (unknown type tag, \
                      invalid current placement, or re-init failure); skipping",
@@ -201,8 +200,7 @@ pub fn reconstruct_inline_children(
             for entry in deferred {
                 tracing::warn!(
                     target = "aether_actor::inline",
-                    alias = entry.alias_id,
-                    parent = entry.parent_id.unwrap_or(cluster_root.0),
+                    subname = entry.full_subname.as_str(),
                     type_tag = entry.type_tag,
                     "inline child not reconstructed across replace_component because its \
                      recorded parent is absent; leaving the orphan absent",

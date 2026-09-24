@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
+use aether_data::ActorPath;
 use aether_data::canonical::{canonical_kind_bytes, kind_id_from_parts};
 
 use crate::mail::registry::authority::BootAuthority;
@@ -84,12 +85,17 @@ impl Registry {
                     // registrable: a real actor there would be
                     // indistinguishable from no actor. The chassis id is
                     // short-circuited ahead of the registry. Every arm below
-                    // refuses both.
-                    if id.0 == 0 || id == MailboxId::CHASSIS_MAILBOX_ID {
+                    // refuses both, and refuses a name outside the ADR-0166
+                    // path grammar the same way, so every stored route name is
+                    // proven once, here.
+                    let Some(canonical_name) = ActorPath::new(&commit.route.canonical_name)
+                        .ok()
+                        .filter(|_| id.0 != 0 && id != MailboxId::CHASSIS_MAILBOX_ID)
+                    else {
                         let name = commit.route.canonical_name.clone();
                         drop(commit.reject_at_home(PreparedSpawnFailure::SubnameInUse { full_name: name.clone() }));
                         return Err(RegistryEffectError::Name(NameConflict { name }));
-                    }
+                    };
                     match staged_route(&staged_routes, inner, id) {
                         // Same-name reuse of a `Dropped` route. Only
                         // `Registry::drop_mailbox` produces that lifecycle, and
@@ -100,7 +106,7 @@ impl Registry {
                         // which is what the conflict arm below reads.
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == commit.route.canonical_name => {}
+                                && existing.canonical_name == canonical_name => {}
                         // A route already occupies this id. `reserve` — where
                         // the authoritative retired-name answer lives — is
                         // still two steps away and will never run for this
@@ -127,10 +133,7 @@ impl Registry {
                         return Err(RegistryEffectError::ActivationRejected);
                     }
                     let route = commit.route;
-                    let record = RouteRecord {
-                        canonical_name: route.canonical_name,
-                        lifecycle: RouteLifecycle::Starting { token },
-                    };
+                    let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Starting { token } };
                     staged_routes.insert(route.id, Some(record.clone()));
                     staged_pending.insert(route.id, Some(token));
                     publication.route_updates.push(Update::Insert(route.id, record));
@@ -150,10 +153,12 @@ impl Registry {
                     applied.push(RegistryApplied::Starting { id: route.id, token });
                 }
                 RegistryEffect::PublishAlias(alias) => {
-                    let name = alias.rendered_name.to_string();
-                    if alias.alias.0 == 0 || alias.alias == MailboxId::CHASSIS_MAILBOX_ID {
-                        return Err(RegistryEffectError::Name(NameConflict { name }));
-                    }
+                    let Some(canonical_name) = ActorPath::new(&alias.rendered_name)
+                        .ok()
+                        .filter(|_| alias.alias.0 != 0 && alias.alias != MailboxId::CHASSIS_MAILBOX_ID)
+                    else {
+                        return Err(RegistryEffectError::Name(NameConflict { name: alias.rendered_name.to_string() }));
+                    };
                     let target_live =
                         match staged_route(&staged_routes, inner, alias.target_parent).map(|route| &route.lifecycle) {
                             Some(RouteLifecycle::Starting { .. }) => false,
@@ -166,21 +171,23 @@ impl Registry {
                             }
                         };
                     match staged_route(&staged_routes, inner, alias.alias) {
-                        Some(RouteRecord { canonical_name, lifecycle: RouteLifecycle::Alias { target_parent } })
-                            if canonical_name == alias.rendered_name.as_ref()
-                                && *target_parent == alias.target_parent =>
-                        {
+                        Some(RouteRecord {
+                            canonical_name: existing,
+                            lifecycle: RouteLifecycle::Alias { target_parent },
+                        }) if *existing == canonical_name && *target_parent == alias.target_parent => {
                             applied.push(RegistryApplied::Mailbox(alias.alias));
                             continue;
                         }
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == alias.rendered_name.as_ref() => {}
-                        Some(_) => return Err(RegistryEffectError::Name(NameConflict { name })),
+                                && existing.canonical_name == canonical_name => {}
+                        Some(_) => {
+                            return Err(RegistryEffectError::Name(NameConflict { name: canonical_name.to_string() }));
+                        }
                         None => {}
                     }
                     let record = RouteRecord {
-                        canonical_name: name,
+                        canonical_name,
                         lifecycle: RouteLifecycle::Alias { target_parent: alias.target_parent },
                     };
                     staged_routes.insert(alias.alias, Some(record.clone()));
@@ -216,23 +223,23 @@ impl Registry {
                     applied.push(RegistryApplied::AliasRetired(true));
                 }
                 RegistryEffect::ReserveStarting { route } => {
-                    if route.id.0 == 0 || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                    let Some(canonical_name) = ActorPath::new(&route.canonical_name)
+                        .ok()
+                        .filter(|_| route.id.0 != 0 && route.id != MailboxId::CHASSIS_MAILBOX_ID)
+                    else {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
-                    }
+                    };
                     match staged_route(&staged_routes, inner, route.id) {
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == route.canonical_name => {}
+                                && existing.canonical_name == canonical_name => {}
                         Some(_) => {
                             return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                         }
                         None => {}
                     }
                     let token = ActivationToken::next(&mut next_activation_token);
-                    let record = RouteRecord {
-                        canonical_name: route.canonical_name,
-                        lifecycle: RouteLifecycle::Starting { token },
-                    };
+                    let record = RouteRecord { canonical_name, lifecycle: RouteLifecycle::Starting { token } };
                     staged_routes.insert(route.id, Some(record.clone()));
                     staged_pending.insert(route.id, Some(token));
                     publication.route_updates.push(Update::Insert(route.id, record));
@@ -286,11 +293,14 @@ impl Registry {
                     applied.push(RegistryApplied::StartingCancellation(cancellation));
                 }
                 RegistryEffect::PublishLive { route, activation } => {
-                    if route.id.0 == 0 || route.id == MailboxId::CHASSIS_MAILBOX_ID {
+                    let Some(canonical_name) = ActorPath::new(&route.canonical_name)
+                        .ok()
+                        .filter(|_| route.id.0 != 0 && route.id != MailboxId::CHASSIS_MAILBOX_ID)
+                    else {
                         return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
-                    }
+                    };
                     let record = RouteRecord {
-                        canonical_name: route.canonical_name.clone(),
+                        canonical_name,
                         lifecycle: RouteLifecycle::Live {
                             endpoint: RouteEndpoint::from_entry(activation.into_legacy()),
                         },
@@ -298,7 +308,7 @@ impl Registry {
                     match staged_route(&staged_routes, inner, route.id) {
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
-                                && existing.canonical_name == route.canonical_name => {}
+                                && existing.canonical_name == record.canonical_name => {}
                         Some(_) => {
                             return Err(RegistryEffectError::Name(NameConflict { name: route.canonical_name }));
                         }
@@ -325,7 +335,7 @@ impl Registry {
                             .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
                     };
                     record.lifecycle = RouteLifecycle::Dropped;
-                    let name = record.canonical_name.clone();
+                    let name = record.canonical_name.to_string();
                     staged_routes.insert(id, Some(record.clone()));
                     publication.route_updates.push(Update::Insert(id, record.clone()));
                     publication.inventory_dirty |= inventory_live;

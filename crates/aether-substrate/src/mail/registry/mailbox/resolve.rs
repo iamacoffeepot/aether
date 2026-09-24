@@ -181,7 +181,7 @@ impl Registry {
         let routes = self.routes.load();
         Ok(match routes.entry_for(&id) {
             Some(route)
-                if route.canonical_name == name
+                if route.canonical_name.as_str() == name
                     && matches!(
                         resolve_route(id, |candidate| routes.entry_for(&candidate)),
                         ResolvedRoute::Starting { .. } | ResolvedRoute::Live { .. }
@@ -263,6 +263,17 @@ impl Registry {
     /// the id is unknown. Used by the closure dispatch path to stamp
     /// `origin` on observation mail (ADR-0011).
     pub fn mailbox_name(&self, id: MailboxId) -> Option<String> {
-        self.routes.load().entry_for(&id).map(|route| route.canonical_name.clone())
+        self.routes.load().entry_for(&id).map(|route| route.canonical_name.to_string())
+    }
+
+    /// The canonical path of the route `actor` proves, read from the
+    /// published view. Every lifecycle answers, `Dropped` included: a route
+    /// keeps its proven name after its actor departs, and only a failed birth
+    /// (a cancelled `Starting` reservation, or a boot or spawn unwound before
+    /// the actor was handed out) leaves the table.
+    /// The crate-private path behind
+    /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
+    pub(crate) fn actor_path(&self, actor: ErasedActorRef) -> Option<ActorPath> {
+        self.routes.load().entry_for(&actor.id()).map(|route| route.canonical_name.clone())
     }
 }

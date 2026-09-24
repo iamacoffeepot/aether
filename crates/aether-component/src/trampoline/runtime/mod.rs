@@ -160,7 +160,7 @@ impl NativeActor for WasmTrampoline {
             component.close_load_window();
             (component.drain_pending_aliases(), component.drain_pending_alias_retirements())
         });
-        state.stage_inline_aliases(ctx, aliases);
+        WasmTrampolineState::stage_inline_aliases(ctx, aliases);
         state.stage_inline_alias_retirements(ctx, retired);
     }
 
@@ -260,7 +260,7 @@ impl NativeActor for WasmTrampoline {
             let Some(component) = state.component.as_mut() else {
                 tracing::warn!(
                     target: "aether_component",
-                    mailbox = %state.mailbox,
+                    actor = %state.own_name(),
                     kind = %ctx.kind_label(env.kind),
                     "mail to trampoline with no wasm loaded (post-drop); discarded — re-load via aether.component.replace",
                 );
@@ -295,7 +295,7 @@ impl NativeActor for WasmTrampoline {
                 // native actors, which have no wedge guard either
                 // today.
                 let kind = ctx.kind_label(env.kind);
-                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", state.mailbox));
+                ctx.fatal_abort(format!("component {} (kind {kind}) trapped: {e}", state.own_name()));
             }
             (
                 component.drain_pending_aliases(),
@@ -303,7 +303,7 @@ impl NativeActor for WasmTrampoline {
                 component.drain_pending_spawns(),
             )
         };
-        state.stage_inline_aliases(ctx, aliases);
+        WasmTrampolineState::stage_inline_aliases(ctx, aliases);
         state.stage_inline_alias_retirements(ctx, retired);
         for pending in pendings {
             state.spawn_sibling(ctx, pending);

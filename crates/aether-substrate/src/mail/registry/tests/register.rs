@@ -137,6 +137,19 @@ fn try_register_inbox_rejects_reserved_chassis_name() {
     assert_eq!(r.len(), 0);
 }
 
+/// A route's name is what a proven reference reads back as its actor path,
+/// and that read has no failure arm, so a name outside the ADR-0166 grammar
+/// never reaches the table.
+#[test]
+fn try_register_inbox_rejects_a_name_outside_the_path_grammar() {
+    let r = Registry::new();
+    for name in ["test bad name", "test.parent:a:b", ":hole"] {
+        let err = r.try_register_inbox(&auth(), name, noop_handler()).expect_err("an ungrammatical name must reject");
+        assert_eq!(err.name, name);
+    }
+    assert_eq!(r.len(), 0);
+}
+
 #[test]
 fn drop_mailbox_frees_name_and_marks_entry_dropped() {
     let r = Registry::new();

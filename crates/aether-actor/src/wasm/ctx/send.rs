@@ -9,8 +9,8 @@ use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
-use crate::model::{CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
-use crate::reference::{ErasedActorRef, Target};
+use crate::model::{Addressable, CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
+use crate::reference::{ActorRef, ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, RouteDecision};
 
@@ -27,7 +27,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
     pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
-        self.push(target.erased().id().0, payload, ChainMode::Inherit);
+        self.push(target.erased(), payload, ChainMode::Inherit);
     }
 
     /// Send `payload` to the declared dependency `R` (ADR-0232 §1–§2),
@@ -45,7 +45,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.push(self.actor_ref::<R>().id().0, payload, ChainMode::Inherit);
+        self.push(self.actor_ref::<R>().erase(), payload, ChainMode::Inherit);
     }
 
     /// Send a slice of cast payloads to the declared dependency `R` as one
@@ -61,7 +61,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.push_many(self.actor_ref::<R>().id().0, payloads);
+        self.push_many(self.actor_ref::<R>().erase(), payloads);
     }
 
     /// Send a request to the declared dependency `R` and return the
@@ -77,7 +77,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.push_tracked(self.actor_ref::<R>().id().0, payload)
+        self.push_tracked(self.actor_ref::<R>(), payload)
     }
 
     /// Send a request to the declared dependency `R` and store `context`
@@ -97,7 +97,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        let request = self.push_tracked(self.actor_ref::<R>().id().0, payload);
+        let request = self.push_tracked(self.actor_ref::<R>(), payload);
         if request.0 != Source::NO_CORRELATION {
             self.inline.insert_request_context(request, context);
         }
@@ -125,7 +125,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.push(self.actor_ref::<R>().id().0, payload, ChainMode::Detached);
+        self.push(self.actor_ref::<R>().erase(), payload, ChainMode::Detached);
     }
 
     /// The one routing call every single-payload `WasmCtx` send funnels
@@ -133,17 +133,17 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// `chain`, stamping this actor as the sender (issue 1987). A
     /// cluster-member recipient dispatches in place; any other hands off to
     /// the host (ADR-0114 addressing amendment).
-    fn push<K: ActorMail>(&self, recipient: u64, payload: &K, chain: ChainMode) {
+    fn push<K: ActorMail>(&self, recipient: ErasedActorRef, payload: &K, chain: ChainMode) {
         let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(recipient, K::ID.0, &bytes, 1, chain, self.mailbox);
+        self.inline.route_or_enqueue(recipient.id().0, K::ID.0, &bytes, 1, chain, self.mailbox);
     }
 
     /// The batch form of [`Self::push`]: the cast payloads cross as one
     /// contiguous slice with their count, inheriting the handler's chain.
-    fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, recipient: u64, payloads: &[K]) {
+    fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, recipient: ErasedActorRef, payloads: &[K]) {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
-            recipient,
+            recipient.id().0,
             K::ID.0,
             bytes,
             payloads.len() as u32,
@@ -156,20 +156,21 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// the host minted for the send. An inline-cluster local send never
     /// leaves the guest, so no host correlation exists for it: that path
     /// warn-logs and returns the no-correlation sentinel rather than reading
-    /// a stale `prev_correlation_p32` value.
-    fn push_tracked<K: ActorMail>(&self, recipient: u64, payload: &K) -> RequestId {
-        match self.inline.route_decision(recipient) {
+    /// a stale `prev_correlation_p32` value. The warning names the recipient
+    /// by `R`'s namespace, which the caller's type already states.
+    fn push_tracked<R: Addressable, K: ActorMail>(&self, recipient: ActorRef<R>, payload: &K) -> RequestId {
+        match self.inline.route_decision(recipient.id().0) {
             RouteDecision::Local => {
-                self.push(recipient, payload, ChainMode::Inherit);
+                self.push(recipient.erase(), payload, ChainMode::Inherit);
                 tracing::warn!(
                     kind = <K as Kind>::NAME,
-                    recipient,
+                    recipient = R::NAMESPACE,
                     "send_tracked on an inline-cluster local route has no host correlation",
                 );
                 RequestId(Source::NO_CORRELATION)
             }
             RouteDecision::Remote => {
-                self.push(recipient, payload, ChainMode::Inherit);
+                self.push(recipient.erase(), payload, ChainMode::Inherit);
                 RequestId(mail::prev_correlation())
             }
         }
@@ -190,7 +191,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        self.push(target.id().0, payload, ChainMode::Detached);
+        self.push(target, payload, ChainMode::Detached);
     }
 }
 

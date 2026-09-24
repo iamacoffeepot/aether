@@ -20,7 +20,7 @@ impl Component {
     pub(super) fn log_oversize_config(store: &Store<ComponentCtx>, config_bytes: usize, reason: &str) {
         tracing::error!(
             target: "aether_substrate::component",
-            mailbox_id = store.data().sender.0,
+            actor = %store.data().actor_name(),
             config_bytes,
             small_region_bytes = SMALL_REGION_BYTES,
             deliverable_cap_bytes = MAX_DELIVERABLE_MAIL_BYTES,
