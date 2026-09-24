@@ -56,10 +56,9 @@ use std::collections::HashMap;
 use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Render, Tick, WindowSize};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, PI, Quat, TAU, Vec2, Vec3};
 use aether_render::{RenderCapability, ViewProjection};
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 const Z_NEAR: f32 = 0.1;
 const Z_FAR: f32 = 100.0;
@@ -301,10 +300,9 @@ impl WasmActor for CameraComponent {
     /// receives `Render` and never submits — a no-op there, where the
     /// render cap discards anyway (ADR-0082 §7 / §11).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<WindowCapability>().subscribe::<WindowSize>(WindowSelector::All);
-        let lifecycle = ctx.actor::<LifecycleCapability>();
-        lifecycle.subscribe::<Tick>();
-        lifecycle.subscribe::<Render>();
+        ctx.subscribe::<WindowCapability, WindowSize>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
+        ctx.subscribe::<LifecycleCapability, Render>();
     }
 
     /// Advance every camera's per-mode state each tick. Inactive cameras
@@ -335,7 +333,7 @@ impl WasmActor for CameraComponent {
             && let Some(cam) = self.cameras.get(name)
         {
             let view_proj = cam.mode.view_proj(self.aspect);
-            ctx.actor::<RenderCapability>().send(&ViewProjection { view_proj });
+            ctx.send::<RenderCapability>(&ViewProjection { view_proj });
         }
     }
 
