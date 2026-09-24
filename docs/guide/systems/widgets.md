@@ -669,10 +669,10 @@ fn on_virtual_list_hover(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, hover
 `VirtualListHover { index: Option<u32>, frame }` is sent whenever
 that answer **changes** — from a pointer move, a wheel, a thumb drag, or a
 fresh item vector arriving under a still pointer — and is attributed by
-`ctx.sender()` like every other value-up event. (A handler may spell
-its actor — `WasmCtx<'_, Self>` — and the macro hands it a ctx typed by that
-actor; the default `Erased` names no actor. The actor is the first parameter,
-the reply mode the second.) The rectangle is the
+`ctx.sender()` like every other value-up event. (A ctx that omits its actor
+is typed by it: `WasmCtx<'_>` reads as `WasmCtx<'_, Self>`, the actor first and
+the reply mode second, and `WasmCtx<'_, Erased>` is the untyped view.) The
+rectangle is the
 row's plate in the same window pixels the panel assigned the list its frame in,
 so a host stands a tooltip on the row without measuring anything, and it is all
 zeroes when `index` is `None` — the event that says to take the tooltip down.

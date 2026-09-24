@@ -575,9 +575,10 @@ fn stamped_source(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> Sour
     dispatch_rx.recv_timeout(Duration::from_secs(2)).expect("the sender's own mail reached its inbox").sender
 }
 
-/// The handler ctx for an inbound whose envelope carried `source`.
-fn sender_ctx(transport: &Arc<NativeBinding>, source: Source) -> NativeCtx<'_> {
-    NativeCtx::new(transport, source, MailId::NONE, MailId::NONE)
+/// The handler ctx for an inbound whose envelope carried `source`, typed by
+/// the handler's actor.
+fn sender_ctx<A>(transport: &Arc<NativeBinding>, source: Source) -> NativeCtx<'_, A> {
+    NativeCtx::new_for_actor(transport, source, MailId::NONE, MailId::NONE)
 }
 
 // Regression (issue 6522): two local components are two senders. A

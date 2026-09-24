@@ -7,13 +7,12 @@
 //! component host (loads) and bundle roots. The core names a loaded bundle by
 //! its digest; the shell keeps each root's proven reference, taken from its
 //! load reply's stamped sender (ADR-0230 §3), keyed by that digest, and sends
-//! to it with the command's ticket as the request context. Inbound [`Call`]
-//! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and
-//! parks the reply keyed by its [`CallerId`]; each reply kind recovers its
-//! ticket from the request context and feeds the matching core
-//! continuation. Dropping the actor abandons every parked reply.
-//! A bundle root's fetch-on-miss `ReadArtifact` is forwarded to the journal
-//! owner with its reply pinned to the root, so the core never sees it.
+//! to it with the command's ticket as the request context. Inbound [`Call`],
+//! [`AwaitProcessed`], and a bundle root's fetch-on-miss [`ReadArtifact`]
+//! mail defers its reply, is fed to the core, and parks the reply keyed by
+//! its [`CallerId`]; each reply kind recovers its ticket from the request
+//! context and feeds the matching core continuation. Dropping the actor
+//! abandons every parked reply.
 
 mod perform;
 
@@ -125,12 +124,15 @@ impl NativeActor for BundleDriver {
         self.perform(ctx, commands);
     }
 
-    /// Serves a bundle root's fetch-on-miss: forwards the `ReadArtifact` to the
-    /// journal owner, which replies to the root directly with the root's
-    /// correlation. The core does not see it and the driver keeps no state.
+    /// Serves a bundle root's fetch-on-miss: the core answers it from its
+    /// artifact cache or one shared journal read per digest, and the parked
+    /// reply carries the answer back to the root with the root's correlation.
     #[handler::manual]
     fn on_fetch_artifact(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, request: ReadArtifact) {
-        ctx.forward_to(&self.journal.erase(), &request);
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+        let (caller, commands) = self.core.fetch_artifact(request);
+        self.callers.insert(caller, owed);
+        self.perform(ctx, commands);
     }
 
     #[handler::single]

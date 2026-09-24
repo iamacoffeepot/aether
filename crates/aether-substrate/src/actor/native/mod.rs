@@ -118,9 +118,10 @@ pub trait Dispatch<S> {
     // ADR-0112: the dispatch seam carries the most-permissive `Manual` ctx so a
     // `#[handler::manual]` arm reaches the reply surface; the macro downgrades
     // to `Single` per single-class handler. Issue 4158: it is also typed by
-    // `Self`, the actor being dispatched, so a handler that opts into the typed
-    // form parents its children under the actor the runtime is actually
-    // running; each arm `erase()`s for a handler whose signature names no actor.
+    // `Self`, the actor being dispatched, so a handler parents its children
+    // under the actor the runtime is actually running. A handler whose ctx
+    // omits its actor is typed by it (ADR-0231 §7); each arm `erase()`s only
+    // for a handler that spells `Erased`.
     /// Route one inbound envelope to the matching `#[handler]` over the state.
     /// `Some(())` on a handled kind + decode success, `None` otherwise.
     fn dispatch(

@@ -48,7 +48,7 @@ Edits under `.claude/` — skill text in `.claude/skills/` especially — and fo
 - Build: `cargo build` (release: `cargo build --release`). The root manifest's `default-members` leaves out the build pipeline (`xtask`), the `aether-puppet` lane driver, and the `aether-test-fixtures-*` wasm crates; add `--workspace` to select every member.
 - Run: `cargo run -p <crate>` — the workspace root has no default binary. Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`.
 - Test: `cargo test` (single test: `cargo test <name>`; single-threaded with output: `cargo test -- --nocapture --test-threads=1`)
-- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
@@ -114,7 +114,7 @@ Pre-build component wasm with `cargo xtask build-wasm` before a scenario suite (
 A component is an actor whose receive side is declared with **`#[actor]`** on one `impl WasmActor for C` block (ADR-0033 / ADR-0074). Guide: `docs/guide/writing-guest-code.md`, `docs/guide/systems/components.md`, `docs/guide/foundations/actor-model.md`, and `docs/guide/architecture/guest-native-boundary.md`.
 
 ```rust
-#[actor]
+#[actor(depends(LifecycleCapability), depends(RenderCapability))]
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.kit.camera";   // default load name
 
@@ -133,15 +133,15 @@ aether_actor::export!(CameraComponent);                    // required; emits wa
 ```
 
 - **Exports**: `export!(A, B, C)` (ADR-0096) designates no default, so a load without an `export` selector is refused and names the exports (ADR-0138); `export!(default = A, B, C)` names one. A leading `boot = B` slot instantiates `B` once per engine and module on every load and is never selectable (ADR-0147).
-- **Handlers**: `#[handler::single | manual]` (ADR-0134) infers the kind from the third parameter; an optional `#[fallback]` taking `Mail<'_>` catches the rest — omit it for a strict receiver. A handler may type its ctx by its actor (`WasmCtx<'_, Self>`, reply mode second: `WasmCtx<'_, Self, Manual>`); the default `Erased` names no actor.
-- **Lifecycle**: `init`, `wire`, `unwire`. `on_dehydrate` / `on_rehydrate` are default-no-op `WasmActor` methods; override them to carry state across `replace_component` (ADR-0101).
+- **Handlers**: `#[handler::single | manual]` (ADR-0134) infers the kind from the third parameter; an optional `#[fallback]` taking `Mail<'_>` catches the rest — omit it for a strict receiver. A ctx that omits its actor is typed by it: `WasmCtx<'_>` reads as `WasmCtx<'_, Self>` (reply mode second: `WasmCtx<'_, Self, Manual>`), so it reaches only declared dependencies; spell `Erased` (`WasmCtx<'_, Erased>`) for the untyped view.
+- **Lifecycle**: `init`, `wire`, `unwire`. `on_dehydrate` / `on_rehydrate` are default-no-op `WasmActor` methods; override them to carry state across `replace_component` (ADR-0101). The `wire` / `unwire` / `on_rehydrate` ctxs are typed by the actor the same way.
 - **Dependencies and addressing** (ADR-0230, `docs/adr/0230-proven-actor-references.md`): `#[actor(depends(R))]` (repeatable) declares that `R` — a root singleton or a co-hosted `Embedded` peer, never an `Instanced` actor — must be live before this actor is created; a load or replacement whose dependency is not live is refused before `init`. `ctx.actor::<R>()` returns a ctx-bound handle whose `.send` inherits the handler's causal chain (`.send_detached` starts a fresh one); on a typed ctx it compiles only for a declared dependency, while the erased ctx still reaches every singleton until ADR-0230's contract phase closes that door. State that outlives a handler holds a proven reference, never a `MailboxId`: `ctx.actor_ref::<R>()` mints an `ActorRef<R>` for a declared dependency and `ctx.sender()` yields an `Option<ErasedActorRef>`; send through either with `ctx.send_to(reference, &kind)`, which checks the kind against an `ActorRef<R>` and leaves an `ErasedActorRef` unchecked. Hand-hashing a name into a `MailboxId` (`mailbox_id_from_name`, `_pair`, `MailboxId::from_name`) is `disallowed-methods` in `clippy.toml`, and CI's raw-mailbox ratchet (`scripts/check-raw-mailbox-ratchet.py`) lets the count of old-door call sites only fall.
 - **Config**: a capability configures through the ADR-0090 `#[derive(aether_substrate::Config)]` path (argv > env > default, handed into `init`), never a naked `std::env::var` / `var_os` read. Both are `disallowed-methods` in `clippy.toml`; a legitimately external read (the config machinery, a process-level tuning knob, a `HOME` / `XDG` lookup, a build script, test code) carries `#[allow(clippy::disallowed_methods)]` plus a one-line reason. See `docs/guide/systems/configuration.md`.
 - **Kind types**: `#[aether_data::kind(name = "…")]` declares the kind and emits the standard stack (`Kind`, `Schema`, `Debug`, `Clone`, `Serialize`, `Deserialize`), with `copy` / `default` / `partial_eq` / `eq` / `pod` / `no_serde` / `derive(…)` naming the departures. A component and its peers share the kind crate (ADR-0066); under the `runtime` feature the same crate emits the cdylib via `export!`.
 
 ## Local checks and CI
 
-GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` has no branch protection: `CI pass` (the `ci.yml` aggregate) is the verdict to wait on, and `Lint title` checks the PR title. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
+GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` has no branch protection: `CI pass` (the `ci.yml` aggregate) is the verdict to wait on, and `Lint title` checks the PR title. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
 
 The working loop opens a PR, watches the current head, and repairs deterministic failures. `scripts/wave-status.sh --wait <PR>` polls until `CI pass` concludes; a fix pushed to the same branch supersedes the old run.
 

@@ -7,7 +7,7 @@ use aether_bloomery_kinds::{
     ReadArtifactResult, RequestSource, Requested, RuleName, SetHead,
 };
 use aether_bloomery_view::Heads;
-use aether_data::Kind;
+use aether_data::{Kind, KindId};
 
 use crate::core::{ArtifactRead, ArtifactTicket, Command, PlannedRecord, ProgramCore};
 use crate::reactors::PendingDestination;
@@ -78,16 +78,41 @@ pub fn plan_intents(bundle: Digest, cause: u64, intents: Vec<ReactorIntent>, hea
         .collect()
 }
 
+/// Plan one checked `SetHead` from its destination's stored kind.
+///
+/// A destination stored under the head's kind leaves the move for
+/// derivation; a missing (`None`) or wrong-kind destination fails the intent.
+fn plan_destination(pending: PendingDestination, stored: Option<KindId>) -> PlannedRecord {
+    let PendingDestination { cause, bundle, reactor, set_head } = pending;
+    let reason = match stored {
+        Some(kind) if kind == set_head.head().kind() => {
+            return PlannedRecord::SetHead { cause, bundle, reactor, set_head };
+        }
+        Some(_) => "set_head destination has the wrong kind",
+        None => "set_head destination is missing",
+    };
+    PlannedRecord::Ready(reaction_failed(cause, bundle, Some(reactor), Detail::new(reason)))
+}
+
 impl ProgramCore {
-    /// Read the next queued `SetHead` destination, in plan order.
+    /// Check the next queued `SetHead` destination, in plan order.
     ///
-    /// Returns `false` when none is queued.
+    /// A destination in the artifact cache is planned at once, with no read;
+    /// any other is read from the journal. Returns `false` when none is
+    /// queued.
     pub(crate) fn check_next_destination(&mut self, out: &mut Vec<Command>) -> bool {
         let Some((order, pending)) = self.routing.current.as_mut().and_then(|work| work.destinations.pop_first())
         else {
             return false;
         };
         let digest = pending.set_head.to();
+        if let Some(kind) = self.artifacts.kind(digest) {
+            let planned = plan_destination(pending, Some(kind));
+            if let Some(work) = self.routing.current.as_mut() {
+                work.order.insert(order, planned);
+            }
+            return true;
+        }
         let ticket = self.mint(ArtifactTicket::mint);
         self.artifact_reads.insert(ticket, ArtifactRead::SetHeadDestination);
         if let Some(work) = self.routing.current.as_mut() {
@@ -99,35 +124,25 @@ impl ProgramCore {
 
     /// Continue the checked `SetHead`'s destination read.
     ///
-    /// A destination stored under the head's kind leaves the move for
-    /// derivation; a missing or wrong-kind destination fails the intent.
+    /// A found destination enters the artifact cache before it is planned,
+    /// so a later check of the same digest reads nothing.
     pub(crate) fn continue_destination_artifact(&mut self, result: ReadArtifactResult, out: &mut Vec<Command>) {
         let Some((order, pending)) = self.routing.current.as_mut().and_then(|work| work.checking.take()) else {
             self.abort("set_head destination arrived with none being checked".to_string(), out);
             return;
         };
-        let PendingDestination { cause, bundle, reactor, set_head } = pending;
-        let planned = match result {
-            ReadArtifactResult::Found { kind, .. } if kind == set_head.head().kind() => {
-                PlannedRecord::SetHead { cause, bundle, reactor, set_head }
+        let stored = match result {
+            ReadArtifactResult::Found { kind, bytes, .. } => {
+                self.artifacts.insert(pending.set_head.to(), kind, bytes);
+                Some(kind)
             }
-            ReadArtifactResult::Found { .. } => PlannedRecord::Ready(reaction_failed(
-                cause,
-                bundle,
-                Some(reactor),
-                Detail::new("set_head destination has the wrong kind"),
-            )),
-            ReadArtifactResult::Missing { .. } => PlannedRecord::Ready(reaction_failed(
-                cause,
-                bundle,
-                Some(reactor),
-                Detail::new("set_head destination is missing"),
-            )),
+            ReadArtifactResult::Missing { .. } => None,
             ReadArtifactResult::Err { message, .. } => {
                 self.abort(format!("set_head destination read failed: {message}"), out);
                 return;
             }
         };
+        let planned = plan_destination(pending, stored);
         if let Some(work) = self.routing.current.as_mut() {
             work.order.insert(order, planned);
         }

@@ -1,8 +1,7 @@
 //! ADR-0065 typed id newtypes — `MailboxId`, `KindId`.
 //!
 //! Each type is `#[repr(transparent)]` over a `u64` (wire-identical
-//! to a raw u64; cast-shape kinds keep their
-//! `#[repr(C)]` layout) and exposes a `pub const TYPE_ID: u64`
+//! to a `u64` varint on the structured wire) and exposes a `pub const TYPE_ID: u64`
 //! that downstream `Schema` impls (in `aether-data`) emit as
 //! `SchemaType::TypeId(Self::TYPE_ID)`. The hub's encoder/decoder
 //! dispatch on the `TYPE_ID` value to translate JSON (tagged-string
@@ -145,10 +144,10 @@ pub struct RequestId(pub u64);
 
 /// Routing token for any mailbox — component or substrate-owned sink.
 /// Carries the ADR-0029 deterministic name hash with ADR-0064 tag
-/// bits in the high nibble. `#[repr(transparent)]` over `u64` so
-/// cast-shape kinds keep their layouts.
+/// bits in the high nibble. `#[repr(transparent)]` over `u64`, so on
+/// the structured wire it is identical to a `u64` varint.
 #[repr(transparent)]
-#[derive(Copy, Clone, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Pod, Zeroable)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MailboxId(pub u64);
 
 impl MailboxId {
