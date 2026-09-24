@@ -77,7 +77,7 @@ Require the worker to run Plan verification plus:
 
 ```bash
 cargo fmt -- --check
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Require a conventional commit, clean tree, exact changed-file list, checks, and deviations in its return. A broken assumption or unresolved design choice is a rescope result, not authority to expand scope.

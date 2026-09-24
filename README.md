@@ -93,7 +93,7 @@ The workspace root has no default binary.
 ```sh
 cargo build
 cargo test
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo fmt -- --check
 ```
 
@@ -296,7 +296,7 @@ commits use Conventional Commits. Before opening or updating a draft, run:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 GitHub Actions owns the expensive build/test matrix; `CI pass` and `Lint title`

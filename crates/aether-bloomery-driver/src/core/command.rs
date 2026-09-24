@@ -1,8 +1,8 @@
 //! The core's outbox: one [`Command`] per requested effect.
 
 use aether_bloomery_kinds::{
-    AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadClosure, ReadEvents, Warm,
-    WatchHead,
+    AppendRecords, CallOutcome, Digest, Event, Invoke, Processed, ReadArtifact, ReadArtifactResult, ReadClosure,
+    ReadEvents, Warm, WatchHead,
 };
 
 use super::ticket::{
@@ -18,9 +18,9 @@ use super::ticket::{
 /// [`Call`'s](aether_bloomery_kinds::Call) one outcome to a waiting caller,
 /// `Processed` delivers an
 /// [`AwaitProcessed`](aether_bloomery_kinds::AwaitProcessed) barrier reply,
-/// and `Abort` reports that the core's journal view cannot be trusted or a
-/// required record cannot be written; the shell maps it to `fatal_abort`
-/// (ADR-0063).
+/// `Fetched` delivers a bundle root's fetch-on-miss answer, and `Abort`
+/// reports that the core's journal view cannot be trusted or a required
+/// record cannot be written; the shell maps it to `fatal_abort` (ADR-0063).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
     /// Read journal entries after the request boundary.
@@ -32,7 +32,7 @@ pub enum Command {
     },
     /// Read one content-addressed bundle artifact.
     ReadArtifact {
-        /// Ticket the matching [`ReadArtifactResult`](aether_bloomery_kinds::ReadArtifactResult) arrives under.
+        /// Ticket the matching [`ReadArtifactResult`] arrives under.
         ticket: ArtifactTicket,
         /// The artifact request.
         request: ReadArtifact,
@@ -114,6 +114,13 @@ pub enum Command {
         caller: CallerId,
         /// The observed journal head.
         reply: Processed,
+    },
+    /// Deliver one fetch-on-miss answer, from the cache or a shared read.
+    Fetched {
+        /// Fetch to answer.
+        caller: CallerId,
+        /// The artifact read's result.
+        result: ReadArtifactResult,
     },
     /// The journal view cannot be trusted or a required record cannot be written.
     Abort {

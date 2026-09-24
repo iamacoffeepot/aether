@@ -31,7 +31,9 @@
 //! reply, kept by digest — and feeds each reply back through its ticketed
 //! continuation. A native `Call` is answered with exactly one `CallOutcome`
 //! once its outcome is recorded, and `AwaitProcessed` is answered with
-//! `Processed` once its bound is quiescent.
+//! `Processed` once its bound is quiescent. A bundle root's fetch-on-miss
+//! is answered by the driver itself, from a byte-bounded cache of found
+//! artifacts or one journal read shared by every fetch of that digest.
 
 #![forbid(unsafe_code)]
 
