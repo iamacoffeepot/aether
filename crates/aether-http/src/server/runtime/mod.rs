@@ -35,13 +35,13 @@ pub use std::sync::{Arc, RwLock, mpsc};
 pub use std::thread;
 pub use std::time::Duration;
 
-pub use aether_data::{Kind, KindId, MailboxId};
+pub use aether_data::{Kind, KindId};
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone};
 pub use aether_substrate::chassis::error::BootError;
+pub use aether_substrate::mail::CapabilityRegistry;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::registry::Registry;
-pub use aether_substrate::mail::{CapabilityRegistry, MailId};
 
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind
 // vocabulary its moved handler bodies name through this module's glob, so

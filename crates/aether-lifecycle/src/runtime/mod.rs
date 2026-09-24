@@ -40,7 +40,6 @@ use aether_substrate::actor::monitor::MonitorHandle;
 
 pub use aether_actor::Manual;
 pub use aether_actor::OutboundReply;
-pub use aether_actor::root_mailbox;
 pub use aether_data::{Kind, KindId, MailboxId as DataMailboxId};
 pub use aether_kinds::LifecycleAdvanceComplete;
 use aether_substrate::Erased;
@@ -497,7 +496,7 @@ impl NativeActor for LifecycleCapability {
     /// frame. Reply: [`LifecycleAdvanceComplete`] once the broadcast
     /// root settles.
     #[handler::manual]
-    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, payload: LifecycleAdvance) {
+    fn on_advance(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, payload: LifecycleAdvance) {
         if state.terminal_reached {
             // Already done — reply immediately with zeros so the
             // chassis main loop unblocks and can break on `next == 0`.
@@ -568,14 +567,7 @@ impl NativeActor for LifecycleCapability {
         // count to zero (which includes every fan-out descendant).
         let root = ctx.in_flight_root();
         let reply_to = ctx.reply_target();
-        if let Some(registry) = state.mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(
-                root,
-                // The cap subscribes settlement against its own mailbox.
-                root_mailbox::<Self>(),
-                <Settled as Kind>::ID,
-                Arc::clone(&state.mailer),
-            );
+        if ctx.subscribe_settlement::<Settled>(root) {
             state.pending = Some(PendingAdvance {
                 root,
                 completed_kind: broadcast,

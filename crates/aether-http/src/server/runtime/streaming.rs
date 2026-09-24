@@ -3,6 +3,7 @@
 // rather than restating a bespoke list per file.
 #[allow(clippy::wildcard_imports)]
 use super::*;
+use aether_actor::HandlesKind;
 
 impl HttpShardState {
     /// Open an inbound request stream (ADR-0128): mint a `stream_id`, record
@@ -58,7 +59,7 @@ impl HttpShardState {
     /// correlation, the reply-interception path writes back — so a streamed
     /// upload answers with one ordinary response and the settlement safety net
     /// still `502`s a handler that drops without replying.
-    pub fn end_request_stream<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId) {
+    pub fn end_request_stream<A: HandlesKind<Settled>>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId) {
         let Some(stream_id) = self.connections.get_mut(&conn_id).and_then(|c| c.active_stream.take()) else {
             return;
         };
@@ -67,7 +68,7 @@ impl HttpShardState {
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
         let mail_id = ctx.send_envelope_detached_to(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
-        self.subscribe_settlement(mail_id);
+        let _ = ctx.subscribe_settlement::<Settled>(mail_id);
         self.in_flight.insert(
             mail_id.correlation_id,
             PendingRequest { conn_id, method: stream.method, keep_alive: stream.keep_alive, handler: stream.handler },
