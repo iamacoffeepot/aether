@@ -67,3 +67,10 @@ fn send_to_child(ctx: &mut WasmCtx<'_>) {
 }
 
 fn main() {}
+
+// `Child` is listed, so only the unhandled send fails. The test crate declares
+// no `library` feature, so the shim's `cfg(feature = "library")` is allowed.
+#[allow(unexpected_cfgs)] // aether-suppression-request: the trybuild crate declares no `library` feature, so the export shim's `cfg(feature = "library")` gate is an unknown value here
+mod listed {
+    aether_actor::export!(super::Parent, private = [super::Child]);
+}

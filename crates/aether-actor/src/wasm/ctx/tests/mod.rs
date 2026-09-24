@@ -62,6 +62,10 @@ impl crate::WasmDispatch<Self> for FailingChild {
     }
 }
 
+// SAFETY: the host unit tests stand in for `export!`, which marks every
+// listed type; no rebuild arm runs in these tests.
+unsafe impl crate::Rebuildable for FailingChild {}
+
 impl ErasedWasmActor for FailingChild {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
@@ -125,6 +129,10 @@ impl crate::WasmDispatch<Self> for SucceedingChild {
 }
 
 impl HandlesKind<()> for SucceedingChild {}
+
+// SAFETY: the host unit tests stand in for `export!`, which marks every
+// listed type; no rebuild arm runs in these tests.
+unsafe impl crate::Rebuildable for SucceedingChild {}
 
 impl ErasedWasmActor for SucceedingChild {
     fn erased_namespace(&self) -> &'static str {
