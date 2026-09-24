@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-07-23
 - **Accepted:** 2026-07-30
-- **Last amended:** 2026-07-30
+- **Last amended:** 2026-09-23
 
 ## Context
 
@@ -331,7 +331,6 @@ parent handler
     return the deterministic id and completion receipt
 
 handler flush
-    fold same-flush mail for the child into its parked bootstrap tail
     submit one ordered effect batch
     flush causally later announcement mail after the spawn effect
 
@@ -406,14 +405,13 @@ Mail to a `Starting` actor is retained, not dispatched.
 The parked FIFO includes:
 
 - explicit `after_init` mail;
-- same-flush mail addressed to the deterministic child id;
 - cross-flush mail racing route publication;
 - wire-time self-mail;
 - other mail received before Live promotion.
 
 The explicit bootstrap prefix is installed first. Subsequent envelopes retain owner-observed order.
 
-Same-flush mail is folded directly into the prepared birth and requires no route-miss round trip.
+*Amended 2026-09-23 (#6395):* a handler cannot name a child it has only staged. No proof names a birth that is not yet `Live`, no singleton resolver reaches an instanced child, and the by-name child lookups were deleted (#6575). So no same-flush mail arises, and the flush submits its births without folding any mail into them. A proof from an earlier life at the same id meets a refused birth (`SubnameRetired` or `SubnameInUse`) and routes like any other mail: to the id's live occupant, or to the unknown-recipient path.
 
 A route-view miss submits an ordered `ParkOrDrop` effect:
 
@@ -811,7 +809,7 @@ Implementation of this ADR must prove:
 - Live promotion converts the staged parent-local reservation before completing success, and live teardown releases the resulting live-child key;
 - root, detached companion or sibling, and logical-child births share the init/Starting/wire/Live protocol without changing their accepted relationship or cascade semantics;
 - explicit `after_init` mail remains the bootstrap prefix;
-- same-flush, cross-flush, and wire-time mail remain FIFO behind that prefix;
+- cross-flush and wire-time mail remain FIFO behind that prefix;
 - newly dispatched Live mail cannot overtake the parked tail;
 - `Starting` publication emits no public inventory event;
 - Live promotion publishes enumeration before emitting inventory change;

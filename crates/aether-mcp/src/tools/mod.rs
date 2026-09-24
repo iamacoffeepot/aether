@@ -33,7 +33,7 @@ use aether_codec::frame::max_frame_size;
 use aether_data::canonical::kind_id_from_parts;
 use aether_data::wire;
 use aether_data::{ActorPath, MailId};
-use aether_data::{EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, mailbox_id_from_name, tagged_id};
+use aether_data::{EngineId, Kind, KindDescriptor, KindId, MailboxId, Tag, Uuid, tagged_id};
 use aether_data::{EnumVariant, Primitive, SchemaType};
 use aether_inventory::kinds::{ListKinds, ListKindsResult, ResolveAddress, ResolveAddressResult};
 #[cfg(test)]
@@ -42,7 +42,7 @@ use aether_kinds::{
     ComponentCapabilities, ComponentSelector, DeathReason, FallbackCapability, HandlerCapability, NamedMail,
     ResolveComponent, ResolveComponentResult, trace::MailNodeWire,
 };
-use aether_rpc::{MailEnvelope, MailboxAddress};
+use aether_rpc::{MailEnvelope, Recipient, ReplyEnvelope};
 #[cfg(test)]
 use base64::Engine as _;
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -298,7 +298,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Send one or more mail items to substrate mailboxes. Each item is {engine_id?, address, kind_name, params?}. `address` names the recipient mailbox and accepts a canonical lineage, an ADR-0166 short path whose `:name` hole names the one instanced child (e.g. `aether.component/:camera`), or a tagged mbx- id (the pre-0.4 key `recipient_name` still deserializes for one release); an item's `engine_id` may be omitted to target the sole supervised engine, and is an error with zero or several engines rather than a guess — resolution is per item, so a batch may still span engines by naming each one; textual addresses are resolved for liveness by the selected engine and are never hashed or alias-cached by aether-mcp. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles (status 'delivered'). The batch-level `replies` projection defaults to `terminal`, which returns the last arrival-ordered correlated reply plus every recognized error; `none` suppresses non-errors, and `all` restores the complete decoded stream. Recognition is exact for decoded `Err` variants and final kind-name error segments/suffixes. Each retained reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is fixed at 300s per item; on timeout the item reports status 'timeout' with timed_out:true and the projected replies collected so far. Set fire_and_forget:true to await recipient resolution, then fire the application mail without awaiting its settlement (status 'dispatched', empty replies regardless of projection). For `Bytes`-typed request fields, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file`, `$base64`, or `$text`. Decoded reply `Bytes` leaves over 16 KiB spill to a host file; a still-oversized complete result then passes through the generic 32 KiB whole-response guard, so explicit `all` never truncates."
+        description = "Send one or more mail items to substrate mailboxes. Each item is {engine_id?, address, kind_name, params?}. `address` names the recipient mailbox and accepts a canonical lineage, an ADR-0166 short path whose `:name` hole names the one instanced child (e.g. `aether.component/:camera`), or a tagged mbx- id, which the selected engine turns into its canonical path before the send (the pre-0.4 key `recipient_name` still deserializes for one release); an item's `engine_id` may be omitted to target the sole supervised engine, and is an error with zero or several engines rather than a guess — resolution is per item, so a batch may still span engines by naming each one; every address is resolved by the selected engine to a canonical path and sent by that path, never hashed or alias-cached by aether-mcp. Each item carries structured `params`, schema-encoded against the substrate kind vocabulary. Best-effort batch: per-item status is returned and one failure doesn't abort siblings. By default each item BLOCKS until its dispatch chain settles (status 'delivered'). The batch-level `replies` projection defaults to `terminal`, which returns the last arrival-ordered correlated reply plus every recognized error; `none` suppresses non-errors, and `all` restores the complete decoded stream. Recognition is exact for decoded `Err` variants and final kind-name error segments/suffixes. Each retained reply is {kind_id, kind_name, params (best-effort decode, null on miss), payload_bytes (base64 string, present only on a decode miss)}. The await cap is fixed at 300s per item; on timeout the item reports status 'timeout' with timed_out:true and the projected replies collected so far. Set fire_and_forget:true to await recipient resolution, then fire the application mail without awaiting its settlement (status 'dispatched', empty replies regardless of projection). For `Bytes`-typed request fields, pass a byte array (`[…]`, canonical) or one `$`-sigil embed: `$file`, `$base64`, or `$text`. Decoded reply `Bytes` leaves over 16 KiB spill to a host file; a still-oversized complete result then passes through the generic 32 KiB whole-response guard, so explicit `all` never truncates."
     )]
     pub async fn send_mail(&self, Parameters(args): Parameters<SendMailArgs>) -> Result<String, McpError> {
         guard_response_size("send_mail", mail::send_mail(self, args).await)
@@ -339,7 +339,7 @@ impl Mcp {
     }
 
     #[tool(
-        description = "Collect a bounded, non-mutating live-engine failure bundle while preserving the caller's required `primary_error`. Omit `engine_id` to target the sole supervised engine; with zero or several engines an omitted id is an error naming the situation, never a guess, and the reply echoes the engine that answered. Explicit selectors only: at most 8 `actor_addresses`, 8 `component_addresses` (each a canonical lineage, an ADR-0166 short path, or a tagged mbx- id — the same spelling every other tool's `address` takes), 16 exact kind names, plus an optional exact `frame.window_id`. Selectors are validated, sorted, and deduplicated before any observation. The result records the selected live/recently-dead fleet row, full schemas for selected kinds, full component descriptions, and for each actor a log tail capped at 100 entries plus its complete cost table; every observed entry is keyed by its `address`. Each observation has a 3-second cap and records success, error, timeout, or budget_exhausted without preventing later observations; the whole bundle has a 15-second budget. Optional frame capture returns the structured JSON text block first and a bounded inline PNG second. This tool never sends mail, replays or retries the failed operation, runs checks, reads a reference image, writes a host file, changes lifecycle state, or performs cleanup. Oversized JSON uses the standard whole-response spill projection."
+        description = "Collect a bounded, non-mutating live-engine failure bundle while preserving the caller's required `primary_error`. Omit `engine_id` to target the sole supervised engine; with zero or several engines an omitted id is an error naming the situation, never a guess, and the reply echoes the engine that answered. Explicit selectors only: at most 8 `actor_addresses`, 8 `component_addresses` (each a canonical lineage, an ADR-0166 short path, or a tagged mbx- id that the selected engine turns into its canonical path — the same spelling every other tool's `address` takes), 16 exact kind names, plus an optional exact `frame.window_id`. Selectors are validated, sorted, and deduplicated before any observation. The result records the selected live/recently-dead fleet row, full schemas for selected kinds, full component descriptions, and for each actor a log tail capped at 100 entries plus its complete cost table; every observed entry is keyed by its `address`. Each observation has a 3-second cap and records success, error, timeout, or budget_exhausted without preventing later observations; the whole bundle has a 15-second budget. Optional frame capture returns the structured JSON text block first and a bounded inline PNG second. This tool never sends mail, replays or retries the failed operation, runs checks, reads a reference image, writes a host file, changes lifecycle state, or performs cleanup. Oversized JSON uses the standard whole-response spill projection."
     )]
     pub async fn collect_failure_evidence(
         &self,
@@ -397,7 +397,7 @@ impl Mcp {
                        Every actor — native or wasm trampoline — serves this kind via the substrate's \
                        framework dispatch arm, so any `address` is queryable (e.g. \"aether.audio\", \
                        \"aether.component/aether.embedded:aether.camera\", an ADR-0166 short path, or a \
-                       tagged mbx- id). Omit engine_id to target the sole supervised engine; with zero \
+                       tagged mbx- id, which the selected engine turns into its canonical path). Omit engine_id to target the sole supervised engine; with zero \
                        or several engines an omitted id is an error, never a guess, and the reply \
                        echoes the engine that answered plus the address asked for. `max` defaults to 100 and clamps to 1000; \
                        pass `level` (`trace|debug|info|warn|error`) for server-side filtering; pass \
@@ -417,7 +417,8 @@ impl Mcp {
                        bracket into a per-handler EWMA; this reads it back — MEASURE-ONLY, the \
                        table has no scheduling effect. Every actor — native or wasm trampoline — \
                        serves this kind via the substrate's framework dispatch arm, so any `address` \
-                       is queryable (a lineage, an ADR-0166 short path, or a tagged mbx- id). Omit \
+                       is queryable (a lineage, an ADR-0166 short path, or a tagged mbx- id, which the \
+                       selected engine turns into its canonical path). Omit \
                        engine_id to target the sole supervised engine; with zero or several engines an \
                        omitted id is an error, never a guess, and the reply echoes the engine that \
                        answered plus the address asked for. Each row carries the handler kind (id + resolved name when \

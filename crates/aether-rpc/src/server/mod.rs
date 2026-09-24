@@ -8,20 +8,25 @@
 //! them through an internal mpsc; an `RpcInboundReady` wake mail tells the
 //! cap's dispatcher to drain.
 //!
-//! On `Call`, the cap proves the wire-borne recipient once at receipt
-//! and dispatches the envelope through the proof via
-//! `NativeCtx::send_envelope_detached_to` (fresh causal chain — the wake
+//! On `Call`, the cap resolves and proves the recipient's `ActorPath` on
+//! arrival through `NativeCtx::accept_call` (ADR-0230 §3) and delivers the
+//! item via `NativeCtx::deliver_detached` (fresh causal chain — the wake
 //! mail is causally unrelated to the wire-borne Call), then subscribes
 //! to settlement of the resulting root via
-//! `SettlementRegistry::subscribe_settlement_mail`. Any reply mail
+//! `NativeCtx::subscribe_settlement`. A path that does not
+//! resolve to a `Live` actor closes the call at once with
+//! `RpcError::NotPresent`. Any reply mail
 //! addressed back at this cap with the dispatch's correlation id
-//! gets lifted into a `ReplyEvent` and written to the originating
+//! gets lifted into a `ReplyEvent`, which carries its kind and bytes and
+//! no address, and written to the originating
 //! connection; the settlement notice closes the call with a
 //! `ReplyEnd`.
 //!
 //! Engine routes: a `Call` addressed at `engine = Some(id)` goes to the
 //! proxy that registered itself for `id` with `RegisterEngineRoute`,
-//! wrapped in a `ForwardEnvelope`. The cap keeps each registrant as a
+//! wrapped in a `ForwardEnvelope` that carries the path as written. The
+//! engine's own `RpcError` comes back in `CallSettled` and is written to the
+//! caller unchanged. The cap keeps each registrant as a
 //! proven reference and monitors it; the registrant's `MonitorNotice`
 //! retires its route and closes its in-flight calls. A call for an
 //! engine with no route closes at once with `RpcError::UnknownEngine`.

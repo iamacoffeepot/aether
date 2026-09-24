@@ -1,6 +1,8 @@
 //! `aether.rpc` mail kinds owned by the RPC server capability (ADR-0121).
 
-use aether_data::{EngineId, KindId, MailboxId};
+use aether_data::{ActorPath, EngineId, KindId};
+
+use crate::RpcError;
 
 /// `aether.rpc.inbound_ready` — sidecar accept / read thread →
 /// `RpcServerCapability` dispatcher wake. Issue 750. Mirrors the
@@ -18,19 +20,21 @@ pub struct RpcInboundReady {}
 /// its substrate over the proxy's outbound RPC connection. Issue 763 P3.
 ///
 /// Carries the *remote* target explicitly: a plain mail to the
-/// proxy is only `kind` + `payload` — it can't say *which mailbox
+/// proxy is only `kind` + `payload` — it can't say *which actor
 /// on the substrate* to deliver to. `ForwardEnvelope` is that
 /// carrier. The hub's `RpcServerCapability` sends it to the proxy
-/// registered for an `engine = Some(_)` wire `Call`'s engine; the proxy
-/// wraps `mailbox` + `kind` + the already-encoded `payload` into an RPC
-/// `Call`, and the substrate's own `RpcServerCapability` proves `mailbox`
-/// at receipt and dispatches it into its local actor system. Any reply
+/// registered for an `engine = Some(_)` wire `Call`'s engine, with the
+/// `Call`'s `recipient` path as written; the proxy wraps `recipient` +
+/// `kind` + the already-encoded `payload` into an RPC `Call`, and the
+/// substrate's own `RpcServerCapability` resolves and proves the path on
+/// arrival and dispatches it into its local actor system. Only that
+/// engine knows its declarations, so only it expands a short path. Any reply
 /// streams back through the proxy and routes to whoever sent this
 /// `ForwardEnvelope` — the proxy keys reply correlation off the inbound
 /// mail's `Source`. Hub-internal: it never crosses the RPC wire.
 #[aether_data::kind(name = "aether.rpc.forward")]
 pub struct ForwardEnvelope {
-    pub mailbox: MailboxId,
+    pub recipient: ActorPath,
     pub kind: KindId,
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
@@ -72,10 +76,12 @@ pub enum RegisterEngineRouteResult {
 /// RPC client. (Local,
 /// non-forwarded calls close on chassis settlement instead; a
 /// forwarded call has no local chain to settle, so it needs this
-/// explicit terminal signal.) `Err` carries the wire `RpcError`
-/// rendered as a string, keeping this terminal signal wire-simple.
+/// explicit terminal signal.) `Err` carries the substrate's wire
+/// [`RpcError`] as it arrived, so the hub writes it to its caller
+/// unchanged and a `RpcError::NotPresent` keeps its variant through the
+/// hub.
 #[aether_data::kind(name = "aether.rpc.call_settled")]
 pub enum CallSettled {
     Ok,
-    Err { error: String },
+    Err { error: RpcError },
 }

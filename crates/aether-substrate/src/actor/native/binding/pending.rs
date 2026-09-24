@@ -1,8 +1,8 @@
 //! What one buffered send records in the outbound window until the flush
-//! turns it back into routed mail, plus the two non-mail work items a handler
-//! can stage alongside it.
+//! turns it back into routed mail, plus the owner batch a handler can stage
+//! alongside it.
 
-use crate::mail::registry::effect::{PreparedSpawnCommit, RegistryBatch, RegistryBatchResult};
+use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 use crate::mail::ring::MailLoc;
 use crate::mail::{MailId, MailRef, MailboxId, Source};
 
@@ -59,12 +59,6 @@ pub(super) struct ComponentOrigin {
 /// one guest `wire` produced.
 pub(super) fn component_origin(origins: &[ComponentOrigin], mail_id: MailId) -> Option<MailboxId> {
     origins.iter().find(|origin| origin.mail_id == mail_id).map(|origin| origin.sender)
-}
-
-pub(super) struct PendingBirthWork {
-    pub(super) after_mail: usize,
-    pub(super) recipient: MailboxId,
-    pub(super) commit: PreparedSpawnCommit,
 }
 
 pub(super) struct PendingOwnerBatchWork {

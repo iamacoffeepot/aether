@@ -8,6 +8,8 @@
 //! keep past the handler that received it. [`NativeCtx::accept_bundle`] is
 //! the bundle front of the payload-borne door: it proves a mail bundle's
 //! addresses and hands back items that can only be delivered.
+//! [`NativeCtx::accept_call`] is its one-item form for a wire `Call`, whose
+//! recipient is an [`ActorPath`] proven on arrival.
 //!
 //! The receiver-addressing methods are emitted from one macro because
 //! [`NativeCtx`] and [`NativeInitCtx`](super::NativeInitCtx) hold the same
@@ -20,7 +22,7 @@ use aether_actor::{
     ActorRef, Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, Reaches,
     ReplyMode, Singleton,
 };
-use aether_data::{MailId, MailboxId};
+use aether_data::{ActorPath, KindId, MailId, MailboxId};
 use aether_kinds::NamedMail;
 
 use crate::actor::native::mailbox::NativeActorMailbox;
@@ -126,7 +128,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a
     /// payload (ADR-0230 §3): the bundle front of [`Self::resolve_live`].
     ///
-    /// Every item's [`ActorPath`](aether_data::ActorPath) recipient resolves
+    /// Every item's [`ActorPath`] recipient resolves
     /// and is proven before any item is returned, so a refusal — an absent,
     /// ambiguous, dropped, or still-starting recipient, or an unknown kind —
     /// moves no mail; the error names the recipient and `label`. The items
@@ -137,7 +139,34 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `aether.render`'s `CaptureFrame`, which proves both of its bundles
     /// before either moves.
     pub fn accept_bundle(&self, bundle: Vec<NamedMail>, label: &str) -> Result<Vec<BoundaryMail>, String> {
-        boundary::accept(self.binding.mailer().registry(), bundle, label)
+        boundary::accept(self.boundary_registry(), bundle, label)
+    }
+
+    /// Prove a wire `Call`'s recipient on arrival (ADR-0230 §3): the one-item
+    /// form of [`Self::accept_bundle`].
+    ///
+    /// `recipient` is the [`ActorPath`] the `Call` named. It resolves against
+    /// this engine, so a short path expands against this engine's
+    /// declarations, and the answered position is proven at once. A path that
+    /// does not resolve to a `Live` actor — never registered, still starting,
+    /// dropped, or an ambiguous or illegal short path — is refused with the
+    /// registry's diagnostic, and nothing moves. `kind` is taken as given.
+    ///
+    /// The item that comes back can only be delivered, through
+    /// [`Self::deliver_detached`]; the proof never leaves it, so the caller
+    /// holds no reference it could keep or send another kind through.
+    ///
+    /// Its consumer is `RpcServerCapability`'s `Call` receipt, which answers a
+    /// refusal as `RpcError::NotPresent`.
+    pub fn accept_call(&self, recipient: &ActorPath, kind: KindId, payload: Vec<u8>) -> Result<BoundaryMail, String> {
+        boundary::accept_call(self.boundary_registry(), recipient, kind, payload)
+    }
+
+    /// The host registry the two boundary fronts, [`Self::accept_bundle`] and
+    /// [`Self::accept_call`], prove their paths against. Private: it serves
+    /// those two fronts and no cap reaches the registry through it.
+    fn boundary_registry(&self) -> &Registry {
+        self.binding.mailer().registry()
     }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound

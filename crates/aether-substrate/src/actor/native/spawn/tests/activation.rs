@@ -92,7 +92,6 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
         staged.identity.id,
         Arc::clone(&staged.identity.canonical_name),
         Arc::downgrade(&staged.transport),
-        Arc::clone(&mailer),
     );
     let commit = spawner.prepare_commit(staged, Some(finalizer), EffectChain::Held(causing_chain));
     let child_id = commit.route.id;
