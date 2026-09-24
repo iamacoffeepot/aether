@@ -1,0 +1,16 @@
+{
+  "camera": "main",
+  "mode": "Orbit",
+  "pan_speed": 0.15,
+  "yaw_speed": 0.02,
+  "pitch_speed": 0.015,
+  "zoom_rate": 0.985,
+  "pitch_limit": 1.5,
+  "distance_floor": 1.0,
+  "seed": {
+    "target": [0.0, 1.6, 0.0],
+    "yaw": 0.6,
+    "pitch": -0.35,
+    "distance": 4.0
+  }
+}

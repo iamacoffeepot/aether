@@ -1,0 +1,22 @@
+{
+  "chassis": "desktop",
+  "components": [
+    {
+      "wasm": "dist/components/aether_kit.wasm",
+      "export": "aether.kit.camera"
+    },
+    {
+      "wasm": "dist/components/aether_kit.wasm",
+      "export": "aether.kit.camera-controller",
+      "config_json": "crates/aether-demo/controller.json"
+    },
+    {
+      "wasm": "dist/components/aether_kit.wasm",
+      "export": "aether.kit.mesh"
+    },
+    {
+      "wasm": "dist/components/aether_demo.wasm",
+      "export": "aether.demo"
+    }
+  ]
+}

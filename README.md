@@ -121,17 +121,19 @@ cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 
 ## Run the demo
 
-![The Utah teapot drawn as pen-plotter line art by the puppet component](docs/media/puppet-turntable.png)
+![The lamp_post.dsl mesh, a terracotta base with a green pole and arm, drawn in the desktop chassis](docs/media/demo.png)
 
 ```sh
-cargo xtask package --profile release --spec demo/puppet-turntable.json --assets crates/aether-mesh/examples
+cargo xtask package --profile release --spec crates/aether-demo/lamp-post.json --assets crates/aether-mesh/examples
 ```
 
-The Utah teapot as pen-plotter line art, turning on a turntable in the desktop
-chassis; drag to orbit. The image above is one frame of that run, captured
-through the substrate harness from the same two config files the demo ships.
-That writes a depot to `target/package/`; run `target/package/aether-desktop`
-with no flags at all, because everything the demo needs is inside it.
+A lamp post authored in the mesh DSL, drawn by the kit mesh viewer and framed
+by the kit camera and camera controller: WASD pan, the arrow keys yaw and
+pitch, and Z/X zoom. Nothing is sent by hand; the demo's last component sends
+the viewer its load at boot. The image above is a desktop-chassis capture of
+that composition. The command writes a depot to `target/package/`; run
+`target/package/aether-desktop` with no flags at all, because everything the
+demo needs is inside it.
 
 Without packaging, the same composition runs straight out of the checkout —
 build the component wasm, then boot the desktop chassis against the demo's
@@ -141,11 +143,11 @@ paths against the working directory):
 ```sh
 cargo xtask build-wasm
 cargo run -p aether-chassis-desktop --bin aether-desktop -- \
-  --boot-manifest demo/puppet-turntable.boot.json \
+  --boot-manifest crates/aether-demo/lamp-post.boot.json \
   --assets-dir crates/aether-mesh/examples
 ```
 
-See [demo/README.md](demo/README.md).
+See [crates/aether-demo/README.md](crates/aether-demo/README.md).
 
 ## Status
 

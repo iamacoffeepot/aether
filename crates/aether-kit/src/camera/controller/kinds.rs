@@ -30,6 +30,23 @@ pub enum ControllerMode {
     Topdown,
 }
 
+/// An initial orbit pose for the controller's shadow, in place of the compiled
+/// baseline. Carried by [`ControllerConfig::seed`]; the fields mirror the
+/// orbit camera's own (`aether.kit.camera.orbit.set`, see
+/// [`OrbitParams`](crate::camera::OrbitParams)).
+#[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
+pub struct OrbitSeed {
+    /// World-space point the eye orbits and looks at.
+    pub target: [f32; 3],
+    /// Orbit yaw, radians.
+    pub yaw: f32,
+    /// Orbit pitch, radians. Negative places the eye above the target
+    /// looking down.
+    pub pitch: f32,
+    /// Eye distance from `target`, world units.
+    pub distance: f32,
+}
+
 /// Init-config for [`CameraController`](crate::camera::controller::CameraController):
 /// which camera to drive, in which mode, and the per-tick rates and
 /// clamps the keymap integrates. Every rate is expressed per tick, so
@@ -74,6 +91,14 @@ pub struct ControllerConfig {
     /// topdown `extent`), world units, so a zoom-in never collapses the
     /// camera onto its target.
     pub distance_floor: f32,
+    /// Initial orbit pose. `None` seeds the compiled baseline, a
+    /// three-quarter overhead look at the origin from 12 units back.
+    /// `Some` replaces it: the controller seeds its shadow, and through
+    /// it the target camera at `wire`, with this pose, so the first held
+    /// key moves from here rather than snapping back to the baseline.
+    /// Orbit mode only; topdown always seeds its compiled pose. The
+    /// orbit auto-advance stays pinned off (`speed: 0`) either way.
+    pub seed: Option<OrbitSeed>,
 }
 
 impl Default for ControllerConfig {
@@ -95,6 +120,7 @@ impl Default for ControllerConfig {
             pitch_limit: 1.5,
             // Never dolly closer than 1 world unit to the target.
             distance_floor: 1.0,
+            seed: None,
         }
     }
 }

@@ -342,6 +342,12 @@ frame.
   `aether.kit.camera-controller.config` init-config that picks the target
   camera, mode, per-tick rates, and clamps, so the camera stays a pure
   projection state machine while the keyboard policy lives in the controller.
+  The config's optional `seed` (`{ target, yaw, pitch, distance }`) replaces the
+  compiled starting orbit pose, a three-quarter overhead look at the origin
+  from 12 units back. The controller seeds its own shadow with it, so a subject
+  framed at boot stays framed once a key is pressed, where an
+  `aether.kit.camera.orbit.set` sent from elsewhere would snap back to the
+  shadow on the first held key. It applies in orbit mode only.
 - **A new drawing component** subscribes the `Render` stage and emits
   `DrawTriangle`s in world space, with `z` chosen against the depth convention
   (backdrop at `z = 0`, movers above). Multiple components can draw into one
