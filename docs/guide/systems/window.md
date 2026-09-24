@@ -51,19 +51,20 @@ with render, lifecycle, and shutdown; it does not interpret raw winit events.
 ## The public surface
 
 Consumers use `WindowCapability` and `WindowManagerMailboxExt` for list,
-create, and subscription operations. They resolve a named `WindowInstance`
-from that typed manager identity and use `WindowMailboxExt` for id-less control:
+create, and subscription operations. A single-window consumer mails the
+per-window operations to the manager too, which re-dispatches them at the sole
+window (see below). A window whose proof the caller holds takes them directly,
+through `WindowMailboxExt`. There is no by-name window lookup in actor code.
 
 ```rust
 use aether_kinds::{Key, WindowMode};
 use aether_window::{
-    WindowCapability, WindowInstance, WindowMailboxExt, WindowManagerMailboxExt,
+    RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowManagerMailboxExt,
     WindowSelector, WindowSizeRequest, WindowSpec,
 };
 
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let windows = ctx.actor::<WindowCapability>();
-    let main = windows.resolve::<WindowInstance>("main");
 
     windows.list();
     windows.create(WindowSpec {
@@ -74,8 +75,8 @@ fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     });
     windows.subscribe::<Key>(WindowSelector::All);
 
-    main.set_title("Aether");
-    main.request_redraw();
+    windows.send(&SetWindowTitle { title: "Aether".to_owned() });
+    windows.send(&RequestWindowRedraw);
 }
 ```
 
@@ -397,9 +398,9 @@ let press = HarnessOp::window_event(
 ```
 
 The child lookup assumes the named window has already been created and its
-creation operation has settled: it proves only a `Live` child. Ordinary actor
-code reaches a window through its own typed `resolve::<WindowInstance>(name)`
-instead.
+creation operation has settled: it proves only a `Live` child. Actor code
+addresses the sole window through the manager, or a window whose proof it
+holds; there is no by-name window lookup in actor code.
 
 Synthetic injection is not a headless production API. The headless runtime
 stays fail-fast so tests cannot accidentally turn unsupported production
