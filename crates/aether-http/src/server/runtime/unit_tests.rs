@@ -1,5 +1,5 @@
 use super::{
-    Arc, HttpResponseStreamOpen, KindId, Mailer, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
+    Arc, HttpResponseStreamOpen, KindId, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
     RegisterRouteResult, Registry, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
     parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive,
     route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
@@ -13,15 +13,14 @@ use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
 use std::time::{Duration, UNIX_EPOCH};
 
-/// Run `body` against a fresh substrate — its registry and mailer — and a
-/// spawner-less test ctx over it: the shape every fixture here that needs a
-/// ctx shares.
-fn with_test_ctx<T>(body: impl FnOnce(&Registry, &Arc<Mailer>, &mut NativeCtx<'_>) -> T) -> T {
+/// Run `body` against a fresh substrate's registry and a spawner-less test
+/// ctx over it: the shape every fixture here that needs a ctx shares.
+fn with_test_ctx<T>(body: impl FnOnce(&Registry, &mut NativeCtx<'_>) -> T) -> T {
     let (registry, mailer) = fresh_substrate();
     let binding = unrouted_binding(&mailer);
     let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
-    body(&registry, &mailer, &mut ctx)
+    body(&registry, &mut ctx)
 }
 
 /// Register a named test-local mailbox and return its proven reference.
@@ -46,7 +45,7 @@ fn disabled_http_server_err_replies_to_register_route() {
     let (_registry, mailer) = fresh_substrate();
     let binding = unrouted_binding(&mailer);
     let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
-    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(&mailer));
+    let mut state = HttpSupervisorState::disabled(HttpServerConfig::default());
 
     let result = HttpServerCapability::on_register_route(
         &mut state,
@@ -359,7 +358,7 @@ mod route_registration {
 
     /// Two proven route holders.
     fn holders() -> (ErasedActorRef, ErasedActorRef) {
-        with_test_ctx(|registry, _, _| (proven(registry, "test.http.route.a"), proven(registry, "test.http.route.b")))
+        with_test_ctx(|registry, _| (proven(registry, "test.http.route.a"), proven(registry, "test.http.route.b")))
     }
 
     #[track_caller]
@@ -574,20 +573,24 @@ mod shard_startup {
         (ShardSink { inbound_tx, dirty: Arc::new(AtomicBool::new(false)), shard }, inbound_rx)
     }
 
-    fn starting_state(count: usize, pending_peers: VecDeque<PendingPeer>) -> (Arc<Registry>, HttpSupervisorState) {
+    fn starting_state(
+        count: usize,
+        pending_peers: VecDeque<PendingPeer>,
+    ) -> (Arc<Registry>, Arc<Mailer>, HttpSupervisorState) {
         let registry = Arc::new(Registry::new());
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let mut state = HttpSupervisorState::disabled(
-            HttpServerConfig { enabled: true, max_connections: 8, ..HttpServerConfig::default() },
-            mailer,
-        );
+        let mut state = HttpSupervisorState::disabled(HttpServerConfig {
+            enabled: true,
+            max_connections: 8,
+            ..HttpServerConfig::default()
+        });
         state.shard_startup = ShardStartup::Starting {
             remaining: count,
             next_to_stage: None,
             slots_by_index: (0..count).map(|_| ShardSlot::Pending).collect(),
             pending_peers,
         };
-        (registry, state)
+        (registry, mailer, state)
     }
 
     fn event_peer(event: InboundEvent) -> SocketAddr {
@@ -608,8 +611,8 @@ mod shard_startup {
         let (third, third_client) = socket_pair();
         let expected = [first.peer, second.peer, third.peer];
         let pending_peers = [first, second, third].into_iter().collect();
-        let (registry, mut state) = starting_state(3, pending_peers);
-        let binding = binding(&registry, &state.mailer);
+        let (registry, mailer, mut state) = starting_state(3, pending_peers);
+        let binding = binding(&registry, &mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let (sink_zero, rx_zero) = sink(&registry, "test.http.shard-zero");
         let (sink_two, rx_two) = sink(&registry, "test.http.shard-two");
@@ -637,7 +640,7 @@ mod shard_startup {
     /// remaining index settles.
     #[test]
     fn duplicate_completion_cannot_finish_startup_twice() {
-        let (registry, mut state) = starting_state(2, VecDeque::new());
+        let (registry, _mailer, mut state) = starting_state(2, VecDeque::new());
         let (sink_zero, _rx_zero) = sink(&registry, "test.http.duplicate-zero");
 
         assert!(matches!(state.finish_shard_spawn(0, Some(sink_zero)), ShardSettlement::Pending));
@@ -653,8 +656,8 @@ mod shard_startup {
     fn all_failed_shards_refuse_every_retained_peer() {
         let (pending, mut client) = socket_pair();
         client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound refusal read");
-        let (registry, mut state) = starting_state(1, once(pending).collect());
-        let binding = binding(&registry, &state.mailer);
+        let (registry, mailer, mut state) = starting_state(1, once(pending).collect());
+        let binding = binding(&registry, &mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         let settled = state.finish_shard_spawn(0, None);
@@ -677,9 +680,9 @@ mod shard_startup {
         let (first, first_client) = socket_pair();
         let (second, mut second_client) = socket_pair();
         second_client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound capacity refusal read");
-        let (_registry, mut state) = starting_state(1, once(first).collect());
+        let (_registry, mailer, mut state) = starting_state(1, once(first).collect());
         state.config.max_connections = 1;
-        let binding = unrouted_binding(&state.mailer);
+        let binding = unrouted_binding(&mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         state.assign_peer(&mut ctx, second.stream, second.peer);
@@ -703,7 +706,7 @@ mod shard_startup {
     fn dropping_starting_state_closes_retained_peer() {
         let (pending, mut client) = socket_pair();
         client.set_read_timeout(Some(Duration::from_secs(1))).expect("bound teardown read");
-        let (_registry, state) = starting_state(1, once(pending).collect());
+        let (_registry, _mailer, state) = starting_state(1, once(pending).collect());
 
         drop(state);
 
@@ -792,7 +795,6 @@ mod wake_coalescing {
 mod monitor_collapse {
     use super::super::{HttpServerConfig, HttpSupervisorState};
     use super::{proven, with_test_ctx};
-    use std::sync::Arc;
 
     /// The `route holder is not monitorable` warn must fire once per
     /// mailbox, not once per route. A mailbox that fails to monitor
@@ -800,8 +802,8 @@ mod monitor_collapse {
     /// `watch` for the same mailbox is a no-op.
     #[test]
     fn watch_remembers_unmonitorable_mailbox() {
-        with_test_ctx(|registry, mailer, ctx| {
-            let mut state = HttpSupervisorState::disabled(HttpServerConfig::default(), Arc::clone(mailer));
+        with_test_ctx(|registry, ctx| {
+            let mut state = HttpSupervisorState::disabled(HttpServerConfig::default());
             let target = proven(registry, "test.http.watch.target");
 
             assert!(!state.monitors.contains_key(&target));
