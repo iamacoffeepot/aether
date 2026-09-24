@@ -28,9 +28,10 @@ publish = false
 # `HandlesKind`, and name-inventory markers compile always-on; the
 # state-bearing wasmtime half (the cap state, the trampoline state, and
 # both init configs, which hold `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`)
-# is gated so a marker-only wasm guest can address
-# `ctx.actor::<ComponentHostCapability>()` without dragging wasmtime and
-# the substrate through.
+# is gated so a marker-only wasm guest can declare
+# `#[actor(depends(ComponentHostCapability))]` and mail it with
+# `ctx.send::<ComponentHostCapability>(..)` without dragging wasmtime and the
+# substrate through.
 
 [features]
 default = ["runtime"]

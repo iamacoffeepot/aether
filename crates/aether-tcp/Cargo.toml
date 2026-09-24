@@ -24,8 +24,9 @@ publish = false
 # wasm-safe identities, mail kinds, and `HandlesKind` markers compile
 # always-on; the `aether_substrate`-typed runtime half (the cap's
 # listener-fleet supervisor map, the accept-loop sidecar threads, and the
-# framed session I/O) is gated so a marker-only wasm guest can address
-# `ctx.actor::<TcpCapability>()` without dragging the substrate through.
+# framed session I/O) is gated so a marker-only wasm guest can declare
+# `#[actor(depends(TcpCapability))]` and mail it with
+# `ctx.send::<TcpCapability>(..)` without dragging the substrate through.
 
 [features]
 default = ["runtime"]

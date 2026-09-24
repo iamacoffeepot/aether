@@ -23,7 +23,7 @@ use alloc::vec::Vec;
 
 /// Typed root marker for the substrate harness's observer mailbox, the
 /// sink the fixtures report to through
-/// `ctx.actor::<SubstrateHarnessObserver>().send(&report)`. Its `NAMESPACE`
+/// `ctx.send::<SubstrateHarnessObserver>(&report)`. Its `NAMESPACE`
 /// mirrors `aether_harness_substrate::SUBSTRATE_HARNESS_OBSERVER_MAILBOX_NAME`;
 /// it lives here so wasm guests don't pull the harness (`std`-bound) into the
 /// FFI build.

@@ -7,7 +7,7 @@
 # ADR-0122) and `crates/aether-fs/src/` for the precedent: the
 # capability owns the resource, its paired request/result kinds live in
 # the capability's own `kinds.rs`, and a guest addresses it by type
-# through `ctx.actor::<FsCapability>()`.
+# through `ctx.send::<FsCapability>(..)` under `depends(FsCapability)`.
 #
 # This hook fires on Edit/Write to `host_fns.rs` and rejects diffs
 # that add a `linker.func_wrap(` call. To deliberately add a host fn
@@ -43,7 +43,7 @@ emit_message() {
         printf 'See docs/guide/capability-anatomy.md and crates/aether-fs/src/ for\n'
         printf 'the precedent: the capability owns the resource, its paired\n'
         printf 'request/result kinds live in its own kinds.rs, and a guest\n'
-        printf 'addresses it by type through ctx.actor::<FsCapability>().\n'
+        printf 'addresses it by type through ctx.send::<FsCapability>(..)\nunder depends(FsCapability).\n'
         printf '\n'
         printf 'If a host fn is genuinely the right tool, override by including\n'
         printf '`// HOST_FN_OK: <reason>` in the new code.\n'

@@ -60,8 +60,8 @@ pub use runtime::{LifecycleConfig, LifecycleConfigLayer, LifecycleOverlay, Lifec
 /// split, ADR-0082). A ZST carrying only the addressing — the
 /// `Addressable` / `HandlesKind` markers and the name-inventory entry,
 /// all emitted always-on by `#[actor]` — so a wasm guest names it via
-/// `ctx.actor::<LifecycleCapability>()` without pulling the substrate
-/// runtime. The state-bearing runtime (`LifecycleCapabilityState` in
+/// `ctx.subscribe::<LifecycleCapability, K>()` without pulling the
+/// substrate runtime. The state-bearing runtime (`LifecycleCapabilityState` in
 /// `mod runtime`, which owns the data graph, subscriber table, fan-out,
 /// and settlement gating) lives behind the one `feature = "runtime"`
 /// gate; the chassis only feeds the cap [`LifecycleAdvance`](aether_kinds::LifecycleAdvance) cadence.

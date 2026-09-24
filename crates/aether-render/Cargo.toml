@@ -24,10 +24,11 @@ publish = false
 # wasm-safe identity (`RenderCapability` / `HeadlessRenderCapability`
 # ZSTs), the drawing/texture kinds, and the `HandlesKind` markers compile
 # always-on; the `aether_substrate`-typed runtime half (plus the wgpu GPU
-# pipeline) is gated so a marker-only wasm guest can address
-# `ctx.actor::<RenderCapability>().send(&triangle)` without dragging the
-# GPU stack through. The old capabilities `render` marker maps to this
-# crate's default-off face; `render-runtime` maps to `runtime`.
+# pipeline) is gated so a marker-only wasm guest can declare
+# `#[actor(depends(RenderCapability))]` and mail it with
+# `ctx.send::<RenderCapability>(&triangle)` without dragging the GPU stack
+# through. The old capabilities `render` marker maps to this crate's
+# default-off face; `render-runtime` maps to `runtime`.
 
 # cargo-machete scans source without expanding macros, so it cannot see that
 # `clap` and `confique` are used only through the `#[derive(aether_substrate::Config)]`

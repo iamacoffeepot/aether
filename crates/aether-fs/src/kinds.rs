@@ -4,7 +4,7 @@
 //! the capability crate rather than in `aether-kinds`.
 //!
 //! Always-on (no `cfg` gate): a wasm component that addresses the fs
-//! cap via `ctx.actor::<FsCapability>()` and a render-only chassis
+//! cap via `ctx.send::<FsCapability>(..)` and a render-only chassis
 //! both need these types, so they ride the target-agnostic build.
 //!
 //! ADR-0041 substrate file I/O. Request kinds on the `"aether.fs"`

@@ -19,8 +19,9 @@ publish = false
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity, kinds, and `HandlesKind` markers compile always-on;
 # the `aether_substrate`-typed runtime half (plus the native `arboard`
-# backend) is gated so a marker-only wasm guest can address
-# `ctx.actor::<ClipboardCapability>()` without dragging the substrate
+# backend) is gated so a marker-only wasm guest can declare
+# `#[actor(depends(ClipboardCapability))]` and mail it with
+# `ctx.send::<ClipboardCapability>(..)` without dragging the substrate
 # through.
 
 [features]

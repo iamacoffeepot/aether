@@ -2,7 +2,7 @@
 //!
 //! These ride the always-on (marker-only `render`) region of the render
 //! module, so a wasm guest on the `render` feature sees the kind types
-//! for typed `ctx.actor::<RenderCapability>().send(&kind)` addressing
+//! for typed `ctx.send::<RenderCapability>(&kind)` addressing
 //! without the `render-runtime` GPU stack. The capture-request kinds
 //! (`CaptureFrame` / `CaptureFrameResult` / `SimilarityCheck`) and the
 //! `FrameCheck` verification family stay in `aether-kinds`: the former
