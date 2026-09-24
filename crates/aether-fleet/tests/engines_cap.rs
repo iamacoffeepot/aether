@@ -9,13 +9,12 @@
 // the fork+exec + startup-race-retry + real-process path — the
 // `FleetServer` unit tests cover the error arms in-process.
 
-// The fixtures boot a bare `Builder::<TestChassis>::new` chassis, and the
-// proxy-collision fixture folds the canonical lineage path a proxy spawn will
-// claim — test wiring, not a production chassis or sibling-cap addressing.
+// The fixtures boot a bare `Builder::<TestChassis>::new` chassis — test
+// wiring, not a production chassis.
 #![allow(clippy::disallowed_methods)]
 
-use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId, Uuid, mailbox_id_from_path};
+use aether_actor::{Addressable, ErasedActorRef};
+use aether_data::{Kind, Uuid};
 use aether_fleet::{FleetConfig, FleetProxy, FleetServer};
 use aether_kinds::descriptors;
 use aether_kinds::{
@@ -32,7 +31,7 @@ use aether_substrate::content_store::{ContentStore, EvictionPolicy};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
-use aether_substrate::testing::{TestChassis, boot_authority};
+use aether_substrate::testing::{TestChassis, boot_authority, drop_ref, registered_ref};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -329,18 +328,12 @@ fn wait_for<T>(deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
     }
 }
 
-fn register_proxy_collision(registry: &Registry, engine_id: Uuid) -> MailboxId {
-    let canonical_name = format!("{}/{}:{}", FleetServer::NAMESPACE, FleetProxy::NAMESPACE, engine_id.simple());
-    let mailbox_id = mailbox_id_from_path(&canonical_name);
-    registry
-        .try_register_inbox_with_id(
-            &boot_authority(),
-            mailbox_id,
-            &canonical_name,
-            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
-        )
-        .expect("install test-only proxy collision authority");
-    mailbox_id
+fn register_proxy_collision(registry: &Registry, engine_id: Uuid) -> ErasedActorRef {
+    registered_ref(
+        registry,
+        &format!("{}/{}:{}", FleetServer::NAMESPACE, FleetProxy::NAMESPACE, engine_id.simple()),
+        Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
+    )
 }
 
 fn assert_port_closes(rpc_port: u16) {
@@ -535,7 +528,7 @@ mod tests {
         assert!(matches!(record.reason, DeathReason::SpawnFailed { .. }));
         assert_port_closes(record.rpc_port);
 
-        registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only proxy collision authority");
+        drop_ref(&registry, collision);
         drop(chassis);
         let _ = fs::remove_dir_all(&store_dir);
         let _ = fs::remove_dir_all(&root);
