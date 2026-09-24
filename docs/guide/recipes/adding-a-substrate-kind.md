@@ -133,7 +133,7 @@ ctx.send::<ClipboardCapability>(&SetClipboardText { text: text.to_owned() });
 ```
 
 Keep the kind public; it is the whole sender surface. A capability adds no
-sender extension trait over the mailbox handle (ADR-0232 §7): a helper method
+sender extension trait over the ctx (ADR-0232 §7): a helper method
 per kind would be a second way to send the same mail beside the flat verb.
 
 ## 6. Verify the boundary

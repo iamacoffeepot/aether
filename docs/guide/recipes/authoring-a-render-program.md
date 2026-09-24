@@ -2,8 +2,8 @@
 
 **Class:** drive. No recompile — use a running render-capable engine (desktop,
 or a `SubstrateHarness` scenario). The walkthrough uses the MCP harness's
-`send_mail` and `capture_frame`; a wasm component sends the same kinds through
-`ctx.actor::<RenderCapability>()`, shown at the end. The contract behind every
+`send_mail` and `capture_frame`; a wasm component sends the same kinds with
+`ctx.send::<RenderCapability>(..)`, shown at the end. The contract behind every
 step is [Authored render programs](../systems/render-programs.md)
 ([ADR-0170](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0170-authored-render-programs.md)).
 
@@ -397,7 +397,7 @@ the color output of every pass naming it.
 
 ## From a wasm component
 
-The same kinds flow through the typed capability handle. Registration is a
+The same kinds flow through the flat send verbs. Registration is a
 send whose reply arrives as ordinary mail, so the component keeps the id from
 a `ProgramRegisterResult` handler and dispatches once it has one:
 
@@ -406,7 +406,7 @@ use aether_render::{ProgramDispatch, ProgramRegister, ProgramRegisterResult, Ren
 
 // In an `#[actor(depends(RenderCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    ctx.actor::<RenderCapability>().send(&self.build_register()); // a ProgramRegister value
+    ctx.send::<RenderCapability>(&self.build_register()); // a ProgramRegister value
 }
 
 #[handler::single]
@@ -427,7 +427,7 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The dispatch then rides wherever the repaint cadence lives — a `Tick` or
 `Render` handler, a settle gate — as
-`ctx.actor::<RenderCapability>().send(&ProgramDispatch { program_id, bindings, geometries, uniforms })`.
+`ctx.send::<RenderCapability>(&ProgramDispatch { program_id, bindings, geometries, uniforms })`.
 A component that draws geometry sends its `CreateGeometry` on the same
 reply-driven path as the register, keeping the `geometry_id` from a
 `CreateGeometryResult` handler; the upload belongs to subject load, and every

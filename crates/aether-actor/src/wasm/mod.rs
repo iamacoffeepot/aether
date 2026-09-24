@@ -1154,8 +1154,9 @@ macro_rules! __export_internal {
         /// Mail-allowed — peer mailboxes are addressable. Receives the
         /// component's own mailbox id so the SDK ctx can self-address.
         ///
-        /// Uses `WasmCtx`, the send-capable runtime ctx, so typed capability
-        /// facades can self-address; `WasmInitCtx` carries no send surface.
+        /// Uses `WasmCtx`, the send-capable runtime ctx, so the actor can
+        /// subscribe and send from `wire`; `WasmInitCtx` carries no send
+        /// surface.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
         pub unsafe extern "C" fn wire(mailbox_id: u64) -> u32 {

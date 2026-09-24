@@ -24,8 +24,9 @@ publish = false
 # wasm-safe identity and `HandlesKind` markers compile always-on; the
 # `aether_substrate`-typed runtime half (the graph state pointer,
 # subscriber table, fan-out, and settlement state machine) is gated so a
-# marker-only wasm guest can address `ctx.actor::<LifecycleCapability>()`
-# without dragging the substrate through.
+# marker-only wasm guest can declare `#[actor(depends(LifecycleCapability))]`
+# and subscribe with `ctx.subscribe::<LifecycleCapability, K>()` without
+# dragging the substrate through.
 
 [features]
 default = ["runtime"]

@@ -201,8 +201,7 @@ the send compiles only when the actor declares that recipient and the recipient
 handles the kind. The siblings are `send_many` (one cast batch),
 `send_tracked` (returns the request id), and `send_with_context` (stores a
 typed context for the reply handler). A proven reference the actor holds sends
-with `ctx.send_to(reference, &kind)`. `ctx.actor::<R>()` is the older typed
-handle the tree is migrating away from. `Kind::ID` and the typed resolver are
+with `ctx.send_to(reference, &kind)`. `Kind::ID` and the typed resolver are
 compile-time constants, so there's no host round-trip to resolve an address. You receive mail with a
 `#[handler::<class>] fn on_x(&mut self, ctx, mail: K)` — the kind is inferred from the
 third parameter (see [Components & lifecycle](components.md) and the *Writing a component*

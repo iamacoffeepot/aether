@@ -17,8 +17,10 @@ publish = false
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the wasm-safe
 # identity, kinds, and `ProcessConfig` domain struct compile always-on; the
 # `aether_substrate`-typed runtime half (the allowlist state, the `TaskQueue`
-# dispatch, the subprocess loop) is gated so a marker-only wasm guest can address
-# `ctx.actor::<ProcessCapability>()` without dragging the substrate stack through.
+# dispatch, the subprocess loop) is gated so a marker-only wasm guest can declare
+# `#[actor(depends(ProcessCapability))]` and mail it with
+# `ctx.send::<ProcessCapability>(..)` without dragging the substrate stack
+# through.
 
 [features]
 default = ["runtime"]

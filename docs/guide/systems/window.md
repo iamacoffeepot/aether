@@ -294,7 +294,7 @@ inside the chain the frame is waiting on, and the frame loop wedges
 component, address the `aether.window` root and send detached:
 
 ```rust
-ctx.actor::<WindowCapability>().send_detached(&SetWindowMenu { menus });
+ctx.send_detached::<WindowCapability>(&SetWindowMenu { menus });
 ```
 
 The root routes a per-window command to the sole live window, and replies
@@ -308,7 +308,7 @@ reaches the sender.
 through the same selector-aware family every window-originated kind uses:
 
 ```rust
-windows.subscribe::<WindowMenuActivated>(WindowSelector::All);
+ctx.subscribe::<WindowCapability, WindowMenuActivated>();
 ```
 
 `shortcut` is accelerator text in muda's grammar — `"Cmd+S"`,

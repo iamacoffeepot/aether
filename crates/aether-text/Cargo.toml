@@ -22,8 +22,9 @@ publish = false
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # wasm-safe identity, kinds, and `HandlesKind` markers compile always-on; the
 # `aether_substrate`-typed runtime half (plus the native `fontdue` TTF parse /
-# rasterize) is gated so a marker-only wasm guest can address
-# `ctx.actor::<TextCapability>()` without dragging `fontdue` / the substrate
+# rasterize) is gated so a marker-only wasm guest can declare
+# `#[actor(depends(TextCapability))]` and mail it with
+# `ctx.send::<TextCapability>(..)` without dragging `fontdue` / the substrate
 # through. The old capabilities `text` marker maps to this crate's default-off
 # face; `text-runtime` maps to `runtime`.
 

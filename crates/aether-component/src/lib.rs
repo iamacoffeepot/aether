@@ -23,7 +23,7 @@
 //! [`ComponentHostParams`] / [`WasmTrampolineConfig`] init bundles holding
 //! `Arc<Engine>` / `Arc<Linker<ComponentCtx>>`. The identities and their
 //! addressing markers compile always-on, so a transport-only wasm guest can
-//! address `ctx.actor::<ComponentHostCapability>()` and resolve a loaded peer
+//! mail `ctx.send::<ComponentHostCapability>(..)` and resolve a loaded peer
 //! without naming the substrate (ADR-0122).
 
 #![forbid(unsafe_code)]
@@ -39,7 +39,7 @@ pub use component::ComponentHostCapability;
 // `Arc<Linker<ComponentCtx>>`). Under the ADR-0122 split it lives behind
 // the `feature = "runtime"` gate (only the runtime half names it), so it
 // re-exports only when that feature is on — a transport-only build sees the
-// cap stub via `ComponentHostCapability` for typed `ctx.actor::<...>()`
+// cap stub via `ComponentHostCapability` for `ctx.send::<ComponentHostCapability>(..)`
 // addressing without dragging the wasmtime stack in.
 #[cfg(feature = "runtime")]
 pub use component::ComponentHostParams;

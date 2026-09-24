@@ -2,7 +2,7 @@
 //!
 //! The scenario uses only `HarnessOp` plus ordinary `LoadComponent` values to
 //! build two component peer scopes. The fixture caller's real bare-type
-//! `ctx.actor::<R>()` send proves the runtime parent selected during explicit
+//! `ctx.send::<R>(..)` proves the runtime parent selected during explicit
 //! placement is what embedded resolution consumes.
 
 use std::fs;

@@ -1,10 +1,9 @@
 //! [`MailSender`] — outbound-mail surface every actor ctx exposes.
 //!
-//! Per-stage capability trait (issue 663 + 665). Both init-time and
-//! runtime ctxs across every transport implement [`MailSender`]; each
-//! per-host concrete ctx struct (FFI: `WasmCtx` / `WasmInitCtx` /
-//! `WasmDropCtx`; substrate: `NativeCtx` / `NativeInitCtx`) provides
-//! its own bodies — there are no default-impl bodies because the
+//! Per-stage capability trait (issue 663 + 665). The send-capable ctxs
+//! implement [`MailSender`] — FFI: `WasmCtx` / `Sends` / `WasmDropCtx`;
+//! substrate: `NativeCtx` — and the init ctxs carry no send surface. Each
+//! provides its own bodies — there are no default-impl bodies because the
 //! cross-target dispatch trait that backed them (`MailTransport`)
 //! retired in 665. Each side calls its dispatch surface inline:
 //! FFI bodies call `crate::wasm::bridge::mail::send_mail`, native bodies hit

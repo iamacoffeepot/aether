@@ -156,9 +156,10 @@ resolve an address. A handler with no match falls through to an optional
 **`#[fallback]`** (taking the raw `Mail<'_>`); omit the fallback and the actor is
 a *strict receiver* — unhandled kinds are reported, not silently dropped.
 
-You address peers **by type** — `ctx.actor::<RenderCapability>().send(&payload)`
-compiles only if that actor actually handles the payload's kind, and both the
-mailbox id and kind id resolve at compile time. The handler takes the decoded mail
+You address peers **by type** — `ctx.send::<RenderCapability>(&payload)`, on a
+ctx whose actor declares `depends(RenderCapability)`, compiles only if that actor
+actually handles the payload's kind, and both the mailbox id and kind id resolve
+at compile time. The handler takes the decoded mail
 **by value** and gets `&mut self` because nothing else can touch the state
 concurrently.
 
@@ -310,26 +311,27 @@ buys nothing: a helper you factor out of a handler to *send* something never
 touches the reply channel,
 yet pinning one class makes it uncallable from the others and staying generic
 means carrying an `M: ReplyMode` parameter it doesn't read. `ctx.sends()` hands
-out `Sends<'_, A>`, typed by the handler's actor — the same addressing and
-outbound-mail verbs (`send`, `send_to`, `actor`, `to`, the detached family)
-with the marker dropped — so the helper takes `&mut Sends<'_, A>` and every
-handler class can call it. A helper that reaches an actor through the view
-states `A: Reaches<R>`, the bound `ctx.actor::<R>()` carries, and `Sends<'_>`
-alone still names the erased view:
+out `Sends<'_, A>`, typed by the handler's actor — the outbound verbs that take
+a proof (`send_to`, plus `send_detached_to` through `MailSender`) with the
+marker dropped — so the helper takes `&mut Sends<'_, A>` and every handler
+class can call it. The view sends only through a reference it is handed: the
+actor mints one with `ctx.actor_ref::<RenderCapability>()` in `wire` and keeps
+it in a field, because minting it in the same call as `ctx.sends()` would not
+borrow-check. `Sends<'_>` alone names the erased view:
 
 ```rust
-fn announce<A: Reaches<RenderCapability>>(sends: &mut Sends<'_, A>, frame: &Frame) {
-    sends.actor::<RenderCapability>().send(frame);
+fn announce<A>(sends: &mut Sends<'_, A>, renderer: ActorRef<RenderCapability>, frame: &Frame) {
+    sends.send_to(renderer, frame);
 }
 
 #[handler::single]
 fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
-    announce(&mut ctx.sends(), &self.frame);        // Single
+    announce(&mut ctx.sends(), self.renderer, &self.frame);        // Single
 }
 
 #[handler::manual]
 fn on_redraw(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _r: Redraw) {
-    announce(&mut ctx.sends(), &self.frame);        // Manual — same helper
+    announce(&mut ctx.sends(), self.renderer, &self.frame);        // Manual — same helper
     ctx.reply(&Acknowledged);                       // reply stays on the ctx
 }
 ```
@@ -455,9 +457,9 @@ impl WindowManagerSurface for DesktopWindowCapability {
 }
 ```
 
-A native set's kinds carry `HandlesKind` markers, so typed sends to an adopter
-(`ctx.actor::<DesktopWindowInstance>().send(&k)`) compile for inherited kinds
-too. The markers travel through a `macro_rules!` bridge the set generates, which
+A native set's kinds carry `HandlesKind` markers, so kind-checked sends to an
+adopter (`ctx.send_to(&window, &k)` through an `ActorRef<DesktopWindowInstance>`)
+compile for inherited kinds too. The markers travel through a `macro_rules!` bridge the set generates, which
 means a set's kind types need spellings that resolve at each adopter's `#[actor]`
 — for a capability crate, the names re-exported at its crate root.
 
@@ -523,7 +525,7 @@ the actor's place in the runtime tree come two ids, two distinct moments
 For a **capability** the two coincide. It sits at the root, so its lineage is
 one node and the fold of one node is that node: `MailboxId == ActorId`, the
 `NAMESPACE` is the whole address (`aether.audio`, `aether.render`,
-`aether.window`), and `ctx.actor::<AudioCapability>()` resolves to it as a
+`aether.window`), and `ctx.send::<AudioCapability>(..)` resolves to it as a
 compile-time const with no runtime lookup.
 
 For a **component** the `NAMESPACE` is the *default load name*, and the loaded
@@ -537,7 +539,8 @@ the fold over the nodes (`mailbox_id_from_path` on the string side), never a
 hash of the joined string.
 
 There is **one addressing verb**: you address a type, and the type declares
-where it lives. `ctx.actor::<Camera>()` reads the resolver `Camera` declares and
+where it lives. `ctx.send::<Camera>(..)` routes through
+`ctx.actor_ref::<Camera>()`, which reads the resolver `Camera` declares and
 selects the routing seed from it — the root for a capability, the caller's
 runtime parent for a loaded component — so the send site says who it is talking
 to and never where that peer sits. Moving the caller under a nested or
@@ -577,9 +580,9 @@ semantics — it makes neither actor a child of the other, and the full
 not use a dash merely to spell a multi-word segment; that is what an underscore
 is for, as in `aether.kit.widget.menu_bar` and `aether.kit.widget.text_field`.
 
-`ctx.actor::<Camera>()` returns the physical trampoline mailbox typed as
-`Camera`: the trampoline and its loaded guest share one mailbox, while the guest
-type supplies the compile-time mail-handling surface. A `const` beside the call
+`ctx.actor_ref::<Camera>()` returns an `ActorRef<Camera>` for the physical
+trampoline mailbox: the trampoline and its loaded guest share one mailbox, while
+the guest type supplies the compile-time mail-handling surface. A `const` beside the call
 site holding what `Camera::NAMESPACE` already declares would be a second naming
 authority nothing checks against the first, and the bare-type spelling exists so
 it has nothing to hold.
@@ -593,7 +596,7 @@ prefix.
 A **singleton** is one of a kind: at most one instance under a given parent, and
 its `ActorId` is the plain `hash(NAMESPACE)`. Every capability is a root
 singleton — its one-node lineage makes its `NAMESPACE` the whole address, so you
-address it straight by type, `ctx.actor::<R>()`.
+address it straight by type, `ctx.send::<R>(..)`.
 
 An **instanced** actor is one of many sharing a prefix. Its `NAMESPACE` is that
 prefix, and each live instance gets its own `ActorId` by folding a runtime
@@ -631,7 +634,7 @@ mid-turn. What comes back is a `SpawnReceipt`: the child's `mailbox_id` and
 for correlation, plus a `completion` `DispatchId`. Neither is a send target: the
 child is not `Live` yet, so nothing can prove it. Mail the child must see first
 rides `after_init` on the birth itself, and later mail goes through
-`ctx.to(&child)` once the `Ok` completion hands back its reference.
+`ctx.send_to(&child, &k)` once the `Ok` completion hands back its reference.
 
 ```rust
 let Ok(receipt) = ctx
@@ -663,7 +666,7 @@ so a handler correlates the completion with the birth it staged straight off the
 outcome, and `C` stays `()` unless there is something the spawn genuinely does
 not know — a peer address, a channel, which leg of a multi-step plan this birth
 belongs to. A handler that keeps or mails its child holds the `Ok` reference
-and sends through `ctx.to(&child)`, so a handler that mails its child after the
+and sends through `ctx.send_to(&child, &k)`, so a handler that mails its child after the
 bootstrap waits for that completion the same way one that must know the child
 is live before it reports success does. Synchronous commit still
 exists, but only at the boot/embedder boundary — `BuiltChassis::spawn_actor` /

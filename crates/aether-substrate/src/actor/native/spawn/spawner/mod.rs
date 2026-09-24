@@ -190,9 +190,8 @@ impl Spawner {
     /// `try_claim_namespace` etc. Cap handlers reaching for the
     /// registry through `transport.spawner().actor_registry()` is
     /// the wrong shape — caps that supervise a fleet hold their own
-    /// child map; caps that just send mail use the typed `ctx.actor`
-    /// / `ctx.to` shortcuts. ADR-0079 supervisor-as-cap
-    /// pattern.
+    /// child map; caps that just send mail use the flat `ctx.send::<R>`
+    /// / `ctx.send_to` verbs. ADR-0079 supervisor-as-cap pattern.
     pub(crate) fn actor_registry(&self) -> &Arc<ActorRegistry> {
         &self.actor_registry
     }
