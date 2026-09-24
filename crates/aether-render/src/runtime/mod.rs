@@ -48,9 +48,8 @@ pub use aether_data::{Kind, KindId};
 use aether_kinds::{CaptureFrame, CaptureFrameResult, WindowId};
 
 use aether_substrate::Manual;
-use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
+use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
-use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::render::visual;
 use aether_substrate::render::{
     CaptureMeta, IDENTITY_VIEW_PROJ, RenderError, encode_png, map_capture_rgba, prepare_capture_copy, record_main_pass,
@@ -206,7 +205,6 @@ pub struct RenderCapabilityState {
 
     pending_capture: Option<PendingCapture>,
 
-    mailer: Arc<Mailer>,
     assets_dir: Option<PathBuf>,
     /// The observer position `RenderParams::observed_kinds` handed over,
     /// held from `init` until `wire` proves it (ADR-0230 §3's receipt door)
@@ -778,9 +776,8 @@ impl NativeActor for RenderCapability {
     fn init(
         config: RenderTuningConfig,
         params: RenderParams,
-        ctx: &mut NativeInitCtx<'_>,
+        _ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RenderCapabilityState, BootError> {
-        let mailer = ctx.mailer();
         Ok(RenderCapabilityState {
             frame_vertices: Vec::with_capacity(config.vertex_buffer_bytes),
             last_submitted: Vec::with_capacity(config.vertex_buffer_bytes),
@@ -812,7 +809,6 @@ impl NativeActor for RenderCapability {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
-            mailer,
             assets_dir: params.assets_dir,
             observer_position: params.observed_kinds,
             observer: None,
@@ -1226,7 +1222,7 @@ impl NativeActor for RenderCapability {
     /// every rejected capture over the wire returned no image, no error and
     /// no timeout (iamacoffeepot/aether#4341).
     #[handler::manual]
-    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: CaptureFrame) {
+    fn on_capture_frame(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: CaptureFrame) {
         state.observe(ctx, <CaptureFrame as Kind>::ID);
         let reply = ctx.take_inbound();
 
@@ -1277,20 +1273,11 @@ impl NativeActor for RenderCapability {
         // settlement fires on. With no settlement registry (some fixtures)
         // `pre_remaining` stays the number dispatched but nothing decrements
         // it, so such a fixture never gates a capture on settlement.
-        let settlement_registry = state.mailer.settlement_registry().cloned();
-        let self_id = ctx.self_id();
         let mut pre_remaining = 0usize;
         for item in pre {
             let mail_id = ctx.deliver_detached(item);
             pre_remaining += 1;
-            if let Some(registry) = settlement_registry.as_deref() {
-                registry.subscribe_settlement_mail(
-                    mail_id,
-                    self_id,
-                    <PreSettled as Kind>::ID,
-                    Arc::clone(&state.mailer),
-                );
-            }
+            let _ = ctx.subscribe_settlement::<PreSettled>(mail_id);
         }
 
         state.pending_capture = Some(PendingCapture {
@@ -1321,16 +1308,13 @@ mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
     use super::texture::StagedTexture;
     use super::*;
-    use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
-    use aether_data::{SessionToken, Uuid};
+    use aether_data::{KindId, MailId, Source};
     use aether_kinds::QuadSpace;
-    use aether_kinds::trace::Nanos;
     use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::envelope::Envelope;
-    use aether_substrate::chassis::inbox::SettlingInbox;
+    use aether_substrate::mail::EgressEvent;
+    use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
-    use aether_substrate::mail::{EgressEvent, MailRef};
     use aether_substrate::testing::{
         decode_reply, fresh_substrate_and_rx, manual_dispatch_ctx, registered_ref, session_sender, test_mailer_and_rx,
         unrouted_binding,
@@ -1352,33 +1336,16 @@ mod tests {
 
     /// Build a `PendingCapture` whose retained guard replies to a Session
     /// source so the toy pump can observe the deferred reply through the
-    /// egress channel. The inbound is queued straight onto a
-    /// `SettlingInbox` (no route), then drained to the guard.
+    /// egress channel. The guard is the one inbound a `<Manual>` dispatch
+    /// ctx carries (no route), taken out of the ctx.
     fn parked_capture(
         mailer: &Arc<Mailer>,
         window: Option<WindowId>,
         pre_remaining: usize,
         deadline: Instant,
     ) -> PendingCapture {
-        let id = MailboxId(0x0CA8);
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        tx.send(OwnedDispatch::disarmed(
-            KindId(0),
-            None,
-            // A Session sender routes the guard's reply to the egress rx.
-            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
-            MailRef::from(Vec::new()),
-            1,
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            Nanos(0),
-            0,
-            id,
-        ))
-        .expect("queue the inbound");
-        let inbox = SettlingInbox::new(id, rx, Arc::clone(mailer));
-        let reply = inbox.try_next().expect("one queued");
+        let binding = ctx_binding(mailer);
+        let reply = manual_dispatch_ctx::<RenderCapability>(&binding, session_sender()).take_inbound();
         PendingCapture {
             window,
             reply,
@@ -1393,7 +1360,7 @@ mod tests {
     /// A minimal headless state for the capture state-machine tests — no
     /// window, no GPU (`gpu` stays `None`, so the ready branch fails fast
     /// rather than touching an absent adapter).
-    fn headless_state(mailer: &Arc<Mailer>) -> RenderCapabilityState {
+    fn headless_state() -> RenderCapabilityState {
         RenderCapabilityState {
             frame_vertices: Vec::new(),
             last_submitted: Vec::new(),
@@ -1422,7 +1389,6 @@ mod tests {
             overlay_observation: Mutex::new(Vec::new()),
             shape_observation: Mutex::new(Vec::new()),
             pending_capture: None,
-            mailer: Arc::clone(mailer),
             assets_dir: None,
             observer_position: None,
             observer: None,
@@ -1465,7 +1431,7 @@ mod tests {
     #[test]
     fn park_then_pre_settled_countdown_readies_on_frame() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.pending_capture = Some(parked_capture(&mailer, None, 2, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
 
@@ -1486,7 +1452,7 @@ mod tests {
     #[test]
     fn expired_capture_replies_err_on_frame() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         // A deadline in the past, with pre-mails still outstanding.
         let past = Instant::now().checked_sub(Duration::from_secs(1)).expect("clock is past the epoch");
         state.pending_capture = Some(parked_capture(&mailer, None, 3, past));
@@ -1503,7 +1469,7 @@ mod tests {
     #[cfg(feature = "desktop")]
     fn detached_target_fails_only_its_pending_capture() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.pending_capture =
             Some(parked_capture(&mailer, Some(WindowId(7)), 1, Instant::now() + FRAME_SETTLEMENT_CAP));
 
@@ -1517,8 +1483,7 @@ mod tests {
 
     #[test]
     fn surfaceless_capture_selection_is_explicit() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
 
         assert!(state.validate_capture_target(None).is_err(), "an unconfigured runtime is not implicitly offscreen");
         state.offscreen_size = Some((64, 48));
@@ -1549,8 +1514,7 @@ mod tests {
 
     #[test]
     fn replacement_discards_only_old_replay_cache_before_committing_live_work() {
-        let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.last_submitted = vec![1, 2, 3];
         state.frame_vertices = vec![4, 5, 6];
         state.pending_program_dispatches.push(ProgramDispatch {
@@ -1573,7 +1537,7 @@ mod tests {
     #[test]
     fn terminal_device_failure_never_reboots_and_disposes_each_mail_shape() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.offscreen_size = Some((64, 48));
         state.device_recovery.force_unusable_for_test("replacement acquisition failed");
         state.textures.entries.insert(3, test_staged_texture(vec![7; 16]));
@@ -1636,7 +1600,7 @@ mod tests {
     #[test]
     fn capture_while_pending_replies_err_immediately() {
         let (mailer, rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.offscreen_size = Some((64, 48));
         state.pending_capture = Some(parked_capture(&mailer, None, 1, Instant::now() + FRAME_SETTLEMENT_CAP));
         let binding = ctx_binding(&mailer);
@@ -1664,7 +1628,7 @@ mod tests {
     #[test]
     fn destroy_texture_removes_registry_entry() {
         let (registry, mailer, _rx) = fresh_substrate_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         let observed = observe_via_mail(&registry, &mut state);
         let texture_id = 7;
         state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
@@ -1691,7 +1655,7 @@ mod tests {
     #[test]
     fn destroy_texture_unknown_and_reserved_ids_leave_registry_untouched() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         let user_texture_id = 3;
         state.textures.entries.insert(user_texture_id, test_staged_texture(vec![1; 16]));
         state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
@@ -1717,7 +1681,7 @@ mod tests {
     #[test]
     fn update_texture_reserved_id_leaves_white_pixels_untouched() {
         let (mailer, _rx) = test_mailer_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         state.textures.entries.insert(WHITE_TEXTURE_ID, test_staged_texture(vec![255; 16]));
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
@@ -1744,7 +1708,7 @@ mod tests {
     #[test]
     fn draw_shapes_accumulates_in_painter_order_and_observed() {
         let (registry, mailer, _rx) = fresh_substrate_and_rx();
-        let mut state = headless_state(&mailer);
+        let mut state = headless_state();
         let observed = observe_via_mail(&registry, &mut state);
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);

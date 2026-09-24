@@ -5,7 +5,7 @@ use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 use super::routing::{RegionFocusTransition, RegionInputLane, Routing};
 use super::{EditorConfig, RegionAttach};
@@ -50,10 +50,10 @@ impl EditorShell {
 
 // Keyless `Embedded` singleton, so a region can name the shell by bare type
 // from its own `wire` and announce itself. Its cardinality is not a choice:
-// the shell subscribes *every* window's nine raw input kinds with
-// `WindowSelector::All`, so a second shell in one engine is a double-delivery
-// bug rather than a configuration. It is therefore loaded under its default
-// name, and cannot be composed beneath a wasm parent.
+// the shell subscribes *every* window's nine raw input kinds (a window
+// subscribe covers every window), so a second shell in one engine is a
+// double-delivery bug rather than a configuration. It is therefore loaded
+// under its default name, and cannot be composed beneath a wasm parent.
 #[actor(depends(WindowCapability))]
 impl WasmActor for EditorShell {
     type Config = EditorConfig;
@@ -66,16 +66,15 @@ impl WasmActor for EditorShell {
     /// Subscribe to raw interactive input from every window. The shell has no
     /// lifecycle, render, or window-size role.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let window = ctx.actor::<WindowCapability>();
-        window.subscribe::<MouseButton>(WindowSelector::All);
-        window.subscribe::<MouseButtonRelease>(WindowSelector::All);
-        window.subscribe::<MouseMove>(WindowSelector::All);
-        window.subscribe::<MouseWheel>(WindowSelector::All);
-        window.subscribe::<Key>(WindowSelector::All);
-        window.subscribe::<KeyRelease>(WindowSelector::All);
-        window.subscribe::<TextInput>(WindowSelector::All);
-        window.subscribe::<ImePreedit>(WindowSelector::All);
-        window.subscribe::<Modifiers>(WindowSelector::All);
+        ctx.subscribe::<WindowCapability, MouseButton>();
+        ctx.subscribe::<WindowCapability, MouseButtonRelease>();
+        ctx.subscribe::<WindowCapability, MouseMove>();
+        ctx.subscribe::<WindowCapability, MouseWheel>();
+        ctx.subscribe::<WindowCapability, Key>();
+        ctx.subscribe::<WindowCapability, KeyRelease>();
+        ctx.subscribe::<WindowCapability, TextInput>();
+        ctx.subscribe::<WindowCapability, ImePreedit>();
+        ctx.subscribe::<WindowCapability, Modifiers>();
     }
 
     /// A region announcing that it is the actor behind one of the declared

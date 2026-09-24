@@ -571,7 +571,7 @@ impl<A: NativeActor> LiveActivation for LegacyLiveActivation<A> {
                 pending_depth()
             };
             let envelope = if bootstrap {
-                OwnedDispatch::disarmed(
+                OwnedDispatch::disarmed_at(
                     mail.kind,
                     None,
                     mail.reply_to,

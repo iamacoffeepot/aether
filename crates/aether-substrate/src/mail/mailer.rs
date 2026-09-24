@@ -27,12 +27,13 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RegistryQueueMetrics, RouteContinuation,
-    RouteEndpoint, RouteRelayHandle,
+    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RegistryQueueMetrics,
+    RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
+use aether_actor::{HandlesKind, RegistryChanged};
 use aether_data::{Kind, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
@@ -315,6 +316,18 @@ impl Mailer {
     /// via the cap's config struct.
     pub fn registry(&self) -> &Arc<Registry> {
         &self.registry
+    }
+
+    /// Subscribe `target` to the registry's inventory changes, as
+    /// [`Registry::subscribe_inventory`] does, through this mailer. The
+    /// crate-private path behind
+    /// [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory),
+    /// which passes its own binding's mailbox as `target`.
+    pub(crate) fn subscribe_inventory_for<A: HandlesKind<RegistryChanged>>(
+        self: &Arc<Self>,
+        target: aether_data::MailboxId,
+    ) -> RegistrySubscription {
+        self.registry.subscribe_inventory::<A>(target, Arc::clone(self))
     }
 
     /// Borrow the wired [`CapabilityRegistry`]

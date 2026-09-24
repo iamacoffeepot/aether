@@ -32,12 +32,12 @@ pub struct ActorOpts {
     /// is intentional so one child identity can be permitted beneath several
     /// logical parents.
     pub child_of: Vec<syn::TypePath>,
-    /// ADR-0230: actor types this actor depends on, from repeated
-    /// `depends(Type)`. Each entry emits `impl DependsOn<R> for Self` plus
-    /// one `Dependency` inputs-manifest record; the host refuses the load
-    /// while any entry has no `Live` route. Only keyless (`One` /
-    /// `Embedded`) actors are declarable — a keyed `R` is a trait-bound
-    /// compile error on the emitted impl, not a macro error here.
+    /// ADR-0230: actor types this actor depends on, from one
+    /// `depends(A, B, …)` list. Each listed type emits `impl DependsOn<R> for
+    /// Self` plus one `Dependency` inputs-manifest record, in list order; the
+    /// host refuses the load while any entry has no `Live` route. Only
+    /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
+    /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
     /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
     /// parent exported from the same resident module.
@@ -118,13 +118,21 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             opts.handler_set = Some(set);
             Ok(())
         } else if meta.path.is_ident("child_of") {
-            push_actor_type_entry(&meta, &mut opts.child_of, "child_of", "child_of(Manager)", "parent")?;
+            push_actor_type_entry(&meta, &mut opts.child_of)?;
             if opts.composable {
                 return Err(meta.error("`composable` and `child_of(...)` are mutually exclusive (ADR-0166)"));
             }
             Ok(())
         } else if meta.path.is_ident("depends") {
-            push_actor_type_entry(&meta, &mut opts.depends, "depends", "depends(RenderCapability)", "dependency")?;
+            // ADR-0230 (issue 6557): one list per actor. Empty lists are
+            // refused, so a non-empty slot means `depends` was already written.
+            if !opts.depends.is_empty() {
+                return Err(meta.error(
+                    "`depends` is written once, as a list — merge this into the first `depends(...)`: \
+                     `depends(A, B)`",
+                ));
+            }
+            opts.depends = parse_depends_list(&meta)?;
             Ok(())
         } else if !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional module path names the runtime module
@@ -153,33 +161,64 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
     Ok(opts)
 }
 
-/// Parse one entry of a repeatable single-actor-type option — `child_of(P)`
-/// or `depends(R)` — into `slot`: exactly one type path, rejecting a
-/// repeated identical type. `name` is the option keyword, `example` its
-/// one-line usage, and `repeat_noun` the word the multi-entry error names.
-fn push_actor_type_entry(
-    meta: &meta::ParseNestedMeta,
-    slot: &mut Vec<syn::TypePath>,
-    name: &str,
-    example: &str,
-    repeat_noun: &str,
-) -> syn::Result<()> {
+/// Parse one entry of the repeatable `child_of(P)` option into `slot`:
+/// exactly one type path, rejecting a repeated identical type.
+fn push_actor_type_entry(meta: &meta::ParseNestedMeta, slot: &mut Vec<syn::TypePath>) -> syn::Result<()> {
     let content;
     syn::parenthesized!(content in meta.input);
-    let target: syn::TypePath = content
-        .parse()
-        .map_err(|_| content.error(format!("`{name}` expects exactly one actor type path, for example `{example}`")))?;
+    let target: syn::TypePath = content.parse().map_err(|_| {
+        content.error("`child_of` expects exactly one actor type path, for example `child_of(Manager)`")
+    })?;
     if !content.is_empty() {
-        return Err(content.error(format!(
-            "`{name}` expects exactly one actor type path; repeat `{name}(...)` for another {repeat_noun}"
-        )));
+        return Err(
+            content.error("`child_of` expects exactly one actor type path; repeat `child_of(...)` for another parent")
+        );
     }
-    let target_tokens = target.to_token_stream().to_string();
-    if slot.iter().any(|existing| existing.to_token_stream().to_string() == target_tokens) {
-        return Err(meta.error(format!("duplicate identical `{name}` declaration in #[actor]")));
+    if contains_type(slot, &target) {
+        return Err(meta.error("duplicate identical `child_of` declaration in #[actor]"));
     }
     slot.push(target);
     Ok(())
+}
+
+/// Parse the `depends(A, B, …)` list (ADR-0230): at least one actor type
+/// path, comma-separated, trailing comma allowed, each type named once.
+/// Declaration order is kept, so it is the order of the emitted
+/// `DependsOn` impls and `Dependency` records.
+fn parse_depends_list(meta: &meta::ParseNestedMeta) -> syn::Result<Vec<syn::TypePath>> {
+    let content;
+    syn::parenthesized!(content in meta.input);
+    if content.is_empty() {
+        return Err(
+            meta.error("`depends` expects at least one actor type path, for example `depends(RenderCapability)`")
+        );
+    }
+    let list_error = || {
+        content.error(
+            "`depends` expects a comma-separated list of actor type paths, \
+             for example `depends(RenderCapability, FsCapability)`",
+        )
+    };
+
+    let mut list: Vec<syn::TypePath> = Vec::new();
+    while !content.is_empty() {
+        let target: syn::TypePath = content.parse().map_err(|_| list_error())?;
+        if contains_type(&list, &target) {
+            return Err(syn::Error::new_spanned(&target, "duplicate identical `depends` entry in #[actor]"));
+        }
+        list.push(target);
+        if !content.is_empty() {
+            content.parse::<syn::Token![,]>().map_err(|_| list_error())?;
+        }
+    }
+    Ok(list)
+}
+
+/// Whether `slot` already names `target`, compared by token spelling — the
+/// one definition of "identical" `child_of` and `depends` share.
+fn contains_type(slot: &[syn::TypePath], target: &syn::TypePath) -> bool {
+    let target_tokens = target.to_token_stream().to_string();
+    slot.iter().any(|existing| existing.to_token_stream().to_string() == target_tokens)
 }
 
 /// Cardinality declaration from `#[actor(singleton|instanced)]` (ADR-0119),

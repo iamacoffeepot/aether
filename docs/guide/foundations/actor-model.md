@@ -124,7 +124,7 @@ block, and each **`#[handler::<class>]`** method *is* a handler — the macro in
 the kind it handles from the method's **third parameter**:
 
 ```rust
-#[actor(depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 
@@ -218,25 +218,17 @@ pub struct TcpListenerActor;
 pub struct TcpSessionActor;
 ```
 
-The mailbox chain selects which permitted lineage is meant. An accepted
-session resolves through its named listener, while an outbound session resolves
-directly beneath the capability:
+The two permitted lineages give an accepted session and an outbound session
+with the same name distinct identities. The lineage is chosen where the session
+is spawned: the listener spawns accepted sessions beneath itself, and the
+capability spawns dialed sessions directly beneath itself. A consumer reaches
+either one through the stamped sender of the session's own mail, never by
+naming it.
 
-```rust
-let accepted_session = tcp
-    .resolve::<TcpListenerActor>("game")
-    .resolve::<TcpSessionActor>("shared");
-let outbound_session = tcp.resolve::<TcpSessionActor>("shared");
-
-assert_ne!(
-    accepted_session.mailbox_id(),
-    outbound_session.mailbox_id(),
-);
-```
-
-`ChildOf` therefore does not choose one global parent for an actor type. Each
-typed `resolve` step checks one declared direct edge, and the mailbox carried
-from the previous step supplies the canonical lineage and identity fold.
+`ChildOf` therefore does not choose one global parent for an actor type. It is
+checked where a child is placed (`spawn_child`) and where an embedder looks one
+up (`child::<P, C>`), and the parent at that point supplies the canonical
+lineage and identity fold.
 
 ### External actor addresses
 

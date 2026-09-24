@@ -6,7 +6,7 @@
 
 use std::path::Path;
 
-use aether_actor::Reaches;
+use aether_actor::DependsOn;
 use aether_kinds::{ClipRect, FontMetrics, GlyphAdvance, QuadSpace};
 use aether_math::Rgba;
 use aether_substrate::actor::native::NativeCtx;
@@ -16,7 +16,7 @@ use aether_render::{DrawTexturedQuads, QuadBlend, RenderCapability, TexturedQuad
 use super::atlas::AtlasEntry;
 
 /// Emit the accumulated quad batch to `aether.render`.
-pub fn emit_draw<A: Reaches<RenderCapability>>(
+pub fn emit_draw<A: DependsOn<RenderCapability>>(
     ctx: &mut NativeCtx<'_, A>,
     texture_id: u32,
     space: QuadSpace,
@@ -26,7 +26,7 @@ pub fn emit_draw<A: Reaches<RenderCapability>>(
     // A rasterized glyph atlas is an ordinary image: coverage rides
     // alpha and the colour beside it was never scaled by it.
     let draw = DrawTexturedQuads { texture_id, space, clip, blend: QuadBlend::Straight, quads };
-    ctx.actor::<RenderCapability>().send(&draw);
+    ctx.send::<RenderCapability>(&draw);
 }
 
 /// A glyph bitmap's pixel dimensions. fontdue bounds these well below

@@ -42,7 +42,6 @@ impl NativeActor for HttpDispatchShard {
             max_header_bytes: seed.max_header_bytes,
             request_timeout: seed.request_timeout,
             keep_alive_timeout: seed.keep_alive_timeout,
-            self_mailbox: ctx.self_id(),
             mailer: ctx.mailer(),
             wake: ctx.self_wake(),
             inbound_rx,
@@ -92,7 +91,7 @@ impl NativeActor for HttpDispatchShard {
     /// supervisor and this shard's reader sidecars fire this; the handler
     /// drains the mpsc and acts per item.
     #[handler::single]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: HttpInboundReady) {
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>, _mail: HttpInboundReady) {
         WakeSink::arm_for_drain(&state.wake_dirty);
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {

@@ -1,4 +1,5 @@
-//! Retiring this actor, and watching the ones it depends on.
+//! Retiring this actor, and watching the ones it depends on, a chain's
+//! settlement, and the registry inventory.
 //!
 //! Issue 607 Phase 4 (ADR-0079) self-shutdown and ADR-0063 fail-fast on one
 //! side; the ADR-0079 §8 monitor surface on the other — register a watch,
@@ -7,11 +8,12 @@
 
 use std::sync::Arc;
 
-use aether_actor::{ErasedActorRef, ReplyMode};
-use aether_data::MailboxId;
+use aether_actor::{ErasedActorRef, HandlesKind, RegistryChanged, ReplyMode};
+use aether_data::{Kind, MailId, MailboxId};
 
 use crate::actor::monitor::{MonitorHandle, notify_alias_departures, notify_departure};
 use crate::actor::registry::MonitorError;
+use crate::mail::registry::RegistrySubscription;
 
 use super::NativeCtx;
 
@@ -100,6 +102,39 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
             other => other?,
         }
         Ok(MonitorHandle::new(registry, watcher, target))
+    }
+
+    /// ADR-0080 §6: subscribe the calling actor to one `K` notice when the
+    /// chain rooted at `root` settles. `K`'s payload is
+    /// [`Settled`](aether_kinds::trace::Settled)'s single [`MailId`], the settled
+    /// root, and the notice pre-fires at once when `root` has already
+    /// settled. The bound `A: HandlesKind<K>` makes a notice kind this actor
+    /// does not handle a compile error, rather than a gate that never opens.
+    ///
+    /// Returns `false`, and subscribes nothing, when the chassis wires no
+    /// settlement registry; each caller decides what that means for it.
+    /// Consumers: the render capture gate (`PreSettled`), the RPC server's
+    /// `ReplyEnd`, the HTTP shard's `502` safety net, and the lifecycle
+    /// advance reply.
+    #[must_use]
+    pub fn subscribe_settlement<K: Kind>(&self, root: MailId) -> bool
+    where
+        A: HandlesKind<K>,
+    {
+        self.binding.subscribe_settlement_notice(root, K::ID)
+    }
+
+    /// Subscribe the calling actor to the registry's inventory changes, as
+    /// [`RegistryChanged`] wakes: one now, and one per change after the
+    /// previous wake is acknowledged through
+    /// [`RegistrySubscription::acknowledge`]. Dropping the returned
+    /// subscription unsubscribes. Consumer: the component host, which keeps
+    /// its inventory view current through it.
+    pub fn subscribe_inventory(&self) -> RegistrySubscription
+    where
+        A: HandlesKind<RegistryChanged>,
+    {
+        self.binding.subscribe_inventory::<A>()
     }
 
     /// ADR-0079 §8 (amended): declare the calling actor's mailbox

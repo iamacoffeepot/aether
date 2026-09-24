@@ -148,7 +148,7 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
         // (`MailId::NONE`), so it is built *disarmed* — there is no
         // obligation to discharge (and `dispatch_one` no-ops its
         // `record_finished` on `NONE` anyway).
-        let env = Envelope::disarmed(
+        let env = Envelope::disarmed_at(
             kind,
             None,
             self.sender,
