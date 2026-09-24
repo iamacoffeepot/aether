@@ -776,7 +776,7 @@ mod tests {
     }
 
     /// Round trip through the host SDK path: a calling actor that declares
-    /// `DependsOn<LifecycleCapability>` sends the request the cap's
+    /// `depends(LifecycleCapability)` sends the request the cap's
     /// `Publisher` impl builds for `Tick` through the flat
     /// `ctx.send::<LifecycleCapability>`. That emits
     /// `LifecycleSubscribeSelf { stage = Tick::ID }` whose `Source` the
@@ -788,19 +788,29 @@ mod tests {
     fn subscribe_request_via_flat_send_lands_calling_actor_in_stage_set() {
         use std::sync::mpsc;
 
-        use aether_actor::{Addressable, DependsOn, One, Publisher};
+        use aether_actor::{Addressable, Publisher};
+        use aether_substrate::actor::native::Envelope;
         use aether_substrate::mail::Source;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
         use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
+        use aether_substrate::{BootError, NativeActor, NativeInitCtx};
 
         struct Caller;
 
-        impl Addressable for Caller {
+        #[aether_actor::actor(depends(LifecycleCapability))]
+        impl NativeActor for Caller {
             const NAMESPACE: &'static str = "test.lifecycle.caller";
-            type Resolver = One;
-        }
+            type Config = ();
 
-        impl DependsOn<LifecycleCapability> for Caller {}
+            fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+                Ok(Self)
+            }
+
+            #[fallback]
+            fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+                let _ = self;
+            }
+        }
 
         let (registry, mailer) = fresh_substrate();
 

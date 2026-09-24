@@ -7,9 +7,10 @@ use std::sync::Arc;
 use aether_actor::{Addressable, ErasedActorRef};
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
-use crate::actor::native::NativeCtx;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
+use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+use crate::chassis::error::BootError;
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, EmbeddedPeer};
@@ -57,9 +58,19 @@ fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
 
 struct Dependent;
 
-impl Addressable for Dependent {
+#[aether_actor::actor(depends(OneDep, EmbeddedPeer))]
+impl NativeActor for Dependent {
     const NAMESPACE: &'static str = "test.native.actor_ref_dependent";
-    type Resolver = aether_actor::One;
+    type Config = ();
+
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+        let _ = self;
+    }
 }
 
 struct OneDep;
@@ -68,9 +79,6 @@ impl Addressable for OneDep {
     const NAMESPACE: &'static str = "test.native.actor_ref_one_dep";
     type Resolver = aether_actor::One;
 }
-
-impl aether_actor::DependsOn<OneDep> for Dependent {}
-impl aether_actor::DependsOn<EmbeddedPeer> for Dependent {}
 
 /// `actor_ref` and `actor` share one derivation on a `NativeCtx<'_, Dependent>`:
 /// the reference proves the folded position for a `One` and for an `Embedded`
