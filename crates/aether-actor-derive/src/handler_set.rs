@@ -7,7 +7,9 @@
 //! plus two hidden items an adopter's `#[actor]` expansion consumes:
 //!
 //! - `__aether_handler_set_dispatch` — the set's own kind-id if-chain,
-//!   returning `DISPATCH_HANDLED` or `DISPATCH_UNKNOWN_KIND`. The adopter
+//!   returning `DISPATCH_HANDLED_RELEASE` from a wasm single arm,
+//!   `DISPATCH_HANDLED` from a manual arm or any native arm, or
+//!   `DISPATCH_UNKNOWN_KIND` when no arm matched (#6412). The adopter
 //!   calls it after its local chain misses (ADR-0169 §2), which is what makes
 //!   a locally-declared handler authoritative over an inherited one.
 //! - `__AETHER_HANDLER_SET_MANIFEST` (wasm sets) — the set's
@@ -600,6 +602,15 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
     let arms = handlers.iter().map(|h| {
         let k = &h.kind_ty;
         let method = &h.method.sig.ident;
+        // #6412: a wasm single arm tells the host it may free the dispatch's
+        // reply handle, as `build_dispatch_body` does for an actor's own arms.
+        // Native actors have no reply table, so every native arm keeps
+        // `DISPATCH_HANDLED`, which the native adopter compares against.
+        let rc = if transport == SetTransport::Wasm && h.class == HandlerClass::Single {
+            quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE }
+        } else {
+            quote! { ::aether_actor::DISPATCH_HANDLED }
+        };
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
                 let __aether_reply = Self::#method(#receiver, __aether_ctx.as_single(), __aether_decoded);
@@ -626,7 +637,7 @@ fn build_set_dispatch_body(handlers: &[HandlerFn], transport: SetTransport, spli
             if #matches_kind {
                 if let ::core::option::Option::Some(__aether_decoded) = #decode {
                     #call
-                    return ::aether_actor::DISPATCH_HANDLED;
+                    return #rc;
                 }
             }
         }

@@ -224,7 +224,7 @@ impl PerSenderEgress {
 mod tests {
     use super::PerSenderEgress;
     use aether_actor::ErasedActorRef;
-    use aether_data::{Kind, KindId, MailId, MailboxId, Source, SourceAddr};
+    use aether_data::{Kind, KindId, MailId, Source, SourceAddr};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::registry::{Registry, noop_handler};
@@ -251,7 +251,7 @@ mod tests {
     /// chain's hold accounting separate — the value a cap handler reads from
     /// `ctx.in_flight_root()`.
     fn root_id(cid: u64) -> MailId {
-        MailId { sender: MailboxId(1), correlation_id: cid }
+        MailId { correlation_id: cid, ..MailId::NONE }
     }
 
     fn session_reply_to(corr: u64) -> Source {

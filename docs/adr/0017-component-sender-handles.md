@@ -4,6 +4,7 @@
 - **Date:** 2026-04-17
 - **Accepted:** 2026-04-17
 - **Amended (#6409):** 2026-09-23 — §4 and §6 are reversed: handles now cross instance boundaries within one mailbox slot. The component trampoline moves the reply table, pending handles and next-handle counter together, from a guest leaving its slot to the next occupant across `replace_component`, drop-then-refill and a replacement that fails to start, so a handle kept in a carried request context or saved state answers its own requester, and a replacement never reissues a pending number. A handle still means nothing outside its own mailbox.
+- **Amended (#6412):** 2026-09-23 — a handle is a slot index (low 20 bits) plus that slot's generation (high 12 bits). A freed slot is reused under the next generation, so a stale handle is refused instead of reaching the slot's new requester, until the slot's 4096th reuse. The table reserves 256 slots, grows when all are held and never drops a held handle, warns with the actor's name at each new high-water mark, and fails the component fast at 2^20 held handles. A single-class dispatch or an unhandled delivery frees its handle (ADR-0112 amendment). A guessed handle still reaches only this mailbox's own pending requesters.
 
 ## Context
 

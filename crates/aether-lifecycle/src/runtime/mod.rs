@@ -653,19 +653,6 @@ mod tests {
         assert!(stage_payload(Render::ID, 83_335).is_empty());
     }
 
-    /// Seed one stage set through the reflexive path — the only door a test
-    /// has now that the table holds proofs and nothing outside
-    /// `aether-substrate` can mint one.
-    #[cfg(test)]
-    fn subscribe_self_from(cap: &mut LifecycleCapabilityState, subscriber: DataMailboxId, stage: KindId) {
-        use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
-
-        let transport = unrouted_binding(&cap.mailer);
-        let source = Source::to(SourceAddr::Component(MailboxId(subscriber.0)));
-        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
-        LifecycleCapability::on_subscribe_self(cap, &mut ctx, LifecycleSubscribeSelf { stage: stage.0 });
-    }
-
     #[cfg(test)]
     fn subscribed(cap: &LifecycleCapabilityState, stage: KindId, subscriber: DataMailboxId) -> bool {
         cap.subscribers.get(&stage).is_some_and(|set| set.iter().any(|r| r.id() == subscriber))
@@ -678,25 +665,43 @@ mod tests {
         // mirroring the window family's `aether.window.unsubscribe_all`),
         // while co-subscribers on a shared stage survive. The bulk purge
         // now matches a wire position against the references the table
-        // holds, which is the predicate this pins.
-        use aether_substrate::mail::{MailId, Source};
+        // holds, which is the predicate this pins. The stage sets are
+        // seeded through the explicit wire form, which proves each
+        // registered id at receipt; the purge takes the same raw ids.
+        use aether_substrate::mail::registry::noop_handler;
+        use aether_substrate::mail::{MailId, MailboxId, Source};
+        use aether_substrate::testing::{boot_authority, fresh_substrate};
+
+        let (registry, mailer) = fresh_substrate();
+        let dropped = registry.register_inbox(&boot_authority(), "test.lifecycle.dropped", noop_handler());
+        let survivor = registry.register_inbox(&boot_authority(), "test.lifecycle.survivor", noop_handler());
 
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-        let dropped = DataMailboxId(0xDEAD);
-        let survivor = DataMailboxId(0xBEEF);
         let render = <Render as Kind>::ID;
         let present = <Present as Kind>::ID;
-        subscribe_self_from(&mut cap, dropped, render);
-        subscribe_self_from(&mut cap, survivor, render);
-        subscribe_self_from(&mut cap, dropped, present);
+        let transport = unrouted_binding(&mailer);
+        let mut subscribe = |stage: KindId, mailbox: MailboxId| {
+            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let reply = LifecycleCapability::on_subscribe(
+                &mut cap,
+                &mut ctx,
+                LifecycleSubscribe { stage: stage.0, mailbox: mailbox.0 },
+            );
+            assert!(matches!(reply, LifecycleSubscribeResult::Ok), "a registered mailbox proves and subscribes");
+        };
+        subscribe(render, dropped);
+        subscribe(render, survivor);
+        subscribe(present, dropped);
 
-        let transport = unrouted_binding(&cap.mailer);
         let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
-        assert!(!subscribed(&cap, render, dropped), "dropped mailbox must leave the Render stage");
-        assert!(!subscribed(&cap, present, dropped), "dropped mailbox must leave the Present stage");
-        assert!(subscribed(&cap, render, survivor), "co-subscribers on a shared stage must survive the purge");
+        assert!(!subscribed(&cap, render, DataMailboxId(dropped.0)), "dropped mailbox must leave the Render stage");
+        assert!(!subscribed(&cap, present, DataMailboxId(dropped.0)), "dropped mailbox must leave the Present stage");
+        assert!(
+            subscribed(&cap, render, DataMailboxId(survivor.0)),
+            "co-subscribers on a shared stage must survive the purge"
+        );
     }
 
     /// An explicit `subscribe` proves its payload-borne mailbox once, at
@@ -750,28 +755,6 @@ mod tests {
         assert!(
             unknown_error.contains("unknown mailbox id"),
             "the unknown refusal stays distinct from the dropped one"
-        );
-    }
-
-    /// A `subscribe_self` carrying a `Component` source lands *that*
-    /// mailbox in the stage set (ADR-0083: the cap reads the
-    /// subscriber off the host-stamped envelope, not a payload field).
-    #[test]
-    fn subscribe_self_subscribes_the_component_source() {
-        use aether_substrate::mail::{MailId, MailboxId, Source, SourceAddr};
-
-        let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
-        let render = <Render as Kind>::ID;
-        let sender = DataMailboxId(0x00C0_FFEE);
-
-        let transport = unrouted_binding(&cap.mailer);
-        let source = Source::to(SourceAddr::Component(MailboxId(sender.0)));
-        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
-        LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
-
-        assert!(
-            subscribed(&cap, render, sender),
-            "a Component-source subscribe_self lands that mailbox in the stage set"
         );
     }
 
