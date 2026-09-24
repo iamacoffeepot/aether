@@ -143,13 +143,10 @@ aether_actor::export!(
     aether_behavior::BehaviorHost
 );
 
-use aether_actor::{
-    ActorInitError, Addressable, Erased, Manual, Reaches, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Addressable, DependsOn, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_render::QuadBlend;
 use aether_render::{
@@ -266,7 +263,7 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
         &mut self,
         ctx: &mut WasmCtx<'_, A, Manual>,
     ) {
@@ -287,7 +284,7 @@ impl Widget {
 
     /// Discharge the closed composite: the root emits it to the render /
     /// text caps; an interior or leaf node replies it up to its parent.
-    fn finish<A: Reaches<RenderCapability> + Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -646,8 +643,10 @@ fn text_items(items: &[WidgetDrawItem], later_overlay: &[WidgetDrawItem]) -> Vec
 /// same-recipient FIFO, then one authored-order `DrawTextBatch` reaches the
 /// text cap. Text's extra hop keeps the established later lane. Public so a
 /// peer compositor in another crate (the terrain workbench panel) reuses the
-/// same single-sender flush for its own composite.
-pub fn emit<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+/// same single-sender flush for its own composite. The caller's actor
+/// declares both caps: `depends(RenderCapability)` and
+/// `depends(TextCapability)` on its `#[actor]`.
+pub fn emit<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     list: &WidgetDrawList,
 ) {
@@ -662,7 +661,7 @@ pub fn emit<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
 /// cluster overlay for the ordinary lane, empty for the overlay lane. Called
 /// for the ordinary items and again for the overlay, so an overlay's quads
 /// and glyphs are submitted after every ordinary quad and glyph respectively.
-fn emit_layer<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
+fn emit_layer<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     items: &[WidgetDrawItem],
     later_overlay: &[WidgetDrawItem],
@@ -670,7 +669,7 @@ fn emit_layer<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
     for run in direct_runs(items) {
         match run {
             DirectRun::Textured { texture_id, clip, quads } => {
-                ctx.actor::<RenderCapability>().send(&DrawTexturedQuads {
+                ctx.send::<RenderCapability>(&DrawTexturedQuads {
                     texture_id,
                     blend: QuadBlend::Straight,
                     space: QuadSpace::Screen,
@@ -679,14 +678,14 @@ fn emit_layer<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
                 });
             }
             DirectRun::Shapes { clip, shapes } => {
-                ctx.actor::<RenderCapability>().send(&DrawShapes {
+                ctx.send::<RenderCapability>(&DrawShapes {
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
                     shapes,
                 });
             }
             DirectRun::Triangles { clip, triangles } => {
-                ctx.actor::<RenderCapability>().send(&DrawScreenTriangles {
+                ctx.send::<RenderCapability>(&DrawScreenTriangles {
                     space: QuadSpace::Screen,
                     clip: clip.framebuffer(),
                     triangles,
@@ -696,7 +695,7 @@ fn emit_layer<A: Reaches<RenderCapability> + Reaches<TextCapability>>(
     }
     let texts = text_items(items, later_overlay);
     if !texts.is_empty() {
-        ctx.actor::<TextCapability>().send(&DrawTextBatch { items: texts });
+        ctx.send::<TextCapability>(&DrawTextBatch { items: texts });
     }
 }
 
@@ -1439,7 +1438,7 @@ mod tests {
 /// render sender: the root emits every widget's solid/textured draws in
 /// structural depth-first order, grouping only adjacent compatible items, so
 /// a background drawn as root chrome sits under the children by construction.
-#[actor(instanced, composable, depends(LifecycleCapability), depends(RenderCapability), depends(TextCapability))]
+#[actor(instanced, composable, depends(LifecycleCapability, RenderCapability, TextCapability))]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
     const NAMESPACE: &'static str = "aether.kit.widget";
@@ -1454,7 +1453,7 @@ impl WasmActor for Widget {
     /// is driven by its parent's `Collect`, so it subscribes nothing.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.root {
-            ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+            ctx.subscribe::<LifecycleCapability, Tick>();
         }
     }
 
@@ -1464,7 +1463,7 @@ impl WasmActor for Widget {
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _tick: Tick) {
         self.drive_frame(ctx);
     }
 
@@ -1476,7 +1475,7 @@ impl WasmActor for Widget {
     /// Sent by a compositing parent each frame; not useful to send
     /// manually.
     #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _collect: Collect) {
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 
@@ -1488,7 +1487,7 @@ impl WasmActor for Widget {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, list: WidgetDrawList) {
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }

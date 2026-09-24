@@ -17,7 +17,7 @@ pub struct PaintProbe {
     render: SetRender,
 }
 
-#[actor(depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for PaintProbe {
     const NAMESPACE: &'static str = "test.paint_probe";
 
