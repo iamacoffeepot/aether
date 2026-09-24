@@ -556,6 +556,7 @@ mod tests {
     use crate::host::test_support::{fixed_output_wasm, forward_output};
     use aether_actor::Lifecycle;
     use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
+    use aether_data::wire;
     use aether_fs::NamespaceAddr;
     use alloc::string::ToString;
     use alloc::vec;
@@ -593,8 +594,7 @@ mod tests {
     }
 
     fn reply_handle(raw: u32) -> ReplyHandle {
-        aether_data::wire::from_bytes(&raw.to_le_bytes())
-            .expect("reply handle should decode from its scalar wire shape")
+        wire::from_bytes(&raw.to_le_bytes()).expect("reply handle should decode from its scalar wire shape")
     }
 
     fn attach_script() -> Vec<u8> {
@@ -632,13 +632,13 @@ mod tests {
     #[test]
     fn lane_direction_resolves_against_wrapped_child() {
         let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0xC0FFEE));
-        assert!(host.lane_is_up(Some(MailboxId(0xC0FFEE))));
+        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
+        assert!(host.lane_is_up(Some(MailboxId(0x00C0_FFEE))));
         assert!(!host.lane_is_up(Some(MailboxId(0xBEEF))));
         assert!(!host.lane_is_up(None));
         // With no wrapped child every source reads down-lane.
         host.wrapped_child = None;
-        assert!(!host.lane_is_up(Some(MailboxId(0xC0FFEE))));
+        assert!(!host.lane_is_up(Some(MailboxId(0x00C0_FFEE))));
     }
 
     // Tripwire: low-rate mirror kinds are still offered to SDK dispatch even
@@ -687,7 +687,7 @@ mod tests {
     #[test]
     fn read_result_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0xC0FFEE));
+        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
@@ -700,7 +700,7 @@ mod tests {
             },
         );
 
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
         assert!(reply.is_none());
         assert!(host.slot.is_some());
         assert!(matches!(host.script_source, ScriptSource::FsRef { .. }));
@@ -722,7 +722,7 @@ mod tests {
             |host| host.offer_sentinel_to_sink(&mut sink, sentinel::ATTACH),
         );
 
-        assert!(matches!(result, Ok(_)));
+        assert!(result.is_ok());
         assert!(reply.is_none());
         assert!(host.slot.is_some());
         assert_eq!(host.script_source, fs_ref("scripts", "actual.wasm"));
@@ -734,7 +734,7 @@ mod tests {
     #[test]
     fn set_script_success_primes_then_offers_attach_after_install() {
         let mut host = host(ScriptSource::None);
-        host.wrapped_child = Some(MailboxId(0xC0FFEE));
+        host.wrapped_child = Some(MailboxId(0x00C0_FFEE));
         let mut sink = RecordingSink::default();
         let mut reports = 0;
 
@@ -821,7 +821,7 @@ mod tests {
     fn rehydrate_with_garbage_boots_fresh() {
         let kind = KindId(0x6789);
         let resident = fixed_output_wasm(kind, &forward_output(b"resident"));
-        let mut host = host(ScriptSource::Inline(resident.clone()));
+        let mut host = host(ScriptSource::Inline(resident));
         host.wrapped_child = Some(MailboxId(0xBEEF));
 
         let before = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
@@ -830,8 +830,8 @@ mod tests {
         let after = host.slot.as_ref().map(|slot| slot.bytes().to_vec());
 
         assert_eq!(after, before, "garbage rehydrate must keep the resident slot");
-        assert_eq!(host.wrapped_child, Some(MailboxId(0xBEEF)), "garbage rehydrate must not clobber the wrapped child",);
-        assert_eq!(host.script_source, before_source, "garbage rehydrate must keep the init-time script source",);
+        assert_eq!(host.wrapped_child, Some(MailboxId(0xBEEF)), "garbage rehydrate must not clobber the wrapped child");
+        assert_eq!(host.script_source, before_source, "garbage rehydrate must keep the init-time script source");
     }
 
     // Tripwire: scriptless or undecodable rehydrate offers no ATTACH because
@@ -862,11 +862,11 @@ mod tests {
 
         let (runtime_result, runtime_reply) =
             host.apply_read_result(attached_script_read_result(), runtime_context, |_| {});
-        assert!(matches!(runtime_result, Ok(_)));
+        assert!(runtime_result.is_ok());
         assert_eq!(runtime_reply.map(ReplyHandle::raw), Some(77));
 
         let (boot_result, boot_reply) = host.apply_read_result(attached_script_read_result(), boot_context, |_| {});
-        assert!(matches!(boot_result, Ok(_)));
+        assert!(boot_result.is_ok());
         assert!(boot_reply.is_none());
     }
 }
