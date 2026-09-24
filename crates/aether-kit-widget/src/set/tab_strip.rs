@@ -287,7 +287,7 @@ impl WidgetDefaults for TabStripWidget {
     }
 
     /// Leaving the strip clears the per-tab hover as well as the widget's.
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_tab = None;
     }

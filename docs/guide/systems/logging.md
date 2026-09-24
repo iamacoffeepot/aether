@@ -118,9 +118,10 @@ fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _t: Tick) {
 }
 ```
 
-A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
-ctx typed by that actor; the default `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
+`WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
+with `depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 A `tracing::*` call from outside a handler — at module load, on a thread the
 actor spawned — is a host-side event by the rule above, so it won't appear in the

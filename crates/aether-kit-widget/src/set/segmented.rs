@@ -249,7 +249,7 @@ impl WidgetDefaults for SegmentedWidget {
         self.pressed_segment = None;
     }
 
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_segment = None;
     }

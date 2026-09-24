@@ -541,7 +541,7 @@ impl WidgetDefaults for NumericWidget {
         self.edit.clear_composition();
     }
 
-    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_>, _lost: FocusLost) {
+    fn on_focus_lost(&mut self, ctx: &mut WasmCtx<'_, Self>, _lost: FocusLost) {
         if self.state.can_mutate()
             && let Some(emission) = self.commit_buffer()
         {
@@ -556,7 +556,7 @@ impl WidgetDefaults for NumericWidget {
 
     /// The pointer leaving the control clears the stepper hover the root's
     /// hover fact alone cannot: hover is per-widget, the overlay per-button.
-    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_>, _lost: HoverLost) {
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
         self.state.set_hovered(false);
         self.hovered_stepper = None;
     }

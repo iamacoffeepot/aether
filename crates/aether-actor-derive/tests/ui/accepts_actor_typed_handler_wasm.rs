@@ -1,7 +1,7 @@
 //! Issue 6279: a handler that spells its actor (`WasmCtx<'_, Self>`) receives
 //! the macro-built typed ctx, and so does a `wire` hook spelling
-//! `WireCtx<'_, '_, Self>`; a handler that spells no actor keeps the erased
-//! view — all three compile on the wasm expansion.
+//! `WireCtx<'_, '_, Self>`; a handler that spells no actor is typed by it too
+//! (ADR-0231 §7, #6533) — all three compile on the wasm expansion.
 
 use aether_actor::{WasmCtx, WireCtx, actor};
 
