@@ -255,6 +255,17 @@ impl NativeBinding {
         self.mailer.kind_label(kind)
     }
 
+    /// The first declared dependency with no `Live` route for a child placed
+    /// under this binding's actor. The path behind
+    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn missing_child_dependency<'a>(
+        &self,
+        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
+    ) -> Option<&'a str> {
+        self.mailer.missing_dependency_under(self.self_mailbox(), dependencies)
+    }
+
     /// #1757: the actor's reply-lineage allocator (a shared-counter
     /// clone). Surfaced so a handler that retains its inbound via
     /// [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)
