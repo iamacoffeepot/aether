@@ -58,11 +58,10 @@ impl<'a> NativeInitCtx<'a> {
     /// The actor's own [`MailboxId`] — the deterministic FNV-1a hash
     /// of its full registered name (ADR-0029). For singletons that's
     /// `Addressable::NAMESPACE`; for instanced actors it's
-    /// `"{NAMESPACE}:{subname}"` (ADR-0079). Init may use this to
-    /// publish its own address — e.g. dispatch
-    /// `aether.window.subscribe { mailbox: ctx.self_id() }` before
-    /// registration completes; replies route correctly once the spawn
-    /// lifecycle finishes inserting the entry.
+    /// `"{NAMESPACE}:{subname}"` (ADR-0079). No handler ctx has a mirror
+    /// of it: the wasm trampoline's `init` is the one caller, and it goes
+    /// with the trampoline's stored position in the closing slice of
+    /// issue 6350.
     #[must_use]
     pub fn self_id(&self) -> MailboxId {
         self.binding.self_mailbox()

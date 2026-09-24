@@ -327,6 +327,19 @@ impl Mailer {
         self.registry.kind_label(kind)
     }
 
+    /// The first declared dependency with no `Live` route for a child placed
+    /// under `parent`, as [`Registry::missing_dependency`] answers it. The
+    /// crate-private path behind
+    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn missing_dependency_under<'a>(
+        &self,
+        parent: aether_data::MailboxId,
+        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
+    ) -> Option<&'a str> {
+        self.registry.missing_dependency(Some(parent), dependencies)
+    }
+
     /// Subscribe `target` to the registry's inventory changes, as
     /// [`Registry::subscribe_inventory`] does, through this mailer. The
     /// crate-private path behind

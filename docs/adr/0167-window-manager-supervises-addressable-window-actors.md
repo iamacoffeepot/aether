@@ -279,6 +279,13 @@ ctx.actor::<WindowCapability>()
     });
 ```
 
+> **Amendment (2026-09-24, issue 6350):** `ApplyWindowCommand` no longer
+> carries `window`, and the child no longer reads `ctx.self_id()`. The
+> manager resolves the window from the child's host-stamped sender against
+> the reference-keyed child table it fills when a child becomes live, and it
+> refuses a command from any other sender with the command's own `Err`. The
+> forwarding and correlation contract below is unchanged.
+
 When the manager replies, the child calls
 `ctx.take_context::<ForwardContext>()`, removes the matching retained inbound,
 and sends the public result through that guard. Concurrent requests remain
