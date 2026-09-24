@@ -96,7 +96,7 @@ pub use reap::terminate_child_group;
 /// proxy before `init` rather than leaving that spawn unsettled. It also
 /// depends on the [`FleetServer`](crate::FleetServer), because it reports its engine's liveness
 /// there.
-#[actor(instanced, child_of(FleetServer), depends(RpcServerCapability), depends(FleetServer))]
+#[actor(instanced, child_of(FleetServer), depends(RpcServerCapability, FleetServer))]
 pub struct FleetProxy;
 
 // The `#[actor]` / `#[handler]` attribute path stays always-on (the macro

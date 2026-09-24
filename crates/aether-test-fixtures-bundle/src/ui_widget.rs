@@ -35,7 +35,7 @@ pub struct UiWidget {
     config: UiWidgetConfig,
 }
 
-#[actor(depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for UiWidget {
     type Config = UiWidgetConfig;
     const NAMESPACE: &'static str = "test.ui_widget";

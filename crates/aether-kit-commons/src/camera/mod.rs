@@ -266,7 +266,7 @@ pub struct CameraComponent {
 ///   camera in place.
 ///
 /// Use `capture_frame` between sends to verify each change.
-#[actor(depends(WindowCapability), depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(WindowCapability, LifecycleCapability, RenderCapability))]
 impl WasmActor for CameraComponent {
     const NAMESPACE: &'static str = "aether.kit.camera";
 

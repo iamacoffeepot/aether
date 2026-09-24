@@ -110,7 +110,7 @@ struct MeshLoadContext {
 /// to swap the cached mesh. Iterate on a DSL by writing the new source
 /// via `aether.fs.write` and re-sending `aether.kit.mesh.load` against the
 /// same path.
-#[actor(depends(LifecycleCapability), depends(RenderCapability), depends(CameraComponent), depends(FsCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability, CameraComponent, FsCapability))]
 impl WasmActor for MeshViewer {
     const NAMESPACE: &'static str = "aether.kit.mesh";
 

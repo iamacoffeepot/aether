@@ -423,7 +423,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// ```
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not declare a dependency on `{R}`",
-    note = "add `depends({R})` to the actor's `#[actor(...)]` attribute"
+    note = "add `{R}` to the `depends(...)` list on the actor's `#[actor(...)]` attribute"
 )]
 pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
 where
