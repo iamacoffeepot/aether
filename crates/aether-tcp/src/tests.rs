@@ -117,7 +117,7 @@ fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, 
         None,
         Nanos(0),
         0,
-        MailboxId(0),
+        target,
     ));
 }
 

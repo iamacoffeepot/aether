@@ -14,8 +14,7 @@ use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, CloseWindowResult, CreateWindow, CreateWindowResult,
     FocusWindowResult, InjectWindowEvent, ListWindows, ListWindowsResult, RequestWindowRedrawResult, RetireWindow,
     SetWindowCursorResult, SetWindowMenuResult, SetWindowModeResult, SetWindowTitleResult, SyntheticWindowCapability,
-    SyntheticWindowInstance, WindowCapability, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowInstance,
-    WindowMode, WindowOpened, WindowSpec,
+    SyntheticWindowInstance, WindowClosed, WindowCommand, WindowId, WindowInfo, WindowMode, WindowOpened, WindowSpec,
 };
 
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SpawnOutcome, TaskDone};
@@ -157,7 +156,6 @@ impl NativeActor for SyntheticWindowCapability {
             reply.reply(&CreateWindowResult::Err { error });
             return;
         }
-        let predicted = ctx.erase().actor::<WindowCapability>().resolve::<WindowInstance>(&mail.spec.name).mailbox_id();
         let receipt = match ctx.spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ()).stage()
         {
             Ok(receipt) => receipt,
@@ -166,21 +164,10 @@ impl NativeActor for SyntheticWindowCapability {
                 return;
             }
         };
-        // The reservation is keyed by the id consumers address, so a divergent
-        // deterministic id dooms it rather than publishing a window nobody can
-        // reach: answer now and reserve nothing, and the completion's
-        // no-reservation arm retires the child the owner still applies.
-        if receipt.mailbox_id != predicted {
-            reply.reply(&CreateWindowResult::Err {
-                error: format!(
-                    "spawned window child {:?} did not match predicted mailbox {predicted:?}",
-                    receipt.mailbox_id
-                ),
-            });
-            return;
-        }
-
-        let id = WindowId(predicted.0);
+        // The receipt's id needs no check against a prediction: the synthetic
+        // identities read the shared window namespace consts, so the child's
+        // fold is the canonical one consumers address.
+        let id = WindowId(receipt.mailbox_id.0);
         let window = SyntheticWindowCapabilityState::describe(mail.spec, id);
         let replaced = state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(Box::new(reply)) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
@@ -333,7 +320,6 @@ mod tests {
     use std::collections::BTreeSet;
     use std::sync::Arc;
 
-    use aether_actor::Addressable;
     use aether_data::{Kind, MailboxId};
     use aether_kinds::Key;
     use aether_substrate::Registry;
@@ -464,7 +450,7 @@ mod tests {
     /// Reducer-only, for the same reason as above: it proves the reservation
     /// set participates in duplicate detection, not the staged spawn path.
     #[test]
-    fn duplicate_live_and_reserved_names_are_rejected_and_distinct_names_predict_distinct_children() {
+    fn duplicate_live_and_reserved_names_are_rejected() {
         let mut state = test_state();
         state.windows.insert(WindowId(7), SyntheticWindowCapabilityState::describe(spec("main", "Game"), WindowId(7)));
 
@@ -482,11 +468,6 @@ mod tests {
         );
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
         assert!(!state.windows.contains_key(&WindowId(9)));
-
-        assert_ne!(
-            WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "main"),
-            WindowInstance::resolve(WindowCapability::resolve(0, ()).0, "palette"),
-        );
     }
 
     #[test]

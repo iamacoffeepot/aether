@@ -52,7 +52,8 @@ pub fn caller(registry: &Registry, name: &str) -> (MailboxId, mpsc::Receiver<Own
 
 /// Enqueue `mail` on `target` as if `caller` sent it with `correlation`.
 pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: MailboxId, correlation: u64, mail: &K) {
-    let MailboxEntry::Inbox { handler, .. } = registry.entry(target.erase()).expect("actor mailbox registered") else {
+    let target = target.erase();
+    let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("actor mailbox registered") else {
         panic!("actor mailbox is not an inbox");
     };
     handler.enqueue(OwnedDispatch::disarmed(
@@ -66,7 +67,7 @@ pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mai
         None,
         Nanos(0),
         0,
-        MailboxId(0),
+        target,
     ));
 }
 
