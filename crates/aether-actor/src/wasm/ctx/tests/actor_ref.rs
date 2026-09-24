@@ -3,15 +3,26 @@
 //! `actor::<Dep>()` folds, for a `One` and for an `Embedded` dependency.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
+use crate::mail::Mail;
 use crate::reference::ErasedActorRef;
-use crate::{Addressable, DependsOn, Embedded, One};
+use crate::wasm::{ActorInitError, WasmInitCtx};
+use crate::{Addressable, Embedded, One};
 use aether_data::MailboxId;
 
 struct Dependent;
 
-impl Addressable for Dependent {
+#[crate::actor(depends(OneDep, EmbeddedDep))]
+impl crate::WasmActor for Dependent {
     const NAMESPACE: &'static str = "test.actor_ref.dependent";
-    type Resolver = One;
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {
+        let _ = self;
+    }
 }
 
 struct OneDep;
@@ -27,9 +38,6 @@ impl Addressable for EmbeddedDep {
     const NAMESPACE: &'static str = "test.actor_ref.embedded_dep";
     type Resolver = Embedded;
 }
-
-impl DependsOn<OneDep> for Dependent {}
-impl DependsOn<EmbeddedDep> for Dependent {}
 
 /// `actor_ref` and `actor` share one derivation: the reference proves the
 /// folded position for both declarable strategies. Owned logic: the shared

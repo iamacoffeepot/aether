@@ -7,6 +7,7 @@
 - **Amended:** 2026-09-24 — §3's dependency list is written as one `depends(A, B, …)` per `#[actor]`: `depends(R)` is a list of one, and a second `depends(...)` in the same attribute is a compile error that points at the list (#6557). [ADR-0232](0232-flat-ctx-send-verbs.md) §2's example is respelled to match.
 - **Amended:** 2026-09-24 — §3: a wire `Call` names its recipient by `ActorPath`; the engine that hosts the recipient resolves and proves it on arrival, an unresolved path is answered as not present (`RpcError::NotPresent`), and no mailbox id crosses the RPC wire as a recipient or in a reply.
 - **Amended:** 2026-09-24 — §3's module-load check reaches private inline children: the types `export!` lists under `private = [..]` are read from the module's `aether.kinds.inputs.private` section and checked like the exported inline-spawnable actors (#6590).
+- **Amended:** 2026-09-24 — §3's declared-dependency proof `DependsOn<R>` is an `unsafe trait` that only `#[actor(depends(..))]` implements; its safety contract is that the macro also records the dependency entry the pre-`init` check reads, and a hand-written safe impl is refused with `E0200` (#6614).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something

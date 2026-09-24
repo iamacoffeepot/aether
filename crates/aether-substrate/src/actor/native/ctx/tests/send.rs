@@ -5,12 +5,13 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Addressable, DependsOn, Manual, One, OutboundReply, Single};
+use aether_actor::{Addressable, Manual, OutboundReply, Single};
 use aether_data::{MailId, MailboxId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
-use crate::actor::native::{DeferredReply, Erased, NativeCtx, TaskDone};
+use crate::actor::native::{DeferredReply, Erased, NativeActor, NativeCtx, NativeInitCtx, TaskDone};
+use crate::chassis::error::BootError;
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, NativeRequestContext, StubActor};
@@ -149,15 +150,23 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
 }
 
 /// The actor the flat-send test's ctx is typed by: it declares the stub actor
-/// as a dependency, as `#[actor(depends(StubActor))]` would.
+/// as a dependency.
 struct Dependent;
 
-impl Addressable for Dependent {
+#[aether_actor::actor(depends(StubActor))]
+impl NativeActor for Dependent {
     const NAMESPACE: &'static str = "test.flat_send.dependent";
-    type Resolver = One;
-}
+    type Config = ();
 
-impl DependsOn<StubActor> for Dependent {}
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+        let _ = self;
+    }
+}
 
 /// ADR-0232 §1–§2: the flat `send_detached::<R>` on a ctx typed by an actor
 /// that declares `R` lands at the position the dependency's proof points to,

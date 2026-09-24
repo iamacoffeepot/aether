@@ -387,6 +387,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_generic_native_depends",
     "rejects_generic_native_lineage_impl",
     "rejects_generic_native_lineage_struct",
+    "rejects_hand_written_depends_on",
     "rejects_handler_set_duplicate_adoption",
     "rejects_handler_set_without_body",
     "rejects_inline_child_send_unhandled_kind",

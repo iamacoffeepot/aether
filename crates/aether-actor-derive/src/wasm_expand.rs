@@ -414,9 +414,11 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 for #self_ty #where_clause {}
         }
     });
+    // ADR-0230: each `unsafe impl DependsOn<R>` pairs with the
+    // `InputsRecord::Dependency` record `manifest.rs` emits for the same `R`.
     let depends_impls = opts.depends.iter().map(|target| {
         quote! {
-            impl #impl_generics ::aether_actor::DependsOn<#target>
+            unsafe impl #impl_generics ::aether_actor::DependsOn<#target>
                 for #self_ty #where_clause {}
         }
     });

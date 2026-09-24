@@ -1,7 +1,7 @@
 error[E0277]: `HeadlessWindowCapability` does not publish `Tick`
-  --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:25:21
+  --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:24:21
    |
-25 |     ctx.subscribe::<WindowCapability, Tick>();
+24 |     ctx.subscribe::<WindowCapability, Tick>();
    |         ---------   ^^^^^^^^^^^^^^^^ subscribing here would store a row that never fires
    |         |
    |         required by a bound introduced by this call
@@ -34,9 +34,9 @@ note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<
    |            ^^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
 
 error[E0277]: `LifecycleCapability` does not publish `Key`
-  --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:29:21
+  --> tests/ui/rejects_subscribe_to_unpublished_kind.rs:28:21
    |
-29 |     ctx.subscribe::<LifecycleCapability, Key>();
+28 |     ctx.subscribe::<LifecycleCapability, Key>();
    |         ---------   ^^^^^^^^^^^^^^^^^^^ subscribing here would store a row that never fires
    |         |
    |         required by a bound introduced by this call
