@@ -28,12 +28,12 @@ Read relevant guide pages and ADRs before changing a subsystem. Prefer current c
 - Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`
 - Test: `cargo test`
 - Single test: `cargo test <name>`
-- Clippy: `cargo clippy --workspace --all-targets -- -D warnings`
+- Clippy: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Format: `cargo fmt`
 - Format check: `cargo fmt -- --check`
 - Check only: `cargo check`
 
-For implementation PRs, this repo uses GitHub Actions as the full build engine. Before pushing an implement branch, locally run the cheap deterministic tier: `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`; fix any red locally before opening or updating a draft PR. Let CI run the expensive checks unless the issue explicitly asks for local verification. If a user explicitly asks for full local build, test, or dist verification, report the result and then note that `target/` and generated `dist/` artifacts can be large, so clean them up when they are no longer needed or ask before preserving them.
+For implementation PRs, this repo uses GitHub Actions as the full build engine. Before pushing an implement branch, locally run the cheap deterministic tier: `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; fix any red locally before opening or updating a draft PR. Let CI run the expensive checks unless the issue explicitly asks for local verification. If a user explicitly asks for full local build, test, or dist verification, report the result and then note that `target/` and generated `dist/` artifacts can be large, so clean them up when they are no longer needed or ask before preserving them.
 
 ## Codex Hooks
 

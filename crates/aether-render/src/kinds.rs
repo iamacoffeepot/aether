@@ -41,7 +41,7 @@ pub struct Frame {
 /// `MailId` field) so the settlement registry's notice-mail bridge
 /// (`subscribe_settlement_mail`) delivers it directly. Chassis-internal —
 /// the settlement bridge is its sole sender.
-#[aether_data::kind(name = "aether.render.pre_settled", copy, default, eq)]
+#[aether_data::kind(name = "aether.render.pre_settled", copy, eq)]
 pub struct PreSettled {
     pub mail_id: MailId,
 }
