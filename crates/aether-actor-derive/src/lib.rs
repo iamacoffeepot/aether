@@ -341,7 +341,7 @@ pub fn capability(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Issue 552 stage 4: gate fields on `not(target_family = "wasm")`
     // to match the macro-emitted `NativeActor` / `NativeDispatch`
     // impls. Wasm builds see the cap struct with no fields (a pure
-    // marker), which is what typed `ctx.actor::<R>().send(...)` needs;
+    // marker), which is what a typed flat send (`ctx.send::<R>(...)`) needs;
     // host builds see the full struct.
     match &mut item.fields {
         Fields::Named(fields) => native_only_fields(&mut fields.named),

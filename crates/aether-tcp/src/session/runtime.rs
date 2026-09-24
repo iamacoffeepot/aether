@@ -18,7 +18,6 @@ pub use std::sync::atomic::{AtomicBool, Ordering};
 pub use std::sync::mpsc;
 pub use std::thread::JoinHandle;
 
-pub use aether_actor::MailSender;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
 

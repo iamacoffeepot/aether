@@ -421,8 +421,8 @@ impl ComponentCtx {
     /// counterpart of [`Self::send`]. Routes the guest's send without
     /// inheriting the in-flight dispatch's lineage, so the recipient
     /// starts a fresh causal chain. Reached from the `send_mail_p32`
-    /// host fn when the guest sets the detached flag (`WasmActorMailbox::
-    /// send_detached`). Correlation / reply-routing are identical to
+    /// host fn when the guest sets the detached flag (the guest's flat
+    /// `send_detached` verb or `MailSender::send_detached_to`). Correlation / reply-routing are identical to
     /// `send` — only the trace lineage differs. `from` (issue 1987) is the
     /// dispatch identity the host fn already resolved, used as in `send`.
     pub fn send_detached(&self, recipient: MailboxId, kind: MailKind, payload: Vec<u8>, count: u32, from: MailboxId) {
