@@ -49,10 +49,11 @@ mod tests {
     use super::*;
     use aether_actor::root_mailbox;
     use aether_substrate::Mailer;
+    use aether_substrate::NativeCtx;
     use aether_substrate::SettlingInbox;
     use aether_substrate::actor::native::envelope::Envelope;
-    use aether_substrate::mail::{Source, SourceAddr};
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::mail::Source;
+    use aether_substrate::testing::registered_binding;
     use std::sync::Arc;
 
     /// iamacoffeepot/aether#1704: the lifecycle reply inbox is a
@@ -95,10 +96,16 @@ mod tests {
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: Envelope| {
             let _ = tx.send(dispatch);
         });
-        let reply_mailbox = registry
-            .try_register_inbox(&boot_authority(), "aether.lifecycle.advance_reply", handler)
-            .expect("register the reply inbox");
-        let inbox = SettlingInbox::new(reply_mailbox, rx, Arc::clone(&mailer));
+        let (reply_binding, reply_ref) =
+            registered_binding(&registry, &mailer, "aether.lifecycle.advance_reply", handler);
+        let inbox = SettlingInbox::new(reply_ref, rx, Arc::clone(&mailer));
+
+        // Both replies address the reply mailbox by the source a real
+        // envelope from it carries: it mails itself once, and dropping that
+        // guard settles the self-send's own chain.
+        NativeCtx::new(&reply_binding, Source::NONE, MailId::NONE, MailId::NONE)
+            .send_to(reply_ref, &LifecycleAdvanceComplete { completed: 0, next: 0 });
+        let sender = inbox.try_next().expect("the reply mailbox's own mail").sender();
 
         let cap_mailbox = root_mailbox::<aether_lifecycle::LifecycleCapability>();
 
@@ -112,7 +119,6 @@ mod tests {
         // mail_id, so the real Inbox arm arms the obligation guard.
         let armed_reply_id = MailId::new(cap_mailbox, 1 << 63);
         let settle_rx = settlement.subscribe_settlement(root);
-        let sender = Source::with_correlation(SourceAddr::Component(reply_mailbox), 7);
         mailer.send_reply(sender, &LifecycleAdvanceComplete { completed: 1, next: 42 }, armed_reply_id, root, None);
         let mail = inbox.try_next().expect("armed reply routed to the inbox");
         match consume_lifecycle_reply(mail) {
@@ -130,9 +136,8 @@ mod tests {
         // envelope drops without the ADR-0094 abort. Reaching the assert at
         // all proves the guard was disarmed.
         let armed_reply_id_2 = MailId::new(cap_mailbox, (1 << 63) + 1);
-        let sender_2 = Source::with_correlation(SourceAddr::Component(reply_mailbox), 8);
         mailer.send_reply(
-            sender_2,
+            sender,
             &LifecycleAdvanceComplete { completed: 2, next: 0 },
             armed_reply_id_2,
             MailId::NONE,

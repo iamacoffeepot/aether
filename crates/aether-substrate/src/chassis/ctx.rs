@@ -510,7 +510,7 @@ impl<'a> ChassisCtx<'a> {
         // arms reach the actor's per-actor `Local<T>` rings.
         Ok(MailboxClaim {
             id,
-            inbox: SettlingInbox::new(id, rx, Arc::clone(self.mailer)),
+            inbox: SettlingInbox::new_at(id, rx, Arc::clone(self.mailer)),
             actor_slots: SharedActorSlots::new(),
             wake_slot,
         })

@@ -24,7 +24,7 @@ use core::marker::PhantomData;
 
 use aether_data::{Kind, MailboxId, RequestId, Source};
 
-use crate::model::{Addressable, ChildOf, HandlesKind, Instanced};
+use crate::model::{Addressable, HandlesKind};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 
@@ -112,21 +112,6 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         context: &'context C,
     ) -> WasmActorMailboxWithContext<'a, 'context, R, C> {
         WasmActorMailboxWithContext { mailbox: *self, context }
-    }
-
-    /// Resolve the instanced child actor `Child` named `name` directly
-    /// beneath this actor.
-    ///
-    /// The declared [`ChildOf<R>`] relationship proves the placement is
-    /// legal, while `Child`'s resolver owns the address construction. The
-    /// returned handle retains this mailbox's sender and inline registry.
-    #[must_use]
-    pub fn resolve<Child>(&self, name: &str) -> WasmActorMailbox<'a, Child>
-    where
-        R: Addressable,
-        Child: ChildOf<R> + Instanced,
-    {
-        WasmActorMailbox::new(Child::resolve(self.mailbox, name).0, self.sender, self.inline)
     }
 
     /// The body of [`Self::send`] with no `R: HandlesKind<K>` bound, shared
@@ -276,41 +261,5 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use core::ptr;
-
-    use crate::model::{Many, One};
-
-    struct Parent;
-
-    impl Addressable for Parent {
-        const NAMESPACE: &'static str = "test.parent";
-        type Resolver = One;
-    }
-
-    struct Child;
-
-    impl Addressable for Child {
-        const NAMESPACE: &'static str = "test.child";
-        type Resolver = Many;
-    }
-
-    impl ChildOf<Parent> for Child {}
-
-    #[test]
-    fn resolve_uses_the_child_resolver_and_retains_context() {
-        let inline = Registry::new();
-        let parent = WasmActorMailbox::<Parent>::new(0xCA11_AB1E, 0x5EED, &inline);
-
-        let child = parent.resolve::<Child>("camera");
-
-        assert_eq!(child.mailbox_id(), Child::resolve(parent.mailbox_id().0, "camera"));
-        assert_eq!(child.sender, parent.sender);
-        assert!(ptr::eq(child.inline, parent.inline));
     }
 }

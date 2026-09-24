@@ -31,7 +31,7 @@ fn closure_handler_runs_on_call() {
     };
     // Test-side id is irrelevant — the handler ignores it.
     h.enqueue(test_owned_dispatch(KindId(0), &[], 7));
-    h.enqueue(OwnedDispatch::disarmed(
+    h.enqueue(OwnedDispatch::disarmed_at(
         KindId(0),
         Some("physics".to_owned()),
         Source::NONE,
@@ -85,7 +85,7 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
         collected_for_handler.lock().unwrap().push(dispatch.payload.into_vec());
     });
 
-    handler.enqueue(OwnedDispatch::disarmed(
+    handler.enqueue(OwnedDispatch::disarmed_at(
         KindId(0),
         None,
         Source::NONE,
@@ -98,7 +98,7 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
         0,
         MailboxId(0),
     ));
-    handler.enqueue(OwnedDispatch::disarmed(
+    handler.enqueue(OwnedDispatch::disarmed_at(
         KindId(0),
         None,
         Source::NONE,
@@ -139,7 +139,7 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
 
     let (tx, rx) = mpsc::channel();
     let handler: Arc<dyn InboxHandler> = Arc::new(ChannelForwarder { tx });
-    handler.enqueue(OwnedDispatch::disarmed(
+    handler.enqueue(OwnedDispatch::disarmed_at(
         KindId(42),
         Some("aether.fs".to_owned()),
         Source::NONE,
