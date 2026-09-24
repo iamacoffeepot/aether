@@ -56,7 +56,11 @@ impl NativeActor for TraceDispatchCapability {
         ctx: &mut NativeCtx<'_>,
         batch: DispatchTraced,
     ) -> DispatchTracedAck {
-        let root = ctx.in_flight_mail_id();
+        // The RPC bridge always stamps the batch, so its own id is the root
+        // every child descends from; a batch without one has no root to ack.
+        let Some(root) = ctx.in_flight_mail_id() else {
+            return DispatchTracedAck::Err { error: "dispatch_traced arrived without a causal chain".to_owned() };
+        };
         // Prove every recipient before any child moves (ADR-0230 §3). A
         // single unprovable recipient or unknown kind aborts the whole
         // batch, surfaced as the ack's `Err` variant so the MCP caller
@@ -86,7 +90,7 @@ mod tests {
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{MailDispatch, Registry};
     use aether_substrate::mail::{Source, SourceAddr};
-    use aether_substrate::testing::{boot_authority, unrouted_binding};
+    use aether_substrate::testing::{boot_authority, token_root, unrouted_binding};
 
     /// Shared scaffolding for the `on_dispatch_traced` tests:
     /// fresh registry + mailer + outbound + transport wired together.
@@ -110,7 +114,7 @@ mod tests {
     /// session sender so the ack reply egresses as `ToSession`.
     fn chassis_root_ctx<A>(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_, A> {
         let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new_for_actor(transport, sender, inbound, inbound)
+        NativeCtx::new_for_actor(transport, sender, Some(inbound), Some(inbound))
     }
 
     /// Issue 749: `on_dispatch_traced` proves each envelope's
@@ -125,7 +129,7 @@ mod tests {
         use aether_kinds::NamedMail;
         use std::sync::Mutex;
 
-        type Capture = (KindId, MailId, Option<MailId>, Vec<u8>);
+        type Capture = (KindId, Option<MailId>, Option<MailId>, Vec<u8>);
 
         /// Inline handler that records every dispatched mail's
         /// `(kind, root, parent, payload)` into the shared
@@ -155,7 +159,7 @@ mod tests {
         let kind_alpha = fix.registry.register_kind(&boot_authority(), "aether.test.kind_a");
         let kind_beta = fix.registry.register_kind(&boot_authority(), "aether.test.kind_b");
 
-        let inbound = MailId { correlation_id: 7, ..MailId::NONE };
+        let inbound = token_root(7);
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
             &mut (),
@@ -189,14 +193,14 @@ mod tests {
         assert_eq!(snapshot.len(), 2, "expected each envelope to dispatch");
         assert!(
             snapshot.iter().any(|(k, root, parent, p)| *k == kind_alpha
-                && *root == inbound
+                && *root == Some(inbound)
                 && *parent == Some(inbound)
                 && p == &vec![1u8, 2]),
             "envelope A missing or chain not inherited; captured: {snapshot:?}"
         );
         assert!(
             snapshot.iter().any(|(k, root, parent, p)| *k == kind_beta
-                && *root == inbound
+                && *root == Some(inbound)
                 && *parent == Some(inbound)
                 && p == &vec![3u8, 4, 5]),
             "envelope B missing or chain not inherited; captured: {snapshot:?}"
@@ -220,7 +224,7 @@ mod tests {
         use aether_kinds::NamedMail;
 
         let fix = dispatch_traced_fixture();
-        let inbound = MailId { correlation_id: 99, ..MailId::NONE };
+        let inbound = token_root(99);
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
             &mut (),

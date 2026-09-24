@@ -11,7 +11,7 @@ use crate::mail::registry::{
     InboxHandler, InlineHandler, MailDispatch, MailboxEntry, OwnedDispatch, Registry, test_dispatch,
     test_owned_dispatch,
 };
-use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
+use crate::mail::{KindId, MailRef, MailboxId, Source};
 use crate::testing::boot_authority as auth;
 
 #[test]
@@ -37,8 +37,8 @@ fn closure_handler_runs_on_call() {
         Source::NONE,
         MailRef::from(Vec::new()),
         3,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -91,8 +91,8 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
         Source::NONE,
         MailRef::from(vec![1, 2, 3]),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -104,8 +104,8 @@ fn inbox_handler_blanket_impl_moves_owned_payload() {
         Source::NONE,
         MailRef::from(vec![4, 5, 6, 7]),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -145,8 +145,8 @@ fn inbox_handler_hand_rolled_impl_dispatches_per_call() {
         Source::NONE,
         MailRef::from(vec![0xAB, 0xCD]),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,

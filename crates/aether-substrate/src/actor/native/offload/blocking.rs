@@ -352,7 +352,7 @@ impl DeferredReply {
         M: ReplyMode,
         R: ActorMail,
     {
-        let root = self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root);
+        let root = self.hold.as_ref().map(SettlementHold::root);
         ctx.reply_to_target(self.reply_to, reply, root, None);
         drop(self.hold.take());
         self.consumed = true;
@@ -441,10 +441,10 @@ impl<O, C> TaskDone<O, C> {
     /// #1695). The deferred reply stamps this so its `Sent` joins the
     /// chain the hold keeps open — replied to from a *later* handler turn
     /// whose own ctx has no relation to the originating chain.
-    /// `MailId::NONE` once the hold is taken (post-`release`) or for a
+    /// `None` once the hold is taken (post-`release`) or for a
     /// chainless dispatch that never held one.
-    fn hold_root(&self) -> MailId {
-        self.hold.as_ref().map_or(MailId::NONE, SettlementHold::root)
+    fn hold_root(&self) -> Option<MailId> {
+        self.hold.as_ref().map(SettlementHold::root)
     }
 
     /// Re-reply the carried `output` through the carried `reply_to`,
@@ -790,7 +790,7 @@ mod tests {
         // The dispatching handler: eager-acquire the hold, spawn the
         // worker, return.
         {
-            let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, root);
+            let mut ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(root));
             // The bare `dispatch_blocking` now returns a `Pending<R>`
             // (ADR-0109); `R` is the declared reply kind (here `Answer`).
             let _pending = ctx.dispatch_blocking::<Answer, Answer, _>(move || Answer { value: 42 });
@@ -806,7 +806,7 @@ mod tests {
 
         // The completion handler runs: rebuild the TaskDone and resolve.
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             let done = ctx.take_task_done::<Answer, ()>(id).expect("the dispatch is in the ledger");
             assert_eq!(*done.output(), Answer { value: 42 });
             done.resolve(&mut ctx);
@@ -851,7 +851,7 @@ mod tests {
         // "Accept": acquire the hold on the accept root + capture the
         // caller, as a TaskQueue does when buffering an over-limit request.
         let buffered_hold = {
-            let ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, accept_root);
+            let ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(accept_root));
             ctx.acquire_settlement_hold()
         };
         assert_eq!(counter.held_open(accept_root), 1, "the accept-time hold keeps the chain open while buffered");
@@ -862,7 +862,7 @@ mod tests {
         let other_root = root_id(2);
         let id = {
             let mut ctx =
-                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 99), MailId::NONE, other_root);
+                NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 99), None, Some(other_root));
             ctx.dispatch_blocking_resumed(buffered_hold, caller_reply_to, move || Answer { value: 7 })
         };
 
@@ -878,7 +878,7 @@ mod tests {
         assert_eq!(landed, id);
 
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             let done = ctx.take_task_done::<Answer, ()>(id).expect("the resumed dispatch is in the ledger");
             assert_eq!(*done.output(), Answer { value: 7 });
             done.resolve(&mut ctx);
@@ -914,7 +914,7 @@ mod tests {
         let caller_reply_to = Source::with_correlation(SourceAddr::Component(caller), 5);
 
         {
-            let mut ctx = NativeCtx::new(&binding, caller_reply_to, MailId::NONE, root);
+            let mut ctx = NativeCtx::new(&binding, caller_reply_to, None, Some(root));
             // Worker produces a raw count; context carries an offset the
             // completion handler folds in.
             let _id = ctx.dispatch_blocking_with(100u64, move || 7u64);
@@ -922,7 +922,7 @@ mod tests {
 
         let id = await_wake(&wake_rx);
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             let done = ctx.take_task_done::<u64, u64>(id).expect("the dispatch is in the ledger");
             assert_eq!(*done.output(), 7);
             assert_eq!(*done.context(), 100);
@@ -951,7 +951,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "hold acquired");
 
         let done: TaskDone<u64, ()> =
-            TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
+            TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
         // The drop releases the hold (verified indirectly: the chain
         // returns to 0 even as the panic unwinds) then panics.
         drop(done);
@@ -970,7 +970,7 @@ mod tests {
 
         let result = catch_unwind(AssertUnwindSafe(|| {
             let done: TaskDone<u64, ()> =
-                TaskDone { output: 1, context: (), hold, reply_to: Source::NONE, resolved: false };
+                TaskDone { output: 1, context: (), hold: Some(hold), reply_to: Source::NONE, resolved: false };
             drop(done);
         }));
         // The drop panics after releasing, so the hold is already gone.
@@ -991,7 +991,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "hold acquired");
 
         let mut table = InflightTable::new();
-        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        let id = table.dispatch_insert(Some(hold), Source::NONE, Box::new(()));
         assert!(table.entries.contains_key(&id), "entry parked");
 
         let abandoned = table.dispatch_abandon(id);
@@ -1011,7 +1011,7 @@ mod tests {
         let hold = mailer.acquire_settlement_hold(root);
 
         let mut table = InflightTable::new();
-        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        let id = table.dispatch_insert(Some(hold), Source::NONE, Box::new(()));
         // Output was never filled: take returns None and retains the entry.
         assert!(table.dispatch_take::<Answer, ()>(id).is_none());
         assert!(table.entries.contains_key(&id), "an unfilled entry stays parked for a later wake");
@@ -1028,7 +1028,7 @@ mod tests {
         let hold = mailer.acquire_settlement_hold(root);
 
         let mut table = InflightTable::new();
-        let id = table.dispatch_insert(hold, Source::NONE, Box::new(()));
+        let id = table.dispatch_insert(Some(hold), Source::NONE, Box::new(()));
         // Fill with a wrong-typed output (u32) where take asks for Answer.
         table.dispatch_fill_output(id, Box::new(7u32));
 
@@ -1045,7 +1045,7 @@ mod tests {
         let (_registry, mailer) = bare_substrate();
         let mut table = InflightTable::new();
         let id = table.dispatch_insert(
-            mailer.acquire_settlement_hold(root_id(13)),
+            Some(mailer.acquire_settlement_hold(root_id(13))),
             Source::NONE,
             Box::new(String::from("typed context")),
         );
@@ -1073,7 +1073,8 @@ mod tests {
     fn typed_take_rebuilds_the_original_output_and_context() {
         let (_registry, mailer) = bare_substrate();
         let mut table = InflightTable::new();
-        let id = table.dispatch_insert(mailer.acquire_settlement_hold(root_id(14)), Source::NONE, Box::new(23_u16));
+        let id =
+            table.dispatch_insert(Some(mailer.acquire_settlement_hold(root_id(14))), Source::NONE, Box::new(23_u16));
         assert_eq!(table.dispatch_fill_output(id, Box::new(Answer { value: 55 })), FillOutcome::Filled);
 
         let done = table.dispatch_take::<Answer, u16>(id).expect("matching typed take succeeds");
@@ -1091,7 +1092,7 @@ mod tests {
         registry.register_inbox(&boot_authority(), "test.deferred_completion.duplicate", forward_to(wake_tx));
 
         let completion =
-            binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root_id(15)), Source::NONE, ());
+            binding.dispatch_arm::<Answer, _>(Some(mailer.acquire_settlement_hold(root_id(15))), Source::NONE, ());
         let id = completion.dispatch_id();
         let duplicate = DeferredCompletion::new(Arc::downgrade(&binding), id);
 
@@ -1115,7 +1116,8 @@ mod tests {
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
         registry.register_inbox(&boot_authority(), "test.deferred_completion.parent_loss", forward_to(wake_tx));
 
-        let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
+        let completion =
+            binding.dispatch_arm::<Answer, _>(Some(mailer.acquire_settlement_hold(root)), Source::NONE, ());
         assert_eq!(counter.held_open(root), 1, "arming parks the hold in the parent ledger");
 
         drop(binding);
@@ -1144,7 +1146,7 @@ mod tests {
         registry.register_inbox(&boot_authority(), "test.deferred_completion.ctx_actor", forward_to(wake_tx));
 
         let completion = {
-            let ctx = NativeCtx::new(&binding, reply_to, MailId::NONE, root);
+            let ctx = NativeCtx::new(&binding, reply_to, None, Some(root));
             ctx.arm_deferred_completion::<Answer, _>(22_u64)
         };
         let id = completion.dispatch_id();
@@ -1155,7 +1157,7 @@ mod tests {
         assert_eq!(counter.held_open(root), 1, "completion fill retains the hold through TaskDone routing");
 
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             let done = ctx.take_task_done::<Answer, u64>(id).expect("typed output and context remain parked");
             assert_eq!(*done.context(), 22);
             done.resolve_with(&mut ctx, |output, context| Answer { value: output.value + context });
@@ -1179,7 +1181,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let root = root_id(19);
 
-        let owed = DeferredReply::new(mailer.acquire_settlement_hold(root), Source::NONE);
+        let owed = DeferredReply::new(Some(mailer.acquire_settlement_hold(root)), Source::NONE);
         assert_eq!(counter.held_open(root), 1, "the debt holds the caller's chain open");
         drop(owed);
     }
@@ -1195,7 +1197,7 @@ mod tests {
         let hold = mailer.acquire_settlement_hold(root);
         assert_eq!(counter.held_open(root), 1);
 
-        let _ = catch_unwind(AssertUnwindSafe(|| drop(DeferredReply::new(hold, Source::NONE))));
+        let _ = catch_unwind(AssertUnwindSafe(|| drop(DeferredReply::new(Some(hold), Source::NONE))));
         assert_eq!(counter.held_open(root), 0, "an unreplied DeferredReply releases its hold on drop");
     }
 
@@ -1208,7 +1210,7 @@ mod tests {
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let root = root_id(21);
 
-        DeferredReply::new(mailer.acquire_settlement_hold(root), Source::NONE).abandon_for_actor_close();
+        DeferredReply::new(Some(mailer.acquire_settlement_hold(root)), Source::NONE).abandon_for_actor_close();
         assert_eq!(counter.held_open(root), 0, "actor-close abandonment releases the chain");
     }
 
@@ -1224,7 +1226,7 @@ mod tests {
         let hold = mailer.acquire_settlement_hold(root);
 
         let payload = catch_unwind(AssertUnwindSafe(|| {
-            let _owed = DeferredReply::new(hold, Source::NONE);
+            let _owed = DeferredReply::new(Some(hold), Source::NONE);
             panic!("handler probe");
         }))
         .expect_err("the handler panic propagates");
@@ -1244,7 +1246,7 @@ mod tests {
         registry.register_inbox(&boot_authority(), "test.deferred_completion.handoff", forward_to(wake_tx));
 
         let first = binding.dispatch_arm::<Answer, _>(
-            mailer.acquire_settlement_hold(root),
+            Some(mailer.acquire_settlement_hold(root)),
             Source::NONE,
             String::from("first"),
         );
@@ -1278,7 +1280,8 @@ mod tests {
         let (wake_tx, wake_rx) = mpsc::channel::<OwnedDispatch>();
         registry.register_inbox(&boot_authority(), "test.deferred_completion.drop", forward_to(wake_tx));
 
-        let completion = binding.dispatch_arm::<Answer, _>(mailer.acquire_settlement_hold(root), Source::NONE, ());
+        let completion =
+            binding.dispatch_arm::<Answer, _>(Some(mailer.acquire_settlement_hold(root)), Source::NONE, ());
         let id = completion.dispatch_id();
         assert_eq!(counter.held_open(root), 1, "arming parks the hold");
 

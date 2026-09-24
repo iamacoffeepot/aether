@@ -115,7 +115,7 @@ impl NativeBinding {
                     };
                     Mail::new(MailboxId(p.recipient), KindId(p.kind), payload, p.count)
                         .with_reply_to(p.reply_to)
-                        .with_lineage(p.mail_id, p.root, p.parent_mail)
+                        .with_lineage(Some(p.mail_id), Some(p.root), p.parent_mail)
                 })
                 .collect();
             (
@@ -133,11 +133,15 @@ impl NativeBinding {
         // the send call, so this is purely the trace-event half.
         let self_mailbox = self.self_mailbox();
         for mail in &routed {
+            // Every buffered mail was stamped with both ids just above.
+            let (Some(mail_id), Some(root)) = (mail.mail_id, mail.root) else {
+                continue;
+            };
             self.mailer.record_sent_event_at(
-                mail.mail_id,
-                mail.root,
+                mail_id,
+                root,
                 mail.parent_mail,
-                component_origin(&component_origins, mail.mail_id).unwrap_or(self_mailbox),
+                component_origin(&component_origins, Some(mail_id)).unwrap_or(self_mailbox),
                 mail.recipient,
                 mail.kind,
                 construct_start,

@@ -183,6 +183,7 @@ mod tests {
     use crate::runtime::test_cap;
     use aether_data::Kind;
     use aether_kinds::{Present, Render};
+    use aether_substrate::testing::token_root;
 
     fn state_with_quit(kind_id: u64, next: u64, quit: Option<u64>) -> LifecycleStateData {
         LifecycleStateData { kind: KindId(kind_id), next: KindId(next), quit: quit.map(KindId) }
@@ -220,7 +221,7 @@ mod tests {
         let mut cap = test_cap(Duration::ZERO);
         assert!(!cap.pending_timed_out());
         cap.pending = Some(PendingAdvance {
-            root: MailId::NONE,
+            root: token_root(1),
             completed_kind: <Render as Kind>::ID,
             next_kind: <Present as Kind>::ID,
             is_terminal: false,
@@ -240,23 +241,23 @@ mod tests {
         let mut cap = test_cap(Duration::from_secs(1));
 
         // First sample seeds the EWMA exactly.
-        cap.record_settlement_latency(Duration::from_millis(10), MailId::NONE);
+        cap.record_settlement_latency(Duration::from_millis(10), token_root(1));
         assert_eq!(cap.settlement_latency_ewma, Some(Duration::from_millis(10)));
         assert!(cap.last_slow_warn.is_none());
 
         // Second sample moves the EWMA toward it by α=0.2:
         // 10ms + 0.2·(20ms − 10ms) = 12ms.
-        cap.record_settlement_latency(Duration::from_millis(20), MailId::NONE);
+        cap.record_settlement_latency(Duration::from_millis(20), token_root(2));
         assert_eq!(cap.settlement_latency_ewma, Some(Duration::from_millis(12)));
         assert!(cap.last_slow_warn.is_none());
 
         // A settle past the 100ms threshold arms the warn + cooldown.
-        cap.record_settlement_latency(Duration::from_millis(250), MailId::NONE);
+        cap.record_settlement_latency(Duration::from_millis(250), token_root(3));
         assert!(cap.last_slow_warn.is_some());
         let armed_at = cap.last_slow_warn.expect("warn armed");
 
         // A second slow settle inside the cooldown does not re-arm.
-        cap.record_settlement_latency(Duration::from_millis(300), MailId::NONE);
+        cap.record_settlement_latency(Duration::from_millis(300), token_root(4));
         assert_eq!(cap.last_slow_warn.expect("still armed"), armed_at, "cooldown should suppress the second warn");
     }
 }

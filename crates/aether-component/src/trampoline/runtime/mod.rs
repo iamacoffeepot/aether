@@ -274,8 +274,8 @@ impl NativeActor for WasmTrampoline {
             // guest-triggered `send_mail_p32` / `reply_mail_p32` stamps
             // `parent_mail = Some(env.mail_id)` and inherits the chain
             // `root`. Without this, the trampoline's wrapped Mail
-            // defaults to `MailId::NONE` and the guest's outbound looks
-            // like a fresh root.
+            // carries no lineage and the guest's outbound looks like a
+            // fresh root.
             // ADR-0114 §2: deliver the *routed* recipient as the guest
             // `Mail`'s recipient, not the trampoline's own id. For a
             // normally-addressed actor `env.recipient` equals

@@ -73,7 +73,7 @@ pub use window::{
 /// synthetic chassis-root mail (ADR-0080 §6). Both the headless driver
 /// and the substrate-harness bin own an `AtomicU64` of these;
 /// symmetric with the per-actor counter on `NativeBinding`, with zero
-/// reserved as the `MailId::NONE` sentinel.
+/// reserved as "no correlation".
 pub fn next_chassis_correlation(counter: &AtomicU64) -> u64 {
     let id = counter.fetch_add(1, Ordering::Relaxed);
     if id == 0 {

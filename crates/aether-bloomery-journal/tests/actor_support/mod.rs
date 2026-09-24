@@ -4,7 +4,7 @@ use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 use aether_actor::{ActorRef, actor};
-use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr};
+use aether_data::{Kind, MailboxId, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::BootError;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -62,8 +62,8 @@ pub fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mai
         Source::with_correlation(SourceAddr::Component(caller), correlation),
         MailRef::from(mail.encode_into_bytes()),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,

@@ -42,7 +42,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// chain settles only after the reply lands (#1695). Routes through
     /// the same binding reply path (the crate-private
     /// `NativeBinding::send_reply_for_handler`) as [`OutboundReply::reply`].
-    pub fn reply_to_target<K: ActorMail>(&mut self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>) {
+    pub fn reply_to_target<K: ActorMail>(
+        &mut self,
+        sender: Source,
+        payload: &K,
+        root: Option<MailId>,
+        parent: Option<MailId>,
+    ) {
         self.binding.send_reply_for_handler(sender, payload, root, parent);
     }
     /// Lineage-aware multicast: encode `payload` once, then push one copy
@@ -93,7 +99,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// `broadcast_to_subscribers` pushes each stage payload to the proofs its
     /// subscriber table holds.
     ///
-    /// At a chassis-root edge (`in_flight_mail_id` is `NONE`) the returned id
+    /// At a chassis-root edge (no `in_flight_mail_id`) the returned id
     /// is the root of a fresh causal chain; mid-handler it is the new mail's
     /// id inside the inherited chain, and a settlement subscription on it
     /// fires when *that mail's* descendants settle, not the whole chain.
@@ -103,20 +109,21 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// takes `(KindId, &[u8])` already encoded and dispatches one.
     ///
     /// An engine-only `kind` (ADR-0233) is refused with a warning and
-    /// [`MailId::NONE`], since no typed bound checks the raw kind here.
+    /// `None`, since no typed bound checks the raw kind here: nothing was
+    /// sent, so there is no mail id to hand back.
     #[must_use]
-    pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+    pub fn send_envelope_tracked_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
         if refuse_engine_only(kind) {
-            return MailId::NONE;
+            return None;
         }
-        self.binding.push_envelope_buffered(
+        Some(self.binding.push_envelope_buffered(
             target.id().0,
             kind.0,
             bytes,
             1,
             self.outbound_parent(),
             self.outbound_root(),
-        )
+        ))
     }
 
     /// Dispatch already-encoded bytes of `kind` to the actor `target` proves
@@ -136,13 +143,13 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// settle individually; only the chain root does).
     ///
     /// An engine-only `kind` (ADR-0233) is refused with a warning and
-    /// [`MailId::NONE`], as [`Self::send_envelope_tracked_to`] refuses it.
+    /// `None`, as [`Self::send_envelope_tracked_to`] refuses it.
     #[must_use]
-    pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> MailId {
+    pub fn send_envelope_detached_to(&self, target: ErasedActorRef, kind: KindId, bytes: &[u8]) -> Option<MailId> {
         if refuse_engine_only(kind) {
-            return MailId::NONE;
+            return None;
         }
-        self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None)
+        Some(self.binding.push_envelope_buffered(target.id().0, kind.0, bytes, 1, None, None))
     }
 
     /// Send `payload` through the held reference `target`, inheriting this
@@ -295,7 +302,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Push `payload` to `target` on behalf of an owed reply: the mail's
     /// reply target is pinned to `reply_to`, the caller still waiting, and its
     /// lineage is `root`, the chain the owed reply's hold keeps open (a fresh
-    /// chain when `root` is [`MailId::NONE`]). The push's settlement count is
+    /// chain when `root` is `None`). The push's settlement count is
     /// taken eagerly, so the hold may be released as soon as this returns.
     ///
     /// The body of [`TaskDone::hand_off`](crate::actor::native::TaskDone::hand_off),
@@ -304,11 +311,10 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         &self,
         target: ErasedActorRef,
         payload: &K,
-        root: MailId,
+        root: Option<MailId>,
         reply_to: Source,
     ) {
         let bytes = payload.encode_into_bytes();
-        let root = (root != MailId::NONE).then_some(root);
         let _ = self.binding.push_envelope_buffered_with_reply_to(
             target.id().0,
             K::ID.0,

@@ -64,15 +64,15 @@ use crate::runtime::trace::SettlementHold;
 /// `spawn_inherit` is available on.
 pub struct InheritCtx<A> {
     binding: Arc<NativeBinding>,
-    inherited_mail_id: MailId,
-    inherited_root: MailId,
+    inherited_mail_id: Option<MailId>,
+    inherited_root: Option<MailId>,
     /// ADR-0080 §12 settlement hold. Acquired on the parent thread
     /// before the worker is spawned (so the `HoldOpen` trace event is
     /// visible before the parent handler's `Finished` lands) and moved
     /// into the worker via this field. The hold's `Drop` impl fires
     /// `Release`, gated jointly with `in_flight` so the parent chain
     /// stays open until the worker exits. `Option` so callers without
-    /// an in-flight root (`MailId::NONE`) skip the hold cleanly — no
+    /// an in-flight root skip the hold cleanly — no
     /// chain to keep open.
     _hold: Option<SettlementHold>,
     _phantom: PhantomData<fn() -> A>,
@@ -83,41 +83,35 @@ impl<A> InheritCtx<A> {
     /// [`crate::actor::native::ctx::NativeCtx::spawn_inherit`].
     pub(crate) fn new(
         binding: Arc<NativeBinding>,
-        inherited_mail_id: MailId,
-        inherited_root: MailId,
+        inherited_mail_id: Option<MailId>,
+        inherited_root: Option<MailId>,
         hold: Option<SettlementHold>,
     ) -> Self {
         Self { binding, inherited_mail_id, inherited_root, _hold: hold, _phantom: PhantomData }
     }
 
     /// The in-flight `MailId` this ctx inherited from its spawning
-    /// handler. Outbound sends use this as `parent_mail`.
+    /// handler, `None` when it had none. Outbound sends use this as
+    /// `parent_mail`.
     #[must_use]
-    pub fn inherited_mail_id(&self) -> MailId {
+    pub fn inherited_mail_id(&self) -> Option<MailId> {
         self.inherited_mail_id
     }
 
     /// The chain root this ctx inherited from its spawning handler.
-    /// Outbound sends inherit this as their `root`.
+    /// Outbound sends inherit this as their `root`; `None` when the
+    /// spawning handler ran in no chain.
     #[must_use]
-    pub fn inherited_root(&self) -> MailId {
+    pub fn inherited_root(&self) -> Option<MailId> {
         self.inherited_root
     }
 
     fn outbound_parent(&self) -> Option<MailId> {
-        if self.inherited_mail_id == MailId::NONE {
-            None
-        } else {
-            Some(self.inherited_mail_id)
-        }
+        self.inherited_mail_id
     }
 
     fn outbound_root(&self) -> Option<MailId> {
-        if self.inherited_root == MailId::NONE {
-            None
-        } else {
-            Some(self.inherited_root)
-        }
+        self.inherited_root
     }
 }
 
@@ -283,8 +277,8 @@ impl<A: Addressable> MailSender for RootCtx<A> {
 #[allow(clippy::disallowed_methods)]
 pub(crate) fn spawn_inherit<A, F>(
     binding: Arc<NativeBinding>,
-    in_flight_mail_id: MailId,
-    in_flight_root: MailId,
+    in_flight_mail_id: Option<MailId>,
+    in_flight_root: Option<MailId>,
     f: F,
 ) -> JoinHandle<()>
 where
@@ -304,7 +298,7 @@ where
     // A ctx without an in-flight root has no chain to keep open, so the
     // acquire hands back no hold. Symmetric with the `outbound_root` /
     // `outbound_parent` `None` cases.
-    let hold = binding.mailer().acquire_settlement_hold(in_flight_root);
+    let hold = in_flight_root.map(|root| binding.mailer().acquire_settlement_hold(root));
     let aborter = binding.fatal_aborter();
     thread::Builder::new()
         .name(format!("aether-inherit-{}", A::NAMESPACE))
@@ -398,8 +392,8 @@ mod tests {
 
     #[derive(Clone, Debug)]
     struct CapturedDispatch {
-        mail_id: MailId,
-        root: MailId,
+        mail_id: Option<MailId>,
+        root: Option<MailId>,
         parent_mail: Option<MailId>,
         sender: aether_data::Source,
     }
@@ -467,7 +461,7 @@ mod tests {
         let inherited_root = MailId::new(MailboxId(0x4a13), 1);
         let inherited_mail = MailId::new(MailboxId(0x4a14), 2);
 
-        spawn_inherit::<StubActor, _>(Arc::clone(&binding), inherited_mail, inherited_root, |mut ctx| {
+        spawn_inherit::<StubActor, _>(Arc::clone(&binding), Some(inherited_mail), Some(inherited_root), |mut ctx| {
             <InheritCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(
                 &mut ctx,
                 &aether_kinds::Tick::default(),
@@ -503,8 +497,8 @@ mod tests {
 
         let join = spawn_inherit::<StubActor, _>(
             Arc::clone(&binding),
-            inherited_mail_id,
-            inherited_root,
+            Some(inherited_mail_id),
+            Some(inherited_root),
             move |mut inherit| {
                 <InheritCtx<StubActor> as MailSender>::send::<StubActor, _>(
                     &mut inherit,
@@ -517,7 +511,7 @@ mod tests {
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1, "exactly one mail dispatched");
         let dispatch = &captured[0];
-        assert_eq!(dispatch.root, inherited_root, "spawned-thread send inherits parent root");
+        assert_eq!(dispatch.root, Some(inherited_root), "spawned-thread send inherits parent root");
         assert_eq!(
             dispatch.parent_mail,
             Some(inherited_mail_id),
@@ -526,10 +520,11 @@ mod tests {
         // `mail_id.sender` is the producer (the actor's binding mailbox);
         // `mail_id.correlation_id` came from the binding's per-actor counter.
         assert_eq!(
-            dispatch.mail_id.sender, producer_mailbox,
+            dispatch.mail_id.map(|id| id.sender),
+            Some(producer_mailbox),
             "fresh mail_id carries the binding's actor mailbox as producer"
         );
-        assert!(dispatch.mail_id.correlation_id > 0, "fresh mail_id has a non-zero correlation");
+        assert!(dispatch.mail_id.is_some_and(|id| id.correlation_id > 0), "fresh mail_id has a non-zero correlation");
     }
 
     /// An explicit typed detached send from `InheritCtx` cuts the captured
@@ -543,12 +538,17 @@ mod tests {
         let inherited_root = MailId::new(MailboxId(0x1234), 7);
         let inherited_mail_id = MailId::new(MailboxId(0x5678), 13);
 
-        let join = spawn_inherit::<StubActor, _>(binding, inherited_mail_id, inherited_root, move |mut inherit| {
-            <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
-                &mut inherit,
-                &aether_kinds::Tick::default(),
-            );
-        });
+        let join = spawn_inherit::<StubActor, _>(
+            binding,
+            Some(inherited_mail_id),
+            Some(inherited_root),
+            move |mut inherit| {
+                <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
+                    &mut inherit,
+                    &aether_kinds::Tick::default(),
+                );
+            },
+        );
         join.join().expect("inherit worker thread joins");
 
         let typed = typed.lock().unwrap();
@@ -580,7 +580,8 @@ mod tests {
         assert_eq!(dispatch.parent_mail, None, "RootCtx send has no parent — chassis-root style");
         assert_eq!(dispatch.root, dispatch.mail_id, "RootCtx send is its own root");
         assert_eq!(
-            dispatch.mail_id.sender, producer_mailbox,
+            dispatch.mail_id.map(|id| id.sender),
+            Some(producer_mailbox),
             "fresh mail_id carries the binding's actor mailbox as producer"
         );
         let _ = dispatch.sender;
@@ -636,7 +637,7 @@ mod tests {
         }
         // Correlation ids are monotonic per actor — three sends, three
         // distinct values.
-        let mut ids: Vec<u64> = captured.iter().map(|d| d.mail_id.correlation_id).collect();
+        let mut ids: Vec<u64> = captured.iter().filter_map(|d| d.mail_id.map(|id| id.correlation_id)).collect();
         ids.sort_unstable();
         ids.dedup();
         assert_eq!(ids.len(), 3, "three distinct correlation ids");
@@ -661,12 +662,16 @@ mod tests {
 
         // Gate the worker so the hold stays open across the assertion.
         let (gate_tx, gate_rx) = channel::<()>();
-        let join =
-            spawn_inherit::<StubActor, _>(Arc::clone(&binding), inherited_mail_id, inherited_root, move |_inherit| {
+        let join = spawn_inherit::<StubActor, _>(
+            Arc::clone(&binding),
+            Some(inherited_mail_id),
+            Some(inherited_root),
+            move |_inherit| {
                 // Block until released — the SettlementHold (moved into
                 // this worker's InheritCtx) is held for the whole body.
                 let _ = gate_rx.recv();
-            });
+            },
+        );
 
         // The hold is acquired on the parent thread before the spawn, so
         // it is open now regardless of worker scheduling.
@@ -697,11 +702,12 @@ mod tests {
         let inherited_root = MailId::new(MailboxId(0x6431), 1);
         let inherited_mail_id = MailId::new(MailboxId(0x6431), 2);
 
-        let payload = spawn_inherit::<StubActor, _>(binding, inherited_mail_id, inherited_root, |_inherit| {
-            panic!("inherit probe 6431");
-        })
-        .join()
-        .expect_err("the worker panics");
+        let payload =
+            spawn_inherit::<StubActor, _>(binding, Some(inherited_mail_id), Some(inherited_root), |_inherit| {
+                panic!("inherit probe 6431");
+            })
+            .join()
+            .expect_err("the worker panics");
         let reason = payload_string(payload.as_ref());
 
         assert!(reason.contains("fatal abort"), "the aborter ran: {reason}");
@@ -733,21 +739,20 @@ mod tests {
         );
     }
 
-    /// `MailId::NONE` inherited root skips the hold — there's no chain to
-    /// keep open. Verify a `NONE`-rooted spawn creates no settlement cell.
+    /// An absent inherited root skips the hold — there's no chain to keep
+    /// open. Verify a rootless spawn creates no settlement cell.
     #[test]
-    fn spawn_inherit_with_none_root_skips_hold() {
+    fn spawn_inherit_without_root_skips_hold() {
         let (_registry, mailer) = fresh_substrate();
         let counter = Arc::clone(mailer.trace_handle().settlement_counter());
         let producer_mailbox = MailboxId(0xC0FE_DEAD_C0FE_DEAD);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
 
         let live_before = counter.live_roots();
-        let join = spawn_inherit::<StubActor, _>(Arc::clone(&binding), MailId::NONE, MailId::NONE, move |_inherit| {});
+        let join = spawn_inherit::<StubActor, _>(Arc::clone(&binding), None, None, move |_inherit| {});
         join.join().expect("inherit worker thread joins");
 
-        assert_eq!(counter.held_open(MailId::NONE), 0, "MailId::NONE root must not acquire a settlement hold");
-        assert_eq!(counter.live_roots(), live_before, "a NONE-root spawn must not create a settlement cell");
+        assert_eq!(counter.live_roots(), live_before, "a rootless spawn must not create a settlement cell");
     }
 
     /// Setup smoke: a `Mail` pushed bare via `Mailer` doesn't trigger
@@ -765,7 +770,7 @@ mod tests {
 
         let captured = captured.lock().unwrap();
         assert_eq!(captured.len(), 1);
-        // Bare push leaves mail_id at its default (NONE).
-        assert_eq!(captured[0].mail_id, MailId::NONE);
+        // Bare push stamps no mail id.
+        assert_eq!(captured[0].mail_id, None);
     }
 }

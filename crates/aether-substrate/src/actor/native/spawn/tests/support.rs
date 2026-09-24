@@ -183,7 +183,7 @@ pub(super) fn finalized_probe(
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent.self_mailbox(), correlation);
     let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
-        spawner.mailer().acquire_settlement_hold(causing_chain),
+        Some(spawner.mailer().acquire_settlement_hold(causing_chain)),
         Source::NONE,
         (),
     );

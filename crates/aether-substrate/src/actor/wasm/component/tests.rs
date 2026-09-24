@@ -46,7 +46,9 @@ fn lineage_capture_handler() -> (LineageCapture, Arc<dyn InboxHandler>) {
     let captured_for_handler = Arc::clone(&captured);
     let handler = Arc::new(move |dispatch: OwnedDispatch| {
         dispatch.discharge();
-        captured_for_handler.lock().unwrap().push((dispatch.mail_id, dispatch.root, dispatch.parent_mail));
+        let mail_id = dispatch.mail_id.expect("a component send stamps its mail id");
+        let root = dispatch.root.expect("a component send stamps its root");
+        captured_for_handler.lock().unwrap().push((mail_id, root, dispatch.parent_mail));
     });
     (captured, handler)
 }
@@ -1428,7 +1430,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
     // when the wasm guest's on_tick handler fires its outbound.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
-    ctx.set_in_flight(inbound_mail, inbound_root);
+    ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, sender);
 
@@ -1486,7 +1488,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
-    ctx.set_in_flight(inbound_mail, inbound_root);
+    ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
     ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, sender);
 

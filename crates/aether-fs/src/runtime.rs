@@ -299,7 +299,7 @@ mod tests {
     // taking `state: &mut FsCapabilityState`, called as
     // `FsCapability::on_x(&mut fix.state, &mut ctx, mail)`.
     fn make_ctx<A>(transport: &Arc<NativeBinding>, sender: Source) -> NativeCtx<'_, A> {
-        NativeCtx::new_for_actor(transport, sender, aether_data::MailId::NONE, aether_data::MailId::NONE)
+        NativeCtx::new_for_actor(transport, sender, None, None)
     }
 
     fn scratch_root(tag: &str) -> PathBuf {

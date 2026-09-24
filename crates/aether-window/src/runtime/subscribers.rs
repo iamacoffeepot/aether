@@ -186,7 +186,7 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::mail::{MailId, Source, SourceAddr};
+    use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::testing::{registered_ref, unrouted_binding};
 
     use super::*;
@@ -216,7 +216,7 @@ mod tests {
         let mut subscribers = WindowSubscribers::new();
         let transport = unrouted_binding(&Arc::new(Mailer::new(Arc::new(Registry::new()))));
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
-        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&transport, source, None, None);
 
         assert!(subscribers.subscribe_self(&mut ctx, WindowSelector::All, Key::ID).is_err());
         assert!(subscribers.unsubscribe_self(&ctx, WindowSelector::All, Key::ID).is_err());
@@ -227,7 +227,7 @@ mod tests {
     #[test]
     fn one_selector_routes_only_the_selected_window() {
         let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let subscriber = proven(&registry, "test.subscribers.one");
 
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(1)), Key::ID, subscriber);
@@ -239,7 +239,7 @@ mod tests {
     #[test]
     fn all_selector_is_prospective() {
         let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let subscriber = proven(&registry, "test.subscribers.all");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, MouseMove::ID, subscriber);
@@ -251,7 +251,7 @@ mod tests {
     #[test]
     fn all_and_one_union_deduplicates_the_same_mailbox() {
         let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let subscriber = proven(&registry, "test.subscribers.union");
         let other = proven(&registry, "test.subscribers.union.other");
 
@@ -265,7 +265,7 @@ mod tests {
     #[test]
     fn unsubscribe_and_bulk_cleanup_preserve_other_routes() {
         let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let subscriber = proven(&registry, "test.subscribers.cleanup");
         let other = proven(&registry, "test.subscribers.cleanup.other");
 
@@ -283,7 +283,7 @@ mod tests {
     #[test]
     fn monitor_cleanup_purges_only_the_departed_mailbox_from_every_route() {
         let (mut subscribers, binding, registry) = fixture();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let departed = proven(&registry, "test.subscribers.departed");
         let survivor = proven(&registry, "test.subscribers.survivor");
 

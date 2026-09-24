@@ -354,7 +354,7 @@ mod tests {
 
     fn session_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
         let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new_for_actor(transport, sender, aether_data::MailId::NONE, aether_data::MailId::NONE)
+        NativeCtx::new_for_actor(transport, sender, None, None)
     }
 
     /// The served manifest carries a known chassis mailbox name

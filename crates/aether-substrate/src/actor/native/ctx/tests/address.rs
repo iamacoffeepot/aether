@@ -5,7 +5,7 @@
 use std::sync::Arc;
 
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::{Kind, MailId, MailboxId, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use crate::actor::native::NativeCtx;
 use crate::actor::native::binding::NativeBinding;
@@ -45,7 +45,7 @@ fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
     assert_eq!(binding.parent_mailbox(), Some(parent));
 
     {
-        let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+        let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
         let peer = ctx.actor::<EmbeddedPeer>();
         assert_eq!(peer.mailbox_id(), recipient);
         peer.send(&CastOnly { code: 17 });
@@ -87,7 +87,7 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
     let current = MailboxId(0xC010);
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
     let ctx: NativeCtx<'_, Dependent, Single> =
-        NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+        NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
 
     assert_eq!(ctx.actor_ref::<OneDep>().id(), ctx.actor::<OneDep>().mailbox_id());
     assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), ctx.actor::<EmbeddedPeer>().mailbox_id());
@@ -106,19 +106,14 @@ fn sender_mints_the_component_source_and_none_without_one() {
     let current = MailboxId(0xC010);
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
 
-    let component = NativeCtx::new(
-        &binding,
-        Source::with_correlation(SourceAddr::Component(MailboxId(0xC030)), 0),
-        MailId::NONE,
-        MailId::NONE,
-    );
+    let component =
+        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(MailboxId(0xC030)), 0), None, None);
     assert_eq!(
         component.sender().map(ErasedActorRef::id),
         Some(MailboxId(0xC030)),
         "a component source mints a sender reference to its id"
     );
 
-    let sourceless =
-        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), MailId::NONE, MailId::NONE);
+    let sourceless = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
     assert!(sourceless.sender().is_none(), "a sourceless dispatch has no sender reference");
 }

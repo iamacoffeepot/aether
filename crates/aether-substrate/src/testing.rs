@@ -247,7 +247,7 @@ where
     // ADR-0112: route through the macro dispatch seam, which carries the
     // `Manual` ctx. Issue 4158: that seam is also typed by the actor, so build
     // it via `new_for_actor` — `new_dispatching` names none.
-    let mut ctx = NativeCtx::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new_for_actor(binding, Source::NONE, None, None);
     A::dispatch(state, &mut ctx, TaskCompletionWake::ID, &payload)
         .expect("test: task completion routes to a #[handler(task)] arm");
 }
@@ -319,6 +319,14 @@ pub fn session_sender_with(id: u128) -> Source {
     Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(id))))
 }
 
+/// A chassis-rooted chain token for a test that needs a root and no chain
+/// behind it: `correlation` under the chassis sender, the shape every real
+/// chassis root has. A test outside the substrate reaches for this rather
+/// than naming a mailbox to build one.
+pub fn token_root(correlation: u64) -> MailId {
+    MailId::new(MailboxId::CHASSIS_MAILBOX_ID, correlation)
+}
+
 /// `Source` for a correlated no-address reply — the shape a task result
 /// (e.g. an `aether.fs` read) carries back into a cap's result handler.
 pub fn fs_reply_source(correlation_id: u64) -> Source {
@@ -339,16 +347,16 @@ pub fn manual_dispatch_ctx<A>(binding: &Arc<NativeBinding>, sender: Source) -> N
     NativeCtx::with_inbound(
         binding,
         sender,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         OwnedDispatch::disarmed_at(
             KindId(0),
             None,
             sender,
             MailRef::from(Vec::new()),
             1,
-            MailId::NONE,
-            MailId::NONE,
+            None,
+            None,
             None,
             Nanos(0),
             0,

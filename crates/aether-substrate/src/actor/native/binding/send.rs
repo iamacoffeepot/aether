@@ -103,8 +103,8 @@ impl NativeBinding {
         // calls are unconditional; the drainer is the optional piece.
         self.mailer.record_sent(mail_id, root, parent_mail, self.self_mailbox(), recipient_id, KindId(kind));
         let mail = Mail::new(recipient_id, KindId(kind), bytes.to_vec(), count).with_reply_to(reply_to).with_lineage(
-            mail_id,
-            root,
+            Some(mail_id),
+            Some(root),
             parent_mail,
         );
         self.mailer.push(mail);
@@ -267,7 +267,7 @@ mod tests {
 
         let transport = Arc::new(NativeBinding::new_for_test(mailer, MailboxId(parent_carry)));
         {
-            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&transport, Source::NONE, None, None);
             <NativeCtx as MailSender>::send::<Child, Tick>(&mut ctx, &Tick::default());
             // ctx drops here → `flush_outbound` routes the buffered send.
         }

@@ -176,7 +176,7 @@ pub(super) fn activation_barrier(id: MailboxId, token: ActivationToken, sequence
     let mail_id = MailId::new(id, sequence);
     Mail::new(id, ACTIVATION_BARRIER_KIND, token.value().to_le_bytes().to_vec(), 1)
         .with_reply_to(Source::with_correlation(SourceAddr::Component(id), sequence))
-        .with_lineage(mail_id, mail_id, None)
+        .with_lineage(Some(mail_id), Some(mail_id), None)
 }
 
 pub(super) fn traced_unknown_mail(
@@ -189,5 +189,5 @@ pub(super) fn traced_unknown_mail(
     let root = MailId::new(MailboxId(0x4111), sequence);
     let settled = settlement.subscribe_settlement(root);
     mailer.record_sent(root, root, None, root.sender, recipient, KindId(0x4111));
-    (Mail::new(recipient, KindId(0x4111), payload, 1).with_lineage(root, root, None), settled)
+    (Mail::new(recipient, KindId(0x4111), payload, 1).with_lineage(Some(root), Some(root), None), settled)
 }

@@ -76,20 +76,20 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// ADR-0080 §5: identity of the mail this handler is dispatching.
     /// Outbound `send` paths read this to stamp `parent_mail` on
     /// child mail (so the receiver inherits the right parent in the
-    /// causal graph). `MailId::NONE` for ctxs without an inbound
+    /// causal graph). `None` for ctxs without an inbound
     /// (chassis-root sends, `unwire`, init).
-    in_flight_mail_id: MailId,
+    in_flight_mail_id: Option<MailId>,
     /// ADR-0080 §5: root of the causal chain this handler runs in.
     /// Outbound `send` paths read this to stamp `root` on child mail
-    /// so descendants share the chain. `MailId::NONE` for ctxs without
+    /// so descendants share the chain. `None` for ctxs without
     /// an inbound — those sends mint a fresh root from their own
     /// `mail_id` in `NativeBinding::send_mail_with_lineage`.
-    in_flight_root: MailId,
+    in_flight_root: Option<MailId>,
     /// ADR-0168 §1: the chain of the work that *caused* this context to
     /// exist, for a context that dispatches no inbound of its own. A
     /// handler-staged birth threads the staging chain here so the newborn's
     /// `wire` hook can attach a birth-completing effect to it; every other
-    /// ctx carries [`MailId::NONE`].
+    /// ctx carries `None`.
     ///
     /// Only [`Self::acquire_settlement_hold`] reads it. The outbound send
     /// lineage ([`Self::outbound_lineage`]) deliberately does not, which is
@@ -98,7 +98,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// startup sends (which it must not), and one *root* cannot tell those
     /// apart. Attaching the causing chain to the effect rather than to the
     /// context is what keeps the two separable.
-    causing_chain: MailId,
+    causing_chain: Option<MailId>,
     /// #1757 / ADR-0094: the single dispatched [`Envelope`], owned here
     /// for the duration of the handler. The dispatcher moves it in at
     /// construction ([`Self::with_inbound`]) and takes it back at its
@@ -158,15 +158,15 @@ impl<'a> NativeCtx<'a, Erased, Single> {
     pub fn new(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
-        in_flight_mail_id: MailId,
-        in_flight_root: MailId,
+        in_flight_mail_id: Option<MailId>,
+        in_flight_root: Option<MailId>,
     ) -> Self {
         Self {
             binding,
             source: sender,
             in_flight_mail_id,
             in_flight_root,
-            causing_chain: MailId::NONE,
+            causing_chain: None,
             inbound: None,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -192,15 +192,15 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
     pub fn new_for_actor(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
-        in_flight_mail_id: MailId,
-        in_flight_root: MailId,
+        in_flight_mail_id: Option<MailId>,
+        in_flight_root: Option<MailId>,
     ) -> Self {
         Self {
             binding,
             source: sender,
             in_flight_mail_id,
             in_flight_root,
-            causing_chain: MailId::NONE,
+            causing_chain: None,
             inbound: None,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -227,8 +227,8 @@ impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
         Self {
             binding,
             source: Source::NONE,
-            in_flight_mail_id: MailId::NONE,
-            in_flight_root: MailId::NONE,
+            in_flight_mail_id: None,
+            in_flight_root: None,
             causing_chain: chain.held_root(),
             inbound: None,
             _mode: PhantomData,
@@ -264,15 +264,15 @@ impl<'a> NativeCtx<'a, Erased, Manual> {
     pub fn new_dispatching(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
-        in_flight_mail_id: MailId,
-        in_flight_root: MailId,
+        in_flight_mail_id: Option<MailId>,
+        in_flight_root: Option<MailId>,
     ) -> Self {
         Self {
             binding,
             source: sender,
             in_flight_mail_id,
             in_flight_root,
-            causing_chain: MailId::NONE,
+            causing_chain: None,
             inbound: None,
             _mode: PhantomData,
             _actor: PhantomData,
@@ -308,8 +308,8 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
     pub(crate) fn with_inbound(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
-        in_flight_mail_id: MailId,
-        in_flight_root: MailId,
+        in_flight_mail_id: Option<MailId>,
+        in_flight_root: Option<MailId>,
         inbound: Envelope,
     ) -> Self {
         Self {
@@ -317,7 +317,7 @@ impl<'a, A> NativeCtx<'a, A, Manual> {
             source: sender,
             in_flight_mail_id,
             in_flight_root,
-            causing_chain: MailId::NONE,
+            causing_chain: None,
             inbound: Some(inbound),
             _mode: PhantomData,
             _actor: PhantomData,

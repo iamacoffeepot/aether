@@ -25,8 +25,8 @@ fn armed_dispatch_panics_if_dropped_without_discharge() {
         Source::NONE,
         MailRef::from(vec![1u8, 2, 3]),
         1,
-        MailId::new(MailboxId(42), 9),
-        MailId::new(MailboxId(42), 9),
+        Some(MailId::new(MailboxId(42), 9)),
+        Some(MailId::new(MailboxId(42), 9)),
         None,
         Nanos(0),
         0,
@@ -56,8 +56,8 @@ fn armed_dispatch_panic_names_the_kind() {
             Source::NONE,
             MailRef::from(Vec::new()),
             1,
-            MailId::new(MailboxId(1), 1),
-            MailId::new(MailboxId(1), 1),
+            Some(MailId::new(MailboxId(1), 1)),
+            Some(MailId::new(MailboxId(1), 1)),
             None,
             Nanos(0),
             0,
@@ -85,8 +85,8 @@ fn discharged_dispatch_does_not_panic() {
         Source::NONE,
         MailRef::from(Vec::new()),
         1,
-        MailId::new(MailboxId(2), 2),
-        MailId::new(MailboxId(2), 2),
+        Some(MailId::new(MailboxId(2), 2)),
+        Some(MailId::new(MailboxId(2), 2)),
         None,
         Nanos(0),
         0,
@@ -110,8 +110,8 @@ fn dispatch_carries_routed_recipient() {
         Source::NONE,
         MailRef::from(Vec::new()),
         1,
-        MailId::new(MailboxId(3), 3),
-        MailId::new(MailboxId(3), 3),
+        Some(MailId::new(MailboxId(3), 3)),
+        Some(MailId::new(MailboxId(3), 3)),
         None,
         Nanos(0),
         0,
@@ -135,8 +135,8 @@ fn transferred_dispatch_does_not_panic() {
         Source::NONE,
         MailRef::from(Vec::new()),
         1,
-        MailId::new(MailboxId(3), 3),
-        MailId::new(MailboxId(3), 3),
+        Some(MailId::new(MailboxId(3), 3)),
+        Some(MailId::new(MailboxId(3), 3)),
         None,
         Nanos(0),
         0,
@@ -156,8 +156,8 @@ fn disarmed_dispatch_does_not_panic() {
         Source::NONE,
         MailRef::from(Vec::new()),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -179,8 +179,8 @@ fn clone_of_armed_dispatch_is_disarmed() {
         Source::NONE,
         MailRef::from(vec![9u8]),
         1,
-        MailId::new(MailboxId(4), 4),
-        MailId::new(MailboxId(4), 4),
+        Some(MailId::new(MailboxId(4), 4)),
+        Some(MailId::new(MailboxId(4), 4)),
         None,
         Nanos(0),
         0,
@@ -193,12 +193,12 @@ fn clone_of_armed_dispatch_is_disarmed() {
     env.discharge();
 }
 
-/// ADR-0094 issue 1326: arming a `MailId::NONE` dispatch mints **no**
-/// obligation — `record_finished` no-ops on `MailId::NONE`, so the
-/// chassis-internal fire-and-forget pushes that stamp it (RPC
+/// ADR-0094 issue 1326: arming a dispatch with no mail id mints **no**
+/// obligation — `record_finished` no-ops on an absent mail id, so the
+/// chassis-internal fire-and-forget pushes that stamp none (RPC
 /// self-pokes like `aether.rpc.inbound_ready`, window pushes) route
 /// through the armed `Inbox` arm but never discharge. The arm site is
-/// unconditional; `ObligationGuard::armed` disarms on NONE so the
+/// unconditional; `ObligationGuard::armed` disarms on an absent id so the
 /// guard's arm condition matches `record_finished` exactly. Dropping
 /// such a dispatch without discharge must NOT panic.
 #[cfg(debug_assertions)]
@@ -210,14 +210,14 @@ fn armed_none_mail_id_dispatch_does_not_panic() {
         Source::NONE,
         MailRef::from(Vec::new()),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
         MailboxId(63),
     );
-    // No discharge / transfer — a NONE dispatch carries no obligation,
+    // No discharge / transfer — a dispatch with no id carries no obligation,
     // so the guard must be disarmed and the drop must be silent.
     drop(env);
 }
@@ -247,8 +247,8 @@ fn standard_inbox_handler_relay_does_not_panic() {
         Source::NONE,
         MailRef::from(vec![0u8]),
         1,
-        MailId::new(MailboxId(5), 5),
-        MailId::new(MailboxId(5), 5),
+        Some(MailId::new(MailboxId(5), 5)),
+        Some(MailId::new(MailboxId(5), 5)),
         None,
         Nanos(0),
         0,
@@ -278,12 +278,12 @@ fn repeated_routed_inbox_mail_preserves_per_mail_metadata() {
     mailer.push(
         Mail::new(recipient, kind, vec![1, 2], 1)
             .with_reply_to(Source::with_correlation(SourceAddr::Component(MailboxId(11)), 41))
-            .with_lineage(first_id, first_id, None),
+            .with_lineage(Some(first_id), Some(first_id), None),
     );
     mailer.push(
         Mail::new(recipient, kind, vec![3, 4], 2)
             .with_reply_to(Source::with_correlation(SourceAddr::Component(MailboxId(11)), 42))
-            .with_lineage(second_id, first_id, Some(first_id)),
+            .with_lineage(Some(second_id), Some(first_id), Some(first_id)),
     );
 
     let first = rx.recv().expect("first routed dispatch");
@@ -295,8 +295,8 @@ fn repeated_routed_inbox_mail_preserves_per_mail_metadata() {
     assert_eq!(first.payload.bytes(), [1, 2]);
     assert_eq!(second.payload.bytes(), [3, 4]);
     assert_eq!(second.count, 2);
-    assert_eq!(second.mail_id, second_id);
-    assert_eq!(second.root, first_id);
+    assert_eq!(second.mail_id, Some(second_id));
+    assert_eq!(second.root, Some(first_id));
     assert_eq!(second.parent_mail, Some(first_id));
     first.discharge();
     second.discharge();

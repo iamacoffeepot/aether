@@ -7,7 +7,7 @@ struct SettlementFixture {
     mailer: Arc<Mailer>,
     egress: mpsc::Receiver<EgressEvent>,
     caller: Source,
-    root: MailId,
+    root: Option<MailId>,
     replies: mpsc::Receiver<OwnedDispatch>,
 }
 
@@ -33,7 +33,7 @@ fn settlement_substrate() -> SettlementFixture {
     }) as Arc<dyn InboxHandler>;
     let (caller, caller_ref) = registered_binding(&reg, &mailer, "test.audio.settlement.caller", handler);
 
-    NativeCtx::new(&caller, Source::NONE, MailId::NONE, MailId::NONE).send_to(caller_ref, &SetMasterGain { gain: 1.0 });
+    NativeCtx::new(&caller, Source::NONE, None, None).send_to(caller_ref, &SetMasterGain { gain: 1.0 });
 
     let request = replies.recv_timeout(Duration::from_secs(2)).expect("the caller's own mail reached its inbox");
     mailer.record_finished(request.mail_id, request.root);
@@ -45,7 +45,7 @@ fn settlement_substrate() -> SettlementFixture {
 /// root and keep the chain UNSETTLED (`live_roots == 1`) until
 /// the reply's `Finished` fires; `live_roots == 0` after.
 ///
-/// Before the fix the reply carried `MailId::NONE` as root, so
+/// Before the fix the reply carried no root, so
 /// `record_sent_inflight` was a no-op and the chain settled
 /// prematurely (caller's settlement window closed too early).
 #[test]
@@ -85,7 +85,7 @@ fn play_track_deferred_reply_settles_caller_chain() {
 
     // The settlement hold was released inside resolve_with, but the
     // reply is now in-flight on the caller root — live_roots must
-    // stay at 1. Pre-fix: root was MailId::NONE so record_sent_inflight
+    // stay at 1. Pre-fix: the reply carried no root, so record_sent_inflight
     // was a no-op and live_roots dropped to 0 here (premature settle).
     assert_eq!(counter.live_roots(), 1, "deferred reply holds the caller chain open after hold releases");
 

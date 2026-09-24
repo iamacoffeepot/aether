@@ -18,7 +18,9 @@ impl NativeBinding {
     /// Settlement is bumped only when the hold accepts the mail. A rejected
     /// mail remains wholly owned by the caller, which performs the ordinary
     /// eager `record_sent` + dispatch path. `None` means accepted; `Some(mail)`
-    /// returns a rejected offer unchanged.
+    /// returns a rejected offer unchanged. A component send always stamps its
+    /// mail id and root, so a mail missing either is not a component send and
+    /// is refused the same way.
     #[cfg(feature = "wasm")]
     pub(crate) fn try_hold_component_mail(&self, mail: Mail, sender: MailboxId) -> Option<Mail> {
         if !self.activation_held.load(Ordering::Acquire) {
@@ -29,11 +31,15 @@ impl NativeBinding {
             return Some(mail);
         }
 
-        self.mailer.record_sent_inflight(mail.root);
+        let (Some(mail_id), Some(root)) = (mail.mail_id, mail.root) else {
+            return Some(mail);
+        };
+
+        self.mailer.record_sent_inflight(root);
         if buffer.construct_start.is_none() {
             buffer.construct_start = Some(self.mailer.now_nanos());
         }
-        let Mail { recipient, kind, payload, count, reply_to, mail_id, root, parent_mail } = mail;
+        let Mail { recipient, kind, payload, count, reply_to, parent_mail, .. } = mail;
         buffer.component_origins.push(ComponentOrigin { mail_id, sender });
         buffer.mails.push(PendingMail {
             recipient: recipient.0,
@@ -111,7 +117,7 @@ impl NativeBinding {
                     location,
                 ));
             }
-            self.mailer.record_finished(mail_id, root);
+            self.mailer.record_finished(Some(mail_id), Some(root));
         }
         drop(births);
         drop(owner_batches);
@@ -157,7 +163,7 @@ mod tests {
         let kind = KindId(0x0041_4504);
 
         binding.hold_outbound_for_activation();
-        ctx.set_in_flight(parent, root);
+        ctx.set_in_flight(Some(parent), Some(root));
         ctx.send(recipient, kind, vec![1, 2, 3], 2, sender);
 
         assert!(recipient_rx.try_recv().is_err(), "wire mail must remain quarantined before activation");
@@ -170,8 +176,8 @@ mod tests {
         assert_eq!(envelope.count, 2);
         assert_eq!(envelope.sender.addr, SourceAddr::Component(sender));
         assert_eq!(envelope.sender.correlation_id, 1);
-        assert_eq!(envelope.mail_id, MailId::new(sender, 1));
-        assert_eq!(envelope.root, root);
+        assert_eq!(envelope.mail_id, Some(MailId::new(sender, 1)));
+        assert_eq!(envelope.root, Some(root));
         assert_eq!(envelope.parent_mail, Some(parent));
         assert_eq!(envelope.recipient, recipient);
         assert_eq!(envelope.origin.as_deref(), Some("test.activation.sender"));

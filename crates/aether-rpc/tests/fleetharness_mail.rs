@@ -14,7 +14,7 @@
 //! comes back as `RpcError::NotPresent` rather than a flattened `Other`.
 
 mod tests {
-    use aether_data::{Kind, MailId};
+    use aether_data::Kind;
     use aether_fs::{List, ListResult, NamespaceAddr};
     use aether_kinds::trace::DispatchTraced;
     use aether_kinds::{Advance, AdvanceResult};
@@ -136,7 +136,7 @@ mod tests {
 
         let (root, replies) =
             harness.send_traced(engine, "aether.fs", &List { addr: NamespaceAddr::new("save", String::new()) });
-        assert_ne!(root, MailId::NONE, "the traced batch ack carries a non-sentinel chassis root");
+        assert_ne!(root.correlation_id, 0, "the traced batch ack carries a minted root");
 
         let echoed = replies
             .iter()

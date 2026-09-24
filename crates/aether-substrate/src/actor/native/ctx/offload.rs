@@ -100,7 +100,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// construction), then parked in the per-actor in-flight ledger
     /// alongside the originating [`Source`] — it outlives the worker
     /// (which holds nothing) and releases only when the completion is
-    /// resolved. `MailId::NONE` for [`Self::in_flight_root`] skips the
+    /// resolved. An absent [`Self::in_flight_root`] skips the
     /// hold cleanly (no chain to hold), matching `spawn_inherit`.
     ///
     /// When `f` returns, the worker stores the output in the ledger's

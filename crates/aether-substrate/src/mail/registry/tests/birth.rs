@@ -154,7 +154,14 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
     owner.run_once();
     let counter = mailer.trace_handle().settlement_counter();
     let forged = activation_barrier(id, token, 2);
-    mailer.record_sent(forged.mail_id, forged.root, None, id, id, forged.kind);
+    mailer.record_sent(
+        forged.mail_id.expect("a barrier is stamped"),
+        forged.root.expect("a barrier is stamped"),
+        None,
+        id,
+        id,
+        forged.kind,
+    );
     mailer.push(forged);
     owner.run_once();
     assert!(registry.entry_at(id).is_none(), "forged same-token barrier cannot promote");
@@ -168,7 +175,14 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
     assert_eq!(*deliveries.lock().unwrap(), [1, 2, 4, 3]);
 
     let forged = activation_barrier(id, token, 5);
-    mailer.record_sent(forged.mail_id, forged.root, None, id, id, forged.kind);
+    mailer.record_sent(
+        forged.mail_id.expect("a barrier is stamped"),
+        forged.root.expect("a barrier is stamped"),
+        None,
+        id,
+        id,
+        forged.kind,
+    );
     assert_eq!(counter.live_roots(), 1, "synthetic control obligation is live before owner consumption");
     mailer.push(forged);
     owner.run_once();
@@ -177,7 +191,14 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
 
     let mut malformed = activation_barrier(id, token, 3);
     malformed.payload = MailRef::from(vec![0xFF]);
-    mailer.record_sent(malformed.mail_id, malformed.root, None, id, id, malformed.kind);
+    mailer.record_sent(
+        malformed.mail_id.expect("a barrier is stamped"),
+        malformed.root.expect("a barrier is stamped"),
+        None,
+        id,
+        id,
+        malformed.kind,
+    );
     mailer.push(malformed);
     owner.run_once();
     assert_eq!(counter.live_roots(), 0, "malformed private control mail is consumed and balanced");
@@ -185,7 +206,14 @@ fn bootstrap_then_parked_then_live_mail_is_deterministic_and_stale_barrier_is_co
 
     let unknown_id = canonical_mailbox_id("unknown-activation-control");
     let unknown = activation_barrier(unknown_id, token, 1);
-    mailer.record_sent(unknown.mail_id, unknown.root, None, unknown_id, unknown_id, unknown.kind);
+    mailer.record_sent(
+        unknown.mail_id.expect("a barrier is stamped"),
+        unknown.root.expect("a barrier is stamped"),
+        None,
+        unknown_id,
+        unknown_id,
+        unknown.kind,
+    );
     mailer.push(unknown);
     owner.run_once();
     assert_eq!(counter.live_roots(), 0, "unknown private control mail is consumed and balanced");

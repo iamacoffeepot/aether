@@ -668,7 +668,11 @@ impl ComponentHostCapabilityState {
         }
         let boot_operation = self.next_boot_operation(actor);
         let bytes = payload.encode_into_bytes();
-        let mail_id = ctx.send_envelope_tracked_to(actor, ReplaceComponent::ID, &bytes);
+        let Some(mail_id) = ctx.send_envelope_tracked_to(actor, ReplaceComponent::ID, &bytes) else {
+            let error = "the replace request was refused as engine-only mail".to_owned();
+            ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
+            return;
+        };
         self.pending_replace.insert(
             mail_id.correlation_id,
             PendingReplace { source, actor, new_wasm: Arc::from(payload.wasm), boot_operation },
@@ -783,7 +787,6 @@ mod tests {
 
     use aether_data::Source;
     use aether_substrate::actor::native::NativeBinding;
-    use aether_substrate::mail::MailId;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::{Registry, noop_handler};
@@ -840,7 +843,7 @@ mod tests {
         let mut state = state();
         let binding = binding(&state);
         let hash = "boot-with-one-pending-request".to_owned();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let live_actor = proven_actor(&state, "test.component.live-actor");
         let boot = boot_entry(&state, "test.component.boot-pending", 1, 1);
         state.register_boot(hash.clone(), boot);
@@ -860,7 +863,7 @@ mod tests {
     fn manual_interleaving_reverse_replacement_boot_completion_keeps_newest_epoch() {
         let mut state = state();
         let binding = binding(&state);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&state, "test.component.reverse-replacement");
         let old_hash = "replacement-n1".to_owned();
         let new_hash = "replacement-n2".to_owned();
@@ -905,7 +908,7 @@ mod tests {
     fn manual_interleaving_drop_before_replacement_boot_completion_cannot_resurrect_ref() {
         let mut state = state();
         let binding = binding(&state);
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
         let actor = proven_actor(&state, "test.component.drop-before-completion");
         let hash = "replacement-completes-after-drop".to_owned();
         let replacement_operation = state.next_boot_operation(actor);

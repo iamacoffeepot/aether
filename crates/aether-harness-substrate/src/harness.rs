@@ -1804,7 +1804,7 @@ mod tests {
         use aether_substrate::testing::boot_authority;
         use std::sync::Mutex;
 
-        type CapturedRow = (MailId, MailId, Option<MailId>);
+        type CapturedRow = (Option<MailId>, Option<MailId>, Option<MailId>);
 
         let mut tb = match SubstrateHarness::start_with_size(64, 48) {
             Ok(tb) => tb,
@@ -1867,18 +1867,15 @@ mod tests {
         let (mail_id, root, parent) = captured[0];
         // Issue 723 fix: each fanned-out copy gets its own MailId, but
         // the root is inherited from the chassis-root tick and the
-        // parent_mail points at it. Pre-fix both would be MailId::NONE
-        // (orphaned: ctx.in_flight was NONE because the tick used
+        // parent_mail points at it. Pre-fix both would be absent
+        // (orphaned: ctx had no in-flight lineage because the tick used
         // bare push, AND the fanout used bare push too).
-        assert_ne!(root, MailId::NONE, "fanned-out copy should inherit a non-default root");
-        assert!(
-            parent.is_some_and(|p| p != MailId::NONE),
-            "fanned-out copy should carry a non-default parent_mail (got {parent:?})",
-        );
+        assert!(root.is_some(), "fanned-out copy should inherit a root");
+        assert!(parent.is_some(), "fanned-out copy should carry a parent_mail (got {parent:?})");
         // The fanned-out copy's own mail_id must be distinct from its
         // parent — it's a child node in the trace tree.
         assert_ne!(
-            mail_id,
+            mail_id.expect("a fanned-out copy carries its own mail id"),
             parent.expect("test setup: parent was asserted non-None above"),
             "fanned-out mail_id should differ from parent (each fanout copy gets a fresh id)"
         );

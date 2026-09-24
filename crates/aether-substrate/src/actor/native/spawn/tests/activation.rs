@@ -81,7 +81,7 @@ fn owner_close_before_apply_rejects_native_finalizer_at_home_and_releases_parent
     let staged = spawner.build::<ActivationProbe>(identity, ActivationConfig::new(events_tx), (), Vec::new()).unwrap();
     let causing_chain = MailId::new(parent_id, 1);
     let deferred = parent.dispatch_arm::<SpawnOutcome<ActivationProbe>, _>(
-        mailer.acquire_settlement_hold(causing_chain),
+        Some(mailer.acquire_settlement_hold(causing_chain)),
         Source::NONE,
         (),
     );

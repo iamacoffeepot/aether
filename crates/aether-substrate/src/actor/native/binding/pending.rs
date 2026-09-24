@@ -57,7 +57,8 @@ pub(super) struct ComponentOrigin {
 /// ordinary native mail. `origins` is empty on every steady-state flush, so
 /// the lookup is a length check there and only ever walks the handful of sends
 /// one guest `wire` produced.
-pub(super) fn component_origin(origins: &[ComponentOrigin], mail_id: MailId) -> Option<MailboxId> {
+pub(super) fn component_origin(origins: &[ComponentOrigin], mail_id: Option<MailId>) -> Option<MailboxId> {
+    let mail_id = mail_id?;
     origins.iter().find(|origin| origin.mail_id == mail_id).map(|origin| origin.sender)
 }
 
