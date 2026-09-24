@@ -140,7 +140,10 @@ aether_actor::export!(
     EditorShell,
     EditorRegion,
     WidgetPanel,
-    aether_behavior::BehaviorHost
+    // ADR-0137: the behavior host is re-exported from `aether-behavior`, so it
+    // is exported without the `Rebuildable` marker the orphan rule forbids
+    // this crate to implement; the panel spawns it by tag, not typed.
+    foreign = [aether_behavior::BehaviorHost],
 );
 
 use aether_actor::{ActorInitError, Addressable, DependsOn, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
