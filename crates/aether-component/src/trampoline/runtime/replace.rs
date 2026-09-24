@@ -82,11 +82,11 @@ impl WasmTrampolineState {
             .actor_caps
             .iter()
             .find(|actor| {
-                // Runtime-name match: hash each loaded actor's declared
-                // namespace (from module metadata) to find the one whose
-                // tag the spawn requested — not a hardcoded sibling.
-                #[allow(clippy::disallowed_methods)]
-                actor.namespace.as_deref().is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == pending.tag)
+                // Runtime-name match: compute each loaded actor's declared
+                // namespace's (from module metadata) actor-type identity to
+                // find the one whose tag the spawn requested — not a
+                // hardcoded sibling.
+                actor.namespace.as_deref().is_some_and(|ns| aether_data::ActorId::singleton(ns).0 == pending.tag)
             })
             .map(|actor| actor.capabilities.clone())
             .unwrap_or_default();
@@ -174,8 +174,7 @@ impl WasmTrampolineState {
                 // Runtime-name routing: `requested` is the export
                 // namespace from the wire replace request, resolved to
                 // its actor-type tag exactly as the load path does.
-                #[allow(clippy::disallowed_methods)]
-                Some(aether_data::mailbox_id_from_name(requested).0),
+                Some(aether_data::ActorId::singleton(requested).0),
             ));
         }
         // Bare replace (`export: None`): reuse the type this trampoline
@@ -189,11 +188,10 @@ impl WasmTrampolineState {
         actors
             .iter()
             .find(|a| {
-                // Runtime-name match: hash each replacement actor's
-                // declared namespace to find the one whose tag was
-                // loaded — not a hardcoded sibling.
-                #[allow(clippy::disallowed_methods)]
-                a.namespace.as_deref().is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
+                // Runtime-name match: compute each replacement actor's
+                // declared namespace's actor-type identity to find the one
+                // whose tag was loaded — not a hardcoded sibling.
+                a.namespace.as_deref().is_some_and(|ns| aether_data::ActorId::singleton(ns).0 == tag)
             })
             .map(|group| (Some(group), Some(tag)))
             .ok_or_else(|| {
