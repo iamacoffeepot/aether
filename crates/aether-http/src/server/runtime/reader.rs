@@ -270,7 +270,6 @@ enum ReaderResolution {
 }
 
 fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, method: HttpMethod) -> ReaderResolution {
-    let registry = &shared.registry;
     let picked = {
         let routes = shared.routes.read().expect("route table lock poisoned");
         match best_route(&routes, path, method) {
@@ -281,7 +280,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
                 let mut live = None;
                 for offset in 0..len {
                     let member = route.members[(start + offset) % len];
-                    if registry.is_live(member) {
+                    if shared.probe.is_live(member) {
                         live = Some((member, route.kind));
                         break;
                     }
@@ -298,7 +297,7 @@ fn resolve_at_reader(shared: &ReaderShared, cursor: &mut usize, path: &str, meth
         Some((handler, kind)) => ReaderResolution::Live {
             handler,
             kind,
-            streaming: shared.capabilities.accepts_actor(handler, <HttpRequestStreamOpen as Kind>::ID),
+            streaming: shared.probe.accepts(handler, <HttpRequestStreamOpen as Kind>::ID),
         },
         None => ReaderResolution::NoHandler,
     }

@@ -111,9 +111,10 @@ impl Registry {
     /// (ADR-0230), which stays true after it departs; this answers the other
     /// question, "is it `Live` now".
     ///
-    /// The http server's request reader is the consumer: it holds route
-    /// members as references and skips one whose actor has departed but
-    /// whose `MonitorNotice` has not yet purged it.
+    /// [`ActorProbe`](crate::actor::native::ActorProbe) is the consumer, on
+    /// behalf of the http server's request reader: it holds route members as
+    /// references and skips one whose actor has departed but whose
+    /// `MonitorNotice` has not yet purged it.
     pub fn is_live(&self, target: ErasedActorRef) -> bool {
         self.is_live_at(target.id())
     }
