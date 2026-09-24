@@ -106,9 +106,12 @@ worth knowing beyond "it's a type tree":
 - **Two wire shapes, and what picks them.** A struct encodes as a raw
   `#[repr(C)]` byte cast (`repr_c = true`) *only if* it is `#[repr(C)]` **and**
   every field is cast-eligible, recursively; otherwise it encodes as structured.
-  Cast-eligible means a scalar primitive, a typed-id newtype (`MailboxId` and
-  friends are `#[repr(transparent)]` over `u64`), a fixed `[T; N]` array of
-  cast-eligible elements, or a nested all-cast-eligible `#[repr(C)]` struct. A
+  Cast-eligible means a scalar primitive, a typed-id newtype other than
+  `MailboxId` (`KindId` and friends are `#[repr(transparent)]` over `u64`), a
+  fixed `[T; N]` array of cast-eligible elements, or a nested
+  all-cast-eligible `#[repr(C)]` struct. A `MailboxId` field makes a struct
+  structured, because a kind that names an actor carries an address rather
+  than a cast position. A
   single `String`, `Bytes`, `Vec`, `Option`, `Map`, `Enum`, or `Ref` field
   anywhere short-circuits the whole struct to structured. You don't choose this —
   the derive computes it at compile time (`CastEligible::ELIGIBLE` ANDs every

@@ -240,10 +240,11 @@ macro_rules! cast_eligible_primitive {
 cast_eligible_primitive!(u8, u16, u32, u64, i8, i16, i32, i64, f32, f64, bool);
 
 // Typed-id newtypes are `#[repr(transparent)]` over `u64`, so a
-// cast-shape struct field typed `MailboxId` / `KindId` is wire-identical
-// to a `u64` field.
+// cast-shape struct field typed `KindId` (or another id below) is
+// wire-identical to a `u64` field. `MailboxId` is excluded: a kind that
+// names an actor carries an address, not a cast position (ADR-0230).
 impl CastEligible for MailboxId {
-    const ELIGIBLE: bool = true;
+    const ELIGIBLE: bool = false;
 }
 impl CastEligible for KindId {
     const ELIGIBLE: bool = true;
