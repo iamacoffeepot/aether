@@ -309,6 +309,9 @@ Replacement is phase-aware rather than transactionally rolled back:
 - a candidate whose hosted type drops or changes a handler row of the type the
   slot hosts is refused before the old instance is touched; added rows are
   allowed ([ADR-0231](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0231-protocol-typed-references-and-reply-checks.md) §5);
+- a candidate whose hosted type (the named export, or the type the slot hosts
+  for a replace with no export) declares a dependency with no `Live` route is
+  refused before the old instance is touched ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md));
 - a state-save error reinstalls the old instance after its `unwire` / `on_dehydrate`
   hooks have run;
 - a candidate that does not declare the kind of a request context the old
