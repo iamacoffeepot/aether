@@ -97,19 +97,6 @@ impl BloomeryHarness {
     /// Panics when no outcome arrives within thirty seconds, or when the
     /// call's chain has not settled within thirty seconds of its outcome.
     pub fn call(&mut self, call: &Call) -> CallOutcome {
-        self.call_within(call, REPLY_TIMEOUT)
-    }
-
-    /// [`BloomeryHarness::call`] with `patience` in place of its thirty-second
-    /// bound, for a call that may legitimately take longer — a live HTTP turn
-    /// whose own fetch timeout is past thirty seconds, where panicking first
-    /// would drop a paid, recorded result on the floor.
-    ///
-    /// # Panics
-    ///
-    /// Panics when no outcome arrives within `patience`, or when the call's
-    /// chain has not settled within `patience` of its outcome.
-    pub fn call_within(&mut self, call: &Call, patience: Duration) -> CallOutcome {
         let correlation = self.next_correlation();
         let settled = self.chassis.send_tracked(
             self.mounted.driver.erase(),
@@ -118,15 +105,13 @@ impl BloomeryHarness {
             correlation,
             Some(ReplyTarget::Actor { to: self.sink.erase(), correlation }),
         );
-        let outcome = self.wait_within(
-            Pending { correlation, request: format!("{} {call:?}", Call::NAME), answer: PhantomData },
-            patience,
-        );
+        let outcome =
+            self.wait(Pending { correlation, request: format!("{} {call:?}", Call::NAME), answer: PhantomData });
 
         assert!(
-            settled.recv_timeout(patience).is_ok(),
+            settled.recv_timeout(REPLY_TIMEOUT).is_ok(),
             "the Call's causal chain did not settle within {} seconds of its outcome: {call:?}",
-            patience.as_secs()
+            REPLY_TIMEOUT.as_secs()
         );
         outcome
     }
@@ -176,14 +161,8 @@ impl BloomeryHarness {
     /// Panics when no reply arrives within thirty seconds, when the sink has
     /// gone, or when the reply is not the kind the request is answered by.
     pub fn wait<K: Answer>(&mut self, pending: Pending<K>) -> K {
-        self.wait_within(pending, REPLY_TIMEOUT)
-    }
-
-    /// [`BloomeryHarness::wait`] with `patience` in place of its thirty-second
-    /// bound.
-    fn wait_within<K: Answer>(&mut self, pending: Pending<K>, patience: Duration) -> K {
         let Pending { correlation, request, .. } = pending;
-        let reply = self.early.remove(&correlation).unwrap_or_else(|| self.receive(correlation, &request, patience));
+        let reply = self.early.remove(&correlation).unwrap_or_else(|| self.receive(correlation, &request));
         K::take(reply).unwrap_or_else(|other| panic!("{request} (correlation {correlation}) was answered by {other:?}"))
     }
 
@@ -207,18 +186,19 @@ impl BloomeryHarness {
     }
 
     /// Receive arrivals until the reply to `request` under `correlation`,
-    /// keeping the others, for at most `patience`.
-    fn receive(&mut self, correlation: u64, request: &str, patience: Duration) -> Reply {
-        let deadline = Instant::now() + patience;
+    /// keeping the others.
+    fn receive(&mut self, correlation: u64, request: &str) -> Reply {
+        let deadline = Instant::now() + REPLY_TIMEOUT;
         loop {
             match self.arrivals.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
                 Ok((arrived, reply)) if arrived == correlation => return reply,
                 Ok((arrived, reply)) => {
                     self.early.insert(arrived, reply);
                 }
-                Err(RecvTimeoutError::Timeout) => {
-                    panic!("no reply to {request} (correlation {correlation}) within {} seconds", patience.as_secs())
-                }
+                Err(RecvTimeoutError::Timeout) => panic!(
+                    "no reply to {request} (correlation {correlation}) within {} seconds",
+                    REPLY_TIMEOUT.as_secs()
+                ),
                 Err(RecvTimeoutError::Disconnected) => {
                     panic!("the reply sink went away before {request} (correlation {correlation}) was answered")
                 }
