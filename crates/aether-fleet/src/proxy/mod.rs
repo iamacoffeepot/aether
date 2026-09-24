@@ -17,13 +17,16 @@
 //!   until **`on_route_registered`** takes the answer.
 //! - **`on_forward`** ([`ForwardEnvelope`](aether_rpc::ForwardEnvelope)) wraps the `recipient`
 //!   path, `kind`, and `payload` into an RPC `Call` and writes it down the
-//!   connection; the substrate resolves the path on arrival. The inbound mail's `Source` is parked under the
-//!   wire `cid` so the eventual reply can route back to the sender.
+//!   connection; the substrate resolves the path on arrival. The reply owed
+//!   to the sender is parked under the wire `cid` as a `DeferredReply`,
+//!   which holds the forward's chain open until the call ends.
 //! - **`on_inbound_ready`** ([`RpcInboundReady`](aether_rpc::RpcInboundReady)) is the reader
-//!   sidecar's wake: it drains `conn.inbound`, lifting `ReplyEvent`
-//!   frames back to the parked `Source` (correlation preserved,
-//!   mirroring `Mailer::send_reply`), dropping the `in_flight` entry on
-//!   `ReplyEnd`, and self-shutting-down on `Bye`.
+//!   sidecar's wake: it drains `conn.inbound`, relaying each `ReplyEvent`
+//!   through the parked debt's `reply_envelope` (correlation preserved),
+//!   answering the debt with a `CallSettled` on `ReplyEnd`, and
+//!   self-shutting-down on `Bye`.
+//! - **`unwire`** abandons every debt still parked when the proxy closes,
+//!   and the hub's RPC server closes the wire calls behind them.
 //!
 //! ## Scope (issue 763 P3 vs P4)
 //!
@@ -119,7 +122,7 @@ mod runtime;
 #[cfg(test)]
 use aether_kinds::DeathReason;
 #[cfg(test)]
-use sinks::{FleetCapCells, FleetCapSink, ProxyReplySink};
+use sinks::{FleetCapCells, FleetCapSink, ProxyReplySink, RecordedReply, ReplyLog};
 
 #[cfg(test)]
 mod tests {
@@ -128,20 +131,27 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::{
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
-        ProxyTarget,
+        ProxyTarget, RecordedReply, ReplyLog,
     };
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
     use aether_data::{ActorPath, EngineId, Kind, Uuid};
-    use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
+    use aether_kinds::TerminateEngine;
+    use aether_rpc::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
     use aether_rpc::server::{RpcBind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
-    use aether_rpc::{ForwardEnvelope, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+    use aether_rpc::{
+        ForwardEnvelope, HelloAck, MailEnvelope, PeerKind, Recipient, ReplyEnvelope, RpcClient, RpcError, WIRE_VERSION,
+        WireFrame,
+    };
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::testing::{TestChassis, fresh_substrate};
     use aether_substrate::{ReplyTarget, Subname};
     use aether_trace::TraceDispatchCapability;
+    use std::collections::VecDeque;
     use std::io::BufReader;
     use std::net::TcpListener;
+    use std::panic::{AssertUnwindSafe, catch_unwind};
+    use std::sync::mpsc::{self, RecvTimeoutError};
     use std::sync::{Arc, Mutex};
     use std::thread;
     use std::time::{Duration, Instant};
@@ -165,7 +175,7 @@ mod tests {
     #[test]
     fn forward_round_trips_reply_back_to_sender() {
         let (registry, mailer) = fresh_substrate();
-        let recorded: Arc<Mutex<Option<u64>>> = Arc::new(Mutex::new(None));
+        let log = ReplyLog::default();
 
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             // TraceObserver produces the `Settled` mail RpcServer's
@@ -173,7 +183,7 @@ mod tests {
             // never closes with a `ReplyEnd`.
             .with_actor::<TraceDispatchCapability>(())
             .with_actor::<TestEchoActor>(())
-            .with_actor::<ProxyReplySink>(Arc::clone(&recorded))
+            .with_actor::<ProxyReplySink>(Arc::clone(&log))
             .with_actor::<FleetCapSink>(FleetCapCells::default())
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams { peer_kind: substrate_peer_kind(), bind: RpcBind::Boot },
@@ -225,16 +235,8 @@ mod tests {
         // Poll for the sink to record the echoed value. The round trip
         // is proxy → server (TCP) → echo → server → proxy (TCP) → sink,
         // all across dispatcher threads — give it a generous deadline.
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let snapshot = *recorded.lock().expect("test setup: recorded mutex poisoned");
-            if let Some(value) = snapshot {
-                assert_eq!(value, 42, "echoed value routed back through the proxy");
-                return;
-            }
-            assert!(Instant::now() < deadline, "reply did not route back through the proxy within 5s");
-            thread::sleep(Duration::from_millis(20));
-        }
+        let first = await_first(&log, "reply did not route back through the proxy");
+        assert_eq!(first, RecordedReply::Echo(42), "echoed value routed back through the proxy");
     }
 
     /// Spawning a proxy at an address with no RPC server fails at
@@ -272,9 +274,7 @@ mod tests {
         assert!(result.is_err(), "spawning a proxy at a closed port should fail at init");
     }
 
-    /// How a [`fake_server`] treats the proxy's heartbeat pings after
-    /// the handshake.
-    #[derive(Clone, Copy)]
+    /// How a [`fake_server`] behaves after the handshake.
     enum Behavior {
         /// Mirror every `Ping(n)` back as `Pong(n)` — a healthy engine.
         Pong,
@@ -283,6 +283,42 @@ mod tests {
         /// Drop the connection right after the handshake — the
         /// connection-close (`Bye`) eviction path.
         Close,
+        /// Report each `Call`'s `cid` on `calls` and answer it with the
+        /// next script in `scripts`; a call with no script left is never
+        /// answered.
+        Scripted { calls: mpsc::Sender<u64>, scripts: VecDeque<CallScript> },
+    }
+
+    /// One frame a scripted [`fake_server`] writes back for a call, under
+    /// that call's `cid`.
+    #[derive(Clone, Copy)]
+    enum ScriptFrame {
+        /// A `ReplyEvent` carrying a [`TestEchoReply`] of this value.
+        Echo(u64),
+        /// A successful `ReplyEnd`.
+        End,
+    }
+
+    /// The frames a scripted [`fake_server`] answers one call with.
+    struct CallScript {
+        frames: Vec<ScriptFrame>,
+        /// When present, the frames wait until this fires.
+        release: Option<mpsc::Receiver<()>>,
+    }
+
+    impl ScriptFrame {
+        fn under(self, cid: u64) -> WireFrame {
+            match self {
+                Self::Echo(value) => WireFrame::ReplyEvent {
+                    cid,
+                    envelope: ReplyEnvelope {
+                        kind: <TestEchoReply as Kind>::ID,
+                        payload: TestEchoReply { value }.encode_into_bytes(),
+                    },
+                },
+                Self::End => WireFrame::ReplyEnd { cid, result: Ok(()) },
+            }
+        }
     }
 
     /// Spin a one-shot fake substrate RPC server on an OS-picked port:
@@ -305,16 +341,34 @@ mod tests {
                 &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: substrate_peer_kind() }),
             )
             .expect("write HelloAck");
+            let mut behavior = behavior;
             if matches!(behavior, Behavior::Close) {
                 return; // drop the stream → the proxy reads eof → Bye
             }
-            // Service pings until the proxy hangs up (read error ends
+            // Service frames until the proxy hangs up (read error ends
             // the `while let`).
             while let Ok::<WireFrame, _>(frame) = read_frame(&mut reader) {
-                if let (WireFrame::Ping(n), Behavior::Pong) = (&frame, behavior)
-                    && write_frame(&mut writer, &WireFrame::Pong(*n)).is_err()
-                {
-                    break;
+                match (&frame, &mut behavior) {
+                    (WireFrame::Ping(n), Behavior::Pong) => {
+                        if write_frame(&mut writer, &WireFrame::Pong(*n)).is_err() {
+                            break;
+                        }
+                    }
+                    (WireFrame::Call { cid: Some(cid), .. }, Behavior::Scripted { calls, scripts }) => {
+                        let _ = calls.send(*cid);
+                        let Some(script) = scripts.pop_front() else {
+                            continue;
+                        };
+                        if let Some(release) = script.release {
+                            let _ = release.recv();
+                        }
+                        for frame in script.frames {
+                            if write_frame(&mut writer, &frame.under(*cid)).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    _ => {}
                 }
             }
         });
@@ -434,5 +488,196 @@ mod tests {
             "a connection-close eviction is reported Crashed, got {:?}",
             died.reason,
         );
+    }
+
+    /// The echo request a test forwards; the scripted fake engine answers
+    /// it without reading it.
+    fn echo_forward() -> ForwardEnvelope {
+        ForwardEnvelope {
+            recipient: ActorPath::new(<TestEchoActor as Addressable>::NAMESPACE).expect("the echo namespace is a path"),
+            kind: <TestEchoRequest as Kind>::ID,
+            payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
+        }
+    }
+
+    /// Block until `log` holds at least `len` entries, or panic naming
+    /// `what` after 5s.
+    fn await_len(log: &ReplyLog, len: usize, what: &str) -> Vec<RecordedReply> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let snapshot = log.lock().expect("test setup: reply log mutex poisoned").clone();
+            if snapshot.len() >= len {
+                return snapshot;
+            }
+            assert!(Instant::now() < deadline, "{what} within 5s, log so far: {snapshot:?}");
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    /// A forward holds its chain open while the remote engine works, relays
+    /// every reply event to the sender in wire order, and ends the exchange
+    /// at its `CallSettled`: an event arriving after the terminal is not
+    /// relayed.
+    #[test]
+    fn forward_holds_its_chain_until_the_terminal_and_relays_replies_in_order() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let scripts = VecDeque::from([
+            CallScript {
+                frames: vec![ScriptFrame::Echo(1), ScriptFrame::Echo(2), ScriptFrame::End, ScriptFrame::Echo(3)],
+                release: Some(release_rx),
+            },
+            CallScript { frames: vec![ScriptFrame::End], release: None },
+        ]);
+        let (port, _server) = fake_server(Behavior::Scripted { calls: calls_tx, scripts });
+
+        let (registry, mailer) = fresh_substrate();
+        let log = ReplyLog::default();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<FleetCapSink>(FleetCapCells::default())
+            .with_actor::<ProxyReplySink>(Arc::clone(&log))
+            .with_actor_configured::<RpcServerCapability>(
+                unbound_rpc_params(),
+                RpcServerConfig { port: None, port_file: None },
+            )
+            .build_passive()
+            .expect("caps boot");
+        let proxy = chassis
+            .spawn_actor_for_test::<FleetProxy>(
+                Subname::Named("scripted"),
+                FleetProxyConfig {
+                    engine_id: EngineId(Uuid::from_u128(3)),
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
+                    heartbeat: None,
+                    connect_budget: None,
+                },
+                (),
+            )
+            .finish()
+            .expect("proxy spawns + connects");
+        let sink = chassis.actor_ref::<ProxyReplySink>().erase();
+
+        let settled = chassis.send_tracked(
+            proxy.erase(),
+            <ForwardEnvelope as Kind>::ID,
+            echo_forward().encode_into_bytes(),
+            1,
+            Some(ReplyTarget::Actor { to: sink, correlation: 11 }),
+        );
+        calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the first call");
+        assert!(
+            settled.recv_timeout(Duration::from_millis(300)).is_err_and(|error| error.is_timeout()),
+            "the forward's chain stays open while the remote call is unanswered",
+        );
+
+        release_tx.send(()).expect("the fake engine waits on the release");
+        let first_exchange = await_len(&log, 3, "the first exchange's replies did not arrive");
+        assert_eq!(
+            first_exchange,
+            vec![RecordedReply::Echo(1), RecordedReply::Echo(2), RecordedReply::Settled(Ok(()))],
+            "reply events relay in wire order, ahead of the terminal",
+        );
+        settled.recv_timeout(Duration::from_secs(5)).expect("the forward's chain settles after its terminal");
+
+        let second = chassis.send_tracked(
+            proxy.erase(),
+            <ForwardEnvelope as Kind>::ID,
+            echo_forward().encode_into_bytes(),
+            2,
+            Some(ReplyTarget::Actor { to: sink, correlation: 12 }),
+        );
+        calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the second call");
+        second.recv_timeout(Duration::from_secs(5)).expect("the second forward's chain settles");
+        assert_eq!(
+            await_len(&log, 4, "the second exchange's terminal did not arrive"),
+            vec![
+                RecordedReply::Echo(1),
+                RecordedReply::Echo(2),
+                RecordedReply::Settled(Ok(())),
+                RecordedReply::Settled(Ok(())),
+            ],
+            "an event after its call's terminal is not relayed",
+        );
+    }
+
+    /// A proxy that closes with a forward still open abandons its debt
+    /// quietly, and the hub's RPC server closes the wire call behind it with
+    /// its departure error.
+    #[test]
+    fn closing_with_a_pending_forward_abandons_it_and_the_hub_closes_the_call() {
+        let (calls_tx, calls_rx) = mpsc::channel();
+        let (port, _server) = fake_server(Behavior::Scripted { calls: calls_tx, scripts: VecDeque::new() });
+
+        let (registry, mailer) = fresh_substrate();
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+            .with_actor::<TraceDispatchCapability>(())
+            .with_actor::<FleetCapSink>(FleetCapCells::default())
+            .with_actor_configured::<RpcServerCapability>(
+                RpcServerParams { peer_kind: substrate_peer_kind(), bind: RpcBind::Boot },
+                RpcServerConfig { port: Some(0), port_file: None },
+            )
+            .build_passive()
+            .expect("caps boot");
+        let hub_port = chassis.handle::<RpcServerHandle>().expect("RpcServerHandle published").local_port;
+        let engine_id = EngineId(Uuid::from_u128(4));
+        let proxy = chassis
+            .spawn_actor_for_test::<FleetProxy>(
+                Subname::Named("closing"),
+                FleetProxyConfig {
+                    engine_id,
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
+                    heartbeat: None,
+                    connect_budget: None,
+                },
+                (),
+            )
+            .finish()
+            .expect("proxy spawns + connects");
+
+        let mut conn = RpcClient::connect(
+            &format!("127.0.0.1:{hub_port}"),
+            PeerKind::Client { client_name: "fleet-proxy-test".into(), client_version: "0.0.1".into() },
+            || {},
+        )
+        .expect("client connects to the hub");
+        let call = MailEnvelope {
+            to: Recipient { engine: Some(engine_id), path: echo_forward().recipient },
+            kind: <TestEchoRequest as Kind>::ID,
+            payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
+        };
+        // The proxy registers its route from `wire`, so retry while the hub
+        // still answers that no route exists.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let cid = loop {
+            let cid = conn.client.call(call.clone()).expect("write Call to the hub");
+            match conn.inbound.recv_timeout(Duration::from_millis(200)) {
+                Ok(WireFrame::ReplyEnd { result: Err(RpcError::UnknownEngine { .. }), .. }) => {
+                    assert!(Instant::now() < deadline, "the proxy's route did not register within 5s");
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(RecvTimeoutError::Timeout) => break cid,
+                other => panic!("unexpected answer while the route registers: {other:?}"),
+            }
+        };
+        calls_rx.recv_timeout(Duration::from_secs(5)).expect("the fake engine receives the forwarded call");
+
+        let _terminated = chassis.send_tracked(
+            proxy.erase(),
+            <TerminateEngine as Kind>::ID,
+            TerminateEngine { engine_id: engine_id.0.to_string() }.encode_into_bytes(),
+            13,
+            None,
+        );
+        let end = conn.inbound.recv_timeout(Duration::from_secs(5)).expect("the hub closes the wire call");
+        let WireFrame::ReplyEnd { cid: closed, result: Err(RpcError::Other { reason }) } = end else {
+            panic!("the hub closes the call with its departure error, got {end:?}");
+        };
+        assert_eq!(closed, cid, "the closed call is the one forwarded");
+        assert!(reason.contains("left before the call settled"), "the departure error names the departure: {reason}");
+
+        drop(conn);
+        let teardown = catch_unwind(AssertUnwindSafe(|| drop(chassis)));
+        assert!(teardown.is_ok(), "closing with a pending forward raises no fatal abort");
     }
 }

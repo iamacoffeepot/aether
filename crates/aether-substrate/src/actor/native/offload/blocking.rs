@@ -316,6 +316,11 @@ pub struct TaskDone<O, C = ()> {
 /// context value, whose drop means nothing. [`Self::abandon_for_actor_close`]
 /// is the only quiet discharge.
 ///
+/// A debt may also forward any number of already-encoded non-terminal
+/// replies first, through [`Self::reply_envelope`], which borrows it and
+/// leaves it owed. [`Self::reply`] and [`Self::abandon_for_actor_close`] stay
+/// the only discharges.
+///
 /// # Distinct from `InboundMail`
 ///
 /// ADR-0080 keeps two counts per root, and this type and
@@ -343,6 +348,22 @@ impl DeferredReply {
         let hold = self.hold.take();
         self.consumed = true;
         (hold, self.reply_to)
+    }
+
+    /// Forward an already-encoded reply to the waiting caller without ending the exchange;
+    /// the typed `reply` stays the one terminal.
+    ///
+    /// The reply takes the same binding reply path as [`Self::reply`], under
+    /// the root this debt's hold keeps open: its `Sent` counts against that
+    /// chain, its id is minted in the replier's reply-lineage space, and the
+    /// caller's correlation is echoed. An engine-only `kind` (ADR-0233) is
+    /// refused with a warning and nothing is sent.
+    ///
+    /// Its consumer is the fleet proxy, which relays each reply event a
+    /// remote engine streams for a forwarded call before the call's
+    /// terminal settles the debt.
+    pub fn reply_envelope<M: ReplyMode, A>(&self, ctx: &mut NativeCtx<'_, A, M>, kind: KindId, bytes: &[u8]) {
+        ctx.reply_envelope_to_target(self.reply_to, kind, bytes, self.hold.as_ref().map(SettlementHold::root), None);
     }
 
     /// Send the terminal reply through the original target and then release
@@ -1290,5 +1311,67 @@ mod tests {
         assert_eq!(counter.held_open(root), 0, "dropping the token abandons its ledger entry and hold");
         assert!(wake_rx.recv_timeout(Duration::from_millis(50)).is_err(), "abandonment emits no wake");
         assert!(binding.dispatch_take::<Answer, ()>(id).is_none(), "the abandoned entry was removed");
+    }
+
+    /// `reply_envelope` forwards each already-encoded reply to the debt's
+    /// caller as it is called, under the name the registry gives its kind,
+    /// and leaves the debt owed: the hold stays until the typed terminal
+    /// `reply` goes out behind them.
+    #[test]
+    fn reply_envelope_forwards_in_order_and_keeps_the_debt_owed() {
+        use crate::mail::outbound::EgressEvent;
+        use crate::testing::{fresh_substrate_and_rx, session_sender, token_root, unrouted_binding};
+        use aether_kinds::Tick;
+
+        let (_registry, mailer, egress) = fresh_substrate_and_rx();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let binding = unrouted_binding(&mailer);
+        let root = token_root(23);
+
+        let mut ctx = NativeCtx::new(&binding, session_sender(), None, Some(root));
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+        let first = Tick { delta_micros: 1 }.encode_into_bytes();
+        let second = Tick { delta_micros: 2 }.encode_into_bytes();
+        owed.reply_envelope(&mut ctx, Tick::ID, &first);
+        owed.reply_envelope(&mut ctx, Tick::ID, &second);
+        assert_eq!(counter.held_open(root), 1, "forwarded replies leave the debt owed");
+
+        owed.reply(&mut ctx, &Tick { delta_micros: 3 });
+        assert_eq!(counter.held_open(root), 0, "the typed reply discharges the debt");
+
+        let delivered: Vec<(String, Vec<u8>)> = egress
+            .try_iter()
+            .map(|event| {
+                let EgressEvent::ToSession { kind_name, payload, .. } = event else {
+                    panic!("only session replies are expected, got {event:?}");
+                };
+                (kind_name, payload)
+            })
+            .collect();
+        let third = Tick { delta_micros: 3 }.encode_into_bytes();
+        let expected: Vec<(String, Vec<u8>)> =
+            [first, second, third].into_iter().map(|payload| (Tick::NAME.to_owned(), payload)).collect();
+        assert_eq!(delivered, expected, "both forwarded replies arrive in order, ahead of the terminal");
+    }
+
+    /// An engine-only kind (ADR-0233) never leaves through `reply_envelope`:
+    /// nothing is sent and the debt stays owed.
+    #[test]
+    fn reply_envelope_refuses_an_engine_only_kind() {
+        use crate::testing::{fresh_substrate_and_rx, session_sender, token_root, unrouted_binding};
+        use aether_kinds::MonitorNotice;
+
+        let (_registry, mailer, egress) = fresh_substrate_and_rx();
+        let counter = Arc::clone(mailer.trace_handle().settlement_counter());
+        let binding = unrouted_binding(&mailer);
+        let root = token_root(24);
+
+        let mut ctx = NativeCtx::new(&binding, session_sender(), None, Some(root));
+        let owed = ctx.defer_reply_to(ctx.reply_target());
+        owed.reply_envelope(&mut ctx, MonitorNotice::ID, &MonitorNotice.encode_into_bytes());
+
+        assert!(egress.try_recv().is_err(), "an engine-only reply is refused, not sent");
+        assert_eq!(counter.held_open(root), 1, "a refused reply leaves the debt owed");
+        owed.abandon_for_actor_close();
     }
 }

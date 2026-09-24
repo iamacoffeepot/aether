@@ -3,7 +3,7 @@
 
 use super::NativeBinding;
 use crate::mail::{MailId, Source};
-use aether_data::{ActorMail, Kind, RequestId};
+use aether_data::{ActorMail, Kind, KindId, RequestId};
 
 impl NativeBinding {
     /// Reply path for native actors (ADR-0080 §5 / #1695). Mints the
@@ -35,6 +35,25 @@ impl NativeBinding {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);
         self.mailer.send_reply(sender, payload, Some(reply_id), root, parent);
+    }
+
+    /// [`Self::send_reply_for_handler`] for an already-encoded reply of
+    /// `kind`: the reply id is minted from the same `reply_lineage`
+    /// allocator and the reply joins the caller's chain under `root` /
+    /// `parent` the same way. Its caller is
+    /// [`DeferredReply::reply_envelope`](crate::actor::native::DeferredReply::reply_envelope),
+    /// through the ctx's engine-only refusal.
+    pub(crate) fn send_reply_envelope_for_handler(
+        &self,
+        sender: Source,
+        kind: KindId,
+        bytes: &[u8],
+        root: Option<MailId>,
+        parent: Option<MailId>,
+    ) {
+        let correlation = self.reply_lineage.mint();
+        let reply_id = MailId::new(self.self_mailbox(), correlation);
+        self.mailer.send_reply_envelope(sender, kind, bytes, Some(reply_id), root, parent);
     }
 
     /// Store request context for a just-minted outbound request, warning

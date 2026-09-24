@@ -93,7 +93,6 @@ pub(super) struct AddressRouteSink {
     names: HashMap<String, String>,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
-    mailer: Arc<Mailer>,
 }
 
 #[actor(singleton, root, depends(RpcServerCapability))]
@@ -102,14 +101,13 @@ impl NativeActor for AddressRouteSink {
     type Params = AddressRouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.test.address_route";
 
-    fn init((): (), params: AddressRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+    fn init((): (), params: AddressRouteLoopbackParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
             engine: params.engine,
             canonical_path: params.canonical_path,
             names: params.names,
             calls: params.calls,
             replies: params.replies,
-            mailer: ctx.mailer(),
         })
     }
 
@@ -121,64 +119,26 @@ impl NativeActor for AddressRouteSink {
     #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::single]
+    #[handler::manual]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
-        use aether_substrate::mail::{Mail, Source, SourceAddr};
-
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
         self.calls.lock().expect("address-route calls mutex is never poisoned").push(mail.clone());
-        let SourceAddr::Component(target) = ctx.reply_target().addr else {
-            return;
-        };
-        let correlation = ctx.reply_target().correlation_id;
+        let owed = ctx.defer_reply_to(ctx.reply_target());
         if mail.kind == ResolveAddress::ID {
-            self.mailer.push(
-                Mail::new(
-                    target,
-                    ResolveAddressResult::ID,
-                    ResolveAddressResult::Ok { canonical_path: self.canonical_path.clone() }.encode_into_bytes(),
-                    1,
-                )
-                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-            );
+            let answer = ResolveAddressResult::Ok { canonical_path: self.canonical_path.clone() };
+            owed.reply_envelope(ctx, ResolveAddressResult::ID, &answer.encode_into_bytes());
         } else if mail.kind == Resolve::ID {
             let request = Resolve::decode_from_bytes(&mail.payload).expect("test resolve request decodes");
             let resolved =
                 request.ids.into_iter().map(|id| ResolvedName { name: self.names.get(&id).cloned(), id }).collect();
-            self.mailer.push(
-                Mail::new(target, ResolveResult::ID, ResolveResult { resolved }.encode_into_bytes(), 1)
-                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-            );
+            owed.reply_envelope(ctx, ResolveResult::ID, &ResolveResult { resolved }.encode_into_bytes());
         } else {
             let reply = self.replies.lock().expect("address-route replies mutex is never poisoned").pop_front();
-            let Some(reply) = reply else {
-                self.mailer.push(
-                    Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
-                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-                );
-                return;
-            };
-            for event in reply.events {
-                self.mailer.push(
-                    Mail::new(target, event.kind, event.payload, 1)
-                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-                );
+            for event in reply.into_iter().flat_map(|reply| reply.events) {
+                owed.reply_envelope(ctx, event.kind, &event.payload);
             }
-            if reply.settle {
-                self.mailer.push(
-                    Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
-                        .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-                );
-            }
-            if !reply.settle {
-                return;
-            }
-            return;
         }
-        self.mailer.push(
-            Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-        );
+        owed.reply(ctx, &CallSettled::Ok);
     }
 }
 
@@ -193,7 +153,6 @@ pub(super) struct ScriptedReplyEvent {
 #[derive(Clone)]
 pub(super) struct ScriptedRouteReply {
     pub(super) events: Vec<ScriptedReplyEvent>,
-    pub(super) settle: bool,
 }
 
 /// Dynamic route fixture for task-level terrain relay tests. The live
@@ -214,7 +173,6 @@ pub(super) struct ScriptedRouteSink {
     inventory: ListKindsResult,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
-    mailer: Arc<Mailer>,
 }
 
 #[actor(instanced, root, depends(RpcServerCapability))]
@@ -225,14 +183,8 @@ impl NativeActor for ScriptedRouteSink {
     type Params = ScriptedRouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.test.scripted_route";
 
-    fn init((): (), params: ScriptedRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self {
-            engine: params.engine,
-            inventory: params.inventory,
-            calls: params.calls,
-            replies: params.replies,
-            mailer: ctx.mailer(),
-        })
+    fn init((): (), params: ScriptedRouteLoopbackParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { engine: params.engine, inventory: params.inventory, calls: params.calls, replies: params.replies })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -243,11 +195,9 @@ impl NativeActor for ScriptedRouteSink {
     #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::single]
+    #[handler::manual]
     #[allow(clippy::needless_pass_by_value)] // Native actor handlers receive owned decoded kinds.
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
-        use aether_substrate::mail::{Mail, Source, SourceAddr};
-
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
         let reply = if mail.kind == ResolveAddress::ID {
             let request = ResolveAddress::decode_from_bytes(&mail.payload).expect("test resolver request decodes");
             ScriptedRouteReply {
@@ -255,7 +205,6 @@ impl NativeActor for ScriptedRouteSink {
                     kind: ResolveAddressResult::ID,
                     payload: ResolveAddressResult::Ok { canonical_path: request.address }.encode_into_bytes(),
                 }],
-                settle: true,
             }
         } else if mail.kind == ListKinds::ID {
             ScriptedRouteReply {
@@ -263,34 +212,22 @@ impl NativeActor for ScriptedRouteSink {
                     kind: ListKindsResult::ID,
                     payload: self.inventory.encode_into_bytes(),
                 }],
-                settle: true,
             }
         } else {
             self.replies
                 .lock()
                 .expect("terrain replies mutex is never poisoned")
                 .pop_front()
-                .unwrap_or(ScriptedRouteReply { events: Vec::new(), settle: true })
+                .unwrap_or(ScriptedRouteReply { events: Vec::new() })
         };
         if mail.kind != ResolveAddress::ID {
             self.calls.lock().expect("terrain calls mutex is never poisoned").push(mail);
         }
-        let SourceAddr::Component(target) = ctx.reply_target().addr else {
-            return;
-        };
-        let correlation = ctx.reply_target().correlation_id;
+        let owed = ctx.defer_reply_to(ctx.reply_target());
         for event in reply.events {
-            self.mailer.push(
-                Mail::new(target, event.kind, event.payload, 1)
-                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-            );
+            owed.reply_envelope(ctx, event.kind, &event.payload);
         }
-        if reply.settle {
-            self.mailer.push(
-                Mail::new(target, CallSettled::ID, CallSettled::Ok.encode_into_bytes(), 1)
-                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-            );
-        }
+        owed.reply(ctx, &CallSettled::Ok);
     }
 }
 
