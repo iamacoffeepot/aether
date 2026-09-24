@@ -295,6 +295,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-character-creator"
+version = "0.3.0-alpha"
+dependencies = [
+ "serde_json",
+]
+
+[[package]]
 name = "aether-chassis"
 version = "0.3.0-alpha"
 dependencies = [

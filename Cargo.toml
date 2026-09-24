@@ -39,6 +39,7 @@ members = [
     "crates/aether-mesh",
     "crates/aether-kit",
     "crates/aether-demo",
+    "crates/aether-character-creator",
     "crates/aether-kit-widget",
     "crates/aether-rpc",
     "crates/aether-fleet",

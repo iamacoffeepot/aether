@@ -1,0 +1,13 @@
+[package]
+name = "aether-character-creator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
+
