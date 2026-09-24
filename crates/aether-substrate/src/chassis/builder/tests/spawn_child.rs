@@ -146,7 +146,7 @@ fn ctx_spawn_child_routes_through_handler() {
                 match &done.output().result {
                     Ok(child) => {
                         state.spawn_count.fetch_add(1, AtomicOrdering::SeqCst);
-                        ctx.to(child).send(&Ping { tag: 44 });
+                        ctx.send_to(child, &Ping { tag: 44 });
                     }
                     Err(crate::SpawnError::SubnameInUse { .. }) => {
                         state.failure_count.fetch_add(1, AtomicOrdering::SeqCst);

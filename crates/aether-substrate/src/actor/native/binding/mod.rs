@@ -19,8 +19,7 @@
 //! no install/uninstall ceremony, no `RefCell` runtime borrow checks.
 //! The actor binding is type-system-tracked through the
 //! `&NativeBinding` references the SDK threads into
-//! [`super::ctx::NativeCtx`], [`super::mailbox::NativeActorMailbox`],
-//! and the substrate-internal helpers below.
+//! [`super::ctx::NativeCtx`] and the substrate-internal helpers below.
 //!
 //! Capabilities build their `NativeBinding` at boot and pass
 //! `&self.transport` (or thread it through to a worker) wherever a
@@ -127,9 +126,8 @@ pub struct NativeBinding {
     /// drain → close → exit path without setting the flag.
     shutdown_flag: Arc<AtomicBool>,
     /// ADR-0087 / 2b (iamacoffeepot/aether#1105): per-actor send-side
-    /// blob buffer. The per-handler [`super::ctx::NativeCtx`] /
-    /// [`super::mailbox::NativeActorMailbox`] send path buffers into
-    /// this (via [`Self::push_envelope_buffered`]); the handler-end
+    /// blob buffer. The per-handler [`super::ctx::NativeCtx`] send
+    /// path buffers into this (via [`Self::push_envelope_buffered`]); the handler-end
     /// flush ([`Self::flush_outbound`], driven by `NativeCtx`'s `Drop`)
     /// forms one ring blob and routes a
     /// [`MailRef::InRing`](crate::mail::MailRef::InRing) per mail.

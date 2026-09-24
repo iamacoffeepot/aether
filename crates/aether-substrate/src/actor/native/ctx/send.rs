@@ -83,16 +83,16 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         }
     }
 
-    /// Untyped sibling of [`NativeActorMailbox::send_tracked`](crate::actor::native::mailbox::NativeActorMailbox::send_tracked):
-    /// dispatch already-encoded bytes of `kind` to the actor `target` proves
-    /// (ADR-0230), inheriting this handler's causal chain, and return the
-    /// minted [`MailId`] for settlement subscription.
+    /// The tracked send through a proof: dispatch already-encoded bytes of
+    /// `kind` to the actor `target` proves (ADR-0230), inheriting this
+    /// handler's causal chain, and return the minted [`MailId`] for
+    /// settlement subscription.
     ///
-    /// The typed `send_tracked` is gated on `R: HandlesKind<K>`, which needs
-    /// the kind and receiver at the compile site. An endpoint that routes
-    /// mail with runtime kinds holds neither, only the proof and opaque
-    /// payload bytes, so this skips that check and dispatches through the
-    /// same lineage-aware path the typed helpers take. A capability fanning
+    /// It takes no `R: HandlesKind<K>` gate, which would need the kind and
+    /// receiver at the compile site. An endpoint that routes mail with
+    /// runtime kinds holds neither, only the proof and opaque payload bytes,
+    /// so this dispatches through the same lineage-aware path the typed
+    /// verbs take without that check. A capability fanning
     /// out pre-encoded bytes to its own subscriber table is the shape this
     /// exists for: `SyntheticWindowCapability::on_inject` replays an injected
     /// event to the window subscribers, and `aether-lifecycle`'s

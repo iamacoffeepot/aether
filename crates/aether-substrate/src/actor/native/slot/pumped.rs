@@ -304,7 +304,7 @@ mod tests {
             // A non-reply peer send: buffered here, flushed at ctx drop
             // through the binding's outbound blob → the pool `WakeSink`,
             // exercising the pool-side blob demux from the pumping thread.
-            ctx.actor::<Peer>().send(&Poke { note: 7 });
+            ctx.send::<Peer>(&Poke { note: 7 });
         }
 
         fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
@@ -625,7 +625,7 @@ mod tests {
         settle.recv().expect("the root settles once the deferred reply finishes");
     }
 
-    /// ADR-0160 §1: a non-reply `ctx.actor::<Peer>().send(...)` from a pumped
+    /// ADR-0160 §1: a non-reply flat `ctx.send::<Peer>(...)` from a pumped
     /// handler routes through the binding's outbound blob → the pool
     /// `WakeSink` (the pool-side blob demux) from the pumping thread, and the
     /// peer receives the mail. Dormant for the window driver, load-bearing
@@ -696,7 +696,7 @@ mod tests {
             assert_eq!(thread::current().id(), caller_thread, "host ingress stays on its caller thread");
             assert!(ActorTraceRing::try_with(|_| ()).is_some(), "the pumped actor's Local slots are stamped");
             state.pings = 41;
-            ctx.actor::<Peer>().send(&Poke { note: 1 });
+            ctx.send::<Peer>(&Poke { note: 1 });
             assert!(
                 matches!(poke_rx.try_recv(), Err(mpsc::TryRecvError::Empty)),
                 "buffered peer work cannot run before the host closure returns",
@@ -712,7 +712,7 @@ mod tests {
         assert!(first.parent_mail.is_none(), "a host-originated root has no parent mail");
         assert_eq!(Poke::decode_from_bytes(first.payload.bytes()).expect("first Poke decodes"), Poke { note: 1 });
 
-        slot.host_turn(|_, ctx| ctx.actor::<Peer>().send(&Poke { note: 2 })).expect("the slot remains live");
+        slot.host_turn(|_, ctx| ctx.send::<Peer>(&Poke { note: 2 })).expect("the slot remains live");
         let (second, second_thread) =
             poke_rx.recv_timeout(Duration::from_secs(2)).expect("the second host-turn peer send arrived");
         assert_ne!(second_thread, caller_thread, "the second peer delivery also runs off the host thread");

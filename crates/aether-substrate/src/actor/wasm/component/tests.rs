@@ -1475,7 +1475,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
 /// set) ignores the lineage and opens a fresh chain — `parent_mail`
 /// is `None` and `root == mail_id`, the same shape as a no-inbound
 /// send. This is the wasm-side opt-out that mirrors the native
-/// `NativeActorMailbox::send_detached`.
+/// `NativeCtx::send_detached`.
 #[test]
 fn send_detached_mints_fresh_chain_despite_in_flight() {
     let registry = Arc::new(Registry::new());
