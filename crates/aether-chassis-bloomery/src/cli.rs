@@ -41,9 +41,11 @@ pub struct BloomeryCli {
     /// HTTP egress knobs for Sampled programs (ADR-0234 decision 7):
     /// `--http-allowlist` shadows `AETHER_HTTP_ALLOWLIST`, the hosts a fetch
     /// may reach. Absent → the member's empty default, which denies every
-    /// fetch. The other `--http-*` flags (`--http-disable`,
-    /// `--http-require-https`, and the body, timeout, and in-flight bounds)
-    /// ride the same overlay.
+    /// fetch. `--http-secrets <host>/bearer=<name>` binds a secret from the
+    /// `--secrets-dir` directory to one allowlisted host (ADR-0235), which
+    /// `aether.http` attaches over HTTPS only. The other `--http-*` flags
+    /// (`--http-disable`, `--http-require-https`, and the body, timeout, and
+    /// in-flight bounds) ride the same overlay.
     #[command(flatten)]
     pub http: HttpOverlay,
 
