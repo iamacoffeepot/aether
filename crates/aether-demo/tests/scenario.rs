@@ -1,7 +1,8 @@
 //! The demo's bring-up reaches the viewer and draws the framed subject.
 //!
-//! Boots a rendering `SubstrateHarness` with the component host, writes
-//! `lamp_post.dsl` into the sandbox's `assets` root, and loads the demo's four
+//! Boots a rendering `SubstrateHarness` with the component host, roots its
+//! `assets` namespace at `crates/aether-mesh/examples` (the tree the depot
+//! packages, so the test names no subject of its own), and loads the demo's four
 //! components in manifest order at their default names: the kit camera, the
 //! kit camera controller with the checked-in `controller.json` (encoded by the
 //! same encoder the depot build and the boot manifest use), the kit mesh
@@ -12,14 +13,13 @@
 
 use std::fs;
 use std::ops::RangeInclusive;
+use std::path::Path;
 
 use aether_actor::Addressable;
 use aether_demo::Demo;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::RenderHarnessBuilderExt;
-use aether_harness_substrate_capture::test_helpers::{
-    init_save_sandbox, require_runtime, test_namespace_roots, write_fixture,
-};
+use aether_harness_substrate_capture::test_helpers::{init_save_sandbox, require_runtime, test_namespace_roots};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png};
 use aether_kinds::{LoadComponent, LogTail, LogTailResult};
 use aether_kit::camera::CameraComponent;
@@ -29,20 +29,16 @@ use aether_kit::mesh::MeshViewer;
 const WIDTH: u32 = 640;
 const HEIGHT: u32 = 360;
 
-/// The subject the demo loads, from the same examples directory the depot
-/// packages as its asset tree.
-const LAMP_POST_DSL: &[u8] =
-    include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../aether-mesh/examples/lamp_post.dsl"));
-
 /// The checked-in controller init-config the demo ships.
 const CONTROLLER_JSON: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/controller.json"));
 
-/// The fraction of the frame the framed lamp post covers. Tuned against the
-/// capture: the checked-in seed covers about 1.4% (the post is thin), the
-/// compiled baseline pose (12 units back, 63° overhead) about 0.2%, so the
-/// floor sits between the two; the ceiling, five times the framed value,
-/// catches a seed that puts the eye in or against the subject.
-const COVERAGE_BAND: RangeInclusive<f32> = 0.007..=0.07;
+/// The fraction of the frame the framed subject covers. Tuned against the
+/// capture: the checked-in seed frames the teapot at about 13%, the compiled
+/// baseline pose (12 units back, 63° overhead) leaves it about 0.6%, so the
+/// floor sits well above the baseline at a third of the framed value; the
+/// ceiling, three times the framed value, catches a seed that puts the eye in
+/// or against the subject.
+const COVERAGE_BAND: RangeInclusive<f32> = 0.04..=0.40;
 
 /// Load the export `R` at its default name, the name a declared dependency
 /// looks for.
@@ -62,11 +58,11 @@ fn demo_loads_the_subject_and_the_seed_frames_it() {
         return;
     };
     let (kit, demo_wasm) = (fs::read(kit_path).expect("read kit wasm"), fs::read(demo_path).expect("read demo wasm"));
-    let sandbox = init_save_sandbox("demo-scenario");
-    write_fixture("lamp_post.dsl", LAMP_POST_DSL);
+    let mut roots = test_namespace_roots(init_save_sandbox("demo-scenario"));
+    roots.assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("../aether-mesh/examples");
     let mut harness = SubstrateHarness::builder()
         .size(WIDTH, HEIGHT)
-        .namespace_roots(test_namespace_roots(sandbox))
+        .namespace_roots(roots)
         .with_render()
         .with_component_host()
         .build()
@@ -100,6 +96,6 @@ fn demo_loads_the_subject_and_the_seed_frames_it() {
     let covered = coverage(&image, background_top_left(&image), 5);
     assert!(
         COVERAGE_BAND.contains(&covered),
-        "the framed lamp post should cover {COVERAGE_BAND:?} of the frame; it covers {covered}",
+        "the framed subject should cover {COVERAGE_BAND:?} of the frame; it covers {covered}",
     );
 }

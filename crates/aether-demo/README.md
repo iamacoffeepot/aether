@@ -1,6 +1,6 @@
-# The lamp-post demo
+# The demo
 
-A lamp post authored in the mesh DSL, drawn in the desktop chassis and framed
+A teapot authored in the mesh DSL, drawn in the desktop chassis and framed
 by a camera you can steer from the keyboard. It is the shortest path from a
 clone to something on screen: no operator, no MCP session, no mail sent by
 hand.
@@ -13,7 +13,7 @@ desktop chassis against the checked-in boot manifest.
 ```sh
 cargo xtask build-wasm
 cargo run -p aether-chassis-desktop --bin aether-desktop -- \
-  --boot-manifest crates/aether-demo/lamp-post.boot.json \
+  --boot-manifest crates/aether-demo/demo.boot.json \
   --assets-dir crates/aether-mesh/examples
 ```
 
@@ -25,7 +25,7 @@ are read relative to the process working directory.
 
 ```sh
 cargo xtask package --profile release \
-  --spec crates/aether-demo/lamp-post.json \
+  --spec crates/aether-demo/demo.json \
   --assets crates/aether-mesh/examples
 ```
 
@@ -38,7 +38,7 @@ thing you would upload.
 
 ## What appears
 
-`lamp_post.dsl` from `crates/aether-mesh/examples/`, seen from a little above
+`teapot.dsl` from `crates/aether-mesh/examples/`, seen from a little above
 and to one side. The keys steer the camera:
 
 | Keys | Move |
@@ -57,8 +57,8 @@ depot manifest carries them.
 
 | File | What it is |
 |---|---|
-| `lamp-post.json` | the depot spec `cargo xtask package --spec` reads |
-| `lamp-post.boot.json` | the JSON boot manifest the dev run reads |
+| `demo.json` | the depot spec `cargo xtask package --spec` reads |
+| `demo.boot.json` | the JSON boot manifest the dev run reads |
 | `controller.json` | the camera controller's init-config: rates, clamps, and the `seed` pose that frames the subject |
 | `src/lib.rs` | the `aether.demo` component |
 
@@ -91,7 +91,9 @@ rather than arriving as a decode error inside the guest.
 ## Changing the subject
 
 The subject is two consts at the top of `src/lib.rs`. Point `SUBJECT_PATH` at
-`teapot.dsl` or `box.dsl`, or any other `.dsl` or `.obj` under the asset root,
-then rebuild the wasm and rerun. A different subject likely wants a different
-`seed` in `controller.json`: `target` is the point the camera looks at,
-`distance` how far back it sits, and a negative `pitch` looks down on it.
+any other `.dsl` or `.obj` under the asset root, then rebuild the wasm and
+rerun. A different subject likely wants a different `seed` in
+`controller.json`: `target` is the point the camera looks at, `distance` how
+far back it sits, and a negative `pitch` looks down on it. Nothing else names
+the subject except the coverage band in `tests/scenario.rs`, which is tuned to
+how much of the frame the framed subject fills.

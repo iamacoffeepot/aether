@@ -1,6 +1,6 @@
 //! The checked-in boot manifest boots on the real headless chassis.
 //!
-//! Reads `lamp-post.boot.json`, points each entry's `wasm` at the pre-built
+//! Reads `demo.boot.json`, points each entry's `wasm` at the pre-built
 //! artifact of the same file stem and its `config_json` at the workspace root
 //! (a boot manifest resolves paths against the working directory, which the
 //! dev run sets to the repository root), and boots `HeadlessChassis` on it
@@ -31,12 +31,12 @@ fn workspace_root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().and_then(Path::parent).expect("workspace root")
 }
 
-/// `lamp-post.boot.json` with each `wasm` replaced by the located artifact of
+/// `demo.boot.json` with each `wasm` replaced by the located artifact of
 /// its file stem and each `config_json` anchored at the workspace root.
 fn staged_manifest(sandbox: &Path) -> Option<PathBuf> {
     let checked_in =
-        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("lamp-post.boot.json")).expect("read lamp-post.boot.json");
-    let mut manifest: Value = serde_json::from_slice(&checked_in).expect("parse lamp-post.boot.json");
+        fs::read(Path::new(env!("CARGO_MANIFEST_DIR")).join("demo.boot.json")).expect("read demo.boot.json");
+    let mut manifest: Value = serde_json::from_slice(&checked_in).expect("parse demo.boot.json");
 
     for entry in manifest["components"].as_array_mut().expect("a components array") {
         let stem = Path::new(entry["wasm"].as_str().expect("a wasm path"))
@@ -50,7 +50,7 @@ fn staged_manifest(sandbox: &Path) -> Option<PathBuf> {
         }
     }
 
-    let staged = sandbox.join("lamp-post.boot.json");
+    let staged = sandbox.join("demo.boot.json");
     fs::write(&staged, serde_json::to_vec(&manifest).expect("serialize the staged manifest"))
         .expect("write the staged manifest");
     Some(staged)
@@ -78,7 +78,7 @@ fn checked_in_boot_manifest_boots_the_demo() {
     ])
     .expect("parse the headless argv");
     let env = CommonEnv::resolve(cli).expect("resolve the headless env");
-    let built = HeadlessChassis::build(env).expect("every boot entry in lamp-post.boot.json loads");
+    let built = HeadlessChassis::build(env).expect("every boot entry in demo.boot.json loads");
 
     let demo = ActorPath::new(&format!("aether.component/aether.embedded:{}", Demo::NAMESPACE))
         .expect("a well-formed actor path");

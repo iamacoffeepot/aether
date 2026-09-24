@@ -12,9 +12,9 @@ name: Release
 #
 # Each platform publishes one depot archive plus one archive per remaining
 # chassis binary. The depot (ADR-0163 §1) is `cargo xtask package` over the
-# checked-in `crates/aether-demo/lamp-post.json` spec: the desktop chassis
+# checked-in `crates/aether-demo/demo.json` spec: the desktop chassis
 # binary, the two workspace license files, and a content-addressed `pack/`
-# holding the lamp-post demo. The spec file owns what goes in it, so the
+# holding the teapot demo. The spec file owns what goes in it, so the
 # headless and hub binaries ship as their own archives rather than being
 # dropped into a depot they are not part of — each carrying the same two
 # license files, because a statically linked binary is redistributed with its
@@ -136,7 +136,7 @@ jobs:
       # `pack/` tree into the extraction directory.
       #
       # The depot's contents are the spec file's business, not this
-      # workflow's: `crates/aether-demo/lamp-post.json` names the chassis, the
+      # workflow's: `crates/aether-demo/demo.json` names the chassis, the
       # components, and the chassis settings, and `--assets` points at the
       # asset directory it loads from.
       - name: Build the demo depot
@@ -144,7 +144,7 @@ jobs:
         run: |
           cargo xtask package \
             --profile release \
-            --spec crates/aether-demo/lamp-post.json \
+            --spec crates/aether-demo/demo.json \
             --assets crates/aether-mesh/examples \
             --out "target/staging/${STEM}"
 

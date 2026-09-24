@@ -144,12 +144,12 @@ or config as much as assets — keeps the operator's whole `NamespaceRoots`.
 
 ```sh
 cargo xtask package \
-  --spec crates/aether-demo/lamp-post.json \
+  --spec crates/aether-demo/demo.json \
   --assets crates/aether-mesh/examples
 ```
 
 That is the checked-in demo (`crates/aether-demo/README.md`): a depot that
-draws the `lamp_post.dsl` mesh, framed and steerable from the keyboard, when its
+draws the `teapot.dsl` mesh, framed and steerable from the keyboard, when its
 binary is run with no flags at all. The mesh viewer draws nothing until it is
 sent `aether.kit.mesh.load`, so the demo's last component, `aether.demo`, sends
 it that load at `wire`, the same mail an operator would.
@@ -164,7 +164,7 @@ the persisted package manifest above:
   `--boot-manifest` argv; the spawned chassis reads the listed wasm itself. Its
   entries take `config` (bytes) or `config_json` (encoded at read time against
   the component's declared `Config` schema), so a checked-in manifest is the
-  no-packaging developer path — `--boot-manifest crates/aether-demo/lamp-post.boot.json`
+  no-packaging developer path — `--boot-manifest crates/aether-demo/demo.boot.json`
   boots the same composition the depot ships. Manifest paths are resolved as-is,
   against the process working directory rather than the manifest's own
   directory.
@@ -253,7 +253,7 @@ git push origin 0.4.0-alpha
 ```
 
 Each platform builds a package depot from the checked-in
-`crates/aether-demo/lamp-post.json` spec plus one archive per remaining chassis
+`crates/aether-demo/demo.json` spec plus one archive per remaining chassis
 binary, and every archive is attached to the release:
 
 | Platform | Depot | Chassis binaries |

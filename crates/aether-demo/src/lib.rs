@@ -24,8 +24,8 @@ use aether_kit::mesh::{LoadMesh, MeshViewer};
 /// root (`--assets-dir`, or a depot's `pack/assets`).
 const SUBJECT_NAMESPACE: &str = "assets";
 /// The subject, relative to [`SUBJECT_NAMESPACE`]. Any `.dsl` or `.obj` under
-/// the asset root works; `teapot.dsl` and `box.dsl` sit beside this one.
-const SUBJECT_PATH: &str = "lamp_post.dsl";
+/// the asset root works; `box.dsl` and `utah_teapot.obj` sit beside this one.
+const SUBJECT_PATH: &str = "teapot.dsl";
 
 /// Sends the mesh viewer its one load at `wire` and logs how it went.
 pub struct Demo {

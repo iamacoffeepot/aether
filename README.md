@@ -121,13 +121,13 @@ cargo run -p aether-chassis-headless --bin aether-headless -- --print-config
 
 ## Run the demo
 
-![The lamp_post.dsl mesh, a terracotta base with a green pole and arm, drawn in the desktop chassis](docs/media/demo.png)
+![A teapot built from mesh DSL primitives, pale blue faces with dark outlines, drawn in the desktop chassis](docs/media/demo.png)
 
 ```sh
-cargo xtask package --profile release --spec crates/aether-demo/lamp-post.json --assets crates/aether-mesh/examples
+cargo xtask package --profile release --spec crates/aether-demo/demo.json --assets crates/aether-mesh/examples
 ```
 
-A lamp post authored in the mesh DSL, drawn by the kit mesh viewer and framed
+A teapot authored in the mesh DSL, drawn by the kit mesh viewer and framed
 by the kit camera and camera controller: WASD pan, the arrow keys yaw and
 pitch, and Z/X zoom. Nothing is sent by hand; the demo's last component sends
 the viewer its load at boot. The image above is a desktop-chassis capture of
@@ -143,7 +143,7 @@ paths against the working directory):
 ```sh
 cargo xtask build-wasm
 cargo run -p aether-chassis-desktop --bin aether-desktop -- \
-  --boot-manifest crates/aether-demo/lamp-post.boot.json \
+  --boot-manifest crates/aether-demo/demo.boot.json \
   --assets-dir crates/aether-mesh/examples
 ```
 

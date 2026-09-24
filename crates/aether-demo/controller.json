@@ -8,9 +8,9 @@
   "pitch_limit": 1.5,
   "distance_floor": 1.0,
   "seed": {
-    "target": [0.0, 1.6, 0.0],
+    "target": [0.0, 0.6, 0.0],
     "yaw": 0.6,
-    "pitch": -0.35,
-    "distance": 4.0
+    "pitch": -0.4,
+    "distance": 2.4
   }
 }
