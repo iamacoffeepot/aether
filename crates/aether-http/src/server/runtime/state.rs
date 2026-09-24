@@ -94,9 +94,6 @@ pub struct HttpSupervisorState {
     /// owning shard on connection close. An atomic rather than a table —
     /// the connections themselves live sharded.
     pub live_connections: Arc<AtomicUsize>,
-    /// Cached `Arc<Mailer>` for registry validation in the registration
-    /// handlers.
-    pub mailer: Arc<Mailer>,
     pub listener_port: u16,
     pub accept_shutdown: Arc<AtomicBool>,
     pub accept_thread: Option<JoinHandle<()>>,
@@ -220,13 +217,12 @@ impl HttpSupervisorState {
     /// `init` returns this when the resolved config is disabled; the
     /// route-registration handlers then fail fast with an `Err` reply
     /// rather than the mail warn-dropping at an unknown mailbox.
-    pub fn disabled(config: HttpServerConfig, mailer: Arc<Mailer>) -> Self {
+    pub fn disabled(config: HttpServerConfig) -> Self {
         let (_inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         Self {
             config,
             routes: Arc::new(RwLock::new(RouteTable::default())),
             live_connections: Arc::new(AtomicUsize::new(0)),
-            mailer,
             listener_port: 0,
             accept_shutdown: Arc::new(AtomicBool::new(false)),
             accept_thread: None,
