@@ -1,5 +1,6 @@
-//! Native declared dependencies checked at birth (ADR-0230): a
-//! `#[actor(depends(R))]` actor whose dependency is not `Live` is refused
+//! Native declared dependencies checked at birth (ADR-0230): every
+//! declared dependency is checked, and a `#[actor(depends(R))]` actor
+//! whose dependency is not `Live` is refused
 //! before `init` at every birth site — the passive boot, the spawner, and
 //! the pumped-slot boot — naming both actors. A dependency on a pumped slot
 //! reserved at the Claim stage passes, and the build fails if that slot is
@@ -24,6 +25,40 @@ struct AudioDep;
 #[aether_actor::actor(root)]
 impl NativeActor for AudioDep {
     const NAMESPACE: &'static str = "test.deps.audio";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
+        let _ = self;
+    }
+}
+
+struct VideoDep;
+
+#[aether_actor::actor(root)]
+impl NativeActor for VideoDep {
+    const NAMESPACE: &'static str = "test.deps.video";
+    type Config = ();
+
+    fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[aether_actor::handler::single]
+    fn on_probe(&mut self, _ctx: &mut NativeCtx<'_>, _probe: Probe) {
+        let _ = self;
+    }
+}
+
+struct PairDependent;
+
+#[aether_actor::actor(root, depends(AudioDep), depends(VideoDep))]
+impl NativeActor for PairDependent {
+    const NAMESPACE: &'static str = "test.deps.pair";
     type Config = ();
 
     fn init((): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
@@ -127,6 +162,39 @@ fn missing_declared_dependency_fails_build_before_init() {
     assert_eq!(namespace, AudioDep::NAMESPACE);
     assert!(!LONELY_INIT_RAN.load(Ordering::SeqCst), "refused before init ran");
     assert_eq!(registry.lookup(LonelyDependent::NAMESPACE), None, "a failed build leaves nothing claimed");
+}
+
+/// An actor with two declared dependencies is refused when either one is
+/// missing, whichever order the inventory lists its declarations in.
+#[test]
+fn each_declared_dependency_is_checked() {
+    let (registry, mailer) = bare_substrate();
+
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<AudioDep>(())
+        .with_actor::<PairDependent>(())
+        .build_passive()
+        .expect_err("a dependent missing its video dependency must fail the build");
+
+    let BootError::DependencyNotLive { actor, namespace } = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actor, PairDependent::NAMESPACE);
+    assert_eq!(namespace, VideoDep::NAMESPACE);
+
+    let (registry, mailer) = bare_substrate();
+
+    let err = Builder::<TestChassis>::new(registry, mailer)
+        .with_actor::<VideoDep>(())
+        .with_actor::<PairDependent>(())
+        .build_passive()
+        .expect_err("a dependent missing its audio dependency must fail the build");
+
+    let BootError::DependencyNotLive { actor, namespace } = err else {
+        panic!("unexpected error: {err:?}");
+    };
+    assert_eq!(actor, PairDependent::NAMESPACE);
+    assert_eq!(namespace, AudioDep::NAMESPACE);
 }
 
 /// Composition order does not matter: the dependent declared FIRST still

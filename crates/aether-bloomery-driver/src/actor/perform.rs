@@ -91,7 +91,6 @@ impl BundleDriver {
 
     /// Take the parked reply tagged with `caller`, if one is still parked.
     fn take_parked(&mut self, caller: CallerId) -> Option<DeferredReply> {
-        let index = self.callers.iter().position(|(parked, _)| *parked == caller)?;
-        Some(self.callers.swap_remove(index).1)
+        self.callers.remove(&caller)
     }
 }
