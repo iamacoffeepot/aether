@@ -1080,7 +1080,7 @@ mod tests {
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let mut state = test_state();
         let (binding, mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let unknown = MailboxId(0xBAD);
 
         assert!(matches!(
@@ -1186,7 +1186,7 @@ mod tests {
         insert_window(&mut state, WindowId(9), "nine", false);
         insert_window(&mut state, WindowId(2), "two", false);
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
 
         let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
         else {
@@ -1205,7 +1205,7 @@ mod tests {
     fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
         let mut state = test_state();
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let id = predicted_window_id("tools");
 
         assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");

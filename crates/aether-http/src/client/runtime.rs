@@ -616,8 +616,12 @@ mod tests {
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = unrouted_binding(&mailer);
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -653,8 +657,12 @@ mod tests {
             HttpConfig::default().default_timeout,
         );
         let transport = unrouted_binding(&mailer);
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,
@@ -686,8 +694,12 @@ mod tests {
         let mut state =
             HttpCapabilityState::from_adapter(stub as Arc<dyn HttpAdapter>, HttpConfig::default().default_timeout);
         let transport = unrouted_binding(&mailer);
-        let mut ctx =
-            NativeCtx::new(&transport, session_sender(), aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(
+            &transport,
+            session_sender(),
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
         HttpCapability::on_fetch(
             &mut state,
             &mut ctx,

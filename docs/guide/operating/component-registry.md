@@ -205,13 +205,13 @@ There is no drain phase and no drain timeout. ADR-0038 made the splice
 structural, so the replace kind's `drain_timeout_ms` field is vestigial wire
 shape the MCP layer always sends empty; the tool exposes no such argument.
 Require an explicit successful result, then re-run
-`describe_component` and a safe probe. Failure is phase-dependent: pre-splice
-validation preserves the old guest; an instantiation failure after the old
-guest is taken can leave the trampoline empty; a rehydrate failure installs the
-new guest but still returns `Err`. Observe live behavior before deciding whether
-to retry or roll forward. After a post-splice error, both MCP's cache and the
-substrate capability registry can describe the old handler set even when the
-slot is empty or the new guest remains installed. Use
+`describe_component` and a safe probe. Failure is phase-dependent: validation
+and a failed instantiation preserve the old guest untouched; a state-save,
+carried-context or rehydrate failure reinstalls the old guest after its `unwire`
+and `on_dehydrate` hooks ran, and their effects stay. Observe live behavior
+before deciding whether to retry or roll forward. After an error, both MCP's
+cache and the substrate capability registry describe the old handler set, which
+the reinstated guest may no longer fully serve if its hooks tore down state. Use
 [Replacement failure states](components/replacement-failure-states.md) rather
 than treating `describe_component` as rollback proof.
 

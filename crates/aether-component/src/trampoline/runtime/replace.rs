@@ -253,15 +253,17 @@ impl WasmTrampolineState {
     }
 
     /// Run `unwire` then `on_dehydrate` on the old instance and lift any
-    /// saved-state bundle. If the trampoline is currently empty (a refill
-    /// after `DropComponent`), there's no prior wasm to drain; the new
-    /// instance starts from scratch. Issue 584 Phase 2b: `unwire` fires first
-    /// so the old instance can announce its retirement before the swap.
+    /// saved-state bundle, handing the retired guest back with it so a
+    /// replacement that fails to rehydrate can reinstall it (#6134). If the
+    /// trampoline is currently empty (a refill after `DropComponent`), there's
+    /// no prior wasm to drain and this returns `None`; the new instance starts
+    /// from scratch. Issue 584 Phase 2b: `unwire` fires first so the old
+    /// instance can announce its retirement before the swap.
     fn retire_guest(
         &mut self,
         target: &impl Display,
         replacement: &HashSet<KindId>,
-    ) -> Result<Option<StateBundle>, String> {
+    ) -> Result<Option<(Component, Option<StateBundle>)>, String> {
         let Some(mut old) = self.component.take() else {
             return Ok(None);
         };
@@ -279,22 +281,21 @@ impl WasmTrampolineState {
         // It runs before the cursor and reply table move out, so the old
         // guest keeps both, and its context table was only borrowed to
         // compose the bundle. Whatever `unwire` and `on_dehydrate` tore down
-        // stays gone (#6134).
+        // stays gone, as ADR-0016 §4 accepts for a rollback after the hooks.
         if let Err(error) = self.check_carried_contexts(target, saved.as_ref(), replacement) {
             self.component = Some(old);
             return Err(error);
         }
         // #6400: record the leaving guest's cursor after `unwire` and
         // `on_dehydrate`, which may still send or reply, so the
-        // replacement — or a later refill, if its instantiate fails —
-        // resumes past its request ids and, #6422, its reply ids.
+        // replacement — or a later refill — resumes past its request ids
+        // and, #6422, its reply ids.
         self.retired_correlations = Some(old.correlation_cursor());
         // #6409: likewise move out its reply table, after both hooks
         // (which may still answer handles), so the replacement answers
-        // the rest to their own requesters. The old component drops at the
-        // end of scope — the `Component`'s own `Drop` releases the wasm store.
+        // the rest to their own requesters.
         self.retired_replies = Some(old.take_pending_replies());
-        Ok(saved)
+        Ok(Some((old, saved)))
     }
 
     pub fn handle_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) -> ReplaceResult {
@@ -365,35 +366,28 @@ impl WasmTrampolineState {
         };
         capabilities.assets = load_window.catalog();
 
-        let saved = match self.retire_guest(&payload.target, &replacement_kinds) {
-            Ok(saved) => saved,
-            Err(error) => return ReplaceResult::Err { error },
-        };
-
         // Build a fresh `ComponentCtx` for the new instance — same
         // mailer + registry/outbound/input references. Mailbox id is
-        // preserved across replace per ADR-0022 §4, and so are its
-        // correlation and reply-lineage sequences (ADR-0139 §3, #6422): the
-        // new instance resumes both from the guest that last left the slot,
-        // so it reuses neither a request id nor a reply `MailId`. Its reply
-        // table starts
-        // empty and is replaced by the carried one once instantiate
-        // succeeds (#6409).
+        // preserved across replace per ADR-0022 §4. The correlation cursor
+        // and reply table it inherits are known only once the old guest's
+        // hooks have run, so both are resumed after instantiate, below.
         let mut substrate_ctx = ComponentCtx::new(
             self.mailbox,
             Arc::clone(&self.registry),
             Arc::clone(&self.mailer),
             Arc::clone(&self.outbound),
         );
-        if let Some(cursor) = self.retired_correlations {
-            substrate_ctx.resume_correlations(cursor);
-        }
         substrate_ctx.install_binding(ctx.transport_arc());
         // ADR-0163 §3 (#3984): install the load window before instantiate so
         // the replacement's `init` can pull assets; closed after instantiate
         // (replace re-runs `init`, not `wire`).
         substrate_ctx.install_load_window(load_window);
 
+        // #6134: instantiate the candidate while the old guest is still
+        // installed and wired. `init` cannot send mail, so starting it early
+        // makes nothing visible outside its own store, and a failed `init`
+        // drops the candidate before the old guest runs any hook.
+        //
         // ADR-0090 (issue 1257): thread the replace mail's config
         // bytes into the new instance's typed `init`, the same way
         // the load path does. Empty means "no config"; a typed-config
@@ -411,12 +405,20 @@ impl WasmTrampolineState {
                 return ReplaceResult::Err { error: format!("wasm instantiation failed: {e}") };
             }
         };
-        // #6409: resume the carried reply table only now that instantiate
-        // succeeded — it consumes the ctx, so a table installed before it
-        // would die with a failed start; left in the slot, the next refill
-        // resumes it. Nothing was delivered during instantiate, so the new
-        // table is still empty, and this precedes `on_rehydrate` and every
-        // delivery.
+
+        let predecessor = match self.retire_guest(&payload.target, &replacement_kinds) {
+            Ok(predecessor) => predecessor,
+            Err(error) => return ReplaceResult::Err { error },
+        };
+
+        // ADR-0139 §3 (#6400, #6422): continue the mailbox's correlation and
+        // reply-lineage sequences from the guest that last left the slot, so
+        // the new instance reuses neither a request id nor a reply `MailId`.
+        // #6409: resume the carried reply table the same way. `init` sent
+        // nothing, and both precede `on_rehydrate` and every delivery.
+        if let Some(cursor) = self.retired_correlations {
+            new_component.resume_correlations(cursor);
+        }
         if let Some(replies) = self.retired_replies.take() {
             new_component.resume_replies(replies);
         }
@@ -424,6 +426,25 @@ impl WasmTrampolineState {
         // load window's job ends once the replacement instantiated — close
         // it, retaining the catalog metadata for the instance's life.
         new_component.close_load_window();
+
+        // ADR-0016 §4: rehydrate the new instance if the old one produced a
+        // bundle. A failed rehydrate aborts the replace: the candidate drops
+        // without publishing its aliases, and the old guest is reinstalled
+        // with its reply table and past every id the candidate minted. The
+        // old guest's `unwire` / `on_dehydrate` effects and any mail the
+        // candidate sent from `on_rehydrate` stay, as ADR-0016 §4 accepts.
+        // The module, hosted type, capability registration and cost cells
+        // are only written below, so they stay the old guest's. On success
+        // the retired guest drops here — the `Component`'s own `Drop`
+        // releases its wasm store.
+        if let Some((mut old, Some(bundle))) = predecessor
+            && let Err(e) = new_component.call_on_rehydrate(&bundle)
+        {
+            old.resume_replies(new_component.take_pending_replies());
+            old.resume_correlations(new_component.correlation_cursor());
+            self.component = Some(old);
+            return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
+        }
 
         // ADR-0097: the new module is now resident — retain it (and
         // the refreshed per-type cap map) so sibling spawns after this
@@ -438,21 +459,6 @@ impl WasmTrampolineState {
         // type rather than reverting to the original load's. A bare
         // replace leaves this unchanged (`effective_tag == self.type_tag`).
         self.type_tag = effective_tag;
-
-        // ADR-0016 §4: rehydrate the new instance if the old one
-        // produced a bundle. A failed rehydrate still installs the
-        // new component (the old one is already gone) and surfaces
-        // the error so the agent decides whether to roll forward.
-        if let Some(bundle) = saved
-            && let Err(e) = new_component.call_on_rehydrate(&bundle)
-        {
-            let (aliases, retired) =
-                (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
-            self.component = Some(new_component);
-            self.stage_inline_aliases(ctx, aliases);
-            self.stage_inline_alias_retirements(ctx, retired);
-            return ReplaceResult::Err { error: format!("on_rehydrate failed: {e}") };
-        }
 
         let (aliases, retired) =
             (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());

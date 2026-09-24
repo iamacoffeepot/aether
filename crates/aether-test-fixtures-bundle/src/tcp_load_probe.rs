@@ -50,7 +50,7 @@ impl TcpLoadProbe {
     }
 }
 
-#[actor]
+#[actor(depends(TcpCapability))]
 impl WasmActor for TcpLoadProbe {
     const NAMESPACE: &'static str = "test.tcp_load_probe";
 
