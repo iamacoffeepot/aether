@@ -93,7 +93,7 @@ mod engine {
     /// `engine_id` is the plain UUID string the engines cap minted at
     /// spawn time — `EngineId` itself doesn't implement `Schema`, so
     /// the wire carries the string form. `rpc_port` is the localhost port
-    /// the cap assigned the substrate's `RpcServerCapability`.
+    /// the substrate's `RpcServerCapability` reported binding.
     ///
     /// `last_heartbeat_age_millis` is how long ago the cap last saw a
     /// liveness signal from this engine (issue 1339) — `0` right after
@@ -198,18 +198,19 @@ mod engine {
     ///
     /// The cap resolves `selector` against its content-addressed binary
     /// store (ADR-0115) to the stored content bytes, materializes them to
-    /// an executable temp file, picks a free localhost port for the
-    /// substrate's `RpcServerCapability`, injects it as `AETHER_RPC_PORT`,
-    /// forks the realized binary with `args` forwarded verbatim, then
-    /// boots an `aether.fleet.proxy:<id>` actor that dials it. Reply:
+    /// an executable temp file, and forks it with `args` forwarded
+    /// verbatim followed by `--rpc-port 0 --rpc-port-file <path>` argv
+    /// (ADR-0162). The substrate binds a port it picks and reports it
+    /// through that file, and the `aether.fleet.proxy:<id>` actor the cap
+    /// boots dials the reported port. Reply:
     /// [`SpawnEngineResult`] — `Err` if the selector resolves to no stored
     /// binary. The host filesystem path is gone from the spawn surface;
     /// the only path input is the one-time [`UploadBinary`].
     ///
     /// `boot_manifest` (when `Some`) is the absolute path to a
     /// `BootManifest` JSON of components to auto-load at boot; the cap
-    /// injects it as `AETHER_BOOT_MANIFEST` alongside `AETHER_RPC_PORT`,
-    /// and the spawned chassis reads the listed wasm itself (spawn is
+    /// addresses it to the child as `--boot-manifest` argv, and the
+    /// spawned chassis reads the listed wasm itself (spawn is
     /// single-host) so the engine comes up with those components already
     /// loading — no follow-up `load_component` round-trips. `None` boots
     /// a bare engine, the pre-existing behaviour.
@@ -223,12 +224,12 @@ mod engine {
     /// Reply to [`SpawnEngine`]. Issue 763 P4.
     ///
     /// `Ok` carries the freshly minted `engine_id` (plain UUID string —
-    /// pass it back to [`TerminateEngine`]) and the `rpc_port` the cap
-    /// assigned. `Err` carries a free-form reason — fork failure, or
+    /// pass it back to [`TerminateEngine`]) and the `rpc_port` the
+    /// substrate reported. `Err` carries a free-form reason — fork failure, or
     /// the proxy failing to connect within the substrate's startup
     /// window — plus `engine_id`, the allocated id when the failure came
-    /// after the cap minted one (`None` for a pre-allocation failure
-    /// like a selector miss or a port-allocation error). A failed spawn
+    /// after the cap minted one (`None` for the one pre-allocation
+    /// failure, a selector miss). A failed spawn
     /// with `engine_id = Some(_)` also leaves a matching `SpawnFailed`
     /// entry in [`ListEnginesResult`]'s `recently_died` ring, so a caller
     /// can correlate and reap. On `Err` no child process is left running.

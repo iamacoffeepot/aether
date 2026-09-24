@@ -1,8 +1,10 @@
 //! Journal view: the folds, their shared cursor, and the fenced write queue.
 //!
 //! The core learns the journal only from [`ReadEvents`](aether_bloomery_kinds::ReadEvents)
-//! pages. Each entry folds into [`Heads`], [`Requests`], and [`Activations`];
-//! pages continue until the cursor reaches the page's `head`. At most one
+//! pages. Each entry folds into [`Heads`], [`HeadHistory`], [`Requests`], and
+//! [`Activations`]; pages continue until the cursor reaches the page's `head`.
+//! The history answers the `Heads` of any seq up to the cursor, so routing
+//! never rereads the journal to rebuild them. At most one
 //! [`AppendRecords`](aether_bloomery_kinds::AppendRecords) is in flight,
 //! fenced at the cursor, and writing decisions come from a FIFO of pending
 //! writes, made only when the core is caught up with no write in flight. A
@@ -12,7 +14,7 @@
 use std::collections::VecDeque;
 
 use aether_bloomery_kinds::{Call, Digest, DriverRecord, EncodedArtifact, JournalEntry, ReactorName, SetHead};
-use aether_bloomery_view::{Activations, Heads, Requests};
+use aether_bloomery_view::{Activations, HeadHistory, Heads, Requests};
 
 use super::ticket::{AppendTicket, CallerId, EventsTicket};
 
@@ -89,6 +91,7 @@ pub enum RequestedClaim {
 #[derive(Debug)]
 pub struct Journal {
     heads: Heads,
+    history: HeadHistory,
     requests: Requests,
     activations: Activations,
     cursor: u64,
@@ -103,6 +106,7 @@ impl Journal {
     pub fn new() -> Self {
         Self {
             heads: Heads::new(),
+            history: HeadHistory::new(),
             requests: Requests::new(),
             activations: Activations::new(),
             cursor: 0,
@@ -116,6 +120,11 @@ impl Journal {
 
     pub fn heads(&self) -> &Heads {
         &self.heads
+    }
+
+    /// Every head move through the cursor, answering `Heads` at any earlier seq.
+    pub fn history(&self) -> &HeadHistory {
+        &self.history
     }
 
     pub fn requests(&self) -> &Requests {
@@ -161,6 +170,9 @@ impl Journal {
             self.heads
                 .apply(&folded)
                 .map_err(|error| format!("heads fold rejected journal entry {}: {error}", entry.seq))?;
+            self.history
+                .apply(&folded)
+                .map_err(|error| format!("head history fold rejected journal entry {}: {error}", entry.seq))?;
             self.requests
                 .apply(&folded)
                 .map_err(|error| format!("requests fold rejected journal entry {}: {error}", entry.seq))?;

@@ -17,8 +17,11 @@ use crate::views::{ErasedView, ViewCtor, ViewSet};
 /// Callers push contiguous journal entries. Views are constructed on first
 /// use, catch up from their trusted cursor, and stay poisoned after a failed
 /// fold. Retained views must be `Send` so this owner can be held by an actor.
-/// This type does not own a journal.
+/// This type does not own a journal. The crate's [`crate::Root`] releases
+/// entries at or below every constructed view's cursor and keeps the last one
+/// as the trigger.
 pub struct Owner {
+    base: Seq,
     prefix: Vec<Entry>,
     slots: BTreeMap<TypeId, CachedView>,
 }
@@ -34,13 +37,13 @@ impl Owner {
     /// Empty prefix at [`Seq`] `(0)`, no views constructed.
     #[must_use]
     pub const fn new() -> Self {
-        Self { prefix: Vec::new(), slots: BTreeMap::new() }
+        Self { base: Seq(0), prefix: Vec::new(), slots: BTreeMap::new() }
     }
 
     /// Last retained sequence, or [`Seq`] `(0)` when nothing has been pushed.
     #[must_use]
     pub fn cursor(&self) -> Seq {
-        self.prefix.last().map_or(Seq(0), |entry| entry.seq)
+        self.prefix.last().map_or(self.base, |entry| entry.seq)
     }
 
     /// Whether any constructed view is unusable after a failed fold.
@@ -56,6 +59,38 @@ impl Owner {
     ///
     /// [`PrepareError`] when `entries` is not the next dense sequence.
     pub fn push(&mut self, entries: &[Entry]) -> Result<(), PrepareError> {
+        self.check_next(entries)?;
+        self.prefix.extend_from_slice(entries);
+        Ok(())
+    }
+
+    /// [`Self::push`] that moves `entries` in rather than cloning them.
+    pub(crate) fn push_owned(&mut self, entries: Vec<Entry>) -> Result<(), PrepareError> {
+        self.check_next(&entries)?;
+        self.prefix.extend(entries);
+        Ok(())
+    }
+
+    /// Drop every retained entry each constructed view has folded, keeping the
+    /// last one as the trigger. With no constructed view, keep only the last.
+    pub(crate) fn release_folded(&mut self) {
+        let cursor = self.cursor();
+        let folded = self
+            .slots
+            .values()
+            .filter(|slot| !slot.poisoned)
+            .map(|slot| slot.last_trusted_cursor)
+            .min()
+            .map_or(cursor, |slowest| slowest.min(cursor));
+        let released = usize::try_from(folded.0.saturating_sub(self.base.0))
+            .unwrap_or(usize::MAX)
+            .min(self.prefix.len().saturating_sub(1));
+        if let Some(last) = self.prefix.drain(..released).next_back() {
+            self.base = last.seq;
+        }
+    }
+
+    fn check_next(&self, entries: &[Entry]) -> Result<(), PrepareError> {
         if entries.is_empty() {
             return Ok(());
         }
@@ -69,7 +104,6 @@ impl Owner {
             }
             expected = Seq(expected.0.checked_add(1).ok_or(PrepareError::Overflow)?);
         }
-        self.prefix.extend_from_slice(entries);
         Ok(())
     }
 
@@ -141,23 +175,21 @@ impl Owner {
     }
 
     fn advance_to(&mut self, ctor: ViewCtor, target: Seq) -> Result<(), PrepareError> {
-        let last_trusted_cursor = self
+        let slot = self
             .slots
-            .get(&ctor.id)
-            .ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor: Seq(0) })?
-            .last_trusted_cursor;
+            .get_mut(&ctor.id)
+            .ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor: Seq(0) })?;
+        let last_trusted_cursor = slot.last_trusted_cursor;
         if last_trusted_cursor >= target {
             return Ok(());
         }
-        let entries = self.suffix(last_trusted_cursor, target)?.to_vec();
-        let slot =
-            self.slots.get_mut(&ctor.id).ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor })?;
+        let entries = suffix(&self.prefix, self.base, last_trusted_cursor, target)?;
         slot.poisoned = true;
         let advanced = slot
             .inner
             .as_mut()
             .ok_or(PrepareError::Poisoned { view: ctor.name, last_trusted_cursor })?
-            .advance(&entries);
+            .advance(entries);
         match advanced {
             Ok(()) => {
                 let actual = slot
@@ -181,13 +213,9 @@ impl Owner {
         }
     }
 
-    fn suffix(&self, after: Seq, through: Seq) -> Result<&[Entry], PrepareError> {
-        let start = usize::try_from(after.0).map_err(|_| PrepareError::Overflow)?;
-        let end = usize::try_from(through.0).map_err(|_| PrepareError::Overflow)?;
-        if end > self.prefix.len() || start > end {
-            return Err(seq_mismatch(Seq(after.0.saturating_add(1)), through));
-        }
-        Ok(&self.prefix[start..end])
+    #[cfg(test)]
+    pub(crate) fn retained(&self) -> usize {
+        self.prefix.len()
     }
 
     pub(crate) fn slot_ref(&self, id: TypeId) -> Option<&dyn Any> {
@@ -205,6 +233,21 @@ impl Default for Owner {
     }
 }
 
+/// Retained entries after `after` through `through`, where `prefix[0]` is the
+/// entry after `base`. An `after` below `base` was released and fails like an
+/// out-of-range suffix.
+fn suffix(prefix: &[Entry], base: Seq, after: Seq, through: Seq) -> Result<&[Entry], PrepareError> {
+    let mismatch = || seq_mismatch(Seq(after.0.saturating_add(1)), through);
+    let start =
+        usize::try_from(after.0.checked_sub(base.0).ok_or_else(mismatch)?).map_err(|_| PrepareError::Overflow)?;
+    let end =
+        usize::try_from(through.0.checked_sub(base.0).ok_or_else(mismatch)?).map_err(|_| PrepareError::Overflow)?;
+    if end > prefix.len() || start > end {
+        return Err(mismatch());
+    }
+    Ok(&prefix[start..end])
+}
+
 fn unique_ctors<S: ViewSet>() -> Vec<ViewCtor> {
     let mut unique = Vec::new();
     let mut seen = BTreeSet::new();
@@ -214,4 +257,98 @@ fn unique_ctors<S: ViewSet>() -> Vec<ViewCtor> {
         }
     });
     unique
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::vec::Vec;
+    use core::error::Error;
+    use core::fmt;
+    use core::ops::RangeInclusive;
+
+    use aether_bloomery_kinds::{Entry, Seq};
+    use aether_bloomery_view::View;
+    use aether_data::KindId;
+
+    use super::Owner;
+
+    /// Counts folded entries and refuses a batch that skips or repeats one.
+    struct Counter<const TAG: u8> {
+        cursor: Seq,
+        folded: u64,
+    }
+
+    #[derive(Debug)]
+    struct Gap;
+
+    impl fmt::Display for Gap {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("batch does not start after the cursor")
+        }
+    }
+
+    impl Error for Gap {}
+
+    impl<const TAG: u8> View for Counter<TAG> {
+        type Error = Gap;
+
+        fn empty() -> Self {
+            Self { cursor: Seq(0), folded: 0 }
+        }
+
+        fn cursor(&self) -> Seq {
+            self.cursor
+        }
+
+        fn advance(&mut self, entries: &[Entry]) -> Result<(), Self::Error> {
+            if entries.first().is_some_and(|first| first.seq.0 != self.cursor.0 + 1) {
+                return Err(Gap);
+            }
+            self.folded += entries.len() as u64;
+            if let Some(last) = entries.last() {
+                self.cursor = last.seq;
+            }
+            Ok(())
+        }
+    }
+
+    type A = Counter<0>;
+    type B = Counter<1>;
+
+    fn entries(seqs: RangeInclusive<u64>) -> Vec<Entry> {
+        seqs.map(|seq| Entry { seq: Seq(seq), kind: KindId(1), cause: None, recorded_at_millis: 0, bytes: Vec::new() })
+            .collect()
+    }
+
+    #[test]
+    fn release_keeps_the_trigger_and_views_keep_folding() {
+        // Catches a dropped trigger, an off-by-one in `base`, and a cursor that falls back to 0.
+        let mut owner = Owner::new();
+        owner.push(&entries(1..=300)).expect("dense");
+        owner.warm::<A>().expect("fold");
+        owner.release_folded();
+        assert_eq!(owner.retained(), 1);
+        assert_eq!(owner.cursor(), Seq(300));
+
+        owner.push(&entries(301..=302)).expect("dense");
+        owner.warm::<A>().expect("fold");
+        let view = owner.get::<A>().expect("constructed");
+        assert_eq!((view.cursor, view.folded), (Seq(302), 302));
+    }
+
+    #[test]
+    fn release_holds_entries_a_lagging_view_still_needs() {
+        // Catches releasing past the slowest view's cursor.
+        let mut owner = Owner::new();
+        owner.push(&entries(1..=5)).expect("dense");
+        owner.warm::<A>().expect("fold");
+        owner.push(&entries(6..=10)).expect("dense");
+        owner.warm::<B>().expect("fold");
+        owner.release_folded();
+        assert_eq!(owner.retained(), 5);
+
+        owner.warm::<A>().expect("fold");
+        let view = owner.get::<A>().expect("constructed");
+        assert_eq!((view.cursor, view.folded), (Seq(10), 10));
+    }
 }

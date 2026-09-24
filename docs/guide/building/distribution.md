@@ -157,8 +157,8 @@ Two boot channels feed a chassis its component set, and they are distinct from
 the persisted package manifest above:
 
 - The JSON boot manifest (`crate::boot_manifest`) names component files by
-  path. The hub's `spawn_substrate` writes it and injects it through
-  `AETHER_BOOT_MANIFEST`; the spawned chassis reads the listed wasm itself. Its
+  path. The hub's `spawn_substrate` writes it and addresses it to the child as
+  `--boot-manifest` argv; the spawned chassis reads the listed wasm itself. Its
   entries take `config` (bytes) or `config_json` (encoded at read time against
   the component's declared `Config` schema), so a checked-in manifest is the
   no-packaging developer path — `--boot-manifest demo/puppet-turntable.boot.json`

@@ -668,8 +668,7 @@ impl HttpShardState {
         // Per-connection transport reader below the mail layer — carries
         // inbound mail in; no inbound chain to inherit, no settlement
         // umbrella.
-        #[allow(clippy::disallowed_methods)]
-        let thread = match thread::Builder::new().name(format!("aether-http-reader-{conn_id}")).spawn(move || {
+        let thread = match self.wake.spawn_sidecar(format!("aether-http-reader-{conn_id}"), move || {
             run_reader_loop(read_half, conn_id, &shutdown_for_thread, &sink, &control_rx, tuning, &shared);
         }) {
             Ok(thread) => thread,

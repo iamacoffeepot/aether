@@ -10,23 +10,28 @@
 //! Worker loop:
 //!
 //! ```text
-//! loop {
+//! run_or_abort(aborter, "scheduler worker aether-worker-<n>", || loop {
 //!     slot = acquire_slot()?;             // own deque → steal → spin → park
 //!     match catch_unwind(|| slot.run_cycle()) {
 //!         Ok(Idle | Closed) => drop(slot),
 //!         Ok(Requeue)       => { injector.push(slot); spin.notify(); }
-//!         Err(payload)      => aborter.abort(panic_reason(payload)),
+//!         Err(payload)      => aborter.abort(panic_reason(actor, payload)),
 //!     }
-//! }
+//! })
 //! ```
 //!
 //! Panic disposition follows ADR-0063 / Open Question 8 of issue 635:
-//! a handler panic catches at the worker boundary and escalates via
-//! the chassis-level aborter. The worker thread itself doesn't crash
-//! (the aborter calls `process::exit`); the catch is what stops the
-//! pool from losing a worker thread silently. Per-actor recovery
-//! (drop the slot, keep the pool alive) is parked behind a future
-//! ADR.
+//! a panic anywhere on a worker escalates via the chassis-level
+//! aborter. The whole worker body runs under the fail-fast boundary
+//! (`fail_fast::run_or_abort`), which catches a panic while acquiring
+//! the next slot, while dropping an actor's last slot reference (its
+//! state `Drop` impls run there in the `Closed` case), or while
+//! requeueing. The per-cycle catch around `run_cycle` stays inside it
+//! only to name the actor in the reason, which the outer boundary
+//! cannot. The worker thread itself doesn't crash (the aborter calls
+//! `process::exit`); the boundary is what stops the pool from losing a
+//! worker thread silently. Per-actor recovery (drop the slot, keep the
+//! pool alive) is parked behind a future ADR.
 
 use std::any::Any;
 use std::panic::AssertUnwindSafe;
@@ -35,6 +40,7 @@ use std::thread::{self, JoinHandle};
 
 use crossbeam_deque::{Injector, Stealer, Worker};
 
+use crate::actor::native::offload::fail_fast;
 use crate::scheduler::spin_park::{Acquired, SpinPark};
 use crate::scheduler::worker_deque;
 
@@ -199,6 +205,8 @@ impl Pool {
             let injector = Arc::clone(&injector);
             let spin = Arc::clone(&spin);
             let aborter = Arc::clone(&aborter);
+            let boundary = Arc::clone(&aborter);
+            let site = format!("scheduler worker {name}");
             let template = config.budget_template;
             let thread_name = name.clone();
             // Scheduler worker pool — the execution floor that *runs* actors; spawned
@@ -206,7 +214,11 @@ impl Pool {
             #[allow(clippy::disallowed_methods)]
             let handle = thread::Builder::new()
                 .name(thread_name)
-                .spawn(move || worker_loop(idx, deque, stealers, injector, spin, aborter, template))
+                .spawn(move || {
+                    fail_fast::run_or_abort(boundary.as_ref(), &site, move || {
+                        worker_loop(idx, deque, stealers, injector, spin, aborter, template);
+                    });
+                })
                 .expect("spawn pool worker thread");
             workers.push(PoolWorkerJoin { handle, name });
         }
@@ -410,6 +422,7 @@ fn format_panic_payload(payload: &Box<dyn Any + Send>, actor_label: &str) -> Str
 mod tests {
     use super::*;
     use crate::runtime::lifecycle::PanicAborter;
+    use crate::runtime::panic_hook::payload_string;
     use crate::scheduler::slot::BATCH_MAX_USEC;
     use crate::scheduler::slot::tests::{CounterSlot, TEST_WORKERS};
     use crate::scheduler::{SlotStateLabel, WakeHandle};
@@ -629,6 +642,55 @@ mod tests {
         }
     }
 
+    /// A slot that runs one cycle and closes, then panics in its `Drop`.
+    /// Handed to the pool as its only strong reference, so the worker's
+    /// `drop(slot)` after `run_cycle` is the last drop — the path that runs
+    /// an actor's state `Drop` impls outside the per-cycle catch.
+    struct DropPanicSlot {
+        ran: Arc<AtomicBool>,
+    }
+
+    impl Drainable for DropPanicSlot {
+        fn run_cycle(&self, _budget: BatchBudget) -> CycleResult {
+            self.ran.store(true, Ordering::Release);
+            CycleResult::Closed
+        }
+
+        fn label(&self) -> &'static str {
+            "drop-panic-slot"
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
+    impl Drop for DropPanicSlot {
+        fn drop(&mut self) {
+            panic!("slot drop probe 6448");
+        }
+    }
+
+    /// A panic on a pool worker outside `run_cycle` — here the last drop of
+    /// a closed slot — escalates through the [`FatalAborter`] with the site
+    /// and the panic payload in the reason, rather than ending the worker
+    /// silently. Body here, `#[test]` wrapper alongside (issue 1522 — pool +
+    /// `wait_until`).
+    fn worker_panic_outside_a_handler_escalates_via_aborter_body() {
+        let handle = standard_handle(1);
+        let ran = Arc::new(AtomicBool::new(false));
+        handle.wake_sink().schedule(Arc::new(DropPanicSlot { ran: Arc::clone(&ran) }));
+
+        assert!(wait_until(Duration::from_secs(5), || ran.load(Ordering::Acquire)));
+
+        let results = handle.shutdown_with_results();
+        let payload = results.into_iter().next().unwrap().expect_err("the worker must end in the escalated panic");
+        let reason = payload_string(payload.as_ref());
+        assert!(reason.contains("fatal abort"), "the panic must escalate through the aborter: {reason}");
+        assert!(reason.contains("scheduler worker aether-worker-0"), "the reason names the worker: {reason}");
+        assert!(reason.contains("slot drop probe 6448"), "the reason carries the panic payload: {reason}");
+    }
+
     /// Regression for the every-K chain backstop
     /// (iamacoffeepot/aether#1535): W self-sustaining loops capture all
     /// W workers, then an independent slot arrives through the
@@ -708,6 +770,11 @@ mod tests {
     #[test]
     fn handler_panic_escalates_via_aborter() {
         handler_panic_escalates_via_aborter_body();
+    }
+
+    #[test]
+    fn worker_panic_outside_a_handler_escalates_via_aborter() {
+        worker_panic_outside_a_handler_escalates_via_aborter_body();
     }
 
     /// Stress: 4 slots × 1000 envelopes each across 2 workers. Confirm

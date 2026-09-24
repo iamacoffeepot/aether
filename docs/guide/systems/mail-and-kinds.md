@@ -187,7 +187,9 @@ internals settle — build on the contracts above, not the internals.
 **From an agent (over MCP).** `send_mail` takes
 `{engine_id, address, kind_name, params}` — `address` is the mailbox,
 `kind_name` is the payload shape, `params` is JSON encoded against the
-kind's schema. For a batch that must settle as one traced unit, use
+kind's schema. An `Option` field may be left out of `params` and encodes as
+`None`; every other field is required. For a batch that must settle as one
+traced unit, use
 `send_mail_traced`. The active MCP tool schema is authoritative for arguments;
 [the harness](../mcp-harness.md) explains the operating model.
 

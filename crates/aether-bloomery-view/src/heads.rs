@@ -156,7 +156,8 @@ impl From<HeadNameError> for HeadFoldError {
     }
 }
 
-fn binding_from(entry: &Entry) -> Result<Option<(RecordedHead, Digest)>, HeadFoldError> {
+/// The binding a recognized move sets, shared by [`Heads`] and [`crate::HeadHistory`].
+pub fn binding_from(entry: &Entry) -> Result<Option<(RecordedHead, Digest)>, HeadFoldError> {
     if entry.kind == RecordedHeadMove::ID {
         let event = entry.decode::<RecordedHeadMove>()?;
         Ok(Some((event.head().clone(), event.to())))

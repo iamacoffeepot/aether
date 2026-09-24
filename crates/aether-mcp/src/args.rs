@@ -30,13 +30,15 @@ pub struct SpawnSubstrateArgs {
     #[serde(default)]
     pub target: Option<String>,
     /// Extra command-line arguments forwarded to the substrate
-    /// verbatim. `AETHER_RPC_PORT` is injected by the hub regardless.
+    /// verbatim. The hub appends its own `--rpc-port 0 --rpc-port-file
+    /// <path>` flags (and `--boot-manifest <path>` when `components` is
+    /// set), so `args` must not carry them.
     #[serde(default)]
     pub args: Vec<String>,
     /// Components to auto-load at boot, in order. When non-empty,
     /// `aether-mcp` stages a temporary boot-manifest JSON of these specs
-    /// and hands its path to the hub, which injects it as
-    /// `AETHER_BOOT_MANIFEST` at the fork — so the spawned engine comes
+    /// and hands its path to the hub, which addresses it to the child as
+    /// `--boot-manifest` argv — so the spawned engine comes
     /// up with these components already live, in one call, with no
     /// follow-up `load_component`. The engine binds its RPC port only once
     /// every boot instance has loaded, and a boot component that fails to
@@ -392,7 +394,7 @@ pub struct MailSpec {
 pub struct EngineInfo {
     /// Engine UUID — pass to `send_mail` / `terminate_substrate`.
     pub engine_id: String,
-    /// The localhost RPC port the hub assigned this substrate.
+    /// The localhost RPC port this substrate reported binding.
     pub rpc_port: u16,
     /// Milliseconds since the hub last confirmed this engine alive
     /// (issue 1339): `0` right after spawn and refreshed each heartbeat when
@@ -423,7 +425,8 @@ pub struct SpawnSubstrateResponse {
 pub struct DeadEngineInfo {
     /// Engine UUID it carried while live.
     pub engine_id: String,
-    /// The localhost RPC port the hub had assigned its substrate.
+    /// The localhost RPC port it carried while live; `0` when it failed to
+    /// spawn before reporting one.
     pub rpc_port: u16,
     /// Why it left the supervised list: `"terminated"` (a deliberate
     /// `terminate_substrate`), `"crashed"` (the substrate closed its RPC

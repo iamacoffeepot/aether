@@ -405,8 +405,8 @@ mod tests {
 
         let (_registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
-        // Spawn: the cap assigns a port, forks the substrate, and the proxy
-        // retries the dial until the fresh process binds. The tracked root
+        // Spawn: the cap forks the substrate, and the proxy dials the port
+        // the fresh process reports once it binds. The tracked root
         // proves the manual handler retains the original correlation and
         // settlement through owner apply and the later task turn.
         let correlation_id = 0x4068;
@@ -476,7 +476,7 @@ mod tests {
     /// to a real headless child, but a test-only canonical route owns the
     /// would-be proxy name when the registry owner applies the birth. The
     /// prepared proxy state must roll back before the single id-bearing reply,
-    /// leaving no live row and no process still listening on its assigned port.
+    /// leaving no live row and no process still listening on its reported port.
     #[test]
     fn owner_rejected_staged_proxy_replies_once_and_reaps_the_child() {
         let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();

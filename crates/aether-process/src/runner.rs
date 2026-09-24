@@ -20,6 +20,7 @@
 //! job; keeping them out of here leaves the loop a pure, testable unit.
 
 use std::io::{ErrorKind, Read, Write};
+use std::panic;
 use std::process::{Child, Command, Stdio};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -105,16 +106,16 @@ pub fn run_to_completion(mut command: Command, stdin: Vec<u8>, timeout: Duration
             Ok(Some(status)) => {
                 break RunOutcome::Completed {
                     exit_code: status.code(),
-                    stdout: join_drain(stdout_reader),
-                    stderr: join_drain(stderr_reader),
+                    stdout: join_or_resume(stdout_reader),
+                    stderr: join_or_resume(stderr_reader),
                 };
             }
             Ok(None) => {
                 if started.elapsed() >= timeout {
                     group_kill_and_reap(&mut child);
                     break RunOutcome::TimedOut {
-                        stdout: join_drain(stdout_reader),
-                        stderr: join_drain(stderr_reader),
+                        stdout: join_or_resume(stdout_reader),
+                        stderr: join_or_resume(stderr_reader),
                     };
                 }
                 thread::sleep(POLL_INTERVAL);
@@ -123,8 +124,8 @@ pub fn run_to_completion(mut command: Command, stdin: Vec<u8>, timeout: Duration
                 // Reap before surfacing (the xtask discipline) so a wait
                 // error never leaves a zombie.
                 group_kill_and_reap(&mut child);
-                drop(join_drain(stdout_reader));
-                drop(join_drain(stderr_reader));
+                drop(join_or_resume(stdout_reader));
+                drop(join_or_resume(stderr_reader));
                 break RunOutcome::WaitFailed { detail: e.to_string() };
             }
         }
@@ -134,7 +135,7 @@ pub fn run_to_completion(mut command: Command, stdin: Vec<u8>, timeout: Duration
     // exited or group-killed, so the write-end's read side is closed and
     // the writer thread has returned (it never outlives the deadline).
     if let Some(writer) = writer {
-        let _ = writer.join();
+        join_or_resume(writer);
     }
     outcome
 }
@@ -153,10 +154,15 @@ fn drain<R: Read + Send + 'static>(stream: Option<R>) -> JoinHandle<Vec<u8>> {
     })
 }
 
-/// Join a drain thread, recovering its buffer (an empty buffer if the
-/// thread panicked — a drain panic must not fail the run).
-fn join_drain(handle: JoinHandle<Vec<u8>>) -> Vec<u8> {
-    handle.join().unwrap_or_default()
+/// Join a helper thread (a drain or the stdin writer), returning its value.
+/// A panic on a helper thread is a bug, not a run outcome: it is re-raised
+/// on the calling thread, where the `dispatch_blocking` worker running the
+/// run escalates it through the chassis aborter (ADR-0063). Every caller
+/// has already reaped or group-killed the child, so re-raising at the first
+/// failed join leaves no zombie; the threads not yet joined return on their
+/// own once the pipes are closed.
+fn join_or_resume<T>(handle: JoinHandle<T>) -> T {
+    handle.join().unwrap_or_else(|payload| panic::resume_unwind(payload))
 }
 
 /// Put the child in its own process group at fork so a deadline reap can
@@ -223,8 +229,10 @@ fn group_kill_and_reap(child: &mut Child) {
 
 #[cfg(all(test, unix))]
 mod tests {
-    use super::{RunOutcome, run_to_completion};
+    use super::{RunOutcome, drain, join_or_resume, run_to_completion};
+    use std::io::{self, Read};
     use std::os::unix::fs::PermissionsExt;
+    use std::panic::{self, AssertUnwindSafe};
     use std::path::PathBuf;
     use std::process::{self, Command};
     use std::sync::atomic::{AtomicU32, Ordering};
@@ -336,5 +344,26 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "the group reap let the stdout-drain join return; a surviving grandchild would have hung it ({elapsed:?})",
         );
+    }
+
+    /// A stream whose `read` panics, standing in for a bug on a drain thread.
+    struct PanickingRead;
+
+    impl Read for PanickingRead {
+        fn read(&mut self, _buf: &mut [u8]) -> io::Result<usize> {
+            panic!("drain probe 6448");
+        }
+    }
+
+    /// A panic on a drain thread re-raises on the thread that joins it (the
+    /// `dispatch_blocking` worker running the run, which escalates it),
+    /// rather than becoming an empty buffer and an `Ok` run with lost output.
+    #[test]
+    fn a_drain_panic_re_raises_on_the_run_thread() {
+        let handle = drain(Some(PanickingRead));
+
+        let payload = panic::catch_unwind(AssertUnwindSafe(|| join_or_resume(handle)))
+            .expect_err("a drain panic must re-raise on the joining thread");
+        assert_eq!(payload.downcast_ref::<&str>(), Some(&"drain probe 6448"));
     }
 }

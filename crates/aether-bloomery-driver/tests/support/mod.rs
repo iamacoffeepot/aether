@@ -78,6 +78,10 @@ pub struct World {
     pub parked: Vec<(WatchTicket, u64)>,
     /// Every `WatchHead` boundary the core emitted, in order.
     pub watches_seen: Vec<u64>,
+    /// Every `ReadEvents` boundary the core emitted, in order.
+    pub events_seen: Vec<u64>,
+    /// `events_seen.len()` at each `Warm` the core emitted, in order.
+    pub warm_marks: Vec<usize>,
     /// Scripted reactor roots by bundle digest, holding cursors and recordings.
     pub reactors: HashMap<Digest, Reactor>,
     /// Bundles behind held `Evaluate` commands, so hand-fed replies sequence.
@@ -126,6 +130,8 @@ impl World {
             fail_reads: None,
             parked: Vec::new(),
             watches_seen: Vec::new(),
+            events_seen: Vec::new(),
+            warm_marks: Vec::new(),
             reactors: HashMap::new(),
             eval_roots: BTreeMap::new(),
             processed: Vec::new(),
@@ -185,6 +191,7 @@ impl World {
     fn step(&mut self, command: Command) -> Step {
         match command {
             Command::ReadEvents { ticket, request } => {
+                self.events_seen.push(request.after);
                 let result = self.page(&request);
                 Step::More(self.core.on_events(ticket, result))
             }
@@ -235,6 +242,7 @@ impl World {
                 }
             }
             Command::Warm { ticket, bundle, request } => {
+                self.warm_marks.push(self.events_seen.len());
                 let first = request.entries().first();
                 let last = request.entries().last();
                 let scripted = self.warm_pages.get(&first).cloned();

@@ -2,7 +2,9 @@
 //!
 //! [`Owner`] retains pushed entries and lazily constructed views. Each concrete
 //! view folds once, catches up from its trusted cursor, and stays poisoned
-//! after a failed fold. [`prepare()`] is a one-shot over a fresh owner.
+//! after a failed fold. A [`Root`] releases entries once every view has folded
+//! them and keeps the last as the trigger. [`prepare()`] is a one-shot over a
+//! fresh owner.
 //!
 //! Authors write `#[reactor] impl Reactor for Name` with `const NAMESPACE` and
 //! `#[rule]` methods. The first parameter after `&self` is a typed stored-event
