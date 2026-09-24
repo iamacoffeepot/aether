@@ -54,8 +54,9 @@ make a job intentionally inapplicable.
 The pull-request-only `New suppressions` job is deliberately outside those
 filters. It examines additions between the pull request's resolved merge base
 and head and rejects four forms: line-anchored Rust `allow(...)` or
-`expect(...)` attributes, Rust `#[ignore]` attributes, new members of the
-top-level `.jscpd.json` `ignore` array, and new members of
+`expect(...)` attributes, Rust `#[ignore]` attributes (either Rust form also
+when a `cfg_attr(...)` applies it, nested or among other attributes), new
+members of the top-level `.jscpd.json` `ignore` array, and new members of
 `package.metadata.cargo-machete.ignored`. The standing suppression population,
 removals, exact renames, comments, strings, and unrelated JSON/TOML keys do not
 fail the diff. Each finding is printed as `file:line — token — added line`.

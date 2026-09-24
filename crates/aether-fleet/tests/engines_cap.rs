@@ -151,7 +151,7 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: None },
+            RpcServerConfig { port: None, port_file: None },
         )
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
@@ -188,7 +188,7 @@ fn write_inert_binary_store(store_dir: &Path, bytes: &[u8]) -> String {
                         "profile": "debug",
                         "target": "x86_64-unknown-linux-gnu",
                         "env_keys": ["AETHER_RPC_PORT"],
-                        "argv_flags": ["rpc-port"]
+                        "argv_flags": ["rpc-port", "rpc-port-file"]
                     }
                 }
             }),
@@ -263,7 +263,7 @@ fn write_pressure_bin(path: &Path, token: &str) {
     let mut script = String::from("#!/bin/sh\nif [ \"$1\" = \"--describe\" ]; then printf '");
     script.push_str("{\"chassis\":\"headless\",\"caps\":[\"aether.rpc.server\"],\"git_sha\":\"");
     script.push_str(token);
-    script.push_str("\",\"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\",\"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\"]}'; fi\n");
+    script.push_str("\",\"profile\":\"debug\",\"target\":\"x86_64-unknown-linux-gnu\",\"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\",\"rpc-port-file\"]}'; fi\n");
     fs::write(path, script).expect("write pressure stand-in");
     fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("chmod pressure stand-in");
 }
@@ -427,7 +427,7 @@ mod tests {
         );
         let engine_id = match spawn {
             SpawnEngineResult::Ok { engine_id, rpc_port } => {
-                assert_ne!(rpc_port, 0, "cap should report the assigned RPC port");
+                assert_ne!(rpc_port, 0, "cap should report the RPC port the substrate bound");
                 engine_id
             }
             SpawnEngineResult::Err { error, .. } => panic!("spawn failed: {error}"),
@@ -560,11 +560,11 @@ mod tests {
         // *conforming* headless manifest on `--describe` — non-empty
         // caps + config surface, so the upload gate accepts it, #3936)
         // but, when forked normally, `exec`s a sleep instead of binding
-        // the RPC port the hub hands it via `--rpc-port` (ADR-0162 argv
-        // injection). The proxy's dial refuses for the whole (short)
-        // connect budget, so the spawn fails after the substrate forked
-        // but never connected — the post-allocation failure this test
-        // pins. `exec` makes the sleep the direct child so the proxy's
+        // a port and reporting it through the `--rpc-port-file` the hub
+        // hands it (ADR-0162 argv injection). The proxy waits for a report
+        // for the whole (short) connect budget, so the spawn fails after
+        // the substrate forked but never connected — the post-allocation
+        // failure this test pins. `exec` makes the sleep the direct child so the proxy's
         // SIGKILL reaps it (no orphan).
         let stand_in = dir.join("aether-headless");
         fs::write(
@@ -573,7 +573,7 @@ mod tests {
                  '{\"chassis\":\"headless\",\"caps\":[\"aether.rpc.server\"],\
                  \"git_sha\":\"deadbee\",\"profile\":\"debug\",\
                  \"target\":\"x86_64-unknown-linux-gnu\",\
-                 \"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\"]}'; \
+                 \"env_keys\":[\"AETHER_RPC_PORT\"],\"argv_flags\":[\"rpc-port\",\"rpc-port-file\"]}'; \
                  exit 0; fi\n\
                  exec sleep 30\n",
         )
@@ -598,8 +598,8 @@ mod tests {
         };
         let (_registry, _chassis, mailer, cells) = boot(config);
 
-        // The spawn forks the stand-in, the proxy dials for the 2 s
-        // budget, then the cap returns Err. Deadline comfortably over
+        // The spawn forks the stand-in, the proxy waits for its port
+        // report for the 2 s budget, then the cap returns Err. Deadline comfortably over
         // the budget + fork.
         let spawn = drive(
             &mailer,
@@ -982,12 +982,13 @@ mod restart_supervision {
     /// `--describe` is delegated verbatim so the store ingests a genuine
     /// conforming manifest and a `default` selector resolves to it.
     ///
-    /// Only `--rpc-port` is forwarded to the real binary. The other flags
-    /// exist to be *observed* in the argv log — they are recipe-fidelity
-    /// markers, and feeding a real chassis flags it does not define would
-    /// test clap rather than the cap. Extracting the port by scanning for
-    /// its flag is also what makes the log meaningful: the script never
-    /// assumes a position the cap might have changed.
+    /// Only `--rpc-port` and `--rpc-port-file` are forwarded to the real
+    /// binary. The other flags exist to be *observed* in the argv log —
+    /// they are recipe-fidelity markers, and feeding a real chassis flags
+    /// it does not define would test clap rather than the cap. Extracting
+    /// the port and its report file by scanning for their flags is also
+    /// what makes the log meaningful: the script never assumes a position
+    /// the cap might have changed.
     ///
     /// When `once_marker` is set, only the first generation crashes and
     /// every later one runs straight through — one restart, then a stable
@@ -996,7 +997,7 @@ mod restart_supervision {
     fn write_crashing_stand_in(path: &Path, real: &str, argv_log: &Path, once_marker: Option<&Path>) {
         let crash_guard = once_marker.map_or_else(String::new, |marker| {
             format!(
-                "if [ -f '{}' ]; then exec \"$REAL\" --rpc-port \"$port\"; fi\n: > '{}'\n",
+                "if [ -f '{}' ]; then exec \"$REAL\" --rpc-port \"$port\" --rpc-port-file \"$file\"; fi\n: > '{}'\n",
                 marker.display(),
                 marker.display()
             )
@@ -1007,13 +1008,15 @@ mod restart_supervision {
              if [ \"$1\" = \"--describe\" ]; then exec \"$REAL\" --describe; fi\n\
              echo \"$*\" >> '{argv_log}'\n\
              port=''\n\
+             file=''\n\
              prev=''\n\
              for a in \"$@\"; do\n\
              \x20 if [ \"$prev\" = \"--rpc-port\" ]; then port=\"$a\"; fi\n\
+             \x20 if [ \"$prev\" = \"--rpc-port-file\" ]; then file=\"$a\"; fi\n\
              \x20 prev=\"$a\"\n\
              done\n\
              {crash_guard}\
-             \"$REAL\" --rpc-port \"$port\" &\n\
+             \"$REAL\" --rpc-port \"$port\" --rpc-port-file \"$file\" &\n\
              child=$!\n\
              sleep {FIXTURE_ALIVE_SECS}\n\
              kill -9 \"$child\" 2>/dev/null\n\
@@ -1063,6 +1066,14 @@ mod restart_supervision {
         }
     }
 
+    /// The word after `flag` in one recorded argv line.
+    fn flag_value<'a>(line: &'a str, flag: &str) -> &'a str {
+        line.split_whitespace()
+            .skip_while(|word| *word != flag)
+            .nth(1)
+            .unwrap_or_else(|| panic!("the argv line carries {flag}: {line}"))
+    }
+
     /// Every argv line the stand-in has recorded so far, oldest first —
     /// one line per forked generation.
     fn recorded_argv(argv_log: &Path) -> Vec<String> {
@@ -1086,8 +1097,9 @@ mod restart_supervision {
     /// reuses the dead engine's id instead of minting one. The argv
     /// assertions are the recipe tripwire: the caller's flags must
     /// reappear verbatim and still lead the hub's own injections, while
-    /// `--rpc-port` must differ, because a port is reserved per fork and
-    /// replaying the dead one would collide.
+    /// `--rpc-port-file` must differ, because each fork reports its port
+    /// through a file in its own engine dir and replaying the dead one
+    /// would read the corpse's report.
     #[test]
     fn a_crashed_engine_is_restarted_under_a_fresh_id_from_the_same_recipe() {
         let real = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
@@ -1103,7 +1115,7 @@ mod restart_supervision {
             boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, 5));
 
         // Recipe-fidelity markers: the stand-in records them and forwards
-        // only `--rpc-port` to the real chassis, so a restart that loses
+        // only the RPC port flags to the real chassis, so a restart that loses
         // either one shows up in the argv log rather than as a boot error.
         let caller_args = vec!["--fixture-marker".to_owned(), "seven".to_owned()];
         let boot_manifest = dir.join("boot-manifest.json").to_string_lossy().into_owned();
@@ -1160,8 +1172,9 @@ mod restart_supervision {
             assert!(marker_at < injected_at, "the caller's args lead the hub's injections: {line}");
         }
         assert_ne!(
-            first, second,
-            "each fork reserves its own RPC port, so the two command lines cannot be identical: {argv:?}",
+            flag_value(first, "--rpc-port-file"),
+            flag_value(second, "--rpc-port-file"),
+            "each fork reports its RPC port through its own file: {argv:?}",
         );
 
         // Tidy up: terminate the successor, which also exercises the

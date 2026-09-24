@@ -24,7 +24,7 @@ mod store;
 
 pub use proxy::FleetProxy;
 #[cfg(not(target_family = "wasm"))]
-pub use proxy::FleetProxyConfig;
+pub use proxy::{FleetProxyConfig, ProxyTarget};
 pub use server::FleetServer;
 #[cfg(not(target_family = "wasm"))]
 // `RestartPolicy` rides along because it is the return type of the public
