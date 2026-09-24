@@ -52,7 +52,9 @@ aether-render = { path = "../aether-render" }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
 # The demo scenario reads `demo/*.json` — the checked-in init-config files
-# themselves — into their config types, so the demo and the gate cannot drift.
+# themselves — into their config types and through the boot path's schema
+# codec, so the demo and the gate cannot drift.
+aether-codec = { path = "../aether-codec" }
 serde_json = { workspace = true }
 
 [lints]

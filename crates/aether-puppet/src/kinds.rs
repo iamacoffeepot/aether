@@ -127,7 +127,10 @@ pub struct Hatch {
     /// dashes as it fades instead of ruling its boundary across the
     /// figure. Zero rules it.
     pub dither: f32,
-    /// Angle of the primary family, in radians.
+    /// Turn of the resident hatch axis set about the model's up axis, in
+    /// radians — see [`hatch::axes`](crate::hatch::axes). It slides where
+    /// on the subject the strokes fall without tipping any axis toward
+    /// the vertical.
     pub tilt: f32,
     /// Where the key light stands, as a direction.
     ///
