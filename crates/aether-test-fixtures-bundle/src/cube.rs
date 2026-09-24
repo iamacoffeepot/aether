@@ -32,7 +32,6 @@ use core::f32::consts::FRAC_PI_4;
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::Tick;
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::{Mat4, Rgb, Vec3};
 use aether_render::{DrawTriangle, RenderCapability, Vertex, ViewProjection};
 
@@ -125,7 +124,7 @@ impl WasmActor for Cube {
     /// `init` can't mail (its ctx has no send surface), so the subscribe
     /// lands here in `wire` (mirrors the probe and the reference camera).
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
     /// Publish the fixed camera, then emit the cube. The camera goes

@@ -24,7 +24,7 @@
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry;
 
-use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_component::ComponentHostCapability;
 use aether_data::{ActorPath, Kind};
 use aether_http as http;
@@ -41,8 +41,8 @@ use aether_kinds::DropComponent;
 /// for the retired `handler_mailbox` config default. Shared by every
 /// catch-all fixture in this module; the routed fixtures register their
 /// specific prefixes instead.
-fn bind_catch_all<A: Reaches<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
-    ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+fn bind_catch_all<A: DependsOn<HttpServerCapability>>(ctx: &mut WasmCtx<'_, A>) {
+    ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
         prefix: "/".to_string(),
         method: None,
         kind: <HttpServerRequest as Kind>::ID,
@@ -411,11 +411,11 @@ impl WasmActor for RoutedStreamingHttpHandler {
 
     /// Claim `/routed-stream` for this actor's own mailbox through the raw
     /// reflexive route form (ADR-0131). Registering from `wire` is the
-    /// common "route to me" case; `ctx` resolves the `aether.http.server`
-    /// cap by type, so the send reads exactly as the `#[http::route]` macro's
-    /// injected registration does.
+    /// common "route to me" case; the send goes to the declared
+    /// `HttpServerCapability`, so it reads exactly as the `#[http::route]`
+    /// macro's injected registration does.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/routed-stream".to_string(),
             method: None,
             kind: <HttpServerRequest as Kind>::ID,

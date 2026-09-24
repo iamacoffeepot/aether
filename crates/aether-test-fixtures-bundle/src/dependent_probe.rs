@@ -25,6 +25,6 @@ impl WasmActor for DependentProbe {
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.bumps });
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: self.bumps });
     }
 }

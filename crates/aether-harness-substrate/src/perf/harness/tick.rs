@@ -93,7 +93,7 @@ impl Dispatch<Self> for TickSource {
             return None;
         }
         for _ in 0..state.burst {
-            ctx.to(&state.entry).send(&Ping { seq: state.seq });
+            ctx.send_to(state.entry, &Ping { seq: state.seq });
             state.seq = state.seq.wrapping_add(1);
             state.sent += 1;
         }

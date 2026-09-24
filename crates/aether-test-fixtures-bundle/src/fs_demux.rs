@@ -16,8 +16,7 @@
 //! membrane hands it the host's reply correlation.
 
 use aether_actor::{
-    ActorInitError, DependsOn, Erased, Mail, Manual, Reaches, RequestId, Subname, WasmActor, WasmCtx, WasmInitCtx,
-    actor,
+    ActorInitError, DependsOn, Mail, Manual, RequestId, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use aether_test_fixtures_kinds::{
@@ -70,7 +69,7 @@ impl WasmActor for FsDemux {
     }
 
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _reply: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _reply: ReadResult) {
         self.read_result(ctx);
     }
 }
@@ -88,7 +87,7 @@ impl FsDemux {
 
     /// Match one `aether.fs.read` reply to the request it answers, and report
     /// once both pending reads have matched.
-    fn read_result<A: Reaches<SubstrateHarnessObserver>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn read_result<A: DependsOn<SubstrateHarnessObserver>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.handle_typed_context(ctx) {
             return;
         }
@@ -115,7 +114,7 @@ impl FsDemux {
                 target: "test.fs_demux",
                 "fs_demux first_matched=true second_matched=true",
             );
-            ctx.actor::<SubstrateHarnessObserver>().send(&FsDemuxReport { first_matched: true, second_matched: true });
+            ctx.send::<SubstrateHarnessObserver>(&FsDemuxReport { first_matched: true, second_matched: true });
         }
     }
 
@@ -123,7 +122,10 @@ impl FsDemux {
     /// context type in turn, A first: a wrong-kind take leaves the context
     /// stored, so the reply carrying context B still recovers it. Returns
     /// whether this reply carried either context.
-    fn handle_typed_context<A: Reaches<SubstrateHarnessObserver>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) -> bool {
+    fn handle_typed_context<A: DependsOn<SubstrateHarnessObserver>>(
+        &mut self,
+        ctx: &mut WasmCtx<'_, A, Manual>,
+    ) -> bool {
         if let Some(context) = ctx.take_context::<FsDemuxContextA>() {
             if context.payload != CONTEXT_A_PAYLOAD {
                 tracing::warn!(
@@ -155,7 +157,7 @@ impl FsDemux {
                 second_payload,
                 "fs_context_demux recovered both contexts by trying each type in turn",
             );
-            ctx.actor::<SubstrateHarnessObserver>().send(&FsContextDemuxReport { first_payload, second_payload });
+            ctx.send::<SubstrateHarnessObserver>(&FsContextDemuxReport { first_payload, second_payload });
         }
         true
     }
