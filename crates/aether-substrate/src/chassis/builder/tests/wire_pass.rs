@@ -60,11 +60,11 @@ fn spawn_actor_runs_wire_once_after_init() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: params })
         }
-        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }
@@ -119,11 +119,11 @@ fn with_actor_runs_wire_once_at_chassis_boot() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_count: params })
         }
-        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+        fn wire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
             state.wire_count.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }
@@ -176,12 +176,13 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_ran: params })
         }
-        fn wire(state: &mut Self, ctx: &mut NativeCtx<'_>) {
-            ctx.actor::<Ponger>().send(&WireBarrierPing { tag: 1 });
+        fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
+            // The send is deliberately undeclared, so the test can boot either actor first.
+            ctx.erase().actor::<Ponger>().send(&WireBarrierPing { tag: 1 });
             state.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }
@@ -213,7 +214,7 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: params })
         }

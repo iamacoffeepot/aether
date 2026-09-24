@@ -65,7 +65,7 @@ fn ctx_monitor_fires_notice_at_target_close() {
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { notice_count: params.0, sender_matched: params.1, monitored: None, handle: Mutex::new(None) })
         }
@@ -209,7 +209,7 @@ fn watcher_close_prunes_targets_forward_index() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
@@ -244,11 +244,11 @@ fn watcher_close_prunes_targets_forward_index() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { handle: Mutex::new(None), close_observed: params })
         }
-        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+        fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
             state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
         }
     }

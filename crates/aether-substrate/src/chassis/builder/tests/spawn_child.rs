@@ -56,7 +56,7 @@ fn ctx_spawn_child_routes_through_handler() {
         type Params = Arc<Mutex<Vec<u32>>>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), received: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received })
@@ -96,7 +96,7 @@ fn ctx_spawn_child_routes_through_handler() {
         type Params = (Arc<AtomicU32>, Arc<AtomicU32>, Arc<Mutex<Vec<u32>>>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init(
             (): (),
             (spawn_count, failure_count, child_received): Self::Params,
@@ -260,7 +260,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), attempts: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             attempts.fetch_add(1, AtomicOrdering::SeqCst);
@@ -297,7 +297,7 @@ fn staged_child_init_failure_releases_parent_reservation_without_registry_write(
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), (attempts, observed): Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { attempts, observed })
@@ -378,7 +378,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), init_count: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             init_count.fetch_add(1, AtomicOrdering::SeqCst);
@@ -414,7 +414,7 @@ fn ctx_spawn_child_rejects_an_invalid_subname_before_child_init_or_registration(
         type Params = (Arc<AtomicU32>, Arc<AtomicBool>);
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init(
             (): (),

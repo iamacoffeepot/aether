@@ -525,10 +525,10 @@ impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> Reaches<R>
 ///
 /// The per-target contexts are generic associated types each concrete
 /// impl pins: the `#[actor]` macro knows the target and emits
-/// `type InitCtx<'a> = WasmInitCtx<'a>; type Ctx<'a> = WasmCtx<'a>;` (or the
-/// native pair), so a `wire`/`unwire` body reaches the concrete ctx's
-/// inherent methods (`ctx.actor::<R>().send(&p)`) with no generic bound at
-/// the call site. `InitError` is pinned per transport subtrait
+/// `type InitCtx<'a> = WasmInitCtx<'a>; type Ctx<'a> = WasmCtx<'a, Self>;` (or
+/// the native pair, `NativeCtx<'a, Self>`), so a `wire`/`unwire` hook receives
+/// a ctx typed by its actor and reaches the concrete ctx's inherent methods
+/// (`ctx.actor::<R>().send(&p)`) with no generic bound at the call site. `InitError` is pinned per transport subtrait
 /// (`WasmActor: Lifecycle<_, InitError = ActorInitError>`), so existing generic
 /// call sites keep seeing a concrete error type.
 pub trait Lifecycle<S> {
@@ -561,8 +561,8 @@ pub trait Lifecycle<S> {
     /// synthesized per impl by `#[actor]`.
     type InitCtx<'a>;
 
-    /// The per-target post-init ctx (`WasmCtx<'a>` / `NativeCtx<'a>`),
-    /// synthesized per impl by `#[actor]`.
+    /// The per-target post-init ctx, typed by the actor (`WasmCtx<'a, Self>` /
+    /// `NativeCtx<'a, Self>`), synthesized per impl by `#[actor]`.
     type Ctx<'a>;
 
     /// Runs once before any mail. Resolves kinds/handles via `ctx` and

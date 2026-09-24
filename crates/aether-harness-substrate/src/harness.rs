@@ -497,7 +497,7 @@ impl SubstrateHarnessBuilder {
     ///
     /// Parentless composition rejects a child-only actor at compile time:
     ///
-    /// ```compile_fail
+    /// ```compile_fail,E0277
     /// use aether_actor::{Addressable, ChildOf, Lifecycle, Many, One};
     /// use aether_data::KindId;
     /// use aether_harness_substrate::SubstrateHarnessBuilder;
@@ -520,7 +520,7 @@ impl SubstrateHarnessBuilder {
     ///     type Params = ();
     ///     type InitError = BootError;
     ///     type InitCtx<'a> = NativeInitCtx<'a>;
-    ///     type Ctx<'a> = NativeCtx<'a>;
+    ///     type Ctx<'a> = NativeCtx<'a, Self>;
     ///
     ///     fn init(_: (), _: (), _: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
     ///         Ok(Self)
@@ -1999,7 +1999,7 @@ mod tests {
             type Params = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a, Self>;
             fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: config })
             }

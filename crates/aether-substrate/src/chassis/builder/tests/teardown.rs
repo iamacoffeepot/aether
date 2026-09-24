@@ -212,7 +212,7 @@ fn teardown_reports_the_handler_panic_that_aborted_the_chassis() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
 
         fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)

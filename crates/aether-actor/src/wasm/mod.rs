@@ -159,7 +159,7 @@ pub trait WasmActor:
         Config: aether_data::Kind + Default,
         Params: aether_data::Kind + Default,
         InitCtx<'a> = WasmInitCtx<'a>,
-        Ctx<'a> = WasmCtx<'a>,
+        Ctx<'a> = WasmCtx<'a, Self>,
     > + WasmDispatch<Self::State>
 {
     /// The runtime state this identity boots into (iamacoffeepot/aether#2311)
@@ -287,11 +287,14 @@ pub trait ErasedWasmActor {
     /// downgrades per handler class.
     fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, mail: crate::Mail<'_>) -> u32;
 
-    /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire) (the synthesized impl downgrades
-    /// the carried [`Manual`](crate::Manual) ctx to `Single`).
+    /// Forwards to [`Lifecycle::wire`](crate::Lifecycle::wire). The synthesized
+    /// impl upgrades the carried erased ctx to the actor, whose lifecycle ctx
+    /// is typed by it, and downgrades the [`Manual`](crate::Manual) view to
+    /// `Single`.
     fn erased_wire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
 
-    /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire).
+    /// Forwards to [`Lifecycle::unwire`](crate::Lifecycle::unwire), upgrading
+    /// the ctx the same way as [`Self::erased_wire`].
     fn erased_unwire(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>);
 
     /// Forwards to [`WasmActor::on_dehydrate`].
@@ -924,10 +927,11 @@ macro_rules! __export_internal {
             // host calls `wire` without a prior `init_with_config` on this
             // instance (idempotent — same value).
             __AETHER_INLINE.set_self_id(mailbox_id);
-            // ADR-0112: the runtime builds the `Manual` view; `wire`'s
-            // default signature is `WasmCtx<'_>` (= Single), so downgrade.
+            // ADR-0112: the runtime builds the erased `Manual` view. The
+            // lifecycle ctx is `WasmCtx<'_, $component>` (= Single), so upgrade
+            // it to the actor once, here where it is born, and downgrade.
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.as_single());
+            <$component as $crate::Lifecycle<$component>>::wire(instance, ctx.__for_actor::<$component>().as_single());
             0
         }
 
@@ -943,7 +947,7 @@ macro_rules! __export_internal {
                 return 1;
             };
             let mut ctx = $crate::WasmCtx::__new(mailbox_id, &__AETHER_INLINE, $crate::wasm::NO_INBOUND_SOURCE);
-            <$component as $crate::Lifecycle<$component>>::unwire(instance, ctx.as_single());
+            <$component as $crate::Lifecycle<$component>>::unwire(instance, ctx.__for_actor::<$component>().as_single());
             0
         }
 

@@ -576,17 +576,18 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // `WasmCtx` the lifecycle call builds; `WireCtx` `Deref`s to it, so the
     // user's `wire` body reaches every send / subscribe verb unchanged.
     // Issue 6279: the renamed hooks keep the author's signatures, so read the
-    // actor off them — a `wire` / `unwire` that spells its actor receives the
-    // `__for_actor::<Self>()` upgrade, every other the erased ctx as today.
-    let wire_ctx = boot_hooks.iter().find(|m| m.sig.ident == "__aether_wire").map(|m| upgrade_ctx_when_named(&m.sig));
+    // actor off them. The lifecycle ctx is typed by the actor, so a `wire` /
+    // `unwire` that spells its actor receives it as is and every other hook
+    // the erased view.
+    let wire_ctx = boot_hooks.iter().find(|m| m.sig.ident == "__aether_wire").map(|m| erase_ctx_unless_named(&m.sig));
     let unwire_ctx =
-        boot_hooks.iter().find(|m| m.sig.ident == "__aether_unwire").map(|m| upgrade_ctx_when_named(&m.sig));
+        boot_hooks.iter().find(|m| m.sig.ident == "__aether_unwire").map(|m| erase_ctx_unless_named(&m.sig));
     let wire_forward = if has_wire {
         let wire_ctx = wire_ctx.expect("has_wire implies a renamed __aether_wire method");
         quote! {
             fn wire(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
             ) {
                 let mut __aether_wire_ctx = ::aether_actor::WireCtx::__new(#wire_ctx);
                 #self_ty::__aether_wire(__aether_state, &mut __aether_wire_ctx);
@@ -600,7 +601,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         quote! {
             fn unwire(
                 __aether_state: &mut Self,
-                __aether_ctx: &mut ::aether_actor::WasmCtx<'_>,
+                __aether_ctx: &mut ::aether_actor::WasmCtx<'_, Self>,
             ) {
                 #self_ty::__aether_unwire(__aether_state, #unwire_ctx);
             }
@@ -626,13 +627,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         // iamacoffeepot/aether#2311: the boot lifecycle over the runtime state.
         // For an un-split component `State = Self`, so `init` returns `Self` and
         // the `wire`/`unwire` forwarders pass the state as the `&mut self`
-        // receiver. The per-target ctx GATs pin the concrete FFI ctx types.
+        // receiver. The per-target ctx GATs pin the concrete FFI ctx types, the
+        // lifecycle ctx typed by the actor.
         impl #impl_generics ::aether_actor::Lifecycle<Self> for #self_ty #where_clause {
             #config_type_tokens
             #params_type_tokens
             type InitError = ::aether_actor::ActorInitError;
             type InitCtx<'__a> = ::aether_actor::WasmInitCtx<'__a>;
-            type Ctx<'__a> = ::aether_actor::WasmCtx<'__a>;
+            type Ctx<'__a> = ::aether_actor::WasmCtx<'__a, Self>;
 
             #wrapped_init
 
@@ -707,13 +709,14 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
             ) -> u32 {
                 self.__aether_dispatch(__aether_ctx, __aether_mail)
             }
-            // ADR-0112: the lifecycle hooks keep their `WasmCtx<'_>` (= Single)
-            // default signatures; downgrade the carried `Manual` ctx here.
+            // ADR-0112: the lifecycle ctx is `WasmCtx<'_, Self>` (= Single);
+            // upgrade the carried erased ctx to the actor once, where it is
+            // born, and downgrade the `Manual` view here.
             fn erased_wire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
-                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.as_single());
+                <#self_ty as ::aether_actor::Lifecycle<Self>>::wire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
             fn erased_unwire(&mut self, __aether_ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>) {
-                <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.as_single());
+                <#self_ty as ::aether_actor::Lifecycle<Self>>::unwire(self, __aether_ctx.__for_actor::<Self>().as_single());
             }
             fn erased_on_dehydrate(
                 &mut self,
@@ -747,6 +750,19 @@ fn upgrade_ctx_when_named(sig: &syn::Signature) -> TokenStream2 {
         quote!(__aether_ctx.__for_actor::<Self>())
     } else {
         quote!(__aether_ctx)
+    }
+}
+
+/// The ctx expression a `wire` / `unwire` forwarder hands its hook. The
+/// lifecycle ctx is already typed by the actor, so it passes as is when the
+/// hook's signature names its actor and as `__aether_ctx.erase()` otherwise —
+/// the same downgrade-only choice native's `erase_unless_ctx_names_actor`
+/// makes for every arm.
+fn erase_ctx_unless_named(sig: &syn::Signature) -> TokenStream2 {
+    if ctx_names_actor(sig) {
+        quote!(__aether_ctx)
+    } else {
+        quote!(__aether_ctx.erase())
     }
 }
 

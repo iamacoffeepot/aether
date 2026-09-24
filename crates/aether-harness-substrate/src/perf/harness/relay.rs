@@ -70,7 +70,7 @@ impl aether_actor::Lifecycle<Self> for Relay {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init(config: Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { downstreams: config.downstreams, work_iters: config.work_iters, received: 0, sent: 0 })
     }

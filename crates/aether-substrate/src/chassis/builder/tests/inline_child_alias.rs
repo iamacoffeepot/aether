@@ -58,7 +58,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         type Params = ();
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self)
         }
@@ -107,7 +107,7 @@ fn vacate_fires_a_notice_for_each_departing_inline_child_alias() {
         );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }
@@ -278,7 +278,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         type Params = Arc<Mutex<Vec<bool>>>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { vacated: params })
         }
@@ -327,7 +327,7 @@ fn despawning_an_inline_child_retires_its_alias_and_notifies_watchers() {
         );
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { monitored: params.0, watched: params.1, notices: params.2, handles: Mutex::new(Vec::new()) })
         }

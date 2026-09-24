@@ -57,13 +57,13 @@ macro_rules! close_observed_state {
             type Params = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a, Self>;
 
             fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { close_observed: params })
             }
 
-            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_>) {
+            fn unwire(state: &mut Self, _ctx: &mut NativeCtx<'_, Self>) {
                 state.close_observed.fetch_add(1, AtomicOrdering::SeqCst);
             }
         }
@@ -139,7 +139,7 @@ macro_rules! unit_shutdown_actor {
             type Params = ();
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a, Self>;
 
             fn init((): Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self)
@@ -170,7 +170,7 @@ impl aether_actor::Lifecycle<Self> for StubLog {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init((): Self::Config, _params: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }

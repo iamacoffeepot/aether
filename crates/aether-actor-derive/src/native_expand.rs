@@ -41,6 +41,10 @@ pub enum NativeEmit {
 /// asked for it. Mirrors the existing `as_single()` downgrade: capability is
 /// only ever removed, so a handler cannot name a parent at all, let alone the
 /// wrong one.
+///
+/// The `wire` / `unwire` forwarders apply it the same way: the lifecycle ctx
+/// is typed by the actor, so a hook that names its actor receives it as is
+/// and every other hook the erased view.
 fn erase_unless_ctx_names_actor(sig: &syn::Signature) -> TokenStream2 {
     if ctx_names_actor(sig) {
         quote!()
@@ -792,26 +796,32 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // `__aether_{wire,unwire}` copies (renamed above to dodge the trait-name
     // collision) by UFCS — passing the state as the receiver for an un-split
     // `&mut self` hook. Emitted only when the user provided the hook; the
-    // trait's default no-op stands otherwise.
+    // trait's default no-op stands otherwise. The lifecycle ctx is typed by
+    // the actor; a hook that does not name its actor is handed `.erase()`.
+    let hook_erase = |name: &str| {
+        lifecycle_methods.iter().find(|m| m.sig.ident == name).map(|m| erase_unless_ctx_names_actor(&m.sig))
+    };
     let wire_forward = if has_wire {
+        let erase = hook_erase("__aether_wire").expect("has_wire implies a renamed __aether_wire method");
         quote! {
             fn wire(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self>,
             ) {
-                #self_ty::__aether_wire(__aether_state, __aether_ctx);
+                #self_ty::__aether_wire(__aether_state, __aether_ctx #erase);
             }
         }
     } else {
         quote! {}
     };
     let unwire_forward = if has_unwire {
+        let erase = hook_erase("__aether_unwire").expect("has_unwire implies a renamed __aether_unwire method");
         quote! {
             fn unwire(
                 __aether_state: &mut #state_ty,
-                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_>,
+                __aether_ctx: &mut ::aether_substrate::NativeCtx<'_, Self>,
             ) {
-                #self_ty::__aether_unwire(__aether_state, __aether_ctx);
+                #self_ty::__aether_unwire(__aether_state, __aether_ctx #erase);
             }
         }
     } else {
@@ -835,14 +845,14 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         // Boot lifecycle over the state — the shared `aether_actor::Lifecycle<S>`
         // (iamacoffeepot/aether#2311), with the per-target ctx GATs pinned to
         // the concrete native ctx types so an `init`/`wire` body keeps its
-        // concrete ctx.
+        // concrete ctx; the lifecycle ctx is typed by the actor.
         #runtime_gate
         impl #impl_generics ::aether_actor::Lifecycle<#state_ty> for #self_ty #where_clause {
             #config_type
             #params_type_tokens
             type InitError = ::aether_substrate::BootError;
             type InitCtx<'__a> = ::aether_substrate::NativeInitCtx<'__a>;
-            type Ctx<'__a> = ::aether_substrate::NativeCtx<'__a>;
+            type Ctx<'__a> = ::aether_substrate::NativeCtx<'__a, Self>;
             #init_method
             #wire_forward
             #unwire_forward
