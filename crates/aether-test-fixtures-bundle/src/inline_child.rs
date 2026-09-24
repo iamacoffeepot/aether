@@ -16,8 +16,9 @@
 //! tagged by `who` handled it, so a `FleetHarness` scenario can send to the
 //! child's address over the real wire and assert the *child* (not the
 //! parent) replied. `InlineChild` is `Instanced` (the `spawn_inline_child`
-//! bound); it is not in the `export!` list because an inline child is
-//! constructed in-process by the parent, not instantiated by the host.
+//! bound) and listed under the `export!` list's `private = [..]` slot: the
+//! parent constructs it in-process, a replace rebuilds it, and the host never
+//! instantiates it by selector.
 //!
 //! # `InlineStatefulParent` / `InlineStatefulChild`
 //!
@@ -137,7 +138,7 @@ impl WasmActor for InlineParent {
 
 /// Inline child for the basic `InlineParent` fixture. Its exact placement
 /// matches the only actor that constructs it. `Instanced` satisfies the
-/// `spawn_inline_child` bound; it is not exported.
+/// `spawn_inline_child` bound; it is listed as private, not exported.
 pub struct InlineChild;
 
 #[actor(instanced, child_of(InlineParent))]
@@ -288,7 +289,8 @@ impl WasmActor for InlineDespawnParent {
 
 /// Inline child for the despawn fixture, placed only beneath the
 /// `InlineDespawnParent` that constructs and tears it down in-process.
-/// `Instanced` satisfies the `spawn_inline_child` bound; it is not exported.
+/// `Instanced` satisfies the `spawn_inline_child` bound; it is listed as
+/// private, not exported.
 pub struct InlineDespawnChild;
 
 #[actor(instanced, child_of(InlineDespawnParent))]

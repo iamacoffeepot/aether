@@ -68,7 +68,7 @@ macro_rules! RequireOneRoot {
             { ty: { $one:ty } namespace: $one_ns:tt extensions: [$($one_ext:tt)*] }
             { ty: { $publisher:ty } namespace: $publisher_ns:tt extensions: [$($publisher_ext:tt)*] }
             { ty: { $root:ty } namespace: "aether.bloomery.bundle" extensions: [] }
-        ], exports: [{ $ordinary:ty } { $bundle:ty }] }
+        ], exports: [{ $ordinary:ty } { $bundle:ty }], private: [{ $invocation:ty }] }
     ) => {
         const _: fn() = || {
             use core::marker::PhantomData;
@@ -85,6 +85,7 @@ macro_rules! RequireOneRoot {
                 { ty: { $root } namespace: "aether.bloomery.bundle" extensions: [] }
             ]
             exports: [{ $ordinary } { $bundle }]
+            private: [{ $invocation }]
         }
     };
     ($($unexpected:tt)*) => {

@@ -2,12 +2,13 @@
 //!
 //! `export!` collects framework-owned descriptor envelopes into `actors` and the
 //! listed types into `exports`, then invokes
-//! `$gen!(@aether_export_generate { remaining_generators } { boot, default, actors, exports })`.
+//! `$gen!(@aether_export_generate { remaining_generators } { boot, default, actors, exports, private })`.
 //! This macro is that hook. It forwards into `__bundle_export_generate`, which
 //! selects the `aether_bloomery_program` and `aether_bloomery_reactor`
 //! extensions on exported paths, emits one hidden bundle root with the state,
-//! handlers, and sections of the roles present, rewrites `exports` only, and
-//! appends a root envelope to `actors`. Original program and reactor envelopes
+//! handlers, and sections of the roles present, rewrites `exports`, appends a
+//! root envelope to `actors`, and appends its per-call invocation actor to
+//! `private` when programs are present. Original program and reactor envelopes
 //! stay attached to their types. Macros cannot reflect on target-crate trait
 //! impls, so there is no empty host-side generator trait. The derive crate is
 //! `proc-macro = true` and is not linked into guest wasm.
@@ -33,7 +34,10 @@
 /// present: `Invoke` / `Invoked` through a per-seq inline child plus
 /// `aether.bloomery.programs` for programs, `Warm` / `Event` / `StatusQuery`
 /// plus `aether.bloomery.reactors` for reactors. The root is never a `boot`
-/// actor. These are compile errors — entries are never dropped silently:
+/// actor. With programs present, the generator appends the invocation actor
+/// to the pipeline's `private` list, beside any the author wrote, so
+/// `export!` marks it rebuildable and a replace rebuilds it like any other
+/// private inline child. These are compile errors — entries are never dropped silently:
 /// - a module with neither a `#[program]` nor a `#[reactor]`;
 /// - a duplicate program `NAME`, or a duplicate or non-literal reactor `NAMESPACE`;
 /// - a program whose `MODE` is not `Mode::Pure`;
@@ -42,7 +46,13 @@
 macro_rules! bundle {
     (@aether_export_generate
         { remaining_generators: [$($rest:path),*] }
-        { boot: $boot:tt, default: $default:tt, actors: [$($actors:tt)*], exports: [$($exports:tt)*] }
+        {
+            boot: $boot:tt,
+            default: $default:tt,
+            actors: [$($actors:tt)*],
+            exports: [$($exports:tt)*],
+            private: [$($private:tt)*]
+        }
     ) => {
         $crate::__bundle_export_generate! {
             remaining_generators: [$($rest),*]
@@ -50,6 +60,7 @@ macro_rules! bundle {
             default: $default
             actors: [$($actors)*]
             exports: [$($exports)*]
+            private: [$($private)*]
         }
     };
     ($($tt:tt)*) => {
