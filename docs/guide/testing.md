@@ -184,7 +184,12 @@ makes an exact golden image the wrong primary oracle.
 
 Every scenario that loads a component opens with `require_wasm("<crate_stem>")`, which
 locates the component's cross-built wasm under
-`target/wasm32-unknown-unknown/<profile>/`. Build that artifact first:
+`target/wasm32-unknown-unknown/<profile>/`. `<profile>` is the one the most recent
+`cargo xtask build-wasm` / `cargo xtask dist` recorded in `dist/manifest.json` (debug by
+default, and debug when no manifest exists); the other profile's directory is never read,
+so a release build from `cargo xtask package` cannot shadow it. The gate prints
+`loading <path>` to stderr, which a failing scenario's output shows. Build that artifact
+first:
 
 ```sh
 cargo xtask build-wasm
@@ -198,7 +203,7 @@ pre-build step runs.
 Without the artifact the gate **fails** the scenario:
 
 ```
-SKIPPED (no wasm for aether_kit_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore
+SKIPPED (no wasm for aether_kit_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore (looked for <checkout>/target/wasm32-unknown-unknown/debug/aether_kit_widget.wasm)
 ```
 
 That is the whole point of the message. The gate used to return `None` here and let

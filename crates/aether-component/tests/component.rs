@@ -5,11 +5,11 @@
 //! ADR-0113), each driven through a [`SubstrateHarness`] composed with
 //! just the component host.
 //!
-//! Skipped when the fixture's wasm hasn't been built — `require_wasm`
-//! locates `target/wasm32-unknown-unknown/{release,debug}/<crate>.wasm`
-//! and skips with an `eprintln!` when it's absent. CI pre-builds the
-//! fixture wasm and sets `AETHER_REQUIRE_RUNTIME=1`, flipping the skip
-//! into a hard panic so a missing pre-build is loud.
+//! `require_wasm` locates the fixture's
+//! `target/wasm32-unknown-unknown/<profile>/<crate>.wasm` under the
+//! profile the last `cargo xtask build-wasm` recorded, and fails the
+//! scenario when it is absent (`AETHER_ALLOW_WASM_SKIP=1` skips
+//! instead). CI pre-builds the fixture wasm before running it.
 
 use std::fs;
 use std::path::Path;
