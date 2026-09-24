@@ -895,7 +895,7 @@ impl NativeActor for RpcServerCapability {
         let Some(entry) = state.in_flight.get(&correlation).copied() else {
             tracing::debug!(
                 target: "aether_substrate::rpc",
-                kind = %ctx.mailer().registry().kind_label(env.kind),
+                kind = %ctx.kind_label(env.kind),
                 correlation,
                 "rpc reply with no matching in-flight call; dropping",
             );

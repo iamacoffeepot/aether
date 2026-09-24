@@ -318,6 +318,14 @@ impl Mailer {
         &self.registry
     }
 
+    /// A kind's display label, as [`Registry::kind_label`] returns it: the
+    /// registered name, or the tagged id's text when the kind is unknown. The
+    /// crate-private path behind
+    /// [`NativeCtx::kind_label`](crate::actor::native::ctx::NativeCtx::kind_label).
+    pub(crate) fn kind_label(&self, kind: KindId) -> String {
+        self.registry.kind_label(kind)
+    }
+
     /// Subscribe `target` to the registry's inventory changes, as
     /// [`Registry::subscribe_inventory`] does, through this mailer. The
     /// crate-private path behind
