@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
 
-use aether_data::MailboxId;
+use aether_actor::ErasedActorRef;
 
 use super::super::kinds::ScheduledNote;
 use super::event::AudioEvent;
@@ -50,11 +50,12 @@ pub struct Synth {
     /// silence, so its wet output stays exactly zero and the mix is
     /// bit-for-bit identical to the pre-reverb dry sum.
     reverb_send: f32,
-    /// Live per-sender level trim (ADR-0127), keyed by the envelope
-    /// sender's `MailboxId`. An absent sender renders at unity (`1.0`). A
+    /// Live per-sender level trim (ADR-0127), keyed by the proven envelope
+    /// sender (ADR-0230), `None` for every caller without a local component
+    /// sender. An absent sender renders at unity (`1.0`). A
     /// `set_sender_gain` inserts/overwrites here; `fill` resolves each
     /// voice's entry once per block, so the trim ducks sounding voices.
-    sender_gains: HashMap<MailboxId, f32>,
+    sender_gains: HashMap<Option<ErasedActorRef>, f32>,
     /// Monotonically increasing counter stamped into each `Voice::seq`
     /// at allocation. Note-off reads the minimum value to locate the
     /// oldest voice on a shared key regardless of pool order (voice-steal
@@ -116,14 +117,21 @@ impl Synth {
     /// the id walks past the built-ins — a loaded sample bank's region
     /// selected by `(pitch, velocity)`), then steal the quietest voice if
     /// at capacity, and push. A second note-on on the same
-    /// `(sender_mailbox, instrument_id, pitch)` key stacks a new voice
+    /// `(sender, instrument_id, pitch)` key stacks a new voice
     /// rather than replacing the existing one, so concurrent same-pitch
     /// notes from one sender each sound independently. A miss on both
     /// kernel sources (unknown id, or a bank with no region covering the
     /// note) warn-drops without touching the pool (ADR-0103 §6).
-    pub fn trigger_note_on(&mut self, sender_mailbox: MailboxId, pitch: u8, velocity: u8, instrument_id: u8, pan: i8) {
+    pub fn trigger_note_on(
+        &mut self,
+        sender: Option<ErasedActorRef>,
+        pitch: u8,
+        velocity: u8,
+        instrument_id: u8,
+        pan: i8,
+    ) {
         let kernel = instrument_by_id(instrument_id)
-            .map(|def| build_builtin_kernel(sender_mailbox, instrument_id, pitch, velocity, def, self.sample_rate))
+            .map(|def| build_builtin_kernel(sender, instrument_id, pitch, velocity, def, self.sample_rate))
             .or_else(|| {
                 self.bank_for(instrument_id).and_then(|bank| {
                     bank.select(pitch, velocity)
@@ -168,9 +176,9 @@ impl Synth {
         // block-stable table `fill` refreshes from, so a voice added
         // mid-block by a scheduled event starts at the right level
         // (ADR-0127).
-        let sender_gain = self.sender_gains.get(&sender_mailbox).copied().unwrap_or(1.0);
+        let sender_gain = self.sender_gains.get(&sender).copied().unwrap_or(1.0);
         self.voices.push(Voice {
-            sender_mailbox,
+            sender,
             instrument_id,
             pitch,
             seq,
@@ -181,7 +189,7 @@ impl Synth {
         });
     }
 
-    /// Release the oldest unreleased voice matching `(sender_mailbox,
+    /// Release the oldest unreleased voice matching `(sender,
     /// instrument_id, pitch)`, if one is sounding. Several voices can
     /// share a key now that same-key note-ons stack (no more
     /// steal-on-retrigger), so note-off pairs oldest-note-on with
@@ -193,16 +201,11 @@ impl Synth {
     /// miss (no matching unreleased voice) is a silent no-op (a late or
     /// unmatched note-off), matching the previous behavior. Shared by
     /// the queue-drained note-off and the scheduled note-off.
-    pub fn trigger_note_off(&mut self, sender_mailbox: MailboxId, pitch: u8, instrument_id: u8) {
+    pub fn trigger_note_off(&mut self, sender: Option<ErasedActorRef>, pitch: u8, instrument_id: u8) {
         if let Some(v) = self
             .voices
             .iter_mut()
-            .filter(|v| {
-                v.sender_mailbox == sender_mailbox
-                    && v.instrument_id == instrument_id
-                    && v.pitch == pitch
-                    && !v.released
-            })
+            .filter(|v| v.sender == sender && v.instrument_id == instrument_id && v.pitch == pitch && !v.released)
             .min_by_key(|v| v.seq)
         {
             v.note_off();
@@ -211,23 +214,23 @@ impl Synth {
 
     /// Fire one scheduled note event through the same paths the
     /// immediate mail would take (ADR-0104).
-    pub fn fire_scheduled(&mut self, sender_mailbox: MailboxId, note: &ScheduledNote) {
+    pub fn fire_scheduled(&mut self, sender: Option<ErasedActorRef>, note: &ScheduledNote) {
         match *note {
             ScheduledNote::On { pitch, velocity, instrument_id, pan } => {
-                self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
+                self.trigger_note_on(sender, pitch, velocity, instrument_id, pan);
             }
-            ScheduledNote::Off { pitch, instrument_id } => self.trigger_note_off(sender_mailbox, pitch, instrument_id),
+            ScheduledNote::Off { pitch, instrument_id } => self.trigger_note_off(sender, pitch, instrument_id),
         }
     }
 
     pub fn drain_events(&mut self) {
         while let Some(ev) = self.events.pop() {
             match ev {
-                AudioEvent::NoteOn { sender_mailbox, pitch, velocity, instrument_id, pan } => {
-                    self.trigger_note_on(sender_mailbox, pitch, velocity, instrument_id, pan);
+                AudioEvent::NoteOn { sender, pitch, velocity, instrument_id, pan } => {
+                    self.trigger_note_on(sender, pitch, velocity, instrument_id, pan);
                 }
-                AudioEvent::NoteOff { sender_mailbox, pitch, instrument_id } => {
-                    self.trigger_note_off(sender_mailbox, pitch, instrument_id);
+                AudioEvent::NoteOff { sender, pitch, instrument_id } => {
+                    self.trigger_note_off(sender, pitch, instrument_id);
                 }
                 AudioEvent::SetMasterGain { gain } => {
                     self.master_gain = gain.clamp(0.0, 1.0);
@@ -235,17 +238,17 @@ impl Synth {
                 AudioEvent::SetReverbSend { send } => {
                     self.reverb_send = send.clamp(0.0, 1.0);
                 }
-                AudioEvent::SetSenderGain { sender_mailbox, gain } => {
+                AudioEvent::SetSenderGain { sender, gain } => {
                     // The handler already clamped to 0.0..=4.0; store the
                     // trim (absent = unity 1.0). `fill` resolves it onto
                     // sounding voices on the next block (ADR-0127).
-                    self.sender_gains.insert(sender_mailbox, gain);
+                    self.sender_gains.insert(sender, gain);
                 }
-                AudioEvent::TrackStart { sender_mailbox, lane, namespace, path, pcm, gain, looping } => {
-                    self.start_track(sender_mailbox, lane, namespace, path, pcm, gain, looping);
+                AudioEvent::TrackStart { sender, lane, namespace, path, pcm, gain, looping } => {
+                    self.start_track(sender, lane, namespace, path, pcm, gain, looping);
                 }
-                AudioEvent::TrackStop { sender_mailbox, lane, namespace, path } => {
-                    self.stop_track(sender_mailbox, lane.as_ref(), &namespace, &path);
+                AudioEvent::TrackStop { sender, lane, namespace, path } => {
+                    self.stop_track(sender, lane.as_ref(), &namespace, &path);
                 }
                 AudioEvent::RegisterInstrument { id, bank } => {
                     // Banks arrive in load order on this single-producer
@@ -265,7 +268,7 @@ impl Synth {
                     }
                     self.banks.push(bank);
                 }
-                AudioEvent::Schedule { sender_mailbox, events } => {
+                AudioEvent::Schedule { sender, events } => {
                     // Offsets are relative to receipt at the callback —
                     // the current frame clock (this drain runs at block
                     // start). Every event in the batch shares this
@@ -274,12 +277,7 @@ impl Synth {
                         let due_frame = self.frame_clock + millis_to_frames(event.at_millis, self.sample_rate);
                         let seq = self.next_schedule_seq;
                         self.next_schedule_seq += 1;
-                        self.scheduled.push(Reverse(ScheduledEntry {
-                            due_frame,
-                            seq,
-                            sender_mailbox,
-                            note: event.event,
-                        }));
+                        self.scheduled.push(Reverse(ScheduledEntry { due_frame, seq, sender, note: event.event }));
                     }
                 }
             }
@@ -287,12 +285,12 @@ impl Synth {
     }
 
     /// Start (or restart) a track in the lane. Re-playing the same
-    /// `(sender_mailbox, lane, namespace, path)` key drops the existing
+    /// `(sender, lane, namespace, path)` key drops the existing
     /// track first, so a key never stacks.
     #[allow(clippy::too_many_arguments)]
     pub fn start_track(
         &mut self,
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         lane: Option<String>,
         namespace: String,
         path: String,
@@ -300,16 +298,16 @@ impl Synth {
         gain: f32,
         looping: bool,
     ) {
-        if let Some(i) = self.tracks.iter().position(|t| t.matches(sender_mailbox, lane.as_ref(), &namespace, &path)) {
+        if let Some(i) = self.tracks.iter().position(|t| t.matches(sender, lane.as_ref(), &namespace, &path)) {
             self.tracks.swap_remove(i);
         }
-        self.tracks.push(TrackVoice::new(sender_mailbox, lane, namespace, path, pcm, gain, looping));
+        self.tracks.push(TrackVoice::new(sender, lane, namespace, path, pcm, gain, looping));
     }
 
     /// Arm the fade-out on the track at this key, if one is playing.
-    pub fn stop_track(&mut self, sender_mailbox: MailboxId, lane: Option<&String>, namespace: &str, path: &str) {
+    pub fn stop_track(&mut self, sender: Option<ErasedActorRef>, lane: Option<&String>, namespace: &str, path: &str) {
         let fade = self.fade_samples();
-        if let Some(t) = self.tracks.iter_mut().find(|t| t.matches(sender_mailbox, lane, namespace, path)) {
+        if let Some(t) = self.tracks.iter_mut().find(|t| t.matches(sender, lane, namespace, path)) {
             t.stop(fade);
         }
     }
@@ -322,7 +320,7 @@ impl Synth {
         // Voices allocated mid-block by a scheduled event resolve their
         // own trim in `trigger_note_on` from the same block-stable table.
         for voice in &mut self.voices {
-            voice.sender_gain = self.sender_gains.get(&voice.sender_mailbox).copied().unwrap_or(1.0);
+            voice.sender_gain = self.sender_gains.get(&voice.sender).copied().unwrap_or(1.0);
         }
         let dt = 1.0 / self.sample_rate;
         let frames = buffer.len() / channels.max(1);
@@ -334,7 +332,7 @@ impl Synth {
             let absolute = self.frame_clock + frame as u64;
             while self.scheduled.peek().is_some_and(|Reverse(top)| top.due_frame <= absolute) {
                 let Reverse(entry) = self.scheduled.pop().expect("peeked entry is present this iteration");
-                self.fire_scheduled(entry.sender_mailbox, &entry.note);
+                self.fire_scheduled(entry.sender, &entry.note);
             }
             // Per-voice stereo placement (ADR-0127): the mono kernel
             // output is trimmed by the sender gain, then split into L/R by

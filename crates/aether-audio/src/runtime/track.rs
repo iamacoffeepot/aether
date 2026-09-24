@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use aether_data::MailboxId;
+use aether_actor::ErasedActorRef;
 
 use super::decode::DecodeError;
 
@@ -27,11 +27,11 @@ pub enum TrackFade {
 /// the `Arc`'d device-rate mono PCM, a position walk, per-track gain,
 /// loop flag, and fade state. A track neither counts against
 /// `MAX_VOICES` nor participates in voice-steal — a music bed must not
-/// be evicted by a note flurry. Keyed by `(sender_mailbox, lane,
-/// namespace, path)`, mirroring the voice key plus the caller-supplied
-/// `lane` that disambiguates senders sharing a source mailbox.
+/// be evicted by a note flurry. Keyed by `(sender, lane, namespace,
+/// path)`, mirroring the voice key plus the caller-supplied `lane` that
+/// disambiguates callers sharing the `None` sender key.
 pub struct TrackVoice {
-    sender_mailbox: MailboxId,
+    sender: Option<ErasedActorRef>,
     lane: Option<String>,
     namespace: String,
     path: String,
@@ -45,7 +45,7 @@ pub struct TrackVoice {
 
 impl TrackVoice {
     pub fn new(
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         lane: Option<String>,
         namespace: String,
         path: String,
@@ -53,27 +53,13 @@ impl TrackVoice {
         gain: f32,
         looping: bool,
     ) -> Self {
-        Self {
-            sender_mailbox,
-            lane,
-            namespace,
-            path,
-            pcm,
-            position: 0,
-            gain,
-            looping,
-            fade: TrackFade::Playing,
-            done: false,
-        }
+        Self { sender, lane, namespace, path, pcm, position: 0, gain, looping, fade: TrackFade::Playing, done: false }
     }
 
     /// True when this event's key matches the track's
-    /// `(sender_mailbox, lane, namespace, path)`.
-    pub fn matches(&self, sender_mailbox: MailboxId, lane: Option<&String>, namespace: &str, path: &str) -> bool {
-        self.sender_mailbox == sender_mailbox
-            && self.lane.as_ref() == lane
-            && self.namespace == namespace
-            && self.path == path
+    /// `(sender, lane, namespace, path)`.
+    pub fn matches(&self, sender: Option<ErasedActorRef>, lane: Option<&String>, namespace: &str, path: &str) -> bool {
+        self.sender == sender && self.lane.as_ref() == lane && self.namespace == namespace && self.path == path
     }
 
     /// Arm the fade-out. Idempotent — a second `stop` while already
@@ -130,7 +116,7 @@ impl TrackVoice {
 /// without re-deriving anything (ADR-0093 §5). The worker produces the
 /// decoded PCM; this carries the synth key + play parameters alongside.
 pub struct TrackDecodeContext {
-    pub sender_mailbox: MailboxId,
+    pub sender: Option<ErasedActorRef>,
     pub lane: Option<String>,
     pub namespace: String,
     pub path: String,

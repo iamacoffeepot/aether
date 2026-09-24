@@ -1,7 +1,7 @@
 use std::str::from_utf8;
 
-use aether_actor::{OutboundReply, Reaches};
-use aether_data::{MailboxId, Source};
+use aether_actor::{ErasedActorRef, OutboundReply, Reaches};
+use aether_data::Source;
 
 use super::decode::decode_wav_to_mono;
 use super::sample::{
@@ -19,13 +19,23 @@ use aether_fs::FsMailboxExt;
 /// track, instrument, and per-sample paths.
 #[aether_data::kind(name = "aether.audio.load_context")]
 pub enum AudioLoadContext {
-    /// A `play_track` WAV read; carries the original reply route plus the
-    /// synth-side track key and playback parameters.
-    Track { source: Source, sender_mailbox: MailboxId, lane: Option<String>, gain: f32, looping: bool },
+    /// A `play_track` WAV read; the load itself waits in the cap's
+    /// `track_loads` under `load_id`.
+    Track { load_id: u64 },
     /// A `load_instrument` `.sfz` read; carries the original reply route.
     Instrument { source: Source },
     /// One sample read in a bank assembly; carries the assembly and exact slot.
     Sample { assembly_id: u64, slot: u64 },
+}
+
+/// A `play_track` whose read is in flight, keyed by `load_id` in the cap's
+/// `track_loads`: held in state because the proven sender cannot ride a kind.
+pub struct TrackLoad {
+    pub source: Source,
+    pub sender: Option<ErasedActorRef>,
+    pub lane: Option<String>,
+    pub gain: f32,
+    pub looping: bool,
 }
 
 impl AudioCapabilityState {
@@ -36,14 +46,12 @@ impl AudioCapabilityState {
     pub fn start_track_decode<A>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, Manual>,
-        context: AudioLoadContext,
+        load: TrackLoad,
         namespace: String,
         path: String,
         bytes: Vec<u8>,
     ) {
-        let AudioLoadContext::Track { source, sender_mailbox, lane, gain, looping } = context else {
-            return;
-        };
+        let TrackLoad { source, sender, lane, gain, looping } = load;
         let Some(device_rate) = self.sample_rate else {
             ctx.reply_to(
                 source,
@@ -61,7 +69,7 @@ impl AudioCapabilityState {
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let target_rate = device_rate as u32;
 
-        let context = TrackDecodeContext { sender_mailbox, lane, namespace, path, gain, looping };
+        let context = TrackDecodeContext { sender, lane, namespace, path, gain, looping };
         // Bridge the hold from this (fs-reply) turn into the decode
         // dispatch, pinning the reply to the original `play_track` caller.
         let hold = ctx.acquire_settlement_hold();

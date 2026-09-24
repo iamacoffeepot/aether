@@ -104,7 +104,7 @@ use aether_actor::actor;
 
 // The runtime half — the whole cpal/synth + `aether_substrate`-typed surface
 // (imports, `AudioCapabilityState`, its helpers + `Drop`, `spawn_audio_worker`,
-// `sender_mailbox_id`, and the `#[runtime] impl`) — lives under `runtime/`, gated
+// and the `#[runtime] impl`) — lives under `runtime/`, gated
 // once here on the crate's `runtime` feature (it pulls the cpal/synth deps and
 // forwards `aether-fs/runtime`).
 #[cfg(feature = "runtime")]

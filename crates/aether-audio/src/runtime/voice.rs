@@ -3,8 +3,9 @@
 //! one sample at a time.
 
 use std::f32::consts::TAU;
+use std::hash::{DefaultHasher, Hash, Hasher};
 
-use aether_data::MailboxId;
+use aether_actor::ErasedActorRef;
 
 use super::instrument::{
     Adsr, InstrumentDef, PARTIAL_COUNT, PARTIAL_SILENCE_FLOOR, PartialBankDef, PitchSweep, REFERENCE_FREQ, VoiceDef,
@@ -123,22 +124,20 @@ fn next_noise(state: &mut u32) -> f32 {
     frac.mul_add(2.0, -1.0)
 }
 
-/// Seed the per-voice noise PRNG from the voice key
-/// (`sender_mailbox`, `instrument_id`, `pitch`) so a fixed key renders
-/// the same noise sequence every run. Forced non-zero — xorshift32 is
+/// Seed the per-voice noise PRNG from the voice key (`sender`,
+/// `instrument_id`, `pitch`) so a fixed key renders the same noise
+/// sequence every run. The key is hashed with `DefaultHasher::new()`,
+/// whose keys are fixed, so the seed goes through the proof's own `Hash`
+/// rather than reading its position. Forced non-zero — xorshift32 is
 /// stuck at zero.
-pub fn voice_seed(sender_mailbox: MailboxId, instrument_id: u8, pitch: u8) -> u32 {
-    // Truncating the 64-bit mailbox id into the hash is intended; the
-    // seed only needs to vary per key, not round-trip.
-    #[allow(clippy::cast_possible_truncation)]
-    let lo = sender_mailbox.0 as u32;
-    #[allow(clippy::cast_possible_truncation)]
-    let hi = (sender_mailbox.0 >> 32) as u32;
-    let mixed = lo.wrapping_mul(2_654_435_761)
-        ^ hi.wrapping_mul(40_503)
-        ^ u32::from(instrument_id).wrapping_mul(2_246_822_519)
-        ^ u32::from(pitch).wrapping_mul(3_266_489_917);
-    mixed | 1
+pub fn voice_seed(sender: Option<ErasedActorRef>, instrument_id: u8, pitch: u8) -> u32 {
+    let mut hasher = DefaultHasher::new();
+    (sender, instrument_id, pitch).hash(&mut hasher);
+    let hash = hasher.finish();
+    // Fold the 64-bit hash into 32 bits; the seed only needs to vary per
+    // key, not round-trip.
+    let folded = u32::try_from((hash ^ (hash >> 32)) & u64::from(u32::MAX)).expect("masked to 32 bits");
+    folded | 1
 }
 
 impl OscVoice {
@@ -556,7 +555,7 @@ pub enum VoiceKernel {
 /// resolve a built-in or a loaded sample bank into a `VoiceKernel`
 /// before the steal bookkeeping, then stamp one `Voice`.
 pub fn build_builtin_kernel(
-    sender_mailbox: MailboxId,
+    sender: Option<ErasedActorRef>,
     instrument_id: u8,
     pitch: u8,
     velocity: u8,
@@ -565,7 +564,7 @@ pub fn build_builtin_kernel(
 ) -> VoiceKernel {
     match def.voice {
         VoiceDef::Oscillator { wave, adsr } => {
-            let seed = voice_seed(sender_mailbox, instrument_id, pitch);
+            let seed = voice_seed(sender, instrument_id, pitch);
             let mut osc = OscVoice::new(pitch, velocity, wave, adsr, def.base_amp, sample_rate, seed);
             if let Some(sweep) = def.pitch_sweep {
                 osc = osc.with_pitch_sweep(sweep, sample_rate);
@@ -591,8 +590,10 @@ pub fn pan_law(pan: i8) -> [f32; 2] {
     [theta.cos(), theta.sin()]
 }
 
-/// A single sounding voice: the routing key (`sender_mailbox`,
-/// `instrument_id`, `pitch`) plus the kernel that renders it. No longer
+/// A single sounding voice: the routing key (`sender`, `instrument_id`,
+/// `pitch`) plus the kernel that renders it. `sender` is the proven
+/// envelope sender (ADR-0230), `None` for every caller without a local
+/// component sender. No longer
 /// `Copy` — a sample voice holds a reference-counted PCM handle
 /// (ADR-0103 §6) — but the pool was never structurally dependent on
 /// `Copy`; it stays a flat `Vec<Voice>` mutated by `swap_remove` /
@@ -601,7 +602,7 @@ pub fn pan_law(pan: i8) -> [f32; 2] {
 /// `seq` is a monotonically increasing counter stamped at allocation.
 /// Voice-steal no longer reads it (it evicts by instantaneous loudness,
 /// `current_level`), but note-off does: several voices can share one
-/// `(sender_mailbox, instrument_id, pitch)` key now that same-key
+/// `(sender, instrument_id, pitch)` key now that same-key
 /// note-ons stack, so `seq` lets note-off pick the *oldest* matching
 /// voice regardless of the pool's current order (which `swap_remove`
 /// scrambles).
@@ -616,7 +617,7 @@ pub fn pan_law(pan: i8) -> [f32; 2] {
 /// once per render block so a `set_sender_gain` ducks sounding voices.
 #[derive(Clone, Debug)]
 pub struct Voice {
-    pub sender_mailbox: MailboxId,
+    pub sender: Option<ErasedActorRef>,
     pub instrument_id: u8,
     pub pitch: u8,
     pub seq: u64,
