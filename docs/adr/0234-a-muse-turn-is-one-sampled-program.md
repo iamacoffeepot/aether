@@ -2,6 +2,7 @@
 
 - **Status:** Proposed
 - **Date:** 2026-09-23
+- **Amended:** 2026-09-24 — a transient vendor refusal (a 429 rate limit, a 503, or a 529, or any non-2xx the vendor's `x-should-retry: true` marks retryable) is the recorded outcome `Transient { retry_after_secs }` instead of `Rejected`; the program still sends one fetch and never retries, a caller retries under a new key, and the waiting mechanism is #6630 (#6618).
 
 Amends [ADR-0228](0228-async-programs-await-sanctioned-mail.md) (its
 Consequences leave Muse and HTTP out of scope: "Muse / HTTP is not this
@@ -98,10 +99,24 @@ program is tested without spending money.
      `Incomplete { text, reason, usage }` when the vendor status is
      `incomplete`, keeping the partial text; `Declined { refusal, usage }`
      when the reply carries a refusal content part; `Rejected` for a
-     non-2xx status or a vendor status of `failed` or `cancelled`; and
-     `Unreadable` for a 2xx body that does not read as a finished
-     response (it does not parse, reports no usage, or carries a vendor
-     status other than those above).
+     non-transient non-2xx status or a vendor status of `failed` or
+     `cancelled`; `Transient { retry_after_secs }` when the vendor refused
+     for now (rate limit or overload), nothing was bought, and a new
+     request may succeed; and `Unreadable` for a 2xx body that does not
+     read as a finished response (it does not parse, reports no usage, or
+     carries a vendor status other than those above).
+   - A non-2xx status is classified in this order. A vendor verdict
+     header `x-should-retry` (name in any case, value exactly `true` or
+     `false`) decides outright: `true` is `Transient`, `false` is
+     `Rejected`; any other value is no verdict. Without one, a 429 whose
+     body's `error.code` is `insufficient_quota` is `Rejected`, because
+     that is a billing state no retry clears; any other 429, including one
+     with an unparseable body, is `Transient`; a 503 or 529 is
+     `Transient`; every other non-2xx is `Rejected`.
+   - `retry_after_secs` is the first `Retry-After` header (name in any
+     case) when its value is ASCII digits that fit a `u32`, and `None`
+     otherwise. An HTTP-date is `None`: a program has no clock to turn a
+     date into a delay.
    - `TurnUsage { input_tokens, cached_input_tokens, output_tokens,
      reasoning_tokens }` records what the vendor reported and claims no
      relation between the counts. A detail count the reply leaves out is
@@ -118,7 +133,9 @@ program is tested without spending money.
    connection error, body too large) means no reply at all: the program
    returns `Refusal::Refused` naming the `HttpError`, which the driver
    records as `Fault { Refused }`. A status outside `100..=599` is not an
-   HTTP reply and refuses the same way.
+   HTTP reply and refuses the same way. A transient refusal is a reply,
+   so it is a result too: its status and body stay on the record, and its
+   classification can be corrected later.
 
 6. **The key comes from the engine credential mechanism (#6593).** A
    program cannot hold a secret safely: its input and cited texts are
@@ -167,6 +184,18 @@ program is tested without spending money.
 - Endpoint and model are recorded in every turn's input, so the record
   says where a turn went and which model answered; the operator's
   allowlist is the control on where turns may go.
+- A `Transient` turn is retried by its caller as a new `Call` under a new
+  key (ADR-0226 decisions 9 and 11). The program only translates the
+  vendor's signal; whether, how often, and when to retry is the caller's
+  policy. Waiting out `Retry-After` needs a clock no program, reactor, or
+  the driver has, so that mechanism is #6630.
+- Adding `Transient` changes the `muse.turn.result` kind id, because
+  ADR-0030 hashes a kind id over its name and schema. Results recorded
+  before the change keep the old kind.
+- A 5xx other than 503 or 529 stays `Rejected`: a gateway error (500, 502,
+  504) can arrive after the vendor started generating, so the program
+  cannot claim nothing was bought. The caller may still retry a
+  `Rejected` turn knowingly, since the status is on the record.
 
 ## Alternatives considered
 
@@ -197,4 +226,13 @@ program is tested without spending money.
   on the vendor side, and the program cannot guarantee it.
 - **Tool definitions in a turn.** Deferred to an amendment (decision 9).
 - **Retrying inside `run`.** Rejected: retry belongs to the graph
-  (ADR-0226), and a hidden retry spends money twice.
+  (ADR-0226), and a hidden retry spends money twice. Backing off also
+  needs a sleep, and a program has no clock or timer; the backoff would
+  hold the bundle's single active invocation (ADR-0226 decision 3), so
+  every other turn on that bundle would wait behind it.
+- **Driver re-runs a transient outcome.** Rejected: the driver would need
+  to decode a program-specific result kind, which is the kind registry
+  ADR-0226 rejects, and hold a timer, though its core is sans-io and
+  reads no clock (`crates/aether-bloomery-driver/src/lib.rs`). It would
+  also silently re-run a recorded request, against ADR-0226 decision 11's
+  one `Call`, one outcome.
