@@ -11,6 +11,7 @@ use std::any::TypeId;
 use std::time::Duration;
 
 use aether_actor::NamespaceError;
+use aether_data::ActorPathError;
 
 use crate::chassis::error::BootError;
 use crate::mail::MailboxId;
@@ -30,6 +31,11 @@ pub enum SpawnError {
     /// chars, or exceeds the byte cap. See
     /// [`NamespaceError`].
     SubnameInvalid(NamespaceError),
+    /// The child's composed canonical name — the parent's proven path, then
+    /// `{A::NAMESPACE}:{subname}` — is not an ADR-0166 actor path: in practice a
+    /// lineage deeper than `MAX_SCOPE_PATH_DEPTH` or longer than
+    /// `MAX_SCOPE_PATH_BYTES`. Reported at staging, before `A::init`.
+    PathInvalid(ActorPathError),
     /// `A::NAMESPACE` is already owned by a different `TypeId`. Trips
     /// when an `Instanced` type tries to spawn under a namespace a
     /// `Singleton` already owns (or vice versa). ADR-0079 unique-owner

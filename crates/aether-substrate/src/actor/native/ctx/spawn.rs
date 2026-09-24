@@ -9,7 +9,7 @@
 use std::sync::Arc;
 
 use aether_actor::{Instanced, ReplyMode};
-use aether_data::MailboxId;
+use aether_data::{ActorPath, MailboxId};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::identity::ActorRuntimeIdentity;
@@ -87,14 +87,14 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// shares this ctx's physical binding. This is the wasm trampoline seam:
     /// an inline actor executes inside the root trampoline but its detached
     /// child must extend the inline actor's lineage. The component host
-    /// validates `parent` against its active cluster and supplies the
-    /// registry-owned canonical `parent_name`; native actor code should use
+    /// validates `parent` against its active cluster and hands in its proven
+    /// canonical `parent_name`; native actor code should use
     /// [`Self::spawn_child`] instead.
     #[doc(hidden)]
     pub fn spawn_child_scoped<'b, C>(
         &'b self,
         parent: MailboxId,
-        parent_name: Arc<str>,
+        parent_name: ActorPath,
         subname: Subname<'b>,
         config: C::Config,
         params: C::Params,

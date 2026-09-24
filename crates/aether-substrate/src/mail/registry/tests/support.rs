@@ -6,12 +6,14 @@ use std::panic;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
+use aether_data::ActorPath;
+
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::cost::CostCell;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::effect::{
     ACTIVATION_BARRIER_KIND, ActivationReservation, ActivationToken, InstalledActivation, LiveActivation,
-    PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
+    PreparedCostCells, PreparedMail, PreparedSpawnActivation, PreparedSpawnCommit, PreparedSpawnFailure,
     RegistryApplied, RegistryEffect,
 };
 use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, canonical_mailbox_id};
@@ -148,7 +150,8 @@ pub(super) fn prepared_test_spawn(
     let cell = Arc::new(CostCell::new());
     let cancelled = Arc::new(AtomicUsize::new(0));
     let effect = RegistryEffect::PreparedSpawn(PreparedSpawnCommit::new(
-        PreparedRoute::with_id(id, name.to_owned()),
+        id,
+        ActorPath::new(name).expect("fixture is an actor path"),
         Box::new(FakePreparedActivation {
             deliveries,
             scheduled,

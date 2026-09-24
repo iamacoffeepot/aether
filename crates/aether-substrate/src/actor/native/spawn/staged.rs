@@ -131,14 +131,14 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             context,
         );
         let receipt = SpawnReceipt {
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
+            canonical_name: staged.identity.canonical_name.clone(),
             completion: completion.dispatch_id(),
         };
         let finalizer = NativeSpawnFinalizer::parented(
             parent_reservation,
             completion,
             staged.identity.id,
-            Arc::clone(&staged.identity.canonical_name),
+            staged.identity.canonical_name.clone(),
             Arc::downgrade(&staged.transport),
         );
         let commit = spawner.prepare_commit(staged, Some(finalizer), chain);
@@ -204,14 +204,14 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             hold.as_ref().map_or(EffectChain::Uncaused(Uncaused::ChainlessTurn), |hold| EffectChain::Held(hold.root()));
         let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(hold, reply_to, context);
         let receipt = SpawnReceipt {
-            canonical_name: Arc::clone(&staged.identity.canonical_name),
+            canonical_name: staged.identity.canonical_name.clone(),
             completion: completion.dispatch_id(),
         };
         let finalizer = NativeSpawnFinalizer::parented(
             parent_reservation,
             completion,
             staged.identity.id,
-            Arc::clone(&staged.identity.canonical_name),
+            staged.identity.canonical_name.clone(),
             Arc::downgrade(&staged.transport),
         );
         parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), chain));

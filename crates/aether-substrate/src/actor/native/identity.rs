@@ -1,6 +1,4 @@
-use std::sync::Arc;
-
-use aether_data::MailboxId;
+use aether_data::{ActorPath, MailboxId};
 
 /// The canonical runtime identity carried by every typed native actor binding
 /// (ADR-0165).
@@ -14,11 +12,11 @@ pub struct ActorRuntimeIdentity {
     mailbox: MailboxId,
     parent: Option<MailboxId>,
     carry: u64,
-    canonical_name: Arc<str>,
+    canonical_name: ActorPath,
 }
 
 impl ActorRuntimeIdentity {
-    pub fn new(mailbox: MailboxId, parent: Option<MailboxId>, carry: u64, canonical_name: Arc<str>) -> Self {
+    pub fn new(mailbox: MailboxId, parent: Option<MailboxId>, carry: u64, canonical_name: ActorPath) -> Self {
         Self { mailbox, parent, carry, canonical_name }
     }
 
@@ -34,29 +32,7 @@ impl ActorRuntimeIdentity {
         self.carry
     }
 
-    pub fn canonical_name(&self) -> &Arc<str> {
+    pub fn canonical_name(&self) -> &ActorPath {
         &self.canonical_name
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn typed_identity_keeps_the_concrete_instance_facts_distinct() {
-        let mailbox = MailboxId(0x4058);
-        let parent = MailboxId(0x4048);
-        let identity = ActorRuntimeIdentity::new(
-            mailbox,
-            Some(parent),
-            0x165,
-            Arc::from("test.parent/test.native.identity:child"),
-        );
-
-        assert_eq!(identity.mailbox(), mailbox);
-        assert_eq!(identity.parent(), Some(parent));
-        assert_eq!(identity.carry(), 0x165);
-        assert_eq!(&**identity.canonical_name(), "test.parent/test.native.identity:child");
     }
 }

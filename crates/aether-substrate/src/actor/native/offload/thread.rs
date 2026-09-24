@@ -99,7 +99,7 @@ mod tests {
     use super::*;
     use std::sync::{Arc, OnceLock};
 
-    use aether_data::MailboxId;
+    use aether_data::{ActorPath, MailboxId};
 
     use crate::chassis::settlement_table::SettlementTable;
     use crate::mail::Mailer;
@@ -190,7 +190,7 @@ mod tests {
             Arc::clone(&mailer),
             MailboxId(0x6431),
             0x6431,
-            Arc::from(NAMESPACE),
+            ActorPath::new(NAMESPACE).expect("fixture is an actor path"),
             Arc::<HoldProbeAborter>::clone(&aborter),
             None,
         );

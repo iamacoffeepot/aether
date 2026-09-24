@@ -14,6 +14,7 @@ use std::sync::{Arc, Weak};
 use std::time::Duration;
 
 use aether_actor::Instanced;
+use aether_data::ActorPath;
 
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::local;
@@ -40,7 +41,7 @@ use super::{InstancedSlotEntry, Spawner};
 const BIRTH_PATIENCE: Duration = Duration::from_secs(30);
 pub(in crate::actor::native::spawn) struct SpawnCommit {
     pub(in crate::actor::native::spawn) mailbox_id: MailboxId,
-    pub(in crate::actor::native::spawn) canonical_name: String,
+    pub(in crate::actor::native::spawn) canonical_name: ActorPath,
 }
 
 impl Spawner {
@@ -105,17 +106,15 @@ impl Spawner {
         A: Instanced + NativeActor,
     {
         let mailbox_id = staged.identity.id;
-        let name = Arc::clone(&staged.identity.canonical_name);
+        let name = staged.identity.canonical_name.clone();
         let (decided, birth) = crossbeam_channel::bounded(1);
-        let finalizer = NativeSpawnFinalizer::external(decided, mailbox_id, Arc::clone(&name));
+        let finalizer = NativeSpawnFinalizer::external(decided, mailbox_id, name.clone());
         let commit = self.prepare_commit(staged, Some(finalizer), EffectChain::Uncaused(Uncaused::EmbedderCall));
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
         }
         match birth.recv_timeout(BIRTH_PATIENCE) {
-            Ok(SpawnOutcome { canonical_name, result }) => {
-                result.map(|_| SpawnCommit { mailbox_id, canonical_name: canonical_name.to_string() })
-            }
+            Ok(SpawnOutcome { canonical_name, result }) => result.map(|_| SpawnCommit { mailbox_id, canonical_name }),
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 tracing::warn!(
                     target: "aether_substrate::spawn",
@@ -343,6 +342,6 @@ impl Spawner {
         // closure was installed (see comment above).
         let _ = manual_wake.wake();
 
-        Ok(SpawnCommit { mailbox_id: id, canonical_name: full_name.to_string() })
+        Ok(SpawnCommit { mailbox_id: id, canonical_name: full_name })
     }
 }

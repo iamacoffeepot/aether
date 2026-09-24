@@ -628,9 +628,12 @@ ordered prepared birth to the parent's buffer
 ([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
 registry moves while the handler runs, so no spawn takes a global lock
 mid-turn. What comes back is a `SpawnReceipt`: the child's `canonical_name`,
-derived from the parent's identity, which names the child for correlation, plus
-a `completion` `DispatchId`. Neither is a send target: the
-child is not `Live` yet, so nothing can prove it. Mail the child must see first
+an `ActorPath` derived from the parent's identity and proven against the
+ADR-0166 address grammar on the spot, which names the child for correlation,
+plus a `completion` `DispatchId`. A lineage too deep or too long for that
+grammar never gets a receipt: `.stage()` itself returns
+`SpawnError::PathInvalid`. Neither field is a send target: the child is not
+`Live` yet, so nothing can prove it. Mail the child must see first
 rides `after_init` on the birth itself, and later mail goes through
 `ctx.send_to(&child, &k)` once the `Ok` completion hands back its reference.
 
@@ -654,7 +657,7 @@ first, say) surfaces as one typed failure rather than a silent half-spawn. A
 
 ```rust
 struct SpawnOutcome<A> {
-    canonical_name: Arc<str>,
+    canonical_name: ActorPath,
     result: Result<ActorRef<A>, SpawnError>,
 }
 ```

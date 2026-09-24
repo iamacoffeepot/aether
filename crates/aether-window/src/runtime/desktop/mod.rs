@@ -1013,7 +1013,7 @@ mod tests {
     use std::fmt::Debug;
     use std::sync::mpsc;
 
-    use aether_data::{Kind, MailboxId};
+    use aether_data::{ActorPath, Kind, MailboxId};
     use aether_kinds::mouse_button;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
@@ -1228,7 +1228,8 @@ mod tests {
             &mut ctx,
             id,
             &SpawnOutcome::<DesktopWindowInstance> {
-                canonical_name: Arc::from("aether.window/aether.window.instance:tools"),
+                canonical_name: ActorPath::new("aether.window/aether.window.instance:tools")
+                    .expect("fixture is an actor path"),
                 result: Err(SpawnError::OwnerClosed),
             },
         );
@@ -1273,7 +1274,8 @@ mod tests {
             &mut NativeCtx::<'_, Erased>::new_for_actor(&binding, Source::NONE, None, None),
             id,
             &SpawnOutcome::<DesktopWindowInstance> {
-                canonical_name: Arc::from("aether.window/aether.window.instance:tools"),
+                canonical_name: ActorPath::new("aether.window/aether.window.instance:tools")
+                    .expect("fixture is an actor path"),
                 result: Ok(child),
             },
         );
