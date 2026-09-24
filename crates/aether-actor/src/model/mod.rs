@@ -352,8 +352,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// A declared load-time dependency (ADR-0230): `Self: DependsOn<R>` means
 /// the actor could not have been created before `R` was `Live` — the host
 /// refuses the load, the module boot actor, or the replacement while `R`
-/// has no `Live` route, before `init`. Emitted by `#[actor(depends(R))]`;
-/// authors never write these by hand.
+/// has no `Live` route, before `init`. Declared with `#[actor(depends(R))]`.
 ///
 /// Only keyless actors are declarable: `R: Singleton + CallerAddressable`
 /// with a [`DependencyResolver`] strategy. A keyed actor cannot be a
@@ -361,7 +360,7 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// that case is reached through the reference its spawn returned:
 ///
 /// ```compile_fail,E0277
-/// use aether_actor::{Addressable, DependsOn, Many, One};
+/// use aether_actor::{ActorInitError, Addressable, Mail, Many, WasmActor, WasmCtx, WasmInitCtx, actor};
 ///
 /// struct Keyed;
 ///
@@ -372,12 +371,17 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 ///
 /// struct Dependent;
 ///
-/// impl Addressable for Dependent {
+/// #[actor(depends(Keyed))]
+/// impl WasmActor for Dependent {
 ///     const NAMESPACE: &'static str = "example.dependent";
-///     type Resolver = One;
-/// }
 ///
-/// impl DependsOn<Keyed> for Dependent {}
+///     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+///         Ok(Self)
+///     }
+///
+///     #[fallback]
+///     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+/// }
 /// ```
 ///
 /// The sealed bound carries its own weight: a custom keyless strategy
@@ -385,7 +389,10 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 /// `DependencyResolver` alone:
 ///
 /// ```compile_fail,E0277
-/// use aether_actor::{Addressable, CallerScope, CallerScoped, DependsOn, MailboxId, One, Resolve};
+/// use aether_actor::{
+///     ActorInitError, Addressable, CallerScope, CallerScoped, Mail, MailboxId, Resolve, WasmActor, WasmCtx,
+///     WasmInitCtx, actor,
+/// };
 ///
 /// struct CustomKeyless;
 ///
@@ -414,18 +421,31 @@ pub trait ChildOf<P: Addressable>: Addressable {}
 ///
 /// struct Dependent;
 ///
-/// impl Addressable for Dependent {
+/// #[actor(depends(Custom))]
+/// impl WasmActor for Dependent {
 ///     const NAMESPACE: &'static str = "example.dependent";
-///     type Resolver = One;
-/// }
 ///
-/// impl DependsOn<Custom> for Dependent {}
+///     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+///         Ok(Self)
+///     }
+///
+///     #[fallback]
+///     fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+/// }
 /// ```
+///
+/// # Safety
+///
+/// Implement it only through `#[actor(depends(R))]`. That expansion also
+/// records the dependency entry the pre-`init` check reads — a link-time
+/// `DependencyEntry` on native, an `InputsRecord::Dependency` in the inputs
+/// manifest on wasm. A hand-written impl mints [`ActorRef<R>`](crate::ActorRef)
+/// proofs for an actor whose birth never checked that `R` was `Live`.
 #[diagnostic::on_unimplemented(
     message = "`{Self}` does not declare a dependency on `{R}`",
     note = "add `{R}` to the `depends(...)` list on the actor's `#[actor(...)]` attribute"
 )]
-pub trait DependsOn<R: Singleton + CallerAddressable>: Addressable
+pub unsafe trait DependsOn<R: Singleton + CallerAddressable>: Addressable
 where
     R::Resolver: DependencyResolver,
 {
@@ -456,7 +476,7 @@ mod reaches_sealed {
 ///
 /// The [`Addressable`] bound is spelled out even though [`DependsOn`] implies
 /// it as a supertrait: without it the two impls overlap. A downstream crate
-/// could write `impl DependsOn<Local> for Erased` — the local `R` satisfies
+/// could write `unsafe impl DependsOn<Local> for Erased` — the local `R` satisfies
 /// the orphan rule — but it cannot write `impl Addressable for Erased`, a
 /// foreign trait for a foreign type, and this crate writes neither. So
 /// [`Erased`] provably never satisfies the blanket impl's bounds.

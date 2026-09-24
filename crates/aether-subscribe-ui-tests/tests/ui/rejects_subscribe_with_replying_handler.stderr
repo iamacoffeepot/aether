@@ -1,7 +1,7 @@
 error[E0277]: a subscriber's handler for a published kind replies `Key`
-  --> tests/ui/rejects_subscribe_with_replying_handler.rs:19:9
+  --> tests/ui/rejects_subscribe_with_replying_handler.rs:22:9
    |
-19 |     ctx.subscribe::<LifecycleCapability, Tick>();
+22 |     ctx.subscribe::<LifecycleCapability, Tick>();
    |         ^^^^^^^^^ the trait `SilentRow` is not implemented for `Key`
    |
    = note: a published event has no one waiting for a reply; the handler must return `()` (ADR-0231 §8)
