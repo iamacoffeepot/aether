@@ -241,7 +241,7 @@ mod tests {
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::mail::{Source, SourceAddr};
     use aether_substrate::runtime::thread_name::{register, resolve_runtime};
-    use aether_substrate::testing::{boot_authority, unrouted_binding};
+    use aether_substrate::testing::{boot_authority, registered_ref, unrouted_binding};
     use std::sync::Arc;
 
     const ADDRESS_TEST_ROOT: &str = "aether.test.inventory_address_root";
@@ -461,15 +461,11 @@ mod tests {
     }
 
     #[test]
-    #[allow(clippy::disallowed_methods)] // boundary-real fixture registers the canonical lineage-fold id
     fn resolve_address_serves_canonical_short_and_engine_errors() {
         let name = "camera";
         let canonical = format!("{ADDRESS_TEST_ROOT}/{ADDRESS_TEST_CHILD}:{name}");
-        let mailbox_id = aether_data::mailbox_id_from_path(&canonical);
         let mut fix = fixture();
-        fix.registry
-            .try_register_inbox_with_id(&boot_authority(), mailbox_id, canonical.clone(), noop_handler())
-            .expect("register canonical child mailbox");
+        registered_ref(&fix.registry, &canonical, noop_handler());
         let mut ctx = session_ctx(&fix.transport);
 
         for address in [canonical.clone(), format!("{ADDRESS_TEST_ROOT}/:{name}")] {

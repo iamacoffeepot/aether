@@ -17,7 +17,7 @@ use super::{
     SessionData, SessionWrite, TcpCapability, TcpListenerActor, TcpSessionActor, UnbindListener, UnbindListenerResult,
 };
 use aether_actor::{Addressable, ErasedActorRef};
-use aether_data::{Kind, LoadName, MailboxId, SessionToken, Uuid, mailbox_id_from_path};
+use aether_data::{Kind, LoadName, SessionToken, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 use aether_substrate::ReplyTarget;
@@ -29,7 +29,7 @@ use aether_substrate::mail::outbound::{EgressEvent, HubOutbound};
 use aether_substrate::mail::registry::OwnedDispatch;
 use aether_substrate::mail::registry::{MailboxEntry, Registry};
 use aether_substrate::mail::{MailRef, Source, SourceAddr};
-use aether_substrate::testing::{TestChassis, boot_authority};
+use aether_substrate::testing::{TestChassis, boot_authority, drop_ref, registered_ref};
 
 fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>, mpsc::Receiver<EgressEvent>) {
     let registry = Arc::new(Registry::new());
@@ -129,10 +129,10 @@ enum CapturedSessionMail {
     Unexpected(aether_data::KindId),
 }
 
-/// Register a capture inbox for a session consumer. Registers under the
-/// ADR-0099 lineage fold of `name` (`try_register_inbox_with_id`) rather
-/// than `hash(name)`, so `name` may be a nested path — the shape a loaded
-/// wasm component has, and the shape the `consumer` field must serve.
+/// Register a capture inbox for a session consumer. The substrate's test
+/// door stands the route at `name`'s ADR-0099 lineage position, so `name`
+/// may be a nested path — the shape a loaded wasm component has, and the
+/// shape the `consumer` field must serve.
 ///
 /// The capture closure runs inline on whichever pool worker dispatched the
 /// session actor's send, so a panic here is escalated to a chassis fatal abort
@@ -147,28 +147,25 @@ enum CapturedSessionMail {
 /// test that wants it awaits it.
 fn register_session_consumer(registry: &Registry, name: &str) -> mpsc::Receiver<CapturedSessionMail> {
     let (tx, rx) = mpsc::channel();
-    registry
-        .try_register_inbox_with_id(
-            &boot_authority(),
-            mailbox_id_from_path(name),
-            name,
-            Arc::new(move |dispatch: OwnedDispatch| {
-                let captured = if dispatch.kind == SessionData::ID {
-                    CapturedSessionMail::Data(
-                        SessionData::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionData"),
-                    )
-                } else if dispatch.kind == SessionClosed::ID {
-                    CapturedSessionMail::Closed(
-                        SessionClosed::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionClosed"),
-                    )
-                } else {
-                    CapturedSessionMail::Unexpected(dispatch.kind)
-                };
-                dispatch.discharge();
-                let _ = tx.send(captured);
-            }),
-        )
-        .expect("register session consumer");
+    registered_ref(
+        registry,
+        name,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            let captured = if dispatch.kind == SessionData::ID {
+                CapturedSessionMail::Data(
+                    SessionData::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionData"),
+                )
+            } else if dispatch.kind == SessionClosed::ID {
+                CapturedSessionMail::Closed(
+                    SessionClosed::decode_from_bytes(dispatch.payload.bytes()).expect("decode SessionClosed"),
+                )
+            } else {
+                CapturedSessionMail::Unexpected(dispatch.kind)
+            };
+            dispatch.discharge();
+            let _ = tx.send(captured);
+        }),
+    );
     rx
 }
 
@@ -187,17 +184,8 @@ fn available_loopback_addr() -> SocketAddr {
     addr
 }
 
-fn register_route_collision(registry: &Registry, canonical_name: &str) -> MailboxId {
-    let id = mailbox_id_from_path(canonical_name);
-    registry
-        .try_register_inbox_with_id(
-            &boot_authority(),
-            id,
-            canonical_name,
-            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
-        )
-        .expect("install the test-only collision authority");
-    id
+fn register_route_collision(registry: &Registry, canonical_name: &str) -> ErasedActorRef {
+    registered_ref(registry, canonical_name, Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
 }
 
 /// Push an encoded mail (via the kind's `encode_into_bytes`) at
@@ -321,7 +309,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let canonical_name = format!("{}/{}:{LISTENER_NAME}", TcpCapability::NAMESPACE, TcpListenerActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let collision_id = register_route_collision(&registry, &canonical_name);
+    let collision = register_route_collision(&registry, &canonical_name);
 
     let rejected: BindListenerResult = drive_and_decode(
         &registry,
@@ -342,7 +330,7 @@ fn staged_bind_rejection_closes_the_socket_replies_once_and_releases_the_name() 
     let rebound =
         TcpListener::bind(socket_addr).expect("the prepared listener socket is dropped before failure completion");
     drop(rebound);
-    registry.drop_mailbox(&boot_authority(), collision_id).expect("remove test-only collision route");
+    drop_ref(&registry, collision);
 
     let retried: BindListenerResult = drive_and_decode(
         &registry,
@@ -448,7 +436,7 @@ fn staged_connect_rejection_closes_the_stream_and_replies_once() {
     let canonical_name = format!("{}/{}:{SESSION_NAME}", TcpCapability::NAMESPACE, TcpSessionActor::NAMESPACE);
     let (registry, _mailer, rx, chassis) = boot_tcp_substrate();
     let tcp = chassis.actor_ref::<TcpCapability>().erase();
-    let _collision_id = register_route_collision(&registry, &canonical_name);
+    let _collision = register_route_collision(&registry, &canonical_name);
     let rejected: ConnectResult = drive_and_decode(
         &registry,
         &rx,

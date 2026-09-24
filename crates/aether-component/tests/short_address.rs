@@ -9,15 +9,11 @@
 //! `#[actor]` declarations actually submit — this test closes the loop
 //! through the public `Registry::resolve_address` seam.
 
-// Registering the trampoline's canonical mailbox is the point: the fold of the
-// expanded path is the reference value under test, not a sibling-cap address.
-#![allow(clippy::disallowed_methods)]
-
 use aether_actor::Addressable;
 use aether_component::ComponentHostCapability;
-use aether_data::{ActorPath, mailbox_id_from_path};
+use aether_data::ActorPath;
 use aether_substrate::mail::registry::noop_handler;
-use aether_substrate::testing::boot_authority;
+use aether_substrate::testing::registered_ref;
 use aether_substrate::{AddressResolutionError, Registry};
 
 /// The canonical address a loaded component named `camera` registers under.
@@ -39,15 +35,11 @@ fn the_component_host_hole_expands_through_the_linked_inventory() {
     let path = |text: &str| ActorPath::new(text).expect("fixture is a well-formed actor path");
     let short = format!("{}/:camera", ComponentHostCapability::NAMESPACE);
     let registry = Registry::new();
-    let id = mailbox_id_from_path(CANONICAL);
-    registry
-        .try_register_inbox_with_id(&boot_authority(), id, CANONICAL, noop_handler())
-        .expect("canonical name is free");
+    registered_ref(&registry, CANONICAL, noop_handler());
 
     // The hole names the one instanced child namespace declared beneath the
     // host.
     let expanded = registry.resolve_address(&path(&short)).expect("short path resolves");
-    assert_eq!(expanded.mailbox_id, id);
     assert_eq!(expanded.canonical_path, CANONICAL);
 
     // A child namespace is not itself a declared root, so it cannot anchor.

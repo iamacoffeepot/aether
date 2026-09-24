@@ -22,7 +22,7 @@
 )]
 #![allow(
     clippy::disallowed_methods,
-    reason = "the canonical test fixture is a deliberate embedder — it builds a bare `TestChassis` via `Builder::new` rather than the `composed` boot seam production chassis route through"
+    reason = "the canonical test fixture is a deliberate embedder — it builds a bare `TestChassis` via `Builder::new` rather than the `composed` boot seam production chassis route through, and `registered_ref` applies the ADR-0099 lineage fold the registry's own name lookup applies" // aether-suppression-request: the existing module allow's reason now also names the lineage fold registered_ref applies; no new allow
 )]
 
 use std::env::temp_dir;
@@ -34,7 +34,7 @@ use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aether_actor::{ErasedActorRef, Manual, Root};
-use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid, mailbox_id_from_path};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
 
@@ -160,8 +160,16 @@ pub fn registered_binding(
 }
 
 /// Register `handler` in `registry` under `name` and return the proven
-/// reference to it — the peer a cap test hands its code under test as a
-/// subscriber, a sender, or a shard.
+/// reference to it: the peer a cap test hands its code under test as a
+/// subscriber, a sender, or a shard, or a route a test stands at a nested
+/// position so a spawn there collides.
+///
+/// `name` is a root name (`test.render.observer`) or a `/`-rendered ADR-0166
+/// lineage path (`aether.http.server/aether.http.server.shard:shard-0`). The
+/// route stands where the registry's own name lookup looks for that name,
+/// the ADR-0099 parse → fold, so `Registry::lookup`,
+/// `Registry::resolve_address`, and a spawn claiming the same path all meet
+/// it. A root name folds to its name hash, the position it always had.
 ///
 /// The reference is proven by the registry's own liveness read, the same
 /// one a handler's `ctx.resolve_live` takes, so a fixture proof and a
@@ -171,19 +179,22 @@ pub fn registered_binding(
 /// Panics if `name` is already registered.
 pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
     registry
-        .resolve_live(registry.register_inbox(&boot_authority(), name, handler))
+        .resolve_live(
+            registry
+                .try_register_inbox_with_id(&boot_authority(), mailbox_id_from_path(name), name, handler)
+                .expect("the fixture name is free"),
+        )
         .expect("a freshly registered inbox proves")
 }
 
 /// Retire the route `reference` proves the way `Registry::drop_mailbox`
-/// retires one: it goes `Dropped` and keeps its name. The substrate's own
-/// tests reach a departed peer through this, so none of them spells the
-/// position it reads.
+/// retires one: it goes `Dropped` and keeps its name. A test that stood a
+/// collision route with [`registered_ref`] removes it through this, so none
+/// of them spells the position it reads.
 ///
 /// # Panics
 /// Panics if the route is not live.
-#[cfg(test)]
-pub(crate) fn drop_ref(registry: &Registry, reference: ErasedActorRef) {
+pub fn drop_ref(registry: &Registry, reference: ErasedActorRef) {
     registry.drop_mailbox(&boot_authority(), reference.id()).expect("a live registered route drops");
 }
 

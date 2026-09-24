@@ -3,11 +3,11 @@
 //! activation-failure paths (ADR-0135), and the reader-thread isolation that
 //! keeps a stalled peer off the shard.
 
-use aether_actor::Addressable;
-use aether_data::{MailboxId, mailbox_id_from_path};
+use aether_actor::{Addressable, ErasedActorRef};
+use aether_data::LoadName;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
-use aether_substrate::testing::{TestChassis, boot_authority, fresh_substrate};
+use aether_substrate::testing::{TestChassis, drop_ref, fresh_substrate, registered_ref};
 use std::io::Write;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -28,18 +28,8 @@ fn shard_canonical_name(index: usize) -> String {
     )
 }
 
-fn register_shard_collision(registry: &Registry, index: usize) -> MailboxId {
-    let canonical_name = shard_canonical_name(index);
-    let id = mailbox_id_from_path(&canonical_name);
-    registry
-        .try_register_inbox_with_id(
-            &boot_authority(),
-            id,
-            canonical_name,
-            Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()),
-        )
-        .expect("install test-only dispatch-shard collision authority");
-    id
+fn register_shard_collision(registry: &Registry, index: usize) -> ErasedActorRef {
+    registered_ref(registry, &shard_canonical_name(index), Arc::new(|dispatch: OwnedDispatch| dispatch.discharge()))
 }
 
 /// The light non-contention test: the cap binds and publishes the bound
@@ -209,15 +199,15 @@ fn cold_first_request_survives_partial_shard_activation_failure() {
 
     let response = round_trip_live(port_of(&chassis), b"GET /cold HTTP/1.1\r\nHost: localhost\r\n\r\n");
     assert!(response.starts_with("HTTP/1.1 200 "), "surviving shard serves the cold peer: {response:?}");
-    let surviving = shard_canonical_name(1);
-    assert_eq!(
-        registry.lookup(&surviving),
-        Some(mailbox_id_from_path(&surviving)),
-        "the successful deterministic index is Live before the retained peer is dispatched",
-    );
+    chassis
+        .child::<HttpServerCapability, HttpDispatchShard>(
+            chassis.actor_ref::<HttpServerCapability>(),
+            LoadName::new("shard-1").expect("the shard key is a valid load name"),
+        )
+        .expect("the successful deterministic index is Live before the retained peer is dispatched");
 
     drop(chassis);
-    registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only shard collision");
+    drop_ref(&registry, collision);
 }
 
 /// Scheduler-backed total apply rejection: every staged shard loses its
@@ -251,7 +241,7 @@ fn all_shard_activation_failures_refuse_without_implicit_retry() {
 
     drop(chassis);
     for collision in collisions {
-        registry.drop_mailbox(&boot_authority(), collision).expect("remove test-only shard collision");
+        drop_ref(&registry, collision);
     }
 }
 

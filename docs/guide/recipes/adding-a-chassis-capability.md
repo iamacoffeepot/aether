@@ -370,6 +370,9 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 A test that needs a proven peer (a subscriber, a sender, a shard) registers
 it with `testing::registered_ref`, which returns the peer's reference, and
 `testing::registered_binding` returns the binding beside its own reference.
+`registered_ref` takes a root name or a `/`-rendered lineage path, so a test
+can stand a route at a nested position (a collision a spawn will claim), and
+`testing::drop_ref` retires it.
 A test that needs a local component as the inbound's sender takes the
 `Source`, and the chain root when it needs one, from a mail its
 `registered_binding` binding actually sent, and writes a root that is only a
