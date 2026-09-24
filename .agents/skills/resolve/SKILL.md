@@ -42,7 +42,7 @@ Read every conflict hunk in three-way context: approved branch intent, current-m
 After all hunks are resolved:
 
 1. verify no conflict markers or unmerged entries remain;
-2. run the Plan's focused verification plus `cargo fmt -- --check` and `cargo clippy --all-targets -- -D warnings`;
+2. run the Plan's focused verification plus `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`;
 3. compute priced overflow against the pull request's actual diff under the frozen `Pricing policy:` and `Pricing matcher:` lines in the draft's `## Approval` section;
 4. create the ordinary merge commit without rewriting history;
 5. plain-push the same branch after confirming the remote head is unchanged.

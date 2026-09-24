@@ -147,7 +147,7 @@ impl SubstrateBoot {
                 let kind = dispatch.kind;
                 let bytes = dispatch.payload;
                 if kind == <aether_kinds::UnresolvedMail as aether_data::Kind>::ID
-                    && let Ok(record) = bytemuck::try_from_bytes::<aether_kinds::UnresolvedMail>(bytes)
+                    && let Some(record) = <aether_kinds::UnresolvedMail as aether_data::Kind>::decode_from_bytes(bytes)
                 {
                     tracing::warn!(
                         target: "aether_substrate::diagnostics",

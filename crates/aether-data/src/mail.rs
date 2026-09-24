@@ -34,7 +34,7 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 /// can carry `MailId` when a trace ring is queried over the wire. The
 /// substrate's host-side `Envelope` and `Mail` types do not serialize,
 /// so the field additions on those remain wire-free.
-#[derive(Copy, Clone, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct MailId {
     pub sender: MailboxId,
     pub correlation_id: u64,
@@ -71,9 +71,9 @@ impl<'de> WireDecode<'de> for MailId {
 }
 
 impl MailId {
-    /// Sentinel for "not yet stamped" / "chassis root". Equivalent to
-    /// `MailId::default()`. The PR 2 dispatch path treats this value
-    /// as the chassis-as-originator marker. Its wire encoding is the
+    /// Sentinel for "not yet stamped" / "chassis root". The PR 2
+    /// dispatch path treats this value as the chassis-as-originator
+    /// marker. Its wire encoding is the
     /// pair `(0, 0)`: a zero sender id and a zero correlation id.
     pub const NONE: Self = Self { sender: MailboxId(0), correlation_id: 0 };
 
