@@ -51,6 +51,26 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ) {
         self.binding.send_reply_for_handler(sender, payload, root, parent);
     }
+
+    /// [`Self::reply_to_target`] for an already-encoded reply of `kind`, the
+    /// body of
+    /// [`DeferredReply::reply_envelope`](crate::actor::native::DeferredReply::reply_envelope).
+    /// An engine-only `kind` (ADR-0233) is refused with a warning and nothing
+    /// is sent, as the `send_envelope_*_to` verbs refuse it.
+    pub(crate) fn reply_envelope_to_target(
+        &mut self,
+        sender: Source,
+        kind: KindId,
+        bytes: &[u8],
+        root: Option<MailId>,
+        parent: Option<MailId>,
+    ) {
+        if refuse_engine_only(kind) {
+            return;
+        }
+        self.binding.send_reply_envelope_for_handler(sender, kind, bytes, root, parent);
+    }
+
     /// Lineage-aware multicast: encode `payload` once, then push one copy
     /// to every `recipient`. The inbound `(mail_id, root)` from this ctx
     /// propagate as `parent_mail` + `inherited_root`, so each fanned-out

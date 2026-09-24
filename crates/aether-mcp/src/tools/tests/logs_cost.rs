@@ -109,14 +109,12 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
                 payload: aether_kinds::LogTailResult::Ok { entries: Vec::new(), next_since: 0, truncated_before: None }
                     .encode_into_bytes(),
             }],
-            settle: true,
         },
         ScriptedRouteReply {
             events: vec![ScriptedReplyEvent {
                 kind: aether_kinds::CostTailResult::ID,
                 payload: aether_kinds::CostTailResult::Ok { rows: Vec::new() }.encode_into_bytes(),
             }],
-            settle: true,
         },
     ])));
     let (_chassis, port) =

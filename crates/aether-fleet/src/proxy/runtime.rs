@@ -14,24 +14,20 @@ use super::config::ProxyTarget;
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
-use aether_actor::{Single, runtime};
-pub use aether_data::{EngineId, Kind};
+use aether_actor::{Manual, Single, runtime};
+pub use aether_data::EngineId;
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
 pub use aether_rpc::{CallSettled, MailEnvelope, Recipient, ReplyEnvelope, RpcConnection, RpcError, WireFrame};
 use aether_rpc::{
     ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult, RpcInboundReady, RpcServerCapability,
 };
-pub use aether_substrate::Mail;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
+pub use aether_substrate::actor::native::{DeferredReply, NativeActor, NativeCtx, NativeInitCtx};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::{Source, SourceAddr};
 pub use aether_substrate::runtime::trace::SettlementHold;
 pub use std::collections::HashMap;
 use std::mem;
 pub use std::process::Child;
-pub use std::sync::Arc;
 
 use super::heartbeat::HeartbeatHandle;
 use super::reap::terminate_child_group;
@@ -52,19 +48,17 @@ pub use super::heartbeat::spawn_heartbeat;
 /// `NativeActor::State` interface without exposing it as crate-public API.
 pub struct FleetProxyState {
     pub engine_id: EngineId,
-    /// Cached so `on_inbound_ready` can push correlation-preserving
-    /// reply mail — `NativeCtx` doesn't expose `mailer()`, only
-    /// `NativeInitCtx` does.
-    pub mailer: Arc<Mailer>,
     /// The live outbound connection: `.client` writes `Call`s,
     /// `.inbound` carries reply frames, `.reader` joins on drop.
     /// `.server` holds the substrate's `HelloAck` identity (the
     /// kind manifest P4's describe handler will read).
     pub conn: RpcConnection,
-    /// wire `cid` → the `Source` of the `ForwardEnvelope` that
-    /// opened the call. `ReplyEvent` frames route back here;
-    /// `ReplyEnd` clears the entry.
-    pub in_flight: HashMap<u64, Source>,
+    /// wire `cid` → the reply owed to whoever sent the
+    /// `ForwardEnvelope` that opened the call. Each entry is the debt for
+    /// one open forward: `ReplyEvent` frames relay through it, and it
+    /// leaves only when its `ReplyEnd` answers it or, when this actor
+    /// closes, through `unwire`'s abandonment. It is never evicted.
+    pub in_flight: HashMap<u64, DeferredReply>,
     /// The forked child substrate, when the engines cap spawned it
     /// (see [`ProxyTarget::Forked`]). `Drop` terminates its
     /// process group + reaps it; `None` once taken or for an adopted
@@ -132,15 +126,14 @@ impl FleetProxyState {
         ctx.send_detached::<FleetServer>(&EngineDied { engine_id: self.engine_id.0.to_string(), reason });
     }
 
-    /// Route a `ReplyEvent`'s envelope back to whoever sent the
-    /// `ForwardEnvelope` that opened `cid`. Mirrors
-    /// `Mailer::send_reply`'s `Component` branch: push a `Mail`
-    /// carrying the reply kind + already-encoded bytes, with the
-    /// original `correlation_id` echoed (reply-to `None` — nobody
-    /// replies to a reply) so a correlation-matching caller picks
-    /// it up.
-    pub fn route_reply(&mut self, cid: u64, envelope: ReplyEnvelope) {
-        let Some(reply_to) = self.in_flight.get(&cid).copied() else {
+    /// Relay a `ReplyEvent`'s envelope to whoever sent the
+    /// `ForwardEnvelope` that opened `cid`, through the debt parked for it:
+    /// the already-encoded reply goes out under the root the debt keeps
+    /// open, with the caller's correlation echoed, and the debt stays owed
+    /// until the call's `ReplyEnd`. An event for a `cid` with no open
+    /// forward (one that arrives after its terminal) is dropped.
+    pub fn route_reply(&mut self, ctx: &mut NativeCtx<'_, FleetProxy, Single>, cid: u64, envelope: &ReplyEnvelope) {
+        let Some(owed) = self.in_flight.get(&cid) else {
             tracing::debug!(
                 target: "aether_substrate::fleet_proxy",
                 engine_id = ?self.engine_id,
@@ -149,29 +142,24 @@ impl FleetProxyState {
             );
             return;
         };
-        let SourceAddr::Component(target) = reply_to.addr else {
-            // The `ForwardEnvelope` arrived with no `Component`
-            // reply target (broadcast / `None`) — there's nowhere
-            // local to route the reply.
-            return;
-        };
-        self.mailer.push(
-            Mail::new(target, envelope.kind, envelope.payload, 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::None, reply_to.correlation_id)),
-        );
+        owed.reply_envelope(ctx, envelope.kind, &envelope.payload);
     }
 
     /// Lift the substrate's terminal `ReplyEnd` for `cid` into a
-    /// [`CallSettled`] mail back to whoever opened the call, then
-    /// clear the in-flight entry. Mirrors [`Self::route_reply`]'s
-    /// correlation handling — a forwarded call has no local chain
-    /// to settle, so this explicit terminal signal is how the
-    /// originating `RpcServerCapability` learns to close its wire
-    /// call. The wire `RpcError` rides in `CallSettled::Err` as it
-    /// arrived, so the hub writes the substrate's refusal (a
-    /// `NotPresent` naming the path, say) to its caller unchanged.
-    pub fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
-        let Some(reply_to) = self.in_flight.remove(&cid) else {
+    /// [`CallSettled`] reply that discharges the debt parked for it. A
+    /// forwarded call has no local chain to settle, so this explicit
+    /// terminal signal is how the originating `RpcServerCapability`
+    /// learns to close its wire call. The wire `RpcError` rides in
+    /// `CallSettled::Err` as it arrived, so the hub writes the
+    /// substrate's refusal (a `NotPresent` naming the path, say) to its
+    /// caller unchanged.
+    pub fn route_settled(
+        &mut self,
+        ctx: &mut NativeCtx<'_, FleetProxy, Single>,
+        cid: u64,
+        result: Result<(), RpcError>,
+    ) {
+        let Some(owed) = self.in_flight.remove(&cid) else {
             tracing::debug!(
                 target: "aether_substrate::fleet_proxy",
                 engine_id = ?self.engine_id,
@@ -180,17 +168,11 @@ impl FleetProxyState {
             );
             return;
         };
-        let SourceAddr::Component(target) = reply_to.addr else {
-            return;
-        };
         let settled = match result {
             Ok(()) => CallSettled::Ok,
             Err(error) => CallSettled::Err { error },
         };
-        self.mailer.push(
-            Mail::new(target, <CallSettled as Kind>::ID, settled.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::None, reply_to.correlation_id)),
-        );
+        owed.reply(ctx, &settled);
     }
 }
 
@@ -204,7 +186,6 @@ impl NativeActor for FleetProxy {
     const NAMESPACE: &'static str = "aether.fleet.proxy";
 
     fn init(mut config: FleetProxyConfig, ctx: &mut NativeInitCtx<'_>) -> Result<FleetProxyState, BootError> {
-        let mailer = ctx.mailer();
         let wake = ctx.self_wake::<RpcInboundReady>();
 
         // Take the target out of the config, leaving a childless husk, so
@@ -253,7 +234,6 @@ impl NativeActor for FleetProxy {
 
         Ok(FleetProxyState {
             engine_id: config.engine_id,
-            mailer,
             conn,
             in_flight: HashMap::new(),
             spawned,
@@ -263,6 +243,15 @@ impl NativeActor for FleetProxy {
             _heartbeat: heartbeat,
             route_hold: None,
         })
+    }
+
+    /// Abandon every forward still open, since this actor is closing and
+    /// can no longer answer it. The hub's RPC server monitors this proxy
+    /// and closes each wire call still in flight here when it departs.
+    fn unwire(state: &mut Self::State, _ctx: &mut NativeCtx<'_>) {
+        for (_, owed) in state.in_flight.drain() {
+            owed.abandon_for_actor_close();
+        }
     }
 
     /// Register this proxy as its engine's route, then fire one
@@ -312,14 +301,15 @@ impl NativeActor for FleetProxy {
     /// Hand the proxy a `ForwardEnvelope { recipient, kind, payload }`
     /// — `recipient` is the substrate-local actor's `ActorPath`, sent on
     /// as written for the substrate to resolve, and `kind` + `payload`
-    /// the mail to deliver there. Any reply routes back to the sender of
-    /// this `ForwardEnvelope`.
-    #[handler::single]
-    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
+    /// the mail to deliver there. Every reply the substrate streams back
+    /// relays to the sender of this `ForwardEnvelope`, and a
+    /// `CallSettled` ends the exchange.
+    #[handler::manual]
+    fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Manual>, mail: ForwardEnvelope) {
         let envelope = MailEnvelope { to: Recipient::local(mail.recipient), kind: mail.kind, payload: mail.payload };
         match state.conn.client.call(envelope) {
             Ok(cid) => {
-                state.in_flight.insert(cid, ctx.reply_target());
+                state.in_flight.insert(cid, ctx.defer_reply_to(ctx.reply_target()));
             }
             Err(e) => {
                 tracing::warn!(
@@ -342,8 +332,8 @@ impl NativeActor for FleetProxy {
     fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self, Single>, _mail: RpcInboundReady) {
         while let Ok(frame) = state.conn.inbound.try_recv() {
             match frame {
-                WireFrame::ReplyEvent { cid, envelope } => state.route_reply(cid, envelope),
-                WireFrame::ReplyEnd { cid, result } => state.route_settled(cid, result),
+                WireFrame::ReplyEvent { cid, envelope } => state.route_reply(ctx, cid, &envelope),
+                WireFrame::ReplyEnd { cid, result } => state.route_settled(ctx, cid, result),
                 // A `Pong` answers this proxy's heartbeat `Ping`
                 // (issue 1339): the substrate is alive. Clear the
                 // miss counter and report the liveness up to the
