@@ -15,10 +15,34 @@ use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, EmbeddedPeer};
 
+struct Dependent;
+
+#[aether_actor::actor(depends(OneDep, EmbeddedPeer))]
+impl NativeActor for Dependent {
+    const NAMESPACE: &'static str = "test.native.actor_ref_dependent";
+    type Config = ();
+
+    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+        let _ = self;
+    }
+}
+
+struct OneDep;
+
+impl Addressable for OneDep {
+    const NAMESPACE: &'static str = "test.native.actor_ref_one_dep";
+    type Resolver = aether_actor::One;
+}
+
 /// A typed embedded recipient resolves from the binding's logical parent,
-/// and a send through that handle reaches the mailbox registered beneath
-/// that parent. The parent is already a tagged routable `MailboxId`; no raw
-/// carry is retained beside it.
+/// and a flat send to that declared dependency reaches the mailbox registered
+/// beneath that parent. The parent is already a tagged routable `MailboxId`;
+/// no raw carry is retained beside it.
 #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
@@ -46,46 +70,21 @@ fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
     assert_eq!(binding.parent_mailbox(), Some(parent));
 
     {
-        let ctx = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
-        let peer = ctx.actor::<EmbeddedPeer>();
-        assert_eq!(peer.mailbox_id(), recipient);
-        peer.send(&CastOnly { code: 17 });
+        let mut ctx: NativeCtx<'_, Dependent> =
+            NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
+        ctx.send::<EmbeddedPeer>(&CastOnly { code: 17 });
     }
 
     let delivered = rx.try_recv().expect("embedded peer send routes at ctx flush");
     assert_eq!(delivered.kind, CastOnly::ID);
 }
 
-struct Dependent;
-
-#[aether_actor::actor(depends(OneDep, EmbeddedPeer))]
-impl NativeActor for Dependent {
-    const NAMESPACE: &'static str = "test.native.actor_ref_dependent";
-    type Config = ();
-
-    fn init(_config: (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self)
-    }
-
-    #[fallback]
-    fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
-        let _ = self;
-    }
-}
-
-struct OneDep;
-
-impl Addressable for OneDep {
-    const NAMESPACE: &'static str = "test.native.actor_ref_one_dep";
-    type Resolver = aether_actor::One;
-}
-
-/// `actor_ref` and `actor` share one derivation on a `NativeCtx<'_, Dependent>`:
-/// the reference proves the folded position for a `One` and for an `Embedded`
-/// dependency, with no registry read. Owned logic: the shared `actor` fold
-/// behind both doors.
+/// `actor_ref` on a `NativeCtx<'_, Dependent>` proves the position each
+/// dependency's resolver folds beneath the binding's scope, for a `One` and
+/// for an `Embedded` dependency, with no registry read. Owned logic: the
+/// scope selection `actor_ref` feeds the resolver.
 #[test]
-fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() {
+fn actor_ref_mints_the_resolver_fold_for_one_and_embedded_dependencies() {
     use aether_actor::Single;
 
     use crate::testing::bare_substrate;
@@ -97,8 +96,8 @@ fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() 
     let ctx: NativeCtx<'_, Dependent, Single> =
         NativeCtx::new_for_actor(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
 
-    assert_eq!(ctx.actor_ref::<OneDep>().id(), ctx.actor::<OneDep>().mailbox_id());
-    assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), ctx.actor::<EmbeddedPeer>().mailbox_id());
+    assert_eq!(ctx.actor_ref::<OneDep>().id(), OneDep::resolve(current.0, ()));
+    assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), EmbeddedPeer::resolve(parent.0, ()));
 }
 
 /// `sender` mints the stamped dispatch source on the erased ctx: `Some` for

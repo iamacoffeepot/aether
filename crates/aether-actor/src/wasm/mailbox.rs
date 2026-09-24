@@ -7,10 +7,9 @@
 //!
 //! Issue 665 split the prior parametric `ActorMailbox<'a, R, T>` into
 //! per-side types so the `MailTransport` trait can retire. Issue 1987
-//! made the FFI variant a ctx-bound transient (`WasmActorMailbox<'a, R>`),
-//! symmetric with the native `NativeActorMailbox<'a, R>`: it carries the
-//! resolving actor's own id as the send's "from" half plus a borrow of
-//! the per-component inline registry the send routes through. The `'a`
+//! made the FFI variant a ctx-bound transient (`WasmActorMailbox<'a, R>`):
+//! it carries the resolving actor's own id as the send's "from" half plus a
+//! borrow of the per-component inline registry the send routes through. The `'a`
 //! borrow keeps origin a property of the executing actor — the handle
 //! cannot be stored past the handler, so it can never carry a stale
 //! origin.
@@ -31,8 +30,8 @@ use crate::wasm::inline::{ChainMode, Registry, RouteDecision};
 /// Phantom-typed receiver-actor handle for FFI guests, built by
 /// [`crate::wasm::WasmCtx::actor`].
 ///
-/// Issue 1987 made it a ctx-bound transient (mirroring the native
-/// `NativeActorMailbox<'a, R>` and the in-cluster [`crate::wasm::RelativeMailbox`]):
+/// Issue 1987 made it a ctx-bound transient (mirroring the in-cluster
+/// [`crate::wasm::RelativeMailbox`]):
 /// it carries the resolving actor's own folded id as the `sender` (the "from"
 /// half every send stamps as origin) plus a borrow of the per-component inline
 /// registry the send routes through. The `'a` borrow is what keeps origin a

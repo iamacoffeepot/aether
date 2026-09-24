@@ -41,11 +41,11 @@
 //!
 //! ## What does NOT live here
 //!
-//! - `actor::<A>()` lookups on per-handler ctx. Once dispatchers are
+//! - Sibling-state lookups on per-handler ctx. Once dispatchers are
 //!   running, caps and components communicate via mail — peering at
 //!   sibling state recreates the shared-state coupling the actor
 //!   model is designed to eliminate. The chassis-level
-//!   `chassis.actor::<X>() -> Arc<X>` retired with issue 629 / Phase A;
+//!   `Arc<X>` accessor for a sibling cap retired with issue 629 / Phase A;
 //!   external runtimes (drivers, `SubstrateHarness`, MCP) reach for
 //!   cap-exported handles instead.
 //!
@@ -54,9 +54,10 @@
 //! Caps that fan-out every kind they're addressed at — broadcast
 //! today, hub-as-actor in the future — author with a `#[fallback]`
 //! method instead of `#[handler]`s. The macro emits a blanket
-//! `impl<K: Kind> HandlesKind<K> for X {}` so typed sends like
-//! `ctx.actor::<BroadcastCapability>().send(&payload)` compile for every K,
-//! and overrides [`Dispatch::dispatch_fallback`] to
+//! `impl<K: Kind> HandlesKind<K> for X {}` so a typed send like
+//! `ctx.send::<BroadcastCapability>(&payload)`, from an actor that declares
+//! `#[actor(depends(BroadcastCapability))]`, compiles for every K, and
+//! overrides [`Dispatch::dispatch_fallback`] to
 //! route every envelope through the user's fallback method. Hybrid
 //! shape (typed handlers + fallback as a runtime safety net) is
 //! rejected by the macro: strict receivers shouldn't silently swallow
@@ -72,7 +73,6 @@ pub(crate) mod dependencies;
 pub mod envelope;
 pub(crate) mod identity;
 pub mod local;
-pub mod mailbox;
 
 pub(crate) mod blob;
 pub mod offload;
@@ -83,7 +83,6 @@ pub use crate::mail::registry::effect::{RegistryBatch, RegistryBatchError, Regis
 pub use binding::NativeBinding;
 pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
 pub use envelope::Envelope;
-pub use mailbox::{NativeActorMailbox, NativeActorMailboxWithContext};
 pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use offload::self_wake::SelfWake;
 pub use offload::thread::{InheritCtx, RootCtx};

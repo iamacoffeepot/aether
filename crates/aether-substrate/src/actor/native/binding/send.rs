@@ -196,7 +196,7 @@ mod tests {
     /// ADR-0099 §5 own-child path through the generic `MailSender::send`
     /// surface: `send::<R>` resolves the receiver through
     /// `R::resolve(caller_carry)` — the same lineage-aware path
-    /// `ctx.actor::<R>()` walks — so a parent at carry `C` sending by
+    /// `ctx.actor_ref::<R>()` folds — so a parent at carry `C` sending by
     /// bare type lands on `fold(C, ActorId::singleton(NAMESPACE))`, not
     /// the flat `hash(NAMESPACE)`. The send-path analogue of
     /// `ctx_actor_folds_own_child_singleton_onto_caller_carry`, closing

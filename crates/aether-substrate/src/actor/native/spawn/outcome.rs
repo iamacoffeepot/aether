@@ -33,8 +33,8 @@ pub struct SpawnReceipt {
 /// a refused birth. Its `Ok` arm is the ADR-0230 proof: the child's
 /// [`ActorRef<A>`], minted once by the registry after the child is published
 /// Live and catch-up is armed. A parent that keeps or mails its child holds
-/// that reference and sends through `ctx.to(&child)`; it never re-derives one
-/// from `mailbox_id`.
+/// that reference and sends through `ctx.send_to(&child, ..)`; it never
+/// re-derives one from `mailbox_id`.
 pub struct SpawnOutcome<A> {
     pub mailbox_id: MailboxId,
     pub canonical_name: Arc<str>,

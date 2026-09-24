@@ -92,7 +92,8 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// ctx carries `None`.
     ///
     /// Only [`Self::acquire_settlement_hold`] reads it. The outbound send
-    /// lineage ([`Self::outbound_lineage`]) deliberately does not, which is
+    /// lineage ([`Self::outbound_parent`] / [`Self::outbound_root`])
+    /// deliberately does not, which is
     /// the whole point: a `wire` ctx serves both the effects that complete
     /// the birth (which the causing chain must cover) and the actor's own
     /// startup sends (which it must not), and one *root* cannot tell those
