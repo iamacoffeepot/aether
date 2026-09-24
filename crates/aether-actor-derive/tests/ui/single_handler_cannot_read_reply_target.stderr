@@ -1,0 +1,5 @@
+error[E0599]: no method named `reply_target` found for mutable reference `&mut WasmCtx<'_>` in the current scope
+  --> tests/ui/single_handler_cannot_read_reply_target.rs:39:25
+   |
+39 |         let _kept = ctx.reply_target();
+   |                         ^^^^^^^^^^^^ method not found in `&mut WasmCtx<'_>`

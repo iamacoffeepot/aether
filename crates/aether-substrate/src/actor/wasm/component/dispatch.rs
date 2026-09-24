@@ -1,10 +1,11 @@
+use aether_actor::DISPATCH_HANDLED_RELEASE;
 use aether_actor::wasm::NO_INBOUND_SOURCE;
 
 use crate::actor::wasm::reply_table::{NO_REPLY_HANDLE, ReplyEntry};
 use crate::mail::{Mail, SourceAddr};
 
 use super::instantiate::Placement;
-use super::{Component, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
+use super::{Component, ComponentCtx, MAX_DELIVERABLE_MAIL_BYTES, SMALL_REGION_BYTES};
 
 /// Sentinel the ADR-0033 `#[actor]` dispatcher returns from
 /// `receive_p32` when mail arrives with a kind id the component has
@@ -43,20 +44,6 @@ impl Component {
         self.store.data_mut().close_load_window();
     }
 
-    /// Deliver a mail into the component's linear memory and invoke
-    /// `receive`. Returns the guest's return value (contract is
-    /// currently informational; host-visible errors propagate as
-    /// `wasmtime::Error`).
-    ///
-    /// ADR-0013 + ADR-0017: a fresh sender handle is allocated from
-    /// the per-instance `ReplyTable` for every inbound that has a
-    /// meaningful reply target — a Claude session (non-NIL
-    /// `SessionToken`), a remote engine mailbox, or a peer component
-    /// (`reply_to.addr = SourceAddr::Component(_)` populated by
-    /// `ComponentCtx::send` / `NativeBinding::send_mail`).
-    /// Broadcast-origin and system-generated mail pass
-    /// `NO_REPLY_HANDLE` so the guest's `mail.reply_handle()` accessor
-    /// returns `None`.
     /// Resolve the inbound mail's source `MailboxId` for the trailing
     /// `receive_p32` frame slot (issue 2001). A peer-component origin
     /// (`SourceAddr::Component`) yields that mailbox's raw id; every other
@@ -71,25 +58,30 @@ impl Component {
         }
     }
 
+    /// Deliver a mail into the component's linear memory and invoke
+    /// `receive`. Returns the guest's return value (contract is
+    /// currently informational; host-visible errors propagate as
+    /// `wasmtime::Error`).
+    ///
+    /// ADR-0013 + ADR-0017: once the payload has a place in guest memory,
+    /// a fresh sender handle is allocated from the per-instance
+    /// `ReplyTable` for every inbound that has a meaningful reply target —
+    /// a Claude session (non-NIL `SessionToken`), a remote engine mailbox,
+    /// or a peer component (`reply_to.addr = SourceAddr::Component(_)`
+    /// populated by `ComponentCtx::send` / `NativeBinding::send_mail`).
+    /// Broadcast-origin and system-generated mail pass `NO_REPLY_HANDLE`
+    /// so the guest's `mail.reply_handle()` accessor returns `None`. A
+    /// dropped delivery allocates nothing.
+    ///
+    /// The handle is freed when the guest answers it, or right after
+    /// `receive` returns when the guest reports a single-class arm
+    /// (`DISPATCH_HANDLED_RELEASE`, ADR-0112) or an unhandled kind
+    /// (`DISPATCH_UNKNOWN_KIND`) — neither can answer later (#6412). A
+    /// manual handler or `#[fallback]` returns `DISPATCH_HANDLED` and its
+    /// handle stays held until answered. A table holding every
+    /// addressable handle fails the delivery, which the trampoline turns
+    /// into an ADR-0063 fail-fast.
     pub fn deliver(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
-        // ADR-0042: carry the incoming correlation through to the
-        // ReplyEntry so a subsequent `reply_mail` echoes it on the
-        // outgoing reply. Session / engine mail that didn't originate
-        // a correlation carries 0 — fine, echo of 0 is a no-op.
-        let correlation = mail.reply_to.correlation_id;
-        let entry = match &mail.reply_to.addr {
-            SourceAddr::Session(token) => Some(ReplyEntry::new(SourceAddr::Session(*token), correlation)),
-            SourceAddr::EngineMailbox { engine_id, mailbox_id } => Some(ReplyEntry::new(
-                SourceAddr::EngineMailbox { engine_id: *engine_id, mailbox_id: *mailbox_id },
-                correlation,
-            )),
-            SourceAddr::Component(m) => Some(ReplyEntry::new(SourceAddr::Component(*m), correlation)),
-            SourceAddr::None => None,
-        };
-        let handle = match entry {
-            Some(e) => self.store.data_mut().reply_table.allocate(e),
-            None => NO_REPLY_HANDLE,
-        };
         // ADR-0095: choose where in guest memory the payload lands via the
         // guest allocator — a fitting payload into the cached small region, a
         // larger one into the grown large region, anything past the ceiling or
@@ -120,6 +112,7 @@ impl Component {
                 return Ok(DISPATCH_DROPPED_OVERSIZE);
             }
         };
+        let handle = self.allocate_reply_handle(mail)?;
 
         self.memory.write(&mut self.store, mail_ptr as usize, mail.payload.bytes())?;
         // ADR-0080 §5 (issue iamacoffeepot/aether#722): publish the
@@ -149,7 +142,56 @@ impl Component {
             .receive
             .call(&mut self.store, (mail.kind.0, mail_ptr, byte_len, mail.count, handle, mail.recipient.0, source));
         self.store.data().clear_in_flight();
+        if let Ok(rc) = result
+            && (rc == DISPATCH_HANDLED_RELEASE || rc == DISPATCH_UNKNOWN_KIND)
+        {
+            self.store.data_mut().reply_table.take(handle);
+        }
         result
+    }
+
+    /// Allocate the reply handle for an inbound about to reach `receive`, or
+    /// `NO_REPLY_HANDLE` when it has no reply target. Warns, naming the
+    /// actor, each time the table's live count passes a new high-water mark,
+    /// and errors when every addressable handle is held.
+    fn allocate_reply_handle(&mut self, mail: &Mail) -> wasmtime::Result<u32> {
+        // ADR-0042: carry the incoming correlation through to the
+        // ReplyEntry so a subsequent `reply_mail` echoes it on the
+        // outgoing reply. Session / engine mail that didn't originate
+        // a correlation carries 0 — fine, echo of 0 is a no-op.
+        let correlation = mail.reply_to.correlation_id;
+        let entry = match &mail.reply_to.addr {
+            SourceAddr::Session(token) => ReplyEntry::new(SourceAddr::Session(*token), correlation),
+            SourceAddr::EngineMailbox { engine_id, mailbox_id } => ReplyEntry::new(
+                SourceAddr::EngineMailbox { engine_id: *engine_id, mailbox_id: *mailbox_id },
+                correlation,
+            ),
+            SourceAddr::Component(m) => ReplyEntry::new(SourceAddr::Component(*m), correlation),
+            SourceAddr::None => return Ok(NO_REPLY_HANDLE),
+        };
+
+        let ctx = self.store.data_mut();
+        let Some(handle) = ctx.reply_table.allocate(entry) else {
+            return Err(wasmtime::Error::msg(format!(
+                "component {} holds 1,048,576 unanswered reply handles, the most its reply table addresses",
+                Self::actor_name(ctx),
+            )));
+        };
+        if let Some(live) = ctx.reply_table.high_water() {
+            tracing::warn!(
+                target: "aether_substrate::component",
+                actor = %Self::actor_name(ctx),
+                live,
+                "reply table grew past its preallocated slots; a request this component keeps and never answers holds its slot",
+            );
+        }
+        Ok(handle)
+    }
+
+    /// The component's canonical name for a diagnostic, falling back to its
+    /// tagged id when the registry has no name for it.
+    fn actor_name(ctx: &ComponentCtx) -> String {
+        ctx.registry.mailbox_name(ctx.sender).unwrap_or_else(|| ctx.sender.to_string())
     }
 
     /// Loudly log an inbound mail dropped by `deliver` because its payload

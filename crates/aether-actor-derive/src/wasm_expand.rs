@@ -808,7 +808,15 @@ fn build_dispatch_body(
         // on the `Manual` ctx (`-> ()` / `-> Pending<R>` discard it — the
         // deferred `Pending` send is #1805). A manual handler is called with
         // the `Manual` ctx directly and issues its own replies — no
-        // auto-reply, regardless of return type.
+        // auto-reply, regardless of return type. The arm's return code
+        // carries its class to the host (#6412): a single arm returns
+        // `DISPATCH_HANDLED_RELEASE`, so the substrate frees the dispatch's
+        // reply handle, and a manual arm returns `DISPATCH_HANDLED`, so the
+        // handle it may have kept stays live.
+        let rc = match h.class {
+            HandlerClass::Single => quote! { ::aether_actor::DISPATCH_HANDLED_RELEASE },
+            HandlerClass::Manual => quote! { ::aether_actor::DISPATCH_HANDLED },
+        };
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
                 let __aether_reply = self.#method(#ctx.as_single(), __aether_decoded);
@@ -836,7 +844,7 @@ fn build_dispatch_body(
                         __aether_mail.decode_kind::<#k>()
                     {
                         #call
-                        return ::aether_actor::DISPATCH_HANDLED;
+                        return #rc;
                     }
                     // A recognized kind id whose payload fails to decode falls
                     // through to the tail (the `#[fallback]`, else
@@ -853,12 +861,13 @@ fn build_dispatch_body(
     // set. Local-first is what makes a locally-declared kind authoritative
     // over an inherited one; the set answers `DISPATCH_UNKNOWN_KIND` when it
     // does not recognize the kind either, leaving the tail below to decide.
+    // Any other code passes through unchanged, so the set's arm class reaches
+    // the host the way a local arm's does (#6412).
     let set_delegation = handler_set.map(|set| {
         quote! {
-            if <Self as #set>::__aether_handler_set_dispatch(self, __aether_ctx, __aether_mail)
-                == ::aether_actor::DISPATCH_HANDLED
-            {
-                return ::aether_actor::DISPATCH_HANDLED;
+            let __aether_set_rc = <Self as #set>::__aether_handler_set_dispatch(self, __aether_ctx, __aether_mail);
+            if __aether_set_rc != ::aether_actor::DISPATCH_UNKNOWN_KIND {
+                return __aether_set_rc;
             }
         }
     });
