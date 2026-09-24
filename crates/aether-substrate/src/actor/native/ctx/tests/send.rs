@@ -1,7 +1,7 @@
-//! What leaves a ctx and under whose chain: a handle, `send_to` or flat
-//! `send` inherits the handler's causal chain while a detached one mints a fresh
-//! root, and every reply entry point accepts a `Pod`-without-`Serialize` cast
-//! kind (ADR-0100).
+//! What leaves a ctx and under whose chain: `send_to` or flat `send` inherits
+//! the handler's causal chain while a detached one mints a fresh root, and
+//! every reply entry point accepts a `Pod`-without-`Serialize` cast kind
+//! (ADR-0100).
 
 use std::sync::Arc;
 
@@ -15,64 +15,6 @@ use crate::chassis::error::BootError;
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, NativeRequestContext, StubActor};
-
-/// ADR-0080 §7 (issue 1802): a handler's send through a proven reference
-/// (`ctx.to(&reference).send()`) lands at the reference's id and inherits
-/// the in-flight causal chain — the recipient mail lands under the caller's
-/// root with the handled mail as its parent — while `send_detached()` opens
-/// a fresh chain regardless of the in-flight lineage. The reference is
-/// minted for the registered inbox's own position, so the send path is
-/// proven off a real route. The buffered send routes at handler end
-/// (`NativeCtx`'s `Drop` flush), so the assertions read the routed
-/// dispatch's lineage off the registered sink.
-#[test]
-fn handle_send_inherits_chain_detached_mints_fresh() {
-    use crate::mail::registry::{OwnedDispatch, Registry};
-    use crate::testing::{bare_substrate, boot_authority};
-    use std::sync::mpsc;
-
-    let (registry, mailer) = bare_substrate();
-    let (tx, rx) = mpsc::channel::<Envelope>();
-    let recipient = registry.register_inbox(
-        &boot_authority(),
-        "test.issue_1802.sink",
-        Arc::new(move |dispatch: OwnedDispatch| {
-            // Terminal test sink (ADR-0094): discharge before observing.
-            dispatch.discharge();
-            let _ = tx.send(dispatch);
-        }),
-    );
-    let reference = Registry::declared_dependency::<StubActor>(recipient);
-
-    let actor_mailbox = MailboxId(0x00BE_EF02);
-    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), actor_mailbox));
-
-    // The chassis-driven chain this handler is running inside.
-    let in_flight_root = MailId::new(MailboxId(0xC0), 7);
-    let in_flight_mail = MailId::new(MailboxId(0x99), 42);
-    let source = Source::with_correlation(SourceAddr::None, 0);
-
-    // Default `send` inherits the caller's chain.
-    {
-        let ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
-        ctx.to(&reference).send(&CastOnly { code: 1 });
-        // ctx drops here → `flush_outbound` routes the buffered send.
-    }
-    let inherited = rx.try_recv().expect("default send routed at flush");
-    assert_eq!(inherited.recipient, recipient, "send addresses the reference's id");
-    assert_eq!(inherited.root, Some(in_flight_root), "send inherits the caller's root");
-    assert_eq!(inherited.parent_mail, Some(in_flight_mail), "send's parent is the in-flight mail");
-    assert_ne!(inherited.mail_id, Some(in_flight_mail), "the outbound mail_id is fresh");
-
-    // `send_detached` opens a fresh chain despite the in-flight lineage.
-    {
-        let ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
-        ctx.to(&reference).send_detached(&CastOnly { code: 2 });
-    }
-    let detached = rx.try_recv().expect("detached send routed at flush");
-    assert!(detached.parent_mail.is_none(), "detached send carries no parent edge");
-    assert_eq!(detached.root, detached.mail_id, "detached send is its own root");
-}
 
 /// ADR-0232 §1: the flat `send_to` family sends through a held reference.
 /// `send_to` and `send_to_with_context` land at the reference's id under the

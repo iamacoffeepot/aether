@@ -11,10 +11,9 @@
 //! `NativeBinding`'s inherent `send_mail`.
 //!
 //! `actor::<R>()` retired from this trait because the returned
-//! typed-mailbox handle is per-side ([`crate::wasm::WasmActorMailbox<R>`]
-//! vs `NativeActorMailbox<'a, R>`). Each ctx provides it as an inherent
-//! method returning its own per-side type; the everyday user-facing
-//! `ctx.actor::<R>().send(&payload)` chain is unchanged. Generic-bounded
+//! typed-mailbox handle was per-side. The wasm ctx keeps it as an inherent
+//! method returning [`crate::wasm::WasmActorMailbox<R>`]; the native ctx
+//! sends through its flat verbs instead and has no handle. Generic-bounded
 //! code that needs cross-impl sends uses the trait's [`MailSender::send`]
 //! / [`MailSender::send_many`] methods.
 
