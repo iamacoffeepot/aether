@@ -212,20 +212,19 @@ impl NativeActor for FleetProxy {
         // has nothing left to terminate. A forked substrate is dialed only
         // on the port it reports, while it lives; an adopted one once.
         let mut target = mem::replace(&mut config.target, ProxyTarget::Adopted { rpc_addr: String::new() });
-        let (conn, addr) =
-            match connect_proxy(&mut target, move || wake.wake(&RpcInboundReady::default()), config.connect_budget) {
-                Ok(connected) => connected,
-                Err(e) => {
-                    // The proxy owns the child it was handed — a failed
-                    // boot must not orphan the substrate, and the same
-                    // group escalation `Drop` runs is what makes that
-                    // true for whatever the substrate itself forked.
-                    if let ProxyTarget::Forked { mut child, .. } = target {
-                        terminate_child_group(&mut child);
-                    }
-                    return Err(BootError::Other(Box::new(e)));
+        let (conn, addr) = match connect_proxy(&mut target, &wake, config.connect_budget) {
+            Ok(connected) => connected,
+            Err(e) => {
+                // The proxy owns the child it was handed — a failed
+                // boot must not orphan the substrate, and the same
+                // group escalation `Drop` runs is what makes that
+                // true for whatever the substrate itself forked.
+                if let ProxyTarget::Forked { mut child, .. } = target {
+                    terminate_child_group(&mut child);
                 }
-            };
+                return Err(BootError::Other(Box::new(e)));
+            }
+        };
         let spawned = match target {
             ProxyTarget::Forked { child, .. } => Some(child),
             ProxyTarget::Adopted { .. } => None,
