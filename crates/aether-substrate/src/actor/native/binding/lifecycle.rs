@@ -249,6 +249,12 @@ impl NativeBinding {
         &self.mailer
     }
 
+    /// A kind's display label from the wired registry. The path behind
+    /// [`NativeCtx::kind_label`](crate::actor::native::ctx::NativeCtx::kind_label).
+    pub(crate) fn kind_label(&self, kind: KindId) -> String {
+        self.mailer.kind_label(kind)
+    }
+
     /// #1757: the actor's reply-lineage allocator (a shared-counter
     /// clone). Surfaced so a handler that retains its inbound via
     /// [`NativeCtx::take_inbound`](crate::actor::native::ctx::NativeCtx::take_inbound)
