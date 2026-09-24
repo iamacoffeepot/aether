@@ -234,9 +234,7 @@ mod tests {
         ChildEntry, HandlerEntry, NameEntry, ParamKind as InventoryParamKind, RootEntry, TemplateEntry,
     };
     use aether_data::tagged_id;
-    use aether_data::{
-        ActorId, MAILBOX_DOMAIN, SessionToken, ThreadId, Uuid, mailbox_id_from_name, thread_id_from_name,
-    };
+    use aether_data::{ActorId, MAILBOX_DOMAIN, SessionToken, Tag, ThreadId, Uuid, thread_id_from_name, with_tag};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -394,9 +392,6 @@ mod tests {
     /// the engine's own `Registry`. An id neither table holds, and a
     /// malformed string, both report `None` (the latter without sinking
     /// its siblings). Order + `id` echo are preserved.
-    // Constructs a well-formed mailbox id no registry holds to drive the
-    // miss path — incidental test data, not a real address.
-    #[allow(clippy::disallowed_methods)]
     #[test]
     fn resolve_dispatches_each_id_family_to_its_table() {
         // Register a dynamic instance name the way the runtime name
@@ -409,28 +404,20 @@ mod tests {
         let unseen = thread_id_from_name("aether-instanced-never-registered");
         let unseen_tag = tagged_id::encode(unseen.0).expect("ThreadId always tag-encodes");
 
-        // A well-formed mailbox id no table holds -> None.
-        let mailbox = mailbox_id_from_name("aether.never-registered");
-        let mailbox_tag = tagged_id::encode(mailbox.0).expect("MailboxId tag-encodes");
+        // A well-formed mailbox id no table holds -> None. Every registered
+        // id carries a 60-bit hash body, so body 1 is never one of them.
+        let mailbox_tag = tagged_id::encode(with_tag(Tag::Mailbox, 1)).expect("a mailbox-tagged id encodes");
 
         let mut fix = fixture();
 
-        // A mailbox registered the way the spawn path registers a hosted
-        // actor (`spawn.rs:470`, ADR-0099 §3): under a lineage-folded id,
-        // carrying the rendered `/` address as its display name — which is
-        // why the id is not `hash(name)` here either. No link-time manifest
-        // carries this name, so the engine `Registry` is the only table
-        // that can reverse it.
-        let component = mailbox_id_from_name("aether.inventory-test.lineage-fold");
-        fix.registry
-            .try_register_inbox_with_id(
-                &boot_authority(),
-                component,
-                "aether.component/aether.embedded:probe",
-                noop_handler(),
-            )
-            .expect("fresh registry has no conflicting mailbox");
-        let component_tag = tagged_id::encode(component.0).expect("MailboxId tag-encodes");
+        // A mailbox registered at runtime, held as the tagged id its
+        // registration returns. No link-time manifest carries this name, so
+        // the engine `Registry` is the only table that can reverse it.
+        let component_tag = fix
+            .registry
+            .try_register_inbox(&boot_authority(), "aether.inventory-test.runtime-probe", noop_handler())
+            .expect("fresh registry has no conflicting mailbox")
+            .to_string();
 
         let mut ctx = session_ctx(&fix.transport);
         let result = InventoryCapability::on_resolve(
@@ -462,7 +449,7 @@ mod tests {
         assert_eq!(result.resolved[2].id, component_tag);
         assert_eq!(
             result.resolved[2].name.as_deref(),
-            Some("aether.component/aether.embedded:probe"),
+            Some("aether.inventory-test.runtime-probe"),
             "a runtime-registered mailbox reverses through the engine registry",
         );
 
