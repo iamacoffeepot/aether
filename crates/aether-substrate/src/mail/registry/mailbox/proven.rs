@@ -413,7 +413,7 @@ mod tests {
             )
             .expect("register a trampoline-named route");
 
-        assert_eq!(registry.loaded::<()>(Registry::structural_erased(cap)), Err(AdoptRefused::NotComponent));
-        assert!(registry.loaded::<()>(Registry::structural_erased(trampoline)).is_ok());
+        assert_eq!(registry.loaded::<ProbeChild>(Registry::structural_erased(cap)), Err(AdoptRefused::NotComponent));
+        assert!(registry.loaded::<ProbeChild>(Registry::structural_erased(trampoline)).is_ok());
     }
 }

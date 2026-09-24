@@ -5,7 +5,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use aether_actor::ActorRef;
+use aether_actor::{ActorRef, Addressable};
 
 use crate::actor::native::DispatchId;
 use crate::mail::MailboxId;
@@ -42,14 +42,14 @@ pub struct SpawnOutcome<A> {
 }
 
 // By hand, because a derive would bound `A: Debug` and actor types do not
-// implement it.
-impl<A> fmt::Debug for SpawnOutcome<A> {
+// implement it. The child is named by its canonical path and `result` prints
+// through `ActorRef<A>`'s namespace form; the position is never printed.
+impl<A: Addressable> fmt::Debug for SpawnOutcome<A> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("SpawnOutcome")
-            .field("mailbox_id", &self.mailbox_id)
             .field("canonical_name", &self.canonical_name)
             .field("result", &self.result)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
