@@ -153,6 +153,13 @@ impl<'a, R> WasmActorMailbox<'a, R> {
         request
     }
 
+    /// The unbounded body of [`Self::send_detached`], shared with the flat
+    /// `WasmCtx::send_detached` verb.
+    pub(crate) fn push_detached<K: ActorMail>(&self, payload: &K) {
+        let bytes = payload.encode_into_bytes();
+        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
+    }
+
     /// The unbounded body of [`Self::send_many`], shared with the flat
     /// `WasmCtx::send_many` verb.
     pub(crate) fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, payloads: &[K]) {
@@ -259,7 +266,6 @@ impl<R: Addressable> WasmActorMailbox<'_, R> {
         R: HandlesKind<K>,
         K: ActorMail,
     {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(self.mailbox, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
+        self.push_detached(payload);
     }
 }
