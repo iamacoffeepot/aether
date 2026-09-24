@@ -107,8 +107,8 @@ complete boundary.
 | ordinary bare test engine | omit selector for `default` |
 | capability-specific chassis discovery | omit selector and use `chassis`, `caps`, and/or `target` query fields |
 
-Selector resolution happens before the hub allocates an engine id or port. A
-selector miss therefore leaves no engine to reap.
+Selector resolution happens before the hub allocates an engine id. A selector
+miss therefore leaves no engine to reap.
 
 ## Spawn checklist
 
@@ -183,7 +183,8 @@ timestamp.
 
 If startup fails after id allocation, the error includes that id and the hub
 records a matching `spawn_failed` entry. If the failure occurs before allocation
-(for example, selector resolution or port allocation), no id exists.
+(for example, selector resolution), no id exists. A failed spawn whose
+substrate never reported a port records `rpc_port` 0.
 
 `prepare_fork` materializes the stored binary and fork+execs it for both the
 initial spawn and an automatic restart. A materialization or process-spawn
@@ -245,12 +246,18 @@ to the prior epoch. If exact clean introspection is required, a deliberate
 
 Fleet operations do not share one universal timeout:
 
-- Proxy startup dialing has a hub configuration budget; a zero configuration
-  is explicitly the wait-forever sentinel.
-- Only a startup exit with exit code 1, which is how a chassis reports a
-  failed RPC bind such as a stolen startup port, is reforked on a fresh port,
-  within a bounded number of attempts. A usage error (exit code 2), a clean
-  exit, a panic, or a signal is reported on the first attempt.
+- The hub forks each substrate with `--rpc-port 0 --rpc-port-file <path>`: the
+  substrate binds a port it picks and writes it to that file once it is
+  reachable, and the proxy dials only that reported port while the substrate is
+  alive. A foreign RPC server on the host therefore cannot answer for an
+  engine.
+- Proxy startup has a hub configuration budget that covers both waiting for the
+  port report and dialing the reported port; a zero configuration is
+  explicitly the wait-forever sentinel.
+- Only a startup exit with exit code 1, which is how a chassis reports a boot
+  error such as a failed RPC bind, is reforked, within a bounded number of
+  attempts. A usage error (exit code 2), a clean exit, a panic, or a signal is
+  reported on the first attempt.
 - Boot-component loads run inside the proxy startup dial: the substrate binds
   only after they answer, so the same connect budget covers them, and a failed
   load is a startup exit reported with the substrate's stderr.

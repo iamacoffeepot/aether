@@ -31,6 +31,14 @@
 //! attribute (or on the struct of a `#[runtime]`-split cap), because the
 //! injected `wire` registration mails the server. A missing declaration is a
 //! compile error at `#[http::router]`.
+//!
+//! A route's or reply method's ctx that omits its actor is typed by the
+//! router's actor: `http::Ctx<'_, WasmCtx<'_>>` reads as
+//! `http::Ctx<'_, WasmCtx<'_, Self>>`, and the generated handler takes the
+//! same typed ctx (ADR-0231 §7). A route therefore reaches its declared
+//! dependencies through the typed verbs, and a route that calls
+//! `ctx.actor::<R>()` needs `depends(R)`. A ctx that names its actor,
+//! including an explicit erased one, passes through unchanged.
 
 #![forbid(unsafe_code)]
 
@@ -43,7 +51,7 @@ use syn::parse::{Parse, ParseStream};
 use syn::spanned::Spanned;
 use syn::{
     Attribute, Expr, ExprLit, FnArg, GenericArgument, Ident, ImplItem, ImplItemFn, ItemImpl, Lit, LitStr, Pat, PatType,
-    PathArguments, ReturnType, Type, TypePath, parse_macro_input, parse_quote,
+    PathArguments, ReturnType, Type, TypePath, parse_macro_input, parse_quote, parse_quote_spanned,
 };
 
 /// `#[http::route(<Method|any>, "<template>")]` — a marker attribute
@@ -267,7 +275,8 @@ struct Routed {
     first_arg: FnArg,
     /// How the glue calls back into the retained method.
     call_style: CallStyle,
-    /// The transport ctx type `C` from `http::Ctx<'_, C>`.
+    /// The transport ctx type `C` from `http::Ctx<'_, C>`, with its actor
+    /// filled in when the author omitted it.
     ctx_c: Type,
     /// Each parameter after the receiver + ctx, in signature order.
     params: Vec<Param>,
@@ -294,7 +303,8 @@ struct ReplyRoute {
     first_arg: FnArg,
     /// How the glue calls back into the retained method.
     call_style: CallStyle,
-    /// The transport ctx type `C` (from `ctx: &mut C`).
+    /// The transport ctx type `C` (from `ctx: &mut C`), with its actor
+    /// filled in when the author omitted it.
     ctx_c: Type,
     /// `#[doc]` attributes carried onto the glue.
     docs: Vec<Attribute>,
@@ -340,7 +350,8 @@ struct Group<'a> {
     first_arg: FnArg,
     /// The call style shared by the group's routes.
     call_style: CallStyle,
-    /// The transport ctx type `C`.
+    /// The transport ctx type `C`, with its actor filled in when the
+    /// author omitted it.
     ctx_c: Type,
     /// `true` when the group's routes return `http::Outcome` — the glue
     /// is `manual`-class and may hold the reply (ADR-0154 §2). All routes
@@ -647,20 +658,26 @@ fn take_reply(method: &mut ImplItemFn) -> syn::Result<Option<ReplyRoute>> {
 /// Extract the transport ctx type `C` from a `#[http::reply]` method's
 /// second parameter, which is `ctx: &mut C` (a reply method takes the raw
 /// transport ctx, not the request-shaped `Ctx`, since it serves a reply
-/// rather than a request).
-fn parse_ref_ctx_type(method: &ImplItemFn) -> syn::Result<Type> {
-    let ctx_arg = method.sig.inputs.iter().nth(1).ok_or_else(|| {
+/// rather than a request). A `C` that omits its actor is filled with
+/// [`fill_actor`] in the method's own signature, and the filled type is
+/// returned for the glue.
+fn parse_ref_ctx_type(method: &mut ImplItemFn) -> syn::Result<Type> {
+    let signature_span = method.sig.span();
+    let ctx_arg = method.sig.inputs.iter_mut().nth(1).ok_or_else(|| {
         syn::Error::new(
-            method.sig.span(),
-            "a reply method's second parameter must be `ctx: &mut NativeCtx<'_, Erased, Manual>`",
+            signature_span,
+            "a reply method's second parameter must be `ctx: &mut NativeCtx<'_, Self, Manual>`",
         )
     })?;
+    let ctx_span = ctx_arg.span();
     let FnArg::Typed(PatType { ty, .. }) = ctx_arg else {
-        return Err(syn::Error::new(ctx_arg.span(), "a reply method's second parameter must be `ctx: &mut …`"));
+        return Err(syn::Error::new(ctx_span, "a reply method's second parameter must be `ctx: &mut …`"));
     };
-    let Type::Reference(reference) = ty.as_ref() else {
-        return Err(syn::Error::new(ty.span(), "a reply method's ctx parameter must be a `&mut` transport ctx"));
+    let ty_span = ty.span();
+    let Type::Reference(reference) = ty.as_mut() else {
+        return Err(syn::Error::new(ty_span, "a reply method's ctx parameter must be a `&mut` transport ctx"));
     };
+    fill_actor(&mut reference.elem);
     Ok((*reference.elem).clone())
 }
 
@@ -723,38 +740,43 @@ fn parse_receiver(method: &ImplItemFn) -> syn::Result<(FnArg, CallStyle)> {
 }
 
 /// Extract the transport ctx type `C` from the method's second
-/// parameter, which must be `http::Ctx<'_, C>`.
-fn parse_ctx_type(method: &ImplItemFn) -> syn::Result<Type> {
-    let ctx_arg = method.sig.inputs.iter().nth(1).ok_or_else(|| {
-        syn::Error::new(method.sig.span(), "a routed method's second parameter must be `ctx: http::Ctx<'_, C>`")
+/// parameter, which must be `http::Ctx<'_, C>`. A `C` that omits its actor
+/// is filled with [`fill_actor`] in the method's own signature, and the
+/// filled type is returned for the glue.
+fn parse_ctx_type(method: &mut ImplItemFn) -> syn::Result<Type> {
+    let signature_span = method.sig.span();
+    let ctx_arg = method.sig.inputs.iter_mut().nth(1).ok_or_else(|| {
+        syn::Error::new(signature_span, "a routed method's second parameter must be `ctx: http::Ctx<'_, C>`")
     })?;
+    let ctx_span = ctx_arg.span();
     let FnArg::Typed(PatType { ty, .. }) = ctx_arg else {
-        return Err(syn::Error::new(
-            ctx_arg.span(),
-            "a routed method's second parameter must be `ctx: http::Ctx<'_, C>`",
-        ));
+        return Err(syn::Error::new(ctx_span, "a routed method's second parameter must be `ctx: http::Ctx<'_, C>`"));
     };
-    let Type::Path(TypePath { path, .. }) = ty.as_ref() else {
-        return Err(syn::Error::new(ty.span(), "a routed method's ctx parameter must be `http::Ctx<'_, C>`"));
+    let ty_span = ty.span();
+    let Type::Path(TypePath { path, .. }) = ty.as_mut() else {
+        return Err(syn::Error::new(ty_span, "a routed method's ctx parameter must be `http::Ctx<'_, C>`"));
     };
     let seg = path
         .segments
-        .last()
-        .ok_or_else(|| syn::Error::new(ty.span(), "a routed method's ctx parameter must be `http::Ctx<'_, C>`"))?;
+        .last_mut()
+        .ok_or_else(|| syn::Error::new(ty_span, "a routed method's ctx parameter must be `http::Ctx<'_, C>`"))?;
     if seg.ident != "Ctx" {
-        return Err(syn::Error::new(ty.span(), "a routed method's ctx parameter must be `http::Ctx<'_, C>`"));
+        return Err(syn::Error::new(ty_span, "a routed method's ctx parameter must be `http::Ctx<'_, C>`"));
     }
-    let PathArguments::AngleBracketed(args) = &seg.arguments else {
-        return Err(syn::Error::new(ty.span(), "http::Ctx needs a transport ctx type argument: `http::Ctx<'_, C>`"));
+    let PathArguments::AngleBracketed(args) = &mut seg.arguments else {
+        return Err(syn::Error::new(ty_span, "http::Ctx needs a transport ctx type argument: `http::Ctx<'_, C>`"));
     };
-    args.args
-        .iter()
+    let transport = args
+        .args
+        .iter_mut()
         .rev()
         .find_map(|arg| match arg {
-            GenericArgument::Type(ty) => Some(ty.clone()),
+            GenericArgument::Type(ty) => Some(ty),
             _ => None,
         })
-        .ok_or_else(|| syn::Error::new(ty.span(), "http::Ctx needs a transport ctx type argument: `http::Ctx<'_, C>`"))
+        .ok_or_else(|| syn::Error::new(ty_span, "http::Ctx needs a transport ctx type argument: `http::Ctx<'_, C>`"))?;
+    fill_actor(transport);
+    Ok(transport.clone())
 }
 
 /// Classify every parameter after the receiver and ctx as a `Path<_>`
@@ -1053,11 +1075,43 @@ fn registration_send(group: &Group<'_>, ctx: &Ident, shared: bool) -> TokenStrea
     }
 }
 
+/// Type a route's or reply method's transport ctx by the router's actor when
+/// it omits one: `NativeCtx<'_>` becomes `NativeCtx<'_, Self>` and a bare
+/// `WasmCtx` becomes `WasmCtx<'_, Self>`, inserting `Self` as the first type
+/// argument after the lifetimes. The router types a route's ctx by its actor
+/// as ADR-0231 §7 types a handler's, so the generated glue and the route
+/// share one typed ctx and nothing erases between them. A ctx whose last
+/// segment already carries a type argument (an actor, erased or not) is left
+/// alone. The match is syntactic, like `#[actor]`'s own reading of a
+/// handler's ctx.
+fn fill_actor(ty: &mut Type) {
+    let actor: GenericArgument = parse_quote_spanned!(ty.span() => Self);
+    let Type::Path(TypePath { path, .. }) = ty else {
+        return;
+    };
+    let Some(seg) = path.segments.last_mut() else {
+        return;
+    };
+    match &mut seg.arguments {
+        PathArguments::None => seg.arguments = PathArguments::AngleBracketed(parse_quote!(<'_, #actor>)),
+        PathArguments::AngleBracketed(args) => {
+            if args.args.iter().any(|arg| matches!(arg, GenericArgument::Type(_))) {
+                return;
+            }
+            let position = args.args.iter().take_while(|arg| matches!(arg, GenericArgument::Lifetime(_))).count();
+            args.args.insert(position, actor);
+        }
+        PathArguments::Parenthesized(_) => {}
+    }
+}
+
 /// Strip a transport ctx type down to its base by dropping any non-lifetime
-/// generic arguments (the reply-class marker a deferred route carries):
-/// `NativeCtx<'a, Erased, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` → `WasmCtx<'a>`.
-/// The synthesized `wire` needs the base ctx because `wire` is a
-/// `Lifecycle` method with the default reply class, not the handler's.
+/// generic arguments (the actor and the reply-class marker a deferred route
+/// carries): `NativeCtx<'a, Self, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` →
+/// `WasmCtx<'a>`. The synthesized `wire` needs the base ctx because `wire` is
+/// a `Lifecycle` method with the default reply class, not the handler's. The
+/// actor [`fill_actor`] filled in is stripped too, so the synthesized `wire`
+/// takes the lifecycle ctx that names no actor.
 fn base_ctx_type(ty: &Type) -> Type {
     let mut ty = ty.clone();
     if let Type::Path(TypePath { path, .. }) = &mut ty
@@ -1113,7 +1167,7 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     // the first group (all routes on one impl share a transport). `wire`
     // is a `Lifecycle` method with the base (default reply-class) ctx, so
     // strip any reply-class type arg a deferred route carries
-    // (`NativeCtx<'_, Erased, Manual>` → `NativeCtx<'_>`).
+    // (`NativeCtx<'_, Self, Manual>` → `NativeCtx<'_>`).
     let template = &groups[0];
     let first_arg = &template.first_arg;
     let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&template.ctx_c));

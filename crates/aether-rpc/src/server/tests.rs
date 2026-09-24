@@ -34,7 +34,7 @@ fn boot_with_rpc_server_only(timeout: Duration) -> (PassiveChassis<TestChassis>,
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("rpc server boots");
@@ -55,7 +55,7 @@ fn boot_with_deferred_echo(timeout: Duration) -> (PassiveChassis<TestChassis>, T
         .with_actor::<DeferredEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("caps boot");
@@ -73,7 +73,7 @@ fn boot_with_echo_server() -> PassiveChassis<TestChassis> {
         .with_actor::<TestEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("caps boot")
@@ -154,7 +154,7 @@ fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: None },
+            RpcServerConfig { port: None, port_file: None },
         )
         .build_passive()
         .expect("disabled rpc server boots");
@@ -184,7 +184,7 @@ fn held_rpc_server_accepts_nothing_until_its_gate_opens() {
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Held },
-            RpcServerConfig { port: Some(port) },
+            RpcServerConfig { port: Some(port), port_file: None },
         )
         .build_passive()
         .expect("held rpc server boots");
@@ -199,6 +199,38 @@ fn held_rpc_server_accepts_nothing_until_its_gate_opens() {
     let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the opened server");
     stream.set_read_timeout(Some(Duration::from_secs(2))).expect("test: set_read_timeout on TcpStream");
     complete_handshake(&mut stream);
+}
+
+/// Issue #6503: a held server composed on port `0` with a port file writes
+/// nothing before its gate opens, then reports the port the OS picked — the
+/// one `open` returned and a dial completes a handshake on — never the
+/// configured `0`.
+#[test]
+fn held_rpc_server_reports_its_bound_port_when_its_gate_opens() {
+    use aether_substrate::testing::{cleanup, scratch_dir};
+    use std::fs;
+
+    let dir = scratch_dir("aether-rpc", "port-file");
+    let port_file = dir.join("rpc.port");
+    let (registry, mailer) = fresh_substrate();
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        .with_actor_configured::<RpcServerCapability>(
+            RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Held },
+            RpcServerConfig { port: Some(0), port_file: Some(port_file.to_string_lossy().into_owned()) },
+        )
+        .build_passive()
+        .expect("held rpc server boots");
+
+    assert!(!port_file.exists(), "a held server reports no port before its gate opens");
+
+    let port = chassis.handle::<RpcBindGate>().expect("a held server publishes its gate").open().expect("gate binds");
+    let reported = fs::read_to_string(&port_file).expect("the opened gate wrote its port file");
+    assert_eq!(reported.trim().parse::<u16>().expect("the port file holds a port"), port);
+
+    let mut stream = TcpStream::connect(("127.0.0.1", port)).expect("connect to the reported port");
+    stream.set_read_timeout(Some(Duration::from_secs(2))).expect("test: set_read_timeout on TcpStream");
+    complete_handshake(&mut stream);
+    cleanup(&dir);
 }
 
 /// `Ping(token)` round-trips as `Pong(token)`.
@@ -364,7 +396,7 @@ fn call_headless_window_list_err_reaches_component_reply() {
         .with_actor::<HeadlessWindowCapability>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("caps boot");
@@ -612,7 +644,7 @@ fn call_without_cid_is_fire_and_forget() {
         .with_actor::<TestEchoActor>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams { peer_kind: test_peer_kind(), bind: RpcBind::Boot },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("caps boot");

@@ -361,6 +361,12 @@ identity extractor). The same surface serves native actors — a routed method o
 an `impl NativeActor` takes `http::Ctx<'_, NativeCtx<'_>>` with a
 `state: &mut YourState` first parameter, and the macros write the native `wire`.
 
+The router types a route's ctx by its actor: `http::Ctx<'_, WasmCtx<'_>>` reads
+as `http::Ctx<'_, WasmCtx<'_, Self>>`. A route therefore reaches the peers its
+actor declares with `depends(..)` through the typed verbs —
+`ctx.actor_ref::<R>()`, and on the guest `ctx.send::<R>(..)` — and a route that
+calls `ctx.actor::<R>()` needs `depends(R)` like any other handler.
+
 Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so
 a streamed response keeps its own hand-written `#[handler::single]`.
