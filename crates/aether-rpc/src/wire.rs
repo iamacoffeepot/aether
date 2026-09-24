@@ -217,7 +217,10 @@ pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
 /// mpsc. It is deliberately actor-agnostic: `aether-mcp` (a plain
 /// binary with no mailbox or `Mailer`) is a consumer too, so readiness
 /// notification is a generic `on_frame` closure rather than a wake-mail
-/// address.
+/// address. An actor consumer dials through
+/// [`RpcClient::connect_fail_fast`], handing over its `SelfWake` so the
+/// reader runs as that actor's sidecar and a reader panic stops the
+/// chassis (ADR-0063); `aether-mcp` dials through [`RpcClient::connect`].
 ///
 /// The whole module is native-only — it owns a `TcpStream` and an OS
 /// thread, so it is gated off the wasm-header build.
@@ -225,6 +228,7 @@ pub use client::{RpcClient, RpcClientError, RpcConnection, RpcReaderHandle};
 mod client {
     use super::{Hello, HelloAck, MailEnvelope, PeerKind, WIRE_VERSION, WireFrame};
     use aether_codec::frame::{FrameError, read_frame, write_frame};
+    use aether_substrate::actor::native::SelfWake;
     use std::error;
     use std::fmt;
     use std::io::{self, BufReader};
@@ -339,10 +343,12 @@ mod client {
         ///
         /// `on_frame` is the scheduling kick: the reader calls it after
         /// pushing each frame onto the inbound channel (and once more
-        /// after the final synthetic `Bye` on EOF / error). Actor
-        /// consumers capture their `Mailer` + mailbox + wake kind in the
-        /// closure and fire wake mail; non-actor consumers pass `|| {}`
-        /// and block / poll [`RpcConnection::inbound`] directly.
+        /// after the final synthetic `Bye` on EOF / error). Non-actor
+        /// consumers pass `|| {}` and block / poll
+        /// [`RpcConnection::inbound`] directly. The reader is a plain OS
+        /// thread with no chassis above it, so a panic in it only drops the
+        /// inbound sender; an actor consumer dials through
+        /// [`RpcClient::connect_fail_fast`] instead.
         ///
         /// A peer that sends no `HelloAck` within ten seconds fails the
         /// connect with [`RpcClientError::Handshake`].
@@ -351,16 +357,42 @@ mod client {
             peer: PeerKind,
             on_frame: impl Fn() + Send + 'static,
         ) -> Result<RpcConnection, RpcClientError> {
-            Self::connect_within(addr, peer, on_frame, HANDSHAKE_TIMEOUT)
+            Self::connect_within(addr, peer, on_frame, HANDSHAKE_TIMEOUT, raw_reader_spawn)
+        }
+
+        /// [`RpcClient::connect`] for an actor consumer: the reader thread
+        /// is a sidecar of the actor that minted `sidecar`, so a panic in
+        /// the read loop or in `on_frame` escalates through that actor's
+        /// chassis aborter with the panic payload in the reason, like a
+        /// handler panic (ADR-0063).
+        ///
+        /// `sidecar` is only the spawn authority; `on_frame` is the
+        /// scheduling kick as on [`RpcClient::connect`], typically a wake
+        /// through a clone of the same `SelfWake`. The consumer is the fleet
+        /// proxy's dial.
+        ///
+        /// A wake whose actor has already closed cannot spawn a sidecar, so
+        /// the connect fails with [`RpcClientError::Connect`].
+        pub fn connect_fail_fast<K>(
+            addr: &str,
+            peer: PeerKind,
+            sidecar: &SelfWake<K>,
+            on_frame: impl Fn() + Send + 'static,
+        ) -> Result<RpcConnection, RpcClientError> {
+            Self::connect_within(addr, peer, on_frame, HANDSHAKE_TIMEOUT, |name, body| {
+                sidecar.spawn_sidecar(name, body)
+            })
         }
 
         /// [`RpcClient::connect`] with the handshake read bounded by
-        /// `handshake_timeout` rather than [`HANDSHAKE_TIMEOUT`].
+        /// `handshake_timeout` rather than [`HANDSHAKE_TIMEOUT`], and the
+        /// reader thread spawned by `spawn_reader`.
         fn connect_within(
             addr: &str,
             peer: PeerKind,
             on_frame: impl Fn() + Send + 'static,
             handshake_timeout: Duration,
+            spawn_reader: impl FnOnce(String, ReaderBody) -> io::Result<JoinHandle<()>>,
         ) -> Result<RpcConnection, RpcClientError> {
             let stream = TcpStream::connect(addr).map_err(RpcClientError::Connect)?;
             stream.set_read_timeout(Some(handshake_timeout)).map_err(RpcClientError::Connect)?;
@@ -408,49 +440,44 @@ mod client {
             let shutdown_for_thread = Arc::clone(&shutdown);
             let (inbound_tx, inbound_rx) = mpsc::channel::<WireFrame>();
 
-            // Transport thread below the mail layer — it carries inbound mail in;
-            // no inbound chain to inherit, so no settlement umbrella to honor.
-            #[allow(clippy::disallowed_methods)]
-            let thread = thread::Builder::new()
-                .name("aether-rpc-client-reader".into())
-                .spawn(move || {
-                    loop {
-                        if shutdown_for_thread.load(Ordering::Acquire) {
-                            break;
-                        }
-                        let frame: WireFrame = match read_frame(&mut reader) {
-                            Ok(f) => f,
-                            Err(e) => {
-                                // Consumer-initiated teardown: the
-                                // RpcReaderHandle's Drop flips the flag and
-                                // shuts the socket, surfacing here as a
-                                // read error. No synthetic Bye — nobody is
-                                // reading the channel.
-                                if shutdown_for_thread.load(Ordering::Acquire) {
-                                    break;
-                                }
-                                // Peer-initiated close (EOF) or a real read
-                                // error: surface it as a Bye so the
-                                // consumer's drain observes the close.
-                                let reason = match &e {
-                                    FrameError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
-                                        "eof".to_string()
-                                    }
-                                    other => format!("read error: {other}"),
-                                };
-                                let _ = inbound_tx.send(WireFrame::Bye { reason });
-                                on_frame();
+            let body: ReaderBody = Box::new(move || {
+                loop {
+                    if shutdown_for_thread.load(Ordering::Acquire) {
+                        break;
+                    }
+                    let frame: WireFrame = match read_frame(&mut reader) {
+                        Ok(f) => f,
+                        Err(e) => {
+                            // Consumer-initiated teardown: the
+                            // RpcReaderHandle's Drop flips the flag and
+                            // shuts the socket, surfacing here as a
+                            // read error. No synthetic Bye — nobody is
+                            // reading the channel.
+                            if shutdown_for_thread.load(Ordering::Acquire) {
                                 break;
                             }
-                        };
-                        if inbound_tx.send(frame).is_err() {
-                            // Receiver dropped — the consumer is gone.
+                            // Peer-initiated close (EOF) or a real read
+                            // error: surface it as a Bye so the
+                            // consumer's drain observes the close.
+                            let reason = match &e {
+                                FrameError::Io(io_err) if io_err.kind() == io::ErrorKind::UnexpectedEof => {
+                                    "eof".to_string()
+                                }
+                                other => format!("read error: {other}"),
+                            };
+                            let _ = inbound_tx.send(WireFrame::Bye { reason });
+                            on_frame();
                             break;
                         }
-                        on_frame();
+                    };
+                    if inbound_tx.send(frame).is_err() {
+                        // Receiver dropped — the consumer is gone.
+                        break;
                     }
-                })
-                .map_err(RpcClientError::Connect)?;
+                    on_frame();
+                }
+            });
+            let thread = spawn_reader("aether-rpc-client-reader".into(), body).map_err(RpcClientError::Connect)?;
 
             Ok(RpcConnection {
                 client: Self { write_half, next_cid: 1 },
@@ -480,12 +507,28 @@ mod client {
         }
     }
 
+    /// The reader thread's read loop, handed to whichever spawn the connect
+    /// form chose.
+    type ReaderBody = Box<dyn FnOnce() + Send + 'static>;
+
+    /// The reader spawn behind [`RpcClient::connect`]: a plain OS thread
+    /// named `name`, with no fail-fast boundary above `body`.
+    ///
+    /// Transport thread below the mail layer — it carries inbound mail in;
+    /// no inbound chain to inherit, so no settlement umbrella to honor.
+    #[allow(clippy::disallowed_methods)] // aether-suppression-request: the reader for a non-actor consumer (aether-mcp) that holds no SelfWake and no chassis aborter; actor consumers spawn through connect_fail_fast
+    fn raw_reader_spawn(name: String, body: ReaderBody) -> io::Result<JoinHandle<()>> {
+        thread::Builder::new().name(name).spawn(body)
+    }
+
     #[cfg(test)]
     #[allow(clippy::disallowed_methods)] // test scaffolding — threads here hold no settlement contract
     mod tests {
-        use super::{RpcClient, RpcClientError};
-        use crate::{HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+        use super::{RpcClient, RpcClientError, raw_reader_spawn};
+        use crate::{HelloAck, PeerKind, RpcInboundReady, RpcServerCapability, WIRE_VERSION, WireFrame};
         use aether_codec::frame::{read_frame, write_frame};
+        use aether_data::Source;
+        use aether_substrate::testing::{fresh_substrate, manual_dispatch_ctx, unrouted_binding};
         use std::io::BufReader;
         use std::net::{TcpListener, TcpStream};
         use std::sync::mpsc;
@@ -544,6 +587,50 @@ mod client {
             }
         }
 
+        /// A panic on the reader thread of a [`RpcClient::connect_fail_fast`]
+        /// connection, here raised by `on_frame` on the EOF path, escalates
+        /// through the aborter of the actor that minted the wake. The test
+        /// binding's aborter is `PanicAborter`, so the joined payload is the
+        /// aborter's own message naming the sidecar site and the panic.
+        ///
+        /// Before issue 6558 the reader ran on a raw spawn, so a reader panic
+        /// reached no aborter: the fleet proxy learned of it only by heartbeat
+        /// eviction, and never with the heartbeat disabled.
+        #[test]
+        fn a_reader_panic_under_connect_fail_fast_reaches_the_actors_aborter() {
+            let (_registry, mailer) = fresh_substrate();
+            let binding = unrouted_binding(&mailer);
+            let wake =
+                manual_dispatch_ctx::<RpcServerCapability>(&binding, Source::NONE).self_wake::<RpcInboundReady>();
+            let (port, server) = fake_server(|mut stream| {
+                let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+                let _hello: WireFrame = read_frame(&mut reader).expect("read Hello");
+                write_frame(
+                    &mut stream,
+                    &WireFrame::HelloAck(HelloAck { wire_version: WIRE_VERSION, server: substrate_peer_kind() }),
+                )
+                .expect("write HelloAck");
+            });
+
+            let mut conn =
+                RpcClient::connect_fail_fast(&format!("127.0.0.1:{port}"), client_peer_kind(), &wake, || {
+                    panic!("reader probe 6558")
+                })
+                .expect("client connects");
+            server.join().expect("fake server thread");
+            let payload =
+                conn.reader.thread.take().expect("reader thread handle").join().expect_err("the reader panics");
+            let reason = payload
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| payload.downcast_ref::<&str>().map(|s| (*s).to_owned()))
+                .unwrap_or_default();
+
+            assert!(reason.contains("fatal abort"), "the aborter ran: {reason}");
+            assert!(reason.contains("sidecar thread aether-rpc-client-reader"), "reason names the site: {reason}");
+            assert!(reason.contains("reader probe 6558"), "reason carries the payload: {reason}");
+        }
+
         /// A server that answers with a mismatched `wire_version` is
         /// rejected at connect time as `RpcClientError::Handshake`, not a
         /// silent hang.
@@ -588,6 +675,7 @@ mod client {
                     client_peer_kind(),
                     || {},
                     Duration::from_millis(200),
+                    raw_reader_spawn,
                 );
                 let _ = result_tx.send(result);
             });
@@ -626,6 +714,7 @@ mod client {
                 client_peer_kind(),
                 || {},
                 Duration::from_millis(200),
+                raw_reader_spawn,
             )
             .expect("client connects");
 

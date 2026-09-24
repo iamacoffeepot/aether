@@ -9,8 +9,9 @@
 //! ## What it does
 //!
 //! - **`init`** dials the substrate's `RpcServerCapability` via
-//!   `RpcClient::connect` and spawns the reader sidecar. The
-//!   handshake's `HelloAck` identity is kept on `conn.server`.
+//!   `RpcClient::connect_fail_fast`, which spawns the reader as the
+//!   proxy's own sidecar, so a reader panic stops the chassis (ADR-0063).
+//!   The handshake's `HelloAck` identity is kept on `conn.server`.
 //! - **`wire`** registers the proxy with the hub's RPC server as its
 //!   engine's route (`RegisterEngineRoute`), holding the spawn chain open
 //!   until **`on_route_registered`** takes the answer.
