@@ -1,0 +1,5 @@
+error: `depends` is written once, as a list — merge this into the first `depends(...)`: `depends(A, B)`
+ --> tests/ui/rejects_repeated_actor_depends.rs:9:25
+  |
+9 | #[actor(depends(First), depends(Second))]
+  |                         ^^^^^^^

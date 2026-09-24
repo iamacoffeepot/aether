@@ -87,7 +87,7 @@ verb.)*
 ### 2. The proof is the declaration
 
 ```rust
-#[actor(depends(RenderCapability), depends(LifecycleCapability))]
+#[actor(depends(RenderCapability, LifecycleCapability))]
 impl WasmActor for Camera {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self>, _tick: Tick) {

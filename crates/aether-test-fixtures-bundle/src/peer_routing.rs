@@ -1,7 +1,8 @@
 //! Parent-relative component-peer routing fixture (issue #4535).
 //!
-//! `ParentPeerCaller` receives `Bump` and forwards it through the bare-type
-//! `ctx.actor::<ParentPeerTarget>()`. The target emits the existing
+//! `ParentPeerCaller` receives `Bump` and forwards it through
+//! `ctx.send::<ParentPeerTarget>`, which resolves the target by type from the
+//! caller's scope. The target emits the existing
 //! `TickObserved` marker to the substrate-harness observer. A harness scenario
 //! can therefore load both actors beneath an explicit logical parent and
 //! observe whether the caller selected the target from that same parent scope.
@@ -23,7 +24,7 @@ impl WasmActor for ParentPeerCaller {
 
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
-        ctx.actor::<ParentPeerTarget>().send(&Bump);
+        ctx.send::<ParentPeerTarget>(&Bump);
     }
 }
 
@@ -39,6 +40,6 @@ impl WasmActor for ParentPeerTarget {
 
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: 1 });
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: 1 });
     }
 }

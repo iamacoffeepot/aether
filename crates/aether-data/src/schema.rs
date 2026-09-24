@@ -802,10 +802,10 @@ pub enum InputsRecord {
     /// single-actor module emits no boundary and decodes byte-identically
     /// under the existing reader, so no section-version bump is needed.
     ActorBoundary { namespace: Cow<'static, str> },
-    /// ADR-0230: one `#[actor(depends(R))]` declaration. `resolver` is the
-    /// dependency's `DependencyResolver::TAG` (`One` for a root singleton,
-    /// `Embedded` for a co-hosted peer); `namespace` is `R::NAMESPACE`.
-    /// Emitted by `#[actor]` once per `depends(...)` entry, after the
+    /// ADR-0230: one type named in `#[actor(depends(..))]`. `resolver` is
+    /// the dependency's `DependencyResolver::TAG` (`One` for a root
+    /// singleton, `Embedded` for a co-hosted peer); `namespace` is
+    /// `R::NAMESPACE`. Emitted by `#[actor]` once per listed type, after the
     /// `Config` record. Appended last like `ActorBoundary`, so a module
     /// that declares nothing encodes byte-identically and an actor with
     /// no `Dependency` records has no dependencies.
