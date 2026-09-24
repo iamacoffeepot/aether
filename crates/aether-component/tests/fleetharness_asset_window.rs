@@ -1,9 +1,9 @@
 //! ADR-0163 §3 (#3984) proof: a wasm guest actually pulls an asset through
-//! its load window during `wire`. Loads the fixture bundle (whose `Probe`
-//! entry actor `export_asset!`s `asset_fixture.txt` and, in `wire`, pulls it
-//! through `AssetWindow::asset` and stashes a fingerprint), then sends
-//! `AssetProbe` over the wire and asserts the reply carries the exact bytes'
-//! length and content checksum — proving the guest-side `asset_fetch_p32`
+//! its load window during `wire`. Loads the fixture bundle (which
+//! `export_asset!`s `asset_fixture.txt`) selecting its `QuietProbe` export,
+//! which in `wire` pulls the asset through `AssetWindow::asset` and stashes a
+//! fingerprint, then sends `AssetProbe` over the wire and asserts the reply
+//! carries the exact bytes' length and content checksum — proving the guest-side `asset_fetch_p32`
 //! transport round-tripped the payload, and that it survived the window
 //! closing (the probe reply runs in an ordinary post-`wire` handler).
 
@@ -34,7 +34,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
         let replies = harness.send(engine, &addr, &AssetProbe);
         let reply = match replies.as_slice() {
