@@ -1,5 +1,5 @@
 //! Reference asset bundle scenario tests (ADR-0163 §4). Each boots a
-//! `SubstrateHarness`, loads `aether-kit-commons`'s wasm artifact (built
+//! `SubstrateHarness`, loads `aether-kit`'s wasm artifact (built
 //! separately for `wasm32-unknown-unknown`) selecting the non-entry
 //! `aether.kit.bundle` export (ADR-0096), and drives the residency
 //! lifecycle the reference actor bakes in:
@@ -21,7 +21,7 @@
 //!
 //! Skipped when no wgpu adapter is available or the component's wasm
 //! hasn't been built (`require_runtime` locates
-//! `target/wasm32-unknown-unknown/{debug,release}/aether_kit_commons.wasm`
+//! `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
 //! and returns `None` when both are absent). CI builds the wasm before
 //! `cargo test`.
 
@@ -33,19 +33,19 @@ use aether_harness_substrate_capture::test_helpers::require_runtime;
 use aether_harness_substrate_capture::visual::{decode_png, differs_from_background};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, LoadResult};
 
-// Force linkage of `aether-kit-commons`'s `inventory::submit!`
+// Force linkage of `aether-kit`'s `inventory::submit!`
 // `KindDescriptor` entries into this test binary — cargo links the test
 // against the host rlib, but the linker strips inventory submits the test
 // code doesn't statically reference.
 #[allow(unused_imports)]
-use aether_kit_commons as _;
+use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
 /// User-facing component name passed to `LoadComponent`.
 const COMPONENT_NAME: &str = "tile";
 
-/// Load `aether-kit-commons`'s pre-built wasm into the harness selecting
+/// Load `aether-kit`'s pre-built wasm into the harness selecting
 /// the `aether.kit.bundle` export (ADR-0096; the kit is defaultless per
 /// ADR-0138, so the selector is required), await `LoadResult`, and return
 /// the loaded component's mailbox id so a test can drop it. The bundle
@@ -80,7 +80,7 @@ fn load_bundle(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
 /// must diverge from the clear color in the captured frame.
 #[test]
 fn bundle_wire_uploads_and_draws_the_resident_tile() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
 
@@ -128,7 +128,7 @@ fn bundle_wire_uploads_and_draws_the_resident_tile() {
 /// loaded-component census an exact census of resident tiles.
 #[test]
 fn bundle_unwire_destroys_the_resident_tile() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
 

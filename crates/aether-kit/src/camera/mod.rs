@@ -368,7 +368,7 @@ impl WasmActor for CameraComponent {
     fn on_create(&mut self, _ctx: &mut WasmCtx<'_>, msg: CameraCreate) {
         if self.cameras.contains_key(&msg.name) {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.create rejected: name already bound; use set_mode to swap modes",
             );
@@ -398,7 +398,7 @@ impl WasmActor for CameraComponent {
             self.active = Some(msg.name);
         } else {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.set_active rejected: no camera bound under that name",
             );
@@ -415,7 +415,7 @@ impl WasmActor for CameraComponent {
             cam.mode = ModeState::from_init(&msg.mode);
         } else {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.set_mode rejected: no camera bound under that name",
             );
@@ -432,7 +432,7 @@ impl WasmActor for CameraComponent {
             match &mut cam.mode {
                 ModeState::Orbit(state) => state.apply(&msg.params),
                 other @ ModeState::Topdown(_) => tracing::warn!(
-                    target: "aether_kit_commons",
+                    target: "aether_kit",
                     name = %msg.name,
                     actual = %other.name(),
                     "camera.orbit.set rejected: camera is in a different mode; switch with set_mode first",
@@ -440,7 +440,7 @@ impl WasmActor for CameraComponent {
             }
         } else {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.orbit.set rejected: no camera bound under that name",
             );
@@ -456,7 +456,7 @@ impl WasmActor for CameraComponent {
             match &mut cam.mode {
                 ModeState::Topdown(state) => state.apply(&msg.params),
                 other @ ModeState::Orbit(_) => tracing::warn!(
-                    target: "aether_kit_commons",
+                    target: "aether_kit",
                     name = %msg.name,
                     actual = %other.name(),
                     "camera.topdown.set rejected: camera is in a different mode; switch with set_mode first",
@@ -464,7 +464,7 @@ impl WasmActor for CameraComponent {
             }
         } else {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 name = %msg.name,
                 "camera.topdown.set rejected: no camera bound under that name",
             );

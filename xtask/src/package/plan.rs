@@ -196,7 +196,7 @@ mod tests {
         // argument as a prebuilt path and anything else as a package name, and
         // rejects more configs than components. Pure input normalization the
         // crate owns.
-        let components = vec!["aether-kit-commons".to_owned(), "build/probe.wasm".to_owned()];
+        let components = vec!["aether-kit".to_owned(), "build/probe.wasm".to_owned()];
         let configs = vec![PathBuf::from("camera.cfg")];
         let settings =
             ChassisSettings { title: Some("loco".to_owned()), tick_hz: Some(60), ..ChassisSettings::default() };
@@ -206,7 +206,7 @@ mod tests {
         assert_eq!(plan.settings.title.as_deref(), Some("loco"));
         assert_eq!(plan.settings.tick_hz, Some(60));
         assert_eq!(plan.components.len(), 2);
-        assert!(matches!(&plan.components[0].source, ComponentSource::Package(p) if p == "aether-kit-commons"));
+        assert!(matches!(&plan.components[0].source, ComponentSource::Package(p) if p == "aether-kit"));
         assert!(matches!(&plan.components[1].source, ComponentSource::Prebuilt(_)), "a .wasm arg is a prebuilt path");
         assert_eq!(
             plan.components[0].config.as_deref(),
