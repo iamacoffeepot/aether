@@ -14,6 +14,7 @@ fn ui() {
     t.pass("tests/ui/pass_export_passthrough.rs");
     t.pass("tests/ui/pass_export_after.rs");
     t.pass("tests/ui/pass_export_shared_api_target.rs");
+    t.pass("tests/ui/pass_export_program_submodule.rs");
     t.compile_fail("tests/ui/fail_export_no_roles.rs");
     t.compile_fail("tests/ui/fail_export_duplicate_program_name.rs");
     t.compile_fail("tests/ui/fail_export_reserved_namespace.rs");

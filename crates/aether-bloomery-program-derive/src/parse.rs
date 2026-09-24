@@ -4,15 +4,13 @@ use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
 
-use crate::check::{ApiBinding, pair_run_with_env, reject_run_receiver, trailing_apis};
+use crate::check::{ApiBinding, pair_run_with_env, reject_run_receiver, require_async_return, trailing_apis};
 
 pub struct ProgramDef {
     pub item: ItemImpl,
     pub self_ty: Type,
     pub name: LitStr,
     pub intent: LitStr,
-    pub input: Type,
-    pub result: Type,
     pub async_run: bool,
     pub sampled: bool,
     pub apis: Vec<ApiBinding>,
@@ -34,8 +32,8 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let mut name = None;
     let mut intent = None;
     let mut sampled = None;
-    let mut input = None;
-    let mut result = None;
+    let mut has_input = false;
+    let mut has_result = false;
     let mut async_run = None;
     let mut apis = Vec::new();
 
@@ -60,16 +58,16 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                 sampled = Some(parse_mode(konst)?);
             }
             ImplItem::Type(alias) if alias.ident == "Input" => {
-                if input.is_some() {
+                if has_input {
                     return Err(syn::Error::new_spanned(&alias.ident, "`type Input` is given twice"));
                 }
-                input = Some(alias.ty.clone());
+                has_input = true;
             }
             ImplItem::Type(alias) if alias.ident == "Result" => {
-                if result.is_some() {
+                if has_result {
                     return Err(syn::Error::new_spanned(&alias.ident, "`type Result` is given twice"));
                 }
-                result = Some(alias.ty.clone());
+                has_result = true;
             }
             ImplItem::Fn(method) if method.sig.ident == "run" => {
                 if async_run.is_some() {
@@ -77,6 +75,9 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
                 }
                 reject_run_receiver(&method.sig)?;
                 let is_async = pair_run_with_env(&method.sig)?;
+                if is_async {
+                    require_async_return(&method.sig)?;
+                }
                 apis = trailing_apis(&method.sig, is_async)?;
                 async_run = Some(is_async);
             }
@@ -99,15 +100,19 @@ pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
     let sampled = sampled.ok_or_else(|| {
         syn::Error::new(item.self_ty.span(), "#[program] requires `const MODE: Mode = Mode::Pure` or `Mode::Sampled`")
     })?;
-    let input = input.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"))?;
-    let result = result.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `type Result`"))?;
+    if !has_input {
+        return Err(syn::Error::new(item.self_ty.span(), "#[program] requires `type Input`"));
+    }
+    if !has_result {
+        return Err(syn::Error::new(item.self_ty.span(), "#[program] requires `type Result`"));
+    }
     let async_run = async_run.ok_or_else(|| syn::Error::new(item.self_ty.span(), "#[program] requires `fn run`"))?;
 
     if sampled && !async_run {
         return Err(syn::Error::new(item.self_ty.span(), "#[program] Mode::Sampled requires async fn run"));
     }
 
-    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, input, result, async_run, sampled, apis, item })
+    Ok(ProgramDef { self_ty: (*item.self_ty).clone(), name, intent, async_run, sampled, apis, item })
 }
 
 fn string_literal(konst: &ImplItemConst, ident: &str) -> syn::Result<LitStr> {

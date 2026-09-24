@@ -1,7 +1,7 @@
 //! `muse.turn`: one stateless turn is one Sampled run with one fetch.
 
 use aether_bloomery_kinds::Mode;
-use aether_bloomery_program::{Async, Env, Http, Program, program};
+use aether_bloomery_program::{Async, Env, Http, Program, Refusal, program};
 
 use crate::input::TurnInput;
 use crate::result::TurnResult;
@@ -22,12 +22,7 @@ impl Program for MuseTurn {
     type Input = TurnInput;
     type Result = TurnResult;
 
-    // `#[program]` writes its own return type, so the signature names `Refusal` by crate path.
-    async fn run(
-        input: Self::Input,
-        env: &mut Env<Async>,
-        mut http: Http,
-    ) -> Result<Self::Result, aether_bloomery_program::Refusal> {
+    async fn run(input: Self::Input, env: &mut Env<Async>, mut http: Http) -> Result<Self::Result, Refusal> {
         let mut texts = Vec::with_capacity(input.items().len());
         for item in input.items() {
             texts.push(env.read_text(item.text()).await?);
