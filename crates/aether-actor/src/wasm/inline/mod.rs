@@ -538,16 +538,6 @@ impl Registry {
         map.iter().find(|(_, slot)| slot.parent == parent.0 && slot.full_subname == subname).map(|(key, _)| *key)
     }
 
-    /// The resolved subname of the inline child registered under `id`, for
-    /// naming it in a diagnostic, or `None` if `id` names no resident child
-    /// (the cluster root, or a stray address). Pure registry lookup. O(log n).
-    #[must_use]
-    pub(crate) fn subname_of(&self, id: MailboxId) -> Option<String> {
-        // SAFETY: see [`Self::insert_child`].
-        let map = unsafe { &*self.inner.get() };
-        map.get(&id).map(|slot| slot.full_subname.clone())
-    }
-
     /// The sibling of the inline child registered under `id` whose resolved
     /// subname is `subname` — the child of `id`'s parent named `subname`.
     /// `None` if `id` has no recorded parent or no such sibling resides.
