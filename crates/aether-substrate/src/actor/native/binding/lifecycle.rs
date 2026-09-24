@@ -12,12 +12,13 @@ use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
-use crate::mail::MailboxId;
 use crate::mail::mailer::Mailer;
+use crate::mail::registry::RegistrySubscription;
+use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
-use aether_actor::{CallerScope, RequestContextTable};
+use aether_actor::{CallerScope, HandlesKind, RegistryChanged, RequestContextTable};
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -189,6 +190,24 @@ impl NativeBinding {
     /// transport's send path.
     pub(crate) fn self_mailbox(&self) -> MailboxId {
         self.identity.mailbox()
+    }
+
+    /// Subscribe this actor to one `kind` notice when `root` settles, through
+    /// the chassis's settlement registry. Returns `false`, and subscribes
+    /// nothing, when the chassis wires no settlement registry. The path behind
+    /// [`NativeCtx::subscribe_settlement`](crate::actor::native::ctx::NativeCtx::subscribe_settlement).
+    pub(crate) fn subscribe_settlement_notice(&self, root: MailId, kind: KindId) -> bool {
+        let Some(registry) = self.mailer.settlement_registry() else {
+            return false;
+        };
+        registry.subscribe_settlement_mail(root, self.self_mailbox(), kind, Arc::clone(&self.mailer));
+        true
+    }
+
+    /// Subscribe this actor to the registry's inventory changes. The path
+    /// behind [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory).
+    pub(crate) fn subscribe_inventory<A: HandlesKind<RegistryChanged>>(&self) -> RegistrySubscription {
+        self.mailer.subscribe_inventory_for::<A>(self.self_mailbox())
     }
 
     /// This actor's lineage carry (ADR-0099 §3) — the rolling fold

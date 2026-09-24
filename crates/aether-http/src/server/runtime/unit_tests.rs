@@ -1,5 +1,5 @@
 use super::{
-    Arc, HttpResponseStreamOpen, KindId, MailboxId, Mailer, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
+    Arc, HttpResponseStreamOpen, KindId, Mailer, NativeCtx, OPCODE_BINARY, OPCODE_CONTINUATION, OPCODE_TEXT,
     RegisterRouteResult, Registry, RwLock, SharedRoutes, WsFrameParse, http_date, normalize_prefix, parse_http_method,
     parse_ws_frame, percent_decode_path, reason_phrase, register_route, render_stream_head, request_keeps_alive,
     route_matches, sec_websocket_accept, serialize_ws_frame, sha1, unregister_route, unregister_routes_all,
@@ -7,6 +7,7 @@ use super::{
 };
 use crate::kinds::{HttpHeader, HttpMethod};
 use aether_actor::ErasedActorRef;
+use aether_data::MailboxId;
 use aether_substrate::mail::registry::noop_handler;
 use aether_substrate::mail::{MailId, Source};
 use aether_substrate::testing::{fresh_substrate, registered_ref, unrouted_binding};
