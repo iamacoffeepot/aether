@@ -48,7 +48,7 @@ Edits under `.claude/` — skill text in `.claude/skills/` especially — and fo
 - Build: `cargo build` (release: `cargo build --release`). The root manifest's `default-members` leaves out the build pipeline (`xtask`), the `aether-puppet` lane driver, and the `aether-test-fixtures-*` wasm crates; add `--workspace` to select every member.
 - Run: `cargo run -p <crate>` — the workspace root has no default binary. Chassis binaries: `cargo run -p aether-chassis-hub --bin aether-hub`, `-p aether-chassis-desktop --bin aether-desktop`, or `-p aether-chassis-headless --bin aether-headless`.
 - Test: `cargo test` (single test: `cargo test <name>`; single-threaded with output: `cargo test -- --nocapture --test-threads=1`)
-- Lint: `cargo clippy --workspace --all-targets -- -D warnings`
+- Lint: `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - Format: `cargo fmt` (check-only: `cargo fmt -- --check`)
 - Type/borrow check only: `cargo check`
 
@@ -141,7 +141,7 @@ aether_actor::export!(CameraComponent);                    // required; emits wa
 
 ## Local checks and CI
 
-GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` has no branch protection: `CI pass` (the `ci.yml` aggregate) is the verdict to wait on, and `Lint title` checks the PR title. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
+GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` has no branch protection: `CI pass` (the `ci.yml` aggregate) is the verdict to wait on, and `Lint title` checks the PR title. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
 
 The working loop opens a PR, watches the current head, and repairs deterministic failures. `scripts/wave-status.sh --wait <PR>` polls until `CI pass` concludes; a fix pushed to the same branch supersedes the old run.
 
