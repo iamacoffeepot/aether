@@ -3,7 +3,6 @@
 mod instance;
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
 
 use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
 use aether_kinds::MonitorNotice;
@@ -26,12 +25,12 @@ const DEFAULT_HEIGHT: u32 = 600;
 
 /// A window whose child actor is staged but not yet authoritatively applied.
 ///
-/// It is keyed by the staged child's canonical name, which names a
-/// reservation, not a live actor, so the window stays out of `windows` — and
-/// therefore out of `ListWindows`, every subscriber fan-out, and
-/// `WindowOpened` — until the owner completes the birth. The
-/// reservation still participates in duplicate-name detection, and it owns the
-/// caller's reply so exactly one `CreateWindowResult` is ever sent.
+/// It is keyed by the window's name, which names a reservation, not a live
+/// actor, so the window stays out of `windows` — and therefore out of
+/// `ListWindows`, every subscriber fan-out, and `WindowOpened` — until the
+/// owner completes the birth. The reservation still participates in
+/// duplicate-name detection, and it owns the caller's reply so exactly one
+/// `CreateWindowResult` is ever sent.
 struct PendingWindowCreate {
     spec: WindowSpec,
     /// Taken by whichever path settles the reservation, so the caller sees
@@ -42,7 +41,9 @@ struct PendingWindowCreate {
 
 pub struct SyntheticWindowCapabilityState {
     windows: BTreeMap<WindowId, WindowInfo>,
-    pending_creates: HashMap<Arc<str>, PendingWindowCreate>,
+    /// Staged creates keyed by window name, the key each birth carries back
+    /// as its completion context.
+    pending_creates: HashMap<String, PendingWindowCreate>,
     /// Each live child's window and monitor, keyed by the child's reference:
     /// the `MonitorNotice` sender a departing child is found by (ADR-0230).
     child_monitors: HashMap<ErasedActorRef, (WindowId, MonitorHandle)>,
@@ -58,8 +59,7 @@ impl SyntheticWindowCapabilityState {
     /// names no `ListWindows` reply can see yet.
     fn check_create(&self, spec: &WindowSpec) -> Result<(), String> {
         crate::validate_window_name(&spec.name)?;
-        if self.windows.values().any(|window| window.name == spec.name)
-            || self.pending_creates.values().any(|pending| pending.spec.name == spec.name)
+        if self.windows.values().any(|window| window.name == spec.name) || self.pending_creates.contains_key(&spec.name)
         {
             return Err(format!("window name `{}` is already in use", spec.name));
         }
@@ -245,17 +245,18 @@ impl NativeActor for SyntheticWindowCapability {
             reply.reply(&CreateWindowResult::Err { error });
             return;
         }
-        let receipt = match ctx.spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ()).stage()
+        // The birth carries the window's name as its completion context, since
+        // that name is what the reservation is keyed by.
+        if let Err(error) = ctx
+            .spawn_child::<SyntheticWindowInstance>(Subname::Named(&mail.spec.name), (), ())
+            .stage_with(mail.spec.name.clone())
         {
-            Ok(receipt) => receipt,
-            Err(error) => {
-                reply.reply(&CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
-                return;
-            }
-        };
+            reply.reply(&CreateWindowResult::Err { error: format!("failed to spawn window child: {error:?}") });
+            return;
+        }
         let replaced = state
             .pending_creates
-            .insert(receipt.canonical_name, PendingWindowCreate { spec: mail.spec, reply: Some(Box::new(reply)) });
+            .insert(mail.spec.name.clone(), PendingWindowCreate { spec: mail.spec, reply: Some(Box::new(reply)) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
     }
 
@@ -263,12 +264,9 @@ impl NativeActor for SyntheticWindowCapability {
     fn on_window_child_spawn_done(
         state: &mut Self::State,
         ctx: &mut NativeCtx<'_>,
-        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>, ()>,
+        done: TaskDone<SpawnOutcome<SyntheticWindowInstance>, String>,
     ) {
-        // The birth names itself by canonical name on both arms, so the
-        // reservation key comes straight off the outcome rather than a context
-        // struct carrying it.
-        let Some(mut pending) = state.pending_creates.remove(done.output().canonical_name.as_ref()) else {
+        let Some(mut pending) = state.pending_creates.remove(done.context()) else {
             if let Ok(child) = &done.output().result {
                 ctx.send_to(child, &RetireWindow);
             }
@@ -336,6 +334,7 @@ impl WindowManagerSurface for SyntheticWindowCapability {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
+    use std::sync::Arc;
 
     use aether_data::{Kind, MailboxId};
     use aether_kinds::Key;
@@ -476,10 +475,9 @@ mod tests {
 
         // A reserved-but-not-yet-live name is invisible to `ListWindows` and
         // still blocks a second create for the same name.
-        state.pending_creates.insert(
-            Arc::from("aether.window/aether.window.instance:palette"),
-            PendingWindowCreate { spec: spec("palette", "Tools"), reply: None },
-        );
+        state
+            .pending_creates
+            .insert("palette".to_owned(), PendingWindowCreate { spec: spec("palette", "Tools"), reply: None });
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
         assert!(!state.windows.values().any(|window| window.name == "palette"));
     }
