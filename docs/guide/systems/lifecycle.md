@@ -174,15 +174,6 @@ is an error at the call. `ctx.unsubscribe::<P, K>()` is the teardown twin, with
 the first two checks. You don't unsubscribe on the way out — the host clears your
 subscriptions when the component drops.
 
-The older facade form, `ctx.actor::<LifecycleCapability>().subscribe::<K>()`,
-still compiles until the remaining callers move to the flat verb. Its
-`subscribe_for::<K>(other_mailbox)` and `unsubscribe_for::<K>(mailbox)` subscribe
-a *different* mailbox (the rare cross-mailbox case). That explicit form names a
-mailbox the cap proves live at receipt, so an unknown or already-dropped one
-replies `Err` rather than registering a subscription whose broadcasts could never
-land; the reflexive form needs no such check, because the host stamped the sender
-on the envelope.
-
 Then handle each stage as its kind, like any other mail:
 
 ```rust

@@ -10,8 +10,8 @@ publish = false
 # per-cap crate. Owns the lifecycle
 # graph + its typestate builder (`graph`), the `LifecycleConfig` init
 # config, the `LifecycleCapability` identity + its subscriber-table and
-# settlement-gating runtime (`runtime`), and the send-side
-# `LifecycleMailboxExt` facade. It is a pure leaf — no other capability
+# settlement-gating runtime (`runtime`), and the `Publisher` impl the flat
+# `ctx.subscribe` verb sends through. It is a pure leaf — no other capability
 # depends on it, so capabilities keeps no `aether-lifecycle` dependency
 # (no facade).
 #

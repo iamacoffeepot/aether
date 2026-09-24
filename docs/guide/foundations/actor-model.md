@@ -133,12 +133,12 @@ impl WasmActor for Hello {
     }
 
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        ctx.actor::<RenderCapability>().send(&TRIANGLE);   // draw every tick
+        ctx.send::<RenderCapability>(&TRIANGLE);   // draw every tick
     }
 
     #[handler::single]
@@ -576,12 +576,6 @@ semantics — it makes neither actor a child of the other, and the full
 `NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
 not use a dash merely to spell a multi-word segment; that is what an underscore
 is for, as in `aether.kit.widget.menu_bar` and `aether.kit.widget.text_field`.
-
-A capability can also dress up its mail surface with **extension-trait helpers** —
-typed methods on the mailbox handle that stand in for raw kind sends.
-`ctx.actor::<WindowCapability>().subscribe::<Key>(WindowSelector::All)` is one
-(from `WindowManagerMailboxExt`), and `aether_fs::FsMailboxExt` is another.
-These name a *kind* the cap already handles; they never name a placement.
 
 `ctx.actor::<Camera>()` returns the physical trampoline mailbox typed as
 `Camera`: the trampoline and its loaded guest share one mailbox, while the guest

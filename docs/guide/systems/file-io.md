@@ -73,9 +73,9 @@ per verb rather than at every return.
 field is passed directly to `std::fs::read`, while `to` is a namespace address.
 An absolute host path is the intended input, but the handler does not enforce
 absoluteness: a relative value resolves against the substrate process's working
-directory. More importantly, it does not authenticate the sender, and the wasm
-`FsMailboxExt` exposes `copy`; any guest that can address `aether.fs` can choose
-the raw source path. Use it only where all such callers are trusted, or add a
+directory. More importantly, it does not authenticate the sender: any actor
+that declares `depends(FsCapability)` can send `copy` and choose the raw source
+path. Use it only where all such callers are trusted, or add a
 real authorization/composition boundary before treating it as an operator-only
 seam. The destination still applies its namespace's write policy and the lexical
 path checks described below.
@@ -147,11 +147,11 @@ unaddressed name.
 
 ## How to use it
 
-**From a component.** Address the cap by type and call the operation:
+**From a component.** Declare `depends(FsCapability)` and send the request kind:
 
 ```rust
-ctx.actor::<FsCapability>().write("save", "slot1.bin", bytes);
-ctx.actor::<FsCapability>().read("save", "slot1.bin");
+ctx.send::<FsCapability>(&Write { addr: NamespaceAddr::new("save", "slot1.bin"), bytes });
+ctx.send::<FsCapability>(&Read { addr: NamespaceAddr::new("save", "slot1.bin") });
 ```
 
 These are fire-and-forget; the result arrives later as its own mail, which you
@@ -174,14 +174,13 @@ with `depends(R)`. The actor is the first parameter, the reply mode the second
 
 The echoed `addr` makes logs and MCP replies readable, but it does not uniquely
 identify duplicate concurrent reads. For duplicate-safe
-one-shot matching, derive `Kind` for a small context, bind it once, and take it
-from the matching reply:
+one-shot matching, derive `Kind` for a small context, send it with the request,
+and take it from the matching reply:
 
 ```rust
 let context = FontLoadContext { source: ctx.reply_target() };
-ctx.actor::<FsCapability>()
-    .with_context(&context)
-    .read(namespace, path);
+let addr = NamespaceAddr::new(namespace, path);
+let request_id = ctx.send_with_context::<FsCapability>(&Read { addr }, &context);
 
 // In the ReadResult handler:
 let Some(context) = ctx.take_context::<FontLoadContext>() else {
@@ -189,11 +188,9 @@ let Some(context) = ctx.take_context::<FontLoadContext>() else {
 };
 ```
 
-The contextual facade remains fire-and-forget. If the caller also needs the
-minted `RequestId` or `MailId`, use the adapter's generic
-`.with_context(&context).send(&Read { .. })` method directly. (The request and
-reply kinds live in `aether-fs/src/kinds.rs`; base mailboxes can likewise
-`send` a `Read` / `Write` kind directly instead of using the facade.)
+`send_with_context` returns the minted `RequestId`, so a caller that also
+needs the id keeps it; one that does not can drop it. (The request and reply
+kinds live in `aether-fs/src/kinds.rs`.)
 
 **From an agent over MCP.** `send_mail` rides settlement and hands back the
 correlated reply, so a read is a single call: mail `aether.fs.read` to `aether.fs`

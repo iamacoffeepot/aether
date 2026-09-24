@@ -249,8 +249,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     }
 
     /// The component's own mailbox id — the value the substrate uses to
-    /// address `receive` calls to this instance. Typed subscription facades
-    /// self-address through their context-bound actor mailbox.
+    /// address `receive` calls to this instance.
     #[must_use]
     pub fn mailbox_id(&self) -> MailboxId {
         MailboxId(self.mailbox)

@@ -128,14 +128,21 @@ reply (a `-> ()` handler, or a manual one), because a broadcast event has no one
 waiting for a reply. `unsubscribe` carries the first two checks: a kind that
 cannot be subscribed cannot be unsubscribed either.
 
-The older facade form, `ctx.actor::<WindowCapability>()` with
-`WindowManagerMailboxExt`, still compiles until the remaining callers move to the
-flat verb, and it is the one place a per-window filter lives:
-`windows.subscribe::<MouseMove>(WindowSelector::One(self.editor_window))`
-receives the kind only from that window, and `WindowSelector::All` matches every
-window as the flat verb does. If one mailbox matches both selectors, it receives
-one copy. The same `Publishes<K>` bound is on the facade's `subscribe`,
-`subscribe_for`, `unsubscribe`, and `unsubscribe_for`.
+The flat verb always selects every window. A per-window filter is the
+subscribe request kind itself, sent with a `WindowSelector::One` selector:
+
+```rust
+ctx.send::<WindowCapability>(&SubscribeWindowSelf {
+    selector: WindowSelector::One(self.editor_window),
+    kind: MouseMove::ID,
+});
+```
+
+That row receives the kind only from that window; `WindowSelector::All` matches
+every window, as the flat verb does. If one mailbox matches both selectors, it
+receives one copy. `UnsubscribeWindowSelf` with the same selector removes the
+row. The kind send carries a bare `KindId`, so it skips the `Publishes<K>`
+check the flat verb makes.
 
 Then handle the event as ordinary mail and inspect its source id:
 
@@ -153,11 +160,10 @@ A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
-The reflexive `subscribe`/`unsubscribe` facade methods use the sending actor's
-host-stamped mailbox and are the normal component API. The rare
-`subscribe_for`/`unsubscribe_for` methods name another local mailbox. The
-runtime validates and monitors explicit subscribers; when a monitored mailbox
-departs, all of its selector rows are removed. Replacing a component preserves
+The flat `ctx.subscribe` / `ctx.unsubscribe` verbs use the sending actor's
+host-stamped mailbox and are the normal component API. The runtime monitors
+each subscriber; when a monitored mailbox departs, all of its selector rows are
+removed. Replacing a component preserves
 its mailbox id and therefore its subscriptions.
 
 If a kind has no matching subscribers, the event is dropped at its source. A

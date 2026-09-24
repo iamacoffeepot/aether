@@ -48,8 +48,8 @@ tracing = { workspace = true, default-features = false }
 # in scope. `aether-substrate` deps back on `aether-actor`, but cargo
 # permits dev-dep cycles for the test-target build graph.
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
-# `aether-lifecycle`; the `hello` example addresses `LifecycleCapability`
-# + `LifecycleMailboxExt`. Its departure left no path into the old
+# `aether-lifecycle`; the `hello` example subscribes to `LifecycleCapability`
+# through the flat `ctx.subscribe` verb. Its departure left no path into the old
 # capabilities monolith from any example, so that dependency is gone.
 aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 # ADR-0163 §2: the asset_sections test parses the built
@@ -57,8 +57,8 @@ aether-lifecycle = { path = "../aether-lifecycle", default-features = false }
 # emission (name, exact bytes, absence from data segments). Same version
 # aether-substrate uses for its section walks.
 wasmparser = "0.246"
-# ADR-0164: the `input_logger` example subscribes through the typed
-# `aether.window` facade.
+# ADR-0164: the `input_logger` example subscribes to `WindowCapability`
+# through the flat `ctx.subscribe` verb.
 aether-window = { path = "../aether-window", default-features = false }
 # iamacoffeepot/aether#3721: the render cap was extracted to `aether-render`;
 # the `hello` example addresses `RenderCapability` + the render kinds (marker face).
