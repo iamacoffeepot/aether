@@ -2,12 +2,12 @@
 //!
 //! Three surfaces over one buffered push. The untyped `send_envelope_*`
 //! family carries already-encoded `(kind, bytes)` for endpoints that hold no
-//! compile-time types, addressed only by proof (ADR-0230) — including the
-//! wire recipient the RPC server proves at receipt — and `fanout`
+//! compile-time types, addressed only by proof (ADR-0230), and `fanout`
 //! multicasts one encoding to a runtime recipient set of proofs. A
-//! boundary bundle item, proven by
-//! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle), leaves
-//! only through `deliver_detached` or `deliver_forwarded`. The call a
+//! boundary item, proven by
+//! [`NativeCtx::accept_bundle`](super::NativeCtx::accept_bundle) or, for a
+//! wire `Call`, [`NativeCtx::accept_call`](super::NativeCtx::accept_call),
+//! leaves only through `deliver_detached` or `deliver_forwarded`. The call a
 //! handler is serving is forwarded, reply target and chain intact, by
 //! `deliver_forwarded` for a bundle item and by `forward_to` for a typed
 //! payload to a proof. The
@@ -119,8 +119,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Use this when the cap is acting on an external event (wire-borne
     /// RPC call, file watcher, timer) rather than forwarding a mail that
     /// was already in flight. `RpcServerState::handle_call` is the model
-    /// consumer: it proves the wire `Call`'s recipient once at receipt and
-    /// sends through the proof. The inbound that wakes the cap is an
+    /// consumer: it relays an engine-addressed wire `Call` to the proxy
+    /// registered for that engine. The inbound that wakes the cap is an
     /// internal wake mail causally unrelated to the wire-borne `Call`, so
     /// inheriting its chain would attribute the dispatch to the wrong root
     /// and `subscribe_settlement_mail` would never fire (descendants don't
@@ -250,14 +250,17 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
         );
     }
 
-    /// Deliver a proven boundary bundle item on a fresh causal chain, as
+    /// Deliver a proven boundary item on a fresh causal chain, as
     /// [`Self::send_envelope_detached_to`] does, and return the minted
     /// [`MailId`] — the root of that chain, which a settlement subscription
     /// can wait on.
     ///
-    /// Its consumer is `aether.render`'s `CaptureFrame`: each pre-mail's id
-    /// feeds the settlement bridge that gates the capture, and each
-    /// after-mail is released through it once the frame is read back.
+    /// Its consumers are `aether.render`'s `CaptureFrame`, where each
+    /// pre-mail's id feeds the settlement bridge that gates the capture and
+    /// each after-mail is released through it once the frame is read back,
+    /// and `RpcServerCapability`'s `Call` receipt, which delivers the item
+    /// [`NativeCtx::accept_call`](super::NativeCtx::accept_call) proved and
+    /// waits on the returned root's settlement to close the call.
     #[must_use]
     pub fn deliver_detached(&self, item: BoundaryMail) -> MailId {
         let BoundaryMail { recipient, kind, payload } = item;

@@ -150,9 +150,10 @@ async fn actor_logs_and_cost_route_to_the_engine_resolved_mailbox_id() {
 
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls.len(), 4);
+    let canonical = ActorPath::new("aether.test/aether.test.child:probe").expect("fixture is an actor path");
     assert_eq!(calls[0].kind, ResolveAddress::ID);
-    assert_eq!(calls[1].mailbox, engine_answer);
+    assert_eq!(calls[1].recipient, canonical);
     assert_eq!(calls[2].kind, ResolveAddress::ID);
-    assert_eq!(calls[3].mailbox, engine_answer);
+    assert_eq!(calls[3].recipient, canonical);
     drop(calls);
 }

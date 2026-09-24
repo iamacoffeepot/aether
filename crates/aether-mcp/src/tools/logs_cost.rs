@@ -5,7 +5,7 @@ use rmcp::ErrorData as McpError;
 use crate::args::{ActorCostArgs, ActorCostResponse, ActorCostRow, ActorLogEntry, ActorLogsArgs, ActorLogsResponse};
 
 use super::Mcp;
-use super::envelope::engine_envelope_by_id;
+use super::envelope::engine_envelope_to;
 use super::ids::{parse_kind_id, static_kind_name};
 use super::render::{internal, internal_msg, json};
 
@@ -60,8 +60,8 @@ pub(super) async fn actor_logs(mcp: &Mcp, args: ActorLogsArgs) -> Result<String,
     };
     let request =
         aether_kinds::LogTail { max: args.max.unwrap_or(0), min_level, since: args.since, contains: args.contains };
-    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
-    let reply = mcp.session.call_one(engine_envelope_by_id(engine, mailbox_id, &request)).await.map_err(internal)?;
+    let path = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
+    let reply = mcp.session.call_one(engine_envelope_to(engine, path, &request)).await.map_err(internal)?;
     match aether_kinds::LogTailResult::decode_from_bytes(&reply.payload) {
         Some(aether_kinds::LogTailResult::Ok { entries, next_since, truncated_before }) => {
             let response = ActorLogsResponse {
@@ -107,8 +107,8 @@ pub(super) async fn actor_cost(mcp: &Mcp, args: ActorCostArgs) -> Result<String,
         None => None,
     };
     let request = CostTail { kind };
-    let (mailbox_id, _) = mcp.resolve_engine_address(engine, &args.address).await.map_err(internal)?;
-    let reply = mcp.session.call_one(engine_envelope_by_id(engine, mailbox_id, &request)).await.map_err(internal)?;
+    let path = mcp.resolve_engine_path(engine, &args.address).await.map_err(internal)?;
+    let reply = mcp.session.call_one(engine_envelope_to(engine, path, &request)).await.map_err(internal)?;
     match CostTailResult::decode_from_bytes(&reply.payload) {
         Some(CostTailResult::Ok { rows }) => {
             let response = ActorCostResponse {

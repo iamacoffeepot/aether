@@ -1,8 +1,9 @@
-use super::super::mail::settle_mail_item;
+use super::super::mail::{finish_traced_dispatch, settle_mail_item};
 #[allow(clippy::wildcard_imports)]
 use super::super::test_support::*;
 #[allow(clippy::wildcard_imports)]
 use super::super::*;
+use aether_kinds::trace::{Nanos, TraceEvent, TraceRingEntry, TraceTail, TraceTailResult};
 use std::collections::VecDeque;
 use tokio::task::yield_now;
 use tokio::time::timeout;
@@ -139,7 +140,7 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
         })
         .await
         .expect("direct mail prepares through the engine resolver");
-    assert_eq!(prepared.envelope.to.mailbox, engine_answer);
+    assert_eq!(prepared.envelope.to.path, ActorPath::new(canonical).expect("fixture is an actor path"));
     assert_eq!(prepared.canonical_recipient, canonical);
     assert_eq!(calls.lock().expect("address-route calls mutex is never poisoned").len(), 1);
 
@@ -167,9 +168,6 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     let supplied = "aether.test/:declared-reply";
     let canonical = "aether.test/aether.test.child:declared-reply";
     let engine_answer = MailboxId(0x4057_0000_0000_0003);
-    #[allow(clippy::disallowed_methods)]
-    let locally_folded = mailbox_id_from_path(supplied);
-    assert_ne!(engine_answer, locally_folded, "test answer must expose accidental client-side folding");
 
     let reply_descriptor =
         KindDescriptor { name: "aether.test.component.reply".to_owned(), schema: SchemaType::String };
@@ -235,7 +233,11 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls.len(), 2, "one resolver RPC precedes one ordinary application delivery");
     assert_eq!(calls[0].kind, ResolveAddress::ID);
-    assert_eq!(calls[1].mailbox, engine_answer, "ordinary send routes to the engine-returned mailbox id");
+    assert_eq!(
+        calls[1].recipient,
+        ActorPath::new(canonical).expect("fixture is an actor path"),
+        "ordinary send routes to the engine-returned canonical path",
+    );
     drop(calls);
 }
 
@@ -270,8 +272,78 @@ async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
     .expect("fired application envelope reaches route sink");
     let calls = calls.lock().expect("address-route calls mutex is never poisoned");
     assert_eq!(calls[0].kind, ResolveAddress::ID);
-    assert_eq!(calls[1].mailbox, engine_answer);
+    assert_eq!(calls[1].recipient, ActorPath::new("aether.fs").expect("fixture is an actor path"));
     drop(calls);
+}
+
+/// Issue 6570: the trace walk turns each frontier layer's ids into the
+/// engine's canonical paths with one `aether.inventory.resolve` per layer,
+/// and tails each ring by that path. The first layer's ring reports a `Sent`
+/// to a second actor, so a second layer must follow. Fails if the walk sends
+/// a tagged id's text as the path, or stops after the first layer.
+#[tokio::test]
+async fn traced_walk_tails_each_layer_by_the_engine_paths() {
+    let seed = with_tag(Tag::Mailbox, 0x10);
+    let child = with_tag(Tag::Mailbox, 0x20);
+    let seed_tag = tagged_id::encode(seed).expect("the seed id encodes");
+    let child_tag = tagged_id::encode(child).expect("the child id encodes");
+    let seed_path = "aether.test.seed";
+    let child_path = "aether.test/aether.test.child:walked";
+
+    let root = MailId { sender: MailboxId(seed), correlation_id: 1 };
+    let sent = TraceRingEntry {
+        sequence: 0,
+        root,
+        event: TraceEvent::Sent {
+            mail_id: root,
+            root,
+            parent_mail: None,
+            sender: root.sender,
+            recipient: MailboxId(child),
+            kind: KindId(1),
+            t_construct_start: Nanos(1),
+            t: Nanos(1),
+        },
+    };
+    let tail = |entries| ScriptedRouteReply {
+        events: vec![ScriptedReplyEvent {
+            kind: TraceTailResult::ID,
+            payload: TraceTailResult::Ok { entries, next_since: 0, truncated_before: None }.encode_into_bytes(),
+        }],
+        settle: true,
+    };
+    let engine = EngineId(Uuid::from_u128(0x4057));
+    let calls = Arc::new(Mutex::new(Vec::new()));
+    let (_chassis, port) = boot_hub_with_address_route(AddressRouteLoopbackParams {
+        engine,
+        mailbox_id: MailboxId(0),
+        canonical_path: String::new(),
+        names: HashMap::from([(seed_tag.clone(), seed_path.to_owned()), (child_tag.clone(), child_path.to_owned())]),
+        calls: Arc::clone(&calls),
+        replies: Arc::new(Mutex::new(VecDeque::from([tail(vec![sent]), tail(Vec::new())]))),
+    });
+    let mcp = connect_mcp(port);
+
+    let _ = finish_traced_dispatch(&mcp, engine, engine.0.to_string(), root, Vec::new(), TraceFormat::Tree).await;
+
+    let calls = calls.lock().expect("address-route calls mutex is never poisoned");
+    let tails: Vec<ActorPath> =
+        calls.iter().filter(|call| call.kind == TraceTail::ID).map(|call| call.recipient.clone()).collect();
+    let resolves: Vec<Vec<String>> = calls
+        .iter()
+        .filter(|call| call.kind == Resolve::ID)
+        .map(|call| Resolve::decode_from_bytes(&call.payload).expect("resolve request decodes").ids)
+        .collect();
+    drop(calls);
+    assert_eq!(
+        tails,
+        vec![
+            ActorPath::new(seed_path).expect("fixture is an actor path"),
+            ActorPath::new(child_path).expect("fixture is an actor path"),
+        ],
+        "each layer's ring is tailed by the path the engine named",
+    );
+    assert_eq!(resolves.get(..2), Some(&[vec![seed_tag], vec![child_tag]][..]), "one resolve per layer");
 }
 
 fn traced_response_node() -> MailNodeJson {

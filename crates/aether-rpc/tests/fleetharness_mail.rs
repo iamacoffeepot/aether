@@ -8,12 +8,17 @@
 //! - **`send_mail`**: a native-cap reply decodes + correlates;
 //! - **`send_mail_traced`**: an atomic traced batch settles, yields its
 //!   non-error ack root, and rides its correlated reply home.
+//!
+//! The recipient-path rows (issue 6570) prove the wire boundary itself: a
+//! short `ActorPath` reaches its actor through the hub, and an absent path
+//! comes back as `RpcError::NotPresent` rather than a flattened `Other`.
 
 mod tests {
     use aether_data::{Kind, MailId};
     use aether_fs::{List, ListResult, NamespaceAddr};
     use aether_kinds::trace::DispatchTraced;
     use aether_kinds::{Advance, AdvanceResult};
+    use aether_rpc::RpcError;
     use aether_test_fixtures_kinds::{ConfigEcho, ConfigQuery, ProbeConfig};
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
@@ -152,6 +157,46 @@ mod tests {
         assert!(
             traced_record.reply_kinds.contains(&ListResult::ID),
             "the traced call's reply stream includes the ListResult",
+        );
+    }
+
+    /// Issue 6570: a wire `Call` names its recipient by `ActorPath`, and the
+    /// engine that hosts it expands an ADR-0166 short path on arrival. Load
+    /// the probe, then address it only as `aether.component/:NAME` and expect
+    /// its one `ConfigEcho`. Fails if any hop — the harness, the hub, or the
+    /// proxy — hashes or folds the recipient text instead of carrying the
+    /// path to the engine, because a folded short path names no mailbox.
+    #[test]
+    fn fleetharness_short_path_reaches_the_component() {
+        if !dist_component_available("aether_test_fixtures_bundle") {
+            return;
+        }
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let config = ProbeConfig { seed: 7, label: "short-path".to_owned() };
+        harness.load_with_config_export(engine, "aether_test_fixtures_bundle", &config, "test.probe_with_config");
+
+        let replies = harness
+            .try_send(engine, "aether.component/:test.probe_with_config", &ConfigQuery)
+            .expect("the short path reaches the loaded probe");
+        assert!(matches!(replies.as_slice(), [one] if one.kind == ConfigEcho::ID), "one ConfigEcho: {replies:?}");
+    }
+
+    /// Issue 6570: a path that resolves to no actor in the engine closes the
+    /// call with `RpcError::NotPresent` naming the path, and the hub relays
+    /// the engine's refusal unchanged. Fails if the proxy or the hub flattens
+    /// the refusal into `RpcError::Other`, or if the engine reports some
+    /// other variant or path.
+    #[test]
+    fn fleetharness_absent_path_is_not_present_through_the_hub() {
+        let mut harness = FleetHarness::start();
+        let engine = harness.spawn_headless();
+        let absent = "aether.component/aether.embedded:never-loaded";
+
+        let error = harness.try_send(engine, absent, &ConfigQuery).expect_err("an absent path is refused");
+        assert!(
+            matches!(&error, RpcError::NotPresent { path, .. } if path.to_string() == absent),
+            "the engine's NotPresent reaches the caller through the hub: {error:?}",
         );
     }
 

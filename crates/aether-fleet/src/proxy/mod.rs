@@ -14,9 +14,9 @@
 //! - **`wire`** registers the proxy with the hub's RPC server as its
 //!   engine's route (`RegisterEngineRoute`), holding the spawn chain open
 //!   until **`on_route_registered`** takes the answer.
-//! - **`on_forward`** ([`ForwardEnvelope`](aether_rpc::ForwardEnvelope)) wraps the `mailbox`,
-//!   `kind`, and `payload` into an RPC `Call` and writes it down the
-//!   connection. The inbound mail's `Source` is parked under the
+//! - **`on_forward`** ([`ForwardEnvelope`](aether_rpc::ForwardEnvelope)) wraps the `recipient`
+//!   path, `kind`, and `payload` into an RPC `Call` and writes it down the
+//!   connection; the substrate resolves the path on arrival. The inbound mail's `Source` is parked under the
 //!   wire `cid` so the eventual reply can route back to the sender.
 //! - **`on_inbound_ready`** ([`RpcInboundReady`](aether_rpc::RpcInboundReady)) is the reader
 //!   sidecar's wake: it drains `conn.inbound`, lifting `ReplyEvent`
@@ -122,8 +122,8 @@ use sinks::{FleetCapCells, FleetCapSink, ProxyReplySink};
 
 #[cfg(test)]
 mod tests {
-    // Test harness resolves echo/sink actor mailboxes by their NAMESPACE for
-    // fixture wiring — reference id derivation, not sibling-cap addressing.
+    // The bridge test deliberately builds a bare test chassis with
+    // `Builder::new` rather than the based boot path.
     #![allow(clippy::disallowed_methods)]
     use super::{
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
@@ -131,7 +131,7 @@ mod tests {
     };
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
-    use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+    use aether_data::{ActorPath, EngineId, Kind, Uuid};
     use aether_rpc::server::test_echo::{TestEchoActor, TestEchoRequest};
     use aether_rpc::server::{RpcBind, RpcServerCapability, RpcServerConfig, RpcServerHandle, RpcServerParams};
     use aether_rpc::{ForwardEnvelope, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
@@ -206,13 +206,11 @@ mod tests {
             .finish()
             .expect("proxy spawns + connects");
 
-        let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
-
         // Forge a `ForwardEnvelope` at the proxy, reply-to the sink.
         // Pushed from the embedder (rather than through an actor send) so
         // the test controls the reply target the proxy parks.
         let fwd = ForwardEnvelope {
-            mailbox: echo_mailbox,
+            recipient: ActorPath::new(<TestEchoActor as Addressable>::NAMESPACE).expect("the echo namespace is a path"),
             kind: <TestEchoRequest as Kind>::ID,
             payload: TestEchoRequest { value: 42 }.encode_into_bytes(),
         };

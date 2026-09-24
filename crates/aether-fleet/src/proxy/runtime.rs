@@ -18,7 +18,7 @@ use aether_actor::{Single, runtime};
 pub use aether_data::{EngineId, Kind};
 pub use aether_kinds::DeathReason;
 use aether_kinds::TerminateEngine;
-pub use aether_rpc::{CallSettled, MailEnvelope, MailboxAddress, RpcConnection, RpcError, WireFrame};
+pub use aether_rpc::{CallSettled, MailEnvelope, Recipient, ReplyEnvelope, RpcConnection, RpcError, WireFrame};
 use aether_rpc::{
     ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult, RpcInboundReady, RpcServerCapability,
 };
@@ -139,7 +139,7 @@ impl FleetProxyState {
     /// original `correlation_id` echoed (reply-to `None` — nobody
     /// replies to a reply) so a correlation-matching caller picks
     /// it up.
-    pub fn route_reply(&mut self, cid: u64, envelope: MailEnvelope) {
+    pub fn route_reply(&mut self, cid: u64, envelope: ReplyEnvelope) {
         let Some(reply_to) = self.in_flight.get(&cid).copied() else {
             tracing::debug!(
                 target: "aether_substrate::fleet_proxy",
@@ -167,8 +167,9 @@ impl FleetProxyState {
     /// correlation handling — a forwarded call has no local chain
     /// to settle, so this explicit terminal signal is how the
     /// originating `RpcServerCapability` learns to close its wire
-    /// call. The wire `RpcError` is rendered to a string; the
-    /// `aether-kinds` layer can't carry the structured variant.
+    /// call. The wire `RpcError` rides in `CallSettled::Err` as it
+    /// arrived, so the hub writes the substrate's refusal (a
+    /// `NotPresent` naming the path, say) to its caller unchanged.
     pub fn route_settled(&mut self, cid: u64, result: Result<(), RpcError>) {
         let Some(reply_to) = self.in_flight.remove(&cid) else {
             tracing::debug!(
@@ -184,7 +185,7 @@ impl FleetProxyState {
         };
         let settled = match result {
             Ok(()) => CallSettled::Ok,
-            Err(e) => CallSettled::Err { error: format!("{e:?}") },
+            Err(error) => CallSettled::Err { error },
         };
         self.mailer.push(
             Mail::new(target, <CallSettled as Kind>::ID, settled.encode_into_bytes(), 1)
@@ -309,19 +310,14 @@ impl NativeActor for FleetProxy {
     /// Relay one mail to the substrate as an RPC `Call`.
     ///
     /// # Agent
-    /// Hand the proxy a `ForwardEnvelope { mailbox, kind, payload }`
-    /// — the `mailbox` is the *substrate-local* recipient, `kind` +
-    /// `payload` the mail to deliver there. Any reply routes back to
-    /// the sender of this `ForwardEnvelope`.
+    /// Hand the proxy a `ForwardEnvelope { recipient, kind, payload }`
+    /// — `recipient` is the substrate-local actor's `ActorPath`, sent on
+    /// as written for the substrate to resolve, and `kind` + `payload`
+    /// the mail to deliver there. Any reply routes back to the sender of
+    /// this `ForwardEnvelope`.
     #[handler::single]
     fn on_forward(state: &mut Self::State, ctx: &mut NativeCtx<'_>, mail: ForwardEnvelope) {
-        let envelope = MailEnvelope {
-            to: MailboxAddress::local(mail.mailbox),
-            from: None,
-            kind: mail.kind,
-            correlation_id: None,
-            payload: mail.payload,
-        };
+        let envelope = MailEnvelope { to: Recipient::local(mail.recipient), kind: mail.kind, payload: mail.payload };
         match state.conn.client.call(envelope) {
             Ok(cid) => {
                 state.in_flight.insert(cid, ctx.reply_target());

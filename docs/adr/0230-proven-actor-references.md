@@ -4,6 +4,7 @@
 - **Date:** 2026-09-21
 - **Amended:** 2026-09-23 — §5's deleted `ctx.actor::<R>()` handle is replaced at the call site by flat ctx verbs (`ctx.send::<R>(&k)`, `ctx.subscribe::<P, K>()`, `ctx.send_to(&r, &k)`) proven by `#[actor(depends(R))]`, with no optional peers ([ADR-0232](0232-flat-ctx-send-verbs.md)).
 - **Amended:** 2026-09-23 — §3's declared-dependency check reaches two more births: an inline-spawnable actor's dependencies are checked when its module loads, and a native dependency on a pumped slot passes the birth check on the slot's Claim-stage reservation, with the boot failing if the pump never goes `Live`.
+- **Amended:** 2026-09-24 — §3: a wire `Call` names its recipient by `ActorPath`; the engine that hosts the recipient resolves and proves it on arrival, an unresolved path is answered as not present (`RpcError::NotPresent`), and no mailbox id crosses the RPC wire as a recipient or in a reply.
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
@@ -131,7 +132,7 @@ pub struct ErasedActorRef { id: MailboxId }
 | `Namespace` | the grammar is valid | `const fn new`, a compile error when invalid | compare, `Debug`, fold to an `ActorId` |
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()` | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
-| `ActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`), compared, displayed; become a position only through the host's `resolve_address` |
+| `ActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`) and name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address` |
 | `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
 | `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
@@ -206,14 +207,7 @@ host call and no mail. Persisted state stores an `Address` for the same
 reason, and this is enforced by the types having no codec rather than by
 convention.
 
-Strings exist in exactly one place: text crosses the MCP, RPC, and harness
-boundary as an `ActorPath`, validated on construction and decode, and the
-host's `resolve_address` parser is the one place an `ActorPath` becomes a
-position. It answers with a position, not an `Address`: the boundary holds no actor type, so there is no `R` to type one
-with, and the position crosses the wire as the `MailEnvelope` recipient. The
-engine that receives the `Call` proves that position once, through the
-payload-borne door above, and sends only through the proof. A position that
-does not prove closes the call with an error instead of parking or dropping.
+Strings exist in exactly one place: text crosses the MCP, RPC, and harness boundary as an `ActorPath`, validated on construction and on decode. A wire `Call` names its recipient by that path, beside the engine that hosts it, so a malformed path fails the frame decode and never reaches resolution, and no mailbox id crosses the wire as a recipient. Nothing outside the engine computes a position for a path: not aether-mcp, not a harness, and not the hub, which relays an engine-addressed `Call` to that engine's proxy with the path as written. The engine that hosts the recipient resolves the path when the `Call` arrives, through the host's `resolve_address`, the one place an `ActorPath` becomes a position, and proves the answer at once through the payload-borne door above. The proof does not leave the RPC server's handler: the server holds a deliver-only item, the same shape a bundle item takes, and delivering it is all it can do. A path that does not resolve to a `Live` actor is not present, whatever the reason: never registered, still starting, dropped, or a short path that is ambiguous or names no declared child. The call closes with `RpcError::NotPresent`, which names the path and carries the registry's diagnostic; nothing is parked or dropped, and the hub relays the refusal to the caller unchanged. A client holding an id an engine reported, from a trace tree or a window listing, asks that engine for the id's canonical path and sends by the path. A reply on the wire carries its kind and bytes and no address.
 A mail bundle — the `NamedMail` list that `DispatchTraced` and `CaptureFrame`
 carry — is the same boundary inside a payload: the receiving capability proves
 every `ActorPath` recipient once, before any item moves, and a proven item can
