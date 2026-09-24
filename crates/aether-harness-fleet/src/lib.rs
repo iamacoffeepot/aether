@@ -1128,7 +1128,7 @@ fn boot_hub(
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("test setup: hub caps boot");

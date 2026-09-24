@@ -72,3 +72,11 @@ Because `M` defaults to `Single`, an unmarked `NativeCtx<'_>` is the single ctx,
 - **Distinct ctx types (`Ctx` / `ManualCtx` / `StreamCtx`) instead of a mode marker.** Rejected: the signature reads marginally more plainly, but it multiplies the ctx into a trio per target (six across native and wasm) with conversions between them, where the marker keeps one type per target and selects the surface by which traits it implements.
 - **Conditional-reply `-> Option<R>` for single.** Rejected: it makes `single` non-total and pattern-matches a std type users reach for meaning other things. Optionality belongs in a concrete reply kind, which keeps the manifest at one declared kind and the caller's expectation explicit.
 - **A streaming return `-> Stream<R>`.** Rejected here as in ADR-0109: it competes with the pub-sub topic layer and its completion question is the settlement-closure primitive's. `stream` reserves the class without committing the mechanism.
+
+## Amendment (#6412)
+
+The reply handle belongs to the manual reply surface. `WasmCtx::reply_target()` exists only on the `Manual` ctx, so a single handler cannot read its handle, and neither can a `#[fallback]` through its ctx (it still holds the raw `Mail`).
+
+A single handler replies at most once, through the macro's `-> R` auto-reply, so once it returns its handle can never be answered. The wasm `#[actor]` dispatcher therefore reports each arm's class to the host in the `receive_p32` return code: a single-class arm, including a single arm of an adopted handler set, returns `DISPATCH_HANDLED_RELEASE` (3), and the substrate frees that dispatch's reply handle as soon as `receive` returns. A strict receiver's miss (`DISPATCH_UNKNOWN_KIND`) ran no handler and no fallback, so the substrate frees its handle too. A manual arm and the `#[fallback]` tail return `DISPATCH_HANDLED` (0), and the handle either may keep stays live until it is answered.
+
+The default stays "keep". A guest built before this amendment returns 0 from every arm, so it keeps every handle and loses no deferred reply; its unanswered handles show up as the reply table's high-water warnings (ADR-0017 amendment). Native actors reply through `Source` and have no reply table, so the native expansion and native handler sets are unchanged.

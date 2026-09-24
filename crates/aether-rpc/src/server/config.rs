@@ -32,6 +32,14 @@ pub struct RpcServerConfig {
     /// port.
     #[config(env = "AETHER_RPC_PORT")]
     pub port: Option<u16>,
+    /// Path the server writes its bound port to once it is listening; unset writes nothing.
+    ///
+    /// The file holds the port in decimal and appears atomically when the
+    /// server becomes reachable: in `init` under [`RpcBind::Boot`], when
+    /// its gate opens under [`RpcBind::Held`]. A hub that forks a substrate
+    /// on port `0` names this file and dials only the port it reports.
+    #[config(env = "AETHER_RPC_PORT_FILE")]
+    pub port_file: Option<String>,
 }
 
 /// When a server composed with a resolved port binds its listener (issue
