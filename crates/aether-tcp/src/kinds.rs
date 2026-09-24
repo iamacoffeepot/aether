@@ -2,7 +2,7 @@
 //!
 //! The original 13 kind types plus the [`ListenerInfo`] helper struct
 //! were formerly defined in `aether-kinds`; they live here now per
-//! ADR-0121 (capabilities own their kinds). This module now owns 16
+//! ADR-0121 (capabilities own their kinds). This module now owns 17
 //! kinds. Kind ids are `fnv1a_64(name, schema)`, so moving declarations
 //! does not change any id or alter wire compatibility.
 
@@ -58,14 +58,26 @@ pub struct Connect {
     pub consumer: Option<aether_data::MailboxId>,
 }
 
-/// Reply to [`Connect`]. `Ok` carries the resolved connect-session
+/// `aether.tcp.connect_self` — [`Connect`] with the sender as the
+/// consumer: the dialed session delivers its inbound frames and close
+/// notices to the actor that sent this mail. The host-stamped sender is
+/// already proven, so a component dials without naming its own position.
+/// `addr` and `name` mean what they mean on [`Connect`]. Reply:
+/// [`ConnectResult`].
+#[aether_data::kind(name = "aether.tcp.connect_self")]
+pub struct ConnectSelf {
+    pub addr: String,
+    pub name: Option<String>,
+}
+
+/// Reply to [`Connect`] and [`ConnectSelf`]. `Ok` carries the resolved connect-session
 /// subname, the session's `MailboxId`, and the connected peer address.
 /// `Err` carries the requested address and a human-readable dial or
 /// spawn failure.
 ///
-/// Typed native and wasm callers resolve by `session_name` through the
-/// `connect_session*` helpers. To *address* the session in a subsequent
-/// mail, use the full ADR-0099 lineage path
+/// A consumer actor writes to the session through the host-stamped sender
+/// of the [`SessionData`] it receives (`ctx.sender()`, then `ctx.send_to`).
+/// An MCP agent addresses the session by the full ADR-0099 lineage path
 /// `aether.tcp/aether.tcp.session:<session_name>` as a mail recipient address —
 /// the bare subname is not a mailbox address. `session_id` is the same
 /// mailbox as a wire id, usable wherever a `MailboxId` is taken (a
@@ -208,8 +220,9 @@ pub struct SessionWrite {
 }
 
 /// `aether.tcp.session_close` — peer asks the session to close
-/// gracefully. Mailed via `ctx.actor::<TcpSessionActor>(...)` or
-/// resolved by subname. The session's handler calls
+/// gracefully. A consumer actor closes the session through the
+/// host-stamped sender of the [`SessionData`] it receives
+/// (`ctx.sender()`, then `ctx.send_to`). The session's handler calls
 /// `ctx.shutdown()`; the close fan-out fires `MonitorNotice` to
 /// the parent actor that spawned it.
 #[aether_data::kind(name = "aether.tcp.session_close", default)]
