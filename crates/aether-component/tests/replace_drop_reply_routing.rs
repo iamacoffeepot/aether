@@ -37,7 +37,12 @@ mod tests {
         let load_replies = harness.send::<LoadComponent>(
             engine,
             "aether.component",
-            &LoadComponent { wasm: wasm.clone(), name: None, config: Vec::new(), export: None },
+            &LoadComponent {
+                wasm: wasm.clone(),
+                name: None,
+                config: Vec::new(),
+                export: Some("test.quiet_probe".to_owned()),
+            },
         );
         let path = match decode_reply::<LoadResult>(&load_replies) {
             LoadResult::Ok { path, .. } => path,
@@ -45,11 +50,19 @@ mod tests {
         };
 
         // Replace probe-with-probe. The reply set is empty before the
-        // fix (`ReplyEnd` with zero events); populated after.
+        // fix (`ReplyEnd` with zero events); populated after. The replace
+        // names its export too: a replace with no export checks the module's
+        // first group, `Probe`, whose observer headless does not register.
         let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
-            &ReplaceComponent { target: path.clone(), wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+            &ReplaceComponent {
+                target: path.clone(),
+                wasm,
+                drain_timeout_ms: None,
+                config: Vec::new(),
+                export: Some("test.quiet_probe".to_owned()),
+            },
         );
         assert!(
             !replace_replies.is_empty(),

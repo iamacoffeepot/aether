@@ -95,7 +95,8 @@ fn artifact_dir(id: &str) -> PathBuf {
     target_root.join("substrate-harness-artifacts").join(id)
 }
 
-/// Load the probe into the harness via `execute`, blocking on the
+/// Load the bundle's `PaintProbe` export (the probe that paints on
+/// `SetRender`) under the `probe` name via `execute`, blocking on the
 /// `LoadResult` reply so subsequent `advance` ops see a
 /// fully-instantiated and tick-subscribed component. Pre-Phase-4 of issue 603 the
 /// harness's `aether.control` mailbox (renamed to `aether.component` in
@@ -107,7 +108,12 @@ fn artifact_dir(id: &str) -> PathBuf {
 fn load_probe(harness: &mut SubstrateHarness, wasm_path: &Path) -> ActorPath {
     let wasm = fs::read(wasm_path).expect("read fixture wasm");
     harness
-        .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
+        .load_any(&LoadComponent {
+            wasm,
+            name: Some(PROBE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.paint_probe".to_owned()),
+        })
         .unwrap_or_else(|error| panic!("load_component: {error}"))
         .1
 }
@@ -177,8 +183,8 @@ fn flat_shape(x: f32, y: f32, width: f32, height: f32) -> Shape {
 }
 
 /// `capture_frame` round-trip with non-empty mail bundles. The
-/// pre-mail bundle flips the fixture's render state to "visible red";
-/// the probe then paints one large triangle, so the captured PNG must
+/// pre-mail bundle flips the `PaintProbe` fixture's render state to
+/// "visible red"; it then paints one large triangle, so the captured PNG must
 /// show a coverage fraction inside a sane band (neither all-background
 /// nor all-filled) with a centroid sitting in the frame interior. The
 /// after-mail bundle flips render back to invisible; a follow-up

@@ -134,7 +134,7 @@ pub struct ConfigEcho {
 #[aether_data::kind(name = "aether.test_fixtures.config_query", default)]
 pub struct ConfigQuery;
 
-/// ADR-0163 §3 (#3984) driver kind: ask the `Probe` fixture to report
+/// ADR-0163 §3 (#3984) driver kind: ask the `QuietProbe` fixture to report
 /// what it pulled from its asset load window during `wire`. No-payload
 /// query; the reply is an [`AssetProbeResult`]. Structured unit struct so
 /// it exercises the schema-driven dispatch path like [`ConfigQuery`].

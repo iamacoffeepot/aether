@@ -8,7 +8,7 @@
 //! seam `--describe` reads to derive its capability roster from the same
 //! claim code a real boot runs.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
 
 use super::passive_boot::PassiveBoot;
@@ -67,7 +67,7 @@ pub(super) fn claim_only(
     // read for nothing and drops when `claim_only` returns — the inbox
     // receiver, actor slots, and wake slot the reservation produced never
     // reach a Start stage on this path.
-    let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+    let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
     // Describe composes nothing that runs, so the record stays empty and drops
     // with the stash above.
     let references = ComposedReferences::default();

@@ -7,14 +7,16 @@
 
 mod tests {
     use aether_data::Kind;
-    use aether_kinds::{DescribeComponent, DescribeComponentResult, Key, Tick};
+    use aether_kinds::{DescribeComponent, DescribeComponentResult, Tick};
+    use aether_test_fixtures_kinds::AssetProbe;
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
-    /// Load the `probe` component, then send `aether.component.describe`
-    /// addressed by the lineage name `load` hands back and assert the reply
-    /// carries the probe's real handler kinds (`Tick`, `Key`). This pins the
-    /// name → substrate-retained-caps path over the wire: the substrate
+    /// Load the bundle's `QuietProbe` export, then send
+    /// `aether.component.describe` addressed by the lineage name the load
+    /// hands back and assert the reply carries the probe's real handler
+    /// kinds (`Tick`, `AssetProbe`). This pins the name →
+    /// substrate-retained-caps path over the wire: the substrate
     /// resolves the name to its mailbox id and serves the full
     /// `ComponentCapabilities` it retained at load, not the lossy projection.
     #[test]
@@ -24,7 +26,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
         let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {
@@ -41,17 +43,17 @@ mod tests {
             }
         };
 
-        // The probe entry actor (`test.probe`) typed-handles Tick,
-        // Key, and SetRender. Asserting two substrate kinds round-trip proves
-        // the wire carried the full retained handler set, not an empty stub.
+        // The quiet probe (`test.quiet_probe`) typed-handles Tick and
+        // AssetProbe. Asserting both round-trip proves the wire carried the
+        // full retained handler set, not an empty stub.
         let handler_ids: Vec<_> = capabilities.handlers.iter().map(|h| h.id).collect();
         assert!(
             handler_ids.contains(&<Tick as Kind>::ID),
             "the described caps should carry the probe's Tick handler, got {handler_ids:?}",
         );
         assert!(
-            handler_ids.contains(&<Key as Kind>::ID),
-            "the described caps should carry the probe's Key handler, got {handler_ids:?}",
+            handler_ids.contains(&<AssetProbe as Kind>::ID),
+            "the described caps should carry the probe's AssetProbe handler, got {handler_ids:?}",
         );
     }
 
@@ -76,7 +78,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
         let replies = harness.send(engine, "aether.component", &DescribeComponent { name: addr.clone() });
         let reply = match replies.as_slice() {
