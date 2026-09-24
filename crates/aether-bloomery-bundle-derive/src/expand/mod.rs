@@ -5,7 +5,8 @@
 //! role's items, and continues the pipeline with every program and reactor
 //! replaced by the root once, at the first one's position. When `export!`
 //! names no `default`, the root becomes the default, so the multi-actor arm
-//! emits the boundary the host matches.
+//! emits the boundary the host matches. With programs present, the
+//! invocation actor the root spawns inline joins the `private` list.
 
 use proc_macro::TokenStream;
 use proc_macro2::TokenStream as TokenStream2;
@@ -33,7 +34,7 @@ pub fn generate(input: TokenStream) -> TokenStream {
 
 fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let roles = classify(&input)?;
-    let GenerateInput { remaining_generators, boot, default, actors, exports } = input;
+    let GenerateInput { remaining_generators, boot, default, actors, exports, private } = input;
     let root = format_ident!("{ROOT_IDENT}");
     let pieces = match &roles {
         Roles::Programs(programs) => vec![programs::pieces(&root, programs)],
@@ -47,6 +48,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
     let default_tokens = default.as_ref().map_or_else(|| quote! { { #root } }, |ty| quote! { { #ty } });
     let actor_tokens = actors.iter().map(envelope_tokens);
     let export_tokens = rewritten_exports(&exports, &roles, &root);
+    let private_tokens = listed_private(&private, &roles);
     let rest = remaining_generators.iter();
     Ok(quote! {
         #bundle
@@ -59,6 +61,7 @@ fn expand_generate(input: GenerateInput) -> syn::Result<TokenStream2> {
                 { ty: { #root } namespace: #BUNDLE_NAMESPACE extensions: [] }
             ]
             exports: [ #export_tokens ]
+            private: [ #private_tokens ]
         }
     })
 }
@@ -87,6 +90,16 @@ fn rewritten_exports(exports: &[Type], roles: &Roles, root: &Ident) -> TokenStre
         }
     }
     out
+}
+
+/// The pipeline's `private` list, plus the invocation actor when the root
+/// spawns one.
+fn listed_private(private: &[Type], roles: &Roles) -> TokenStream2 {
+    let listed = private.iter().map(|ty| quote! { { #ty } });
+    let invocation = matches!(roles, Roles::Programs(_) | Roles::Both { .. })
+        .then(programs::invocation_ident)
+        .map(|ident| quote! { { #ident } });
+    quote! { #(#listed)* #invocation }
 }
 
 fn optional_type_tokens(ty: Option<&Type>) -> TokenStream2 {

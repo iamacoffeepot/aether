@@ -2,7 +2,8 @@
 //!
 //! `export!` hands every generator the same shape: the remaining generator
 //! paths, the optional `boot` / `default` types, one framework-owned
-//! descriptor envelope per listed path, and the current `exports` selection.
+//! descriptor envelope per listed path, the current `exports` selection, and
+//! the `private` inline-child types.
 //! Each envelope's extensions decide its [`Tag`]: an `aether_bloomery_program`
 //! extension carries a [`ProgramMeta`], an `aether_bloomery_reactor` extension
 //! marks a reactor, and anything else is ordinary. Every extension's tokens
@@ -23,6 +24,7 @@ pub struct GenerateInput {
     pub default: Option<Type>,
     pub actors: Vec<Envelope>,
     pub exports: Vec<Type>,
+    pub private: Vec<Type>,
 }
 
 pub struct Envelope {
@@ -61,6 +63,7 @@ impl Parse for GenerateInput {
         let mut default = None;
         let mut actors = Vec::new();
         let mut exports = Vec::new();
+        let mut private = Vec::new();
         while !input.is_empty() {
             let key: Ident = input.parse()?;
             input.parse::<Token![:]>()?;
@@ -70,13 +73,14 @@ impl Parse for GenerateInput {
                 "default" => default = parse_optional_type(input)?,
                 "actors" => actors = parse_classified_list(input)?,
                 "exports" => exports = parse_export_types(input)?,
+                "private" => private = parse_export_types(input)?,
                 other => return Err(syn::Error::new_spanned(&key, format!("unknown generator field `{other}`"))),
             }
         }
         if exports.is_empty() {
             return Err(syn::Error::new(Span::call_site(), "bundle requires at least one export type"));
         }
-        Ok(Self { remaining_generators, boot, default, actors, exports })
+        Ok(Self { remaining_generators, boot, default, actors, exports, private })
     }
 }
 
