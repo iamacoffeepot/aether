@@ -173,7 +173,10 @@ the persisted package manifest above:
 
 Both drain into the same `env.autoload` list, which `boot_standard` loads in
 list order after the build, waiting for every component to answer its load
-before the RPC server binds. The runtime boot
+before the RPC server binds. A boot load that does not answer within the
+boot-load budget (`AETHER_BOOT_LOAD_BUDGET_SECS` / `--boot-load-budget-secs`,
+default 20 s, never zero) fails the boot, naming the component, so a
+hub spawn fails with that name in its `spawn_failed` detail. The runtime boot
 manifest can expand a configured `replicas` count into named instances; the
 package manifest carries the same `replicas` field.
 

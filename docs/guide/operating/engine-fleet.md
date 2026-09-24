@@ -142,7 +142,10 @@ first successful dial means every boot component is live. A boot component that
 fails to load, including two specs that derive the same lineage name, makes the
 substrate exit nonzero with the component and the host's error on its stderr,
 and the spawn fails with a `spawn_failed` entry rather than leaving a
-half-booted engine running. A successful tool reply therefore proves that every
+half-booted engine running. A boot load that does not answer within the
+boot-load budget (`AETHER_BOOT_LOAD_BUDGET_SECS`, default 20 s) fails the boot
+the same way, naming the component, so the spawn fails with that name in its
+`spawn_failed` detail. A successful tool reply therefore proves that every
 boot instance loaded. Describe a component before relying on its handlers.
 
 `spawn_substrate` may also take a `mails` list — init mail (each entry
