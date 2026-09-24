@@ -3,6 +3,7 @@
 - **Status:** Proposed
 - **Date:** 2026-09-18
 - **Amended:** 2026-09-19 — one `bundle` export generator and one root per bundle digest serving programs, reactors, or both (ADR-0225 decision 8).
+- **Amended:** 2026-09-24 — `export!` takes keyed entries only; a bundle is spelled `export!(public = [..], generators = [aether_bloomery_bundle::bundle])` (issue 6584).
 
 ## Context
 

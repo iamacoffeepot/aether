@@ -1,0 +1,10 @@
+error[E0119]: conflicting implementations of trait `Rebuildable<__AetherModule>` for type `A`
+  --> tests/ui/rejects_default_listed_public.rs:41:5
+   |
+41 |     aether_actor::export!(default = super::A, public = [super::A, super::B]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |     |
+   |     first implementation here
+   |     conflicting implementation for `A`
+   |
+   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the macro `aether_actor::export` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -22,6 +22,6 @@ mod inner {
     }
 }
 
-export!(inner::Publisher, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [inner::Publisher], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

@@ -1,6 +1,6 @@
 //! ADR-0147 fixture: a multi-actor module with an unconditional `boot =` slot.
 //!
-//! Exported via `export!(boot = Boot, WidgetA, WidgetB)`: `Boot` is the module's
+//! Exported via `export!(boot = Boot, public = [WidgetA, WidgetB])`: `Boot` is the module's
 //! boot actor — instantiated once per loaded module content hash, whatever
 //! export selector a load names, and not itself selectable — while `WidgetA` /
 //! `WidgetB` are ordinary selectable actors (no `default =`, so the module is
@@ -100,4 +100,4 @@ impl WasmActor for WidgetB {
 // ADR-0147: `Boot` is the unconditional boot slot; `WidgetA` / `WidgetB` are
 // the ordinary selectable exports. No `default =` — this module is
 // selector-load-only.
-aether_actor::export!(boot = Boot, WidgetA, WidgetB);
+aether_actor::export!(boot = Boot, public = [WidgetA, WidgetB]);

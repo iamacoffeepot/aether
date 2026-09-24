@@ -18,7 +18,7 @@ impl Reactor for Publisher {
     }
 }
 
-export!(Publisher, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Publisher], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {
     let _ = Publisher::NAMESPACE;

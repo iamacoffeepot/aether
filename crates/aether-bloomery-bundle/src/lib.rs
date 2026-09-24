@@ -4,8 +4,7 @@
 //!
 //! ```ignore
 //! aether_actor::export!(
-//!     Summarize,
-//!     SourcePublisher,
+//!     public = [Summarize, SourcePublisher],
 //!     generators = [aether_bloomery_bundle::bundle],
 //! );
 //! ```

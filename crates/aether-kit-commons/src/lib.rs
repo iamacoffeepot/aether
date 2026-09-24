@@ -57,8 +57,6 @@ pub mod mesh;
 // terrain / sim / workbench siblings likewise owned their own cdylibs while
 // they were in the workspace).
 aether_actor::export!(
-    camera::CameraComponent,
-    camera::controller::CameraController,
-    mesh::MeshViewer,
-    bundle::BundleComponent
+    public =
+        [camera::CameraComponent, camera::controller::CameraController, mesh::MeshViewer, bundle::BundleComponent,]
 );

@@ -19,8 +19,7 @@
 ///
 /// ```ignore
 /// aether_actor::export!(
-///     Summarize,
-///     SourcePublisher,
+///     public = [Summarize, SourcePublisher],
 ///     generators = [aether_bloomery_bundle::bundle],
 /// );
 /// ```
@@ -34,10 +33,10 @@
 /// present: `Invoke` / `Invoked` through a per-seq inline child plus
 /// `aether.bloomery.programs` for programs, `Warm` / `Event` / `StatusQuery`
 /// plus `aether.bloomery.reactors` for reactors. The root is never a `boot`
-/// actor. With programs present, the generator appends the invocation actor
-/// to the pipeline's `private` list, beside any the author wrote, so
-/// `export!` marks it rebuildable and a replace rebuilds it like any other
-/// private inline child. These are compile errors — entries are never dropped silently:
+/// actor. With programs present, the root declares the invocation actor in
+/// its `#[actor(spawns(..))]` and the generator appends it to the pipeline's
+/// `private` list, beside any the author wrote, so `export!` marks it
+/// rebuildable and a replace rebuilds it like any other private inline child. These are compile errors — entries are never dropped silently:
 /// - a module with neither a `#[program]` nor a `#[reactor]`;
 /// - a duplicate program `NAME`, or a duplicate or non-literal reactor `NAMESPACE`;
 /// - a program whose `MODE` is not `Mode::Pure`;
@@ -65,7 +64,7 @@ macro_rules! bundle {
     };
     ($($tt:tt)*) => {
         ::core::compile_error!(
-            "bundle is an export! generator; write `export!(..., generators = [aether_bloomery_bundle::bundle])`"
+            "bundle is an export! generator; write `export!(public = [..], generators = [aether_bloomery_bundle::bundle])`"
         );
     };
 }

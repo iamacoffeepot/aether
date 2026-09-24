@@ -720,7 +720,7 @@ its own **sibling** types — `Instanced` actors its module also exports
 ([ADR-0097](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0097-wasm-sibling-spawn.md)) — only when the child declares the exact
 `child_of(Parent)` relationship or is an instanced `composable` module child.
 One wasm crate can export several
-actor types (`export!(RootManager, Panel, …)`), and a running instance stands up a
+actor types (`export!(public = [RootManager, Panel, …])`), and a running instance stands up a
 sibling just as the listener stands up a session:
 `ctx.spawn_child::<RootManager, Panel>(Subname::Counter, &config)`. `WasmCtx` is
 addressed by tag rather than by Rust type, so the parent is named at the call

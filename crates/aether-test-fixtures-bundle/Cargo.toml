@@ -7,7 +7,7 @@ publish = false
 
 # The main fixture bundle: a single cdylib that consolidates the bulk of
 # the workspace's wasm test fixtures as one ADR-0096 multi-actor module
-# (`export!(Probe, …)`, `Probe` the entry). One `src/<name>.rs` module per
+# (`export!(default = Probe, public = […])`, `Probe` the entry). One `src/<name>.rs` module per
 # former fixture; the integration tests load this one wasm and select an
 # in-bundle actor with `export: Some("<NAMESPACE>")`. The typed↔reshaped
 # replace pair lives in standalone satellite crates — a cross-module

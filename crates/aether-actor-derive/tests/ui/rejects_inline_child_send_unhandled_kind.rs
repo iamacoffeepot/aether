@@ -28,7 +28,7 @@ struct Unhandled {
 
 struct Parent;
 
-#[actor]
+#[actor(spawns(Child))]
 impl WasmActor for Parent {
     const NAMESPACE: &'static str = "test.inline_child.parent";
 
@@ -72,5 +72,5 @@ fn main() {}
 // no `library` feature, so the shim's `cfg(feature = "library")` is allowed.
 #[allow(unexpected_cfgs)] // aether-suppression-request: the trybuild crate declares no `library` feature, so the export shim's `cfg(feature = "library")` gate is an unknown value here
 mod listed {
-    aether_actor::export!(super::Parent, private = [super::Child]);
+    aether_actor::export!(public = [super::Parent], private = [super::Child]);
 }

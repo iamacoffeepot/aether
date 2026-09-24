@@ -17,7 +17,7 @@ use aether_kinds::Ping;
 /// Default export: spawns the composable `Needy` inline once wired.
 pub struct Holder;
 
-#[actor]
+#[actor(spawns(Needy))]
 impl WasmActor for Holder {
     const NAMESPACE: &'static str = "test.inline_dependency.holder";
 
@@ -49,4 +49,4 @@ impl WasmActor for Needy {
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 
-aether_actor::export!(default = Holder, Needy);
+aether_actor::export!(default = Holder, public = [Needy]);

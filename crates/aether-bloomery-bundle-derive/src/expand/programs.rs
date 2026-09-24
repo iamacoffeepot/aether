@@ -46,7 +46,7 @@ pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
         #invocation_actor
         #(#sections)*
     };
-    RolePieces { field_name: format_ident!("programs"), field, init, handlers, items }
+    RolePieces { field_name: format_ident!("programs"), field, init, handlers, items, spawns: vec![invocation_ident()] }
 }
 
 /// The program role's root state: the live-seq table plus the two relay maps

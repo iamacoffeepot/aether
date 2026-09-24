@@ -76,7 +76,7 @@ pub const LABELS_SECTION: &str = "aether.kinds.labels";
 pub const NAMESPACE_SECTION: &str = "aether.namespace";
 
 /// The section name of the ADR-0138 no-default marker. A defaultless
-/// multi-actor module (`export!(A, B, …)` with no `default =`) omits the
+/// multi-actor module (`export!(public = [A, B, …])` with no `default =`) omits the
 /// [`NAMESPACE_SECTION`] and emits this section instead — a single
 /// version byte whose mere presence tells the host the module has no
 /// bare-load default, so an unselected load is a hard error naming
