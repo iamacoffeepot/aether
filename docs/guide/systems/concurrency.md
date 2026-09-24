@@ -133,7 +133,7 @@ causal chain open*:
 | primitive | holds the chain? | for |
 |---|---|---|
 | `spawn_inherit` | yes — for the worker thread's lifetime | offloaded work that replies *before* the worker ends |
-| `spawn_detached` | no — each send mints a fresh root | true fire-and-forget background work |
+| `spawn_detached` | no — the worker holds no chain and sends no mail | true fire-and-forget background work |
 | `dispatch_blocking` (hold-until-resolve) | yes — until you `resolve`, *outliving* the worker | the "reply in a later turn" shape above |
 
 A panic in any of the three is fatal

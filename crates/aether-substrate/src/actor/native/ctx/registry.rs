@@ -5,9 +5,10 @@
 //! producer does rather than taking the registry's locks mid-turn (ADR-0165).
 
 use aether_actor::ReplyMode;
-use aether_data::KindId;
+use aether_data::{ActorPath, KindDescriptor, KindId};
 
 use crate::actor::native::offload::blocking::DispatchId;
+use crate::mail::registry::AddressResolutionError;
 use crate::mail::registry::effect::{RegistryBatch, RegistryBatchResult};
 
 use super::NativeCtx;
@@ -23,6 +24,48 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     #[must_use]
     pub fn kind_label(&self, kind: KindId) -> String {
         self.binding.kind_label(kind)
+    }
+
+    /// The engine's live kind vocabulary: every kind descriptor the registry
+    /// holds right now, sorted by name. A component's kinds appear here the
+    /// moment its load returns.
+    ///
+    /// Consumer: the `aether.inventory` cap's `ListKinds` handler, which
+    /// projects each descriptor onto the wire.
+    #[must_use]
+    pub fn kind_descriptors(&self) -> Vec<KindDescriptor> {
+        self.binding.kind_descriptors()
+    }
+
+    /// The origin name of one ADR-0064 tagged id, looked up in the one table
+    /// its tag names: a `thr-…` id in the process thread-name registry, a
+    /// `mbx-…` id in the registry's route names (so a runtime-loaded component
+    /// names its lineage address), a `knd-…` id in its kind names. A miss, any
+    /// other tag, or text that is not a tagged id answers `None`.
+    ///
+    /// The id arrives as tagged text and only a name comes back, so no mailbox
+    /// position crosses this verb.
+    ///
+    /// Consumer: the `aether.inventory` cap's `Resolve` handler.
+    #[must_use]
+    pub fn tagged_id_name(&self, tagged: &str) -> Option<String> {
+        self.binding.tagged_id_name(tagged)
+    }
+
+    /// The canonical path of the live actor `address` names. ADR-0166
+    /// short-path expansion, canonical validation, and the liveness check are
+    /// the registry's own, the same boundary the rpc server resolves an
+    /// external `Call` recipient through; the answer is the path text alone,
+    /// never a mailbox position.
+    ///
+    /// # Errors
+    ///
+    /// The registry's [`AddressResolutionError`] when the address is
+    /// ambiguous, malformed for its root, or names no live actor.
+    ///
+    /// Consumer: the `aether.inventory` cap's `ResolveAddress` handler.
+    pub fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+        self.binding.canonical_path(address)
     }
 
     /// Stage a typed registry-owner batch from the current handler. The batch

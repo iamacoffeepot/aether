@@ -83,7 +83,7 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// Outbound `send` paths read this to stamp `root` on child mail
     /// so descendants share the chain. `None` for ctxs without
     /// an inbound — those sends mint a fresh root from their own
-    /// `mail_id` in `NativeBinding::send_mail_with_lineage`.
+    /// `mail_id` in `NativeBinding::push_envelope_buffered`.
     in_flight_root: Option<MailId>,
     /// ADR-0168 §1: the chain of the work that *caused* this context to
     /// exist, for a context that dispatches no inbound of its own. A

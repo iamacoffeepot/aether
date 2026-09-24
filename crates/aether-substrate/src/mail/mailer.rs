@@ -27,14 +27,15 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RegistryQueueMetrics,
-    RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    AddressResolutionError, CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
+    RegistryQueueMetrics, RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
+use crate::runtime::thread_name;
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
-use aether_actor::{HandlesKind, RegistryChanged};
-use aether_data::{Kind, KindId};
+use aether_data::tagged_id::{self, Tag};
+use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
@@ -264,7 +265,7 @@ impl Mailer {
     /// into one call so chassis-side mail (Tick fanout from the
     /// frame loop, hub-bridged inbound, MCP-bridged) gets observable
     /// lineage without duplicating the producer-side hook in
-    /// `NativeBinding::send_mail_with_lineage`.
+    /// `NativeBinding::push_envelope_returning_root_before_push`.
     ///
     /// Returns the freshly minted `MailId` so the caller can
     /// subscribe to its settlement via the chassis
@@ -327,16 +328,57 @@ impl Mailer {
         self.registry.kind_label(kind)
     }
 
+    /// Every registered kind descriptor, sorted by name, as
+    /// [`Registry::list_kind_descriptors`] returns them. The crate-private
+    /// path behind
+    /// [`NativeCtx::kind_descriptors`](crate::actor::native::ctx::NativeCtx::kind_descriptors).
+    pub(crate) fn kind_descriptors(&self) -> Vec<KindDescriptor> {
+        self.registry.list_kind_descriptors()
+    }
+
+    /// The origin name of one ADR-0064 tagged id, looked up in the one table
+    /// its tag names: the process thread-name registry for `thr-…`, this
+    /// registry's route names for `mbx-…`, its kind names for `knd-…`. A miss,
+    /// another tag, or malformed text is `None`. The crate-private path behind
+    /// [`NativeCtx::tagged_id_name`](crate::actor::native::ctx::NativeCtx::tagged_id_name).
+    pub(crate) fn tagged_id_name(&self, tagged: &str) -> Option<String> {
+        let raw = tagged_id::decode(tagged).ok()?;
+        match tagged_id::tag_of(raw) {
+            Some(Tag::Thread) => thread_name::resolve_runtime(raw),
+            Some(Tag::Mailbox) => self.registry.mailbox_name(aether_data::MailboxId(raw)),
+            Some(Tag::Kind) => self.registry.kind_name(KindId(raw)),
+            _ => None,
+        }
+    }
+
+    /// The canonical path of the live actor `address` names, through
+    /// [`Registry::resolve_address`], keeping only the path. The
+    /// crate-private path behind
+    /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
+    pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+        self.registry.resolve_address(address).map(|resolved| resolved.canonical_path)
+    }
+
+    /// The first declared dependency with no `Live` route for a child placed
+    /// under `parent`, as [`Registry::missing_dependency`] answers it. The
+    /// crate-private path behind
+    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn missing_dependency_under<'a>(
+        &self,
+        parent: aether_data::MailboxId,
+        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
+    ) -> Option<&'a str> {
+        self.registry.missing_dependency(Some(parent), dependencies)
+    }
+
     /// Subscribe `target` to the registry's inventory changes, as
     /// [`Registry::subscribe_inventory`] does, through this mailer. The
     /// crate-private path behind
     /// [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory),
     /// which passes its own binding's mailbox as `target`.
-    pub(crate) fn subscribe_inventory_for<A: HandlesKind<RegistryChanged>>(
-        self: &Arc<Self>,
-        target: aether_data::MailboxId,
-    ) -> RegistrySubscription {
-        self.registry.subscribe_inventory::<A>(target, Arc::clone(self))
+    pub(crate) fn subscribe_inventory_for(self: &Arc<Self>, target: aether_data::MailboxId) -> RegistrySubscription {
+        self.registry.subscribe_inventory(target, Arc::clone(self))
     }
 
     /// Borrow the wired [`CapabilityRegistry`]
@@ -424,7 +466,7 @@ impl Mailer {
     ///
     /// Equivalent to [`Self::send_reply`] with an absent lineage
     /// triple — the bare form is the lineage form's chassis-root case,
-    /// as `NativeBinding::send_mail_with_lineage` is with `None` / `None`.
+    /// as `NativeBinding::push_envelope_buffered` is with `None` / `None`.
     pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,

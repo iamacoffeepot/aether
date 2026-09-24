@@ -312,15 +312,14 @@ impl TraceHandle {
     /// the root's emit-time `held_open` count and decrements it again on
     /// `Drop`. Settlement for `root` gates on
     /// `(in_flight == 0 && held_open == 0)`, so any thread that
-    /// outlives its spawning handler (`InheritCtx<A>` from
+    /// outlives its spawning handler (the worker spawned by
     /// [`crate::actor::native::NativeCtx::spawn_inherit`]) keeps the
     /// chain open until it drops.
     ///
     /// Acquired on the parent thread before the worker is spawned so the
     /// `held_open` increment is visible to the settlement counter before
     /// the parent handler's `Finished` lands. Moving the guard into the
-    /// worker thread (via the `InheritCtx<A>` ctor) ties release to the
-    /// worker's lifetime.
+    /// worker's closure ties release to the worker's lifetime.
     ///
     /// `root` is a real chain by type (ADR-0168 §2): a caller whose chain
     /// may be absent writes `root.map(|root| handle.acquire_settlement_hold(root))`

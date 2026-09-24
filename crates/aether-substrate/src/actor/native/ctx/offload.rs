@@ -1,13 +1,13 @@
 //! Moving work off the actor's own thread.
 //!
 //! Two shapes, both ADR-0080 §12 / ADR-0093. A raw worker thread
-//! (`spawn_inherit` / `spawn_detached`) either folds into this handler's
-//! causal chain or deliberately starts its own. A hold-until-resolve
-//! dispatch (`dispatch_blocking*`) acquires the settlement hold eagerly on
-//! this thread, parks it in the per-actor in-flight ledger, and replies from
-//! a later handler turn when the completion wake lands.
+//! (`spawn_inherit` / `spawn_detached`) runs a closure that sends nothing,
+//! either holding this handler's causal chain open or holding none. A
+//! hold-until-resolve dispatch (`dispatch_blocking*`) acquires the
+//! settlement hold eagerly on this thread, parks it in the per-actor
+//! in-flight ledger, and replies from a later handler turn when the
+//! completion wake lands.
 
-use std::sync::Arc;
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 use aether_actor::{Addressable, ReplyMode, Singleton};
@@ -17,67 +17,55 @@ use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply,
 use crate::actor::native::offload::fail_fast;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::actor::native::offload::thread;
-use crate::actor::native::{InheritCtx, RootCtx};
 use crate::mail::Source;
 use crate::runtime::trace::SettlementHold;
 
 use super::NativeCtx;
 
 impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
-    /// ADR-0080 §12 spawn primitive: launch a worker thread that
-    /// inherits this handler's in-flight `(mail_id, root)` so its
-    /// sends fold into the current causal chain. The closure `f`
-    /// receives a [`InheritCtx<W>`] — sends
-    /// from inside `f` carry `parent_mail = self.in_flight_mail_id()`
-    /// and `root = self.in_flight_root()` automatically.
+    /// ADR-0080 §12 spawn primitive: run `f` on a worker thread named for
+    /// this actor, holding this handler's in-flight chain open until the
+    /// worker exits.
+    ///
+    /// The settlement hold is acquired on this thread before the worker
+    /// spawns and moves into the worker's body, so the chain cannot settle
+    /// between this handler's `Finished` and the worker's exit. An absent
+    /// [`Self::in_flight_root`] has no chain to hold, and the worker runs
+    /// holding nothing. The worker receives no ctx and sends no mail: a
+    /// thread that has to reach this actor again wakes it through
+    /// [`Self::self_wake`], and work that replies in a later handler turn
+    /// uses [`Self::dispatch_blocking`].
     ///
     /// Use for short-burst CPU offload that is *part of* the current
-    /// handler's causal closure (e.g., parsing, encoding,
-    /// pixel-pushing). For long-lived workers responding to external
-    /// events with no caller context (TCP per-connection workers,
-    /// pollers), use [`Self::spawn_detached`] instead.
-    ///
-    /// **Settlement contract gap (issue iamacoffeepot/aether#716):**
-    /// the parent chain may settle before the worker's first send
-    /// arrives; callers gate-sensitive to settlement should not
-    /// rely on the parent chain staying open for the worker's
-    /// lifetime today.
+    /// handler's causal closure. For a worker that answers to no chain, use
+    /// [`Self::spawn_detached`].
     ///
     /// A panic in `f` is fatal (ADR-0063): the worker escalates it through
     /// the chassis aborter with the panic payload in the reason, after its
-    /// settlement hold has dropped. An expected failure belongs in what the
-    /// worker sends, never in a panic.
-    pub fn spawn_inherit<W, F>(&self, f: F) -> JoinHandle<()>
+    /// settlement hold has dropped.
+    pub fn spawn_inherit(&self, f: impl FnOnce() + Send + 'static) -> JoinHandle<()>
     where
-        // ADR-0119: `W` only supplies `W::NAMESPACE` (thread name) and
-        // parameterizes `InheritCtx<W>` (Addressable-only). The former
-        // `Singleton` bound was incidental, and single-cardinality
-        // enforcement made it block instanced workers — relaxed to Addressable.
-        W: Addressable + 'static,
-        F: FnOnce(InheritCtx<W>) + Send + 'static,
+        A: Addressable,
     {
-        thread::spawn_inherit::<W, F>(Arc::clone(self.binding), self.in_flight_mail_id, self.in_flight_root, f)
+        thread::spawn_inherit(self.binding, self.in_flight_root, A::NAMESPACE, f)
     }
 
-    /// ADR-0080 §12 spawn primitive: launch a worker thread with no
-    /// in-flight inheritance. The closure `f` receives a
-    /// [`RootCtx<W>`] — each send mints a
-    /// fresh root chain with `W`'s mailbox as the producer.
+    /// ADR-0080 §12 spawn primitive: run `f` on a worker thread named for
+    /// this actor, holding no chain. The worker receives no ctx and sends no
+    /// mail.
     ///
-    /// Use for long-lived workers that respond to external events
-    /// (TCP per-connection workers, pollers). For short-burst CPU
-    /// offload that is part of the current handler's causal closure,
-    /// use [`Self::spawn_inherit`].
+    /// Use for a long-lived worker that answers to something outside any
+    /// mail chain, such as a child process's pipe. For short-burst CPU
+    /// offload that is part of the current handler's causal closure, use
+    /// [`Self::spawn_inherit`].
     ///
     /// A panic in `f` is fatal (ADR-0063): the worker escalates it through
-    /// the chassis aborter with the panic payload in the reason. An expected
-    /// failure belongs in what the worker sends, never in a panic.
-    pub fn spawn_detached<W, F>(&self, f: F) -> JoinHandle<()>
+    /// the chassis aborter with the panic payload in the reason.
+    pub fn spawn_detached(&self, f: impl FnOnce() + Send + 'static) -> JoinHandle<()>
     where
-        W: Addressable + Singleton + 'static,
-        F: FnOnce(RootCtx<W>) + Send + 'static,
+        A: Addressable + Singleton,
     {
-        thread::spawn_detached::<W, F>(Arc::clone(self.binding), f)
+        thread::spawn_detached(self.binding, A::NAMESPACE, f)
     }
 
     /// A [`SelfWake<K>`] for the rare dedicated thread a cap runs itself —

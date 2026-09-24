@@ -61,9 +61,23 @@ fn register_lineage_capture_sink(registry: &Arc<Registry>, name: &str) -> (Linea
     (captured, sink_id)
 }
 
+/// Build a ctx at `sender` from a test binding carrying `parent`, the way
+/// the trampoline builds one from its own binding.
+fn ctx_at(
+    registry: Arc<Registry>,
+    mailer: Arc<Mailer>,
+    outbound: Arc<HubOutbound>,
+    sender: MailboxId,
+    parent: Option<MailboxId>,
+) -> ComponentCtx {
+    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, parent));
+    ComponentCtx::new(binding, registry, mailer, outbound)
+}
+
 fn ctx() -> ComponentCtx {
     let registry = Arc::new(Registry::new());
-    ComponentCtx::new(MailboxId(0), Arc::clone(&registry), Arc::new(Mailer::new(registry)), HubOutbound::disconnected())
+    let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
+    ctx_at(registry, mailer, HubOutbound::disconnected(), MailboxId(0), None)
 }
 
 fn instantiate(wat: &str) -> Component {
@@ -98,9 +112,7 @@ fn try_instantiate_with_config(wat: &str, config_bytes: &[u8]) -> wasmtime::Resu
 fn ctx_with_parent(sender: MailboxId, parent: MailboxId) -> ComponentCtx {
     let registry = Arc::new(Registry::new());
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let mut ctx = ComponentCtx::new(sender, registry, Arc::clone(&mailer), HubOutbound::disconnected());
-    ctx.install_binding(Arc::new(NativeBinding::new_for_test_with_parent(mailer, sender, Some(parent))));
-    ctx
+    ctx_at(registry, mailer, HubOutbound::disconnected(), sender, Some(parent))
 }
 
 fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, ComponentCtx) {
@@ -108,10 +120,7 @@ fn replacement_ctx_pair(sender: MailboxId, parent: MailboxId) -> (ComponentCtx, 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), sender, Some(parent)));
     let build = || {
-        let mut ctx =
-            ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
-        ctx.install_binding(Arc::clone(&binding));
-        ctx
+        ComponentCtx::new(Arc::clone(&binding), Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected())
     };
     (build(), build())
 }
@@ -1142,7 +1151,7 @@ fn plane_ctx_for_reply() -> (ComponentCtx, Receiver<EgressEvent>, aether_data::K
         )
         .expect("register kind");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(M(0), registry, mailer, outbound);
+    let ctx = ctx_at(registry, mailer, outbound, M(0), None);
     (ctx, rx, pong_id)
 }
 
@@ -1276,7 +1285,7 @@ fn reply_mail_component_target_echoes_inbound_correlation() {
         .expect("register kind");
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), M(0), None);
     let mut component = instantiate_with_ctx(&wat_replies(pong_id.0), ctx);
 
     // Inbound whose reply target is a peer component, carrying
@@ -1309,7 +1318,7 @@ fn guest_send_of_an_engine_only_kind_returns_status_three_and_delivers_nothing()
     let registry = Arc::new(Registry::new());
     let (captured, sink_id) = register_lineage_capture_sink(&registry, "engine_only_send_sink");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), M(0), None);
     let mut component = instantiate_with_ctx(&wat_sends(sink_id.0, MonitorNotice::ID.0), ctx);
 
     component.deliver(&SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)).expect("deliver");
@@ -1337,7 +1346,7 @@ fn guest_reply_of_an_engine_only_kind_returns_engine_only_status_and_delivers_no
         )
         .expect("register kind");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-    let ctx = ComponentCtx::new(M(0), Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), M(0), None);
     let mut component = instantiate_with_ctx(&wat_replies(MonitorNotice::ID.0), ctx);
 
     let mail = SubstrateMail::new(M(0), aether_data::KindId(0), vec![], 1)
@@ -1367,7 +1376,7 @@ fn unknown_recipient_bubbles_up_with_sender_mailbox() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
 
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), outbound, sender, None);
 
     let unknown = MailboxId(0xDEAD_BEEF_u64);
     let kind = aether_data::KindId(0xABCD_u64);
@@ -1401,7 +1410,7 @@ fn unknown_recipient_without_outbound_warn_drops() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     // Deliberately no `with_outbound` — exercises the local warn-drop path.
 
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), outbound);
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), outbound, sender, None);
 
     ctx.send(MailboxId(0xDEAD_BEEF_u64), aether_data::KindId(0xABCD), vec![], 0, sender);
     assert!(outbound_rx.try_recv().is_err(), "no bubble-up without a wired outbound");
@@ -1422,7 +1431,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // Inbound lineage: the chassis-driven tick chain we're "in"
     // when the wasm guest's on_tick handler fires its outbound.
@@ -1447,7 +1456,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 /// Companion: with no in-flight context (chassis-bypass / test
 /// fixture), `ctx.send` mints a fresh root chain — `parent_mail`
 /// is `None` and `root == mail_id`. This is the same shape
-/// `NativeBinding::send_mail_with_lineage(None, None)` produces.
+/// `NativeBinding::push_envelope_buffered(None, None)` produces.
 #[test]
 fn send_without_in_flight_mints_fresh_root_chain() {
     let registry = Arc::new(Registry::new());
@@ -1455,7 +1464,7 @@ fn send_without_in_flight_mints_fresh_root_chain() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x33));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
     // No `set_in_flight` call.
 
     ctx.send(sink_id, aether_data::KindId(0xCAFE), vec![], 1, sender);
@@ -1483,7 +1492,7 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
 
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x55));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
@@ -1541,7 +1550,7 @@ fn scoped_wasm_spawns_extend_the_executing_inline_actor() {
 
     let parent_name = format!("{root_name}/{TRAMPOLINE_NAMESPACE}:branch");
     let parent = aether_data::mailbox_id_from_path(&parent_name);
-    let mut ctx = ComponentCtx::new(root, Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), root, None);
     ctx.stage_alias(PreparedAliasRoute::new(parent, parent_name.clone(), root));
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(parent), ctx);
 
@@ -1582,7 +1591,7 @@ fn scoped_wasm_spawns_reject_a_foreign_parent() {
         .try_register_inbox_with_id(&boot_authority(), root, root_name, root_handler)
         .expect("register component root");
     let foreign = aether_data::mailbox_id_from_path("aether.component/aether.embedded:foreign");
-    let ctx = ComponentCtx::new(root, registry, mailer, HubOutbound::disconnected());
+    let ctx = ctx_at(registry, mailer, HubOutbound::disconnected(), root, None);
     let mut component = instantiate_with_ctx(&wat_scoped_spawns(foreign), ctx);
 
     component.deliver(&Mail::new(root, aether_data::KindId(0), Vec::new(), 1)).expect("deliver rejected spawn turn");
@@ -1650,7 +1659,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     let (captured, sink_id) = register_lineage_capture_sink(&registry, "inline_self_origin_sink");
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // `from == self` (a normally-addressed actor).
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
@@ -1670,7 +1679,7 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
-    let ctx = ComponentCtx::new(sender, Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected());
+    let ctx = ctx_at(Arc::clone(&registry), Arc::clone(&mailer), HubOutbound::disconnected(), sender, None);
 
     // `from == an inline-child alias` distinct from the component's own id.
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
@@ -1691,7 +1700,7 @@ fn pending_inline_alias_is_trusted_before_owner_publication() {
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
     let sender = MailboxId(aether_data::with_tag(Tag::Mailbox, 0x42));
     let alias = MailboxId(aether_data::with_tag(Tag::Mailbox, 0xA11A5));
-    let mut ctx = ComponentCtx::new(sender, Arc::clone(&registry), mailer, HubOutbound::disconnected());
+    let mut ctx = ctx_at(Arc::clone(&registry), mailer, HubOutbound::disconnected(), sender, None);
     ctx.stage_alias(PreparedAliasRoute::new(alias, "pending-inline-alias", sender));
 
     assert!(!registry.is_alias_to(alias, sender), "the owner has not published the route yet");
