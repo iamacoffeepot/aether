@@ -681,7 +681,7 @@ mod tests {
         let present = <Present as Kind>::ID;
         let transport = unrouted_binding(&mailer);
         let mut subscribe = |stage: KindId, mailbox: MailboxId| {
-            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
             let reply = LifecycleCapability::on_subscribe(
                 &mut cap,
                 &mut ctx,
@@ -693,7 +693,7 @@ mod tests {
         subscribe(render, survivor);
         subscribe(present, dropped);
 
-        let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
         assert!(!subscribed(&cap, render, DataMailboxId(dropped.0)), "dropped mailbox must leave the Render stage");
@@ -728,7 +728,7 @@ mod tests {
         let render = <Render as Kind>::ID;
         let transport = unrouted_binding(&mailer);
         let mut subscribe = |mailbox: MailboxId| {
-            let mut ctx = NativeCtx::new(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
             LifecycleCapability::on_subscribe(
                 &mut cap,
                 &mut ctx,
@@ -771,7 +771,7 @@ mod tests {
 
         let transport = unrouted_binding(&cap.mailer);
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
-        let mut ctx = NativeCtx::new(&transport, source, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, source, MailId::NONE, MailId::NONE);
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
 
         assert!(
@@ -835,7 +835,7 @@ mod tests {
         // Tick stage set.
         let mut cap = tick_start_graph_cap();
         let cap_transport = unrouted_binding(&cap.mailer);
-        let mut ctx = NativeCtx::new(&cap_transport, source, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, MailId::NONE, MailId::NONE);
         assert_eq!(ctx.sender(), Some(sender), "the host stamps the calling actor as the Source");
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);
 

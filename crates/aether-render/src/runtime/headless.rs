@@ -204,8 +204,12 @@ mod headless_tests {
         let (mailer, _rx) = test_mailer_and_rx();
         let mut state = HeadlessRenderCapabilityState;
         let transport = unrouted_binding(&mailer);
-        let mut ctx =
-            NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(
+            &transport,
+            aether_data::Source::NONE,
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
         let result = HeadlessRenderCapability::on_create_texture(
             &mut state,
             &mut ctx,
@@ -240,8 +244,12 @@ mod headless_tests {
         let (mailer, _rx) = test_mailer_and_rx();
         let mut state = HeadlessRenderCapabilityState;
         let transport = unrouted_binding(&mailer);
-        let mut ctx =
-            NativeCtx::new(&transport, aether_data::Source::NONE, aether_data::MailId::NONE, aether_data::MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(
+            &transport,
+            aether_data::Source::NONE,
+            aether_data::MailId::NONE,
+            aether_data::MailId::NONE,
+        );
         let result = HeadlessRenderCapability::on_create_geometry(
             &mut state,
             &mut ctx,

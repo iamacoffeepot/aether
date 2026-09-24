@@ -108,9 +108,9 @@ mod tests {
     /// Build a chassis-root `NativeCtx` against the fixture's
     /// transport, anchoring the in-flight + reply-to fields to a
     /// session sender so the ack reply egresses as `ToSession`.
-    fn chassis_root_ctx(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_> {
+    fn chassis_root_ctx<A>(transport: &Arc<NativeBinding>, inbound: MailId) -> NativeCtx<'_, A> {
         let sender = Source::to(SourceAddr::Session(SessionToken(Uuid::nil())));
-        NativeCtx::new(transport, sender, inbound, inbound)
+        NativeCtx::new_for_actor(transport, sender, inbound, inbound)
     }
 
     /// Issue 749: `on_dispatch_traced` proves each envelope's
