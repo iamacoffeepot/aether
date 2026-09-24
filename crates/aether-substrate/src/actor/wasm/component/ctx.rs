@@ -18,7 +18,7 @@ use super::StateBundle;
 /// mailbox's guest mints in: the next send correlation and the next
 /// reply-lineage id. Read from a live component with
 /// [`super::Component::correlation_cursor`] and resumed by its successor
-/// with [`ComponentCtx::resume_correlations`], so a mailbox never reuses a
+/// with [`super::Component::resume_correlations`], so a mailbox never reuses a
 /// request id or a reply's trace `MailId` within a run (ADR-0139 §3,
 /// #6422). Opaque: it has no public constructor, accessor or codec, so a
 /// cursor can only come from a live component and can never lower a
@@ -105,8 +105,8 @@ pub struct ComponentCtx {
     /// "no correlation" (backward-compat sentinel for replies that
     /// don't filter on correlation, and for `prev_correlation` before
     /// the slot's first send), and a replacement instance resumes its
-    /// predecessor's value through [`Self::resume_correlations`], so a
-    /// mailbox never reuses an id within a run (ADR-0139 §3). Holds the
+    /// predecessor's value through [`super::Component::resume_correlations`],
+    /// so a mailbox never reuses an id within a run (ADR-0139 §3). Holds the
     /// *next* id to mint; `prev_correlation()` reads `counter - 1` to
     /// return the last one minted.
     ///
@@ -145,7 +145,7 @@ pub struct ComponentCtx {
     /// One per mailbox slot, not per instance, like `correlation_counter`:
     /// a fresh slot starts at [`REPLY_LINEAGE_BASE`], and a replacement
     /// resumes its predecessor's value through
-    /// [`Self::resume_correlations`], so its replies never reuse a trace
+    /// [`super::Component::resume_correlations`], so its replies never reuse a trace
     /// `MailId` its predecessor already sent (#6422).
     reply_lineage_counter: Cell<u64>,
     /// ADR-0097: sibling-spawn requests staged by the `spawn_sibling`
@@ -337,13 +337,11 @@ impl ComponentCtx {
     }
 
     /// Continue this mailbox's send correlation and reply-lineage
-    /// sequences from a guest that left the slot, so the new instance
-    /// never mints a request id or a reply `MailId` its predecessor
-    /// already used (ADR-0139 §3, #6422). Only ever raises either
-    /// counter. Call before [`super::Component::instantiate`], so sends
-    /// and replies from `init` and `on_rehydrate` onward continue the
-    /// sequences; the consumer is the component trampoline's replace.
-    pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
+    /// sequences from a guest that left the slot, so this instance never
+    /// mints a request id or a reply `MailId` another already used
+    /// (ADR-0139 §3, #6422). Only ever raises either counter. Read through
+    /// [`super::Component::resume_correlations`].
+    pub(super) fn resume_correlations(&mut self, cursor: CorrelationCursor) {
         self.correlation_counter.set(cursor.send.max(self.correlation_counter.get()));
         self.reply_lineage_counter.set(cursor.reply_lineage.max(self.reply_lineage_counter.get()));
     }

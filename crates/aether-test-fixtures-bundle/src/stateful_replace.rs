@@ -15,10 +15,18 @@
 //! export that makes this a genuine multi-actor module
 //! (`export!(Counter, Sidecar)`), exercising the boxed `ErasedWasmActor`
 //! hot-swap path.
+//!
+//! `RehydrateTrap` is a failure-injection export (#6134): it keeps every
+//! handler row `Counter` has, so the ADR-0231 §5 contract check accepts it
+//! as `Counter`'s replacement, and its `on_rehydrate` traps, so a replace
+//! of a `Counter` that saved state fails at rehydrate. A test uses it to
+//! show the replace rolls back to the running `Counter` (ADR-0016 §4).
 
 // `#[handler]` / `#[fallback]` methods take `&mut self` to match the
 // dispatch ABI even when stateless.
 #![allow(clippy::unused_self)]
+
+use std::process;
 
 use aether_actor::{
     ActorInitError, Erased, Mail, Manual, OutboundReply, PriorState, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx,
@@ -87,4 +95,41 @@ impl WasmActor for Sidecar {
 
     #[fallback]
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {}
+}
+
+/// Failure-injection export: a replacement for `Counter` whose
+/// `on_rehydrate` traps, so a replace that carries `Counter`'s saved state
+/// fails at rehydrate. The handlers mirror `Counter`'s rows and are never
+/// expected to run.
+pub struct RehydrateTrap {
+    count: u32,
+}
+
+#[actor]
+impl WasmActor for RehydrateTrap {
+    const NAMESPACE: &'static str = "test.stateful.rehydrate_trap";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(RehydrateTrap { count: 0 })
+    }
+
+    /// Increment the in-memory counter, the row `Counter` declares.
+    #[handler::single]
+    fn on_bump(&mut self, _ctx: &mut WasmCtx<'_>, _bump: Bump) {
+        self.count += 1;
+    }
+
+    /// Reply with the counter, the row `Counter` declares.
+    #[handler::manual]
+    fn on_count_query(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: CountQuery) {
+        if ctx.reply_target().is_some() {
+            ctx.reply(&CountReport { count: self.count });
+        }
+    }
+
+    /// Trap the wasm instance: `abort` lowers to `unreachable`, which the
+    /// host reports as an `on_rehydrate` failure.
+    fn on_rehydrate(&mut self, _ctx: &mut WasmCtx<'_>, _prior: PriorState<'_>) {
+        process::abort();
+    }
 }
