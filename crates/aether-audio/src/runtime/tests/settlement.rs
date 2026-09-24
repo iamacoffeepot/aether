@@ -1,29 +1,45 @@
 use super::*;
 
-/// Substrate with a registry, settlement counter, egress rx (for
-/// `drive_task_completion`), and a registered component inbox.
-///
-/// The inbox handler discharges the ADR-0094 obligation before
-/// forwarding so the caller can observe the `OwnedDispatch` (and
-/// call `record_finished`) without tripping the debug guard on drop.
-///
-/// Returns `(mailer, egress_rx, caller_mailbox, reply_rx)`.
-fn settlement_substrate() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>, MailboxId, mpsc::Receiver<OwnedDispatch>) {
-    let reg = Arc::new(Registry::new());
-    let (outbound, egress_rx) = HubOutbound::attached_loopback();
-    let mailer = Arc::new(Mailer::new(Arc::clone(&reg)).with_outbound(outbound));
-    let (reply_tx, reply_rx) = mpsc::channel::<OwnedDispatch>();
-    let caller_mailbox = reg.register_inbox(
-        &boot_authority(),
-        "test.audio.settlement.caller",
-        Arc::new(move |dispatch: OwnedDispatch| {
-            // ADR-0094: terminal consumer — discharge before forwarding.
-            dispatch.discharge();
-            let _ = reply_tx.send(dispatch);
-        }) as Arc<dyn InboxHandler>,
-    );
-    (mailer, egress_rx, caller_mailbox, reply_rx)
+/// A substrate with a settlement counter, the egress rx
+/// `drive_task_completion` drains, and a registered caller whose reply
+/// target and chain root are the stamp of a mail it really sent.
+struct SettlementFixture {
+    mailer: Arc<Mailer>,
+    egress: mpsc::Receiver<EgressEvent>,
+    caller: Source,
+    root: MailId,
+    replies: mpsc::Receiver<OwnedDispatch>,
 }
+
+/// Build a [`SettlementFixture`]. The caller's inbox discharges the
+/// ADR-0094 obligation before forwarding each dispatch to `replies`, so
+/// the test can observe the `OwnedDispatch` (and call `record_finished`)
+/// without tripping the debug guard on drop.
+///
+/// The caller sends one mail to itself on a fresh chain. Its dispatch
+/// carries the `Source` and root the binding's send path stamps, which
+/// are what a real caller's request would hand the cap. The fixture
+/// records that mail's `Finished`, so the settlement counter starts at
+/// zero.
+fn settlement_substrate() -> SettlementFixture {
+    let reg = Arc::new(Registry::new());
+    let (outbound, egress) = HubOutbound::attached_loopback();
+    let mailer = Arc::new(Mailer::new(Arc::clone(&reg)).with_outbound(outbound));
+    let (reply_tx, replies) = mpsc::channel::<OwnedDispatch>();
+    let handler = Arc::new(move |dispatch: OwnedDispatch| {
+        // ADR-0094: terminal consumer — discharge before forwarding.
+        dispatch.discharge();
+        let _ = reply_tx.send(dispatch);
+    }) as Arc<dyn InboxHandler>;
+    let (caller, caller_ref) = registered_binding(&reg, &mailer, "test.audio.settlement.caller", handler);
+
+    NativeCtx::new(&caller, Source::NONE, MailId::NONE, MailId::NONE).send_to(caller_ref, &SetMasterGain { gain: 1.0 });
+
+    let request = replies.recv_timeout(Duration::from_secs(2)).expect("the caller's own mail reached its inbox");
+    mailer.record_finished(request.mail_id, request.root);
+    SettlementFixture { mailer, egress, caller: request.sender, root: request.root, replies }
+}
+
 /// #1693 / #1701 regression: a deferred `play_track` reply
 /// (read → decode worker → resolve) must inherit the caller's
 /// root and keep the chain UNSETTLED (`live_roots == 1`) until
@@ -34,15 +50,13 @@ fn settlement_substrate() -> (Arc<Mailer>, mpsc::Receiver<EgressEvent>, MailboxI
 /// prematurely (caller's settlement window closed too early).
 #[test]
 fn play_track_deferred_reply_settles_caller_chain() {
-    let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
+    let SettlementFixture { mailer, egress: rx, caller, root, replies: reply_rx } = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
     let transport = unrouted_binding(&mailer);
     let (mut cap, _queue) = live_cap();
-    let root = MailId::new(MailboxId(0xC0), 1);
-    let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 1);
 
     {
-        let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
+        let mut ctx = NativeCtx::new_dispatching(&transport, caller, root, root);
         AudioCapability::on_play_track(
             &mut cap,
             &mut ctx,
@@ -86,15 +100,13 @@ fn play_track_deferred_reply_settles_caller_chain() {
 /// must keep the chain UNSETTLED until the reply's `Finished` fires.
 #[test]
 fn load_instrument_deferred_reply_settles_caller_chain() {
-    let (mailer, rx, caller_mailbox, reply_rx) = settlement_substrate();
+    let SettlementFixture { mailer, egress: rx, caller, root, replies: reply_rx } = settlement_substrate();
     let counter = Arc::clone(mailer.trace_handle().settlement_counter());
     let transport = unrouted_binding(&mailer);
     let (mut cap, _queue) = live_cap();
-    let root = MailId::new(MailboxId(0xC0), 3);
-    let caller_source = Source::with_correlation(SourceAddr::Component(caller_mailbox), 3);
 
     {
-        let mut ctx = NativeCtx::new_dispatching(&transport, caller_source, root, root);
+        let mut ctx = NativeCtx::new_dispatching(&transport, caller, root, root);
         AudioCapability::on_load_instrument(
             &mut cap,
             &mut ctx,

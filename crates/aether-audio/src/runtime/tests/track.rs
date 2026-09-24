@@ -173,7 +173,7 @@ fn play_track_happy_path_replies_ok_and_starts_a_track() {
     let (mailer, rx) = test_mailer_and_rx();
     let transport = unrouted_binding(&mailer);
 
-    let root = MailId::new(MailboxId(0xC0), 1);
+    let root = MailId { correlation_id: 1, ..MailId::NONE };
     let mut ctx = NativeCtx::new_dispatching(&transport, session_sender(), root, root);
     AudioCapability::on_play_track(
         &mut cap,

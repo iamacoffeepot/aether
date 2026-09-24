@@ -80,7 +80,7 @@ mod tests {
     use std::sync::Arc;
 
     use super::*;
-    use aether_data::{KindId, MailId, MailboxId, SessionToken, Uuid};
+    use aether_data::{KindId, MailId, SessionToken, Uuid};
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
@@ -155,7 +155,7 @@ mod tests {
         let kind_alpha = fix.registry.register_kind(&boot_authority(), "aether.test.kind_a");
         let kind_beta = fix.registry.register_kind(&boot_authority(), "aether.test.kind_b");
 
-        let inbound = MailId::new(MailboxId(0xC0DE), 7);
+        let inbound = MailId { correlation_id: 7, ..MailId::NONE };
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
             &mut (),
@@ -220,7 +220,7 @@ mod tests {
         use aether_kinds::NamedMail;
 
         let fix = dispatch_traced_fixture();
-        let inbound = MailId::new(MailboxId(0xC0DE), 99);
+        let inbound = MailId { correlation_id: 99, ..MailId::NONE };
         let mut ctx = chassis_root_ctx(&fix.transport, inbound);
         let ack = TraceDispatchCapability::on_dispatch_traced(
             &mut (),
