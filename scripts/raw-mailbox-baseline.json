@@ -7,7 +7,6 @@
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 37,
     "<recipient>.id() at a send": 0,
-    "clippy::disallowed_methods": 150,
-    "ctx.self_id()": 1
+    "clippy::disallowed_methods": 150
   }
 }

@@ -19,11 +19,14 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::ErasedActorRef;
-use aether_data::Kind;
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, KindId};
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
-use aether_kinds::{CostTail, CostTailResult, LoadComponent, Tick};
-use aether_test_fixtures_kinds::UnsubscribeKeys;
+use aether_kinds::{
+    CostTail, CostTailResult, DropComponent, DropResult, LoadComponent, ReplaceComponent, ReplaceResult, Tick,
+};
+use aether_test_fixtures_kinds::{Bump, InlineProbe, UnsubscribeKeys};
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
 // land in this test binary (mirrors `cap_registry.rs`).
@@ -79,4 +82,62 @@ fn init_seeds_cells_and_dispatch_folds() {
     let unsubscribe =
         rows.iter().find(|r| r.kind_id == UnsubscribeKeys::ID).expect("UnsubscribeKeys handler cell present");
     assert_eq!(unsubscribe.samples, 0, "an un-dispatched handler stays at the neutral seed");
+}
+
+fn cost_kinds(harness: &SubstrateHarness, actor: ErasedActorRef) -> Vec<KindId> {
+    let CostTailResult::Ok { rows } = harness.cost_table().tail(actor, &CostTail { kind: None }) else {
+        panic!("expected Ok");
+    };
+    rows.iter().map(|row| row.kind_id).collect()
+}
+
+/// `NativeCtx::sync_guest` unions the trampoline's own measured framework arms
+/// with the guest's handlers (iamacoffeepot/aether#4269), and releasing the
+/// guest drops its rows before re-seeding those arms. A sync that seeded only
+/// the guest's kinds would leave the arms that outlive a drop unmeasured, and
+/// one that skipped the drop would leave a dropped guest's handlers measured.
+#[test]
+fn replace_and_drop_keep_framework_arms_measured() {
+    let Some(bundle_path) = require_wasm("aether_test_fixtures_bundle") else {
+        return;
+    };
+    let wasm = fs::read(&bundle_path).expect("read fixture wasm");
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let base = LoadComponent {
+        wasm: wasm.clone(),
+        name: Some("swappable".to_owned()),
+        config: Vec::new(),
+        export: Some("test.contract.base".to_owned()),
+    };
+    let (swappable, path) =
+        harness.load_any(&base).unwrap_or_else(|error| panic!("load_component(swappable): {error}"));
+    let host = harness.actor_ref::<ComponentHostCapability>();
+
+    let replace = ReplaceComponent {
+        target: path.clone(),
+        wasm,
+        drain_timeout_ms: None,
+        config: Vec::new(),
+        export: Some("test.contract.extended".to_owned()),
+    };
+    let swapped =
+        harness.execute(vec![("swap", HarnessOp::send_and_await_reply(&host, &replace))]).expect("replace sequence");
+    if let ReplaceResult::Err { error } = swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
+        panic!("replace_component: {error}");
+    }
+    let replaced = cost_kinds(&harness, swappable);
+    assert!(replaced.contains(&ReplaceComponent::ID), "the replace arm stays measured across a replace");
+    assert!(replaced.contains(&InlineProbe::ID), "the replacement's new handler is measured");
+
+    let dropped = harness
+        .execute(vec![("drop", HarnessOp::send_and_await_reply(&host, &DropComponent { target: path }))])
+        .expect("drop sequence");
+    if let DropResult::Err { error } = dropped.reply::<DropResult>("drop").expect("decode DropResult") {
+        panic!("drop_component: {error}");
+    }
+    let released = cost_kinds(&harness, swappable);
+    assert!(released.contains(&ReplaceComponent::ID), "an empty slot still measures the replace arm that refills it");
+    assert!(released.contains(&DropComponent::ID), "an empty slot still measures the drop arm");
+    assert!(!released.contains(&Bump::ID), "a dropped guest's handler leaves the table");
+    assert!(!released.contains(&InlineProbe::ID), "a dropped guest's handler leaves the table");
 }

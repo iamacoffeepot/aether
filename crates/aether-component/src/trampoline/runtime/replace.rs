@@ -4,21 +4,20 @@ use std::collections::HashSet;
 use std::fmt::Display;
 use std::sync::Arc;
 
-use aether_actor::Local as _;
 use aether_actor::Single;
 use aether_data::ActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
 use aether_substrate::actor::native::{
-    Dispatch, NativeCtx, RegistryBatch, RegistryBatchResult, SpawnError, SpawnOutcome, TaskDone,
+    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnError, SpawnOutcome, TaskDone,
 };
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
 use aether_substrate::actor::wasm::kind_manifest::ActorInputs;
 use aether_substrate::mail::registry::PreparedAliasRoute;
-use aether_substrate::mail::{CostCells, KindId, MailboxId};
+use aether_substrate::mail::{KindId, MailboxId};
 use wasmtime::Module;
 
 use crate::component::replacement_refusal;
@@ -71,8 +70,9 @@ impl WasmTrampolineState {
     /// trampoline runs the typed `spawn_child::<WasmTrampoline>` (the
     /// identity ZST) the substrate host fn couldn't (it can't name this
     /// type), reusing
-    /// the resident `Module` and registering the spawned sibling's
-    /// own capability group (looked up by actor-type tag). A
+    /// the resident `Module` and handing the spawned sibling its
+    /// own capability group (looked up by actor-type tag), which the
+    /// sibling's `wire` registers from its declaration. A
     /// spawn-time failure surfaces here, asynchronously to the guest
     /// (which already received the `MailboxId`): logged, not fatal.
     pub fn spawn_sibling(&self, ctx: &mut NativeCtx<'_, WasmTrampoline, Single>, pending: PendingSpawn) {
@@ -94,7 +94,7 @@ impl WasmTrampolineState {
             module: self.module.clone(),
             registry: Arc::clone(&self.registry),
             outbound: Arc::clone(&self.outbound),
-            capabilities: capabilities.clone(),
+            capabilities,
             config: pending.config,
             type_tag: Some(pending.tag),
             actor_caps: self.actor_caps.clone(),
@@ -115,7 +115,6 @@ impl WasmTrampolineState {
             .stage_with(SiblingSpawnContext {
                 parent_name: pending.parent_name.clone(),
                 subname: pending.subname.clone(),
-                capabilities,
             })
         });
         if let Err(e) = staged {
@@ -128,19 +127,14 @@ impl WasmTrampolineState {
         }
     }
 
-    pub(super) fn finish_sibling_spawn(&self, done: TaskDone<SpawnOutcome<WasmTrampoline>, SiblingSpawnContext>) {
-        match &done.output().result {
-            Ok(child) => {
-                self.mailer.capability_registry().register_actor(child.erase(), &done.context().capabilities);
-            }
-            Err(error) => {
-                tracing::warn!(
-                    target: "aether_component",
-                    parent = %done.context().parent_name,
-                    subname = %done.context().subname,
-                    "sibling spawn failed after owner staging: {error:?}",
-                );
-            }
+    pub(super) fn finish_sibling_spawn(done: TaskDone<SpawnOutcome<WasmTrampoline>, SiblingSpawnContext>) {
+        if let Err(error) = &done.output().result {
+            tracing::warn!(
+                target: "aether_component",
+                parent = %done.context().parent_name,
+                subname = %done.context().subname,
+                "sibling spawn failed after owner staging: {error:?}",
+            );
         }
         done.release_no_reply();
     }
@@ -205,13 +199,14 @@ impl WasmTrampolineState {
     }
 
     /// ADR-0230: the replacement's hosted type must find every declared
-    /// dependency live, checked before anything is touched. An actor the
-    /// registry does not name has nothing to refuse and passes.
-    fn check_dependencies(&self, group: Option<&ActorInputs>) -> Result<(), String> {
-        let (Some(group), Some(canonical)) = (group, self.registry.mailbox_name(self.mailbox)) else {
+    /// dependency live, checked before anything is touched. `own` is this
+    /// trampoline's canonical path, which names it in the refusal. A module
+    /// that declares no group has nothing to refuse and passes.
+    fn check_dependencies(&self, own: &ActorPath, group: Option<&ActorInputs>) -> Result<(), String> {
+        let Some(group) = group else {
             return Ok(());
         };
-        replacement_refusal(&self.registry, &canonical, &group.dependencies).map_or(Ok(()), Err)
+        replacement_refusal(&self.registry, own.as_str(), &group.dependencies).map_or(Ok(()), Err)
     }
 
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
@@ -301,7 +296,11 @@ impl WasmTrampolineState {
         Ok(Some((old, saved)))
     }
 
-    pub fn handle_replace<A>(&mut self, ctx: &mut NativeCtx<'_, A>, payload: ReplaceComponent) -> ReplaceResult {
+    pub fn handle_replace(
+        &mut self,
+        ctx: &mut NativeCtx<'_, WasmTrampoline>,
+        payload: ReplaceComponent,
+    ) -> ReplaceResult {
         // `payload.wasm` is the new module bytes; `target` named this
         // trampoline and the host proved it before forwarding, so the field
         // only names the actor in a contract or carried-context refusal.
@@ -338,7 +337,7 @@ impl WasmTrampolineState {
         // ADR-0230 and ADR-0231 §5: checked before anything is touched, so a
         // refusal leaves the old module (or the empty post-drop slot) as it
         // was.
-        if let Err(error) = self.check_dependencies(group) {
+        if let Err(error) = self.check_dependencies(&ctx.path(), group) {
             return ReplaceResult::Err { error };
         }
         let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
@@ -465,40 +464,23 @@ impl WasmTrampolineState {
 
         let (aliases, retired) =
             (new_component.drain_pending_aliases(), new_component.drain_pending_alias_retirements());
+        self.capabilities = capabilities.clone();
         self.component = Some(new_component);
         Self::stage_inline_aliases(ctx, aliases);
         self.stage_inline_alias_retirements(ctx, retired);
 
-        // iamacoffeepot/aether#1037: re-register the trampoline's
-        // capabilities against the post-replace handler set. The
-        // mailbox id is stable across replace (ADR-0022 §4), so
-        // `register` overwrites the prior entry — the validator
-        // sees the new accept-set immediately.
-        self.mailer.capability_registry().register(self.mailbox, &capabilities);
-
-        // iamacoffeepot/aether#1128: re-seed the per-handler cost
-        // cells against the post-replace handler set, into BOTH
-        // indexes. The mailbox id is stable across replace
-        // (ADR-0022 §4), so the global `seed` reuses the prior cell
-        // for an unchanged kind (keeping its accumulated EWMA) and
-        // adds a neutral cell for a new one. `on_replace_component`
-        // runs on the trampoline's own dispatch thread inside
-        // `with_stamped`, so we can re-stamp the per-actor `CostCells`
-        // cache directly with the freshly-returned `Arc`s — keeping
-        // the cache exact across replace (a new kind's cell would
-        // otherwise miss until the cache happened to re-pull).
-        //
+        // Sync the post-replace declaration. iamacoffeepot/aether#1037: the
+        // mailbox id is stable across replace (ADR-0022 §4), so the accept set
+        // is overwritten in place and the validator sees it immediately.
+        // iamacoffeepot/aether#1128: the cost cells re-seed into both indexes,
+        // reusing the prior cell for an unchanged kind (keeping its
+        // accumulated EWMA) and adding a neutral cell for a new one; this
+        // handler runs on the trampoline's own dispatch thread inside
+        // `with_stamped`, so the per-actor cache stays exact across replace.
         // The trampoline's own framework arms ride along
-        // (iamacoffeepot/aether#4269): `capabilities` is the *guest's* handler
-        // set, and seeding from it alone dropped the cells for the kinds this
-        // native actor dispatches itself — `ReplaceComponent` among them, so
-        // this very handler's cost went unmeasured on every replace.
-        let mut handler_kinds: Vec<KindId> = <WasmTrampoline as Dispatch<Self>>::measured_kinds();
-        let guest_kinds: Vec<KindId> =
-            capabilities.handlers.iter().map(|h| h.id).filter(|id| !handler_kinds.contains(id)).collect();
-        handler_kinds.extend(guest_kinds);
-        let seeded = self.mailer.cost_table().seed(self.mailbox, &handler_kinds);
-        CostCells::try_with_mut(|cells| cells.seed(seeded));
+        // (iamacoffeepot/aether#4269), `ReplaceComponent` among them, so this
+        // very handler's cost stays measured.
+        ctx.sync_guest(self);
 
         ReplaceResult::Ok { capabilities }
     }
@@ -518,7 +500,6 @@ fn declared_kinds(wasm: &[u8]) -> Result<HashSet<KindId>, String> {
 pub(super) struct SiblingSpawnContext {
     parent_name: String,
     subname: String,
-    capabilities: ComponentCapabilities,
 }
 
 #[derive(Clone)]

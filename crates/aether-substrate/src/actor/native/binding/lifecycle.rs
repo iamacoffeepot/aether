@@ -12,6 +12,8 @@ use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
+#[cfg(feature = "wasm")]
+use crate::mail::CostCells;
 use crate::mail::mailer::Mailer;
 use crate::mail::registry::{AddressResolutionError, RegistrySubscription};
 use crate::mail::{KindId, MailId, MailboxId};
@@ -20,6 +22,8 @@ use crate::runtime::lifecycle::FatalAborter;
 use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
 use aether_data::{ActorPath, KindDescriptor};
+#[cfg(feature = "wasm")]
+use aether_kinds::ComponentCapabilities;
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -299,6 +303,39 @@ impl NativeBinding {
         dependencies: impl IntoIterator<Item = (u8, &'a str)>,
     ) -> Option<&'a str> {
         self.mailer.missing_dependency_under(self.self_mailbox(), dependencies)
+    }
+
+    /// Make this actor's accept set exactly `guest`, and seed a cost cell for
+    /// every kind in `measured`, reusing the cell a row already holds, into
+    /// both the global table and the per-actor cache. The path behind
+    /// [`NativeCtx::sync_guest`](crate::actor::native::ctx::NativeCtx::sync_guest)
+    /// for a resident guest.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn host_guest(&self, guest: &ComponentCapabilities, measured: &[KindId]) {
+        self.mailer.capability_registry().register(self.self_mailbox(), guest);
+        self.seed_costs(measured);
+    }
+
+    /// Clear this actor's accept set and drop its cost rows, then re-seed
+    /// `measured` into both indexes. The path behind
+    /// [`NativeCtx::sync_guest`](crate::actor::native::ctx::NativeCtx::sync_guest)
+    /// for an empty slot.
+    #[cfg(feature = "wasm")]
+    pub(crate) fn release_guest(&self, measured: &[KindId]) {
+        self.mailer.capability_registry().remove(self.self_mailbox());
+        self.mailer.cost_table().drop_mailbox(self.self_mailbox());
+        self.seed_costs(measured);
+    }
+
+    /// Seed `measured` into the global cost table and stamp the same cells
+    /// into the per-actor `CostCells` cache. It runs on the actor's own turn,
+    /// inside `with_stamped`, so both indexes share each cell.
+    #[cfg(feature = "wasm")]
+    fn seed_costs(&self, measured: &[KindId]) {
+        use aether_actor::Local as _;
+
+        let seeded = self.mailer.cost_table().seed(self.self_mailbox(), measured);
+        CostCells::try_with_mut(|cells| cells.seed(seeded));
     }
 
     /// #1757: the actor's reply-lineage allocator (a shared-counter

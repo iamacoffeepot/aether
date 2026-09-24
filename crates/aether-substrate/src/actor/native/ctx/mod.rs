@@ -8,8 +8,8 @@
 //! [`NativeInitCtx`] alongside the existing inherent methods, so
 //! user-facing handler bodies are now spelled in the same
 //! cross-transport vocabulary FFI guests use. Substrate-internal
-//! accessors (`mailer`, `publish_handle`, `transport_arc`, `self_id`,
-//! plus the `spawn_child` builder) stay inherent — they expose
+//! accessors (`mailer`, `publish_handle`, `transport_arc`, plus the
+//! `spawn_child` builder) stay inherent — they expose
 //! types that don't belong on a cross-transport trait
 //! (`Arc<Mailer>`, `Arc<Spawner>`, the chassis [`ExportedHandles`] map,
 //! the substrate-only `HandlerSpawnBuilder<'_, A>` whose
@@ -27,7 +27,8 @@
 //! (`inbound`), how it moves work off its own thread (`offload`),
 //! how it stages a registry batch (`registry`) or a child birth
 //! (`spawn`), how it retires itself and watches peers (`lifecycle`),
-//! and how raw + typed mail leaves it (`send`). `init` holds the
+//! how raw + typed mail leaves it (`send`), and what a guest host
+//! declares (`guest`). `init` holds the
 //! boot-time [`NativeInitCtx`], and `handles` the chassis-owned
 //! [`ExportedHandles`] map it publishes into.
 
@@ -45,6 +46,8 @@ use crate::mail::mailer::Mailer;
 use crate::runtime::effect_chain::EffectChain;
 
 mod address;
+#[cfg(feature = "wasm")]
+mod guest;
 mod handles;
 mod inbound;
 mod init;
@@ -57,6 +60,8 @@ mod spawn;
 #[cfg(test)]
 mod tests;
 
+#[cfg(feature = "wasm")]
+pub use guest::GuestHost;
 pub use handles::ExportedHandles;
 pub use init::NativeInitCtx;
 
