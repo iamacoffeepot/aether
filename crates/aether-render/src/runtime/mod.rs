@@ -1308,17 +1308,13 @@ mod tests {
     use super::super::{ScreenTriangle, ScreenVertex, Shape, TextureFormat, TextureSampling, TextureUsage};
     use super::texture::StagedTexture;
     use super::*;
-    use aether_data::{KindId, MailId, MailboxId, Source, SourceAddr};
-    use aether_data::{SessionToken, Uuid};
+    use aether_data::{KindId, MailId, Source};
     use aether_kinds::QuadSpace;
-    use aether_kinds::trace::Nanos;
     use aether_math::Rgba;
     use aether_substrate::actor::native::binding::NativeBinding;
-    use aether_substrate::actor::native::envelope::Envelope;
-    use aether_substrate::chassis::inbox::SettlingInbox;
+    use aether_substrate::mail::EgressEvent;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
-    use aether_substrate::mail::{EgressEvent, MailRef};
     use aether_substrate::testing::{
         decode_reply, fresh_substrate_and_rx, manual_dispatch_ctx, registered_ref, session_sender, test_mailer_and_rx,
         unrouted_binding,
@@ -1340,33 +1336,16 @@ mod tests {
 
     /// Build a `PendingCapture` whose retained guard replies to a Session
     /// source so the toy pump can observe the deferred reply through the
-    /// egress channel. The inbound is queued straight onto a
-    /// `SettlingInbox` (no route), then drained to the guard.
+    /// egress channel. The guard is the one inbound a `<Manual>` dispatch
+    /// ctx carries (no route), taken out of the ctx.
     fn parked_capture(
         mailer: &Arc<Mailer>,
         window: Option<WindowId>,
         pre_remaining: usize,
         deadline: Instant,
     ) -> PendingCapture {
-        let id = MailboxId(0x0CA8);
-        let (tx, rx) = mpsc::channel::<Envelope>();
-        tx.send(OwnedDispatch::disarmed(
-            KindId(0),
-            None,
-            // A Session sender routes the guard's reply to the egress rx.
-            Source::to(SourceAddr::Session(SessionToken(Uuid::nil()))),
-            MailRef::from(Vec::new()),
-            1,
-            MailId::NONE,
-            MailId::NONE,
-            None,
-            Nanos(0),
-            0,
-            id,
-        ))
-        .expect("queue the inbound");
-        let inbox = SettlingInbox::new(id, rx, Arc::clone(mailer));
-        let reply = inbox.try_next().expect("one queued");
+        let binding = ctx_binding(mailer);
+        let reply = manual_dispatch_ctx::<RenderCapability>(&binding, session_sender()).take_inbound();
         PendingCapture {
             window,
             reply,
