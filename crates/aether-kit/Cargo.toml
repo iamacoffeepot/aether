@@ -18,8 +18,9 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# An embedding cdylib (the shelved aether-kit-workbench inline-spawned one of kit's actors)
-# enables this to strip this crate's `export!` entry surface: one `export!` emits
+# An embedding cdylib (`aether-demo`, whose demo actor names `MeshViewer` by type
+# to declare it a dependency and send it mail) enables this to strip this crate's
+# `export!` entry surface: one `export!` emits
 # the FFI entries per wasm module, so the entry-free rlib face keeps the actor
 # impls without a second `receive_p32` / `init` colliding with the embedder's own
 # `export!` at link. Non-default, so kit's own wasm build still emits.

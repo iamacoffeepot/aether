@@ -82,6 +82,7 @@ server.
 | `aether-kit` | common standalone reference actors: camera + camera-controller, mesh viewer |
 | `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
+| `aether-demo` | the release demo: its bring-up component (`aether.demo`, which sends the kit mesh viewer its load at boot), depot spec, boot manifest, and controller config |
 | `aether-puppet` | the wasm-hosted mascot actor: mesh-derived pen-plotter line art, authored face controls, rigging, and render mail |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
