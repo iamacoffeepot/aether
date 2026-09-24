@@ -25,7 +25,8 @@ use crate::kinds::Detail;
 #[derive(Clone, Copy)]
 pub struct Sync;
 
-/// Same injected map and staging as [`Sync`], plus awaitable journal `read` on a miss.
+/// Same injected map and staging as [`Sync`], plus an awaitable `read` that fetches a miss
+/// through the bundle root and the driver, which forwards it to the journal.
 #[derive(Clone, Copy)]
 pub struct Async;
 
@@ -37,7 +38,9 @@ struct Inner {
     terminal: BTreeMap<Digest, Refusal>,
 }
 
-/// One journal `ReadArtifact` the invocation child must send before polling again.
+/// One `ReadArtifact` the invocation child must send to its bundle root before polling again.
+///
+/// The root relays it to the driver, which forwards it to the journal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct PendingArtifact {
     /// Digest the program asked to fetch.

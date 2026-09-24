@@ -370,8 +370,13 @@ mod tests {
                     loop {
                         if let Some(i) = lc.claim() {
                             mine.push(i);
-                        } else if producer_done.load(Ordering::Acquire) && lc.claim().is_none() {
-                            break;
+                        } else if producer_done.load(Ordering::Acquire) {
+                            // The producer is done, so one more claim either finds a
+                            // straggler, which counts like any other, or ends the worker.
+                            match lc.claim() {
+                                Some(i) => mine.push(i),
+                                None => break,
+                            }
                         } else {
                             thread::yield_now();
                         }

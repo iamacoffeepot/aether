@@ -33,7 +33,7 @@ use std::sync::Arc;
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use aether_actor::{Manual, Root};
+use aether_actor::{ErasedActorRef, Manual, Root};
 use aether_data::{Kind, KindId, MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
 use aether_kinds::descriptors;
 use aether_kinds::trace::Nanos;
@@ -133,15 +133,17 @@ pub fn unrouted_binding(mailer: &Arc<Mailer>) -> Arc<NativeBinding> {
 }
 
 /// A spawner-less binding over `mailer` whose own mailbox is `handler`,
-/// registered in `registry` under `name`.
+/// registered in `registry` under `name`, returned beside the proven
+/// reference to that mailbox.
 ///
 /// Mail to the binding's own mailbox — a worker's completion wake, a
 /// coalesced self-wake — lands in `handler`, and the binding stamps the
 /// registered mailbox as the source of what it sends, so a test that
-/// asserts that source reads the expected address back through
-/// [`Registry::lookup`]. `registry` must be the one `mailer` routes
-/// through; it is taken explicitly, the way [`boot_test_chassis_with`]
-/// takes it.
+/// asserts that source compares the stamped sender against the returned
+/// reference. The reference is proven by the registry's own liveness read,
+/// the same one a handler's `ctx.resolve_live` takes. `registry` must be
+/// the one `mailer` routes through; it is taken explicitly, the way
+/// [`boot_test_chassis_with`] takes it.
 ///
 /// # Panics
 /// Panics if `name` is already registered.
@@ -150,9 +152,27 @@ pub fn registered_binding(
     mailer: &Arc<Mailer>,
     name: &str,
     handler: Arc<dyn InboxHandler>,
-) -> Arc<NativeBinding> {
+) -> (Arc<NativeBinding>, ErasedActorRef) {
     let mailbox = registry.register_inbox(&boot_authority(), name, handler);
-    Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), mailbox))
+    let reference = registry.resolve_live(mailbox).expect("a freshly registered inbox proves");
+
+    (Arc::new(NativeBinding::new_for_test(Arc::clone(mailer), mailbox)), reference)
+}
+
+/// Register `handler` in `registry` under `name` and return the proven
+/// reference to it — the peer a cap test hands its code under test as a
+/// subscriber, a sender, or a shard.
+///
+/// The reference is proven by the registry's own liveness read, the same
+/// one a handler's `ctx.resolve_live` takes, so a fixture proof and a
+/// production proof come from the same code.
+///
+/// # Panics
+/// Panics if `name` is already registered.
+pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHandler>) -> ErasedActorRef {
+    registry
+        .resolve_live(registry.register_inbox(&boot_authority(), name, handler))
+        .expect("a freshly registered inbox proves")
 }
 
 /// Boot a `TestChassis` carrying exactly one cap `A` with `config`. The

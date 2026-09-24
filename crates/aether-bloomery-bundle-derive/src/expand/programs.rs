@@ -11,28 +11,59 @@ use super::root::RolePieces;
 use crate::classify::ProgramEntry;
 
 const INVOCATION_IDENT: &str = "__AetherBloomeryBundleInvocation";
+const STATE_IDENT: &str = "__AetherBloomeryBundleProgramState";
 const TABLE_IDENT: &str = "__AETHER_BLOOMERY_BUNDLE_PROGRAM_TABLE";
 
 pub fn pieces(root: &Ident, programs: &[ProgramEntry]) -> RolePieces {
     let program = quote! { ::aether_bloomery_bundle::__macro_internals::aether_bloomery_program };
     let table = format_ident!("{TABLE_IDENT}");
     let invocation = format_ident!("{INVOCATION_IDENT}");
+    let state = format_ident!("{STATE_IDENT}");
     let field = quote! {
-        programs: #program::Root<::core::option::Option<::aether_actor::ReplyHandle>>,
+        programs: #state,
     };
     let init = quote! {
-        let programs = #program::Root::new(&#table);
+        let programs = #state {
+            root: #program::Root::new(&#table),
+            invokers: #program::__macro_internals::BTreeMap::new(),
+            fetches: #program::__macro_internals::BTreeMap::new(),
+        };
     };
     let handlers = expand_handlers(root, &invocation, &program);
+    let state_struct = expand_state(&state, &program);
     let table_static = expand_table(&table, programs, &program);
     let invocation_actor = expand_invocation(root, &invocation, &table, &program, programs);
     let sections = programs.iter().map(|entry| expand_section(entry, &program));
     let items = quote! {
+        #state_struct
         #table_static
         #invocation_actor
         #(#sections)*
     };
     RolePieces { field_name: format_ident!("programs"), field, init, handlers, items }
+}
+
+/// The program role's root state: the live-seq table plus the two relay maps
+/// a fetch-on-miss travels through. An invocation's fetch goes to its root,
+/// which sends it to whoever sent that invocation's `Invoke` (the driver) and
+/// relays the answer back to the invocation.
+fn expand_state(state: &Ident, program: &TokenStream2) -> TokenStream2 {
+    quote! {
+        struct #state {
+            root: #program::Root<::core::option::Option<::aether_actor::ReplyHandle>>,
+            /// Each live invocation's `Invoke` sender, keyed by the invocation.
+            invokers: #program::__macro_internals::BTreeMap<
+                ::aether_actor::ErasedActorRef,
+                ::aether_actor::ErasedActorRef,
+            >,
+            /// The invocation each relayed fetch answers to, keyed by the
+            /// root's own request.
+            fetches: #program::__macro_internals::BTreeMap<
+                #program::__macro_internals::RequestId,
+                ::aether_actor::ErasedActorRef,
+            >,
+        }
+    }
 }
 
 fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> TokenStream2 {
@@ -44,7 +75,7 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             invoke: #program::Invoke,
         ) {
             use ::aether_actor::OutboundReply;
-            match self.programs.admit(&invoke) {
+            match self.programs.root.admit(&invoke) {
                 ::core::result::Result::Err(rejected) => {
                     if ctx.reply_target().is_some() {
                         ctx.reply(&rejected);
@@ -60,6 +91,9 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
                     ) {
                         ::core::result::Result::Ok(child) => {
                             admission.start(child.id(), ctx.reply_target());
+                            if let Some(invoker) = ctx.sender() {
+                                self.programs.invokers.insert(child.erase(), invoker);
+                            }
                             child.send(ctx, &invoke);
                         }
                         ::core::result::Result::Err(_) => {
@@ -83,13 +117,56 @@ fn expand_handlers(root: &Ident, invocation: &Ident, program: &TokenStream2) -> 
             let Some(sender) = ctx.sender() else {
                 return;
             };
-            let Some((_, reply)) = self.programs.finish(&invoked, Some(sender.id())) else {
+            let Some((_, reply)) = self.programs.root.finish(&invoked, Some(sender.id())) else {
                 return;
             };
+            self.programs.invokers.remove(&sender);
             if let Some(reply) = reply {
                 ctx.reply_to(reply, &invoked);
             }
             ctx.despawn_inline_child(sender);
+        }
+
+        #[handler::manual]
+        fn on_read_artifact(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            request: #program::kinds::ReadArtifact,
+        ) {
+            use ::aether_actor::{MailSender, OutboundReply};
+            let Some(sender) = ctx.sender() else {
+                return;
+            };
+            let Some(invoker) = self.programs.invokers.get(&sender).copied() else {
+                let refused = #program::kinds::ReadArtifactResult::Err {
+                    digest: request.digest,
+                    message: #program::__macro_internals::ToString::to_string("no live invocation sent this fetch"),
+                };
+                if ctx.reply_target().is_some() {
+                    ctx.reply(&refused);
+                } else {
+                    ctx.send_to(sender, &refused);
+                }
+                return;
+            };
+            ctx.send_to(invoker, &request);
+            let fetch = #program::__macro_internals::RequestId(ctx.prev_correlation());
+            self.programs.fetches.insert(fetch, sender);
+        }
+
+        #[handler::manual]
+        fn on_read_artifact_result(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_, ::aether_actor::Erased, ::aether_actor::Manual>,
+            result: #program::kinds::ReadArtifactResult,
+        ) {
+            let Some(fetch) = ctx.in_reply_to() else {
+                return;
+            };
+            let Some(invocation) = self.programs.fetches.remove(&fetch) else {
+                return;
+            };
+            ctx.send_to(invocation, &result);
         }
     }
 }
@@ -120,13 +197,18 @@ fn expand_invocation(
     let api_tys: Vec<_> = programs.iter().flat_map(|entry| entry.meta.apis.iter()).collect();
     let resume = resume_after_poll(program);
     let send_pending = expand_send_pending(program, api_tys.as_slice());
+    let fetch_reply = expand_fetch_reply(program);
     quote! {
         struct #invocation {
             session: ::core::option::Option<#program::AsyncSession>,
             parent: ::core::option::Option<::aether_actor::ErasedActorRef>,
             waiting: #program::__macro_internals::BTreeMap<
                 #program::__macro_internals::RequestId,
-                #program::__macro_internals::Pending,
+                #program::__macro_internals::PendingCall,
+            >,
+            fetching: #program::__macro_internals::BTreeMap<
+                #program::kinds::Digest,
+                #program::__macro_internals::PendingArtifact,
             >,
         }
 
@@ -141,6 +223,7 @@ fn expand_invocation(
                     session: ::core::option::Option::None,
                     parent: ::core::option::Option::None,
                     waiting: #program::__macro_internals::BTreeMap::new(),
+                    fetching: #program::__macro_internals::BTreeMap::new(),
                 })
             }
 
@@ -164,39 +247,24 @@ fn expand_invocation(
                 }
             }
 
+            #fetch_reply
+
             #[fallback]
             fn on_mail(&mut self, ctx: &mut ::aether_actor::WasmCtx<'_>, mail: ::aether_actor::Mail<'_>) {
                 let Some(request) = ctx.in_reply_to() else {
                     return;
                 };
-                let Some(expected) = self.waiting.remove(&request) else {
+                let Some(pending) = self.waiting.remove(&request) else {
                     return;
                 };
-                let expected_kind = match &expected {
-                    #program::__macro_internals::Pending::Artifact(_) => {
-                        <#program::kinds::ReadArtifactResult as #program::__macro_internals::Kind>::ID
-                    }
-                    #program::__macro_internals::Pending::Send(pending) => pending.expected_reply,
-                };
-                if mail.kind() != expected_kind {
-                    self.waiting.insert(request, expected);
+                if mail.kind() != pending.expected_reply {
+                    self.waiting.insert(request, pending);
                     return;
                 }
                 let Some(session) = self.session.as_mut() else {
                     return;
                 };
-                match expected {
-                    #program::__macro_internals::Pending::Artifact(pending) => {
-                        let Some(result) = mail.decode_kind::<#program::kinds::ReadArtifactResult>() else {
-                            self.waiting.insert(request, #program::__macro_internals::Pending::Artifact(pending));
-                            return;
-                        };
-                        session.fulfill(pending, result);
-                    }
-                    #program::__macro_internals::Pending::Send(pending) => {
-                        session.fulfill_send(&pending, mail.kind(), mail.bytes().to_vec());
-                    }
-                }
+                session.fulfill_send(&pending, mail.kind(), mail.bytes().to_vec());
                 #resume
             }
         }
@@ -217,12 +285,46 @@ fn expand_invocation(
     }
 }
 
+/// The invocation's handler for its root's relay of a fetch-on-miss answer.
+fn expand_fetch_reply(program: &TokenStream2) -> TokenStream2 {
+    let resume = resume_after_poll(program);
+    quote! {
+        /// The root's relay of this invocation's fetch-on-miss answer. It
+        /// arrives as a cluster-local send from the parent, which carries
+        /// no correlation, so the wait is keyed by the fetched digest.
+        #[handler::single]
+        fn on_read_artifact_result(
+            &mut self,
+            ctx: &mut ::aether_actor::WasmCtx<'_>,
+            result: #program::kinds::ReadArtifactResult,
+        ) {
+            if self.parent.is_none() || ctx.sender() != self.parent {
+                return;
+            }
+            let digest = match &result {
+                #program::kinds::ReadArtifactResult::Found { digest, .. }
+                | #program::kinds::ReadArtifactResult::Missing { digest }
+                | #program::kinds::ReadArtifactResult::Err { digest, .. } => *digest,
+            };
+            let Some(pending) = self.fetching.remove(&digest) else {
+                return;
+            };
+            let Some(session) = self.session.as_mut() else {
+                return;
+            };
+            session.fulfill(pending, result);
+            #resume
+        }
+    }
+}
+
 fn resume_after_poll(program: &TokenStream2) -> TokenStream2 {
     quote! {
         match session.poll() {
             #program::__macro_internals::PollResult::Finished(invoked) => {
                 self.session = ::core::option::Option::None;
                 self.waiting.clear();
+                self.fetching.clear();
                 self.reply_invoked(ctx, &invoked);
             }
             #program::__macro_internals::PollResult::NeedArtifact(pending) => {
@@ -243,16 +345,24 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
             &mut self,
             ctx: &mut ::aether_actor::WasmCtx<'_, A, M>,
             pending: #program::__macro_internals::Pending,
-        ) where
-            A: ::aether_actor::Reaches<#program::__macro_internals::JournalRoot>,
-        {
+        ) {
             use ::aether_actor::MailSender;
             match pending {
                 #program::__macro_internals::Pending::Artifact(pending) => {
-                    ctx.actor::<#program::__macro_internals::JournalRoot>()
-                        .send(&#program::kinds::ReadArtifact { digest: pending.digest });
-                    let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
-                    self.waiting.insert(request, #program::__macro_internals::Pending::Artifact(pending));
+                    let Some(parent) = self.parent else {
+                        if let Some(session) = self.session.as_mut() {
+                            session.fulfill(pending, #program::kinds::ReadArtifactResult::Err {
+                                digest: pending.digest,
+                                message: #program::__macro_internals::ToString::to_string(
+                                    "the invocation has no parent to fetch through",
+                                ),
+                            });
+                            #resume
+                        }
+                        return;
+                    };
+                    ctx.send_to(parent, &#program::kinds::ReadArtifact { digest: pending.digest });
+                    self.fetching.insert(pending.digest, pending);
                 }
                 #program::__macro_internals::Pending::Send(pending) => {
                     const ALLOWED: &[&str] = &[
@@ -269,7 +379,7 @@ fn expand_send_pending(program: &TokenStream2, api_tys: &[&syn::Type]) -> TokenS
                     }
                     pending.dispatch(ctx);
                     let request = #program::__macro_internals::RequestId(ctx.prev_correlation());
-                    self.waiting.insert(request, #program::__macro_internals::Pending::Send(pending));
+                    self.waiting.insert(request, pending);
                 }
             }
         }

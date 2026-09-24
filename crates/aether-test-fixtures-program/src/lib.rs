@@ -3,7 +3,7 @@
 use std::future;
 
 use aether_actor::export;
-use aether_bloomery_kinds::{Mode, OpaqueBytes, Ref, Refusal, Utf8Text};
+use aether_bloomery_kinds::{Digest, Mode, OpaqueBytes, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::kinds::Detail;
 use aether_bloomery_program::{Async, Env, Http, Process, Program, Sync, program};
 use aether_http::{Fetch, FetchResult, HttpMethod};
@@ -168,10 +168,39 @@ impl Program for Stall {
     }
 }
 
-export!(Summarize, Refuse, FetchBody, Exec, Stall, generators = [aether_bloomery_bundle::bundle]);
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_uncited.input")]
+struct ReadUncitedInput {
+    text: Digest,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.read_uncited.result")]
+struct ReadUncitedResult {
+    text: Ref<Utf8Text>,
+}
+
+struct ReadUncited;
+
+#[program]
+impl Program for ReadUncited {
+    const NAME: &'static str = "test.program.read_uncited";
+    const MODE: Mode = Mode::Pure;
+    const INTENT: &'static str = "Read text the input names by bare digest, which the closure does not carry.";
+    type Input = ReadUncitedInput;
+    type Result = ReadUncitedResult;
+
+    async fn run(input: Self::Input, env: &mut Env<Async>) -> Result<Self::Result, Refusal> {
+        let text = env.read_text(Ref::from_digest(input.text)).await?;
+        Ok(ReadUncitedResult { text: env.stage_text(&format!("fetched:{text}")) })
+    }
+}
+
+export!(Summarize, Refuse, FetchBody, Exec, Stall, ReadUncited, generators = [aether_bloomery_bundle::bundle]);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;
 const _: FetchBody = FetchBody;
 const _: Exec = Exec;
 const _: Stall = Stall;
+const _: ReadUncited = ReadUncited;

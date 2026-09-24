@@ -22,7 +22,9 @@ mod tests {
     /// of `ReplyEnd`. The drop routes through the component host's
     /// `forward_to` and the replace through its tracked forward; before
     /// the issue-1466 fix the forward let the call settle before the
-    /// trampoline replied, so the reply set came back empty.
+    /// trampoline replied, so the reply set came back empty. The replace
+    /// names no export, so it reuses the hosted `QuietProbe` and checks
+    /// only its dependencies, which headless serves.
     #[test]
     fn forwarded_replace_and_drop_route_their_reply() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -50,19 +52,11 @@ mod tests {
         };
 
         // Replace probe-with-probe. The reply set is empty before the
-        // fix (`ReplyEnd` with zero events); populated after. The replace
-        // names its export too: a replace with no export checks the module's
-        // first group, `Probe`, whose observer headless does not register.
+        // fix (`ReplyEnd` with zero events); populated after.
         let replace_replies = harness.send::<ReplaceComponent>(
             engine,
             "aether.component",
-            &ReplaceComponent {
-                target: path.clone(),
-                wasm,
-                drain_timeout_ms: None,
-                config: Vec::new(),
-                export: Some("test.quiet_probe".to_owned()),
-            },
+            &ReplaceComponent { target: path.clone(), wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
         );
         assert!(
             !replace_replies.is_empty(),

@@ -7,6 +7,7 @@
 - **Amended:** 2026-09-21 — chassis mounting lands in `aether-chassis-bloomery`: base stratum + component host + RPC server, with the journal owner and the driver spawned post-build as `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`, which widens the unauthenticated-writes consequence to any local process reaching a bound RPC port (issue #6244).
 - **Amended:** 2026-09-23 — decision 10: the driver sends `WatchHead` on a fresh chain (issue #6401).
 - **Amended:** 2026-09-23 — the bloomery's RPC listener binds only after the journal owner and the driver are mounted, so a reachable engine can take driver calls (issue #6399).
+- **Amended:** 2026-09-24 — a bundle's fetch-on-miss travels invocation → bundle root → driver, and the driver forwards it to the journal owner with the reply pinned to the root; a bundle addresses no journal position (issue #6478).
 
 ## Context
 
@@ -304,7 +305,11 @@ Nothing on main can carry any of this yet:
   #6244): base stratum + component host + RPC server, with the journal
   owner and the driver spawned post-build as
   `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`,
-  then binds the RPC listener (issue #6399).
+  then binds the RPC listener (issue #6399). A bundle's fetch-on-miss
+  travels invocation → bundle root → driver, the driver forwards it to
+  the journal owner with the reply pinned to the root, and the root
+  relays the answer to the invocation, so bundles address no journal
+  position (issue #6478).
 - **Amendments.** Following ADR-0224's precedent, the older ADRs stay
   unedited. This ADR amends:
   - ADR-0223: the feeder becomes this driver; `DropComponent` is never

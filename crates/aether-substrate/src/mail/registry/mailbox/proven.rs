@@ -240,9 +240,11 @@ impl Registry {
     /// is ADR-0230's closing consequence — the proof is about the actor the
     /// position reaches, not about the shape of the route record.
     ///
-    /// Its one caller is
+    /// Its callers are
     /// [`NativeCtx::resolve_live`](crate::actor::native::NativeCtx::resolve_live),
-    /// the single public spelling a capability uses.
+    /// the single public spelling a capability uses, and the test-support
+    /// fixtures `testing::registered_ref` and `testing::registered_binding`,
+    /// which prove the inbox they just registered.
     pub(crate) fn resolve_live(&self, position: MailboxId) -> Result<ErasedActorRef, ResolveLiveError> {
         let routes = self.routes.load();
         match resolve_route(position, |candidate| routes.entry_for(&candidate)) {

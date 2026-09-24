@@ -2,9 +2,11 @@
 //! entry has no `Live` route is refused before it is created — the load, the
 //! module boot actor, or the replacement replies its operation's `Err`
 //! naming the actor and the missing namespace, before `init` runs. The
-//! fourth site is the module itself (ADR-0230 §3): a load or replace also
-//! refuses when an actor its module can spawn inline declares a dependency
-//! with no `Live` route, before anything in the module runs.
+//! trampoline checks the replacement site against the type it will host;
+//! the other sites are checked by the component host. The fourth site is
+//! the module itself (ADR-0230 §3): a load or replace also refuses when an
+//! actor its module can spawn inline declares a dependency with no `Live`
+//! route, before anything in the module runs.
 
 use std::collections::HashSet;
 
@@ -33,32 +35,13 @@ pub(super) fn missing_dependency<'a>(
     registry.missing_dependency(parent, dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
 }
 
-/// The refusal error for a replacement whose target actor declares a
+/// The refusal error for a replacement whose hosted type declares a
 /// dependency with no `Live` route, or `None` when the replacement may
-/// proceed. The target is the named export, or the first non-boot group
-/// for a bare replace; the parent is the replaced actor's own, read back
-/// from the registry. An actor the registry does not know cannot swap, so
-/// there is nothing to refuse and the replace proceeds down its existing
-/// path.
-pub(super) fn replacement_refusal(
-    registry: &Registry,
-    actor_mailbox: MailboxId,
-    actors: &[ActorInputs],
-    export: Option<&str>,
-    boot: Option<&str>,
-) -> Option<String> {
-    let canonical = registry.mailbox_name(actor_mailbox)?;
-    let group = match export {
-        // An export the new module does not declare stays the trampoline's
-        // error, as today.
-        Some(requested) => actors.iter().find(|actor| actor.namespace.as_deref() == Some(requested))?,
-        // A bare replace reuses the trampoline's current hosted type, which
-        // the host does not track; the first group stands in, except the
-        // boot group — the boot actor is never the hosted type, and its own
-        // dependencies are checked separately, under the component host,
-        // when the replacement module boot stages.
-        None => actors.iter().find(|actor| boot.is_none_or(|ns| actor.namespace.as_deref() != Some(ns)))?,
-    };
+/// proceed. The caller is the trampoline, which passes its own canonical
+/// name and the dependencies of the type the replacement will host: the
+/// named export, or its current hosted type for a bare replace. The parent
+/// is the replaced actor's own, derived from `canonical`.
+pub fn replacement_refusal(registry: &Registry, canonical: &str, dependencies: &[Dependency]) -> Option<String> {
     // The parent path is the canonical path minus its leaf (`/` is
     // structural — a subname cannot contain it), resolved through the
     // registry like any other address. A parent that no longer resolves —
@@ -71,7 +54,7 @@ pub(super) fn replacement_refusal(
         .and_then(|(path, _)| ActorPath::new(path).ok())
         .and_then(|path| registry.resolve_address(&path).ok())
         .map(|resolved| resolved.mailbox_id);
-    missing_dependency(registry, parent, &group.dependencies).map(|namespace| dependency_refusal(&canonical, namespace))
+    missing_dependency(registry, parent, dependencies).map(|namespace| dependency_refusal(canonical, namespace))
 }
 
 /// The module's inline-spawnable groups, in declaration order, each with its
