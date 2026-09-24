@@ -1,7 +1,7 @@
 //! ADR-0138 fixture: a defaultless multi-actor module.
 //!
 //! Two `WasmActor` types, `Alpha` and `Beta`, exported via a bare
-//! `export!(Alpha, Beta)` with no `default =`. Per ADR-0138 that designates
+//! `export!(public = [Alpha, Beta])` with no `default =`. Per ADR-0138 that designates
 //! **no** bare-load default: the module carries the `aether.no_default` marker
 //! section and omits `aether.namespace`, so the host rejects a `load` with
 //! no export selector (a hard error naming the exports) while a named
@@ -52,6 +52,6 @@ impl WasmActor for Beta {
     fn on_ping(&mut self, _ctx: &mut WasmCtx<'_>, _ping: Ping) {}
 }
 
-// ADR-0138: a bare `export!(A, B)` (no `default =`) is deliberately
+// ADR-0138: `export!(public = [A, B])` with no `default =` is deliberately
 // defaultless — this is the whole point of the fixture.
-aether_actor::export!(Alpha, Beta);
+aether_actor::export!(public = [Alpha, Beta]);

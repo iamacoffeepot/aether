@@ -69,7 +69,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // an extra `wasm::` segment.
 pub use wasm::{
     ActorInitError, ActorTypeTag, ErasedWasmActor, InlineChild, ModuleChild, Rebuildable, RelativeMailbox, Sends,
-    SpawnError, WasmActor, WasmActorMailbox, WasmActorMailboxWithContext, WasmCtx, WasmDispatch, WasmDropCtx,
+    SpawnError, Spawns, WasmActor, WasmActorMailbox, WasmActorMailboxWithContext, WasmCtx, WasmDispatch, WasmDropCtx,
     WasmInitCtx, WireCtx,
 };
 

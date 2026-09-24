@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — module boot and default-export loading in `crates/aether-component/src/component/runtime/load.rs`, covered by `crates/aether-component/tests/boot.rs`)
 - **Date:** 2026-07-11
+- **Amended:** 2026-09-24 — `export!` takes keyed entries only, in any order; the boot slot is spelled `export!(boot = B, public = [A, …])`, optionally with `default = D` (issue 6584).
 
 ## Context
 

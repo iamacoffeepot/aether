@@ -1,7 +1,7 @@
 error: cannot find macro `Alias` in this scope
-  --> tests/ui/fail_export_type_alias.rs:21:9
+  --> tests/ui/fail_export_type_alias.rs:21:19
    |
-21 | export!(Alias, generators = [aether_bloomery_bundle::bundle]);
-   |         ^^^^^
+21 | export!(public = [Alias], generators = [aether_bloomery_bundle::bundle]);
+   |                   ^^^^^
    |
    = note: `Alias` is in scope, but it is a type alias, not a macro

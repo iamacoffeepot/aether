@@ -228,13 +228,13 @@ impl WasmActor for Echo {
     }
 }
 
-aether_actor::export!(Echo);
+aether_actor::export!(public = [Echo]);
 ```
 
 For multi-actor modules, declare the default explicitly:
 
 ```rust
-aether_actor::export!(default = Console, Inspector, Worker);
+aether_actor::export!(default = Console, public = [Inspector, Worker]);
 ```
 
 Without `default =`, a multi-actor module is defaultless and every load must select

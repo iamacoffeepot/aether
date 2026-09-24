@@ -69,4 +69,4 @@ impl WasmActor for Hello {
     }
 }
 
-aether_actor::export!(Hello);
+aether_actor::export!(public = [Hello]);

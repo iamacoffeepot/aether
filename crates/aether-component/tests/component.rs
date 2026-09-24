@@ -266,8 +266,8 @@ fn multi_actor_unknown_export_errors() {
     }
 }
 
-/// ADR-0138: a defaultless multi-actor module (a bare `export!(Alpha,
-/// Beta)`, no `entry =`) has no bare-load entry. A `load` with no export
+/// ADR-0138: a defaultless multi-actor module (`export!(public = [Alpha,
+/// Beta])`, no `default =`) has no bare-load entry. A `load` with no export
 /// selector is a hard `LoadResult::Err` that names the exports — not an
 /// instantiation of whichever type sits first — while a named
 /// `export: Some("test.defaultless.alpha")` load of the same module
@@ -528,7 +528,7 @@ fn replace_component_preserves_mailbox_identity() {
 /// ADR-0101: a multi-actor module's entry export carries state across
 /// `replace_component` through the `on_dehydrate` / `on_rehydrate`
 /// hooks, now `WasmActor` defaults rather than an opt-in subtrait. Loads
-/// the `stateful_replace` fixture (`export!(Counter, Sidecar)`), bumps
+/// the `stateful_replace` fixture (`export!(public = [Counter, Sidecar])`), bumps
 /// the entry `Counter`'s in-memory count to 3, replaces the wasm at the
 /// same mailbox id with the same binary, then re-queries the count.
 /// Because the boxed `ErasedWasmActor` now forwards the hooks, the count

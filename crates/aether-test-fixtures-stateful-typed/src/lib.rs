@@ -76,4 +76,4 @@ impl WasmActor for Counter {
     }
 }
 
-aether_actor::export!(Counter);
+aether_actor::export!(public = [Counter]);

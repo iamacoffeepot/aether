@@ -793,7 +793,7 @@ pub enum InputsRecord {
     /// reader lifts it into `ComponentCapabilities.config`.
     Config { id: KindId, name: Cow<'static, str> },
     /// ADR-0096: a per-actor boundary marker in a multi-actor module.
-    /// `export!(A, B, …)` writes one `ActorBoundary { namespace }` ahead
+    /// `export!(public = [A, B, …])` writes one `ActorBoundary { namespace }` ahead
     /// of each exported type's own handler / fallback / component-doc /
     /// config records, so the reader can group the flat record stream
     /// back into per-type capability sets. `namespace` is the type's

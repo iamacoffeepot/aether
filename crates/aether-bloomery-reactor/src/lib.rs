@@ -17,7 +17,7 @@
 //!
 //! [`Reactor::evaluate`] is the generated preparation/evaluation boundary.
 //! [`Reactor::visit_arms`] exposes trigger, [`Params`], and output types.
-//! `aether_actor::export!(…, generators = [aether_bloomery_bundle::bundle])`
+//! `aether_actor::export!(public = […], generators = [aether_bloomery_bundle::bundle])`
 //! collects framework-owned `actors` envelopes and an `exports` selection,
 //! selects the bloomery reactor extension on exported paths, keeps ordinary
 //! actors in the export list, and generates one digest-loaded root at
@@ -39,8 +39,7 @@
 //!
 //! ```ignore
 //! aether_actor::export!(
-//!     SourcePublisher,
-//!     SourceWitness,
+//!     public = [SourcePublisher, SourceWitness],
 //!     generators = [aether_bloomery_bundle::bundle],
 //! );
 //! ```

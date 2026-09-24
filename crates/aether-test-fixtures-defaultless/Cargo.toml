@@ -6,7 +6,7 @@ license.workspace = true
 publish = false
 
 # ADR-0138 fixture: a DEFAULTLESS multi-actor module. Two `WasmActor`
-# types (`Alpha`, `Beta`) exported via a bare `export!(Alpha, Beta)` (no
+# types (`Alpha`, `Beta`) exported via `export!(public = [Alpha, Beta])` (no
 # `default =`), so the module designates no bare-load default — a `load` with
 # no export selector against it is a hard error naming the exports, and a
 # named `export: Some("<NAMESPACE>")` load resolves as usual. Standalone

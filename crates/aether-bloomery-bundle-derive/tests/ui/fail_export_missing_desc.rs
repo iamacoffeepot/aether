@@ -4,6 +4,6 @@ use aether_actor::export;
 
 struct Plain;
 
-export!(Plain, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Plain], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

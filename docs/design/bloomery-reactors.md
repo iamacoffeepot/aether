@@ -154,7 +154,7 @@ impl Reactor for SceneCompilation {
 }
 
 aether_actor::export!(
-    SceneCompilation,
+    public = [SceneCompilation],
     generators = [aether_bloomery_reactor::bundle_reactors],
 );
 ```

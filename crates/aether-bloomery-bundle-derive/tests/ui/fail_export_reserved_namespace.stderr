@@ -4,7 +4,7 @@ error: NAMESPACE `aether.bloomery.bundle` is reserved for the generated bundle r
 19 | #[actor]
    | ^^^^^^^^
 ...
-46 | export!(Probe, Listed, generators = [aether_bloomery_bundle::bundle]);
-   | --------------------------------------------------------------------- in this macro invocation
+46 | export!(public = [Probe, Listed], generators = [aether_bloomery_bundle::bundle]);
+   | -------------------------------------------------------------------------------- in this macro invocation
    |
    = note: this error originates in the macro `$crate::__export_collect` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)

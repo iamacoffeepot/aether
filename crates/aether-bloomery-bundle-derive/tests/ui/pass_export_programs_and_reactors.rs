@@ -93,6 +93,6 @@ macro_rules! RequireOneRoot {
     };
 }
 
-export!(default = Probe, One, Publisher, generators = [aether_bloomery_bundle::bundle, RequireOneRoot]);
+export!(default = Probe, public = [One, Publisher], generators = [aether_bloomery_bundle::bundle, RequireOneRoot]);
 
 fn main() {}

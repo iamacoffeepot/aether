@@ -1,12 +1,8 @@
 error: export! default cannot be a reactor in a mixed module; name an ordinary actor or omit default
   --> tests/ui/fail_export_default_reactor.rs:35:1
    |
-35 | / export!(
-36 | |     default = Publisher,
-37 | |     Sink,
-38 | |     generators = [aether_bloomery_bundle::bundle],
-39 | | );
-   | |_^
+35 | export!(default = Publisher, public = [Sink], generators = [aether_bloomery_bundle::bundle]);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
    |
    = note: this error originates in the macro `$crate::__export_parse` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)
 

@@ -59,7 +59,7 @@ impl WasmActor for Echo {
     }
 }
 
-aether_actor::export!(Echo);
+aether_actor::export!(public = [Echo]);
 ```
 
 A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
@@ -78,15 +78,15 @@ The contracts are visible in the types:
 
 ## 3. Make default selection explicit
 
-For one actor, `export!(Echo)` is unambiguous. For several actors choose whether
-the module has a default:
+`export!` takes keyed entries only. For one actor, `export!(public = [Echo])` is
+unambiguous. For several actors choose whether the module has a default:
 
 ```rust
 // Bare loads select Console; other actors remain selectable.
-aether_actor::export!(default = Console, Inspector, Worker);
+aether_actor::export!(default = Console, public = [Inspector, Worker]);
 
 // No default: every load must select Alpha or Beta explicitly.
-aether_actor::export!(Alpha, Beta);
+aether_actor::export!(public = [Alpha, Beta]);
 ```
 
 Declaration order does **not** make the first actor the default. Defaultless

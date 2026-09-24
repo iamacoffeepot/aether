@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Rebuildable,
-    Sends, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Sends,
+    Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -207,7 +207,7 @@ impl WidgetPanel {
     /// the spec is ignored — the panel owns layout). Each widget gets its rect
     /// in both the composite layout table and the focus table, and its
     /// `WidgetFrame`. An empty child list falls back to [`reference_stack`].
-    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -371,10 +371,56 @@ fn stack_row<K: Copy>(key: K, width_pixels: Option<f32>, height_pixels: f32) -> 
     Row::cells(height_pixels, vec![cell])
 }
 
+/// The sixteen stock widget children [`spawn_widget_child`] can spawn inline,
+/// as one bound. [`WidgetPanel`] and [`ScrollWidget`] declare all sixteen in
+/// their `#[actor(spawns(..))]`, so a generic helper that reaches
+/// [`spawn_widget_child`] names this bound instead of sixteen [`Spawns`]
+/// bounds. The blanket impl is the only one: an actor has it exactly when it
+/// declares every one of the sixteen.
+pub trait SpawnsWidgets:
+    Spawns<LabelWidget>
+    + Spawns<ImageWidget>
+    + Spawns<SliderWidget>
+    + Spawns<RadioGroupWidget>
+    + Spawns<TextFieldWidget>
+    + Spawns<TextAreaWidget>
+    + Spawns<ButtonWidget>
+    + Spawns<VirtualListWidget>
+    + Spawns<Widget>
+    + Spawns<ScrollWidget>
+    + Spawns<ToggleWidget>
+    + Spawns<SegmentedWidget>
+    + Spawns<NumericWidget>
+    + Spawns<DropdownWidget>
+    + Spawns<TabStripWidget>
+    + Spawns<MenuBarWidget>
+{
+}
+
+impl<A> SpawnsWidgets for A where
+    A: Spawns<LabelWidget>
+        + Spawns<ImageWidget>
+        + Spawns<SliderWidget>
+        + Spawns<RadioGroupWidget>
+        + Spawns<TextFieldWidget>
+        + Spawns<TextAreaWidget>
+        + Spawns<ButtonWidget>
+        + Spawns<VirtualListWidget>
+        + Spawns<Widget>
+        + Spawns<ScrollWidget>
+        + Spawns<ToggleWidget>
+        + Spawns<SegmentedWidget>
+        + Spawns<NumericWidget>
+        + Spawns<DropdownWidget>
+        + Spawns<TabStripWidget>
+        + Spawns<MenuBarWidget>
+{
+}
+
 /// Decode, spawn, and derive one panel child's static/dynamic routing profile.
 /// Keeping this dispatch out of `ensure_spawned` leaves the layout loop focused
 /// on ordering and placement.
-pub fn spawn_widget_child<A>(
+pub fn spawn_widget_child<A: SpawnsWidgets>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -407,7 +453,11 @@ pub fn spawn_widget_child<A>(
 /// [`spawn_row_control_child`] does: the exhaustive dispatcher above stays a
 /// dispatcher, and a reader looking for one kind's profile finds every
 /// sibling profile beside it.
-fn spawn_content_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_content_child<A: SpawnsWidgets>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
     match spec.kind {
         WidgetKind::Label => decode_child::<LabelConfig>(spec).and_then(|config| {
             let reference = spawn::<LabelWidget, A>(ctx, &spec.subname, &config)?;
@@ -510,7 +560,11 @@ fn spawn_content_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSp
     }
 }
 
-fn spawn_button_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpec, row: f32) -> Option<SpawnedChild> {
+fn spawn_button_child<A: Spawns<ButtonWidget>>(
+    ctx: &mut WasmCtx<'_, A, Manual>,
+    spec: &WidgetChildSpec,
+    row: f32,
+) -> Option<SpawnedChild> {
     let config = decode_child::<ButtonConfig>(spec)?;
     let reference = spawn::<ButtonWidget, A>(ctx, &spec.subname, &config)?;
     Some(SpawnedChild {
@@ -527,7 +581,7 @@ fn spawn_button_child<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSpe
     })
 }
 
-fn spawn_virtual_list_child<A>(
+fn spawn_virtual_list_child<A: Spawns<VirtualListWidget>>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     row: f32,
@@ -597,7 +651,7 @@ fn virtual_list_height(row_height: f32, visible_row_count: u32) -> Option<f32> {
     (height.is_finite() && height >= 0.0).then_some(height)
 }
 
-fn spawn_composite_child<A>(
+fn spawn_composite_child<A: Spawns<Widget>>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -630,7 +684,7 @@ fn spawn_composite_child<A>(
     })
 }
 
-fn spawn_scroll_child<A>(
+fn spawn_scroll_child<A: Spawns<ScrollWidget>>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     layout: ChildLayout,
@@ -667,7 +721,7 @@ fn spawn_scroll_child<A>(
 /// Spawn the one-row control children. Keeping their mechanical decode/spawn
 /// profiles together prevents the main exhaustive dispatcher from becoming a
 /// second long-form implementation surface.
-fn spawn_row_control_child<A>(
+fn spawn_row_control_child<A: SpawnsWidgets>(
     ctx: &mut WasmCtx<'_, A, Manual>,
     spec: &WidgetChildSpec,
     row: f32,
@@ -892,8 +946,9 @@ fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects,
 /// logging and dropping the slot on failure.
 fn spawn<C, A>(ctx: &mut WasmCtx<'_, A, Manual>, subname: &str, config: &C::Config) -> Option<ErasedActorRef>
 where
-    C: ModuleChild + ErasedWasmActor + Rebuildable,
+    C: ModuleChild + ErasedWasmActor,
     <C as WasmActor>::State: ErasedWasmActor,
+    A: Spawns<C>,
 {
     match ctx.spawn_inline::<C>(Subname::Named(subname), config) {
         Ok(child) => Some(child.erase()),
@@ -1158,7 +1213,25 @@ fn spawn_behavior_host<A>(
 #[actor(
     instanced,
     child_of(EditorRegion),
-    depends(WindowCapability, LifecycleCapability, RenderCapability, TextCapability)
+    depends(WindowCapability, LifecycleCapability, RenderCapability, TextCapability),
+    spawns(
+        LabelWidget,
+        ImageWidget,
+        SliderWidget,
+        RadioGroupWidget,
+        TextFieldWidget,
+        TextAreaWidget,
+        ButtonWidget,
+        VirtualListWidget,
+        Widget,
+        ScrollWidget,
+        ToggleWidget,
+        SegmentedWidget,
+        NumericWidget,
+        DropdownWidget,
+        TabStripWidget,
+        MenuBarWidget
+    )
 )]
 impl WasmActor for WidgetPanel {
     type Config = PanelConfig;

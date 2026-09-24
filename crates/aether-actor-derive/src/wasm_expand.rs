@@ -420,6 +420,30 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
                 for #self_ty #where_clause {}
         }
     });
+    // ADR-0114 (issue 6583): one `Spawns<C>` impl per declared inline child,
+    // which the typed spawn verbs require, and the matching bound on the
+    // hidden `__aether_listed_children::<M>`, which every `export!` that lists
+    // this actor calls with its own module type, so that `export!` must list
+    // every declared child. Emitted together here and nowhere else: a
+    // hand-written `Spawns` impl would let a spawn skip the `export!` check.
+    let spawns = &opts.spawns;
+    let spawns_impls = spawns.iter().map(|child| {
+        quote! {
+            unsafe impl #impl_generics ::aether_actor::Spawns<#child>
+                for #self_ty #where_clause {}
+        }
+    });
+    let listed_children = quote! {
+        impl #impl_generics #self_ty #where_clause {
+            #[doc(hidden)]
+            #[allow(private_bounds)] // aether-suppression-request: a pub actor may declare a private child, and the check's bound names it; the fn is hidden and never called
+            pub fn __aether_listed_children<__AetherM>()
+            where
+                #(#spawns: ::aether_actor::Rebuildable<__AetherM>,)*
+            {
+            }
+        }
+    };
 
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
     // kind. Auto-generated marker impls gate
@@ -649,6 +673,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         #module_child_impl
         #(#child_impls)*
         #(#depends_impls)*
+        #(#spawns_impls)*
+        #listed_children
 
         #(#handles_kind_impls)*
         #(#reply_marker_impls)*
@@ -725,7 +751,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
         }
 
         // ADR-0096: object-safe erasure so a multi-actor module's
-        // `export!(A, B, …)` arm can hold whichever exported type an
+        // `export!(public = [A, B, …])` form can hold whichever exported type an
         // instance became in one `Slot<Box<dyn ErasedWasmActor>>` and
         // route the FFI shims through it. Forwards to the inherent
         // dispatch table and the `WasmActor` lifecycle hooks; `init`
