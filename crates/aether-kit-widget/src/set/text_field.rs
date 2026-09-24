@@ -27,7 +27,7 @@
 //! field's own — it commits. Page Up and Page Down have no meaning in one line
 //! and are ignored.
 
-use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::KEY_ENTER;
 use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput};
@@ -84,7 +84,7 @@ impl TextFieldWidget {
 
     /// Start a font-metrics request when one is due (single-flight; a duplicate
     /// desired id coalesces onto the outstanding flight).
-    fn pump_font_metrics<A: Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
+    fn pump_font_metrics<A: DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
