@@ -51,9 +51,9 @@ pub struct PendingReplies(ReplyTable);
 /// only `Arc<Registry>` and `Arc<Mailer>` the cycle is broken: neither
 /// of those owns any actor.
 pub struct ComponentCtx {
-    pub sender: MailboxId,
-    pub registry: Arc<Registry>,
-    pub queue: Arc<Mailer>,
+    pub(crate) sender: MailboxId,
+    pub(crate) registry: Arc<Registry>,
+    pub(crate) queue: Arc<Mailer>,
     /// ADR-0013: direct outbound handle so the `reply_mail` host fn
     /// can address a specific Claude session without routing through
     /// a well-known sink. Broadcast still goes through
@@ -97,11 +97,9 @@ pub struct ComponentCtx {
     pub init_failure: Option<String>,
     /// Trampoline binding the reply / outbound-mail host fns route
     /// through (the binding owns the actor's inbox + reply machinery +
-    /// correlation counter). `Some` for ctx instances built by
-    /// `WasmTrampoline::init` (in `aether-component`; issue 634
-    /// Phase 4 PR 3); `None` for the test paths that build
-    /// `ComponentCtx` without a real trampoline.
-    pub binding: Option<Arc<NativeBinding>>,
+    /// correlation counter). Every ctx is built from its trampoline's
+    /// binding, which also supplies [`Self::sender`] (#6521).
+    pub(crate) binding: Arc<NativeBinding>,
     /// ADR-0042 correlation counter. One per mailbox slot, not per
     /// instance: a fresh slot starts at `1` so that `0` always means
     /// "no correlation" (backward-compat sentinel for replies that
@@ -222,10 +220,16 @@ impl ComponentCtx {
     /// empty sender table. Using this over the struct literal keeps
     /// the private fields (`reply_table`, `saved_state`,
     /// `save_state_error`) internal to the wiring — callers should
-    /// never set them directly.
-    pub fn new(sender: MailboxId, registry: Arc<Registry>, queue: Arc<Mailer>, outbound: Arc<HubOutbound>) -> Self {
+    /// never set them directly. The ctx's own position is read from
+    /// `binding`, so the two cannot disagree.
+    pub fn new(
+        binding: Arc<NativeBinding>,
+        registry: Arc<Registry>,
+        queue: Arc<Mailer>,
+        outbound: Arc<HubOutbound>,
+    ) -> Self {
         Self {
-            sender,
+            sender: binding.self_mailbox(),
             registry,
             queue,
             outbound,
@@ -233,7 +237,7 @@ impl ComponentCtx {
             saved_state: None,
             save_state_error: None,
             init_failure: None,
-            binding: None,
+            binding,
             correlation_counter: Cell::new(1),
             reply_correlation: Cell::new(Source::NO_CORRELATION),
             in_flight_mail_id: Cell::new(None),
@@ -299,7 +303,7 @@ impl ComponentCtx {
     /// Install the ADR-0163 asset load window before
     /// `Component::instantiate`, so the guest's `init` and `wire` can pull
     /// asset bytes through the `asset_fetch_p32` host fn. Called by
-    /// `WasmTrampoline::init`, mirroring [`Self::install_binding`].
+    /// `WasmTrampoline::init` right after it builds the ctx.
     pub fn install_load_window(&mut self, window: LoadWindow) {
         self.load_window = Some(window);
     }
@@ -313,21 +317,6 @@ impl ComponentCtx {
         if let Some(window) = self.load_window.as_mut() {
             window.close();
         }
-    }
-
-    /// Wire the trampoline's `NativeBinding` into the ctx so the
-    /// reply / outbound-mail host fns (in
-    /// [`crate::actor::wasm::host_fns`]) can route through it. Called
-    /// by `WasmTrampoline::init` (in
-    /// `aether-component`) right after constructing the ctx and before
-    /// `Component::instantiate` — the host-fn closure captures the ctx
-    /// via the wasmtime `Store` data pointer at instantiation time,
-    /// not at host-fn call time, so installing later than that is
-    /// fine. Promoted from `pub(crate)` to `pub` by issue 654 when the
-    /// trampoline moved to `aether-component` next to its only
-    /// consumer; no other call site exists today and none is intended.
-    pub fn install_binding(&mut self, binding: Arc<NativeBinding>) {
-        self.binding = Some(binding);
     }
 
     /// The next send correlation and the next reply-lineage id this
@@ -529,17 +518,12 @@ impl ComponentCtx {
         );
 
         // ADR-0165: guest `wire` runs before this actor's route is
-        // authoritatively Live. A trampoline-backed ctx therefore offers its
-        // fully-stamped mail to the binding's existing activation hold. The
-        // hold check and append share one lock with release: rejection means
-        // release already won, so this mail may take the ordinary eager path.
-        let mail = if let Some(binding) = &self.binding {
-            match binding.try_hold_component_mail(mail, identity) {
-                Some(mail) => mail,
-                None => return,
-            }
-        } else {
-            mail
+        // authoritatively Live. The ctx therefore offers its fully-stamped
+        // mail to the binding's existing activation hold. The hold check and
+        // append share one lock with release: rejection means release
+        // already won, so this mail may take the ordinary eager path.
+        let Some(mail) = self.binding.try_hold_component_mail(mail, identity) else {
+            return;
         };
 
         // Issue 1987: the recorded source + the `origin` name stamped below

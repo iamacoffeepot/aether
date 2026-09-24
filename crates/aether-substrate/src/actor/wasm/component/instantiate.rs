@@ -215,11 +215,9 @@ impl Component {
         let mailbox_id = store.data().sender.0;
         // The component store is wired to the hosting trampoline's native
         // binding before instantiate. That binding owns the logical parent;
-        // a root actor, or a raw test/legacy context without a binding, has
-        // none, which the parent-aware init ABI encodes as `0`, and continues
-        // through the compatibility exports below.
-        let parent_mailbox_id =
-            store.data().binding.as_ref().and_then(|binding| binding.parent_mailbox()).map_or(0, |parent| parent.0);
+        // a root actor has none, which the parent-aware init ABI encodes as
+        // `0`, and continues through the compatibility exports below.
+        let parent_mailbox_id = store.data().binding.parent_mailbox().map_or(0, |parent| parent.0);
         // ADR-0095: the guest's generic delivery allocator. Probed before the
         // config write because config delivery routes through it, exactly like
         // `deliver` routes mail. Present on macro-built guests (emitted by

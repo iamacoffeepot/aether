@@ -49,8 +49,8 @@ pub(super) fn kind_inventory(kinds: &FxHashMap<KindId, KindSlot>) -> Vec<KindDes
 }
 
 impl Registry {
-    #[doc(hidden)]
-    pub fn subscribe_inventory<A>(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription
+    #[allow(clippy::extra_unused_type_parameters)] // aether-suppression-request: `A` exists only for its bound, the compile-time check that the subscriber handles `RegistryChanged`; the lint fired once this narrowed to `pub(crate)`
+    pub(crate) fn subscribe_inventory<A>(&self, target: MailboxId, mailer: Arc<Mailer>) -> RegistrySubscription
     where
         A: HandlesKind<RegistryChanged>,
     {
