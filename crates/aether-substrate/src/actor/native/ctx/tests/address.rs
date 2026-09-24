@@ -4,13 +4,14 @@
 
 use std::sync::Arc;
 
-use aether_actor::{Addressable, ErasedActorRef};
+use aether_actor::Addressable;
 use aether_data::{Kind, MailboxId, mailbox_id_from_path};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use crate::chassis::error::BootError;
+use crate::mail::registry::{InboxHandler, OwnedDispatch};
 use crate::mail::{Source, SourceAddr};
 
 use super::support::{CastOnly, EmbeddedPeer};
@@ -46,7 +47,6 @@ impl Addressable for OneDep {
 #[allow(clippy::disallowed_methods)] // test scaffolding — synthetic lineage IDs exercise parent-relative routing
 #[test]
 fn embedded_actor_resolves_and_delivers_beneath_binding_parent() {
-    use crate::mail::registry::OwnedDispatch;
     use crate::testing::{bare_substrate, boot_authority};
     use std::sync::mpsc;
 
@@ -100,27 +100,33 @@ fn actor_ref_mints_the_resolver_fold_for_one_and_embedded_dependencies() {
     assert_eq!(ctx.actor_ref::<EmbeddedPeer>().id(), EmbeddedPeer::resolve(parent.0, ()));
 }
 
-/// `sender` mints the stamped dispatch source on the erased ctx: `Some` for
-/// a `SourceAddr::Component` source, proving exactly its id, and `None` for
-/// `SourceAddr::None`. Owned logic: the source classification `sender`
-/// performs itself.
+/// `sender` mints the stamped dispatch source only when it holds a route in
+/// this substrate's registry: `Some` of the very reference registered here,
+/// `None` for a component source routed only in another registry, and `None`
+/// for `SourceAddr::None`. Owned logic: the source classification and the
+/// route read `sender` performs itself.
 #[test]
-fn sender_mints_the_component_source_and_none_without_one() {
-    use crate::testing::bare_substrate;
+fn sender_mints_only_a_routed_component_source() {
+    use crate::testing::{bare_substrate, registered_binding, registered_ref};
 
-    let (_registry, mailer) = bare_substrate();
-    let parent = MailboxId(0xC020);
-    let current = MailboxId(0xC010);
-    let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
+    let (registry, mailer) = bare_substrate();
+    let (binding, _receiver) = registered_binding(&registry, &mailer, "test.native.sender_host", discharging());
+    let routed = registered_ref(&registry, "test.native.sender_routed", discharging());
+    let (elsewhere_registry, _elsewhere_mailer) = bare_substrate();
+    let unrouted = registered_ref(&elsewhere_registry, "test.native.sender_elsewhere", discharging());
 
     let component =
-        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(MailboxId(0xC030)), 0), None, None);
-    assert_eq!(
-        component.sender().map(ErasedActorRef::id),
-        Some(MailboxId(0xC030)),
-        "a component source mints a sender reference to its id"
-    );
+        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(routed.id()), 0), None, None);
+    assert_eq!(component.sender(), Some(routed), "a routed component source mints its own reference");
+
+    let forged =
+        NativeCtx::new(&binding, Source::with_correlation(SourceAddr::Component(unrouted.id()), 0), None, None);
+    assert!(forged.sender().is_none(), "a component source with no route here mints nothing");
 
     let sourceless = NativeCtx::new(&binding, Source::with_correlation(SourceAddr::None, 0), None, None);
     assert!(sourceless.sender().is_none(), "a sourceless dispatch has no sender reference");
+}
+
+fn discharging() -> Arc<dyn InboxHandler> {
+    Arc::new(|dispatch: OwnedDispatch| dispatch.discharge())
 }

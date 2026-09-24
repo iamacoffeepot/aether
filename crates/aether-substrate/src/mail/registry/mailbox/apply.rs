@@ -97,13 +97,14 @@ impl Registry {
                         return Err(RegistryEffectError::Name(NameConflict { name }));
                     };
                     match staged_route(&staged_routes, inner, id) {
-                        // Same-name reuse of a `Dropped` route. Only
-                        // `Registry::drop_mailbox` produces that lifecycle, and
-                        // it is a public routing primitive no chassis or cap
-                        // calls today (issue 4152 audited every caller: all are
-                        // tests). Retiring an actor leaves its route in place
-                        // and tombstones the id in the `ActorRegistry` instead,
-                        // which is what the conflict arm below reads.
+                        // Same-name reuse of a `Dropped` route. The boot and
+                        // eager-spawn unwinds produce one through
+                        // `Registry::drop_mailbox`: they retire a route that
+                        // reached `Live` and keep its name, so a later birth of
+                        // the same actor reuses it here. Retiring a live actor
+                        // leaves its route in place and tombstones the id in
+                        // the `ActorRegistry` instead, which is what the
+                        // conflict arm below reads.
                         Some(existing)
                             if matches!(existing.lifecycle, RouteLifecycle::Dropped)
                                 && existing.canonical_name == canonical_name => {}
@@ -340,26 +341,6 @@ impl Registry {
                     publication.route_updates.push(Update::Insert(id, record.clone()));
                     publication.inventory_dirty |= inventory_live;
                     applied.push(RegistryApplied::Dropped(name));
-                }
-                RegistryEffect::RemoveMailbox(id) => {
-                    let (removable, inventory_live) =
-                        staged_route(&staged_routes, inner, id).map_or((false, false), |record| {
-                            match &record.lifecycle {
-                                RouteLifecycle::Live { .. } => (true, true),
-                                RouteLifecycle::Alias { target_parent } => (
-                                    true,
-                                    staged_route(&staged_routes, inner, *target_parent)
-                                        .is_some_and(|target| matches!(target.lifecycle, RouteLifecycle::Live { .. })),
-                                ),
-                                RouteLifecycle::Starting { .. } | RouteLifecycle::Dropped => (false, false),
-                            }
-                        });
-                    if removable {
-                        staged_routes.insert(id, None);
-                        publication.route_updates.push(Update::Remove(id));
-                        publication.inventory_dirty |= inventory_live;
-                    }
-                    applied.push(RegistryApplied::Removed(removable));
                 }
                 RegistryEffect::InstallSeize { id, handle } => {
                     let Some(mut record) = staged_route(&staged_routes, inner, id).cloned() else {

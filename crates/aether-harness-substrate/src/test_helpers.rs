@@ -56,6 +56,7 @@ use std::sync::OnceLock;
 use aether_fs::NamespaceRoots;
 use std::env;
 use std::fs;
+use std::io;
 use std::process;
 
 /// Process-wide test sandbox. Single `OnceLock` so repeat calls
@@ -68,9 +69,10 @@ use std::process;
 /// `set_var` call — it just memoises the path.
 static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 
-/// Locate `<crate_name>.wasm` under the workspace target dir. Tries
-/// `release` first, then `debug` so either build profile works. Also
-/// probes `examples/<crate_name>.wasm` so a caller can name an
+/// Locate `<crate_name>.wasm` under the workspace target dir, in the
+/// profile directory the most recent `cargo xtask build-wasm` /
+/// `cargo xtask dist` run built. Also probes
+/// `<profile>/examples/<crate_name>.wasm` so a caller can name an
 /// `[[example]] crate-type = ["cdylib"]` artifact, should one exist.
 /// Returns `None` if no candidate path exists.
 ///
@@ -79,69 +81,119 @@ static TEST_SAVE_DIR: OnceLock<PathBuf> = OnceLock::new();
 /// `"aether_test_fixtures_bundle"`), or an example name for an
 /// `[[example]]` cdylib.
 ///
-/// The workspace target dir is resolved at run time: the
-/// `CARGO_TARGET_DIR` override when set, else `target/` under the
-/// nearest ancestor of the current directory that is a checkout root
-/// (holds a `Cargo.lock`). Run time rather than
-/// `env!("CARGO_MANIFEST_DIR")`: the lane hosts share one build
-/// directory across many checkouts, so a compiled test binary can
-/// outlive the tree it was compiled in — and a compile-time path then
-/// names a checkout whose `target/` is gone, failing every wasm-loading
-/// scenario in the member at once. Cargo and nextest run every test
-/// with the current directory inside its own package, so the walk up
-/// from there lands on the checkout the test runs in, whose `target/`
-/// (directory or symlink) holds the pre-built wasm. The compile-time
-/// path remains only as the last resort for a caller whose current
-/// directory is outside any checkout.
+/// The profile is the `profile` field of `dist/manifest.json` under the
+/// checkout root, which every `build-wasm` / `dist` run rewrites after
+/// its build; with no manifest it is `debug`, cargo's and `build-wasm`'s
+/// default. Only that one profile directory is probed: `cargo xtask
+/// package` cross-builds release wasm into the same target dir without
+/// touching `dist/`, and a probe that fell through to the other profile
+/// would load that leftover artifact in place of the one just built.
+///
+/// The checkout root is resolved at run time: the nearest ancestor of
+/// the current directory that holds a `Cargo.lock`, and the target dir
+/// is the `CARGO_TARGET_DIR` override when set, else `target/` under
+/// that root. Run time rather than `env!("CARGO_MANIFEST_DIR")`: the
+/// lane hosts share one build directory across many checkouts, so a
+/// compiled test binary can outlive the tree it was compiled in — and a
+/// compile-time path then names a checkout whose `target/` is gone,
+/// failing every wasm-loading scenario in the member at once. Cargo and
+/// nextest run every test with the current directory inside its own
+/// package, so the walk up from there lands on the checkout the test
+/// runs in, whose `target/` (directory or symlink) holds the pre-built
+/// wasm. The compile-time path remains only as the last resort for a
+/// caller whose current directory is outside any checkout.
 ///
 /// # Panics
 /// Panics on the compile-time last resort if `CARGO_MANIFEST_DIR` does
 /// not have two ancestor directories — fail-fast per ADR-0063: the
 /// helper crate lives at `crates/<crate>`, so the workspace root is
-/// always two levels up.
+/// always two levels up. Also panics when `dist/manifest.json` exists
+/// but cannot be read, is not JSON with a `profile` string, or names a
+/// profile other than `debug` / `release`: that is a broken xtask
+/// output, not a missing build.
 #[must_use]
+pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
+    probe_component_wasm(crate_name).ok()
+}
+
+/// [`locate_component_wasm`] with the miss kept: `Err` carries the
+/// top-level path a build would have written, so [`require_wasm`] can
+/// name what it looked for.
 // Test-only: CARGO_TARGET_DIR is the standard cargo build-output override, not
 // cap config — honor it so wasm built into an out-of-tree target dir is found.
 #[allow(clippy::disallowed_methods)]
-pub fn locate_component_wasm(crate_name: &str) -> Option<PathBuf> {
-    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(
-        || {
-            env::current_dir().ok().and_then(|current| runtime_target_root(&current)).unwrap_or_else(|| {
-                Path::new(env!("CARGO_MANIFEST_DIR"))
-                    .parent()
-                    .and_then(Path::parent)
-                    .expect("workspace root reachable from CARGO_MANIFEST_DIR")
-                    .join("target")
-            })
-        },
-        PathBuf::from,
-    );
-    for profile in ["release", "debug"] {
-        let base = target_root.join("wasm32-unknown-unknown").join(profile);
-        // Top-level cdylib crates land directly under the profile dir.
-        let top_level = base.join(format!("{crate_name}.wasm"));
-        if top_level.exists() {
-            return Some(top_level);
-        }
-        // `[[example]] crate-type = ["cdylib"]` cdylibs land under
-        // `<profile>/examples/<example_name>.wasm` (ADR-0090 c1).
-        let example = base.join("examples").join(format!("{crate_name}.wasm"));
-        if example.exists() {
-            return Some(example);
-        }
-    }
-    None
+fn probe_component_wasm(crate_name: &str) -> Result<PathBuf, PathBuf> {
+    let root = env::current_dir().ok().and_then(|current| checkout_root(&current)).unwrap_or_else(|| {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(Path::parent)
+            .expect("workspace root reachable from CARGO_MANIFEST_DIR")
+            .to_path_buf()
+    });
+    let target_root = env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    locate_under(&root, &target_root, crate_name)
 }
 
-/// `target/` under the nearest ancestor of `current` that is a checkout
-/// root (holds a `Cargo.lock`), or `None` when no ancestor is one.
+/// The nearest ancestor of `current` that is a checkout root (holds a
+/// `Cargo.lock`), or `None` when no ancestor is one.
 ///
 /// Nearest root, not nearest `target/`: a checkout that has not built
 /// wasm yet must resolve to where its target *would* be, so the
 /// strict-mode panic names the pre-build the caller actually needs to
 /// run — never a leftover target somewhere above the checkout.
-fn runtime_target_root(current: &Path) -> Option<PathBuf> {
-    current.ancestors().find(|dir| dir.join("Cargo.lock").is_file()).map(|root| root.join("target"))
+fn checkout_root(current: &Path) -> Option<PathBuf> {
+    current.ancestors().find(|dir| dir.join("Cargo.lock").is_file()).map(Path::to_path_buf)
+}
+
+/// Probe `<crate_name>.wasm` in the one profile directory
+/// [`built_wasm_profile`] names for `checkout_root`: the top-level
+/// cdylib first, then the `examples/` cdylib. `Err` carries the
+/// top-level path when neither exists.
+fn locate_under(checkout_root: &Path, target_root: &Path, crate_name: &str) -> Result<PathBuf, PathBuf> {
+    let base = target_root.join("wasm32-unknown-unknown").join(built_wasm_profile(&checkout_root.join("dist")));
+    // Top-level cdylib crates land directly under the profile dir.
+    let top_level = base.join(format!("{crate_name}.wasm"));
+    if top_level.exists() {
+        return Ok(top_level);
+    }
+    // `[[example]] crate-type = ["cdylib"]` cdylibs land under
+    // `<profile>/examples/<example_name>.wasm` (ADR-0090 c1).
+    let example = base.join("examples").join(format!("{crate_name}.wasm"));
+    if example.exists() {
+        return Ok(example);
+    }
+    Err(top_level)
+}
+
+/// The one field of `cargo xtask dist`'s `dist/manifest.json` the
+/// locator reads.
+#[derive(serde::Deserialize)]
+struct DistManifestProfile {
+    profile: String,
+}
+
+/// The cargo profile the most recent `cargo xtask build-wasm` /
+/// `cargo xtask dist` run recorded in `<dist_dir>/manifest.json`, or
+/// `debug` when there is no manifest.
+///
+/// # Panics
+/// Panics naming the manifest when it exists but cannot be read, does
+/// not parse as JSON with a `profile` string, or names a profile other
+/// than `debug` / `release` — fail-fast per ADR-0063.
+fn built_wasm_profile(dist_dir: &Path) -> &'static str {
+    let manifest = dist_dir.join("manifest.json");
+    let text = match fs::read_to_string(&manifest) {
+        Ok(text) => text,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return "debug",
+        Err(error) => panic!("read {}: {error}", manifest.display()),
+    };
+    let recorded: DistManifestProfile = serde_json::from_str(&text)
+        .unwrap_or_else(|error| panic!("{} has no readable `profile`: {error}", manifest.display()));
+    match recorded.profile.as_str() {
+        "debug" => "debug",
+        "release" => "release",
+        other => panic!("{} names unknown profile {other:?}", manifest.display()),
+    }
 }
 
 /// Opt back into the pre-#5724 skip: with `AETHER_ALLOW_WASM_SKIP=1` a
@@ -179,29 +231,43 @@ fn wasm_skip_allowed() -> bool {
 /// consumer who genuinely cannot cross-build wasm wants and what nobody
 /// reaches for by accident.
 ///
+/// On a hit it prints `loading <path>` to stderr, so a failing
+/// scenario's captured output names the wasm it ran; a miss names the
+/// path it looked for. [`locate_component_wasm`] states which profile
+/// directory that is.
+///
 /// # Panics
 /// Panics when the named crate's wasm artifact is not pre-built and the
-/// skip is not explicitly allowed — fail-fast per ADR-0063.
+/// skip is not explicitly allowed — fail-fast per ADR-0063 — and when
+/// `dist/manifest.json` is present but broken (see
+/// [`locate_component_wasm`]).
 #[must_use]
-// Test-only skip diagnostic — emitted from `cargo test` runners so an
+// Test-only load / skip diagnostic — emitted from `cargo test` runners so an
 // allowed skip is visible alongside `test ... ok` lines. Not routed
 // through `tracing` because the test harness already captures stderr
 // and surfaces it on failure (issue 891).
 #[allow(clippy::print_stderr)]
 pub fn require_wasm(crate_name: &str) -> Option<PathBuf> {
-    // The else arm runs side effects (assert + eprintln); `map_or_else`
-    // would bury that under closures with no clarity win.
-    #[allow(clippy::option_if_let_else)]
-    if let Some(path) = locate_component_wasm(crate_name) {
-        Some(path)
-    } else {
-        assert!(
-            wasm_skip_allowed(),
-            "SKIPPED (no wasm for {crate_name}): run `cargo xtask build-wasm` \
-             — set AETHER_ALLOW_WASM_SKIP=1 to ignore",
-        );
-        eprintln!("skipping: {crate_name}.wasm not built; run `cargo xtask build-wasm`");
-        None
+    // Both arms name the file, so a failing scenario's captured stderr
+    // says which wasm it ran and a miss says where it looked.
+    match probe_component_wasm(crate_name) {
+        Ok(path) => {
+            eprintln!("loading {}", path.display());
+            Some(path)
+        }
+        Err(looked_for) => {
+            assert!(
+                wasm_skip_allowed(),
+                "SKIPPED (no wasm for {crate_name}): run `cargo xtask build-wasm` \
+                 — set AETHER_ALLOW_WASM_SKIP=1 to ignore (looked for {})",
+                looked_for.display(),
+            );
+            eprintln!(
+                "skipping: {crate_name}.wasm not built at {}; run `cargo xtask build-wasm`",
+                looked_for.display()
+            );
+            None
+        }
     }
 }
 
@@ -284,7 +350,7 @@ pub fn envelope<K: Kind>(recipient: &str, mail: &K) -> NamedMail {
 
 #[cfg(test)]
 mod tests {
-    use super::runtime_target_root;
+    use super::{checkout_root, locate_under};
     use std::{env, fs, process};
 
     #[test]
@@ -302,8 +368,49 @@ mod tests {
         fs::create_dir_all(&nested).expect("scratch tree");
         fs::write(checkout.join("Cargo.lock"), "").expect("checkout marker");
 
-        assert_eq!(runtime_target_root(&nested), Some(checkout.join("target")));
-        assert_eq!(runtime_target_root(&scratch), None, "no ancestor checkout, no resolution");
+        assert_eq!(checkout_root(&nested), Some(checkout));
+        assert_eq!(checkout_root(&scratch), None, "no ancestor checkout, no resolution");
+
+        fs::remove_dir_all(&scratch).expect("scratch removed");
+    }
+
+    #[test]
+    fn wasm_profile_follows_the_dist_manifest() {
+        // `cargo xtask build-wasm` builds debug by default, and `cargo xtask
+        // package` cross-builds release into the same target dir without
+        // rewriting `dist/`. A probe across both profiles in a fixed order
+        // then loads whichever leftover it checks first: release-first
+        // shadows a fresh debug build, debug-first shadows a fresh
+        // `build-wasm --profile release`. Only the profile the manifest
+        // records is read, and no manifest means debug.
+        let scratch = env::temp_dir().join(format!("aether-wasm-profile-{}", process::id()));
+        let target = scratch.join("target");
+        let dist = scratch.join("dist");
+        let debug = target.join("wasm32-unknown-unknown").join("debug").join("probe.wasm");
+        let release = target.join("wasm32-unknown-unknown").join("release").join("probe.wasm");
+        for artifact in [&debug, &release] {
+            fs::create_dir_all(artifact.parent().expect("profile dir")).expect("scratch profile dir");
+            fs::write(artifact, b"").expect("scratch artifact");
+        }
+        fs::create_dir_all(&dist).expect("scratch dist");
+        let record = |profile: &str| {
+            fs::write(dist.join("manifest.json"), format!(r#"{{"profile":"{profile}"}}"#)).expect("scratch manifest");
+        };
+
+        record("debug");
+        assert_eq!(locate_under(&scratch, &target, "probe"), Ok(debug.clone()));
+        record("release");
+        assert_eq!(locate_under(&scratch, &target, "probe"), Ok(release));
+        fs::remove_file(dist.join("manifest.json")).expect("manifest removed");
+        assert_eq!(locate_under(&scratch, &target, "probe"), Ok(debug.clone()), "no manifest reads debug");
+
+        record("debug");
+        fs::remove_file(&debug).expect("debug artifact removed");
+        assert_eq!(
+            locate_under(&scratch, &target, "probe"),
+            Err(debug),
+            "a miss names the recorded profile's path and never falls through to release",
+        );
 
         fs::remove_dir_all(&scratch).expect("scratch removed");
     }
