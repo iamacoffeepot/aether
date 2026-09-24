@@ -576,7 +576,7 @@ only for a genuine adjacent sibling of an existing bare base:
 `aether.kit.camera` actor. The dash has no addressing semantics — it makes neither actor a child of the other, and the full
 `NAMESPACE` still yields the `ActorId` before lineage yields the `MailboxId`. Do
 not use a dash merely to spell a multi-word segment; that is what an underscore
-is for, as in `aether.kit.widget.menu_bar` and `aether.kit.widget.text_field`.
+is for, as in `aether.widget.menu_bar` and `aether.widget.text_field`.
 
 `ctx.actor_ref::<Camera>()` returns an `ActorRef<Camera>` for the physical
 trampoline mailbox: the trampoline and its loaded guest share one mailbox, while

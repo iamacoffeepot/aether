@@ -53,7 +53,7 @@ pub mod mesh;
 // bundle) with no bare-load target, so ADR-0138's defaultless policy governs
 // every export here: each is reached by `module@actor` selector, never by
 // list position. The widget set and its `EditorShell` arbiter live in
-// `aether-kit-widget`, exported from its own cdylib, not here (the shelved
+// `aether-widget`, exported from its own cdylib, not here (the shelved
 // terrain / sim / workbench siblings likewise owned their own cdylibs while
 // they were in the workspace).
 aether_actor::export!(

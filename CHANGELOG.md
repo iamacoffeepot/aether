@@ -12,7 +12,7 @@ APIs without a deprecation window.
 - Serve HTTP from an actor: `aether.http.server` registers typed routes off an `#[http::router]` impl block, upgrades to websockets, streams request and response bodies under windowed flow control, and spreads one route across replicated handler mailboxes.
 - Open more than one window: `aether.window.create` gives each window its own addressable mailbox, with a real platform menu bar and cursor icons on macOS and Windows.
 - Hear more than a synth: load an SFZ instrument bank or play a WAV track through `aether.fs`, place each note in the stereo image with a per-note pan, and trim one sender's sounding voices live.
-- Build a screen out of widgets: `aether-kit-widget` ships buttons, tabs, dropdowns, virtual lists, sliders, text fields, dialogs, tooltips, toasts and splitters as inline child actors that composite into one ordered draw.
+- Build a screen out of widgets: `aether-widget` ships buttons, tabs, dropdowns, virtual lists, sliders, text fields, dialogs, tooltips, toasts and splitters as inline child actors that composite into one ordered draw.
 - Reload a component without restarting the engine: `cargo xtask dev-component` watches, cross-builds, uploads and swaps one wasm module in place, and `on_dehydrate` / `on_rehydrate` carry its state across the swap.
 
 ### Engine

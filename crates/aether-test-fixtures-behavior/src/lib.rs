@@ -1,6 +1,6 @@
 //! Local kind twins for the behavior-script fixtures (issue 2688).
 //!
-//! A behavior script cannot depend on `aether-kit-widget` for the kinds it
+//! A behavior script cannot depend on `aether-widget` for the kinds it
 //! transforms — the widget crate pulls `aether-actor`, which would classify the
 //! script cdylib as a component. Each twin here re-derives a widget kind under
 //! the *same* `#[kind(name)]` wire name, so its `KindId` and wire bytes match
@@ -10,20 +10,20 @@
 
 #![forbid(unsafe_code)]
 
-/// Twin of `aether_kit_widget::SliderChanged` — the value-up event the
+/// Twin of `aether_widget::SliderChanged` — the value-up event the
 /// scripts intercept. Same wire name and field shape as
-/// `crates/aether-kit-widget/src/kinds.rs`.
-#[aether_data::kind(name = "aether.kit.widget.slider.changed")]
+/// `crates/aether-widget/src/kinds.rs`.
+#[aether_data::kind(name = "aether.widget.slider.changed")]
 pub struct SliderChanged {
     pub value: f32,
     pub committed: bool,
 }
 
-/// Twin of `aether_kit_widget::RadioSelected` — carries a `u32` up the panel
+/// Twin of `aether_widget::RadioSelected` — carries a `u32` up the panel
 /// lane, which the scripts reuse as an observable effect (`ctx.panel().emit`)
 /// to surface their authored `count` where the panel logs it. Same wire name
-/// and field shape as `crates/aether-kit-widget/src/kinds.rs`.
-#[aether_data::kind(name = "aether.kit.widget.radio.selected")]
+/// and field shape as `crates/aether-widget/src/kinds.rs`.
+#[aether_data::kind(name = "aether.widget.radio.selected")]
 pub struct RadioSelected {
     pub index: u32,
 }

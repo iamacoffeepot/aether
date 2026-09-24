@@ -1,6 +1,6 @@
 # The widget set & focus model
 
-`aether-kit-widget` ships a set of guest-side widgets — a slider, a text field, a
+`aether-widget` ships a set of guest-side widgets — a slider, a text field, a
 multiline text area, a radio group, a fixed-row virtual list, a button, a label,
 an image, a toggle, a segmented control, a tab strip, a dropdown, a menu bar,
 a numeric editor, a tooltip, a toast region, a dialog plate, and a splitter —
@@ -12,12 +12,11 @@ translating their value events, never re-deriving hit rects, focus, or per-row
 layout for each new knob.
 
 The set is a defaultless grab-bag module (ADR-0138): load a widget by its
-`module@export` selector against the `aether_kit_widget` stem — `WidgetPanel` is
-`aether_kit_widget@aether.kit.widget.panel`, the `EditorShell` arbiter is
-`aether_kit_widget@aether.kit.widget.editor`, and so on. The `aether.kit.widget.*`
-export namespaces themselves are unchanged. **Every stock widget is exported**,
-not a chosen subset, so any of them can be loaded by selector as well as spawned
-inline by a root.
+`module@export` selector against the `aether_widget` stem — `WidgetPanel` is
+`aether_widget@aether.widget.panel`, the `EditorShell` arbiter is
+`aether_widget@aether.widget.editor`, and so on. **Every stock widget is
+exported**, not a chosen subset, so any of them can be loaded by selector as
+well as spawned inline by a root.
 
 Wherever the module loads, whichever export is selected, it needs the window,
 lifecycle, render, text and clipboard capabilities live. Its actors declare
@@ -31,7 +30,7 @@ text with namespace roots for its fs, and the in-memory clipboard.
 
 Every widget kind — configs, events, and the schema types nested in them — is
 declared in one place and reaches the crate root, so a consumer writes
-`use aether_kit_widget::{ButtonConfig, DialogConfig};` and never has to know
+`use aether_widget::{ButtonConfig, DialogConfig};` and never has to know
 which module a kind happens to be defined in.
 
 The widgets build on two foundations documented alongside them: the
@@ -190,27 +189,27 @@ widget sends can misreport it.
 
 One rule per axis, so a name can be guessed rather than looked up.
 
-- **The kind is `aether.kit.widget.{widget}.{suffix}`**, and the suffix is the
+- **The kind is `aether.widget.{widget}.{suffix}`**, and the suffix is the
   semantic class of the event, not a synonym chosen per widget: `.changed` for
   a continuous value that moved (slider, numeric, toggle, splitter),
   `.selected` for a choice among a vector (radio, segmented, tab strip,
   dropdown, virtual list), `.committed` for an edit a reader finished (the two
-  text controls, which share `aether.kit.widget.text.committed` because they
+  text controls, which share `aether.widget.text.committed` because they
   emit the identical value), and `.activated` for a verb that was pressed
   (button, menu bar, a virtual list's row verb). Reports that are neither a
   value nor a verb keep their own descriptive suffix — `.hover`, `.shed` —
   because "changed" would say less about them, not more.
 - **A report every widget of a class makes is one kind under
-  `aether.kit.widget.` directly**, not one per widget. Every overlay-bearing
-  widget reports `aether.kit.widget.open_changed { open }` and takes
-  `aether.kit.widget.dismiss`; every widget that stands a plate somewhere
-  reports `aether.kit.widget.placed { frame, content }`. A per-widget kind
+  `aether.widget.` directly**, not one per widget. Every overlay-bearing
+  widget reports `aether.widget.open_changed { open }` and takes
+  `aether.widget.dismiss`; every widget that stands a plate somewhere
+  reports `aether.widget.placed { frame, content }`. A per-widget kind
   there bought nothing — the root's handler for it is byte-identical across
   widgets — and cost a new handler every time the set grew.
 - **The Rust type is the wire name minus its dots**: `slider.changed` is
   `SliderChanged`, `tab_strip.selected` is `TabStripSelected`,
   `menu_bar.activated` is `MenuBarActivated`. The exceptions are stated rather
-  than drifted: a kind directly under `aether.kit.widget.` whose tail is a
+  than drifted: a kind directly under `aether.widget.` whose tail is a
   generic word carries the family segment so the exported symbol still names
   something (`frame` is `WidgetFrame`, `draw_list` is `WidgetDrawList`), and a
   data-down setter reads as the imperative it is (`set_state` is
@@ -348,7 +347,7 @@ The wrapper is public, so a consumer building its own tooltip or hint plate
 gets the same shape without copying the rule:
 
 ```rust
-use aether_kit_widget::set::{reveal_wrap_width, wrap_to_width};
+use aether_widget::set::{reveal_wrap_width, wrap_to_width};
 
 // `measure` is yours: exact glyph advances from a resolved `CachedFontMetrics`
 // once the font settles, an approximation before that.
@@ -399,7 +398,7 @@ tag's colour" could not be said, and a name could not carry its own tier.
 
 The **tier ladder** is a generic four-step scale: anything ranked — a drop's
 rarity, a tier list, a plan's confidence — writes its names in it. The rungs
-are numbered rather than named because the kit does not know what they rank:
+are numbered rather than named because the widget set does not know what they rank:
 `tier_1` is the plain ink, and the three above it are a cool blue, a yellow and
 a warm gold. A host maps its own vocabulary onto them in one function, the same
 way it maps onto the hue set.
@@ -442,13 +441,13 @@ run — a tag, a match, a live value — is the token used once and read once.
 
 Every widget that draws a single line — label, button, text field, numeric,
 list row, segmented bucket, tab, dropdown row — places it with one shared
-rule, `aether_kit_widget::set::text_origin_y(row_top, row_height,
+rule, `aether_widget::set::text_origin_y(row_top, row_height,
 size_pixels)`. Reach for it rather than deriving an origin at the draw site;
 per-widget arithmetic is how the set drifted out of alignment once already.
 
 The rule exists because `aether.text` places a `Screen` draw's `origin` at the
 *pen*, not at the ink: the baseline lands one **ascent** below the origin, and
-an ascent is not the draw size. The kit's font (RobotoMono) has an ascent of
+an ascent is not the draw size. The widget set's font (RobotoMono) has an ascent of
 `2146 / 2048` em, so an origin computed as though the line were `size_pixels`
 tall sank every glyph about a fifth of the size below centre — a visible sag in
 a 24-pixel row, and the reason text on buttons and inputs read as sitting low
@@ -482,7 +481,7 @@ to stand exactly as tall as the letters do.
 **Never send a glyph the face lacks.** Nothing in the text path errors or skips
 one: `aether.text` looks the character up in the font's cmap, gets glyph index
 `0`, and rasterizes `.notdef` — in the vendored RobotoMono, a hollow box —
-while the kit's measurement (`CachedFontMetrics::measure`, the same table every
+while the widget set's measurement (`CachedFontMetrics::measure`, the same table every
 widget sizes from) falls back to the `.notdef` advance. So an unsupported
 character is silently a box of the right width in every box measured around it.
 A host that wants `⌘` in a label ships a face that has it, or writes
@@ -535,10 +534,10 @@ for its frame is **elided** — cut on a character boundary with an ellipsis
 clip bounds it as it always did; the clip stays the backstop either way, but it
 cuts mid-glyph, which reads as a name that ends oddly rather than as a name
 that was too long. The same helper is public, so a consumer cutting its own
-row uses the kit's rule:
+row uses the widget set's rule:
 
 ```rust
-use aether_kit_widget::set::elide_to_width;
+use aether_widget::set::elide_to_width;
 
 let shown = elide_to_width(name, column_width, |run| measure(run));
 ```
@@ -585,7 +584,7 @@ scrollbar is still too close to content to the left side"); a host that wants
 more sets more, and every list gets the wider default without asking. The
 reported intrinsic counts the same gutter, so a slot sized from it does not
 hand the bar back a gutter's worth of the text it just asked for. A host
-drawing its own rows against a kit list's geometry reserves the same width:
+drawing its own rows against a stock list's geometry reserves the same width:
 `Theme::space(2)` of track plus `Theme::space(scroll_bar_gap_units)` of gap,
 whenever the vector overflows the viewport.
 
@@ -605,7 +604,7 @@ let clip = Rect { width: list.width + strip, ..list }; // or the track is clippe
 ```
 
 `scroll_strip_width` is the gutter plus `VirtualListConfig::scroll_track_width`,
-so a host reserving the column copies no kit constant, and it answers before
+so a host reserving the column copies no widget constant, and it answers before
 any draw list arrives — which is when a layout needs it. The clip matters: a
 slot clipped to the list's own frame erases a track drawn outside it, and a
 press in the strip reaches the list only if the host's hit test reaches across
@@ -645,7 +644,7 @@ rows it holds. The intrinsic's height is the *viewport*; this
 is everything the list scrolls through, so a plate drawn to it is as tall as
 what it holds rather than a tall empty box (§4). Only the widget can answer it
 — the wrapping is the widget's because the font metrics are — and a host that
-counted rows itself would mirror the kit's note cap and line-height ratio and
+counted rows itself would mirror the widget set's note cap and line-height ratio and
 drift from them silently. It is `None` for a table the list has not measured
 yet (the advances still in flight), where a plate sized from a guess would
 resize under the reader a frame later.
@@ -684,7 +683,7 @@ than whichever row happens to pass under the pointer. It is not a selection and
 never becomes one: hovering a row says the reader is looking at it, which is
 what a tooltip answers, and says nothing about what they have chosen.
 
-A pointed-at row draws a face of its own — the kit's role-agnostic hover wash
+A pointed-at row draws a face of its own — the widget set's role-agnostic hover wash
 over the plain surface, the same face a dropdown's open list draws under the
 pointer, so the two lists answer a pointer alike. It **composes** with the
 selection rather than replacing it: a chosen row under the pointer is the
@@ -717,7 +716,7 @@ words in it are often not one thing said once — `Spell Fire Duration` is three
 tags, and **a tag wears the ink of what it names**:
 
 ```rust
-use aether_kit_widget::{InkedSpan, TextInk, VirtualListRow};
+use aether_widget::{InkedSpan, TextInk, VirtualListRow};
 
 let row = VirtualListRow::from(gem.name).with_trailing(vec![
     InkedSpan::new("Fire", TextInk::HueWarm),
@@ -752,7 +751,7 @@ can say its own tier without a `(unique)` suffix after it or a plate behind the
 whole row:
 
 ```rust
-use aether_kit_widget::{TextInk, VirtualListRow};
+use aether_widget::{TextInk, VirtualListRow};
 
 let row = VirtualListRow::from(item.name).with_ink(TextInk::Tier3);
 ```
@@ -781,13 +780,13 @@ A row's `actions` are the verbs bound to *that* row — the `×` that unbinds th
 skill, the `Change gem` that re-picks this one:
 
 ```rust
-use aether_kit_widget::{RowAction, VirtualListRow};
+use aether_widget::{RowAction, VirtualListRow};
 
 let row = VirtualListRow::from(name)
     .with_actions(vec![RowAction::text("Change gem"), RowAction::danger("×")]);
 ```
 
-Each is drawn as a **real button** at the row's right end — the kit's own button
+Each is drawn as a **real button** at the row's right end — the widget set's own button
 face, so a row verb has the same `ButtonEmphasis` / `ButtonTone` ladder, the
 same measured-label-plus-two-pads width, the same elision, and the same hover /
 pressed answer a `ButtonConfig` draws with. They are written left to right, so
@@ -824,7 +823,7 @@ skill does not cost a select first. A list that cannot be changed — disabled
 *or* read-only — draws every verb in the disabled state and takes no press on
 one.
 
-Row verbs are **pointer-first**. The kit's keyboard traversal moves between
+Row verbs are **pointer-first**. The widget set's keyboard traversal moves between
 widgets (the root's Tab) and a list is one focus stop whose arrows and page
 keys are its selection; there is no focus traversal *into* a row, so no key is
 bound to a row verb. A verb that must be reachable from the keyboard gets a
@@ -833,7 +832,7 @@ button of its own beside the list, bound to the selected row.
 Rank a row verb **down**. A column of rows each carrying a filled accent plate
 has spent the primary-action token once per row, which is the same defect as a
 screen of five yellow buttons — `RowAction::text` (quiet, neutral) and
-`RowAction::danger` (quiet, error-inked) are the two the kit names for it.
+`RowAction::danger` (quiet, error-inked) are the two the widget set names for it.
 
 ### A row that is a table entry
 
@@ -856,7 +855,7 @@ Four fields answer that, each opt-in and each defaulting to the plain row:
 | `rule_above: bool` | a `theme.outline` hairline across the row's text budget at the **top of that space**: the rule, then the air, then the row |
 
 ```rust
-use aether_kit_widget::VirtualListRow;
+use aether_widget::VirtualListRow;
 
 let rows = vec![
     VirtualListRow::from("Armour").with_trailing(vec!["0".into()]).with_space_before(1),
@@ -1087,7 +1086,7 @@ keeps both rules (round-4 note 19 — "I'd prefer if it was aligned to the first
 line of text and then new paragraphs just had a break (empty line)"). A line
 that wrapped is one thought that ran out of measure, so its continuation rows
 start flush with its first row: `hanging_indent_pixels` is `0` by default and
-the kit's own plates leave it there. A new paragraph is a new thought, and
+the widget set's own plates leave it there. A new paragraph is a new thought, and
 takes a **blank row**: a `TooltipLine` with no words in it draws one empty
 line box, and so does a blank line inside one line's own text
 (`"first\n\nsecond"`). A blank at the very top or bottom of the plate is
@@ -1281,7 +1280,7 @@ the resize dies with it. Spawn the strip once and re-frame it.
 A popover is a plate hosting *other* children over the primary view, dismissed
 by a press outside it or by Escape. It ships as the `set::popover` module and
 the plain `Popover` value a root owns beside its `Focus`, **not** as a widget —
-because hosting interactive children is a root's job in this kit. Pointer and
+because hosting interactive children is a root's job in this widget set. Pointer and
 keyboard routing, hit rectangles, focus traversal, and drag capture all live in
 the root's `Focus` table over the root's own direct children; `ScrollWidget`
 re-frames and re-composites its content and keeps only a wheel hit table, and
@@ -1357,7 +1356,7 @@ children standing on it and raise them into the overlay lane with
 `Composite::set_slot_overlay(child, true)`, so the plate arrives under its own
 contents and over the screen it covers.
 
-**Resizing** uses the handle the kit already has. Frame a `SplitterWidget` with
+**Resizing** uses the handle the widget set already has. Frame a `SplitterWidget` with
 `bare: true` over the plate's right edge (`SplitterAxis::Horizontal`), another
 over its bottom edge (`Vertical`), and a third over the bottom-right corner
 (`Corner`), and re-frame the dialog on each `SplitterChanged`:
@@ -1420,7 +1419,7 @@ Left/Right movement clamps at the first and last option. Empty option lists
 have no hit buckets. `SegmentedSelected { index }` reports only actual changes.
 The selected bucket fills with `theme.selection` over `theme.selection_text`;
 hovered, pressed, disabled, validation, and focus presentation use the common
-theme/state contract. Each option's label is elided with the kit's ellipsis to
+theme/state contract. Each option's label is elided with the widget set's ellipsis to
 what its own bucket holds less one `pad` either side, measured against the
 theme font's resolved metrics — a label wider than its bucket would otherwise
 be overpainted by the next segment's fill, cut mid-glyph with nothing saying
@@ -1462,7 +1461,7 @@ slot to it never triggers the fit at all; like the image widget's natural size,
 the reference panel does not yet consume it. The selected tab is marked twice, by
 ink and by a two-pixel `theme.text_primary` underline along its bottom edge:
 its label is written in `theme.text_primary` while every other tab's recedes
-into `theme.text_muted`, the same ink the kit spends on a caption or a
+into `theme.text_muted`, the same ink the widget set spends on a caption or a
 placeholder. It is never marked by a fill — every tab keeps the row's own
 `surface_raised`, so the strip reads as a row of places with one marked rather
 than a row of buttons with one lit, and hover and press stay the only fills the
@@ -1749,7 +1748,7 @@ field shows its caret and no ring. Only the ring is keyboard-conditional:
 `push_control_outlines` and the Button's own border are the whole list of draws
 that consult `focus_visible()`.
 
-Drag capture is the kit's own policy over the raw button vocabulary: a left
+Drag capture is the widget set's own policy over the raw button vocabulary: a left
 press that hits a widget sets capture on that child, moves route to it while
 capture holds, and the matching release clears it. That is what lets a slider
 track the cursor past the end of its track and a button cancel when the release
@@ -1816,7 +1815,7 @@ scissor bound and is routinely much larger than the glyphs inside it — every r
 of a list carries the whole viewport — so the subtraction reads the box the text
 occupies: from its pen origin, one line tall and at most one em per character
 wide. A fill that misses that box is skipped whole, and so is a **hairline** —
-anything under half a draw size through, which is every stroke the kit draws
+anything under half a draw size through, which is every stroke the widget set draws
 over a run rather than over the line: a caret, an IME underline, a rule, a focus
 ring. Both exclusions are about cost rather than pixels. Cutting a scissor where
 no glyph was hidden renders the same frame, but it turns one text batch into
@@ -1881,7 +1880,7 @@ cap to draw a missing-glyph box for.
 
 ## Scroll containers and wheel ownership
 
-`ScrollWidget` (`aether.kit.widget.scroll`) is the stateful container for an
+`ScrollWidget` (`aether.widget.scroll`) is the stateful container for an
 oversized widget subtree. A `WidgetKind::Scroll` child decodes `ScrollConfig`:
 its `viewport_extent` is the row the parent places, `content_extent` is the
 fixed clamp authority, `initial_offset` is clamped at startup, and `content`
@@ -1925,7 +1924,7 @@ scroll containers.
 
 ## Editor-wide region ownership
 
-`EditorShell` (export `aether.kit.widget.editor`) composes several independent
+`EditorShell` (export `aether.widget.editor`) composes several independent
 roots into one input domain without turning them into one widget tree. It is
 the sole subscriber for interactive input across its configured regions; each
 panel still owns widget focus and capture inside its own cluster, while the
@@ -1962,7 +1961,7 @@ release are consumed. Plain Tab is forwarded unchanged so the focused panel's
 own widget traversal remains intact.
 
 A widget panel stands behind a region through `EditorRegion` (export
-`aether.kit.widget.editor_region`). Load it with the panel's `PanelConfig` and
+`aether.widget.editor_region`). Load it with the panel's `PanelConfig` and
 its `editor_region` set to the matching `RegionSpec.name`. It declares the
 shell, so a region loaded before the shell is refused rather than announcing
 into nothing. As it wires it announces itself, then spawns a `WidgetPanel` from
@@ -2035,7 +2034,7 @@ of poisoning every frame downstream with NaN.
 
 ## The reference panel
 
-`WidgetPanel` (export `aether.kit.widget.panel`) is the worked example — the
+`WidgetPanel` (export `aether.widget.panel`) is the worked example — the
 test vehicle and the template a real editor forks. It embeds `Composite` and
 `Focus`, spawns the vertical stack its `PanelConfig` declares on its first
 frame (each `WidgetChildSpec` names a `WidgetKind` and carries that widget's
@@ -2061,7 +2060,7 @@ into world-knob driver mail. Hand it your own `children` and fill in those
 handlers.
 
 **`children` selects from the stock set; it does not extend it.** `WidgetKind`
-is a closed, kit-owned enum — every variant maps to a compile-time
+is a closed, crate-owned enum — every variant maps to a compile-time
 `spawn_inline_child::<P, A>` call, which is what makes the dispatch exhaustive
 and an unknown widget a compile error rather than a runtime warn-drop. So a
 `WidgetChildSpec` cannot name a widget a consumer wrote. A consumer that needs
@@ -2073,7 +2072,7 @@ strip it wants) a root needs to place and route it; `ChildLayout` says whether
 the slot is a panel row or a content extent; `content_frame` takes the clear
 column a host-owned scroll bar stands in out of an assigned rectangle. Adding a
 variant to `WidgetKind` is a change to this crate, and the stock set is
-deliberately what the kit itself can draw.
+deliberately what the widget crate itself can draw.
 
 Inline children are externally addressable by lineage. Keep the exact root
 `name` returned by `load_component`, then append
@@ -2091,7 +2090,7 @@ without resetting its label or any sibling state:
   "mails": [{
     "engine_id": "<engine-id>",
     "address": "aether.component/aether.embedded:panel/aether.embedded:button",
-    "kind_name": "aether.kit.widget.set_state",
+    "kind_name": "aether.widget.set_state",
     "params": {
       "state": {
         "visible": true,
@@ -2150,7 +2149,7 @@ rounded set. A caret and a stepper arrow are one
 `WidgetDrawItem::Triangle` — three local corners with a colour each — where a
 stack of quad rows used to approximate them. A flat fill — a row, a track, a
 selection band, a rule, a divider, a scroll bar's track — is the same `Shape`
-at `corner_radius: 0.0` with a fill and nothing else, so the kit has one
+at `corner_radius: 0.0` with a fill and nothing else, so the widget set has one
 rectangle item rather than two.
 
 The theme owns the numbers. `corner_radius_pixels` (one spacing unit at 1×),

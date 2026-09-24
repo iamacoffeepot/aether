@@ -394,7 +394,7 @@ and each is the general form of a specific complaint.
 ## What the kit provides for this method
 
 The method leans on kit surfaces rather than consumer-local reimplementations.
-Almost all of them are in `aether-kit-widget` today:
+Almost all of them are in `aether-widget` today:
 
 - **Theme**: `Theme::text_size_pixels(TextRole)` is the type scale with named
   roles, `Theme::space(steps)` is the spacing scale, `selection` and

@@ -92,7 +92,7 @@ impl<C: Addressable> InlineChild<C> {
     /// keeps the fact that the spawn registered the child, so it is a valid
     /// target for [`WasmCtx::send_to`] and a key for a table of children.
     ///
-    /// Consumed by [`Self::send`] above, by `aether-kit-widget`'s panel spawn,
+    /// Consumed by [`Self::send`] above, by `aether-widget`'s panel spawn,
     /// and by its composite node's spawn. The *reference* erasure: unrelated
     /// to the ctx reply-mode `erase()` the native `#[actor]` expansion emits.
     #[must_use]

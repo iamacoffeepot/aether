@@ -198,13 +198,13 @@ pre-build step runs.
 Without the artifact the gate **fails** the scenario:
 
 ```
-SKIPPED (no wasm for aether_kit_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore
+SKIPPED (no wasm for aether_widget): run `cargo xtask build-wasm` — set AETHER_ALLOW_WASM_SKIP=1 to ignore
 ```
 
 That is the whole point of the message. The gate used to return `None` here and let
 each scenario `return` early, which reports `test … ok` — a green suite that ran none
 of the code under test, indistinguishable from a green suite that ran all of it. An
-agent changing a widget, running `cargo test -p aether-kit-widget`, and reporting the
+agent changing a widget, running `cargo test -p aether-widget`, and reporting the
 change proven was reading that. If you genuinely cannot cross-build wasm, take the
 skip deliberately with `AETHER_ALLOW_WASM_SKIP=1`, and do not read the result as
 proof of anything the wasm would have exercised.

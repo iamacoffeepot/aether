@@ -302,7 +302,7 @@ mod tests {
     fn a_directory_that_is_not_the_package_name_still_names_the_package() {
         // Tripwire: cargo spells a path id both ways, and the failure line has
         // to name the crate a reader would go edit.
-        let renamed = message("path+file:///repo/crates/kit#aether-kit-widget@0.3.0-alpha", "warning");
-        assert_eq!(workspace_diagnostic(&renamed).expect("read").package, "aether-kit-widget");
+        let renamed = message("path+file:///repo/crates/kit#aether-widget@0.3.0-alpha", "warning");
+        assert_eq!(workspace_diagnostic(&renamed).expect("read").package, "aether-widget");
     }
 }

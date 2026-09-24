@@ -1,0 +1,359 @@
+//! Named-load activation of `WidgetDefaults` adopters (issue 5671).
+//!
+//! A local `#[handler]` that redeclares a set kind concatenates the same
+//! kind into the trampoline manifest twice. `CostTable::prepare` then
+//! rejects the duplicate and named `LoadComponent` fails with
+//! `ActivationRejected`, while inline panel reconstruction still succeeds.
+//! These scenarios load the already-exported adopters by typed config and
+//! drive the override bodies that existing panel tests do not cover.
+//!
+//! Skips when the stem wasm has not been pre-built (`require_wasm`). CI sets
+//! `AETHER_REQUIRE_RUNTIME=1` to turn that skip into a hard failure.
+
+mod support;
+
+use std::fs;
+
+use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
+use aether_component::ComponentHostCapability;
+use aether_data::{Kind, LoadName};
+use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_kinds::{LoadComponent, LoadResult, LogTailResult, MouseMove, TextInput, Tick, WindowId};
+use aether_render::HeadlessRenderCapability;
+use aether_widget::set::{NumericWidget, VirtualListWidget};
+use aether_widget::{
+    ButtonConfig, FocusLost, HoverLost, NumericConfig, PanelConfig, SegmentedConfig, TextAreaConfig, TextFieldConfig,
+    Theme, VirtualListConfig, VirtualListRow, WidgetChildSpec, WidgetKind, WidgetPanel,
+};
+use support::widget_caps;
+
+const TEST_WINDOW_ID: WindowId = WindowId(1);
+const WASM_STEMS: [&str; 2] = ["aether_widget", "aether_widget_behavior"];
+
+/// A GPU-free bench with the component host and everything the widget module
+/// declares: the headless render stub, text (its fs from the sandbox roots) and
+/// the in-memory clipboard.
+fn bench(width: u32, height: u32) -> SubstrateHarness {
+    widget_caps(
+        SubstrateHarness::builder()
+            .size(width, height)
+            .namespace_roots(test_namespace_roots(init_save_sandbox("widget-activation")))
+            .with_actor::<HeadlessRenderCapability>(())
+            .with_component_host(),
+    )
+    .build()
+    .expect("boot")
+}
+
+fn trampoline_address(name: &str) -> String {
+    format!("aether.component/{}:{name}", aether_component::WasmTrampoline::NAMESPACE)
+}
+
+/// The `C` child the panel spawned under `subname`.
+fn panel_child<C: ChildOf<WidgetPanel> + Instanced>(
+    harness: &SubstrateHarness,
+    panel: ActorRef<WidgetPanel>,
+    subname: &str,
+) -> ActorRef<C> {
+    harness
+        .child::<WidgetPanel, C>(&panel, LoadName::new(subname).expect("a valid child subname"))
+        .unwrap_or_else(|error| panic!("the panel's {subname} child is live: {error}"))
+}
+
+struct NamedLoad {
+    export: &'static str,
+    name: &'static str,
+    config: Vec<u8>,
+}
+
+fn exported_adopters() -> [NamedLoad; 6] {
+    [
+        NamedLoad {
+            export: "aether.widget.button",
+            name: "button",
+            config: ButtonConfig { label: "Go".to_owned(), theme: Theme::DEFAULT, ..ButtonConfig::default() }
+                .encode_into_bytes(),
+        },
+        NamedLoad {
+            export: "aether.widget.text_field",
+            name: "text_field",
+            config: TextFieldConfig {
+                initial: String::new(),
+                max_chars: 0,
+                theme: Theme::DEFAULT,
+                ..TextFieldConfig::default()
+            }
+            .encode_into_bytes(),
+        },
+        NamedLoad {
+            export: "aether.widget.text_area",
+            name: "text_area",
+            config: TextAreaConfig {
+                initial: String::new(),
+                max_chars: 0,
+                rows: 3,
+                theme: Theme::DEFAULT,
+                ..TextAreaConfig::default()
+            }
+            .encode_into_bytes(),
+        },
+        NamedLoad {
+            export: "aether.widget.numeric",
+            name: "numeric",
+            config: NumericConfig {
+                min: 0.0,
+                max: 100.0,
+                step: 1.0,
+                initial: 0.0,
+                theme: Theme::DEFAULT,
+                ..NumericConfig::default()
+            }
+            .encode_into_bytes(),
+        },
+        NamedLoad {
+            export: "aether.widget.segmented",
+            name: "segmented",
+            config: SegmentedConfig {
+                options: vec!["Raise".to_owned(), "Lower".to_owned()],
+                initial: 0,
+                theme: Theme::DEFAULT,
+                ..SegmentedConfig::default()
+            }
+            .encode_into_bytes(),
+        },
+        NamedLoad {
+            export: "aether.widget.virtual_list",
+            name: "virtual_list",
+            config: VirtualListConfig {
+                items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
+                initial: Some(0),
+                visible_row_count: 2,
+                theme: Theme::DEFAULT,
+                ..VirtualListConfig::default()
+            }
+            .encode_into_bytes(),
+        },
+    ]
+}
+
+fn load_named(harness: &mut SubstrateHarness, wasm: &[u8], case: &NamedLoad) -> String {
+    let loaded = harness
+        .execute(vec![(
+            "load",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &LoadComponent {
+                    wasm: wasm.to_vec(),
+                    name: Some(case.name.to_owned()),
+                    config: case.config.clone(),
+                    export: Some(case.export.to_owned()),
+                },
+            ),
+        )])
+        .expect("named load sequence");
+    match loaded.reply::<LoadResult>("load").expect("decode LoadResult") {
+        LoadResult::Ok { path: name, .. } => name.to_string(),
+        LoadResult::Err { error } => panic!("named load {} ({}) failed: {error}", case.name, case.export),
+    }
+}
+
+fn load_panel_with(
+    harness: &mut SubstrateHarness,
+    wasm: &[u8],
+    children: Vec<WidgetChildSpec>,
+) -> ActorRef<WidgetPanel> {
+    let config = PanelConfig {
+        x: 10.0,
+        y: 10.0,
+        width: 200.0,
+        font_namespace: String::new(),
+        font_path: String::new(),
+        theme: Theme::DEFAULT,
+        children,
+        owns_input: true,
+        editor_region: String::new(),
+    };
+    let (panel, path) = harness
+        .load::<WidgetPanel>(LoadComponent {
+            wasm: wasm.to_vec(),
+            name: Some("panel".to_owned()),
+            config: config.encode_into_bytes(),
+            export: Some("aether.widget.panel".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
+    assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
+    panel
+}
+
+fn panel_log_messages(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Vec<String> {
+    match harness.log_tail(panel.erase(), None, None) {
+        LogTailResult::Ok { entries, .. } => entries.into_iter().map(|entry| entry.message).collect(),
+        LogTailResult::Err { error } => panic!("log_tail on the panel failed: {error}"),
+    }
+}
+
+fn field<'a>(message: &'a str, key: &str) -> Option<&'a str> {
+    let prefix = format!("{key}=");
+    message.split_whitespace().find_map(|token| token.strip_prefix(&prefix))
+}
+
+fn numeric_value(message: &str) -> Option<f32> {
+    field(message, "value")?.parse().ok()
+}
+
+/// Duplicate local+set kinds used to reject `CostTable::prepare` at named
+/// load. Each already-exported adopter must activate under both the stock
+/// and behavior-host wasm artifacts.
+#[test]
+fn named_load_exported_widget_defaults_adopters_succeeds() {
+    for stem in WASM_STEMS {
+        let Some(wasm_path) = require_wasm(stem) else {
+            continue;
+        };
+        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let mut harness = bench(64, 48);
+        for case in exported_adopters() {
+            let name = load_named(&mut harness, &wasm, &case);
+            assert_eq!(
+                name,
+                trampoline_address(case.name),
+                "{stem} named load of {} must register under {}; got {name}",
+                case.export,
+                trampoline_address(case.name),
+            );
+        }
+    }
+}
+
+/// Numeric blur commits the typed buffer. The shared default only cancels
+/// activation, so a dropped override would preview and then lose the value.
+#[test]
+fn numeric_focus_lost_commits_the_typed_buffer() {
+    for stem in WASM_STEMS {
+        let Some(wasm_path) = require_wasm(stem) else {
+            continue;
+        };
+        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let mut harness = bench(240, 80);
+        let panel = load_panel_with(
+            &mut harness,
+            &wasm,
+            vec![WidgetChildSpec {
+                subname: "numeric".to_owned(),
+                kind: WidgetKind::Numeric,
+                origin: [0.0, 0.0],
+                clip: None,
+                config: NumericConfig {
+                    min: 0.0,
+                    max: 100.0,
+                    step: 1.0,
+                    initial: 0.0,
+                    theme: Theme::DEFAULT,
+                    ..NumericConfig::default()
+                }
+                .encode_into_bytes(),
+            }],
+        );
+        harness
+            .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+            .expect("spawn the numeric child");
+        let numeric = panel_child::<NumericWidget>(&harness, panel, "numeric");
+        harness
+            .execute(vec![(
+                "type",
+                HarnessOp::send_and_settle(&numeric, &TextInput { window: TEST_WINDOW_ID, text: "7".to_owned() }),
+            )])
+            .expect("numeric type session");
+        let before = panel_log_messages(&mut harness, panel);
+        let before_numeric: Vec<&String> =
+            before.iter().filter(|message| message.contains("widget numeric changed")).collect();
+        assert_eq!(
+            before_numeric.len(),
+            1,
+            "{stem}: typing must preview exactly once; log was:\n{}",
+            before.join("\n"),
+        );
+        assert_eq!(field(before_numeric[0], "widget"), Some("numeric"));
+        assert_eq!(numeric_value(before_numeric[0]), Some(7.0));
+        assert_eq!(field(before_numeric[0], "committed"), Some("false"));
+        harness
+            // `FocusLost` rides the adopted `WidgetDefaults` set, which carries
+            // no typed marker, so it is sent erased.
+            .execute(vec![("blur", HarnessOp::send_and_settle(numeric.erase(), &FocusLost))])
+            .expect("numeric focus-lost session");
+        let after = panel_log_messages(&mut harness, panel);
+        let after_numeric: Vec<&String> =
+            after.iter().filter(|message| message.contains("widget numeric changed")).collect();
+        assert_eq!(after_numeric.len(), 2, "{stem}: FocusLost must append the commit; log was:\n{}", after.join("\n"));
+        assert_eq!(field(after_numeric[1], "widget"), Some("numeric"));
+        assert_eq!(numeric_value(after_numeric[1]), Some(7.0));
+        assert_eq!(field(after_numeric[1], "committed"), Some("true"));
+    }
+}
+
+/// Virtual-list `HoverLost` clears the hovered row. The shared default only
+/// flips the widget-wide hover bit, so a dropped override would leave the
+/// last row reported as still under the pointer.
+#[test]
+fn virtual_list_hover_lost_clears_the_hovered_row() {
+    for stem in WASM_STEMS {
+        let Some(wasm_path) = require_wasm(stem) else {
+            continue;
+        };
+        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let mut harness = bench(240, 120);
+        let panel = load_panel_with(
+            &mut harness,
+            &wasm,
+            vec![WidgetChildSpec {
+                subname: "inventory".to_owned(),
+                kind: WidgetKind::VirtualList,
+                origin: [0.0, 0.0],
+                clip: None,
+                config: VirtualListConfig {
+                    items: vec![VirtualListRow::from("Row 0"), VirtualListRow::from("Row 1")],
+                    initial: Some(0),
+                    visible_row_count: 2,
+                    theme: Theme::DEFAULT,
+                    ..VirtualListConfig::default()
+                }
+                .encode_into_bytes(),
+            }],
+        );
+        harness
+            .execute(vec![("spawn", HarnessOp::send_and_settle(&panel, &Tick::default()))])
+            .expect("spawn the list child");
+        let list = panel_child::<VirtualListWidget>(&harness, panel, "inventory");
+        harness
+            .execute(vec![(
+                "hover_row",
+                HarnessOp::send_and_settle(&list, &MouseMove { window: TEST_WINDOW_ID, x: 30.0, y: 22.0 }),
+            )])
+            .expect("virtual-list hover session");
+        let before = panel_log_messages(&mut harness, panel);
+        let before_hover: Vec<&String> =
+            before.iter().filter(|message| message.contains("widget virtual list hover")).collect();
+        assert_eq!(
+            before_hover.len(),
+            1,
+            "{stem}: a move over the first row must report it once; log was:\n{}",
+            before.join("\n"),
+        );
+        assert_eq!(field(before_hover[0], "widget"), Some("inventory"));
+        // tracing records Option<u32> as the inner number, or omits the field when None;
+        // a missing `row` is the leave only on this newly emitted second hover event.
+        assert_eq!(field(before_hover[0], "index"), Some("0"));
+        harness
+            // `HoverLost` rides the adopted `WidgetDefaults` set, which carries
+            // no typed marker, so it is sent erased.
+            .execute(vec![("leave", HarnessOp::send_and_settle(list.erase(), &HoverLost))])
+            .expect("virtual-list hover-lost session");
+        let after = panel_log_messages(&mut harness, panel);
+        let after_hover: Vec<&String> =
+            after.iter().filter(|message| message.contains("widget virtual list hover")).collect();
+        assert_eq!(after_hover.len(), 2, "{stem}: HoverLost must append the leave; log was:\n{}", after.join("\n"));
+        assert_eq!(field(after_hover[1], "widget"), Some("inventory"));
+        assert_eq!(field(after_hover[1], "index"), None);
+    }
+}

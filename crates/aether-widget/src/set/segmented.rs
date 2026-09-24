@@ -1,0 +1,512 @@
+// `#[handler]` methods take their decoded mail by value per the ADR-0033
+// dispatch ABI (the full rationale is on the same allow in `lib.rs`).
+#![allow(clippy::needless_pass_by_value, clippy::cast_precision_loss)]
+
+//! Horizontal exclusive segmented control (issue 2926).
+//!
+//! The chosen segment is a state, not an affordance: it fills with the theme's
+//! selection role and inks with `selection_text`, leaving the accent to mean
+//! "the primary action" and nothing else.
+
+use alloc::string::String;
+use alloc::vec::Vec;
+
+use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_kinds::keycode::{KEY_LEFT, KEY_RIGHT};
+use aether_kinds::mouse_button;
+use aether_kinds::{Key, MouseButton, MouseButtonRelease, MouseMove};
+use aether_text::{FontMetricsResult, TextCapability};
+
+use crate::set::defaults::{WidgetDefaults, widget_chrome};
+use crate::set::{
+    accept_font_metrics_result, clamp_option_index, clamp_selection, elide_to_width, measured_text_width,
+    pump_text_font_metrics, push_control_outlines, quad, release_left, reply_draw, text_origin_y,
+};
+use crate::state::{InteractionState, emit_state_changed};
+use crate::text_edit::FontMetricsAdapter;
+use crate::theme::{Theme, ThemeState};
+use crate::{
+    Collect, HoverLost, SegmentedConfig, SegmentedSelected, SetSelection, SetWidgetState, WidgetControlState,
+    WidgetDrawItem, WidgetDrawList, WidgetFrame,
+};
+
+#[derive(Debug, Clone, Copy)]
+enum SegmentDirection {
+    Previous,
+    Next,
+}
+
+/// A horizontal row of equal-width exclusive choices.
+pub struct SegmentedWidget {
+    options: Vec<String>,
+    selected: usize,
+    theme: Theme,
+    frame: WidgetFrame,
+    state: InteractionState,
+    pressed_segment: Option<usize>,
+    hovered_segment: Option<usize>,
+    /// Single-flight exact metrics for the active theme font: what each
+    /// option's label is elided against so it stays inside its own bucket.
+    font_metrics: FontMetricsAdapter,
+}
+
+impl SegmentedWidget {
+    fn segment_at_local_x(local_x: f32, width: f32, option_count: usize) -> Option<usize> {
+        if option_count == 0
+            || !local_x.is_finite()
+            || !width.is_finite()
+            || width <= 0.0
+            || local_x < 0.0
+            || local_x >= width
+        {
+            return None;
+        }
+        let segment_width = width / option_count as f32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let index = (local_x / segment_width) as usize;
+        (index < option_count).then_some(index)
+    }
+
+    fn segment_at_pointer_x(&self, pointer_x: f32) -> Option<usize> {
+        Self::segment_at_local_x(pointer_x - self.frame.x, self.frame.width, self.options.len())
+    }
+
+    fn select_at(&mut self, pointer_x: f32) -> Option<usize> {
+        if !self.state.can_mutate() {
+            return None;
+        }
+        let segment = self.segment_at_pointer_x(pointer_x)?;
+        self.pressed_segment = Some(segment);
+        if segment == self.selected {
+            return None;
+        }
+        self.selected = segment;
+        Some(segment)
+    }
+
+    fn step(&mut self, direction: SegmentDirection) -> Option<usize> {
+        if !self.state.can_mutate() || self.options.is_empty() {
+            return None;
+        }
+        let next = match direction {
+            SegmentDirection::Previous => self.selected.saturating_sub(1),
+            SegmentDirection::Next => (self.selected + 1).min(self.options.len() - 1),
+        };
+        if next == self.selected {
+            return None;
+        }
+        self.selected = next;
+        Some(next)
+    }
+
+    fn adopt_control_state(&mut self, next: WidgetControlState) -> bool {
+        if !self.state.replace(next) {
+            return false;
+        }
+        if !self.state.can_mutate() {
+            self.pressed_segment = None;
+        }
+        if !self.state.is_available() {
+            self.hovered_segment = None;
+        }
+        true
+    }
+
+    fn apply_control_state<A>(&mut self, ctx: &WasmCtx<'_, A>, next: WidgetControlState) {
+        if self.adopt_control_state(next) {
+            emit_state_changed(ctx, &self.state);
+        }
+    }
+
+    fn emit<A>(ctx: &WasmCtx<'_, A>, selected: usize) {
+        if let Some(parent) = ctx.parent() {
+            #[allow(clippy::cast_possible_truncation)]
+            let index = selected as u32;
+            parent.send(&SegmentedSelected { index });
+        }
+    }
+
+    /// The run one option shows, cut to what its own bucket holds.
+    ///
+    /// The buckets are a fixed `width / options.len()` and the draw pushes
+    /// segment `i`'s fill, then its label, then segment `i + 1`'s fill — so a
+    /// label wider than its bucket was **overpainted** by the next segment's
+    /// plate, and a three-option row in a 240-pixel pane showed `Raise terr`
+    /// with no mark saying it had been cut. Every other single-line control in
+    /// the kit cuts with [`elide_to_width`] for exactly this reason (the
+    /// label, the button ladder, the tab strip, the list rows); this is the
+    /// same rule in the last fixed-bucket place it was missing.
+    ///
+    /// The budget is the bucket less one `pad` either side, so a run that fits
+    /// keeps its own margins. An unmeasured run draws whole and left-padded
+    /// for the frame or two before the theme font's metrics land, exactly as
+    /// the tab strip's does — there is no width to cut against yet, and
+    /// guessing one would visibly re-cut when the real metrics arrive. An
+    /// empty run — nothing to say, or a bucket too narrow for even the
+    /// ellipsis — draws nothing.
+    fn option_run(&self, option: &str, segment_width: f32) -> String {
+        let size = self.theme.label_size_pixels;
+        self.font_metrics.resolved().map_or_else(
+            || String::from(option),
+            |metrics| {
+                elide_to_width(option, self.theme.pad.mul_add(-2.0, segment_width), |run| {
+                    measured_text_width(metrics, run, size)
+                })
+            },
+        )
+    }
+
+    /// The width at which no option elides, and a row's height.
+    ///
+    /// The buckets are a fixed `width / options.len()`, so the width that
+    /// shows every option whole is the *widest* option's run plus a `pad`
+    /// either side, taken that many times — sizing to the sum of the
+    /// individual labels would still cut the long one, because the long one
+    /// only ever gets its equal share.
+    ///
+    /// The control already measures each run to decide what to elide
+    /// ([`Self::option_run`]); this is the same measurement reported up
+    /// instead of only consumed, so a host lays out a row of choices from what
+    /// they say rather than from a guessed width that clips the longest one.
+    ///
+    /// `None` until the theme font's metrics land, the same pre-measurement
+    /// silence the button and the numeric keep: a slot sized from the
+    /// per-character approximation would be resized the moment the real
+    /// advances arrived.
+    fn intrinsic(&self) -> Option<[f32; 2]> {
+        let metrics = self.font_metrics.resolved()?;
+        let size = self.theme.label_size_pixels;
+        let widest =
+            self.options.iter().map(|option| measured_text_width(metrics, option, size)).fold(0.0_f32, f32::max);
+        Some([self.options.len() as f32 * self.theme.pad.mul_add(2.0, widest), self.theme.row_height])
+    }
+
+    /// The control's local draw: one fill per bucket, a hairline between
+    /// adjacent buckets, each option's run inside its own bucket, and the
+    /// shared control outlines.
+    fn draw_items(&self) -> Vec<WidgetDrawItem> {
+        let width = self.frame.width;
+        let height = self.frame.height;
+        let size = self.theme.label_size_pixels;
+
+        let mut items = Vec::new();
+        if !self.options.is_empty() {
+            let segment_width = width / self.options.len() as f32;
+            for (index, option) in self.options.iter().enumerate() {
+                let x = index as f32 * segment_width;
+                let selected = index == self.selected;
+                let base = if selected {
+                    self.theme.selection
+                } else {
+                    self.theme.surface_raised
+                };
+                let theme_state = if self.pressed_segment == Some(index) {
+                    ThemeState::Pressed
+                } else if self.hovered_segment == Some(index) {
+                    ThemeState::Hover
+                } else if !self.state.control().enabled {
+                    ThemeState::Disabled
+                } else {
+                    ThemeState::Normal
+                };
+
+                items.push(quad(x, 0.0, segment_width, height, self.theme.fill(base, theme_state)));
+                if index > 0 {
+                    items.push(quad(x, 0.0, 1.0, height, self.theme.fill(self.theme.outline, theme_state)));
+                }
+
+                let run = self.option_run(option, segment_width);
+                if !run.is_empty() {
+                    items.push(WidgetDrawItem::Text {
+                        x: x + self.theme.pad,
+                        y: text_origin_y(0.0, height, size),
+                        font_id: self.theme.font_id,
+                        text: run,
+                        size_pixels: size,
+                        color: self.theme.fill(
+                            if selected {
+                                self.theme.selection_text
+                            } else {
+                                self.theme.text_primary
+                            },
+                            theme_state,
+                        ),
+                        clip: None,
+                    });
+                }
+            }
+        }
+
+        push_control_outlines(&mut items, width, height, &self.state, &self.theme);
+        items
+    }
+}
+
+widget_chrome!(SegmentedWidget, font_metrics);
+
+impl WidgetDefaults for SegmentedWidget {
+    fn cancel_activation(&mut self) {
+        self.pressed_segment = None;
+    }
+
+    fn on_hover_lost(&mut self, _ctx: &mut WasmCtx<'_, Self>, _lost: HoverLost) {
+        self.state.set_hovered(false);
+        self.hovered_segment = None;
+    }
+}
+
+/// A segmented widget. Spawned inline by a panel root with a
+/// [`SegmentedConfig`]; reports [`SegmentedSelected`] on selection changes.
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability))]
+impl WasmActor for SegmentedWidget {
+    type Config = SegmentedConfig;
+    const NAMESPACE: &'static str = "aether.widget.segmented";
+
+    fn init(config: SegmentedConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let selected = clamp_option_index(config.initial, config.options.len());
+        let desired_font_id = config.theme.font_id;
+        Ok(Self {
+            options: config.options,
+            selected,
+            theme: config.theme,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width: 0.0, height: 0.0 },
+            state: InteractionState::new(config.state),
+            pressed_segment: None,
+            hovered_segment: None,
+            font_metrics: FontMetricsAdapter::new(desired_font_id),
+        })
+    }
+
+    /// Kick off the font-metrics request for the initial theme font; the
+    /// per-bucket elision depends on it.
+    fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    /// Replace the options / theme in place, re-clamping the selection into
+    /// the new vector. `initial` seeds the control only at `init`;
+    /// [`SetSelection`] moves the choice.
+    #[handler::single]
+    fn on_config(&mut self, ctx: &mut WasmCtx<'_>, config: SegmentedConfig) {
+        self.options = config.options;
+        self.selected = clamp_selection(self.selected, self.options.len());
+        self.font_metrics.set_desired(config.theme.font_id);
+        self.theme = config.theme;
+        self.pressed_segment = None;
+        self.hovered_segment = None;
+        self.apply_control_state(ctx, config.state);
+        pump_text_font_metrics(ctx, &mut self.font_metrics);
+    }
+
+    #[handler::single]
+    fn on_set_widget_state(&mut self, ctx: &mut WasmCtx<'_>, set: SetWidgetState) {
+        self.apply_control_state(ctx, set.state);
+    }
+
+    /// Push the chosen segment from the host, clamped into the options.
+    /// Silent — no [`SegmentedSelected`]. A `None` index is ignored: a
+    /// segmented control always has a selection.
+    #[handler::single]
+    fn on_set_selection(&mut self, _ctx: &mut WasmCtx<'_>, set: SetSelection) {
+        if let Some(index) = set.index {
+            self.selected = clamp_option_index(index, self.options.len());
+        }
+    }
+
+    /// Install a font-metrics reply; the next `Collect` cuts each label
+    /// against its real width.
+    #[handler::single]
+    fn on_font_metrics_result(&mut self, ctx: &mut WasmCtx<'_>, result: FontMetricsResult) {
+        accept_font_metrics_result(ctx, &mut self.font_metrics, result);
+    }
+
+    #[handler::single]
+    fn on_mouse_button(&mut self, ctx: &mut WasmCtx<'_>, press: MouseButton) {
+        if press.button == mouse_button::LEFT
+            && let Some(selected) = self.select_at(press.x)
+        {
+            Self::emit(ctx, selected);
+        }
+    }
+
+    #[handler::single]
+    fn on_mouse_button_release(&mut self, _ctx: &mut WasmCtx<'_>, release: MouseButtonRelease) {
+        release_left(&mut self.pressed_segment, None, release);
+    }
+
+    #[handler::single]
+    fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, moved: MouseMove) {
+        if self.state.is_available() {
+            self.hovered_segment = self.segment_at_pointer_x(moved.x);
+        }
+    }
+
+    #[handler::single]
+    fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
+        let direction = match key.code {
+            KEY_LEFT => SegmentDirection::Previous,
+            KEY_RIGHT => SegmentDirection::Next,
+            _ => return,
+        };
+        if let Some(selected) = self.step(direction) {
+            Self::emit(ctx, selected);
+        }
+    }
+
+    #[handler::single]
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_>, _collect: Collect) {
+        reply_draw(ctx, &self.state, || WidgetDrawList::items(self.draw_items()).with_intrinsic(self.intrinsic()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use aether_kinds::{CachedFontMetrics, FontMetrics};
+    use alloc::vec;
+
+    use crate::set::ELLIPSIS;
+
+    /// A fixed-advance table: every glyph is half a 1000-unit em, so at the
+    /// theme's 14-pixel label size each character is exactly 7 pixels. What
+    /// fits a bucket is then a character count a reader can check by hand.
+    fn uniform_metrics() -> CachedFontMetrics {
+        CachedFontMetrics::new(&FontMetrics {
+            units_per_em: 1000.0,
+            ascent: 800.0,
+            descent: -200.0,
+            line_gap: 0.0,
+            default_advance: 500.0,
+            advances: vec![],
+        })
+    }
+
+    fn segmented(options: usize, selected: usize) -> SegmentedWidget {
+        SegmentedWidget {
+            options: (0..options).map(|index| format!("option-{index}")).collect(),
+            selected,
+            theme: Theme::DEFAULT,
+            frame: WidgetFrame { x: 10.0, y: 0.0, width: 90.0, height: 24.0 },
+            state: InteractionState::new(WidgetControlState::default()),
+            pressed_segment: None,
+            hovered_segment: None,
+            font_metrics: FontMetricsAdapter::new(Theme::DEFAULT.font_id),
+        }
+    }
+
+    /// A control whose theme font's metrics have already resolved, framed at
+    /// `width` — the state every frame after the first one or two is in.
+    fn measured(options: &[&str], width: f32) -> SegmentedWidget {
+        let mut font_metrics = FontMetricsAdapter::new(Theme::DEFAULT.font_id);
+        assert_eq!(
+            font_metrics.take_pending_request(),
+            Some(Theme::DEFAULT.font_id),
+            "the control asks for its theme font once",
+        );
+        assert!(!font_metrics.accept_reply(Some(uniform_metrics())));
+        SegmentedWidget {
+            options: options.iter().map(|option| String::from(*option)).collect(),
+            selected: 0,
+            theme: Theme::DEFAULT,
+            frame: WidgetFrame { x: 0.0, y: 0.0, width, height: 24.0 },
+            state: InteractionState::new(WidgetControlState::default()),
+            pressed_segment: None,
+            hovered_segment: None,
+            font_metrics,
+        }
+    }
+
+    /// Each drawn run paired with its left and right edge in local pixels —
+    /// what the reader is looking at when they judge whether a label stayed in
+    /// its own bucket.
+    fn drawn_runs(control: &SegmentedWidget) -> Vec<(String, f32, f32)> {
+        let metrics = control.font_metrics.resolved().expect("measured");
+        control
+            .draw_items()
+            .iter()
+            .filter_map(|item| match item {
+                WidgetDrawItem::Text { x, text, size_pixels, .. } => {
+                    Some((text.clone(), *x, x + measured_text_width(metrics, text, *size_pixels)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    // Tripwire: the buckets are a fixed `width / options.len()`, and the draw
+    // pushes segment i's fill, then its label, then segment i + 1's fill — so
+    // a label wider than its bucket is overpainted at the boundary rather than
+    // merely overlapping, and the reader sees `Raise terr` with nothing saying
+    // it was cut. Pins every run inside its own bucket's padded box, and pins
+    // that an over-long one carries the kit's ellipsis.
+    #[test]
+    fn an_option_label_is_elided_into_its_own_bucket() {
+        let control = measured(&["Raise terrain", "Lower terrain", "Smooth"], 240.0);
+        let pad = control.theme.pad;
+        let segment_width = 240.0 / 3.0;
+
+        let runs = drawn_runs(&control);
+        assert_eq!(runs.len(), 3, "every option draws a run");
+        for (index, (run, left, right)) in runs.iter().enumerate() {
+            #[allow(clippy::cast_precision_loss)] // test options are three small buckets
+            let bucket_left = index as f32 * segment_width;
+            assert!(*left >= bucket_left + pad, "run {index} starts inside its own bucket");
+            assert!(
+                *right <= bucket_left + segment_width - pad,
+                "run {index} ({run}) runs to {right}, past its bucket's padded right edge",
+            );
+        }
+        assert!(runs[0].0.ends_with(ELLIPSIS), "a label that did not fit is marked as cut, not silently sliced");
+        assert!(runs[1].0.ends_with(ELLIPSIS));
+        assert_eq!(runs[2].0, "Smooth", "a label that fits keeps every character");
+    }
+
+    #[test]
+    fn an_unmeasured_control_draws_its_labels_whole() {
+        let control = segmented(3, 0);
+        assert_eq!(control.option_run("option-0", 30.0), "option-0", "no metrics is no width to cut against");
+    }
+
+    #[test]
+    fn empty_and_boundary_hits_are_explicit() {
+        assert_eq!(SegmentedWidget::segment_at_local_x(0.0, 90.0, 0), None);
+        assert_eq!(SegmentedWidget::segment_at_local_x(-0.1, 90.0, 3), None);
+        assert_eq!(SegmentedWidget::segment_at_local_x(0.0, 90.0, 3), Some(0));
+        assert_eq!(SegmentedWidget::segment_at_local_x(29.99, 90.0, 3), Some(0));
+        assert_eq!(SegmentedWidget::segment_at_local_x(30.0, 90.0, 3), Some(1));
+        assert_eq!(SegmentedWidget::segment_at_local_x(60.0, 90.0, 3), Some(2));
+        assert_eq!(SegmentedWidget::segment_at_local_x(90.0, 90.0, 3), None);
+    }
+
+    #[test]
+    fn pointer_bucketing_and_arrow_steps_clamp_at_the_ends() {
+        let mut control = segmented(3, 0);
+        assert_eq!(control.select_at(75.0), Some(2));
+        assert_eq!(control.step(SegmentDirection::Next), None, "right at the end is clamped");
+        assert_eq!(control.step(SegmentDirection::Previous), Some(1));
+        assert_eq!(control.step(SegmentDirection::Previous), Some(0));
+        assert_eq!(control.step(SegmentDirection::Previous), None, "left at the start is clamped");
+    }
+
+    #[test]
+    fn initial_index_clamps_for_nonempty_and_empty_options() {
+        assert_eq!(clamp_option_index(9, 3), 2);
+        assert_eq!(clamp_option_index(9, 0), 0);
+    }
+
+    #[test]
+    fn unavailable_and_read_only_states_block_pointer_and_key_mutation() {
+        let mut control = segmented(3, 0);
+        let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
+        assert!(control.adopt_control_state(read_only));
+        assert_eq!(control.select_at(75.0), None);
+        assert_eq!(control.step(SegmentDirection::Next), None);
+        assert_eq!(control.selected, 0);
+
+        let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
+        assert!(control.adopt_control_state(disabled));
+        assert_eq!(control.select_at(75.0), None);
+        assert_eq!(control.selected, 0);
+    }
+}

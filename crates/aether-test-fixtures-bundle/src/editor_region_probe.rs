@@ -11,10 +11,10 @@ use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, Was
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
-use aether_kit_widget::{EditorShell, RegionAttach};
 use aether_test_fixtures_kinds::{
     DrainEditorInputs, DrainEditorInputsResult, EditorRegionProbeConfig, ObservedEditorInput,
 };
+use aether_widget::{EditorShell, RegionAttach};
 use core::mem;
 
 pub struct EditorRegionProbe {
