@@ -1,0 +1,33 @@
+{
+  "id": "resp_0002",
+  "object": "response",
+  "created_at": 1790000060,
+  "status": "incomplete",
+  "error": null,
+  "incomplete_details": { "reason": "max_output_tokens" },
+  "model": "muse-spark-1.3",
+  "store": false,
+  "output": [
+    {
+      "id": "rs_0002",
+      "type": "reasoning",
+      "summary": []
+    },
+    {
+      "id": "msg_0002",
+      "type": "message",
+      "status": "incomplete",
+      "role": "assistant",
+      "content": [
+        { "type": "output_text", "text": "A bloomery is a furnace that", "annotations": [] }
+      ]
+    }
+  ],
+  "usage": {
+    "input_tokens": 1200,
+    "input_tokens_details": { "cached_tokens": 0 },
+    "output_tokens": 64,
+    "output_tokens_details": { "reasoning_tokens": 58 },
+    "total_tokens": 1264
+  }
+}
