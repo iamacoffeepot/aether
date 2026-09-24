@@ -9,7 +9,7 @@
 //! the bundle front of the payload-borne door: it proves a mail bundle's
 //! addresses and hands back items that can only be delivered.
 //! [`NativeCtx::accept_call`] is its one-item form for a wire `Call`, whose
-//! recipient is an [`ActorPath`](aether_data::ActorPath) proven on arrival.
+//! recipient is an [`ActorPath`] proven on arrival.
 //!
 //! The receiver-addressing methods are emitted from one macro because
 //! [`NativeCtx`] and [`NativeInitCtx`](super::NativeInitCtx) hold the same
@@ -128,7 +128,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// Prove a mail bundle that crossed the MCP or harness boundary inside a
     /// payload (ADR-0230 §3): the bundle front of [`Self::resolve_live`].
     ///
-    /// Every item's [`ActorPath`](aether_data::ActorPath) recipient resolves
+    /// Every item's [`ActorPath`] recipient resolves
     /// and is proven before any item is returned, so a refusal — an absent,
     /// ambiguous, dropped, or still-starting recipient, or an unknown kind —
     /// moves no mail; the error names the recipient and `label`. The items

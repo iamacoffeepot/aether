@@ -1,7 +1,7 @@
 //! A mail bundle that crossed the boundary inside a payload, proven once.
 //!
 //! `DispatchTraced` and `CaptureFrame` carry a list of [`NamedMail`]s: each
-//! item names its recipient as an [`ActorPath`](aether_data::ActorPath), an
+//! item names its recipient as an [`ActorPath`], an
 //! address and nothing more. ADR-0230 section 3 makes the receiving engine
 //! prove that address once and send only through the proof, so a bundle is
 //! the same boundary inside a payload, and a wire `Call` is the same boundary
