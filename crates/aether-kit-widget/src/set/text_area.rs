@@ -372,7 +372,7 @@ impl WidgetDefaults for TextAreaWidget {
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
 /// A re-sent config resizes and restyles it in place, holding the buffer;
 /// [`SetText`] replaces what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_area";

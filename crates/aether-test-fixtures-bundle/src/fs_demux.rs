@@ -47,7 +47,7 @@ pub struct FsDemux {
     context_second_payload: Option<u32>,
 }
 
-#[actor(depends(FsCapability), depends(SubstrateHarnessObserver))]
+#[actor(depends(FsCapability, SubstrateHarnessObserver))]
 impl WasmActor for FsDemux {
     const NAMESPACE: &'static str = "test.fs_demux";
 
@@ -192,7 +192,7 @@ pub struct InlineFsDemuxChild {
     demux: FsDemux,
 }
 
-#[actor(instanced, child_of(InlineFsDemuxParent), depends(FsCapability), depends(SubstrateHarnessObserver))]
+#[actor(instanced, child_of(InlineFsDemuxParent), depends(FsCapability, SubstrateHarnessObserver))]
 impl WasmActor for InlineFsDemuxChild {
     const NAMESPACE: &'static str = "test.inline.fs_demux_child";
 

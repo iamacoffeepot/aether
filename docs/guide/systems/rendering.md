@@ -279,7 +279,7 @@ Both are frame-lifecycle stages, subscribed on `aether.lifecycle` from the `wire
 hook:
 
 ```rust
-// In an `#[actor(depends(LifecycleCapability), depends(RenderCapability))]` block.
+// In an `#[actor(depends(LifecycleCapability, RenderCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();

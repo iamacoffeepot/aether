@@ -9,7 +9,7 @@ help: the trait `DependsOn<LifecycleCapability>` is not implemented for `Subscri
    |
  5 | struct Subscriber;
    | ^^^^^^^^^^^^^^^^^
-   = note: add `depends(LifecycleCapability)` to the actor's `#[actor(...)]` attribute
+   = note: add `LifecycleCapability` to the `depends(...)` list on the actor's `#[actor(...)]` attribute
 note: required by a bound in `aether_actor::wasm::ctx::subscribe::<impl WasmCtx<'_, A, M>>::subscribe`
   --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/subscribe.rs
    |

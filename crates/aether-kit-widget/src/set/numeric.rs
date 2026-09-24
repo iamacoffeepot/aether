@@ -564,7 +564,7 @@ impl WidgetDefaults for NumericWidget {
 
 /// A numeric editor. Spawned inline by a panel root with a [`NumericConfig`];
 /// reports preview and committed [`NumericChanged`] events.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
 impl WasmActor for NumericWidget {
     type Config = NumericConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.numeric";
