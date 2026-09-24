@@ -1452,13 +1452,12 @@ macro_rules! __export_internal {
             unsafe impl $crate::Rebuildable<__AetherModule> for $listed {}
         )*
 
-        const _: () = {
-            // Never called: each call's where clause requires every child the
-            // listed type declares in `spawns(..)` to be listed here as well.
-            #[allow(dead_code)] // aether-suppression-request: the coverage check is a never-called function; only its body's where clauses matter
-            fn __aether_export_covers_children() {
-                $( <$listed>::__aether_listed_children::<__AetherModule>(); )*
-            }
+        // Never called: a closure body is type-checked, so each call's where
+        // clause requires every child the listed type declares in
+        // `spawns(..)` to be listed here as well, and an unused const needs
+        // no suppression.
+        const _: fn() = || {
+            $( <$listed>::__aether_listed_children::<__AetherModule>(); )*
         };
     };
 
