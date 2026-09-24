@@ -18,7 +18,7 @@ use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
-use aether_actor::{CallerScope, HandlesKind, RegistryChanged, RequestContextTable};
+use aether_actor::{CallerScope, RequestContextTable};
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -206,8 +206,8 @@ impl NativeBinding {
 
     /// Subscribe this actor to the registry's inventory changes. The path
     /// behind [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory).
-    pub(crate) fn subscribe_inventory<A: HandlesKind<RegistryChanged>>(&self) -> RegistrySubscription {
-        self.mailer.subscribe_inventory_for::<A>(self.self_mailbox())
+    pub(crate) fn subscribe_inventory(&self) -> RegistrySubscription {
+        self.mailer.subscribe_inventory_for(self.self_mailbox())
     }
 
     /// This actor's lineage carry (ADR-0099 §3) — the rolling fold

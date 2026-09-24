@@ -18,15 +18,6 @@ use crate::mail::registry::{MailboxEntry, OwnedDispatch, Registry, canonical_mai
 use crate::mail::{KindId, Mail, MailId, MailboxId, Source, SourceAddr};
 use crate::testing::boot_authority as auth;
 
-pub(super) struct InventorySubscriber;
-
-impl aether_actor::Addressable for InventorySubscriber {
-    const NAMESPACE: &'static str = "test.inventory-subscriber";
-    type Resolver = aether_actor::One;
-}
-
-impl aether_actor::HandlesKind<aether_actor::RegistryChanged> for InventorySubscriber {}
-
 pub(super) fn inventory_subscription_fixture()
 -> (Arc<Registry>, Arc<Mailer>, crossbeam_channel::Receiver<KindId>, MailboxId) {
     let registry = Arc::new(Registry::new());
