@@ -104,6 +104,8 @@ impl ProgramCore {
     /// role alone never blocks routing.
     fn routing_quiet(&self) -> bool {
         let routing = &self.routing;
+        // A bundle root's fetch read is left out on purpose: routing never
+        // waits on a program's fetch-on-miss.
         let reading = self
             .artifact_reads
             .values()

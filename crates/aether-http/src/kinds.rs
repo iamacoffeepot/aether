@@ -480,9 +480,8 @@ pub enum RegisterRouteResult {
 /// instead, so the route table stops dispatching at a dropped
 /// trampoline without anyone mailing this. Idempotent: a mailbox
 /// holding no routes is a no-op. Fire-and-forget; no reply.
-/// Cast-shape (Pod) — one `MailboxId`, fixed size.
-#[repr(C)]
-#[aether_data::kind(name = "aether.http.server.unregister_routes_all", pod, eq)]
+/// Fire-and-forget; one mailbox field.
+#[aether_data::kind(name = "aether.http.server.unregister_routes_all", copy, eq)]
 pub struct UnregisterRoutesAll {
     pub mailbox: aether_data::MailboxId,
 }

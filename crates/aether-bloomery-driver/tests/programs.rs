@@ -157,7 +157,7 @@ fn unbound_head_is_refused_and_records_nothing() -> Result<(), Box<dyn Error>> {
 
 #[test]
 fn fetch_on_miss_reads_through_the_mounted_journal() -> Result<(), Box<dyn Error>> {
-    // Catches a fetch sent to a position nobody serves (#6478), a relay that loses the invocation's wait, a driver forward that does not pin the reply target to the bundle root, and a relay that forwards only `Found`.
+    // Catches a fetch sent to a position nobody serves (#6478), a relay that loses the invocation's wait, a driver answer that does not reach the bundle root with its correlation (from a journal read or from the cache), and a relay that forwards only `Found`.
     let Some(wasm_path) = require_wasm("aether_test_fixtures_program") else {
         return Ok(());
     };
@@ -181,12 +181,20 @@ fn fetch_on_miss_reads_through_the_mounted_journal() -> Result<(), Box<dyn Error
     assert_eq!(transition.result, expected, "the program read the fetched text");
     assert!(harness.stores(&transition.result), "the staged result is stored");
 
-    let missing = Call { program: PROGRAM, name, input: missing_input, origin, key: 2 };
+    let missing = Call { program: PROGRAM, name: name.clone(), input: missing_input, origin: origin.clone(), key: 2 };
     match harness.call(&missing) {
         CallOutcome::Fault { key: 2, fault, .. } => {
             assert_eq!(fault.reason, FaultReason::InputMissing, "a missing fetch faults InputMissing");
         }
         other => panic!("expected an InputMissing fault, got {other:?}"),
+    }
+
+    let cached = Call { program: PROGRAM, name, input: found_input, origin, key: 3 };
+    match harness.call(&cached) {
+        CallOutcome::Transition { key: 3, transition, .. } => {
+            assert_eq!(transition.result, expected, "the cached fetch answers the program");
+        }
+        other => panic!("expected a Transition outcome, got {other:?}"),
     }
     Ok(())
 }

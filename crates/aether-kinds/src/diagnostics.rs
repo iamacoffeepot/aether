@@ -11,8 +11,7 @@
 /// sent to — the id space is cross-process-stable (ADR-0029 /
 /// ADR-0030 / issue #186) so agents can map it back to a name in
 /// tooling. `kind_id` is the kind the original mail carried.
-#[repr(C)]
-#[aether_data::kind(name = "aether.mail.unresolved", pod, default, eq)]
+#[aether_data::kind(name = "aether.mail.unresolved", copy, eq)]
 pub struct UnresolvedMail {
     pub recipient_mailbox_id: aether_data::MailboxId,
     pub kind_id: aether_data::KindId,

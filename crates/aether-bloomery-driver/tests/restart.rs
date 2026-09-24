@@ -26,6 +26,7 @@ fn restart_world(world: &mut World) -> Vec<Command> {
     world.reactors.clear();
     world.eval_roots.clear();
     world.processed.clear();
+    world.fetched.clear();
     world.answers.clear();
     world.abort = None;
     world.appends.clear();
