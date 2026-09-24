@@ -9,6 +9,8 @@ during expand and migrate, a change that raises an old-door count, or that
 raises the checked-in baseline to match new call sites, does not land. The
 `.actor::<` and `.to(&` rows track ADR-0232's typed-handle doors
 (`ctx.actor::<R>()` and `ctx.to(&reference)`) the same way, down to zero.
+The `ctx.self_id()` row tracks an actor reading its own mailbox position,
+which ADR-0230 retires: no actor reads its own position.
 
 Base/head split. CI materializes this file from the pull request's *base*
 commit (`git show "${BASE_SHA}:scripts/check-raw-mailbox-ratchet.py"`), the
@@ -59,6 +61,7 @@ PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("clippy::disallowed_methods", re.compile(r"clippy::disallowed_methods")),
     (".actor::<", re.compile(r"\.actor::<")),
     (".to(&", re.compile(r"\.to\(&")),
+    ("ctx.self_id()", re.compile(r"\bctx\.self_id\(\)")),
 )
 PATTERN_NAMES: tuple[str, ...] = tuple(name for name, _ in PATTERNS)
 _PATTERN_NAME_SET = frozenset(PATTERN_NAMES)

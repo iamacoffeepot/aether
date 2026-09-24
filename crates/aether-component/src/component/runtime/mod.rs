@@ -216,10 +216,8 @@ impl NativeActor for ComponentHostCapability {
         })
     }
 
-    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_>) {
-        state.registry_subscription = Some(
-            state.registry.subscribe_inventory::<ComponentHostCapability>(ctx.self_id(), Arc::clone(&state.mailer)),
-        );
+    fn wire(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>) {
+        state.registry_subscription = Some(ctx.subscribe_inventory());
     }
 
     /// Load a fresh wasm component into the substrate.

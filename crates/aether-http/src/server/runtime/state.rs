@@ -5,7 +5,7 @@
 use super::*;
 
 use crate::server::shard::HttpDispatchShard;
-use aether_actor::{ErasedActorRef, Single};
+use aether_actor::{ErasedActorRef, HandlesKind, Single};
 use aether_substrate::Subname;
 use std::collections::HashSet;
 use std::collections::hash_map::Entry;
@@ -148,9 +148,6 @@ pub struct HttpShardState {
     /// `request_timeout`, which stays the in-flight read + response
     /// deadline.
     pub keep_alive_timeout: Duration,
-    /// The shard's own position, for [`Self::subscribe_settlement`] alone:
-    /// the settlement registry takes a subscriber position.
-    pub self_mailbox: MailboxId,
     /// Cached `Arc<Mailer>` so the shard can validate a matched route's
     /// registrant against the registry at dispatch time and subscribe to
     /// settlement. The shard is single-threaded post-ADR-0038 so direct
@@ -589,17 +586,6 @@ impl HttpShardState {
         WakeSink { inbound_tx: self.inbound_tx.clone(), wake: self.wake.clone(), dirty: Arc::clone(&self.wake_dirty) }
     }
 
-    pub fn subscribe_settlement(&self, mail_id: MailId) {
-        if let Some(registry) = self.mailer.settlement_registry() {
-            registry.subscribe_settlement_mail(
-                mail_id,
-                self.self_mailbox,
-                <Settled as Kind>::ID,
-                Arc::clone(&self.mailer),
-            );
-        }
-    }
-
     /// Release this connection's slot in the global live count (ADR-0135).
     /// Paired with the supervisor's assignment-time increment; called
     /// exactly once per assigned connection — on close, or on an adoption
@@ -713,7 +699,7 @@ impl HttpShardState {
     /// check is caught by the settlement `502` net — the same net that
     /// covers the dispatch-to-delivery gap.
     #[allow(clippy::too_many_arguments)]
-    pub fn dispatch_prepared<A>(
+    pub fn dispatch_prepared<A: HandlesKind<Settled>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
@@ -733,7 +719,7 @@ impl HttpShardState {
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.
-        self.subscribe_settlement(mail_id);
+        let _ = ctx.subscribe_settlement::<Settled>(mail_id);
         self.in_flight.insert(mail_id.correlation_id, PendingRequest { conn_id, method, keep_alive, handler });
     }
 

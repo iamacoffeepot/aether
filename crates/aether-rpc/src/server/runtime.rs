@@ -31,7 +31,7 @@ use super::{
     MonitorNotice, PeerKind, RegisterEngineRoute, RpcBind, RpcInboundReady, RpcServerCapability, RpcServerConfig,
     RpcServerParams, Settled,
 };
-use aether_actor::runtime;
+use aether_actor::{HandlesKind, runtime};
 use aether_substrate::atomic_write::atomic_write;
 use aether_substrate::mail::ResolveLiveError;
 use aether_substrate::net::teardown_connect_addr;
@@ -395,7 +395,12 @@ impl RpcServerState {
     }
 
     /// Dispatch one incoming frame.
-    pub fn dispatch_frame<A>(&mut self, ctx: &mut NativeCtx<'_, A>, conn_id: ConnId, frame: WireFrame) {
+    pub fn dispatch_frame<A: HandlesKind<Settled>>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        conn_id: ConnId,
+        frame: WireFrame,
+    ) {
         match frame {
             WireFrame::Hello(hello) => self.handle_hello(conn_id, hello),
             WireFrame::HelloAck(_) => {
@@ -447,7 +452,7 @@ impl RpcServerState {
         );
     }
 
-    pub fn handle_call<A>(
+    pub fn handle_call<A: HandlesKind<Settled>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A>,
         conn_id: ConnId,
@@ -539,7 +544,7 @@ impl RpcServerState {
         // Subscribe to settlement of the dispatched chain so we
         // close the call with a ReplyEnd. Requires the chassis
         // settlement registry — fail loud if not wired.
-        let Some(reg) = self.mailer.settlement_registry() else {
+        if !ctx.subscribe_settlement::<Settled>(mail_id) {
             self.write_frame_to(
                 conn_id,
                 &WireFrame::ReplyEnd {
@@ -548,8 +553,7 @@ impl RpcServerState {
                 },
             );
             return;
-        };
-        reg.subscribe_settlement_mail(mail_id, ctx.self_id(), <Settled as Kind>::ID, Arc::clone(&self.mailer));
+        }
         self.in_flight.insert(mail_id.correlation_id, InFlight { conn_id, wire_cid, route: None });
     }
 
@@ -726,7 +730,7 @@ impl NativeActor for RpcServerCapability {
     /// dispatcher; the handler drains the mpsc and dispatches per
     /// item.
     #[handler::single]
-    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_>, _mail: RpcInboundReady) {
+    fn on_inbound_ready(state: &mut Self::State, ctx: &mut NativeCtx<'_, Self>, _mail: RpcInboundReady) {
         while let Ok(event) = state.inbound_rx.try_recv() {
             match event {
                 InboundEvent::Bound { listener } => {
