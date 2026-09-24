@@ -1159,10 +1159,7 @@ fn spawn_behavior_host<A>(
 #[actor(
     instanced,
     child_of(EditorRegion),
-    depends(WindowCapability),
-    depends(LifecycleCapability),
-    depends(RenderCapability),
-    depends(TextCapability)
+    depends(WindowCapability, LifecycleCapability, RenderCapability, TextCapability)
 )]
 impl WasmActor for WidgetPanel {
     type Config = PanelConfig;

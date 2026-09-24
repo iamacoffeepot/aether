@@ -196,7 +196,7 @@ impl WasmActor for ContractProbe {
 
 struct DependentProbe;
 
-#[actor(depends(FirstParent), depends(EmbeddedPeer))]
+#[actor(depends(FirstParent, EmbeddedPeer))]
 impl WasmActor for DependentProbe {
     const NAMESPACE: &'static str = "manifest.dependent";
 

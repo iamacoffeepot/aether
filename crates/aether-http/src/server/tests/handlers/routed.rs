@@ -285,14 +285,7 @@ pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
 
 #[http::router]
-#[actor(
-    singleton,
-    root,
-    depends(HttpServerCapability),
-    depends(EchoPeer),
-    depends(SilentPeer),
-    depends(ComponentHostCapability)
-)]
+#[actor(singleton, root, depends(HttpServerCapability, EchoPeer, SilentPeer, ComponentHostCapability))]
 impl NativeActor for DeferRouteHandler {
     type State = DeferRouteHandlerState;
     type Config = ();

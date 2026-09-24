@@ -1,8 +1,6 @@
 use aether_actor::actor;
 
-struct Target;
-
-#[actor(depends(Target, Target))]
+#[actor(depends())]
 pub struct Child;
 
 fn main() {}

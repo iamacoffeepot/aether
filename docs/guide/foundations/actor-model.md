@@ -124,7 +124,7 @@ block, and each **`#[handler::<class>]`** method *is* a handler — the macro in
 the kind it handles from the method's **third parameter**:
 
 ```rust
-#[actor(depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 

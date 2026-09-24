@@ -28,7 +28,7 @@ error[E0277]: `Sender` does not declare a dependency on `Stranger`
 72 |         ctx.send::<Stranger>(&Handled { seq: trigger.seq });
    |             ^^^^ unsatisfied trait bound
    |
-   = note: add `depends(Stranger)` to the actor's `#[actor(...)]` attribute
+   = note: add `Stranger` to the `depends(...)` list on the actor's `#[actor(...)]` attribute
 help: the trait `DependsOn<Stranger>` is not implemented for `Sender`
       but trait `DependsOn<Peer>` is implemented for it
   --> tests/ui/rejects_flat_send_outside_declared_dependencies.rs:60:1
