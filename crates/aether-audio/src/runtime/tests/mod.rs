@@ -23,15 +23,15 @@ use aether_substrate::testing::{
     assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
     fresh_substrate, fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, unrouted_binding,
 };
-use aether_substrate::{EgressEvent, Erased, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
+use aether_substrate::{EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
 use crossbeam_queue::ArrayQueue;
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
 const TEST_RATE: f32 = 48_000.0;
 
-fn read_result_ctx(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, Erased, Manual> {
-    NativeCtx::new_dispatching(transport, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE)
+fn read_result_ctx<A>(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, A, Manual> {
+    NativeCtx::new_for_actor(transport, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE)
 }
 
 /// Build a cap with a live event queue but no cpal worker — the
@@ -63,10 +63,10 @@ fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
 
 /// ADR-0112: a `Manual` ctx for directly calling `#[handler::manual]`
 /// methods (`on_load_instrument`, `on_read_result`). Mirrors `load_ctx`
-/// but uses `new_dispatching` so the method's `OutboundReply` surface
-/// is available.
-fn manual_ctx(transport: &Arc<NativeBinding>) -> NativeCtx<'_, Erased, Manual> {
-    NativeCtx::new_dispatching(transport, session_sender(), MailId::NONE, MailId::NONE)
+/// in the `Manual` mode, so the method's `OutboundReply` surface is
+/// available.
+fn manual_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A, Manual> {
+    NativeCtx::new_for_actor(transport, session_sender(), MailId::NONE, MailId::NONE)
 }
 
 mod instrument;

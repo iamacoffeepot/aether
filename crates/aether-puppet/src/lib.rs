@@ -113,14 +113,14 @@ use aether_actor::{
     ActorInitError, Erased, Manual, OutboundReply, PriorState, ReplyHandle, WasmActor, WasmCtx, WasmDropCtx,
     WasmInitCtx, actor,
 };
-use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
+use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult, Write};
 use aether_kinds::{MouseButton, MouseButtonRelease, MouseMove, MouseWheel, Render, WindowSize};
-use aether_lifecycle::{LifecycleCapability, LifecycleMailboxExt};
+use aether_lifecycle::LifecycleCapability;
 use aether_math::{Mat4, Rigid, Vec2, Vec3};
 use aether_render::{
     CreateGeometryResult, CreateTextureResult, ProgramRegisterResult, RenderCapability, ViewProjection,
 };
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 use core::mem;
 use std::collections::VecDeque;
 
@@ -779,7 +779,7 @@ impl Puppet {
     }
 }
 
-#[actor(depends(LifecycleCapability), depends(WindowCapability), depends(FsCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, WindowCapability, FsCapability, RenderCapability))]
 impl WasmActor for Puppet {
     type Config = PuppetConfig;
     const NAMESPACE: &'static str = "aether.puppet";
@@ -839,18 +839,17 @@ impl WasmActor for Puppet {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Render>();
+        ctx.subscribe::<LifecycleCapability, Render>();
 
         // Window-originated input is addressed through the window identity
         // (ADR-0164), not the lifecycle stream — subscribing to these on
         // lifecycle compiles and silently delivers nothing, which is how
         // the first attempt at a drag camera did exactly nothing.
-        let window = ctx.actor::<WindowCapability>();
-        window.subscribe::<MouseButton>(WindowSelector::All);
-        window.subscribe::<MouseButtonRelease>(WindowSelector::All);
-        window.subscribe::<MouseMove>(WindowSelector::All);
-        window.subscribe::<MouseWheel>(WindowSelector::All);
-        window.subscribe::<WindowSize>(WindowSelector::All);
+        ctx.subscribe::<WindowCapability, MouseButton>();
+        ctx.subscribe::<WindowCapability, MouseButtonRelease>();
+        ctx.subscribe::<WindowCapability, MouseMove>();
+        ctx.subscribe::<WindowCapability, MouseWheel>();
+        ctx.subscribe::<WindowCapability, WindowSize>();
 
         // The configured subject, issued here rather than in `init` because
         // `init`'s ctx cannot mail. Nobody is owed a `LoadResult` — there is
@@ -858,7 +857,10 @@ impl WasmActor for Puppet {
         // when the caller was fire-and-forget: in the actor log.
         if let Some(subject) = self.subject_at_boot.take() {
             for context in self.stage(&subject) {
-                ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+                let _ = ctx.send_with_context::<FsCapability>(
+                    &Read { addr: NamespaceAddr::new(&context.namespace, &context.path) },
+                    &context,
+                );
             }
         }
     }
@@ -890,7 +892,10 @@ impl WasmActor for Puppet {
         if let Some(load) = carried.pending {
             self.owed = carried.owed;
             for context in self.stage(&load) {
-                ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+                let _ = ctx.send_with_context::<FsCapability>(
+                    &Read { addr: NamespaceAddr::new(&context.namespace, &context.path) },
+                    &context,
+                );
             }
         }
     }
@@ -978,14 +983,17 @@ impl WasmActor for Puppet {
     /// caller is answered `Err` now, and its reads are dropped as they
     /// land.
     #[handler::manual]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: Load) {
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, mail: Load) {
         if let Some(superseded) = self.owed.take() {
             ctx.reply_to(superseded, &LoadResult::Err { reason: SUPERSEDED.to_owned() });
         }
         self.owed = ctx.reply_target();
 
         for context in self.stage(&mail) {
-            ctx.actor::<FsCapability>().with_context(&context).read(&context.namespace, &context.path);
+            let _ = ctx.send_with_context::<FsCapability>(
+                &Read { addr: NamespaceAddr::new(&context.namespace, &context.path) },
+                &context,
+            );
         }
     }
 
@@ -1337,12 +1345,20 @@ impl WasmActor for Puppet {
             return;
         };
 
-        let fs = ctx.actor::<FsCapability>();
-        fs.write(&dump.namespace, format!("{}/dims.txt", dump.prefix), format!("{} {}", planes.width, planes.height));
-        fs.write(&dump.namespace, format!("{}/label.bin", dump.prefix), planes.class.clone());
+        ctx.send::<FsCapability>(&Write {
+            addr: NamespaceAddr::new(&dump.namespace, format!("{}/dims.txt", dump.prefix)),
+            bytes: format!("{} {}", planes.width, planes.height).into_bytes(),
+        });
+        ctx.send::<FsCapability>(&Write {
+            addr: NamespaceAddr::new(&dump.namespace, format!("{}/label.bin", dump.prefix)),
+            bytes: planes.class.clone(),
+        });
         for (name, plane) in [("tone", &planes.tone), ("facing", &planes.facing)] {
             let bytes: Vec<u8> = plane.iter().flat_map(|at| at.to_le_bytes()).collect();
-            fs.write(&dump.namespace, format!("{}/{name}.bin", dump.prefix), bytes);
+            ctx.send::<FsCapability>(&Write {
+                addr: NamespaceAddr::new(&dump.namespace, format!("{}/{name}.bin", dump.prefix)),
+                bytes,
+            });
         }
         tracing::info!(
             target: "aether_puppet",
@@ -1359,8 +1375,7 @@ impl WasmActor for Puppet {
     #[allow(clippy::too_many_lines, reason = "one ordered render mailbox transaction across the three layers")]
     #[handler::single]
     fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _stage: Render) {
-        let render = ctx.actor::<RenderCapability>();
-        render.send(&self.view_projection());
+        ctx.send::<RenderCapability>(&self.view_projection());
 
         if self.subject.is_none() {
             return;
@@ -1448,24 +1463,24 @@ impl WasmActor for Puppet {
         // frame before's.
         for register in self.strokes.take_registers() {
             self.awaiting.registers.push_back(Awaiting::Strokes);
-            render.send(&register);
+            ctx.send::<RenderCapability>(&register);
         }
         for destroy in self.strokes.take_destroys() {
-            render.send(&destroy);
+            ctx.send::<RenderCapability>(&destroy);
         }
         for create in self.strokes.take_creates() {
             self.awaiting.textures.push_back(Awaiting::Strokes);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for create in self.strokes.take_geometry_creates() {
             self.awaiting.geometries.push_back(Awaiting::Strokes);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for update in self.strokes.take_geometry_updates() {
-            render.send(&update);
+            ctx.send::<RenderCapability>(&update);
         }
         for dispatch in self.strokes.take_dispatches() {
-            render.send(&dispatch);
+            ctx.send::<RenderCapability>(&dispatch);
         }
 
         // The candidate owns a separate transparent sheet and is mounted
@@ -1474,28 +1489,28 @@ impl WasmActor for Puppet {
         // keep their established order, with the replacement silhouette
         // composited last.
         for destroy in self.gpu_silhouette.take_program_destroys() {
-            render.send(&destroy);
+            ctx.send::<RenderCapability>(&destroy);
         }
         for register in self.gpu_silhouette.take_registers() {
             self.awaiting.registers.push_back(Awaiting::GpuSilhouette);
-            render.send(&register);
+            ctx.send::<RenderCapability>(&register);
         }
         for destroy in self.gpu_silhouette.take_destroys() {
-            render.send(&destroy);
+            ctx.send::<RenderCapability>(&destroy);
         }
         for create in self.gpu_silhouette.take_creates() {
             self.awaiting.textures.push_back(Awaiting::GpuSilhouette);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for create in self.gpu_silhouette.take_geometry_creates() {
             self.awaiting.geometries.push_back(Awaiting::GpuSilhouette);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for update in self.gpu_silhouette.take_geometry_updates() {
-            render.send(&update);
+            ctx.send::<RenderCapability>(&update);
         }
         for dispatch in self.gpu_silhouette.take_dispatches() {
-            render.send(&dispatch);
+            ctx.send::<RenderCapability>(&dispatch);
         }
 
         // The easel's, in the same dependency order: the programs a
@@ -1507,28 +1522,28 @@ impl WasmActor for Puppet {
         // all — to the same mailbox, so the render cap sees them in
         // exactly this order.
         for destroy in self.easel.take_program_destroys() {
-            render.send(&destroy);
+            ctx.send::<RenderCapability>(&destroy);
         }
         for register in self.easel.take_registers() {
             self.awaiting.registers.push_back(Awaiting::Easel);
-            render.send(&register);
+            ctx.send::<RenderCapability>(&register);
         }
         for destroy in self.easel.take_destroys() {
-            render.send(&destroy);
+            ctx.send::<RenderCapability>(&destroy);
         }
         for create in self.easel.take_creates() {
             self.awaiting.textures.push_back(Awaiting::Easel);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for create in self.easel.take_geometry_creates() {
             self.awaiting.geometries.push_back(Awaiting::Easel);
-            render.send(&create);
+            ctx.send::<RenderCapability>(&create);
         }
         for update in self.easel.take_geometry_updates() {
-            render.send(&update);
+            ctx.send::<RenderCapability>(&update);
         }
         for dispatch in self.easel.take_dispatch() {
-            render.send(&dispatch);
+            ctx.send::<RenderCapability>(&dispatch);
         }
 
         // The ordinary two billboards, sheet first, then the opt-in GPU
@@ -1536,13 +1551,13 @@ impl WasmActor for Puppet {
         // compose in send order.
         let subject_radius = (subject.max - subject.min).length() * 0.5;
         if let Some(sheet) = self.easel.draw(&view, subject_radius) {
-            render.send(&sheet);
+            ctx.send::<RenderCapability>(&sheet);
         }
         if let Some(ink) = self.strokes.draw(&view, subject_radius) {
-            render.send(&ink);
+            ctx.send::<RenderCapability>(&ink);
         }
         if let Some(silhouette) = self.gpu_silhouette.draw(&view, subject_radius) {
-            render.send(&silhouette);
+            ctx.send::<RenderCapability>(&silhouette);
         }
     }
 

@@ -123,7 +123,7 @@ impl Dispatch<Self> for RingRelay {
     ) -> Option<()> {
         if kind.0 == RingLink::ID.0 {
             if let Some(close) = state.close {
-                ctx.to(&close).send(&RingLink);
+                ctx.send_to(close, &RingLink);
             }
             if state.next.is_none() {
                 state.next = ctx.sender();

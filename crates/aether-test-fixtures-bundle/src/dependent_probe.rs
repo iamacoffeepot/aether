@@ -14,7 +14,7 @@ pub struct DependentProbe {
     bumps: u64,
 }
 
-#[actor(depends(ParentPeerTarget), depends(SubstrateHarnessObserver))]
+#[actor(depends(ParentPeerTarget, SubstrateHarnessObserver))]
 impl WasmActor for DependentProbe {
     const NAMESPACE: &'static str = "test.parent_peer.dependent";
 
@@ -25,6 +25,6 @@ impl WasmActor for DependentProbe {
     #[handler::single]
     fn on_bump(&mut self, ctx: &mut WasmCtx<'_>, _bump: Bump) {
         self.bumps += 1;
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.bumps });
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: self.bumps });
     }
 }

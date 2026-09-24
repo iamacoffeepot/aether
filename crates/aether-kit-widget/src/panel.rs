@@ -50,7 +50,7 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Reaches, Rebuildable,
+    ActorInitError, Addressable, DependsOn, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Rebuildable,
     Sends, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
@@ -60,11 +60,10 @@ use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput, Tick,
 };
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Vec2;
 use aether_render::RenderCapability;
 use aether_text::{LoadFont, LoadFontResult, TextCapability};
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 use crate::composite::Composite;
 use crate::focus::{
@@ -307,7 +306,7 @@ impl WidgetPanel {
 
     /// Discharge a closed frame: flatten the composite and emit it from the
     /// panel's single render + text sender.
-    fn finish<A: Reaches<RenderCapability> + Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn finish<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.frame_discharge.is_closed() {
             return;
         }
@@ -1159,10 +1158,7 @@ fn spawn_behavior_host<A>(
 #[actor(
     instanced,
     child_of(EditorRegion),
-    depends(WindowCapability),
-    depends(LifecycleCapability),
-    depends(RenderCapability),
-    depends(TextCapability)
+    depends(WindowCapability, LifecycleCapability, RenderCapability, TextCapability)
 )]
 impl WasmActor for WidgetPanel {
     type Config = PanelConfig;
@@ -1197,21 +1193,22 @@ impl WasmActor for WidgetPanel {
     /// [`EditorRegion`], which relays the editor shell's input to it.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
         if self.config.owns_input {
-            let window = ctx.actor::<WindowCapability>();
-            window.subscribe::<MouseButton>(WindowSelector::All);
-            window.subscribe::<MouseButtonRelease>(WindowSelector::All);
-            window.subscribe::<MouseMove>(WindowSelector::All);
-            window.subscribe::<MouseWheel>(WindowSelector::All);
-            window.subscribe::<Key>(WindowSelector::All);
-            window.subscribe::<KeyRelease>(WindowSelector::All);
-            window.subscribe::<TextInput>(WindowSelector::All);
-            window.subscribe::<ImePreedit>(WindowSelector::All);
-            window.subscribe::<Modifiers>(WindowSelector::All);
+            ctx.subscribe::<WindowCapability, MouseButton>();
+            ctx.subscribe::<WindowCapability, MouseButtonRelease>();
+            ctx.subscribe::<WindowCapability, MouseMove>();
+            ctx.subscribe::<WindowCapability, MouseWheel>();
+            ctx.subscribe::<WindowCapability, Key>();
+            ctx.subscribe::<WindowCapability, KeyRelease>();
+            ctx.subscribe::<WindowCapability, TextInput>();
+            ctx.subscribe::<WindowCapability, ImePreedit>();
+            ctx.subscribe::<WindowCapability, Modifiers>();
         }
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
         if !self.config.font_path.is_empty() {
-            ctx.actor::<TextCapability>()
-                .send(&LoadFont { namespace: self.config.font_namespace.clone(), path: self.config.font_path.clone() });
+            ctx.send::<TextCapability>(&LoadFont {
+                namespace: self.config.font_namespace.clone(),
+                path: self.config.font_path.clone(),
+            });
         }
     }
 
@@ -1222,7 +1219,7 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// Tick-driven; not useful to send manually.
     #[handler::manual]
-    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _tick: Tick) {
+    fn on_tick(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _tick: Tick) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -1243,7 +1240,7 @@ impl WasmActor for WidgetPanel {
     /// # Agent
     /// A child's reply; not useful to send manually.
     #[handler::manual]
-    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, list: WidgetDrawList) {
+    fn on_draw_list(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, list: WidgetDrawList) {
         if accept_open_child_list(&self.frame_discharge, &mut self.composite, ctx, list) {
             self.finish(ctx);
         }

@@ -31,7 +31,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Mail, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, Mail, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_math::Rgba;
 use aether_text::{FontMetricsResult, TextCapability};
 
@@ -68,7 +68,7 @@ impl LabelWidget {
     /// Start a font-metrics request when one is due. Every label measures: a
     /// `Start` label draws flush left either way, but the width is also how it
     /// knows its text is wider than its slot and owes the hover reveal.
-    fn pump_font_metrics<A: Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
+    fn pump_font_metrics<A: DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 

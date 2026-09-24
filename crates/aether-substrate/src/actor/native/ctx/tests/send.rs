@@ -1,5 +1,5 @@
-//! What leaves a ctx and under whose chain: a handle or `send_to` send
-//! inherits the handler's causal chain while a detached one mints a fresh
+//! What leaves a ctx and under whose chain: a handle, `send_to` or flat
+//! `send` inherits the handler's causal chain while a detached one mints a fresh
 //! root, and every reply entry point accepts a `Pod`-without-`Serialize` cast
 //! kind (ADR-0100).
 
@@ -197,6 +197,64 @@ fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
     assert_eq!(detached.recipient, recipient, "flat send_detached addresses the declared dependency");
     assert!(detached.parent_mail.is_none(), "flat send_detached carries no parent edge");
     assert_eq!(detached.root, detached.mail_id, "flat send_detached is its own root");
+}
+
+/// ADR-0232 §1: the flat `send::<R>` and `send_with_context::<R>` on a ctx
+/// typed by an actor that declares `R` land at the position the dependency's
+/// proof points to, under the handler's in-flight root with the handled mail
+/// as parent (ADR-0080 §7), and `send_with_context` stores its context under
+/// the routed mail's correlation. A body copied from `send_detached` with no
+/// lineage, a wrong recipient, or a context stored under another correlation
+/// fails here rather than only in the audio and text caps' fs round trips.
+#[test]
+fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers_chain() {
+    use crate::mail::registry::OwnedDispatch;
+    use crate::testing::{bare_substrate, boot_authority};
+    use std::sync::mpsc;
+
+    let (registry, mailer) = bare_substrate();
+    let (tx, rx) = mpsc::channel::<Envelope>();
+    let recipient = registry.register_inbox(
+        &boot_authority(),
+        StubActor::NAMESPACE,
+        Arc::new(move |dispatch: OwnedDispatch| {
+            // Terminal test sink (ADR-0094): discharge before observing.
+            dispatch.discharge();
+            let _ = tx.send(dispatch);
+        }),
+    );
+
+    let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0x00BE_EF05)));
+    let in_flight_root = MailId::new(MailboxId(0xC3), 10);
+    let in_flight_mail = MailId::new(MailboxId(0x9C), 45);
+    let source = Source::with_correlation(SourceAddr::None, 0);
+
+    {
+        let mut ctx: NativeCtx<'_, Dependent, Single> =
+            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+        ctx.send::<StubActor>(&CastOnly { code: 6 });
+    }
+    let sent = rx.try_recv().expect("flat send routed at flush");
+    assert_eq!(sent.recipient, recipient, "flat send addresses the declared dependency");
+    assert_eq!(sent.root, in_flight_root, "flat send inherits the caller's root");
+    assert_eq!(sent.parent_mail, Some(in_flight_mail), "flat send's parent is the in-flight mail");
+
+    let context = NativeRequestContext { value: 55 };
+    let context_id = {
+        let mut ctx: NativeCtx<'_, Dependent, Single> =
+            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+        ctx.send_with_context::<StubActor>(&CastOnly { code: 7 }, &context)
+    };
+    let with_context = rx.try_recv().expect("flat send_with_context routed at flush");
+    assert_eq!(with_context.mail_id, context_id, "the returned id is the routed mail's");
+    assert_eq!(with_context.recipient, recipient, "flat send_with_context addresses the declared dependency");
+    assert_eq!(with_context.root, in_flight_root, "flat send_with_context inherits the caller's root");
+    assert_eq!(with_context.parent_mail, Some(in_flight_mail), "flat send_with_context's parent is the in-flight mail");
+    assert_eq!(
+        binding.take_request_context::<NativeRequestContext>(RequestId(context_id.correlation_id)),
+        Some(context),
+        "the context is stored under the routed mail's correlation",
+    );
 }
 
 /// One `TaskDone<CastOnly, ()>` per `resolve*` method, bundled into a tuple

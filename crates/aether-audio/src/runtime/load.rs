@@ -1,6 +1,6 @@
 use std::str::from_utf8;
 
-use aether_actor::{ErasedActorRef, OutboundReply, Reaches};
+use aether_actor::{DependsOn, ErasedActorRef, OutboundReply};
 use aether_data::Source;
 
 use super::decode::decode_wav_to_mono;
@@ -10,9 +10,9 @@ use super::sample::{
 };
 use super::sfz::parse_sfz;
 use super::track::{DecodeOutput, TrackDecodeContext};
-use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx};
+use super::{AudioCapabilityState, FsCapability, Manual, NativeCtx, Read};
 use crate::kinds::{LoadInstrumentResult, PlayTrackResult};
-use aether_fs::FsMailboxExt;
+use aether_fs::NamespaceAddr;
 
 /// Context stored under each `aether.fs.read` request correlation while an
 /// audio load is in flight. One enum covers the shared `ReadResult` handler's
@@ -82,7 +82,7 @@ impl AudioCapabilityState {
     /// `aether.fs.read` per unique referenced sample (ADR-0103 §5). A
     /// bad UTF-8 / parse replies `Err` immediately; otherwise a
     /// [`BankAssembly`] is parked until the sample reads complete.
-    pub fn on_sfz_loaded<A: Reaches<FsCapability>>(
+    pub fn on_sfz_loaded<A: DependsOn<FsCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, Manual>,
         source: Source,
@@ -148,13 +148,15 @@ impl AudioCapabilityState {
             },
         );
 
-        // Address the fs cap through the lineage-correct resolver
-        // (ADR-0099); `send` propagates this handler's chain by default
-        // so each `ReadResult` settles back into it.
-        let fs = ctx.actor::<FsCapability>();
+        // Mail each read to the declared fs dependency with the flat
+        // `send_with_context`, which propagates this handler's chain so
+        // each `ReadResult` settles back into it.
         for (slot, fs_path) in fs_paths {
             let context = AudioLoadContext::Sample { assembly_id, slot };
-            fs.with_context(&context).read(namespace.clone(), fs_path);
+            let _ = ctx.send_with_context::<FsCapability>(
+                &Read { addr: NamespaceAddr::new(namespace.clone(), fs_path) },
+                &context,
+            );
         }
     }
 

@@ -358,11 +358,11 @@ bundle unless you're persisting a non-kind blob or driving an explicit migration
 
 ## Declared dependencies
 
-An actor that cannot run without another actor says so on `#[actor]`, once per
-dependency ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)):
+An actor that cannot run without other actors lists them in one `depends(...)`
+on `#[actor]` ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)):
 
 ```rust
-#[actor(depends(RenderCapability), depends(ParentPeerTarget))]
+#[actor(depends(RenderCapability, ParentPeerTarget))]
 impl WasmActor for MeshViewer {
     // …
 }
@@ -373,7 +373,8 @@ capability) or a co-hosted peer under the same parent (`Embedded`). A keyed
 (`Instanced`) entry is a compile error: which instance is meant is run-time
 data, and that instance is reached through the reference its spawn returned. The declaration travels in the
 wasm inputs section, so the host reads it without running the guest, and the
-macro also emits `impl DependsOn<R>` for each entry.
+macro also emits `impl DependsOn<R>` for each entry. A second `depends(...)` in
+the same attribute is a compile error: every dependency goes in the one list.
 
 A load, a module boot actor, or a replacement whose declared dependency has no
 `Live` route is refused before `init` — the operation replies its `Err` naming
