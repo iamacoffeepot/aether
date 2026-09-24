@@ -30,7 +30,7 @@ pub struct WasmTrampolineConfig {
     /// "no config" — a `Config = ()` guest decodes `&[]` uniformly.
     pub config: Vec<u8>,
     /// ADR-0096: the selected export's actor-type tag
-    /// (`mailbox_id_from_name(NAMESPACE)`), threaded through to
+    /// (`ActorId::singleton(NAMESPACE)`), threaded through to
     /// `Component::instantiate` so it calls `init_typed_p32`.
     /// `None` instantiates the module's entry type via the legacy
     /// `init_with_config_p32` path — the only type a single-actor
