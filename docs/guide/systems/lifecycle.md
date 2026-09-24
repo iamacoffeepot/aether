@@ -186,7 +186,7 @@ A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
-`aether-kit-commons`'s `camera` export subscribes `Tick` and `Render` — it
+`aether-kit`'s `camera` export subscribes `Tick` and `Render` — it
 computes its camera matrix on `Tick` and publishes it to `aether.render` on
 `Render`; its `MeshViewer` export (`aether.kit.mesh`) subscribes `Render` to
 replay its mesh each frame.

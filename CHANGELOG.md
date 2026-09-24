@@ -59,12 +59,12 @@ APIs without a deprecation window.
 - **Crates.** `aether-capabilities` and `aether-substrate-bundle` no longer exist. Depend on the individual `aether-<cap>` and `aether-chassis-<name>` crates.
 - **Binaries.** `aether-substrate`, `aether-substrate-headless` and `aether-substrate-hub` are now `aether-desktop`, `aether-headless` and `aether-hub`.
 - **Spawned children.** No `AETHER_*` environment key is inherited by a forked substrate; the child's environment is built from an allowlist and its config arrives as argv.
-- **Reference components.** The bundled camera and mesh components moved into `aether-kit-commons` and renamed their namespaces: `aether.camera` → `aether.kit.camera`, `aether.mesh` → `aether.kit.mesh`.
+- **Reference components.** The bundled camera and mesh components moved into `aether-kit` and renamed their namespaces: `aether.camera` → `aether.kit.camera`, `aether.mesh` → `aether.kit.mesh`.
 - **MCP.** `capture_frame` requires an explicit `window_id`. Mail items name their target with `address` (the old `recipient_name` still deserializes). `replace_component` takes `address` instead of `mailbox_id` and no longer accepts `drain_timeout_ms`. `describe_kinds` replaces `full` with `detail`.
 
 ### Removed
 
-- Crates: `aether-capabilities` (dissolved into the per-capability crates), `aether-substrate-bundle` (dissolved into `aether-chassis-*`), `aether-camera` and `aether-mesh-viewer` (folded into `aether-kit-commons`), `aether-test-fixture-probe`.
+- Crates: `aether-capabilities` (dissolved into the per-capability crates), `aether-substrate-bundle` (dissolved into `aether-chassis-*`), `aether-camera` and `aether-mesh-viewer` (folded into `aether-kit`), `aether-test-fixture-probe`.
 - postcard as an engine dependency — the workspace owns its wire format.
 - The `aether.observation.frame_stats` kind; frame verdicts are computed substrate-side by `capture_frame`.
 

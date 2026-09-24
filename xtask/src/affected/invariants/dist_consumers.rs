@@ -247,7 +247,7 @@ fn dist_resolution_reads_calls_and_paths_but_not_prose() {
     // the check fires on every diagnostic string naming a build command —
     // a red nobody trusts is a red somebody deletes. Narrow it and the
     // hand-rolled locator, the shape that caused #4197, walks through.
-    assert!(dist_resolution(r#"let wasm = require_wasm("aether_kit_commons");"#).is_some(), "a locator call");
+    assert!(dist_resolution(r#"let wasm = require_wasm("aether_kit");"#).is_some(), "a locator call");
     assert!(
         dist_resolution(r#"let base = root.join("wasm32-unknown-unknown").join(profile); base.exists()"#).is_some(),
         "a hand-rolled path build followed by a filesystem read"

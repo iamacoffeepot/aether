@@ -1,7 +1,7 @@
 //! Acceptance: a held key drives the keyboard camera controller, which steers
 //! the peer camera component, which scrolls the rendered view (issue 2820).
 //!
-//! Loads two `aether-kit-commons` actors — `CameraComponent` (the projection
+//! Loads two `aether-kit` actors — `CameraComponent` (the projection
 //! state machine, loaded under its default name `aether.kit.camera`) and
 //! `CameraController` (the keyboard driver, loaded with an init-config) —
 //! draws a high-contrast world-anchored striped ground straight to
@@ -16,7 +16,7 @@
 //! unit tests; this is the composition-and-motion proof the harness split
 //! routes to `SubstrateHarness`.
 //!
-//! Skipped when no wgpu adapter is available or the `aether_kit_commons` wasm has not
+//! Skipped when no wgpu adapter is available or the `aether_kit` wasm has not
 //! been pre-built (the shared `require_runtime` gate). CI sets
 //! `AETHER_REQUIRE_RUNTIME=1` to turn either skip into a hard failure.
 
@@ -34,8 +34,8 @@ use aether_harness_substrate_capture::test_helpers::{envelope, require_runtime};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png, mean_absolute_error};
 use aether_kinds::keycode::KEY_D;
 use aether_kinds::{Key, KeyRelease, LoadComponent, NamedMail, Render, WindowId, WindowSize};
-use aether_kit_commons::camera::CameraComponent;
-use aether_kit_commons::camera::controller::{CameraController, ControllerConfig};
+use aether_kit::camera::CameraComponent;
+use aether_kit::camera::controller::{CameraController, ControllerConfig};
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, Vertex};
 
@@ -48,7 +48,7 @@ const TEST_WINDOW_ID: WindowId = WindowId(1);
 /// Load-time name for the controller instance.
 const CONTROLLER_NAME: &str = "controller";
 
-/// Load the `aether_kit_commons` export `R` under `name` with optional
+/// Load the `aether_kit` export `R` under `name` with optional
 /// init-config bytes, blocking on `LoadResult` so the component is
 /// instantiated and subscribed before the next op. Returns its reference and
 /// the lineage path a capture bundle's `NamedMail` carries.
@@ -123,7 +123,7 @@ fn capture_scene(harness: &mut SubstrateHarness, camera: &ActorPath, label: &'st
 #[test]
 #[allow(clippy::cast_precision_loss)]
 fn held_key_pans_the_camera_over_the_painted_world() {
-    let Some(kit_path) = require_runtime("aether_kit_commons") else {
+    let Some(kit_path) = require_runtime("aether_kit") else {
         return;
     };
     let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
