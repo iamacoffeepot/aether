@@ -9,9 +9,9 @@
 //! load reply's stamped sender (ADR-0230 §3), keyed by that digest, and sends
 //! to it with the command's ticket as the request context. Inbound [`Call`]
 //! and [`AwaitProcessed`] mail defers its reply, is fed to the core, and
-//! appends the reply to a parked list tagged with its [`CallerId`]; each
-//! reply kind recovers its ticket from the request context and feeds the
-//! matching core continuation. Dropping the actor abandons every parked reply.
+//! parks the reply keyed by its [`CallerId`]; each reply kind recovers its
+//! ticket from the request context and feeds the matching core
+//! continuation. Dropping the actor abandons every parked reply.
 //! A bundle root's fetch-on-miss `ReadArtifact` is forwarded to the journal
 //! owner with its reply pinned to the root, so the core never sees it.
 
@@ -63,7 +63,7 @@ pub struct BundleDriver {
     core: ProgramCore,
     journal: ActorRef<JournalActor>,
     startup: Vec<Command>,
-    callers: Vec<(CallerId, DeferredReply)>,
+    callers: HashMap<CallerId, DeferredReply>,
     /// The digest each in-flight load was issued for, keyed by its ticket.
     loading: BTreeMap<LoadTicket, Digest>,
     /// Each loaded bundle's root, the stamped sender of its load reply.
@@ -79,7 +79,7 @@ impl NativeActor for BundleDriver {
     fn init(limit: ClosureLimit, params: DriverParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         let DriverParams { journal } = params;
         let (core, startup) = ProgramCore::start(limit);
-        Ok(Self { core, journal, startup, callers: Vec::new(), loading: BTreeMap::new(), roots: HashMap::new() })
+        Ok(Self { core, journal, startup, callers: HashMap::new(), loading: BTreeMap::new(), roots: HashMap::new() })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -91,7 +91,7 @@ impl NativeActor for BundleDriver {
     fn on_call(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, call: Call) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.call(call);
-        self.callers.push((caller, owed));
+        self.callers.insert(caller, owed);
         self.perform(ctx, commands);
     }
 
@@ -103,7 +103,7 @@ impl NativeActor for BundleDriver {
     ) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.await_processed(request);
-        self.callers.push((caller, owed));
+        self.callers.insert(caller, owed);
         self.perform(ctx, commands);
     }
 
@@ -224,7 +224,7 @@ impl NativeActor for BundleDriver {
 
 impl Drop for BundleDriver {
     fn drop(&mut self) {
-        for (_, owed) in mem::take(&mut self.callers) {
+        for owed in mem::take(&mut self.callers).into_values() {
             owed.abandon_for_actor_close();
         }
     }
