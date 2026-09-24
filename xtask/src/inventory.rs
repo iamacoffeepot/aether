@@ -22,7 +22,7 @@ const ACTOR_DEP: &str = "aether-actor";
 /// 2688): a cdylib depending on the behavior SDK. Paired with the *absence*
 /// of [`ACTOR_DEP`] so a behavior and a component stay disjoint artifact
 /// classes — a component has `aether-actor`, a behavior does not.
-/// `aether-kit-widget` declares both (an unconditional `aether-actor` dep and an
+/// `aether-widget` declares both (an unconditional `aether-actor` dep and an
 /// optional `aether-behavior` one), and `cargo metadata` lists optional deps, so
 /// the absence guard is what keeps it a component rather than misclassifying it.
 const BEHAVIOR_DEP: &str = "aether-behavior";
@@ -82,7 +82,7 @@ pub struct Component {
     /// Package features to enable for this component's wasm build — the
     /// features whose declared value pulls in `aether-behavior`
     /// (structurally derived, see [`behavior_features`]). Empty for a
-    /// component with no such feature; `["behavior"]` for `aether-kit-widget`, so
+    /// component with no such feature; `["behavior"]` for `aether-widget`, so
     /// its wasm carries the `BehaviorHost` and the `wasmi` interpreter.
     pub features: Vec<String>,
 }
@@ -105,7 +105,7 @@ pub struct Behavior {
 /// One `cargo build` invocation. Lib components build per-package
 /// (`-p <pkg>`); example components build that package's examples
 /// (`-p <pkg> --examples`). `features` are passed as `--features` when
-/// non-empty (the kit host build); an empty set builds default features.
+/// non-empty (the widget host build); an empty set builds default features.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct BuildPlan {
     pub package: String,
@@ -133,11 +133,11 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
                 continue;
             }
             // Stock features only. A component that declares a behavior
-            // feature (the kit's `behavior`) is built with it enabled as a
+            // feature (the widget crate's `behavior`) is built with it enabled as a
             // *separate* `<stem>_behavior.wasm` variant (issue 2688,
             // `discover_behavior_variants`) — the shared `<stem>.wasm` the
             // other scenarios load stays lean, so linking wasmi in for the
-            // one behavior-host scenario doesn't bloat every kit consumer.
+            // one behavior-host scenario doesn't bloat every widget consumer.
             components.push(Component {
                 package: package.name.to_string(),
                 from_example: target.kind.contains(&TargetKind::Example),
@@ -152,7 +152,7 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
 /// A host-carrying **variant** build of a component that declares a behavior
 /// feature (issue 2688). Built with the feature enabled and copied to a
 /// `<stem>_behavior.wasm` sibling so it stays separate from the stock
-/// `<stem>.wasm` every other scenario loads — the kit's `behavior` feature
+/// `<stem>.wasm` every other scenario loads — the widget crate's `behavior` feature
 /// links `wasmi` in (~20× the wasm size), and only the behavior-host scenario
 /// needs it. Keyed structurally on the same `dep:aether-behavior` token
 /// [`discover_behaviors`] excludes on, so it auto-discovers any future
@@ -160,7 +160,7 @@ pub fn discover_components(metadata: &Metadata) -> Vec<Component> {
 pub struct BehaviorVariant {
     /// `cargo build -p <package>` argument.
     pub package: String,
-    /// The stock wasm stem (`aether_kit_widget`); the variant is copied to
+    /// The stock wasm stem (`aether_widget`); the variant is copied to
     /// `<stem>_behavior.wasm`.
     pub stem: String,
     /// The behavior feature(s) to enable for the variant build.
@@ -191,7 +191,7 @@ pub fn discover_behavior_variants(metadata: &Metadata) -> Vec<BehaviorVariant> {
 /// Discover the behavior-script set (ADR-0137, issue 2688): every workspace
 /// package that depends on `aether-behavior`, exposes a `cdylib` target, and
 /// does **not** depend on `aether-actor`. The `aether-actor`-absence guard is
-/// load-bearing — it keeps behaviors and components disjoint, so `aether-kit-widget`
+/// load-bearing — it keeps behaviors and components disjoint, so `aether-widget`
 /// (which deps both) stays a component. Behavior scripts are `[[example]]`
 /// cdylibs, landing under `<profile>/examples/<stem>.wasm` exactly where
 /// `locate_component_wasm` already probes, so the scenario locates each script
@@ -219,11 +219,11 @@ pub fn discover_behaviors(metadata: &Metadata) -> Vec<Behavior> {
 }
 
 /// The feature names on `package` whose declared value enables the optional
-/// `aether-behavior` dependency ([`BEHAVIOR_FEATURE_TOKEN`]). For `aether-kit-widget`
+/// `aether-behavior` dependency ([`BEHAVIOR_FEATURE_TOKEN`]). For `aether-widget`
 /// this is `["behavior"]`, the feature that pulls the `BehaviorHost` `export!`
 /// entry and the `wasmi` interpreter into its wasm — which the #2688 scenario
 /// needs the widget build to carry. Deriving it structurally (rather than
-/// hardcoding `"aether-kit-widget"` / `"behavior"`) keys the rule on the same
+/// hardcoding `"aether-widget"` / `"behavior"`) keys the rule on the same
 /// `aether-behavior` signal `discover_behaviors` excludes on.
 fn behavior_features(package: &Package) -> Vec<String> {
     let mut features: Vec<String> = package

@@ -17,7 +17,7 @@ use aether_data::{KindId, Schema};
 use serde::{Deserialize, Serialize};
 
 /// The wrapped child the host interposes on: the child actor's type tag
-/// (the `hash(NAMESPACE)` `u64` — `ActorTypeTag::of::<W>().0` on the kit
+/// (the `hash(NAMESPACE)` `u64` — `ActorTypeTag::of::<W>().0` on the widget
 /// side, the SDK-sanctioned hash), its subname, and its pre-encoded config
 /// bytes. Stored as a raw `u64` because [`ChildSpec`] is a `Schema`-derived
 /// config that wire-encodes and persists cleanly; the host wraps it as
@@ -25,7 +25,7 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Schema, Default)]
 pub struct ChildSpec {
     /// `hash(NAMESPACE)` of the wrapped actor type. For a stock
-    /// `aether-kit-widget` widget, `aether_kit_widget::WidgetKind::type_tag()`
+    /// `aether-widget` widget, `aether_widget::WidgetKind::type_tag()`
     /// produces this value without linking that crate's `runtime` feature.
     pub type_tag: u64,
     /// The wrapped child's subname within the cluster.
@@ -43,7 +43,7 @@ pub enum ScriptSource {
     /// `set_script` swaps one in.
     #[default]
     None,
-    /// The script bytes inline (the kit's `set_script` path, or a config
+    /// The script bytes inline (the `set_script` path, or a config
     /// that ships the wasm directly).
     Inline(Vec<u8>),
     /// Fetch the script from a substrate I/O namespace at boot
@@ -72,7 +72,7 @@ pub struct HostConfig {
     /// The kind id whose arrival down-lane the host maps onto the reserved
     /// FRAME sentinel (the script's per-frame hook). `0` disables the frame
     /// mapping. Configurable rather than hard-wired to a widget kind so the SDK
-    /// keeps no `aether-kit-widget` dependency — the widget crate's
+    /// keeps no `aether-widget` dependency — the widget crate's
     /// `WidgetKind::BehaviorHost` arm sets this to its own `Collect` id.
     pub frame_trigger: u64,
     /// Low-rate mirror-kind ids always offered to SDK dispatch even when the

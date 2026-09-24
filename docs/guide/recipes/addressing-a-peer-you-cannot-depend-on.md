@@ -37,13 +37,13 @@ receiver was handed.
 Pick one actor to be the dependent. It declares the other, and sends to it on
 a ctx typed by itself. In the editor, the region declares the shell and
 announces itself from `wire`
-(`crates/aether-kit-widget/src/editor_region.rs`):
+(`crates/aether-widget/src/editor_region.rs`):
 
 ```rust
 #[actor(instanced, depends(EditorShell))]
 impl WasmActor for EditorRegion {
     type Config = PanelConfig;
-    const NAMESPACE: &'static str = "aether.kit.widget.editor_region";
+    const NAMESPACE: &'static str = "aether.widget.editor_region";
 
     // …
 
@@ -75,17 +75,17 @@ how the position follows the actor when it is re-parented is
 
 ### Across a crate boundary
 
-In `aether-kit-widget` both actors live in one crate, so the region names the
+In `aether-widget` both actors live in one crate, so the region names the
 shell with a plain `use`. When the dependent lives in another component crate,
 that crate depends on the receiver's crate with the receiver's `library`
 feature, as `crates/aether-test-fixtures-bundle/Cargo.toml` does:
 
 ```toml
-aether-kit-widget = { path = "../aether-kit-widget", features = ["library"] }
+aether-widget = { path = "../aether-widget", features = ["library"] }
 ```
 
 The receiver's crate declares the feature, non-default
-(`crates/aether-kit-widget/Cargo.toml`):
+(`crates/aether-widget/Cargo.toml`):
 
 ```toml
 [features]
@@ -104,7 +104,7 @@ The in-tree example is `EditorRegionProbe` in
 in another crate that declares `depends(EditorShell)` and announces itself the
 same way. The receiver may take the dependent crate back only as a
 dev-dependency, which cargo allows because a dev-dependency edge is outside the
-normal build graph; `aether-kit-widget` does this to load the fixture in its
+normal build graph; `aether-widget` does this to load the fixture in its
 own tests, and the fixture manifest's comment says so.
 
 ## Reverse direction: the envelope sender
@@ -112,7 +112,7 @@ own tests, and the fixture manifest's comment says so.
 The receiver never declares the dependent. The dependent's announcement is an
 ordinary kind the receiver handles (`RegionAttach`, which names only the
 region), and the receiver's handler keeps the mail's sender
-(`crates/aether-kit-widget/src/editor.rs`):
+(`crates/aether-widget/src/editor.rs`):
 
 ```rust
 #[handler::single]
@@ -132,7 +132,7 @@ fn on_region_attach(&mut self, ctx: &mut WasmCtx<'_>, attach: RegionAttach) {
 the host stamped on the envelope, with no lookup. It is `None` for a sourceless
 dispatch (session, remote-engine, or broadcast mail), so the handler reports
 that and returns. It needs no actor type, so it works on the erased ctx.
-`Routing::attach` (`crates/aether-kit-widget/src/routing.rs`) stores the
+`Routing::attach` (`crates/aether-widget/src/routing.rs`) stores the
 reference against the declared region name, and refuses an unknown name or a
 second announcement for a region already attached rather than re-pointing a
 live route.

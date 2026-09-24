@@ -2,7 +2,7 @@
 
 These systems turn engine state into human-visible or editable output. Native
 capabilities own devices and low-level resources; `aether-kit` and
-`aether-kit-widget` actors compose them into reusable camera, mesh, and
+`aether-widget` actors compose them into reusable camera, mesh, and
 widget behavior.
 
 | Concern | Chapter |

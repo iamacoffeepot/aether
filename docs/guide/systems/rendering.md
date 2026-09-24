@@ -175,7 +175,7 @@ fill), or a soft halo (a shadow with neither) at any scale. The batch takes the
 same painter position and the same `clip` scissor as any other overlay batch,
 through its own pipeline: one more overlay draw, not a pass and not a layer.
 The vocabulary is fixed and substrate-owned — callers supply parameters, never
-WGSL — so the overlay lane stays a closed contract the widget kit's hole
+WGSL — so the overlay lane stays a closed contract the widget set's hole
 cutting can reason about. A `corner_radius` of `0.0` with a `fill` alone is a
 flat rectangle, which is why there is no separate flat-quad verb: the overlay's
 three verbs are one per fragment stage — sample a texture, evaluate a distance

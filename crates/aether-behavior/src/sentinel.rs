@@ -9,7 +9,7 @@
 //! `with_tag`-prefixed FNV hashes), so this tiny low-valued block cannot
 //! collide with any authored kind. Keeping `#[on_frame]` on an SDK-owned
 //! sentinel — rather than the widget `Collect` kind its natural spelling
-//! implies — is what frees the SDK of any `aether-kit-widget` dependency.
+//! implies — is what frees the SDK of any `aether-widget` dependency.
 
 use aether_data::KindId;
 

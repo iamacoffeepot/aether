@@ -117,10 +117,10 @@ dependencies = [
  "aether-fs",
  "aether-harness-substrate",
  "aether-kinds",
- "aether-kit-widget",
  "aether-render",
  "aether-test-fixtures-behavior",
  "aether-text",
+ "aether-widget",
  "serde",
  "tracing",
  "wasmi",
@@ -758,31 +758,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "aether-kit-widget"
-version = "0.3.0-alpha"
-dependencies = [
- "aether-actor",
- "aether-behavior",
- "aether-clipboard",
- "aether-component",
- "aether-data",
- "aether-fs",
- "aether-harness-substrate",
- "aether-harness-substrate-capture",
- "aether-kinds",
- "aether-lifecycle",
- "aether-math",
- "aether-render",
- "aether-test-fixtures-bundle",
- "aether-test-fixtures-kinds",
- "aether-text",
- "aether-window",
- "inventory",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "aether-lifecycle"
 version = "0.3.0-alpha"
 dependencies = [
@@ -1022,12 +997,12 @@ dependencies = [
  "aether-data",
  "aether-http",
  "aether-kinds",
- "aether-kit-widget",
  "aether-lifecycle",
  "aether-math",
  "aether-render",
  "aether-tcp",
  "aether-test-fixtures-kinds",
+ "aether-widget",
  "aether-window",
  "serde",
  "tracing",
@@ -1208,6 +1183,31 @@ dependencies = [
  "aether-kinds",
  "aether-substrate",
  "inventory",
+]
+
+[[package]]
+name = "aether-widget"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-behavior",
+ "aether-clipboard",
+ "aether-component",
+ "aether-data",
+ "aether-fs",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-kinds",
+ "aether-lifecycle",
+ "aether-math",
+ "aether-render",
+ "aether-test-fixtures-bundle",
+ "aether-test-fixtures-kinds",
+ "aether-text",
+ "aether-window",
+ "inventory",
+ "serde",
+ "tracing",
 ]
 
 [[package]]

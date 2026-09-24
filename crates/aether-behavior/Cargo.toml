@@ -65,10 +65,10 @@ wat = "1"
 aether-harness-substrate = { path = "../aether-harness-substrate" }
 # The gate builds the panel/slider/behavior-host configs from the widget
 # vocabulary and loads the `behavior`-feature widget wasm by stem
-# (`aether_kit_widget_behavior`, built by `cargo xtask dist`). The widget set
+# (`aether_widget_behavior`, built by `cargo xtask dist`). The widget set
 # and its `behavior` feature were extracted from `aether-kit` to
-# `aether-kit-widget` (iamacoffeepot/aether#3950).
-aether-kit-widget = { path = "../aether-kit-widget" }
+# `aether-widget` (iamacoffeepot/aether#3950).
+aether-widget = { path = "../aether-widget" }
 # The widget module declares render, text and clipboard wherever it loads, so
 # the gate composes the headless render stub, text and the in-memory clipboard.
 aether-render = { path = "../aether-render" }
