@@ -4,8 +4,9 @@
 //! injected-data sandbox reactors use. The native driver sends
 //! [`Invoke`]; [`invoke()`] runs one sync [`Program`] and replies [`Invoked`].
 //! [`Env<Sync>`] is injected lookup: a miss is [`Refusal::InputMissing`].
-//! [`Env<Async>::read`] fetches a missing digest from the journal and resumes
-//! when [`kinds::ReadArtifactResult`] arrives. Only native code writes journal
+//! [`Env<Async>::read`] fetches a missing digest through the bundle root and
+//! the driver, which forwards it to the journal, and resumes when
+//! [`kinds::ReadArtifactResult`] arrives. Only native code writes journal
 //! records. A program's identity is its bundle digest plus name, not a stored
 //! declaration digest. [`Root`] is the bundle root's state: the program table
 //! plus the live-seq table.
@@ -43,7 +44,7 @@ pub mod __macro_internals {
 
     pub use crate::declare::{AsyncProgram, SyncProgram};
     pub use crate::env::{InjectedApi, Pending, PendingArtifact, PendingCall};
-    pub use crate::invoke::{JOURNAL_NAMESPACE, JournalRoot, PollResult, Started};
+    pub use crate::invoke::{PollResult, Started};
     pub use crate::root::{program_table, start_invocation};
     pub use crate::section::{MODE_PURE, MODE_SAMPLED, program_record_len, write_program_record};
 
