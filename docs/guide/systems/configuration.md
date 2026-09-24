@@ -8,7 +8,9 @@
 > and defers the rollout's internals to the ADR.
 
 Configuration is how a knob's value gets decided before the engine runs — the
-worker-pool size, an HTTP allowlist, a provider's API key, the tick rate. Values
+worker-pool size, an HTTP allowlist, the tick rate. (A secret such as an API key
+is never a knob value; config only names it — see
+[Secrets are never knob values](#secrets-are-never-knob-values).) Values
 come from a **layered stack** of sources (defaults, environment, command-line
 arguments) with a defined precedence, declared once per knob and resolved the
 same way everywhere. And it's **per-spawn**: two substrates launched from one
@@ -97,7 +99,38 @@ aggregate, so the dump and the unknown-key sweep list exactly the knobs this
 chassis wires and nothing else — headless doesn't "know" the window and audio
 knobs it never composes. That listing is generated from the field annotations,
 so it can't drift from what the engine actually reads. It's the first place to
-look when you're unsure what a build will do with a given variable.
+look when you're unsure what a build will do with a given variable. The dump
+ends with a `SECRETS` section: the `--secrets-dir` directory and each secret
+file's name and status (`set` or `invalid: <rule>`), never a value.
+
+## Secrets are never knob values
+
+A secret — an API key, a bearer token — is never a knob value, an argv flag, an
+environment variable, or a kind field, because every one of those surfaces is
+printed, inherited, journaled, or mailed somewhere
+([ADR-0235](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0235-secrets-are-named-files-held-only-by-native-capabilities.md)).
+Instead each secret is a **named file** in one directory, named by the
+`--secrets-dir <path>` flag every chassis root carries (a systemd unit passes
+`--secrets-dir %d`; there is no environment-variable form). Config holds only
+the **name**: a capability declares a `SecretRefs` knob — a comma list of
+`<key>=<secret-name>` — with the `#[config(secrets)]` field hint, and loads the
+values once in `init`:
+
+```rust
+/// Names only; the values live in the secrets directory (ADR-0235).
+#[cfg(feature = "runtime")]
+#[cfg_attr(feature = "runtime", config(secrets))]
+pub secrets: SecretRefs,
+```
+
+The hint wires the validating parser on the env, file, and argv sides and binds
+the refs to the source stack's `--secrets-dir` when the member resolves;
+`config.secrets.load()?` in `init` then yields the values as `Secret`s — redacted
+`Debug`, read only through `expose()`, wiped on drop. Because the knob holds
+names, its `--print-config` row is safe to print. `HttpConfig.secrets`
+(`--http-secrets`) is the first consumer; the
+[*Supplying secrets*](../recipes/supplying-secrets.md) recipe walks the operator
+side.
 
 ## Configuring a running engine
 
@@ -164,7 +197,8 @@ field carries only its `default` — confique's native parsing trims the value,
 treats an empty one as unset (falling back to the default), accepts the usual
 bool spellings (`1` / `true` / `yes` / `0` / `false` / `no`), and hard-errors on
 a non-empty garbage value. The remaining field hints (`env`, `cli_long`,
-`ms_duration`, `csv_set`, `nonzero`) carry the rest of the per-knob shape;
+`ms_duration`, `csv_set`, `nonzero`, and `secrets` for a
+[secret binding](#secrets-are-never-knob-values)) carry the rest of the per-knob shape;
 `parse` names a custom parser for the rare field that needs one. Two things to
 know going in:
 

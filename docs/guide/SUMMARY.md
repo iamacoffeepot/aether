@@ -87,6 +87,7 @@
   - [Writing a behavior](recipes/writing-a-behavior.md)
   - [Serving HTTP from a component](recipes/serving-http.md)
   - [Supervising the hub with systemd](recipes/supervising-the-hub.md)
+  - [Supplying secrets](recipes/supplying-secrets.md)
   - [Debugging a hung settlement](recipes/debugging-a-hung-settlement.md)
 
 # Testing and verification

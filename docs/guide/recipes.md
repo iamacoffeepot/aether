@@ -76,6 +76,9 @@ current source.
 - **Supervising the hub with systemd** (drive-only) — run the standing fleet
   hub from the checked-in `scripts/aether-hub.service` user unit with a
   per-host environment file and journald.
+- **Supplying secrets** (drive-only) — put each secret in a named file under
+  `--secrets-dir`, bind it by name (`--http-secrets`), check it with
+  `--print-config`, and rotate by restart (ADR-0235).
 - **Debugging a hung settlement** (drive-only) — reading a stuck mail chain
   with the trace tools.
 

@@ -15,8 +15,12 @@
 //! - The request handler (`on_messages_send`, `on_cli_send`) validates,
 //!   builds the edge request, stashes a [`RequestContext`] carrying the
 //!   original caller, and `send_with_context`s the edge request. A synchronous
-//!   rejection (disabled / no key / unknown model / unsupported CLI knob)
-//!   replies immediately and dispatches nothing.
+//!   rejection (disabled / unknown model / unsupported CLI knob) replies
+//!   immediately and dispatches nothing.
+//!
+//! The Messages API key never enters the component (ADR-0235): the operator
+//! binds it on `aether.http` as `api.anthropic.com/x-api-key=<secret-name>`,
+//! and the http cap attaches it to the fetch.
 //! - The reply handler (`on_fetch_result`, `on_run_result`) recovers the
 //!   context with `take_context`, runs the pure parser + error mapping, and
 //!   replies the provider `_result` kind to the original caller.
@@ -63,13 +67,15 @@ pub struct AnthropicComponent {
 /// `aether.anthropic` guest component.
 ///
 /// # Agent
-/// `load_component` this binary with an `AnthropicComponentConfig` (the API key
-/// + timeout + CLI binary name), then send `aether.anthropic.messages.send`
-/// (HTTPS via `aether.http`) or `aether.anthropic.cli.send` (the `claude`
-/// subprocess via `aether.process`) to its loaded address and await the
-/// matching `_result` reply. The Messages backend needs `aether.http` egress to
-/// the Messages API host allowlisted; the CLI backend needs `claude`
-/// allowlisted on `aether.process`.
+/// `load_component` this binary with an `AnthropicComponentConfig` (timeout +
+/// CLI binary name), then send `aether.anthropic.messages.send` (HTTPS via
+/// `aether.http`) or `aether.anthropic.cli.send` (the `claude` subprocess via
+/// `aether.process`) to its loaded address and await the matching `_result`
+/// reply. The Messages backend needs `api.anthropic.com` on the `aether.http`
+/// allowlist and the key bound there as
+/// `--http-secrets api.anthropic.com/x-api-key=<secret-name>` (ADR-0235) — the
+/// component never holds it; the CLI backend needs `claude` allowlisted on
+/// `aether.process`.
 #[actor(depends(HttpCapability, ProcessCapability))]
 impl WasmActor for AnthropicComponent {
     type Config = AnthropicComponentConfig;
@@ -83,16 +89,18 @@ impl WasmActor for AnthropicComponent {
     ///
     /// # Agent
     /// Reply: `MessagesSendResult`. Replies `Err { Unauthorized }`
-    /// synchronously when the component has no key (or is disabled), and
-    /// `Err { UnknownModel }` when `model` is outside the supported table —
-    /// neither dispatches a fetch. Otherwise submits the fetch immediately; the
-    /// reply lands when the edge round-trip settles.
+    /// synchronously when the component is disabled, and `Err { UnknownModel }`
+    /// when `model` is outside the supported table — neither dispatches a
+    /// fetch. Otherwise submits the fetch immediately; the reply lands when the
+    /// edge round-trip settles. A missing or rejected key surfaces as the
+    /// vendor's 401 / 403, mapped to `Err { Unauthorized }` — for example when
+    /// no `aether.http` binding for `api.anthropic.com/x-api-key` exists.
     #[handler::manual]
     fn on_messages_send(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, mail: MessagesSend) {
         let reply = ctx.reply_target();
         let request_id = mail.request_id;
 
-        if self.config.disabled || self.config.api_key.is_none() {
+        if self.config.disabled {
             Self::reply_messages(ctx, reply, request_id, Err(AnthropicError::Unauthorized));
             return;
         }
@@ -129,7 +137,7 @@ impl WasmActor for AnthropicComponent {
             request_id,
             url: MESSAGES_URL.to_string(),
             method: HttpMethod::Post,
-            headers: self.messages_headers(),
+            headers: Self::messages_headers(),
             body: body_bytes,
             timeout_ms: self.timeout_ms(),
         };
@@ -262,22 +270,19 @@ impl WasmActor for AnthropicComponent {
 }
 
 impl AnthropicComponent {
-    /// The Messages-API request headers built from init-config: the `x-api-key`
-    /// (present only in the enabled path this is reached from), the pinned
-    /// `anthropic-version`, `content-type`, and a `user-agent`.
-    fn messages_headers(&self) -> Vec<HttpHeader> {
-        let mut headers = vec![
+    /// The Messages-API request headers: the pinned `anthropic-version`,
+    /// `content-type`, and a `user-agent`. The key header is not among them —
+    /// `aether.http` attaches the operator-bound secret for the host
+    /// (ADR-0235).
+    fn messages_headers() -> Vec<HttpHeader> {
+        vec![
             HttpHeader { name: "anthropic-version".to_string(), value: ANTHROPIC_VERSION.to_string() },
             HttpHeader { name: "content-type".to_string(), value: "application/json".to_string() },
             HttpHeader {
                 name: "user-agent".to_string(),
                 value: concat!("aether/", env!("CARGO_PKG_VERSION")).to_string(),
             },
-        ];
-        if let Some(key) = &self.config.api_key {
-            headers.push(HttpHeader { name: "x-api-key".to_string(), value: key.clone() });
-        }
-        headers
+        ]
     }
 
     /// The per-request fetch timeout: the configured value, or `None` (the http

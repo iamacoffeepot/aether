@@ -78,6 +78,12 @@ struct FieldAttr {
     /// shape (e.g. `default_timeout` → Layer field `timeout_ms` not
     /// `default_timeout_ms`).
     layer_field: Option<String>,
+    /// `secrets` hint (ADR-0235), holding the hint's span so a misuse error
+    /// points at it — the field is a `SecretRefs` naming the secrets this cap
+    /// binds. The derive wires `aether_substrate::config::parse_secret_refs` on
+    /// the env side, an empty default, and a `ConfigMember::resolve` that binds
+    /// the refs to the source stack's `--secrets-dir`.
+    secrets: Option<Span>,
 }
 
 /// One field's resolved shape after attribute + type-driven inference.
@@ -108,6 +114,9 @@ struct FieldInfo {
     /// composition-derived argv surface is introspectable at runtime, from
     /// the same machinery that emits the flag, never a parallel hand list.
     cli_long: String,
+    /// Whether this field carries the `secrets` hint, so the member's
+    /// `resolve` binds it to the source stack's secrets directory.
+    binds_secrets: bool,
 }
 
 pub fn derive(input: TokenStream) -> TokenStream {
@@ -237,12 +246,15 @@ fn parse_field_attr(attrs: &[Attribute]) -> syn::Result<FieldAttr> {
             } else if meta.path.is_ident("layer_field") {
                 out.layer_field = Some(meta.value()?.parse::<LitStr>()?.value());
                 Ok(())
+            } else if meta.path.is_ident("secrets") {
+                out.secrets = Some(meta.path.span());
+                Ok(())
             } else {
                 Err(meta.error(
                     "unknown field attribute; expected one of \
                      `env = \"...\"`, `cli_long = \"...\"`, `default = <lit>`, \
                      `parse = <fn_path>`, `ms_duration`, `csv_set`, `nonzero`, \
-                     `layer_field = \"...\"`",
+                     `layer_field = \"...\"`, `secrets`",
                 ))
             }
         })?;
@@ -276,6 +288,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     if attr.nonzero && attr.default.is_none() {
         return Err(syn::Error::new(span, "`nonzero` hint requires a `default` (a resolved `0` coerces to it)"));
     }
+    let default = effective_default(&attr, &domain_ty)?;
 
     let is_bool = is_bool_type(&domain_ty);
     let is_string = matches!(&domain_ty, Type::Path(tp) if path_is(&tp.path, "String"));
@@ -315,7 +328,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         syn::parse_quote!(u32)
     } else if is_option_numeric {
         syn::parse_quote!(Option<String>)
-    } else if inner_option_ty.is_none() && attr.default.is_none() {
+    } else if inner_option_ty.is_none() && default.is_none() {
         let inner = &domain_ty;
         syn::parse_quote!(Option<#inner>)
     } else {
@@ -361,7 +374,7 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
     let cli_id = cli_long.replace('-', "_");
 
     let resolved_parse = resolve_parse_env(&attr);
-    let layer_attrs = build_layer_attrs(&env_key, attr.default.as_ref(), resolved_parse.as_ref());
+    let layer_attrs = build_layer_attrs(&env_key, default.as_ref(), resolved_parse.as_ref());
     // Per-flag `--help` text (issue 3862): the domain field's first
     // rustdoc sentence — the consumer-grade summary under the first-sentence
     // convention — followed by the confique-resolved env key and declared
@@ -377,6 +390,8 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         Some("BOOL")
     } else if attr.csv_set {
         Some("ITEMS")
+    } else if attr.secrets.is_some() {
+        Some("BINDINGS")
     } else {
         None
     };
@@ -411,17 +426,43 @@ fn field_info(field: &Field, container: &ContainerAttr) -> syn::Result<FieldInfo
         overlay_attrs,
         into_layer_stmt,
         cli_long,
+        binds_secrets: attr.secrets.is_some(),
     })
+}
+
+/// The Layer default: the field's own `default`, or for a `secrets` field
+/// (ADR-0235) an empty binding list. A `secrets` hint is valid only on a
+/// `SecretRefs` field and takes no `default` or `parse` of its own — the
+/// resolve step binds nothing else, so any other shape is a compile error at
+/// the hint.
+fn effective_default(attr: &FieldAttr, domain_ty: &Type) -> syn::Result<Option<Expr>> {
+    let Some(hint) = attr.secrets else {
+        return Ok(attr.default.clone());
+    };
+    if !is_secret_refs_type(domain_ty) {
+        return Err(syn::Error::new(hint, "`secrets` hint requires field type `aether_substrate::config::SecretRefs`"));
+    }
+    if attr.default.is_some() || attr.parse.is_some() {
+        return Err(syn::Error::new(
+            hint,
+            "`secrets` hint takes no `default` or `parse`: it wires the secret-refs parser and an empty default",
+        ));
+    }
+    Ok(Some(syn::parse_quote!("")))
 }
 
 /// Resolve the Layer `parse_env`: an explicit `parse =` wins (the
 /// `parse_dir` escape hatch); else a `csv_set` field auto-wires the
-/// shared trim+split helper so the cap never names it. Plain numeric /
+/// shared trim+split helper and a `secrets` field the validating
+/// secret-refs parser, so the cap never names either. Plain numeric /
 /// `Duration` / `bool` / `String` fields resolve to `None` and ride
 /// confique's native deserialization (which trims, treats an empty value
 /// as unset → default, and hard-errors on garbage — ADR-0090 §4).
 fn resolve_parse_env(attr: &FieldAttr) -> Option<Path> {
-    attr.parse.clone().or_else(|| attr.csv_set.then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set)))
+    attr.parse
+        .clone()
+        .or_else(|| attr.csv_set.then(|| syn::parse_quote!(::aether_substrate::config::parse_csv_set)))
+        .or_else(|| attr.secrets.map(|_| syn::parse_quote!(::aether_substrate::config::parse_secret_refs)))
 }
 
 fn build_layer_attrs(env_key: &str, default: Option<&Expr>, parse: Option<&Path>) -> TokenStream2 {
@@ -697,8 +738,23 @@ fn emit_trait_impl(domain_ident: &Ident, layer_ident: &Ident, fields: &[FieldInf
 /// sibling overlay emits — both are computed from the one `cli_long` resolution
 /// in [`field_info`], so the member's reported argv surface can never drift from
 /// the flags the overlay actually accepts (ADR-0162).
+///
+/// A `secrets` field (ADR-0235) is bound to the source stack's `--secrets-dir`
+/// after resolution, so the cap's `init` can load the names it declares. The
+/// inherent `from_env` shims skip this step: refs they resolve stay unbound,
+/// and loading them reports that no secrets directory was given.
 fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str, fields: &[FieldInfo]) -> TokenStream2 {
     let cli_flags = fields.iter().map(|f| f.cli_long.as_str());
+    let secret_fields: Vec<&Ident> = fields.iter().filter(|f| f.binds_secrets).map(|f| &f.ident).collect();
+    let resolve_body = if secret_fields.is_empty() {
+        quote! { sources.resolve_layered::<Self>(#section) }
+    } else {
+        quote! {
+            let mut this = sources.resolve_layered::<Self>(#section)?;
+            #( this.#secret_fields.bind(sources.secrets_dir()); )*
+            ::core::result::Result::Ok(this)
+        }
+    };
     quote! {
         impl ::aether_substrate::config::ConfigMember for #domain_ident {
             fn members() -> ::std::vec::Vec<::aether_substrate::config::ConfigMemberRecord> {
@@ -713,7 +769,7 @@ fn emit_member_impl(domain_ident: &Ident, layer_ident: &Ident, section: &str, fi
             fn resolve(
                 sources: &mut ::aether_substrate::config::ConfigSources,
             ) -> ::core::result::Result<Self, ::aether_substrate::config::ConfigError> {
-                sources.resolve_layered::<Self>(#section)
+                #resolve_body
             }
         }
     }
@@ -850,6 +906,13 @@ fn emit_overlay_struct(
 fn is_duration_type(ty: &Type) -> bool {
     if let Type::Path(TypePath { path, .. }) = ty {
         return path.segments.last().is_some_and(|s| s.ident == "Duration");
+    }
+    false
+}
+
+fn is_secret_refs_type(ty: &Type) -> bool {
+    if let Type::Path(TypePath { path, .. }) = ty {
+        return path_is(path, "SecretRefs");
     }
     false
 }

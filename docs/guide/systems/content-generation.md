@@ -1,9 +1,9 @@
 # Content-generation capabilities
 
 Aether exposes long-running provider calls — text, images, or music — as wasm
-guest components a substrate loads on demand. A loaded provider component holds
-its own credentials and runs the pure request/response logic, but owns no
-socket, subprocess, or disk: it reaches the network through `aether.http`, the
+guest components a substrate loads on demand. A loaded provider component runs
+the pure request/response logic but holds no key and owns no socket,
+subprocess, or disk: it reaches the network through `aether.http`, the
 `claude` CLI through `aether.process`, and artifact staging through `aether.fs`,
 addressing each edge capability by mail (ADR-0159). The shipped provider
 namespace is `aether.anthropic` (the `aether.gemini` image/music provider is
@@ -16,19 +16,23 @@ CI substrate links none of the provider machinery at boot.
 ## Loading a provider
 
 Upload the component wasm to the hub's content store, then load it — either at
-spawn time through a boot manifest or afterward with `load_component`. The API
-key and per-request tuning ride init-config bytes (ADR-0090 §5), so the raw key
-never touches process env or the wire beyond the component's own `Config`:
+spawn time through a boot manifest or afterward with `load_component`.
+Per-request tuning rides init-config bytes (ADR-0090 §5). The API key does not:
+it is a named file in the engine's `--secrets-dir`, bound on `aether.http` by
+host (ADR-0235), so it never enters the component, a kind, or mail:
 
 ```text
 upload_component(staged_path, name)             # aether_anthropic
-spawn_substrate(components=[{selector, config_path}])   # boot-manifest load
+spawn_substrate(args=["--secrets-dir", "<dir>",
+                      "--http-allowlist", "api.anthropic.com",
+                      "--http-secrets", "api.anthropic.com/x-api-key=anthropic"],
+                components=[{selector, config_path}])   # boot-manifest load
   # or, on a running engine:
 load_component(engine_id, selector, config_path)
 ```
 
 `config_path` points at the component's init-config bytes — for anthropic the
-API key, timeout, and CLI-binary override. A loaded component registers at
+disable flag, timeout, and CLI-binary override. A loaded component registers at
 `aether.component/aether.embedded:aether.anthropic`; mail its request kinds to
 that lineage address.
 
@@ -54,8 +58,9 @@ ported pure logic, stashes the caller's reply handle as a context, and dispatche
 one edge request; the reply handler recovers the context, runs the ported
 parser, and replies the provider `_result` kind to the original caller.
 
-- **The Messages API** rides `aether.http.fetch`. The component sets
-  the `x-api-key` / auth header from its init-config and feeds the `FetchResult`
+- **The Messages API** rides `aether.http.fetch`. The component sets no key
+  header: `aether.http` attaches the operator's `api.anthropic.com/x-api-key`
+  binding to the fetch (ADR-0235), and the component feeds the `FetchResult`
   body to the parser. Egress is bounded per-sender at the `aether.http` edge
   (ADR-0158), so the component queues nothing itself — no false early settlement.
 - **The `claude` CLI backend** rides `aether.process.run`. The allowlist must
@@ -84,19 +89,22 @@ paths such as `gen/<uuid>.png` — never a literal `save://` address. Treat the 
 - cleanup and retention policy belong to the configured staging directory;
 - never interpolate a generated path into a shell command.
 
-## Configuration and credentials
+## Configuration and secrets
 
-Each component receives independent enable/disable, credential, concurrency, and
-timeout configuration through its init-config bytes. Missing credentials or
-explicit disablement short-circuit every request to a bounded `Unauthorized`
-error rather than hanging.
+Each component receives independent enable/disable, concurrency, and timeout
+configuration through its init-config bytes. Explicit disablement
+short-circuits every request to a bounded `Unauthorized` error rather than
+hanging.
 
-The interim security posture (ADR-0159 §5) places the raw key inside the
-component's memory and onto the `x-api-key` header of each fetch: the trust model
-is "the substrate owner trusted this component when they loaded it with this
-key." Secret-reference headers, so the plaintext key never enters guest memory,
-are the named future hardening. Credentials remain host configuration — they must
-not appear in mail logs, generated outputs, or guide examples.
+The key is not component configuration (ADR-0235, superseding ADR-0159 §5). The
+operator puts it in a named file under the engine's `--secrets-dir` and binds it
+on `aether.http` as `--http-secrets api.anthropic.com/x-api-key=<secret-name>`;
+the http cap reads it once at boot and attaches it to each HTTPS fetch to that
+exact host. The component never holds, reads, or names it, so the plaintext key
+is never in guest memory, a kind, mail, or the journal. With no binding the
+vendor answers 401, which reaches the caller as `Unauthorized`. See the
+[*Supplying secrets*](../recipes/supplying-secrets.md) recipe. Secrets must not
+appear in mail logs, generated outputs, or guide examples.
 
 The Anthropic CLI adapter additionally crosses a subprocess trust boundary
 through `aether.process`, whose deny-by-default allowlist and argv-array-only
@@ -138,11 +146,12 @@ allowlists to drive the deterministic refusal paths. Useful boundaries include:
 - typed provider error mapping from a `FetchResult` / process refusal;
 - the two-handler context recovery and reply routing;
 - staged file extension/content;
-- disabled/missing-credential behavior.
+- disabled behavior (a missing key is the vendor's 401, mapped by the error
+  table).
 
 ## Change route
 
 - Anthropic kinds + guest component: `crates/aether-anthropic/src/`
 - Edge capabilities the components mail: `crates/aether-http/`, `crates/aether-process/`, `crates/aether-fs/`
-- Decision: ADR-0159 (guest-hosted providers), ADR-0050 (kind vocabulary), ADR-0139 (reply correlation), ADR-0158 (egress bound)
+- Decision: ADR-0159 (guest-hosted providers), ADR-0050 (kind vocabulary), ADR-0139 (reply correlation), ADR-0158 (egress bound), ADR-0235 (secrets)
 - Configuration: [Configuration](configuration.md)

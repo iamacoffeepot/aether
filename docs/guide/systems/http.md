@@ -107,13 +107,44 @@ example on the [Configuration](configuration.md#adding-a-knob) page:
   Default 16 MB. An oversize body on either side returns `BodyTooLarge`.
 - `AETHER_HTTP_TIMEOUT_MS` — default per-request timeout. Default 30 s. A
   `Fetch` with a `timeout_ms` overrides it per request.
+- `AETHER_HTTP_SECRETS` (`--http-secrets`) — secrets the cap attaches as
+  request headers, bound by exact host: a comma list of
+  `<host>/<header-name>=<secret-name>` or `<host>/bearer=<secret-name>`. Names
+  only; the values are files in the `--secrets-dir` directory. See
+  *Operator-bound secrets* below.
 
-**Headers pass through, with two exceptions.** A caller-set `Host` header is
+**Headers pass through, with three exceptions.** A caller-set `Host` header is
 stripped and logged at warn — the substrate derives `Host` from the URL, and
 letting a component override it would route the server-side vhost past the
 allowlisted host the TLS handshake actually reached. `User-Agent` is injected as
-`aether/<version>` when the caller doesn't set one. Every other header —
-`Authorization`, `Content-Type`, `Accept` — passes through unchanged.
+`aether/<version>` when the caller doesn't set one. A header the operator bound
+a secret to for the request's host is replaced by the bound value (below).
+Every other header — `Authorization`, `Content-Type`, `Accept` — passes through
+unchanged.
+
+**Operator-bound secrets (ADR-0235).** An API key is never something an actor
+holds, sends, or names. The operator puts each secret in a named file under
+`--secrets-dir` and binds it here by host and header —
+`--http-secrets api.anthropic.com/x-api-key=anthropic`, or
+`api.muse.example/bearer=muse` for `Authorization: Bearer <value>` (RFC 6750).
+The cap reads the bound files once, at boot, and attaches each value itself:
+
+- only to a request whose host **exactly** equals the bound host, after the
+  allowlist check, on each hop — so a redirect to another host never carries it;
+- only over HTTPS — a plain-`http` request to a bound host is refused with
+  `InvalidUrl` before anything is dialed;
+- replacing a caller-set header of the same name (compared case-insensitively),
+  with a warning that names only the header and host;
+- marked sensitive, so a debug print of the request shows `Sensitive`.
+
+A host has one secret per header: a second binding for the same host and header
+fails boot, naming the host, header, and both secret names — as do a bound host
+missing from the allowlist and a header name that is not an HTTP token. A
+disabled cap loads nothing. `Fetch` has no field that names a secret, so an
+actor can neither choose one nor see one; every actor whose fetch reaches a
+bound host gets the header. The walkthrough — files, modes, systemd / Docker /
+Kubernetes, `--print-config`, rotation — is the
+[*Supplying secrets*](../recipes/supplying-secrets.md) recipe.
 
 **One request at a time—and a known exception to the normal blocking rule.** The
 adapter is backed by blocking `ureq` and currently runs on the capability's
@@ -130,15 +161,14 @@ it warn-drops like any unaddressed name.
 ### Where this page's authority ends: parallel egress paths
 
 `aether.http` is the general-purpose egress mailbox, and the `AETHER_HTTP_*`
-knobs gate it. They do **not** gate the engine's entire outbound surface. The
-provider capability — `aether.anthropic` — is a parallel
-egress path registered alongside `aether.http`. It carries its own HTTP
-client and its own provider-specific configuration, and dials out directly
-rather than routing through `aether.http`. The allowlist, disable flag, body cap,
-and timeout on this page apply to `aether.http` alone; a deployer locking down
-egress reckons with the provider cap's own configuration separately. That cap
-is content generation, a subject of its own — out of scope here, named so you
-know which mailbox this page governs and which it does not.
+knobs gate it. The `aether.anthropic` provider component owns no HTTP client of
+its own: its Messages backend mails `aether.http.fetch` (ADR-0159), so this
+page's allowlist, body cap, timeout, and secret bindings govern it — its API key
+is an `--http-secrets` binding here, never component config. Network reach by
+other routes — a subprocess run through `aether.process`, the RPC links between
+the hub and its engines — is outside this page; a deployer locking down egress
+reckons with that configuration separately. Content generation is a subject of its own
+([Content generation](content-generation.md)).
 
 ## How to use it
 
@@ -188,6 +218,13 @@ in the initial URL has to be on the chassis allowlist (`AETHER_HTTP_ALLOWLIST` a
 `spawn_substrate` time) or the reply is `AllowlistDenied`. `describe_kinds`
 carries the exact param schema for `Fetch` if you need it.
 
+**From an operator, for an authenticated API.** Don't put a key in a `Fetch`
+header. Bind it at spawn instead — `spawn_substrate(args=["--secrets-dir",
+"<dir>", "--http-allowlist", "api.example.com", "--http-secrets",
+"api.example.com/bearer=example"])` — and the cap attaches it to every fetch to
+that host. `--print-config` lists each secret's name and status in its
+`SECRETS` section, never a value.
+
 ## How to extend or reuse it
 
 The seam is the backend trait. A new backend is an implementation of
@@ -212,6 +249,9 @@ too — they tie to the byte-handle design.
 - The transport decision, the backend choice, the body cap and timeout
   rationale, and the stopgap allowlist —
   [ADR-0043](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0043-substrate-http-egress-net-sink.md).
+- Secrets as named files, the host binding, and the injection rules —
+  [ADR-0235](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0235-secrets-are-named-files-held-only-by-native-capabilities.md)
+  and the [*Supplying secrets*](../recipes/supplying-secrets.md) recipe.
 - The `AETHER_HTTP_*` knobs as a worked `Config` derive, and how a per-spawn
   layer reaches them — [Configuration](configuration.md).
 - Why a single `send_mail` returns the fetch's reply — the settlement contract on

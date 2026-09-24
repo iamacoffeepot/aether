@@ -75,8 +75,9 @@ fn user_turn(text: &str) -> Vec<Message> {
     vec![Message { role: Role::User, content: text.to_owned() }]
 }
 
-/// A configured key + supported model dispatches a Messages fetch, which the
-/// empty `aether.http` allowlist denies; the component maps that back to a typed
+/// A supported model dispatches a Messages fetch (the key is the http cap's
+/// operator binding, ADR-0235, never component config), which the empty
+/// `aether.http` allowlist denies; the component maps that back to a typed
 /// `AnthropicError` reply rather than hanging or warn-dropping.
 #[test]
 fn messages_send_maps_http_allowlist_refusal_to_typed_error() {
@@ -84,12 +85,7 @@ fn messages_send_maps_http_allowlist_refusal_to_typed_error() {
         return;
     };
     let mut harness = boot();
-    let config = AnthropicComponentConfig {
-        api_key: Some("test-key-not-a-real-secret".to_owned()),
-        disabled: false,
-        timeout_millis: 0,
-        cli_binary: "claude".to_owned(),
-    };
+    let config = AnthropicComponentConfig { disabled: false, timeout_millis: 0, cli_binary: "claude".to_owned() };
     let component = load_component(&mut harness, &wasm_path, &config);
 
     let result = harness
@@ -132,7 +128,7 @@ fn cli_send_maps_process_refusal_to_cli_not_found() {
         return;
     };
     let mut harness = boot();
-    // Default config: no key (the CLI path needs none), `claude` as the binary.
+    // Default config: `claude` as the binary (the CLI path needs no key).
     let component = load_component(&mut harness, &wasm_path, &AnthropicComponentConfig::default());
 
     let result = harness

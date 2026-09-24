@@ -20,10 +20,10 @@
 //! `#[derive(aether_substrate::StageArgv)]` — the container half that delegates
 //! to every field's `stage_argv`. A chassis then stages its whole CLI in one
 //! `cli.stage_argv(&mut sources)` call, so adding an overlay field to a root IS
-//! staging it. Non-overlay meta fields (`config` / `print_config` / `describe`)
-//! carry `#[stage(skip)]`; an unannotated non-overlay field fails to compile,
-//! and a staged-but-never-composed overlay fails boot loudly
-//! (`ConfigSources::validate_no_orphan_argv`).
+//! staging it. Non-overlay meta fields (`config` / `secrets_dir` /
+//! `print_config` / `describe`) carry `#[stage(skip)]`; an unannotated
+//! non-overlay field fails to compile, and a staged-but-never-composed overlay
+//! fails boot loudly (`ConfigSources::validate_no_orphan_argv`).
 //!
 //! Flag naming is mechanical: strip an `AETHER_` (or top-level)
 //! prefix, lowercase, hyphenate. `AETHER_HTTP_TIMEOUT_MS` →
@@ -61,22 +61,29 @@ use aether_http::{HttpOverlay, HttpServerOverlay};
 use aether_lifecycle::LifecycleOverlay;
 use aether_process::ProcessOverlay;
 use aether_rpc::RpcServerOverlay;
-use aether_substrate::config::{ConfigError, ConfigSources, SettlementOverlay, StageArgv};
+use aether_substrate::config::{ConfigError, ConfigSources, SecretsDir, SettlementOverlay, StageArgv};
 use clap::Args;
 
 use crate::boot::{
     ActorRingOverlay, ChassisBootOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, load_chassis_config,
 };
 
-/// The three source-selecting meta flags every chassis root carries. They name
-/// the file source and the print/describe exits, so they belong to no cap
-/// member and take no part in argv staging (`#[stage(skip)]` where flattened).
+/// The source-selecting meta flags every chassis root carries. They name the
+/// file source, the secrets directory, and the print/describe exits, so they
+/// belong to no cap member and take no part in argv staging (`#[stage(skip)]`
+/// where flattened).
 #[derive(Args, Debug, Default, Clone)]
 pub struct ChassisMeta {
     /// Sectioned TOML chassis config file. Values from this file sit below env
     /// and argv in the source stack.
     #[arg(long = "config", value_name = "PATH")]
     pub config: Option<String>,
+
+    /// Directory of named secret files (ADR-0235); a systemd unit passes
+    /// `--secrets-dir %d`. A path, never a value: each file is one secret, its
+    /// name the file name. Absent, the engine has no secrets.
+    #[arg(long = "secrets-dir", value_name = "PATH")]
+    pub secrets_dir: Option<String>,
 
     /// Print every config knob (source-resolved value, default, doc) and exit
     /// before boot (ADR-0090 §4 discovery dump).
@@ -101,15 +108,17 @@ pub trait ChassisCli: StageArgv + Sized {
     /// exits.
     fn meta(&self) -> &ChassisMeta;
 
-    /// Assemble the source stack: the loaded `--config` file plus every cap
-    /// member's typed argv overlay, staged in one derived [`StageArgv`] call off
-    /// the CLI declaration itself.
+    /// Assemble the source stack: the loaded `--config` file, the located
+    /// `--secrets-dir` (ADR-0235), and every cap member's typed argv overlay,
+    /// staged in one derived [`StageArgv`] call off the CLI declaration itself.
     ///
     /// # Errors
     ///
-    /// Returns [`ConfigError`] when the `--config` file fails to load or parse.
+    /// Returns [`ConfigError`] when the `--config` file fails to load or parse,
+    /// or the `--secrets-dir` path is not an absolute directory.
     fn into_sources(self) -> Result<ConfigSources, ConfigError> {
         let mut sources = ConfigSources::new(load_chassis_config(self.meta().config.clone())?);
+        sources.set_secrets_dir(SecretsDir::locate(self.meta().secrets_dir.clone())?);
         self.stage_argv(&mut sources);
         Ok(sources)
     }

@@ -5,6 +5,9 @@
 use std::collections::HashSet;
 use std::time::Duration;
 
+#[cfg(feature = "runtime")]
+use aether_substrate::config::SecretRefs;
+
 use super::{
     DEFAULT_MAX_BODY_BYTES, DEFAULT_MAX_IN_FLIGHT_PER_SENDER, DEFAULT_MAX_IN_FLIGHT_TOTAL, DEFAULT_TIMEOUT_MILLIS,
 };
@@ -12,7 +15,7 @@ use super::{
 /// Resolved configuration for the substrate's HTTP adapter. Chassis
 /// mains read env vars (`AETHER_HTTP_DISABLE`, `AETHER_HTTP_ALLOWLIST`,
 /// `AETHER_HTTP_REQUIRE_HTTPS`, `AETHER_HTTP_MAX_BODY_BYTES`,
-/// `AETHER_HTTP_TIMEOUT_MS`) into a `HttpConfig` and pass it to
+/// `AETHER_HTTP_TIMEOUT_MS`, `AETHER_HTTP_SECRETS`) into a `HttpConfig` and pass it to
 /// `HttpCapability::new`. Tests build a `HttpConfig` directly,
 /// never touching process env (issue 464).
 ///
@@ -87,6 +90,23 @@ pub struct HttpConfig {
     /// resolved `0` clamps to 1 in the dispatcher.
     #[cfg_attr(feature = "runtime", config(default = 32))]
     pub max_in_flight_total: usize,
+    /// Secrets the cap attaches as request headers, bound by exact HTTPS host (ADR-0235).
+    ///
+    /// A comma list of `<host>/<header-name>=<secret-name>`, or
+    /// `<host>/bearer=<secret-name>` for `Authorization: Bearer <value>`
+    /// (RFC 6750) — e.g. `api.anthropic.com/x-api-key=anthropic`. Names only;
+    /// the values live in the secrets directory `--secrets-dir` names, read
+    /// once at boot. A host has one secret per header: a second binding for
+    /// the same host and header is refused at boot, as are a bound host
+    /// missing from `allowlist` and a header name that is not an HTTP token.
+    /// The header is attached only to a request whose host exactly equals the
+    /// bound host, over HTTPS, after the allowlist check, replacing any
+    /// caller-set header of the same name; a plain-`http` request to a bound
+    /// host is refused. Runtime-gated: the wasm marker build links no
+    /// substrate.
+    #[cfg(feature = "runtime")]
+    #[cfg_attr(feature = "runtime", config(secrets))]
+    pub secrets: SecretRefs,
 }
 
 impl Default for HttpConfig {
@@ -99,6 +119,8 @@ impl Default for HttpConfig {
             default_timeout: Duration::from_millis(u64::from(DEFAULT_TIMEOUT_MILLIS)),
             max_in_flight_per_sender: DEFAULT_MAX_IN_FLIGHT_PER_SENDER,
             max_in_flight_total: DEFAULT_MAX_IN_FLIGHT_TOTAL,
+            #[cfg(feature = "runtime")]
+            secrets: SecretRefs::default(),
         }
     }
 }

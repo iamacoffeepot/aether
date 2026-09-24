@@ -10,6 +10,7 @@ use confique::meta::Meta;
 use super::dump::dump_config;
 use super::known_keys::{KnobRecord, KnownKeys, known_keys};
 use super::member::ConfigMemberRecord;
+use super::secrets::SecretsDir;
 use super::sources::{ConfigProvenance, ConfigSources};
 
 /// The composition-derived chassis config aggregate (ADR-0156 §4): the
@@ -80,10 +81,11 @@ impl ConfigManifest {
     }
 
     /// Render the `--print-config` discovery dump from this walk plus the
-    /// residual hand-registered knobs.
+    /// residual hand-registered knobs, closed by the secrets section for the
+    /// `--secrets-dir` directory (ADR-0235 §5).
     #[must_use]
-    pub fn dump(&self, records: &[KnobRecord]) -> String {
-        dump_config(&self.metas(), records)
+    pub fn dump(&self, records: &[KnobRecord], secrets: Option<&SecretsDir>) -> String {
+        dump_config(&self.metas(), records, secrets)
     }
 
     /// ADR-0156 §5: the resolved-provenance rollup — for every declared member,

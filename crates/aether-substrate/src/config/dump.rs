@@ -1,7 +1,8 @@
 //! The `--print-config` discovery dump (ADR-0090 §4): walk the composed
 //! members' confique `Meta`s plus the residual hand-registered knob records
 //! into a stable plaintext table of key, live value, source label, default,
-//! and doc.
+//! and doc, followed by the secrets section (ADR-0235 §5): the directory, its
+//! source, and each secret's name and status — never a value.
 
 use std::env;
 use std::fmt::Write as _;
@@ -9,6 +10,7 @@ use std::fmt::Write as _;
 use confique::meta::{Expr, Field, FieldKind, LeafKind, Meta};
 
 use super::known_keys::KnobRecord;
+use super::secrets::SecretsDir;
 
 /// Render a `confique::meta::Expr` default as a plain string (matching
 /// how it would be typed in env). Best-effort for the discovery dump;
@@ -83,8 +85,13 @@ fn collect_meta_rows(meta: &'static Meta, rows: &mut Vec<DumpRow>) {
 /// `KnobRecord` directly (`source` = `env` when the var is set, else
 /// `unregistered-default` since their default lives only in the
 /// record). Output is a stable plaintext table.
+///
+/// A `SECRETS` section follows the table (ADR-0235 §5): the `--secrets-dir`
+/// directory and each validly named secret file's status (`set` or
+/// `invalid: <rule>`), or a line saying no directory was given. A knob that
+/// binds secrets already prints only names in its own row.
 #[must_use]
-pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord]) -> String {
+pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord], secrets: Option<&SecretsDir>) -> String {
     let mut rows: Vec<DumpRow> = Vec::new();
     for meta in metas {
         collect_meta_rows(meta, &mut rows);
@@ -112,6 +119,11 @@ pub fn dump_config(metas: &[&'static Meta], records: &[KnobRecord]) -> String {
         let (key, value, source, default, doc) = (&r.key, &r.value, r.source, &r.default, &r.doc);
         let _ = writeln!(out, "{key:<key_w$}  {value:<val_w$}  {source:<src_w$}  {default:<def_w$}  {doc}");
     }
+    out.push_str("\nSECRETS\n");
+    match secrets {
+        Some(dir) => out.push_str(&dir.describe()),
+        None => out.push_str("dir: none (pass --secrets-dir <path>; a systemd unit passes --secrets-dir %d)\n"),
+    }
     out
 }
 
@@ -122,7 +134,7 @@ mod tests {
 
     #[test]
     fn dump_config_renders_meta_keys_defaults_and_docs() {
-        let dump = dump_config(&[fixture_meta()], FIXTURE_KNOBS);
+        let dump = dump_config(&[fixture_meta()], FIXTURE_KNOBS, None);
         // Confique knob from the Meta walk: key + default + a header.
         assert!(dump.contains("AETHER_TEST_COUNT"));
         assert!(dump.contains('7')); // the count default
@@ -137,7 +149,7 @@ mod tests {
     fn dump_config_labels_env_set_value_as_env_source() {
         // SAFETY: single-threaded test; unique key set then removed.
         unsafe { env::set_var("AETHER_FIXTURE_KNOB", "99") };
-        let dump = dump_config(&[], FIXTURE_KNOBS);
+        let dump = dump_config(&[], FIXTURE_KNOBS, None);
         // SAFETY: same scope.
         unsafe { env::remove_var("AETHER_FIXTURE_KNOB") };
         let row = dump.lines().find(|l| l.contains("AETHER_FIXTURE_KNOB")).expect("knob row present");

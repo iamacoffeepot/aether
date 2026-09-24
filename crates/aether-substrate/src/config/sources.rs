@@ -16,6 +16,7 @@ use super::error::ConfigError;
 use super::known_keys::collect_meta_env_keys;
 use super::member::ConfigMember;
 use super::resolve::{FromArgvThenEnv, file_section};
+use super::secrets::SecretsDir;
 
 /// Which layer of the source stack supplied a resolved member's value
 /// (ADR-0156 §5). Reported per member by
@@ -127,6 +128,10 @@ pub struct ConfigSources {
     /// so a layer still present after resolution names its orphaned config type.
     argv: HashMap<TypeId, Box<dyn Any>>,
     argv_names: HashMap<TypeId, &'static str>,
+    /// ADR-0235: the `--secrets-dir` directory, when one was given. A
+    /// `#[config(secrets)]` member's resolve binds its refs to it; the stack
+    /// holds only the path, never a value.
+    secrets_dir: Option<SecretsDir>,
 }
 
 impl ConfigSources {
@@ -142,6 +147,7 @@ impl ConfigSources {
             override_names: HashMap::new(),
             argv: HashMap::new(),
             argv_names: HashMap::new(),
+            secrets_dir: None,
         }
     }
 
@@ -161,7 +167,21 @@ impl ConfigSources {
             override_names: HashMap::new(),
             argv: HashMap::new(),
             argv_names: HashMap::new(),
+            secrets_dir: None,
         }
+    }
+
+    /// Set the secrets directory (ADR-0235) — the chassis CLI's located
+    /// `--secrets-dir`, or `None` when the flag is absent.
+    pub fn set_secrets_dir(&mut self, dir: Option<SecretsDir>) {
+        self.secrets_dir = dir;
+    }
+
+    /// The secrets directory a `#[config(secrets)]` member binds its refs to,
+    /// or `None` when no `--secrets-dir` was given.
+    #[must_use]
+    pub fn secrets_dir(&self) -> Option<&SecretsDir> {
+        self.secrets_dir.as_ref()
     }
 
     /// Stage a programmatic explicit value for member `C` — the top layer of
