@@ -165,13 +165,19 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
 
 impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
     /// Upgrade this erased ctx to the actor being dispatched (issue 6279).
-    /// The `#[actor]` macro calls it with `Self` for a handler, `#[fallback]`,
-    /// `wire`, or `unwire` hook whose signature names its actor, ahead of the
-    /// per-class [`Self::as_single`] downgrade; every
-    /// other arm receives the erased ctx as today. Defined on the erased form
-    /// only, so the upgrade always starts from the dispatcher's erased ctx.
+    /// The `#[actor]` macro calls it with `Self` for a handler or `#[fallback]`
+    /// whose signature names its actor, ahead of the per-class
+    /// [`Self::as_single`] downgrade; every other arm receives the erased ctx
+    /// as today. Defined on the erased form only, so the upgrade always starts
+    /// from the dispatcher's erased ctx.
     ///
-    /// Not part of the public API; the macro is the only intended caller.
+    /// The lifecycle ctx is typed by its actor, so the macro's
+    /// `ErasedWasmActor::erased_wire` / `erased_unwire` and `export!`'s
+    /// single-actor `wire` / `unwire` shims are its second caller: each
+    /// upgrades once, where the erased ctx is born at the FFI boundary.
+    ///
+    /// Not part of the public API; the macro and `export!` are the only
+    /// intended callers.
     #[doc(hidden)]
     #[must_use]
     pub fn __for_actor<A>(&mut self) -> &mut WasmCtx<'a, A, M> {

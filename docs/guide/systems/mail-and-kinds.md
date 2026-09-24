@@ -125,8 +125,10 @@ old guest keeps the context. A take of the wrong type returns `None` and
 leaves the context stored, so a reply handler that serves several context kinds
 tries each type in turn. Keep contexts small: stash routing
 bookkeeping such as the caller's reply handle, origin, or parse mode; keep bulky
-domain state in actor fields and put only an id in the context. A reply handle
-kept in a context stays answerable across `replace_component`: the mailbox's
+domain state in actor fields and put only an id in the context. The table never
+drops a context: it grows past its preallocated room and logs a warning at each
+new high-water mark, so a peer that never replies shows up in the actor's log.
+A reply handle kept in a context stays answerable across `replace_component`: the mailbox's
 pending replies move to the replacement with it. Only a `#[handler::manual]`
 handler can read and keep its reply handle; a single handler's handle is freed
 when it returns. A component whose held handles keep growing logs a warning

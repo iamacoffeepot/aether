@@ -162,7 +162,7 @@ where
         // Phase 3: the `unwire` hook, under this actor's stamped slots so any
         // final `tracing::*` / `Local<T>` access resolves to its rings.
         local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new(&self.binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, MailId::NONE, MailId::NONE);
             A::unwire(actor.as_mut(), &mut close_ctx);
         });
         // iamacoffeepot/aether#3051: the close hook is the last phase allowed

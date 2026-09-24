@@ -158,6 +158,9 @@ impl WasmActor for Camera {
 }
 ```
 
+A native actor's `wire` and `unwire` hooks spell `NativeCtx<'_, Self>` the
+same way to reach their declared dependencies.
+
 `ctx.subscribe::<P, K>()` subscribes the calling actor — the cap reads the
 subscriber off the inbound's host-stamped `Source`, so you name neither the stage
 id nor your own mailbox. It is checked at compile time three ways: `P` must

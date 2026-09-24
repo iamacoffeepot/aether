@@ -51,7 +51,7 @@ fn with_actor_boots_dispatches_and_tears_down() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { received: params })
         }
@@ -161,7 +161,7 @@ fn with_actor_stamps_local_for_init_and_handler() {
         type Params = Arc<AtomicU32>;
         type InitError = BootError;
         type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a>;
+        type Ctx<'a> = NativeCtx<'a, Self>;
         fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             // Init runs inside the chassis builder's stamp guard
             // — write a sentinel so the handler test below proves
@@ -247,7 +247,7 @@ macro_rules! counting_cap {
             type Params = Arc<AtomicU32>;
             type InitError = BootError;
             type InitCtx<'a> = NativeInitCtx<'a>;
-            type Ctx<'a> = NativeCtx<'a>;
+            type Ctx<'a> = NativeCtx<'a, Self>;
             fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
                 Ok(Self { received: params })
             }

@@ -237,10 +237,11 @@ pub struct Registry {
     queue: UnsafeCell<VecDeque<QueuedMail>>,
     /// SDK-owned request contexts keyed by host reply correlation id
     /// (ADR-0139). Lives beside the inline registry because every wasm ctx and
-    /// mailbox already carries this macro-emitted per-component static. A
-    /// `RefCell`, so a reentrant borrow panics instead of aliasing; every
-    /// borrow is taken inside one method below and released before it
-    /// returns.
+    /// mailbox already carries this macro-emitted per-component static. The
+    /// table never evicts: it grows past its preallocated room and warns at
+    /// each new high-water mark. A `RefCell`, so a reentrant borrow panics
+    /// instead of aliasing; every borrow is taken inside one method below and
+    /// released before it returns.
     request_contexts: RefCell<RequestContextTable>,
     /// The `export!`-installed by-tag spawn resolver (issue 2692), or `None`
     /// on a raw registry never wired by `export!` (a host-unit registry).
@@ -282,9 +283,22 @@ impl Registry {
         }
     }
 
-    /// Store a typed request context under `request` (ADR-0139).
+    /// Store a typed request context under `request` (ADR-0139), warning
+    /// when the table passes a new high-water mark. The warning names no
+    /// actor: a guest's `tracing` event lands in its own log ring
+    /// (ADR-0081 §7), which already attributes it.
     pub(crate) fn insert_request_context<C: Kind>(&self, request: RequestId, context: &C) {
-        self.request_contexts.borrow_mut().insert(request, context);
+        let high_water = {
+            let mut table = self.request_contexts.borrow_mut();
+            table.insert(request, context);
+            table.high_water()
+        };
+        if let Some(live) = high_water {
+            tracing::warn!(
+                live,
+                "request context table grew past its preallocated room; a reply that never arrives keeps its context"
+            );
+        }
     }
 
     /// Remove and decode the typed request context stored under `request`;

@@ -111,7 +111,7 @@ impl aether_actor::Lifecycle<Self> for CommitChild {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self)
     }
@@ -180,7 +180,7 @@ impl aether_actor::Lifecycle<Self> for CommitParent {
     type Params = ();
     type InitError = BootError;
     type InitCtx<'a> = NativeInitCtx<'a>;
-    type Ctx<'a> = NativeCtx<'a>;
+    type Ctx<'a> = NativeCtx<'a, Self>;
     fn init((): (), (): (), _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self { live: Vec::new(), staged: 0, succeeded: 0, failed: 0 })
     }

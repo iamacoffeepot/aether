@@ -129,30 +129,65 @@ pub struct NativeCtx<'a, A = Erased, M: ReplyMode = Single> {
 /// [`NativeCtx::spawn_child`] lives only on the typed form, so the parent of
 /// a staged birth is read off the ctx rather than declared beside it — a
 /// caller has no way to name a parent the runtime will then contradict.
-/// Every ctx built where no actor is in scope — `wire` / `unwire`, the
-/// chassis root, a cap-side test fixture — is this form, and loses only a
-/// call it could not have made correctly.
+/// Every ctx built where no actor is in scope — the chassis root, a cap-side
+/// test fixture — is this form, and loses only a call it could not have made
+/// correctly. A `wire` / `unwire` hook that names no actor receives this view
+/// of its actor-typed lifecycle ctx.
 ///
 /// A type-position marker like [`Single`] / [`Manual`], never a value: it is
 /// only ever the `A` of a `NativeCtx`, so it carries no impls of its own.
 pub use aether_actor::Erased;
 impl<'a> NativeCtx<'a, Erased, Single> {
-    /// Internal constructor — the chassis dispatcher trampoline (in
-    /// `chassis::builder`) builds these for `wire` / `unwire` / close
-    /// hooks. Cap-side test fixtures in the per-cap crates also reach
-    /// for it directly so they can drive a handler method without
-    /// spinning up a full chassis; that's why it's `pub` rather than
-    /// `pub(crate)`.
+    /// Inbound-less constructor for a ctx that names no actor. Cap-side test
+    /// fixtures in the per-cap crates reach for it directly so they can drive
+    /// a handler method without spinning up a full chassis; that's why it's
+    /// `pub` rather than `pub(crate)`. The lifecycle hooks do not use it: the
+    /// runtime builds their ctx typed by the actor ([`Self::new_for_actor`]
+    /// for the close hook, `for_wire` for `wire`).
     ///
     /// ADR-0112: stays `<Single>` so those ~hundred fixtures that call
     /// handler methods directly keep their single-mode ctx unchanged.
     /// Build a `<Manual>` ctx for driving the macro dispatch trampoline
     /// with [`Self::new_dispatching`].
     ///
-    /// It also stays [`Erased`], for the same reason: a `wire` hook and the
-    /// fixtures that call a handler directly name no actor, so nothing here
-    /// could parent a child. [`Self::new_for_actor`] is the one that does.
+    /// It also stays [`Erased`], for the same reason: the fixtures that call a
+    /// handler directly name no actor, so nothing here could parent a child.
+    /// [`Self::new_for_actor`] is the one that does.
     pub fn new(
+        binding: &'a Arc<NativeBinding>,
+        sender: Source,
+        in_flight_mail_id: MailId,
+        in_flight_root: MailId,
+    ) -> Self {
+        Self {
+            binding,
+            source: sender,
+            in_flight_mail_id,
+            in_flight_root,
+            causing_chain: MailId::NONE,
+            inbound: None,
+            _mode: PhantomData,
+            _actor: PhantomData,
+        }
+    }
+}
+
+impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
+    /// The actor-naming counterpart of [`Self::new`] / [`Self::new_dispatching`]
+    /// (issue 4158): the same inbound-less ctx, typed by the actor it
+    /// dispatches for, so the handler it drives reaches [`Self::spawn_child`].
+    /// The reply mode comes from the use site rather than from a second
+    /// constructor.
+    ///
+    /// `binding` must be that actor's own binding — the birth lands under
+    /// whatever identity the binding carries, and `A` is what the child's
+    /// `ChildOf<A>` permission is checked against. The pumped host turn
+    /// ([`PumpedSlot::host_turn`](super::slot::pumped::PumpedSlot::host_turn))
+    /// and both slots' close hooks, which hand the `unwire` hook a ctx typed
+    /// by its actor, are the production callers and derive both from the same
+    /// slot; a cap-side fixture driving a spawning handler names its own actor
+    /// here.
+    pub fn new_for_actor(
         binding: &'a Arc<NativeBinding>,
         sender: Source,
         in_flight_mail_id: MailId,
@@ -171,8 +206,9 @@ impl<'a> NativeCtx<'a, Erased, Single> {
     }
 
     /// The `wire`-hook context, built by every birth path that runs
-    /// `A::wire` (ADR-0079 amended). It dispatches no inbound, so it carries
-    /// no in-flight lineage of its own.
+    /// `A::wire` (ADR-0079 amended) and typed by that actor, which the hook's
+    /// parameter type pins. It dispatches no inbound, so it carries no
+    /// in-flight lineage of its own.
     ///
     /// `chain` is the birth path's ADR-0168 §3 declaration of what orders the
     /// effects this hook stages. [`EffectChain::Held`] carries the chain of
@@ -192,38 +228,6 @@ impl<'a> NativeCtx<'a, Erased, Single> {
             in_flight_mail_id: MailId::NONE,
             in_flight_root: MailId::NONE,
             causing_chain: chain.held_root(),
-            inbound: None,
-            _mode: PhantomData,
-            _actor: PhantomData,
-        }
-    }
-}
-
-impl<'a, M: ReplyMode, A> NativeCtx<'a, A, M> {
-    /// The actor-naming counterpart of [`Self::new`] / [`Self::new_dispatching`]
-    /// (issue 4158): the same inbound-less ctx, typed by the actor it
-    /// dispatches for, so the handler it drives reaches [`Self::spawn_child`].
-    /// The reply mode comes from the use site rather than from a second
-    /// constructor.
-    ///
-    /// `binding` must be that actor's own binding — the birth lands under
-    /// whatever identity the binding carries, and `A` is what the child's
-    /// `ChildOf<A>` permission is checked against. The pumped host turn
-    /// ([`PumpedSlot::host_turn`](super::slot::pumped::PumpedSlot::host_turn))
-    /// is the production caller and derives both from the same slot; a
-    /// cap-side fixture driving a spawning handler names its own actor here.
-    pub fn new_for_actor(
-        binding: &'a Arc<NativeBinding>,
-        sender: Source,
-        in_flight_mail_id: MailId,
-        in_flight_root: MailId,
-    ) -> Self {
-        Self {
-            binding,
-            source: sender,
-            in_flight_mail_id,
-            in_flight_root,
-            causing_chain: MailId::NONE,
             inbound: None,
             _mode: PhantomData,
             _actor: PhantomData,
