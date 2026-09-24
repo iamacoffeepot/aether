@@ -96,7 +96,7 @@ fn boot_hub_with_fleet_local_sink(cells: FleetLocalCells) -> (PassiveChassis<Tes
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("fleet-local sink hub boots");

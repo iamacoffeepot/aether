@@ -70,7 +70,7 @@ fn boot_hub(engine_config: FleetConfig) -> (PassiveChassis<TestChassis>, u16) {
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(0) },
+            RpcServerConfig { port: Some(0), port_file: None },
         )
         .build_passive()
         .expect("hub caps boot");
