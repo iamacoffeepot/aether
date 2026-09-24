@@ -1110,8 +1110,9 @@ fn fill_actor(ty: &mut Type) {
 /// carries): `NativeCtx<'a, Self, Manual>` → `NativeCtx<'a>`, `WasmCtx<'a>` →
 /// `WasmCtx<'a>`. The synthesized `wire` needs the base ctx because `wire` is
 /// a `Lifecycle` method with the default reply class, not the handler's. The
-/// actor [`fill_actor`] filled in is stripped too, so the synthesized `wire`
-/// takes the lifecycle ctx that names no actor.
+/// actor [`fill_actor`] filled in is stripped too, and `#[actor]` then types
+/// the synthesized `wire` by the router's actor, as it does every `wire` whose
+/// ctx omits its actor (ADR-0231 §7).
 fn base_ctx_type(ty: &Type) -> Type {
     let mut ty = ty.clone();
     if let Type::Path(TypePath { path, .. }) = &mut ty
@@ -1167,7 +1168,8 @@ fn inject_registration(item: &mut ItemImpl, groups: &[Group<'_>], shared: bool) 
     // the first group (all routes on one impl share a transport). `wire`
     // is a `Lifecycle` method with the base (default reply-class) ctx, so
     // strip any reply-class type arg a deferred route carries
-    // (`NativeCtx<'_, Self, Manual>` → `NativeCtx<'_>`).
+    // (`NativeCtx<'_, Self, Manual>` → `NativeCtx<'_>`). `#[actor]` then
+    // types the base ctx by the router's actor.
     let template = &groups[0];
     let first_arg = &template.first_arg;
     let ctx_c = synthesized_wire_ctx_type(base_ctx_type(&template.ctx_c));

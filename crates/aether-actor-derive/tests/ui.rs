@@ -357,6 +357,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_handler_set_wasm",
     "accepts_manual_handler_wasm",
     "accepts_minimal_actor",
+    "accepts_omitted_ctx_actor_is_self_wasm",
     "accepts_replies_marker",
     "accepts_state_actor",
     "accepts_struct_hosted_actor",

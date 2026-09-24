@@ -33,10 +33,9 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
     /// `SourceAddr::Component` routes back here.
     ///
     /// The parent is the ctx's own actor, never a caller-supplied one
-    /// (issue 4158): a handler opts into this call by naming the actor in
-    /// its ctx signature — `ctx: &mut NativeCtx<'_, Self, Single>` or
-    /// `NativeCtx<'_, Self, Manual>` — and the `#[actor]` macro hands it a
-    /// ctx typed by the actor it is dispatching for. A parent that
+    /// (issue 4158): the `#[actor]` macro hands every handler whose ctx does
+    /// not spell `Erased` — `NativeCtx<'_>`, `NativeCtx<'_, Self, Manual>` —
+    /// a ctx typed by the actor it is dispatching for (ADR-0231 §7). A parent that
     /// disagrees with the executing binding is therefore not a runtime
     /// error to check but a state with no spelling.
     ///

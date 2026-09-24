@@ -125,13 +125,14 @@ aether_actor::export!(Web);
 ```
 
 `#[handler::single]` replies by *returning* its kind, as above.
-`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Erased, Manual>`)
+`#[handler::manual]` opts into the `Manual` ctx (`WasmCtx<'_, Self, Manual>`)
 whose `ctx.reply(&…)` sends the reply explicitly — reach for it when one handler
 needs to reply one of *several* kinds (see "Mixing buffered and streamed routes"
 below), since a single return type can't express that choice. A handler may
-spell its actor instead of the default — `WasmCtx<'_, Self>` — and the macro
-hands it a ctx typed by that actor; `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+omit its actor, and the macro types the ctx by it — `WasmCtx<'_>` reads as
+`WasmCtx<'_, Self>`, reaching only the actors the component declares with
+`depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 The component registers at `aether.component/aether.embedded:web` (its
 `NAMESPACE` const rendered through the ADR-0099 lineage). Its `wire` hook
@@ -206,6 +207,7 @@ use aether_http::HttpServerCapability;
 use aether_http::kinds::{HttpServerRequest, RegisterRouteSelf};
 use aether_data::Kind as _;
 
+// In an `#[actor(depends(HttpServerCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
         prefix: "/api".to_string(),

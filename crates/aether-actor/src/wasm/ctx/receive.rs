@@ -62,9 +62,10 @@ pub struct WasmCtx<'a, A = Erased, M: ReplyMode = Single> {
     /// [`Single`], so the common `WasmCtx<'_>` signature is unchanged.
     _mode: PhantomData<M>,
     /// Phantom marker naming the actor this ctx dispatches *for*. The
-    /// `#[actor]` macro supplies it — a handler that spells its actor
-    /// receives the typed form, every other arm the [`Erased`] view — so
-    /// the default keeps the common `WasmCtx<'_>` signature unchanged.
+    /// `#[actor]` macro supplies it: a method whose ctx omits its actor is
+    /// typed by it (ADR-0231 §7), and only one that spells [`Erased`]
+    /// receives the erased view. The type default is [`Erased`], for a ctx
+    /// built where no actor is in scope.
     _actor: PhantomData<fn() -> A>,
 }
 
@@ -166,15 +167,18 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
 impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
     /// Upgrade this erased ctx to the actor being dispatched (issue 6279).
     /// The `#[actor]` macro calls it with `Self` for a handler or `#[fallback]`
-    /// whose signature names its actor, ahead of the per-class
-    /// [`Self::as_single`] downgrade; every other arm receives the erased ctx
-    /// as today. Defined on the erased form only, so the upgrade always starts
-    /// from the dispatcher's erased ctx.
+    /// whose signature names its actor — every one that does not spell
+    /// [`Erased`] (ADR-0231 §7) — ahead of the per-class [`Self::as_single`]
+    /// downgrade, and once at an adopted handler set's delegation, whose
+    /// dispatch method takes the ctx typed by its adopter. Defined on the
+    /// erased form only, so the upgrade always starts from the dispatcher's
+    /// erased ctx.
     ///
     /// The lifecycle ctx is typed by its actor, so the macro's
-    /// `ErasedWasmActor::erased_wire` / `erased_unwire` and `export!`'s
-    /// single-actor `wire` / `unwire` shims are its second caller: each
-    /// upgrades once, where the erased ctx is born at the FFI boundary.
+    /// `ErasedWasmActor::erased_wire` / `erased_unwire` /
+    /// `erased_on_rehydrate` and `export!`'s single-actor `wire` / `unwire` /
+    /// `on_rehydrate` shims are its other callers: each upgrades once, where
+    /// the erased ctx is born at the FFI boundary.
     ///
     /// Not part of the public API; the macro and `export!` are the only
     /// intended callers.
@@ -191,9 +195,10 @@ impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
 
 impl<'a, A, M: ReplyMode> WasmCtx<'a, A, M> {
     /// Downgrade-only coercion: view this ctx as one that names no actor. A
-    /// handler that spells its actor reaches an erased-only helper through
-    /// this. Like [`Self::as_single`] the coercion only removes capability —
-    /// the way back up is the macro's [`Self::__for_actor`].
+    /// typed handler — every handler that does not spell [`Erased`] — reaches
+    /// an erased-only helper through this. Like [`Self::as_single`] the
+    /// coercion only removes capability — the way back up is the macro's
+    /// [`Self::__for_actor`].
     #[must_use]
     pub fn erase(&mut self) -> &mut WasmCtx<'a, Erased, M> {
         // SAFETY: `A` appears only in `PhantomData`, so `WasmCtx<'a, A, M>` and

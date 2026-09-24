@@ -9,9 +9,9 @@ use crate::diagnostics::doc_attrs;
 use crate::handler_parse::{
     HandlerClass, HandlerReply, HandlerVariant, NativeActorHandlerFn, NativeActorTaskHandlerFn, NativeFallbackFn,
     TaskReplyMode, attr_is_fallback, attr_is_handler, classify_handler_reply, classify_task_reply_mode,
-    ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, handler_cfgs, parse_handler_class,
-    parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks, rewrite_self_state_first_param,
-    types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
+    erase_unless_ctx_names_actor, extract_native_actor_handler_kind, extract_task_handler_types, fill_ctx_actor,
+    handler_cfgs, parse_handler_class, parse_handler_variant, reject_duplicate_handler_kinds, rename_lifecycle_hooks,
+    rewrite_self_state_first_param, types_token_eq, validate_addressable_consts, validate_native_fallback_sig,
 };
 use crate::kind_imports::{ImportDemand, KindImport, harvest_kind_imports, select_for_demands};
 use crate::opts::{ActorCardinality, ActorOpts, parse_actor_opts};
@@ -33,24 +33,6 @@ pub enum NativeEmit {
     /// The addressing markers come from the struct-side `#[actor]`, so none are
     /// emitted here and the `NAMESPACE` const is consumed (dropped).
     RuntimeOnly,
-}
-
-/// Issue 4158: the trailing `.erase()` a dispatch arm appends when the
-/// handler's ctx signature does not name the actor — empty when it does, so
-/// the typed ctx (and with it `spawn_child`) reaches only a handler that
-/// asked for it. Mirrors the existing `as_single()` downgrade: capability is
-/// only ever removed, so a handler cannot name a parent at all, let alone the
-/// wrong one.
-///
-/// The `wire` / `unwire` forwarders apply it the same way: the lifecycle ctx
-/// is typed by the actor, so a hook that names its actor receives it as is
-/// and every other hook the erased view.
-fn erase_unless_ctx_names_actor(sig: &syn::Signature) -> TokenStream2 {
-    if ctx_names_actor(sig) {
-        quote!()
-    } else {
-        quote!(.erase())
-    }
 }
 
 fn reject_generic_native_lineage(generics: &syn::Generics, opts: &ActorOpts) -> syn::Result<()> {
@@ -192,6 +174,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                         HandlerVariant::Mail => {
                             let (kind_ty, is_slice) = extract_native_actor_handler_kind(&f.sig, is_split)?;
                             let reply = classify_handler_reply(&f.sig.output);
+                            fill_ctx_actor(&mut f.sig);
                             handlers.push(NativeActorHandlerFn { method: f, kind_ty, is_slice, reply, class, cfgs });
                         }
                         HandlerVariant::Task => {
@@ -212,6 +195,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                             }
                             let (output_ty, context_ty, is_borrow) = extract_task_handler_types(&f.sig, is_split)?;
                             let mode = classify_task_reply_mode(&f.sig, is_borrow)?;
+                            fill_ctx_actor(&mut f.sig);
                             task_handlers.push(NativeActorTaskHandlerFn { method: f, output_ty, context_ty, mode });
                         }
                     }
@@ -221,6 +205,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     }
                     validate_native_fallback_sig(&f.sig, is_split)?;
                     f.attrs.remove(idx);
+                    fill_ctx_actor(&mut f.sig);
                     fallback = Some(NativeFallbackFn { method: f });
                 } else if f.sig.ident == "init" {
                     if init_method.is_some() {
@@ -231,6 +216,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                     }
                     init_method = Some(f);
                 } else if f.sig.ident == "wire" || f.sig.ident == "unwire" {
+                    fill_ctx_actor(&mut f.sig);
                     lifecycle_methods.push(f);
                 } else {
                     helpers.push(f);
@@ -426,7 +412,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             rewrite_self_state_first_param(m, concrete);
         }
     }
-    let (has_wire, has_unwire) = rename_lifecycle_hooks(&mut lifecycle_methods);
+    let (has_wire, has_unwire, _) = rename_lifecycle_hooks(&mut lifecycle_methods);
 
     // The concrete runtime state type: the declared `type State` for a split
     // cap, `Self` for an un-split one. The composed `Lifecycle<S>` /
@@ -455,10 +441,11 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
         // handler is a `&mut self` method and UFCS passes `state` as the
         // receiver; for a split cap it is an associated fn taking the state
         // explicitly. One call form covers both.
-        // Issue 4158: the dispatch ctx is also typed by the actor, so a
-        // handler that named it in its signature can `spawn_child` under the
-        // actor actually running. One that did not gets the `erase()`d view
-        // and reaches no spawn surface at all.
+        // Issue 4158 / #6533: the dispatch ctx is also typed by the actor, and
+        // `fill_ctx_actor` typed every handler signature that omitted its
+        // actor, so the handler receives the typed ctx and can `spawn_child`
+        // under the actor actually running. Only a handler that spells `Erased`
+        // gets the `erase()`d view, and with it no spawn surface at all.
         let erase = erase_unless_ctx_names_actor(&h.method.sig);
         let call = match (h.class, &h.reply) {
             (HandlerClass::Single, HandlerReply::Sync(_)) => quote! {
@@ -503,15 +490,14 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
 
     // ADR-0169 §2: after the local chain misses, consult the adopted handler
     // set. Local-first is what keeps a locally-declared kind authoritative over
-    // an inherited one. The set's handlers never name the actor in their ctx —
-    // they are written once for a family — so they take the erased view, the
-    // same downgrade `erase_unless_ctx_names_actor` applies to a local handler
-    // that did not ask for the typed ctx.
+    // an inherited one. The set's dispatch method takes the ctx typed by its
+    // adopter (#6533), so the typed dispatch ctx passes straight through; the
+    // set's own arms erase only for a member that spells `Erased`.
     let set_delegation = opts.handler_set.as_ref().map(|set| {
         quote! {
             if <Self as #set>::__aether_handler_set_dispatch(
                 __aether_state,
-                __aether_ctx.erase(),
+                __aether_ctx,
                 __aether_kind,
                 __aether_payload,
             ) == ::aether_actor::DISPATCH_HANDLED
@@ -547,10 +533,10 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
             // ctx, so downgrade with `as_single()`.
             // Folded shape: UFCS `Self::method(state, …)` (see the mail-arm
             // note above) over `__aether_state: &mut Self::State`.
-            // Issue 4158: same signature-directed erasure the mail arms run,
-            // so a completion handler can stage a follow-on child by naming
-            // the actor in its ctx. `resolve_value` is the framework's own
-            // call and always takes the erased view.
+            // Issue 4158 / #6533: same signature-directed erasure the mail arms
+            // run, so a completion handler receives the typed ctx and can stage
+            // a follow-on child unless it spells `Erased`. `resolve_value` is
+            // the framework's own call and always takes the erased view.
             let erase = erase_unless_ctx_names_actor(&t.method.sig);
             let dispatch = match t.mode {
                 TaskReplyMode::ByValue => quote! {
@@ -610,7 +596,7 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // (the default returns `false`). Forwarded through UFCS over the state,
     // mirroring the typed-handler arms — including the mode downgrade to the
     // `Single` signature a `#[fallback]` declares and the issue-4158 actor
-    // erasure, which a catch-all cap opts out of the same way a handler does.
+    // erasure, which now serves only a `#[fallback]` that spells `Erased`.
     let fallback_dispatch_override = fallback.as_ref().map(|f| {
         let method_ident = &f.method.sig.ident;
         let erase = erase_unless_ctx_names_actor(&f.method.sig);
@@ -797,7 +783,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // collision) by UFCS — passing the state as the receiver for an un-split
     // `&mut self` hook. Emitted only when the user provided the hook; the
     // trait's default no-op stands otherwise. The lifecycle ctx is typed by
-    // the actor; a hook that does not name its actor is handed `.erase()`.
+    // the actor, and so is every hook that omitted its actor (#6533); only a
+    // hook that spells `Erased` is handed `.erase()`.
     let hook_erase = |name: &str| {
         lifecycle_methods.iter().find(|m| m.sig.ident == name).map(|m| erase_unless_ctx_names_actor(&m.sig))
     };

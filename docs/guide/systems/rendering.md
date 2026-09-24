@@ -279,6 +279,7 @@ Both are frame-lifecycle stages, subscribed on `aether.lifecycle` from the `wire
 hook:
 
 ```rust
+// In an `#[actor(depends(LifecycleCapability), depends(RenderCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
     let lifecycle = ctx.actor::<LifecycleCapability>();
     lifecycle.subscribe::<Tick>();
@@ -291,9 +292,10 @@ fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
 }
 ```
 
-A handler may spell its actor — `WasmCtx<'_, Self>` — and the macro hands it a
-ctx typed by that actor; the default `Erased` names no actor. The actor is the
-first parameter, the reply mode the second (`WasmCtx<'_, Self, Manual>`).
+A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
+`WasmCtx<'_, Self>`, so the ctx reaches only the actors the component declares
+with `depends(R)`. The actor is the first parameter, the reply mode the second
+(`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
 Address the cap by type — `ctx.actor::<RenderCapability>()` — and send
 `DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). On a chassis whose
