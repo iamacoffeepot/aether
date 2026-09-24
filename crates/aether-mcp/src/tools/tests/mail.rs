@@ -123,10 +123,9 @@ async fn send_mail_fire_and_forget_rejects_unknown_engine_during_resolution() {
 async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution() {
     let supplied = "aether.test/:camera";
     let canonical = "aether.test/aether.test.child:camera";
-    let engine_answer = MailboxId(0x4057_0000_0000_0001);
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, canonical, Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, canonical, Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     let prepared = mcp
@@ -167,7 +166,6 @@ async fn direct_mail_uses_the_engine_answer_and_named_mail_skips_pre_resolution(
 async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved_path() {
     let supplied = "aether.test/:declared-reply";
     let canonical = "aether.test/aether.test.child:declared-reply";
-    let engine_answer = MailboxId(0x4057_0000_0000_0003);
 
     let reply_descriptor =
         KindDescriptor { name: "aether.test.component.reply".to_owned(), schema: SchemaType::String };
@@ -183,8 +181,7 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
     }])));
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) =
-        boot_hub_with_address_route_replies(engine, engine_answer, canonical, Arc::clone(&calls), replies);
+    let (_chassis, port) = boot_hub_with_address_route_replies(engine, canonical, Arc::clone(&calls), replies);
     let mcp = connect_mcp(port);
     mcp.prefill_engine(engine);
     mcp.merge_into_engine_cache(engine, vec![reply_descriptor.clone()]);
@@ -243,10 +240,9 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
 
 #[tokio::test]
 async fn fire_and_forget_awaits_resolution_but_not_application_settlement() {
-    let engine_answer = MailboxId(0x4057_0000_0000_0002);
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, engine_answer, "aether.fs", Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, "aether.fs", Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     mcp.deliver_one_fire(MailSpec {
@@ -316,7 +312,6 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let (_chassis, port) = boot_hub_with_address_route(AddressRouteLoopbackParams {
         engine,
-        mailbox_id: MailboxId(0),
         canonical_path: String::new(),
         names: HashMap::from([(seed_tag.clone(), seed_path.to_owned()), (child_tag.clone(), child_path.to_owned())]),
         calls: Arc::clone(&calls),

@@ -10,17 +10,13 @@ use super::super::test_support::{
 };
 use super::super::*;
 use crate::args::{CompareComponentContractsArgs, ComponentContractSubject};
-use aether_data::{EngineId, KindId, Uuid, canonical::kind_id_from_parts, mailbox_id_from_path, tagged_id, wire};
+use aether_data::{EngineId, KindId, Uuid, canonical::kind_id_from_parts, wire};
 use aether_kinds::{ComponentCapabilities, DescribeComponent, DescribeComponentResult, KindDescriptorWire};
 use std::sync::atomic::AtomicUsize;
 use std::sync::{Arc, Mutex};
 
 fn identity(engine_id: &str, lineage: &str) -> ContractIdentity {
-    ContractIdentity {
-        engine_id: engine_id.to_owned(),
-        canonical_lineage: lineage.to_owned(),
-        mailbox_id: "mbx-0000000000000000".to_owned(),
-    }
+    ContractIdentity { engine_id: engine_id.to_owned(), canonical_lineage: lineage.to_owned() }
 }
 
 fn handler(schema: SchemaType) -> HandlerContract {
@@ -243,10 +239,6 @@ async fn router_dispatches_a_fresh_compatible_comparison_with_explicit_subject_i
     assert_eq!(result["candidate"]["engine_id"], second_engine.0.to_string());
     assert_eq!(result["baseline"]["canonical_lineage"], baseline);
     assert_eq!(result["candidate"]["canonical_lineage"], candidate);
-    assert_eq!(
-        result["baseline"]["mailbox_id"],
-        tagged_id::encode(mailbox_id_from_path(baseline).0).expect("fixture mailbox id is taggable")
-    );
     let calls = calls.lock().expect("calls mutex is sound");
     assert_eq!(calls.len(), 4, "each subject performs live describe plus strict inventory refresh");
     assert_eq!(calls.iter().filter(|call| call.kind == DescribeComponent::ID).count(), 2);

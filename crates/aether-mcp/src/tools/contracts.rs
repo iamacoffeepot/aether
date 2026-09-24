@@ -15,7 +15,6 @@ use super::{Mcp, SchemaType};
 pub(super) struct ContractIdentity {
     pub(super) engine_id: String,
     pub(super) canonical_lineage: String,
-    pub(super) mailbox_id: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -91,11 +90,7 @@ async fn snapshot_subject(
     address: &str,
 ) -> anyhow::Result<ContractSnapshot> {
     let observed = mcp.strict_component_snapshot(engine, address).await?;
-    let identity = ContractIdentity {
-        engine_id,
-        canonical_lineage: observed.canonical_lineage,
-        mailbox_id: tagged_id::encode(observed.mailbox_id.0).unwrap_or_else(|| format!("{:#x}", observed.mailbox_id.0)),
-    };
+    let identity = ContractIdentity { engine_id, canonical_lineage: observed.canonical_lineage };
     let mut handlers = BTreeMap::new();
     for handler in observed.capabilities.handlers {
         let input = descriptor(&observed.kinds, &handler.name, handler.id, "handler input")?;

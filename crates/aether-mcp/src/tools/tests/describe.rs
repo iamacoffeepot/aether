@@ -405,13 +405,12 @@ async fn describe_kinds_live_path_surfaces_component_defined_kind() {
 async fn describe_component_reads_the_cache() {
     let engine_id = "00000000-0000-0000-0000-000000000001";
     let canonical = "aether.component/aether.embedded:fake_component";
-    // A real, taggable mailbox id (arbitrary u64s don't carry the
+    // A well-formed tagged mailbox id (arbitrary u64s don't carry the
     // mailbox-domain bits `tagged_id::encode` needs).
-    let mailbox = mailbox_id_from_name("aether.test.fake_component");
-    let tagged = tagged_id::encode(mailbox.0).expect("mailbox id is taggable");
+    let tagged = tagged_id::encode(with_tag(Tag::Mailbox, 1)).expect("a mailbox-tagged id encodes");
     let engine = EngineId(Uuid::parse_str(engine_id).expect("test setup: engine_id is a valid uuid"));
     let calls = Arc::new(Mutex::new(Vec::new()));
-    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, mailbox, canonical, Arc::clone(&calls));
+    let (_chassis, port) = boot_hub_with_address_route_loopback(engine, canonical, Arc::clone(&calls));
     let mcp = connect_mcp(port);
 
     // A tagged id names no lineage to key the cache by, so it is refused
@@ -488,7 +487,6 @@ async fn describe_component_reads_the_cache() {
 async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_supplied_alias() {
     let supplied = "aether.component/:camera";
     let canonical = "aether.component/aether.embedded:camera";
-    let engine_answer = MailboxId(0x4057_0000_0000_0100);
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
     let replies = Arc::new(Mutex::new(VecDeque::from([ScriptedRouteReply {
@@ -509,8 +507,7 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
         }],
         settle: true,
     }])));
-    let (_chassis, port) =
-        boot_hub_with_address_route_replies(engine, engine_answer, canonical, Arc::clone(&calls), replies);
+    let (_chassis, port) = boot_hub_with_address_route_replies(engine, canonical, Arc::clone(&calls), replies);
     let mcp = connect_mcp(port);
 
     let output = mcp

@@ -5,7 +5,7 @@
 
 use super::*;
 pub(super) use crate::args::*;
-pub(super) use aether_data::{mailbox_id_from_name, mailbox_id_from_path, with_tag};
+pub(super) use aether_data::with_tag;
 pub(super) use aether_fleet::{FleetConfig, FleetServer};
 pub(super) use aether_kinds::descriptors;
 pub(super) use aether_rpc::{
@@ -74,7 +74,6 @@ pub(super) struct RouteInventorySink {
 #[derive(Clone)]
 pub(super) struct AddressRouteLoopbackParams {
     pub(super) engine: EngineId,
-    pub(super) mailbox_id: MailboxId,
     pub(super) canonical_path: String,
     /// Tagged id → the path `aether.inventory.resolve` answers for it; an id
     /// absent here is answered with no name.
@@ -91,7 +90,6 @@ pub(super) struct AddressRouteLoopbackParams {
 /// registers as the route for its one engine from `wire`, like a real proxy.
 pub(super) struct AddressRouteSink {
     engine: EngineId,
-    mailbox_id: MailboxId,
     canonical_path: String,
     names: HashMap<String, String>,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
@@ -108,7 +106,6 @@ impl NativeActor for AddressRouteSink {
     fn init((): (), params: AddressRouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
         Ok(Self {
             engine: params.engine,
-            mailbox_id: params.mailbox_id,
             canonical_path: params.canonical_path,
             names: params.names,
             calls: params.calls,
@@ -140,11 +137,7 @@ impl NativeActor for AddressRouteSink {
                 Mail::new(
                     target,
                     ResolveAddressResult::ID,
-                    ResolveAddressResult::Ok {
-                        mailbox_id: self.mailbox_id,
-                        canonical_path: self.canonical_path.clone(),
-                    }
-                    .encode_into_bytes(),
+                    ResolveAddressResult::Ok { canonical_path: self.canonical_path.clone() }.encode_into_bytes(),
                     1,
                 )
                 .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
@@ -258,14 +251,10 @@ impl NativeActor for ScriptedRouteSink {
 
         let reply = if mail.kind == ResolveAddress::ID {
             let request = ResolveAddress::decode_from_bytes(&mail.payload).expect("test resolver request decodes");
-            #[allow(clippy::disallowed_methods)]
-            // test double mirrors the engine answer expected by legacy terrain assertions
-            let mailbox_id = mailbox_id_from_path(&request.address);
             ScriptedRouteReply {
                 events: vec![ScriptedReplyEvent {
                     kind: ResolveAddressResult::ID,
-                    payload: ResolveAddressResult::Ok { mailbox_id, canonical_path: request.address }
-                        .encode_into_bytes(),
+                    payload: ResolveAddressResult::Ok { canonical_path: request.address }.encode_into_bytes(),
                 }],
                 settle: true,
             }
@@ -510,29 +499,20 @@ pub(super) fn boot_hub_with_route_loopback(
 
 pub(super) fn boot_hub_with_address_route_loopback(
     engine: EngineId,
-    mailbox_id: MailboxId,
     canonical_path: &str,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
-    boot_hub_with_address_route_replies(
-        engine,
-        mailbox_id,
-        canonical_path,
-        calls,
-        Arc::new(Mutex::new(VecDeque::new())),
-    )
+    boot_hub_with_address_route_replies(engine, canonical_path, calls, Arc::new(Mutex::new(VecDeque::new())))
 }
 
 pub(super) fn boot_hub_with_address_route_replies(
     engine: EngineId,
-    mailbox_id: MailboxId,
     canonical_path: &str,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
     boot_hub_with_address_route(AddressRouteLoopbackParams {
         engine,
-        mailbox_id,
         canonical_path: canonical_path.to_owned(),
         names: HashMap::new(),
         calls,
