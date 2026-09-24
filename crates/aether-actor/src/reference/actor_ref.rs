@@ -7,6 +7,7 @@ use core::marker::PhantomData;
 use aether_data::{Address, MailboxId};
 
 use super::ErasedActorRef;
+use crate::Addressable;
 
 /// Proof that an actor of type `R` reached `Live` at an id, in this engine
 /// session (ADR-0230).
@@ -100,8 +101,34 @@ impl<R> Hash for ActorRef<R> {
     }
 }
 
-impl<R> fmt::Debug for ActorRef<R> {
+/// A reference prints its actor type, never its position.
+impl<R: Addressable> fmt::Debug for ActorRef<R> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("ActorRef").field("id", &self.id).finish()
+        write!(f, "ActorRef<{}>", R::NAMESPACE)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use alloc::format;
+
+    use aether_data::MailboxId;
+
+    use super::ActorRef;
+
+    struct Probe;
+
+    impl crate::Addressable for Probe {
+        const NAMESPACE: &'static str = "test.reference.probe";
+        type Resolver = crate::One;
+    }
+
+    // Tripwire: a reference never renders its position, typed or erased.
+    #[test]
+    fn debug_names_the_actor_type_and_never_the_position() {
+        let reference = ActorRef::<Probe>::new(MailboxId(7));
+
+        assert_eq!(format!("{reference:?}"), "ActorRef<test.reference.probe>");
+        assert_eq!(format!("{:?}", reference.erase()), "ErasedActorRef { .. }");
     }
 }

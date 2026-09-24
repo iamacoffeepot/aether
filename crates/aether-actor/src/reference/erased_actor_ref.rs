@@ -1,5 +1,7 @@
 //! [`ErasedActorRef`]: proof that some actor reached `Live` at an id.
 
+use core::fmt;
+
 use aether_data::MailboxId;
 
 /// Proof that some actor reached `Live` at an id, in this engine session
@@ -13,7 +15,7 @@ use aether_data::MailboxId;
 /// beside it are, and exists so a cap can key an ordered set of subscribers
 /// on proofs rather than on positions — `WindowSubscribers` in
 /// `aether-window` is the consumer that asks for it.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ErasedActorRef {
     id: MailboxId,
 }
@@ -37,5 +39,13 @@ impl ErasedActorRef {
     #[must_use]
     pub const fn id(self) -> MailboxId {
         self.id
+    }
+}
+
+/// An erased reference has no actor type to name, and never prints its
+/// position.
+impl fmt::Debug for ErasedActorRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ErasedActorRef").finish_non_exhaustive()
     }
 }
