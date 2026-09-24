@@ -8,7 +8,7 @@
 use core::error::Error;
 use core::fmt;
 
-use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Ref, Seq, SetHead, Tree};
+use aether_bloomery_kinds::{Entry, Head, HeadMoved, Program, Seq, SetHead, Tree};
 use aether_bloomery_reactor::{And, Guard, reactor};
 use aether_bloomery_view::{Heads, Publish, PublishError, View};
 use aether_data::wire::{decode_from_slice, encode_to_vec};
@@ -76,15 +76,25 @@ impl Publish for FoldTally {
     }
 }
 
-struct CurrentCompilation {
-    program: Ref<Program>,
-}
+/// Declines until the `current` program head is bound.
+struct CurrentCompilation;
 
 impl Guard<HeadMoved<Tree>> for CurrentCompilation {
     type Views = And<Heads, FoldTally>;
 
     fn resolve(_trigger: &HeadMoved<Tree>, (heads, _tally): (&Heads, &FoldTally)) -> Option<Self> {
-        Some(Self { program: heads.get(&CURRENT)? })
+        heads.get(&CURRENT).map(|_| Self)
+    }
+}
+
+/// Declines until the shared fold has folded past the trigger.
+struct FoldAdvanced;
+
+impl Guard<HeadMoved<Tree>> for FoldAdvanced {
+    type Views = FoldTally;
+
+    fn resolve(_trigger: &HeadMoved<Tree>, tally: &FoldTally) -> Option<Self> {
+        (tally.cursor.0 > 0).then_some(Self)
     }
 }
 
@@ -95,9 +105,8 @@ impl Reactor for SourcePublisher {
     const NAMESPACE: &'static str = "test.bloomery.source.publisher";
 
     #[rule]
-    fn publish_source(&self, change: HeadMoved<Tree>, current: CurrentCompilation, heads: Heads) -> SetHead {
-        assert_eq!(heads.get(&CURRENT), Some(current.program));
-        SetHead::new(&PUBLISHED, None, change.to())
+    fn publish_source(&self, change: HeadMoved<Tree>, _current: CurrentCompilation, heads: Heads) -> SetHead {
+        SetHead::new(&PUBLISHED, heads.get(&PUBLISHED), change.to())
     }
 }
 
@@ -108,8 +117,7 @@ impl Reactor for SourceWitness {
     const NAMESPACE: &'static str = "test.bloomery.source.witness";
 
     #[rule]
-    fn note_heads(&self, change: HeadMoved<Tree>, tally: FoldTally) -> SetHead {
-        assert!(tally.cursor.0 > 0);
+    fn note_heads(&self, change: HeadMoved<Tree>, _advanced: FoldAdvanced) -> SetHead {
         SetHead::new(&PUBLISHED, None, change.to())
     }
 }
