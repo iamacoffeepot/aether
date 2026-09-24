@@ -11,7 +11,7 @@ use std::sync::Arc;
 use std::thread::{Builder as ThreadBuilder, JoinHandle};
 
 use aether_actor::{Addressable, ReplyMode, Singleton};
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use crate::actor::native::offload::blocking::{DeferredCompletion, DeferredReply, DispatchId, Pending, TaskDone};
 use crate::actor::native::offload::fail_fast;
@@ -86,7 +86,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// place of a stored mailbox id plus a mailer: it names no position and
     /// can send only that one wake (ADR-0230).
     #[must_use]
-    pub fn self_wake<K: Kind>(&self) -> SelfWake<K> {
+    pub fn self_wake<K: ActorMail>(&self) -> SelfWake<K> {
         SelfWake::new(self.binding)
     }
 
@@ -127,7 +127,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn dispatch_blocking<O, R, F>(&mut self, f: F) -> Pending<R>
     where
         O: Send + 'static,
-        R: Kind,
+        R: ActorMail,
         F: FnOnce() -> O + Send + 'static,
     {
         let id = self.dispatch_blocking_with::<O, (), F>((), f);
@@ -139,7 +139,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// [`DispatchId::NONE`] when only a hold was captured for a later resumed
     /// dispatch. Bounded submit helpers are the other public mint site;
     /// `Pending::new` stays crate-internal.
-    pub fn pending<R: Kind>(&self, dispatch_id: DispatchId) -> Pending<R> {
+    pub fn pending<R: ActorMail>(&self, dispatch_id: DispatchId) -> Pending<R> {
         Pending::new(dispatch_id)
     }
 

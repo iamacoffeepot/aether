@@ -95,9 +95,11 @@ pub struct Quit;
 /// frame. `delta_micros` is copied into [`Tick`] when the current stage is
 /// `Tick`; other stages remain empty signals. The driver then broadcasts,
 /// awaits settlement, and advances along the resolved edge (`next` or
-/// `quit`). This is the cadence input, not a stage broadcast.
+/// `quit`). This is the cadence input, not a stage broadcast. Engine-only
+/// mail (ADR-0233): the chassis drivers push it from host code through the
+/// mailer.
 #[repr(C)]
-#[aether_data::kind(name = "aether.lifecycle.advance", pod, default, eq)]
+#[aether_data::kind(name = "aether.lifecycle.advance", pod, default, eq, engine_only)]
 pub struct LifecycleAdvance {
     pub delta_micros: u32,
 }

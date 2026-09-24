@@ -1,7 +1,7 @@
 //! The mail surface every concrete window manager carries (ADR-0169).
 
 use aether_actor::{Manual, OutboundReply, handler_set};
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorMail, MailboxId};
 use aether_substrate::actor::native::{Erased, NativeCtx};
 
 use super::subscribers::WindowSubscribers;
@@ -27,7 +27,7 @@ use crate::{
 /// `Err` carries the refusal text for the two ambiguous cases and for a sole
 /// window that is no longer live, which the caller receives as the command's
 /// own `Err` variant rather than as silence or a forward into a dead mailbox.
-fn route_to_sole_window<K: Kind, A>(
+fn route_to_sole_window<K: ActorMail, A>(
     windows: &[WindowId],
     ctx: &mut NativeCtx<'_, A, Manual>,
     mail: &K,

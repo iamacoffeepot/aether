@@ -813,7 +813,7 @@ pub fn extract_handler_kind_type(sig: &Signature) -> syn::Result<Type> {
 pub enum HandlerReply {
     /// `-> ()` or no return type — fire-and-forget, replies nothing.
     None,
-    /// `-> R: Kind` — reply `R` to the inbound sender synchronously on
+    /// `-> R: ActorMail` — reply `R` to the inbound sender synchronously on
     /// handler return, routed through the inbound guard's reply path.
     Sync(Type),
     /// `-> Pending<R>` — `R` is the deferred reply kind, discharged

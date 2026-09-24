@@ -30,6 +30,9 @@ pub struct UnresolvedMail {
 /// it holds (ADR-0230). An inline child departs under its own alias
 /// (ADR-0114 §4), the identity its sends stamp, so the notice's sender
 /// is the alias rather than the host.
+///
+/// Engine-only mail (ADR-0233): the registry's `notify_departure` pushes it
+/// from host code through the mailer, and no actor may send it.
 #[repr(C)]
-#[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq)]
+#[aether_data::kind(name = "aether.actor.monitor_notice", pod, default, eq, engine_only)]
 pub struct MonitorNotice;

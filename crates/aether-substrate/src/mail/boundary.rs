@@ -13,8 +13,17 @@
 //! The proof never leaves the item and the item is never exportable, so a
 //! boundary-derived reference cannot land in actor state as something a cap
 //! sends other kinds through.
+//!
+//! A bundle item names its kind as text, so no `ActorMail` bound can refuse
+//! engine-only mail on it (ADR-0233). [`is_engine_only`] is the check every
+//! door that carries only a raw `KindId` makes instead, and `accept` makes it
+//! for each item before proving the recipient.
+
+use std::collections::HashSet;
+use std::sync::OnceLock;
 
 use aether_actor::ErasedActorRef;
+use aether_data::name_inventory::engine_only_kinds;
 use aether_kinds::NamedMail;
 
 use crate::mail::KindId;
@@ -54,6 +63,9 @@ pub struct BoundaryMail {
 pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -> Result<Vec<BoundaryMail>, String> {
     let mut accepted = Vec::with_capacity(bundle.len());
     for item in bundle {
+        if registry.kind_id(&item.kind_name).is_some_and(is_engine_only) {
+            return Err(format!("engine-only kind {:?} in {label}", item.kind_name));
+        }
         let recipient = registry
             .resolve_address(&item.recipient)
             .map_err(|error| error.to_string())
@@ -64,6 +76,26 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
         accepted.push(BoundaryMail { recipient, kind, payload: item.payload });
     }
     Ok(accepted)
+}
+
+/// Whether `kind` is engine-only mail (ADR-0233): a statement only the engine
+/// makes, such as a departure notice or a settlement, which no actor may
+/// originate.
+///
+/// A typed send is refused by its missing `ActorMail` bound, so this is for
+/// the doors that carry only a raw `KindId`: the RPC server's wire `Call`,
+/// bundle items through
+/// [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle),
+/// the guest `send_mail_p32` / `reply_mail_p32` host functions, and the
+/// native `send_envelope_*_to` verbs. The engine's own senders push through
+/// the mailer and cross none of these doors, so they stay exempt.
+///
+/// The set is folded once from the link-time `EngineOnlyKind` list, so it
+/// covers every engine-only kind linked into this binary.
+#[must_use]
+pub fn is_engine_only(kind: KindId) -> bool {
+    static DECLARED: OnceLock<HashSet<KindId>> = OnceLock::new();
+    DECLARED.get_or_init(|| engine_only_kinds().map(|entry| entry.kind).collect()).contains(&kind)
 }
 
 /// ADR-0166 §5 — the structured resolution diagnostic reaching the bundle
@@ -80,7 +112,8 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
 #[allow(clippy::disallowed_methods)] // aether-suppression-request: moved test; fixtures fold their own canonical paths
 mod tests {
     use aether_actor::Addressable;
-    use aether_data::{ActorPath, Kind, mailbox_id_from_path};
+    use aether_data::{ActorPath, Kind, KindDescriptor, Schema, mailbox_id_from_path};
+    use aether_kinds::MonitorNotice;
 
     use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use crate::chassis::error::BootError;
@@ -194,5 +227,32 @@ mod tests {
         let error = accept(&registry, bundle(&absent), "test bundle").expect_err("absent recipient");
         assert!(error.contains("no live mailbox"), "an absent recipient still reports absence: {error}");
         assert!(!error.contains("ambiguous"), "an absent recipient is not reported as ambiguous: {error}");
+    }
+
+    /// ADR-0233: a bundle item of engine-only mail is refused on its kind
+    /// before its recipient is proven, so `send_mail_traced` and
+    /// `capture_frame` cannot forward a forged notice. The recipient here is
+    /// absent on purpose: a door that proved the recipient first would report
+    /// it instead of the kind.
+    #[test]
+    fn accept_refuses_an_engine_only_kind_before_proving_the_recipient() {
+        let registry = Registry::new();
+        // The real descriptor, so the name resolves to the id the engine-only
+        // list holds, as boot registration from the inventory resolves it.
+        registry
+            .register_kind_with_descriptor(
+                &boot_authority(),
+                KindDescriptor { name: <MonitorNotice as Kind>::NAME.into(), schema: MonitorNotice::SCHEMA },
+            )
+            .expect("fresh kind");
+        let item = NamedMail {
+            recipient: ActorPath::new("test.bundle_diagnostics.absent").expect("fixture recipient is well formed"),
+            kind_name: <MonitorNotice as Kind>::NAME.to_owned(),
+            payload: MonitorNotice.encode_into_bytes(),
+            count: 1,
+        };
+
+        let error = accept(&registry, vec![item], "test bundle").expect_err("engine-only mail is refused");
+        assert!(error.contains("engine-only kind"), "the error names the kind's class: {error}");
     }
 }

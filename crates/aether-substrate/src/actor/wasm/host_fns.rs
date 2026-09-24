@@ -11,6 +11,7 @@ use aether_data::wire;
 use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
+use crate::mail::boundary::is_engine_only;
 use crate::mail::registry::{PreparedAliasRoute, Registry};
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
@@ -27,6 +28,9 @@ pub const REPLY_UNKNOWN_HANDLE: u32 = 1;
 pub const REPLY_SESSION_GONE: u32 = 2;
 pub const REPLY_OOB: u32 = 3;
 pub const REPLY_KIND_NOT_FOUND: u32 = 4;
+/// The guest replied with engine-only mail (ADR-0233), which no actor may
+/// originate. Returned before the reply handle is taken, so nothing is sent.
+pub const REPLY_ENGINE_ONLY_KIND: u32 = 5;
 
 /// ADR-0016 §2: maximum size of a single state bundle. A `save_state`
 /// call with `len > MAX_STATE_BUNDLE_BYTES` is rejected (status 3) and
@@ -52,6 +56,9 @@ pub const SAVE_STATE_TOO_LARGE: u32 = 3;
 // saving readability; the v0 host-fn list is small and stable.
 #[allow(clippy::too_many_lines)]
 pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
+    // `send_mail_p32` statuses: `0` sent, `1` the guest exports no memory,
+    // `2` the payload is out of bounds, `3` the kind is engine-only mail
+    // (ADR-0233), refused before anything is read or sent.
     linker.func_wrap(
         "aether",
         "send_mail_p32",
@@ -64,6 +71,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          detached: u32,
          from: u64|
          -> u32 {
+            if is_engine_only(KindId(kind)) {
+                tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), "actor-originated engine-only mail refused");
+                return 3;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return 1; // guest exports no memory
             };
@@ -595,6 +606,10 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
          count: u32,
          from: u64|
          -> u32 {
+            if is_engine_only(KindId(kind)) {
+                tracing::warn!(target: "aether_substrate::mail", kind = %KindId(kind), "actor-originated engine-only mail refused");
+                return REPLY_ENGINE_ONLY_KIND;
+            }
             let Some(memory) = caller.get_export("memory").and_then(wasmtime::Extern::into_memory) else {
                 return REPLY_OOB;
             };

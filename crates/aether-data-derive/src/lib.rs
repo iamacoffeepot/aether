@@ -13,9 +13,10 @@
 //! `#[aether_data::kind(name = "…")]` is the usual declaration form: it names
 //! the kind and emits the standard stack (`Debug`, `Clone`, `Kind`, `Schema`,
 //! serde), with options for the contract variations (`eq`, `partial_eq`,
-//! `copy`, `default`, `pod`, `no_serde`, `derive(…)`). The `Kind` and `Schema`
-//! derives are the longhand, and their one helper attribute is
-//! `#[kind(name = "…")]`: a string literal, required, nothing else accepted.
+//! `copy`, `default`, `pod`, `no_serde`, `engine_only`, `derive(…)`). The
+//! `Kind` and `Schema` derives are the longhand, and their one helper
+//! attribute is `#[kind(name = "…")]`: a string literal, required, plus the
+//! bare `engine_only` flag and nothing else.
 //! The grammar that literal must follow is written out in
 //! `docs/guide/systems/mail-and-kinds.md` and enforced by
 //! `crates/aether-kinds/tests/kind_name_grammar.rs`.
@@ -28,6 +29,11 @@
 //! `KIND_DOMAIN` prefix keeps the `Kind::ID` space disjoint from `MailboxId`.
 //! The derive reads `<Self as Schema>::SCHEMA` and `LABEL_NODE`, so the type
 //! must implement `Schema` too.
+//!
+//! `Kind` also emits `impl ActorMail`, the bound every typed send and reply
+//! requires, unless the kind declares `engine_only` (ADR-0233). An
+//! engine-only kind instead submits an `EngineOnlyKind` entry on native
+//! targets, the link-time list the substrate's raw-`KindId` doors refuse.
 //!
 //! `Schema` emits `SCHEMA` (the const-constructible `SchemaType` tree),
 //! `LABEL` (the Rust type path from `module_path!()`), and `LABEL_NODE` (the
@@ -96,6 +102,7 @@ const MAX_TRANSFORM_INPUTS: usize = 8;
 /// #[aether_data::kind(name = "…", copy, default)]               // + Copy, Default
 /// #[aether_data::kind(name = "…", pod)]                         // + Copy, bytemuck::Pod/Zeroable; no serde
 /// #[aether_data::kind(name = "…", no_serde)]                    // drop Serialize/Deserialize
+/// #[aether_data::kind(name = "…", engine_only)]                 // no ActorMail: the engine sends it
 /// #[aether_data::kind(name = "…", derive(Hash, PartialOrd))]    // escape hatch
 /// ```
 ///
@@ -158,10 +165,26 @@ pub fn derive_storage(input: TokenStream) -> TokenStream {
 #[allow(clippy::too_many_lines)]
 fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let KindAttr { name: kind_name } = parse_kind_attr(&input.attrs)?;
+    let KindAttr { name: kind_name, engine_only } = parse_kind_attr(&input.attrs)?;
     if let Data::Union(u) = &input.data {
         return Err(syn::Error::new_spanned(u.union_token, "Kind derive does not support unions"));
     }
+
+    // ADR-0233: every kind is actor mail unless it declares `engine_only`,
+    // in which case it joins the link-time list the raw-`KindId` doors read.
+    let mail_class = if engine_only {
+        quote! {
+            #[cfg(not(target_family = "wasm"))]
+            ::aether_data::__inventory::inventory::submit! {
+                ::aether_data::name_inventory::EngineOnlyKind {
+                    kind: <#name as ::aether_data::Kind>::ID,
+                    name: <#name as ::aether_data::Kind>::NAME,
+                }
+            }
+        }
+    } else {
+        quote! { impl ::aether_data::ActorMail for #name {} }
+    };
 
     // ADR-0033 wire-shape autodetect: `#[repr(C)]` on the type means
     // the substrate carried it as raw cast bytes (and the user has
@@ -239,6 +262,8 @@ fn expand_kind(input: &DeriveInput) -> syn::Result<TokenStream2> {
                 #encode_body
             }
         }
+
+        #mail_class
 
         // Intermediate `static` holds the schema value — reading
         // `<T as Schema>::SCHEMA` by value in a const expression
@@ -967,6 +992,8 @@ fn reject_hashmap(ty: &Type) -> syn::Result<()> {
 
 pub(crate) struct KindAttr {
     pub(crate) name: String,
+    /// The bare `engine_only` flag (ADR-0233).
+    pub(crate) engine_only: bool,
 }
 
 pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
@@ -975,7 +1002,12 @@ pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
             continue;
         }
         let mut name: Option<String> = None;
+        let mut engine_only = false;
         attr.parse_nested_meta(|meta| {
+            if meta.path.is_ident("engine_only") {
+                engine_only = true;
+                return Ok(());
+            }
             if meta.path.is_ident("name") {
                 let value = meta.value()?;
                 let expr: Expr = value.parse()?;
@@ -987,10 +1019,10 @@ pub(crate) fn parse_kind_attr(attrs: &[Attribute]) -> syn::Result<KindAttr> {
                 }
                 return Err(meta.error("`name` must be a string literal"));
             }
-            Err(meta.error("expected `name = \"...\"`"))
+            Err(meta.error("expected `name = \"...\"` or `engine_only`"))
         })?;
         if let Some(name) = name {
-            return Ok(KindAttr { name });
+            return Ok(KindAttr { name, engine_only });
         }
     }
     Err(syn::Error::new(

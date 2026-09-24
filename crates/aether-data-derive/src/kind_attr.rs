@@ -7,7 +7,7 @@
 //! declaration site it drifted into dozens of orderings and memberships
 //! of the same idea, none of them load-bearing. Naming the *contract*
 //! instead — a kind, optionally copyable, comparable, defaultable, POD,
-//! or serde-free — fixes the membership in one place.
+//! serde-free, or engine-only — fixes the membership in one place.
 //!
 //! The emitted derives use absolute paths for everything outside the
 //! prelude (`::aether_data`, `::serde`, `::bytemuck`) so a declaring
@@ -34,6 +34,7 @@ pub enum Flag {
     Eq,
     Pod,
     NoSerde,
+    EngineOnly,
 }
 
 impl Flag {
@@ -45,6 +46,7 @@ impl Flag {
             ("eq", Self::Eq),
             ("pod", Self::Pod),
             ("no_serde", Self::NoSerde),
+            ("engine_only", Self::EngineOnly),
         ] {
             if path.is_ident(name) {
                 return Some(flag);
@@ -62,7 +64,7 @@ pub struct KindArgs {
 }
 
 const EXPECTED_OPTIONS: &str = "expected `name = \"...\"`, `copy`, `default`, `partial_eq`, `eq`, `pod`, \
-                                `no_serde`, or `derive(Trait, ...)`";
+                                `no_serde`, `engine_only`, or `derive(Trait, ...)`";
 
 impl KindArgs {
     fn has(&self, flag: Flag) -> bool {
@@ -160,9 +162,12 @@ pub fn expand(args: &KindArgs, item: &TokenStream2) -> syn::Result<TokenStream2>
 
     let derives = args.derive_paths();
     let name = &args.name;
+    // `engine_only` adds no derive: it is a property of the `Kind` impl, so it
+    // rides the helper attribute the `Kind` derive reads.
+    let engine_only = args.has(Flag::EngineOnly).then(|| quote!(, engine_only));
     Ok(quote! {
         #[derive(#(#derives),*)]
-        #[kind(name = #name)]
+        #[kind(name = #name #engine_only)]
         #item
     })
 }

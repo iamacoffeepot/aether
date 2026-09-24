@@ -2,7 +2,7 @@
 //! [`WasmCtx::parent`] / [`WasmCtx::child`] / [`WasmCtx::sibling`] verbs
 //! that resolve one (ADR-0114 addressing amendment).
 
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorMail, MailboxId};
 
 use super::WasmCtx;
 use crate::model::ctx::reply_mode::ReplyMode;
@@ -61,7 +61,7 @@ impl RelativeMailbox<'_> {
     /// in-flight causal chain (the default, ADR-0080 §7); the local path
     /// carries no host trace ids, so the flag is moot for an in-cluster
     /// send.
-    pub fn send<K: Kind>(&self, payload: &K) {
+    pub fn send<K: ActorMail>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.sender);
     }
@@ -81,7 +81,7 @@ impl RelativeMailbox<'_> {
     /// In-cluster the recipient dispatches in place regardless; the detach
     /// flag rides through only on the cross-cluster fallback path, which a
     /// resolved relative never takes.
-    pub fn send_detached<K: Kind>(&self, payload: &K) {
+    pub fn send_detached<K: ActorMail>(&self, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(self.id.0, K::ID.0, &bytes, 1, ChainMode::Detached, self.sender);
     }

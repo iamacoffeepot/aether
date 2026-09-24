@@ -2,7 +2,7 @@
 //! declared dependency, and through a held reference) and the
 //! [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
-use aether_data::{Kind, RequestId};
+use aether_data::{ActorMail, Kind, RequestId};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
@@ -28,7 +28,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// (ADR-0230). There is no by-name counterpart, because text is not a
     /// proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
-    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
+    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.erased().id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
     }
@@ -114,7 +114,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
@@ -130,7 +130,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         self.inline.route_or_enqueue(
@@ -150,7 +150,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(
@@ -164,7 +164,7 @@ impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
     }
 
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
     }
@@ -181,14 +181,14 @@ impl<A> OutboundReply for WasmCtx<'_, A, Manual> {
         self.sender
     }
 
-    fn reply<K: Kind>(&mut self, payload: &K) {
+    fn reply<K: ActorMail>(&mut self, payload: &K) {
         if let Some(handle) = self.sender {
             let bytes = payload.encode_into_bytes();
             mail::reply_mail(handle.raw(), K::ID.0, &bytes, 1, self.mailbox);
         }
     }
 
-    fn reply_to<K: Kind>(&mut self, sender: ReplyHandle, payload: &K) {
+    fn reply_to<K: ActorMail>(&mut self, sender: ReplyHandle, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::reply_mail(sender.raw(), K::ID.0, &bytes, 1, self.mailbox);
     }

@@ -767,6 +767,8 @@ mod tests {
         }
     }
 
+    impl aether_data::ActorMail for CastReply {}
+
     /// `PollUntil` fails with the value its last probe actually saw
     /// rather than a bare "condition not met" — the property that makes
     /// the op worth having over the sleep it replaces (issue 4196). The

@@ -1,7 +1,7 @@
 //! Input-only editor shell over independently-rooted peer regions (ADR-0141).
 
 use aether_actor::{ActorInitError, ErasedActorRef, WasmActor, WasmCtx, WasmInitCtx, actor};
-use aether_data::Kind;
+use aether_data::ActorMail;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
 };
@@ -29,7 +29,7 @@ impl EditorShell {
     ///
     /// Priming recurses exactly once: the nested call carries no focus edge of
     /// its own, so it sends the modifiers and returns.
-    fn forward<A, K: Kind>(
+    fn forward<A, K: ActorMail>(
         &self,
         ctx: &mut WasmCtx<'_, A>,
         focus: Option<RegionFocusTransition>,

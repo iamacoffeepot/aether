@@ -36,7 +36,7 @@
 
 use core::marker::PhantomData;
 
-use aether_data::{Kind, MailboxId};
+use aether_data::{ActorMail, MailboxId};
 
 use super::WasmCtx;
 use crate::model::ctx::Erased;
@@ -132,7 +132,7 @@ impl<A> Sends<'_, A> {
     /// Send `payload` through a held reference, inheriting the handler's
     /// causal chain. Identical to [`WasmCtx::send_to`]: an [`ActorRef<R>`] is
     /// kind-checked against `K` and an [`ErasedActorRef`] is not.
-    pub fn send_to<K: Kind>(&mut self, target: impl Target<K>, payload: &K) {
+    pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
         self.route::<K>(target.erased().id().0, &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
 
@@ -145,7 +145,7 @@ impl<A> Sends<'_, A> {
     /// recipient, kind, and chain mode to the inline registry, stamping this
     /// actor as the sender. A cluster-member recipient dispatches in place;
     /// any other hands off to the host (ADR-0114 addressing amendment).
-    fn route<K: Kind>(&self, recipient: u64, bytes: &[u8], count: u32, chain: ChainMode) {
+    fn route<K: ActorMail>(&self, recipient: u64, bytes: &[u8], count: u32, chain: ChainMode) {
         self.inline.route_or_enqueue(recipient, K::ID.0, bytes, count, chain, self.mailbox);
     }
 
@@ -164,7 +164,7 @@ impl<A> MailSender for Sends<'_, A> {
     fn send<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.route::<K>(self.resolve_singleton::<R>(), &payload.encode_into_bytes(), 1, ChainMode::Inherit);
     }
@@ -172,7 +172,7 @@ impl<A> MailSender for Sends<'_, A> {
     fn send_many<R, K>(&mut self, payloads: &[K])
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let count = payloads.len() as u32;
         self.route::<K>(self.resolve_singleton::<R>(), bytemuck::cast_slice(payloads), count, ChainMode::Inherit);
@@ -185,12 +185,12 @@ impl<A> MailSender for Sends<'_, A> {
     fn send_detached<R, K>(&mut self, payload: &K)
     where
         R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.route::<K>(self.resolve_singleton::<R>(), &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 
-    fn send_detached_to<K: Kind>(&mut self, target: ErasedActorRef, payload: &K) {
+    fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         self.route::<K>(target.id().0, &payload.encode_into_bytes(), 1, ChainMode::Detached);
     }
 }

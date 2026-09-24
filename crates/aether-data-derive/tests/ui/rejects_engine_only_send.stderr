@@ -1,0 +1,29 @@
+error[E0277]: `Notice` is engine-only mail: the engine sends it, never an actor
+  --> tests/ui/rejects_engine_only_send.rs:14:10
+   |
+14 |     send(&Notice);
+   |     ---- ^^^^^^^ declared #[kind(engine_only)]
+   |     |
+   |     required by a bound introduced by this call
+   |
+help: the trait `ActorMail` is not implemented for `Notice`
+  --> tests/ui/rejects_engine_only_send.rs:5:1
+   |
+ 5 | struct Notice;
+   | ^^^^^^^^^^^^^
+help: the following other types implement trait `ActorMail`
+  --> tests/ui/rejects_engine_only_send.rs:7:1
+   |
+ 7 | #[aether_data::kind(name = "test.actor_mail")]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ `Plain`
+   |
+  ::: $WORKSPACE/crates/aether-data/src/lib.rs
+   |
+   | impl ActorMail for () {}
+   | ^^^^^^^^^^^^^^^^^^^^^ `()`
+note: required by a bound in `send`
+  --> tests/ui/rejects_engine_only_send.rs:10:12
+   |
+10 | fn send<K: aether_data::ActorMail>(_: &K) {}
+   |            ^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `send`
+   = note: this error originates in the derive macro `::aether_data::Kind` (in Nightly builds, run with -Z macro-backtrace for more info)

@@ -1,6 +1,6 @@
 //! [`Target`]: a held reference a flat `send_to` verb sends through.
 
-use aether_data::Kind;
+use aether_data::ActorMail;
 
 use super::{ActorRef, ErasedActorRef};
 use crate::model::HandlesKind;
@@ -26,7 +26,8 @@ mod sealed {
 /// target only for the kinds `R` handles, which keeps the compile-time check
 /// the `ctx.to(&reference)` handle had. An [`ErasedActorRef`] is a target for
 /// every kind, unchecked, as ADR-0230 §2 allows for a proof whose actor type
-/// the holder cannot name. A borrow of either is a target too, so a reference
+/// the holder cannot name. Either way the kind must be [`ActorMail`], so no
+/// target carries engine-only mail (ADR-0233). A borrow of either is a target too, so a reference
 /// reached through a borrow, such as a map lookup, sends without a copy-out.
 /// A held reference is `Copy`, so a call site passes it by value.
 ///
@@ -67,24 +68,24 @@ mod sealed {
 ///     ctx.send_to(peer, &());
 /// }
 /// ```
-pub trait Target<K: Kind>: sealed::Sealed {
+pub trait Target<K: ActorMail>: sealed::Sealed {
     /// The proof this target sends through, with its actor type forgotten.
     fn erased(&self) -> ErasedActorRef;
 }
 
-impl<R: HandlesKind<K>, K: Kind> Target<K> for ActorRef<R> {
+impl<R: HandlesKind<K>, K: ActorMail> Target<K> for ActorRef<R> {
     fn erased(&self) -> ErasedActorRef {
         self.erase()
     }
 }
 
-impl<K: Kind> Target<K> for ErasedActorRef {
+impl<K: ActorMail> Target<K> for ErasedActorRef {
     fn erased(&self) -> ErasedActorRef {
         *self
     }
 }
 
-impl<K: Kind, T: Target<K> + ?Sized> Target<K> for &T {
+impl<K: ActorMail, T: Target<K> + ?Sized> Target<K> for &T {
     fn erased(&self) -> ErasedActorRef {
         (**self).erased()
     }

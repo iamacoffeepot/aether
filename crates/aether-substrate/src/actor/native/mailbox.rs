@@ -18,7 +18,7 @@
 use core::marker::PhantomData;
 
 use aether_actor::{Addressable, ChildOf, HandlesKind, Instanced, MailboxForward, Singleton};
-use aether_data::{Kind, MailId, RequestId};
+use aether_data::{ActorMail, Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
 
@@ -141,7 +141,7 @@ impl<R: Addressable, C: Kind> NativeActorMailboxWithContext<'_, '_, R, C> {
     pub fn send<K>(&self, payload: &K) -> MailId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.mailbox.send_with_context(payload, self.context)
     }
@@ -165,7 +165,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let _ = self.send_tracked(payload);
     }
@@ -175,7 +175,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send_many<K>(&self, payloads: &[K])
     where
         R: HandlesKind<K>,
-        K: Kind + bytemuck::NoUninit,
+        K: ActorMail + bytemuck::NoUninit,
     {
         let bytes: &[u8] = bytemuck::cast_slice(payloads);
         // Batch count rides as `u32` on the wire (matches the FFI ABI);
@@ -201,7 +201,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send_detached<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let _ = self.send_detached_tracked(payload);
     }
@@ -219,7 +219,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send_detached_tracked<K>(&self, payload: &K) -> MailId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         self.binding.push_envelope_buffered(self.mailbox, K::ID.0, &bytes, 1, None, None)
@@ -248,7 +248,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send_tracked<K>(&self, payload: &K) -> MailId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let bytes = payload.encode_into_bytes();
         // 2b: buffer into the actor's send-side ring with the captured
@@ -263,7 +263,7 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
     pub fn send_with_context<K, C>(&self, payload: &K, context: &C) -> MailId
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
         C: Kind,
     {
         let mail_id = self.send_tracked(payload);
@@ -281,7 +281,7 @@ impl<R: Addressable> MailboxForward<R> for NativeActorMailbox<'_, R> {
     fn forward<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         self.send(payload);
     }
@@ -291,7 +291,7 @@ impl<R: Addressable, C: Kind> MailboxForward<R> for NativeActorMailboxWithContex
     fn forward<K>(&self, payload: &K)
     where
         R: HandlesKind<K>,
-        K: Kind,
+        K: ActorMail,
     {
         let _ = self.send(payload);
     }

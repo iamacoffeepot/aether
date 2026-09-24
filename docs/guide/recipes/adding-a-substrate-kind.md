@@ -59,6 +59,7 @@ departures from that contract:
 | `default` | `Default` | payloads with a meaningful zero |
 | `pod` | `Copy`, `bytemuck::Pod`, `bytemuck::Zeroable`; drops serde | cast-encoded kinds — keep the `#[repr(C)]` above it, it is what makes the cast legal |
 | `no_serde` | — (drops `Serialize`/`Deserialize`) | kinds that never cross a JSON/TOML edge |
+| `engine_only` | — (withholds `ActorMail`) | engine-only mail the host alone sends, such as a departure or settlement notice (ADR-0233): no actor can send or reply it, and the raw-`KindId` doors refuse it |
 | `derive(A, B)` | `A`, `B` verbatim | `Hash`, `PartialOrd`, and other one-off needs |
 
 A kind whose derive list this vocabulary cannot state exactly — no `Debug`, no
@@ -66,6 +67,11 @@ A kind whose derive list this vocabulary cannot state exactly — no `Debug`, no
 `#[derive(…)]` + `#[kind(name = …)]` form. Both spellings produce the same
 type; the attribute is shorthand for the common contract, not a replacement for
 the derives.
+
+Every typed send and reply requires `ActorMail`, which the `Kind` derive
+implements unless the kind declares `engine_only`. A hand-written `Kind` impl
+adds `impl aether_data::ActorMail for T {}` itself when actors may send the
+kind; without it, the kind cannot be sent at all.
 
 Reply is a handler contract, not a `Kind` associated type. Name/result shapes
 should make the pairing clear, but live handler inventory is what declares the

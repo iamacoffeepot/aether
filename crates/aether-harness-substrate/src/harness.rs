@@ -1984,6 +1984,7 @@ mod tests {
             const ID: DataKindId = DataKindId(0xB0B1_B2B3_B4B5_B6B7);
             aether_data::pod_kind_codec!();
         }
+        impl aether_data::ActorMail for Bump {}
 
         struct Child {
             received: Arc<AtomicU32>,

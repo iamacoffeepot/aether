@@ -36,6 +36,8 @@ macro_rules! pod_kind {
                 bytemuck::bytes_of(self).to_vec()
             }
         }
+
+        impl aether_data::ActorMail for $type {}
     };
 }
 
