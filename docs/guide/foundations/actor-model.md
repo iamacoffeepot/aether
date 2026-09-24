@@ -627,9 +627,9 @@ permission and subname checks, `A::init`, the transport — and appends one
 ordered prepared birth to the parent's buffer
 ([ADR-0165](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0165-handlers-read-views-emit-effects.md)). Nothing in the shared
 registry moves while the handler runs, so no spawn takes a global lock
-mid-turn. What comes back is a `SpawnReceipt`: the child's `mailbox_id` and
-`canonical_name`, both derived from the parent's identity, which name the child
-for correlation, plus a `completion` `DispatchId`. Neither is a send target: the
+mid-turn. What comes back is a `SpawnReceipt`: the child's `canonical_name`,
+derived from the parent's identity, which names the child for correlation, plus
+a `completion` `DispatchId`. Neither is a send target: the
 child is not `Live` yet, so nothing can prove it. Mail the child must see first
 rides `after_init` on the birth itself, and later mail goes through
 `ctx.send_to(&child, &k)` once the `Ok` completion hands back its reference.
@@ -654,16 +654,16 @@ first, say) surfaces as one typed failure rather than a silent half-spawn. A
 
 ```rust
 struct SpawnOutcome<A> {
-    mailbox_id: MailboxId,
     canonical_name: Arc<str>,
     result: Result<ActorRef<A>, SpawnError>,
 }
 ```
 
-so a handler correlates the completion with the birth it staged straight off the
-outcome, and `C` stays `()` unless there is something the spawn genuinely does
-not know — a peer address, a channel, which leg of a multi-step plan this birth
-belongs to. A handler that keeps or mails its child holds the `Ok` reference
+so a handler correlates the completion with the birth it staged by
+`canonical_name`, straight off the outcome, and `C` stays `()` unless there is
+something the spawn genuinely does not know — a peer address, a channel, which
+leg of a multi-step plan this birth belongs to. A handler whose correlation key
+is not the child's name passes that key as `C`. A handler that keeps or mails its child holds the `Ok` reference
 and sends through `ctx.send_to(&child, &k)`, so a handler that mails its child after the
 bootstrap waits for that completion the same way one that must know the child
 is live before it reports success does. Synchronous commit still

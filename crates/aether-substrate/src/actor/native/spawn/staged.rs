@@ -131,7 +131,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             context,
         );
         let receipt = SpawnReceipt {
-            mailbox_id: staged.identity.id,
             canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };
@@ -205,7 +204,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             hold.as_ref().map_or(EffectChain::Uncaused(Uncaused::ChainlessTurn), |hold| EffectChain::Held(hold.root()));
         let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(hold, reply_to, context);
         let receipt = SpawnReceipt {
-            mailbox_id: staged.identity.id,
             canonical_name: Arc::clone(&staged.identity.canonical_name),
             completion: completion.dispatch_id(),
         };

@@ -3,6 +3,7 @@
 mod instance;
 
 use std::collections::{BTreeMap, HashMap};
+use std::sync::Arc;
 
 use aether_actor::{ActorRef, ErasedActorRef, Manual, runtime};
 use aether_kinds::MonitorNotice;
@@ -25,13 +26,14 @@ const DEFAULT_HEIGHT: u32 = 600;
 
 /// A window whose child actor is staged but not yet authoritatively applied.
 ///
-/// Its [`WindowId`] names a reservation, not a live actor, so the window stays
-/// out of `windows` — and therefore out of `ListWindows`, every subscriber
-/// fan-out, and `WindowOpened` — until the owner completes the birth. The
+/// It is keyed by the staged child's canonical name, which names a
+/// reservation, not a live actor, so the window stays out of `windows` — and
+/// therefore out of `ListWindows`, every subscriber fan-out, and
+/// `WindowOpened` — until the owner completes the birth. The
 /// reservation still participates in duplicate-name detection, and it owns the
 /// caller's reply so exactly one `CreateWindowResult` is ever sent.
 struct PendingWindowCreate {
-    window: WindowInfo,
+    spec: WindowSpec,
     /// Taken by whichever path settles the reservation, so the caller sees
     /// exactly one `CreateWindowResult`. `Option` mirrors the desktop
     /// manager's `PendingCreate`, whose boot window has no caller to answer.
@@ -40,7 +42,7 @@ struct PendingWindowCreate {
 
 pub struct SyntheticWindowCapabilityState {
     windows: BTreeMap<WindowId, WindowInfo>,
-    pending_creates: HashMap<WindowId, PendingWindowCreate>,
+    pending_creates: HashMap<Arc<str>, PendingWindowCreate>,
     /// Each live child's window and monitor, keyed by the child's reference:
     /// the `MonitorNotice` sender a departing child is found by (ADR-0230).
     child_monitors: HashMap<ErasedActorRef, (WindowId, MonitorHandle)>,
@@ -57,7 +59,7 @@ impl SyntheticWindowCapabilityState {
     fn check_create(&self, spec: &WindowSpec) -> Result<(), String> {
         crate::validate_window_name(&spec.name)?;
         if self.windows.values().any(|window| window.name == spec.name)
-            || self.pending_creates.values().any(|pending| pending.window.name == spec.name)
+            || self.pending_creates.values().any(|pending| pending.spec.name == spec.name)
         {
             return Err(format!("window name `{}` is already in use", spec.name));
         }
@@ -91,7 +93,7 @@ impl SyntheticWindowCapabilityState {
         child: ActorRef<SyntheticWindowInstance>,
         pending: PendingWindowCreate,
     ) {
-        let PendingWindowCreate { window, mut reply } = pending;
+        let PendingWindowCreate { spec, mut reply } = pending;
         let monitor = match ctx.monitor(child.erase()) {
             Ok(monitor) => monitor,
             Err(error) => {
@@ -103,7 +105,11 @@ impl SyntheticWindowCapabilityState {
                 return;
             }
         };
-        let id = window.id;
+        // The child's id needs no check against a prediction: the synthetic
+        // identities read the shared window namespace consts, so the child's
+        // fold is the canonical one consumers address.
+        let id = WindowId(child.id().0);
+        let window = Self::describe(spec, id);
         self.child_monitors.insert(child.erase(), (id, monitor));
         self.windows.insert(id, window.clone());
         self.publish(ctx, id, &WindowOpened { window: window.clone() });
@@ -247,12 +253,9 @@ impl NativeActor for SyntheticWindowCapability {
                 return;
             }
         };
-        // The receipt's id needs no check against a prediction: the synthetic
-        // identities read the shared window namespace consts, so the child's
-        // fold is the canonical one consumers address.
-        let id = WindowId(receipt.mailbox_id.0);
-        let window = SyntheticWindowCapabilityState::describe(mail.spec, id);
-        let replaced = state.pending_creates.insert(id, PendingWindowCreate { window, reply: Some(Box::new(reply)) });
+        let replaced = state
+            .pending_creates
+            .insert(receipt.canonical_name, PendingWindowCreate { spec: mail.spec, reply: Some(Box::new(reply)) });
         debug_assert!(replaced.is_none(), "a window name is reserved exactly once");
     }
 
@@ -262,9 +265,10 @@ impl NativeActor for SyntheticWindowCapability {
         ctx: &mut NativeCtx<'_>,
         done: TaskDone<SpawnOutcome<SyntheticWindowInstance>, ()>,
     ) {
-        // The birth names itself on both arms, so the reservation key comes
-        // straight off the outcome rather than a context struct carrying it.
-        let Some(mut pending) = state.pending_creates.remove(&WindowId(done.output().mailbox_id.0)) else {
+        // The birth names itself by canonical name on both arms, so the
+        // reservation key comes straight off the outcome rather than a context
+        // struct carrying it.
+        let Some(mut pending) = state.pending_creates.remove(done.output().canonical_name.as_ref()) else {
             if let Ok(child) = &done.output().result {
                 ctx.send_to(child, &RetireWindow);
             }
@@ -332,7 +336,6 @@ impl WindowManagerSurface for SyntheticWindowCapability {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeSet;
-    use std::sync::Arc;
 
     use aether_data::{Kind, MailboxId};
     use aether_kinds::Key;
@@ -474,14 +477,11 @@ mod tests {
         // A reserved-but-not-yet-live name is invisible to `ListWindows` and
         // still blocks a second create for the same name.
         state.pending_creates.insert(
-            WindowId(9),
-            PendingWindowCreate {
-                window: SyntheticWindowCapabilityState::describe(spec("palette", "Tools"), WindowId(9)),
-                reply: None,
-            },
+            Arc::from("aether.window/aether.window.instance:palette"),
+            PendingWindowCreate { spec: spec("palette", "Tools"), reply: None },
         );
         assert!(state.check_create(&spec("palette", "Other tools")).is_err());
-        assert!(!state.windows.contains_key(&WindowId(9)));
+        assert!(!state.windows.values().any(|window| window.name == "palette"));
     }
 
     #[test]

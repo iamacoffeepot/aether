@@ -387,7 +387,7 @@ impl NativeActor for TcpCapability {
     ) {
         let OutboundSessionSpawn { addr, session_name, peer } = done.context().clone();
         done.resolve_with(ctx, move |outcome, _| match &outcome.result {
-            Ok(_) => ConnectResult::Ok { session_name, session_id: outcome.mailbox_id, peer },
+            Ok(child) => ConnectResult::Ok { session_name, session_id: child.id(), peer },
             Err(error) => ConnectResult::Err { addr, error: format!("spawn failed: {error:?}") },
         });
     }
@@ -417,7 +417,6 @@ impl NativeActor for TcpCapability {
             }
         };
 
-        let listener_mailbox = done.output().mailbox_id;
         state.listeners.insert(
             listener.erase(),
             ListenerEntry {
@@ -431,7 +430,7 @@ impl NativeActor for TcpCapability {
         );
         done.resolve_with(ctx, move |_, _| BindListenerResult::Ok {
             listener_name,
-            listener_id: listener_mailbox,
+            listener_id: listener.id(),
             local_port,
         });
     }
