@@ -1063,12 +1063,13 @@ fn emit_native_lineage_markers(self_ty: &Type, generics: &syn::Generics, opts: &
                 for #self_ty #where_clause {}
         }
     });
-    // ADR-0230: native expansion emits the `DependsOn` impls plus one link-time
-    // `DependencyEntry` per listed type below, which the birth sites check
-    // before `init`.
+    // ADR-0230: native expansion emits each `unsafe impl DependsOn<R>` together
+    // with the link-time `DependencyEntry` for the same `R` below, which the
+    // birth sites check before `init`. Emitting the two together is the
+    // trait's safety contract.
     let depends_impls = opts.depends.iter().map(|target| {
         quote! {
-            impl #impl_generics ::aether_actor::DependsOn<#target>
+            unsafe impl #impl_generics ::aether_actor::DependsOn<#target>
                 for #self_ty #where_clause {}
         }
     });

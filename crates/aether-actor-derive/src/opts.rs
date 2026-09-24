@@ -33,9 +33,10 @@ pub struct ActorOpts {
     /// logical parents.
     pub child_of: Vec<syn::TypePath>,
     /// ADR-0230: actor types this actor depends on, from one
-    /// `depends(A, B, …)` list. Each listed type emits `impl DependsOn<R> for
-    /// Self` plus one `Dependency` inputs-manifest record, in list order; the
-    /// host refuses the load while any entry has no `Live` route. Only
+    /// `depends(A, B, …)` list. Each listed type emits
+    /// `unsafe impl DependsOn<R> for Self` plus one `Dependency`
+    /// inputs-manifest record, in list order; the host refuses the load
+    /// while any entry has no `Live` route. Only
     /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
@@ -184,7 +185,7 @@ fn push_actor_type_entry(meta: &meta::ParseNestedMeta, slot: &mut Vec<syn::TypeP
 /// Parse the `depends(A, B, …)` list (ADR-0230): at least one actor type
 /// path, comma-separated, trailing comma allowed, each type named once.
 /// Declaration order is kept, so it is the order of the emitted
-/// `DependsOn` impls and `Dependency` records.
+/// `unsafe impl DependsOn<R>` items and `Dependency` records.
 fn parse_depends_list(meta: &meta::ParseNestedMeta) -> syn::Result<Vec<syn::TypePath>> {
     let content;
     syn::parenthesized!(content in meta.input);
