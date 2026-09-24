@@ -46,8 +46,8 @@ use aether_actor::{DependencyResolver, Embedded, One};
 use aether_data::{
     ACTOR_LINEAGE_SECTION, ACTOR_LINEAGE_SECTION_VERSION, ActorLineageRecord, EnumVariant, INPUTS_SECTION,
     INPUTS_SECTION_VERSION, InputsRecord, KINDS_SECTION_VERSION, KindDescriptor, KindLabels, KindShape,
-    LABELS_SECTION_VERSION, LabelNode, NamedField, SchemaCell, SchemaShape, SchemaType, VariantLabel,
-    canonical::kind_id_from_shape, wire,
+    LABELS_SECTION_VERSION, LabelNode, NamedField, PRIVATE_INPUTS_SECTION, SchemaCell, SchemaShape, SchemaType,
+    VariantLabel, canonical::kind_id_from_shape, wire,
 };
 use aether_kinds::{ComponentCapabilities, ConfigCapability, FallbackCapability, HandlerCapability};
 use serde::de::DeserializeOwned;
@@ -347,6 +347,24 @@ pub struct ActorInputs {
 /// load error, since the macro emits at most one of each per type. A
 /// module that declares no inputs section at all returns an empty vec.
 pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, String> {
+    read_inputs_groups(wasm, INPUTS_SECTION)
+}
+
+/// Decode the module's `aether.kinds.inputs.private` section (issue 6590)
+/// into one [`ActorInputs`] per private inline child, the types `export!`
+/// lists under `private = [..]`. The section has the grammar of
+/// `aether.kinds.inputs`, every group led by an `ActorBoundary`, and only
+/// the module-load dependency check (ADR-0230 §3) reads it, so a private
+/// type never reaches export selection or component description. A module
+/// without private children has no section and yields an empty vec.
+pub fn read_private_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, String> {
+    read_inputs_groups(wasm, PRIVATE_INPUTS_SECTION)
+}
+
+/// Decode every custom section named exactly `section` into its
+/// [`ActorInputs`] groups. The name match is exact: the private section's
+/// name has the exported one as a prefix, and the two must never mix.
+fn read_inputs_groups(wasm: &[u8], section: &str) -> Result<Vec<ActorInputs>, String> {
     let mut records: Vec<InputsRecord> = Vec::new();
 
     for payload in Parser::new(0).parse_all(wasm) {
@@ -354,10 +372,10 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
         let Payload::CustomSection(reader) = payload else {
             continue;
         };
-        if reader.name() != INPUTS_SECTION {
+        if reader.name() != section {
             continue;
         }
-        decode_inputs_records(reader.data(), &mut records)?;
+        decode_inputs_records(section, reader.data(), &mut records)?;
     }
 
     let mut groups: Vec<ActorInputs> = Vec::new();
@@ -381,34 +399,28 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
             InputsRecord::Fallback { doc } => {
                 let caps = current_capabilities(&mut groups);
                 if caps.fallback.is_some() {
-                    return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Fallback record — macro emits at most one per actor"
-                    ));
+                    return Err(format!("{section}: duplicate Fallback record — macro emits at most one per actor"));
                 }
                 caps.fallback = Some(FallbackCapability { doc: doc.map(Cow::into_owned) });
             }
             InputsRecord::Component { doc } => {
                 let caps = current_capabilities(&mut groups);
                 if caps.doc.is_some() {
-                    return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Component record — macro emits at most one per actor"
-                    ));
+                    return Err(format!("{section}: duplicate Component record — macro emits at most one per actor"));
                 }
                 caps.doc = Some(doc.into_owned());
             }
             InputsRecord::Config { id, name } => {
                 let caps = current_capabilities(&mut groups);
                 if caps.config.is_some() {
-                    return Err(format!(
-                        "{INPUTS_SECTION}: duplicate Config record — macro emits at most one per actor"
-                    ));
+                    return Err(format!("{section}: duplicate Config record — macro emits at most one per actor"));
                 }
                 caps.config = Some(ConfigCapability { id, name: name.into_owned() });
             }
             InputsRecord::Dependency { resolver, namespace } => {
                 if resolver != One::TAG && resolver != Embedded::TAG {
                     return Err(format!(
-                        "{INPUTS_SECTION}: dependency resolver tag {resolver:#x} not understood by this substrate build"
+                        "{section}: dependency resolver tag {resolver:#x} not understood by this substrate build"
                     ));
                 }
                 current_group(&mut groups)
@@ -423,10 +435,11 @@ pub fn read_actor_inputs_from_bytes(wasm: &[u8]) -> Result<Vec<ActorInputs>, Str
 /// Decode the module's `aether.actor.lineage` section (ADR-0166) into its
 /// placement records, in section order. `export!` emits the section for
 /// the module's exported types; the host reads it to select the
-/// inline-spawnable groups — a `ModuleChild` record, or a `Child` whose
-/// parent is exported by the same module — whose declared dependencies it
-/// checks when the module loads (ADR-0230 §3). A module without the
-/// section returns an empty vec; an unknown record version is an error.
+/// inline-spawnable exported groups — a `ModuleChild` record, or a `Child`
+/// whose parent is exported or private in the same module — whose declared
+/// dependencies it checks when the module loads (ADR-0230 §3). A module
+/// without the section returns an empty vec; an unknown record version is
+/// an error.
 pub fn read_actor_lineage_from_bytes(wasm: &[u8]) -> Result<Vec<ActorLineageRecord>, String> {
     let mut out = Vec::new();
     for payload in Parser::new(0).parse_all(wasm) {
@@ -472,14 +485,12 @@ pub fn read_inputs_from_bytes(wasm: &[u8]) -> Result<ComponentCapabilities, Stri
     Ok(read_actor_inputs_from_bytes(wasm)?.into_iter().next().map(|actor| actor.capabilities).unwrap_or_default())
 }
 
-fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(), String> {
+fn decode_inputs_records(section: &str, data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(), String> {
     let mut cursor = data;
     while !cursor.is_empty() {
         let version = cursor[0];
         if version != INPUTS_SECTION_VERSION {
-            return Err(format!(
-                "{INPUTS_SECTION}: record version {version:#x} not understood by this substrate build"
-            ));
+            return Err(format!("{section}: record version {version:#x} not understood by this substrate build"));
         }
         let body = &cursor[1..];
         match wire::take_from_bytes::<InputsRecord>(body) {
@@ -488,7 +499,7 @@ fn decode_inputs_records(data: &[u8], out: &mut Vec<InputsRecord>) -> Result<(),
                 cursor = rest;
             }
             Err(e) => {
-                return Err(format!("{INPUTS_SECTION}: wire decode failed at record {}: {e}", out.len() + 1));
+                return Err(format!("{section}: wire decode failed at record {}: {e}", out.len() + 1));
             }
         }
     }
@@ -716,6 +727,12 @@ mod tests {
     }
 
     fn wasm_with_two_sections(canonical: &[u8], labels: &[u8]) -> Vec<u8> {
+        wasm_with_named_sections([(MANIFEST_SECTION, canonical), (LABELS_SECTION, labels)])
+    }
+
+    /// A module carrying two custom sections, each under the name paired
+    /// with its bytes, in order.
+    fn wasm_with_named_sections([(first_name, first), (second_name, second)]: [(&str, &[u8]); 2]) -> Vec<u8> {
         use core::fmt::Write as _;
         let esc = |bs: &[u8]| -> String {
             let mut s = String::with_capacity(bs.len() * 3);
@@ -726,11 +743,11 @@ mod tests {
         };
         let wat = format!(
             r#"(module
-                (@custom "{MANIFEST_SECTION}" "{}")
-                (@custom "{LABELS_SECTION}" "{}")
+                (@custom "{first_name}" "{}")
+                (@custom "{second_name}" "{}")
                 (func (export "noop")))"#,
-            esc(canonical),
-            esc(labels),
+            esc(first),
+            esc(second),
         );
         wat::parse_str(wat).unwrap()
     }
@@ -1370,6 +1387,29 @@ mod tests {
         let err = read_actor_inputs_from_bytes(&wasm).unwrap_err();
         assert!(err.contains("dependency resolver tag"), "err: {err}");
         assert!(err.contains(INPUTS_SECTION), "err: {err}");
+    }
+
+    #[test]
+    fn the_inputs_readers_keep_their_sections_apart() {
+        // Issue 6590: the private section's name has the exported one as a
+        // prefix. Each reader matches its own name exactly, so a private
+        // group never reaches export selection or component description,
+        // and the load check still sees it.
+        let exported = inputs_section(&[InputsRecord::ActorBoundary { namespace: "m.exported".into() }]);
+        let private = inputs_section(&[
+            InputsRecord::ActorBoundary { namespace: "m.private".into() },
+            InputsRecord::Dependency { resolver: One::TAG, namespace: "aether.fs".into() },
+        ]);
+        let wasm = wasm_with_named_sections([(INPUTS_SECTION, &exported), (PRIVATE_INPUTS_SECTION, &private)]);
+
+        let exported_groups = read_actor_inputs_from_bytes(&wasm).unwrap();
+        let exported_namespaces: Vec<_> = exported_groups.iter().map(|group| group.namespace.as_deref()).collect();
+        assert_eq!(exported_namespaces, [Some("m.exported")]);
+
+        let private_groups = read_private_actor_inputs_from_bytes(&wasm).unwrap();
+        let private_namespaces: Vec<_> = private_groups.iter().map(|group| group.namespace.as_deref()).collect();
+        assert_eq!(private_namespaces, [Some("m.private")]);
+        assert_eq!(private_groups[0].dependencies[0].namespace, "aether.fs");
     }
 
     #[test]

@@ -227,6 +227,8 @@ impl ComponentHostCapabilityState {
         let descriptors = kind_manifest::read_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
         let actors =
             kind_manifest::read_actor_inputs_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
+        let private = kind_manifest::read_private_actor_inputs_from_bytes(&payload.wasm)
+            .map_err(|error| LoadResult::Err { error })?;
         let boot_namespace =
             kind_manifest::read_boot_namespace_from_bytes(&payload.wasm).map_err(|error| LoadResult::Err { error })?;
         let lineage =
@@ -237,7 +239,9 @@ impl ComponentHostCapabilityState {
         // ADR-0230 §3: an actor the module can spawn inline runs before the
         // host sees it, so its declared dependencies are checked here, before
         // kind registration, the module boot actor, or the requested actor.
-        if let Some(error) = inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref()) {
+        if let Some(error) =
+            inline_dependency_refusal(&self.registry, &actors, &private, &lineage, module_namespace.as_deref())
+        {
             return Err(LoadResult::Err { error });
         }
 
@@ -658,10 +662,11 @@ impl ComponentHostCapabilityState {
         // The module-wide inline check runs here; the trampoline checks the
         // dependencies of the type the replacement will host.
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
+            && let Ok(private) = kind_manifest::read_private_actor_inputs_from_bytes(&payload.wasm)
             && let Ok(lineage) = kind_manifest::read_actor_lineage_from_bytes(&payload.wasm)
             && let Ok(module_namespace) = kind_manifest::read_namespace_from_bytes(&payload.wasm)
             && let Some(error) =
-                inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref())
+                inline_dependency_refusal(&self.registry, &actors, &private, &lineage, module_namespace.as_deref())
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;

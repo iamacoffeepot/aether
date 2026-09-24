@@ -475,10 +475,13 @@ pub mod guest_alloc;
 /// on a replace but does not export (ADR-0114 §5). Every exported and every
 /// private type gets [`Rebuildable`], which the typed
 /// inline spawn verbs require, so a child neither exported nor listed here
-/// fails to compile where it is spawned. A private type reaches only the
-/// rehydrate shim's rebuild arm: it is not loadable by an export selector,
-/// not in the manifest sections the host reads, and not spawnable by
-/// runtime tag.
+/// fails to compile where it is spawned. A private type reaches the
+/// rehydrate shim's rebuild arm and the `aether.kinds.inputs.private`
+/// section, which only the host's module-load dependency check reads
+/// (ADR-0230 §3), so a load or replace of the module is refused while a
+/// private child's declared dependency is not live. It is not loadable by an
+/// export selector, not in `aether.kinds.inputs` or any other manifest
+/// section the host reads, and not spawnable by runtime tag.
 ///
 /// ```ignore
 /// aether_actor::export!(default = Parent, Sibling, private = [Child]);
@@ -954,6 +957,10 @@ macro_rules! __export_internal {
         static __AETHER_INPUTS_SECTION: [u8; <$component>::__AETHER_INPUTS_MANIFEST_LEN] =
             <$component>::__AETHER_INPUTS_MANIFEST;
 
+        // Issue 6590: the private inline children's groups, in their own
+        // section beside the boundary-free single-actor inputs.
+        $crate::__export_internal!(@private_inputs $($private),*);
+
         // ADR-0166: pin only this exported actor's anonymous placement facts.
         // The actor macro emits associated const data; retention stays at the
         // cdylib-root `export!` call so transitive rlibs contribute no custom
@@ -1395,6 +1402,83 @@ macro_rules! __export_internal {
         )*
     };
 
+    // Issue 6590: pin the private inline children's inputs into the sibling
+    // `aether.kinds.inputs.private` section, so the host's module-load
+    // dependency check (ADR-0230 §3) reads their `#[actor(depends(..))]`
+    // declarations. Nothing else reads the section, so a private type stays
+    // out of export selection and component description. Every `export!`
+    // form calls this once; an empty private list emits no section.
+    (@private_inputs) => {};
+    (@private_inputs $($private:ty),+) => {
+        $crate::__export_internal!(
+            @grouped_inputs __AETHER_PRIVATE_INPUTS_LEN, __AETHER_PRIVATE_INPUTS_SECTION,
+            "aether.kinds.inputs.private" ; $($private),+
+        );
+    };
+
+    // ADR-0096: one inputs section of `ActorBoundary`-led groups. Each
+    // listed type's records are preceded by an `ActorBoundary { namespace }`
+    // record (version-tagged like every other record) so the host's reader
+    // regroups the flat record stream into one capability set per type, in
+    // list order. The multi-actor `aether.kinds.inputs` static and the
+    // private-children static are both this arm, so the two sections share
+    // one record grammar byte for byte.
+    (@grouped_inputs $len:ident, $section_static:ident, $section:literal ; $($listed:ty),+) => {
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        const $len: usize = 0usize $(
+            + 1
+            + $crate::__macro_internals::canonical::inputs_actor_boundary_len(
+                <$listed as $crate::Addressable>::NAMESPACE,
+            )
+            + <$listed>::__AETHER_INPUTS_MANIFEST_LEN
+        )+;
+
+        #[cfg(all(target_family = "wasm", not(feature = "library")))]
+        #[unsafe(link_section = $section)]
+        static $section_static: [u8; $len] = {
+            let mut out = [0u8; $len];
+            let mut pos = 0usize;
+            $(
+                {
+                    // The per-type `ActorBoundary` record, then that
+                    // type's own `aether.kinds.inputs` manifest bytes.
+                    const BOUNDARY_LEN: usize =
+                        $crate::__macro_internals::canonical::inputs_actor_boundary_len(
+                            <$listed as $crate::Addressable>::NAMESPACE,
+                        );
+                    const BOUNDARY_BYTES: [u8; BOUNDARY_LEN] =
+                        $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
+                            <$listed as $crate::Addressable>::NAMESPACE,
+                        );
+                    // Per-record section version byte — a token reference
+                    // to `INPUTS_SECTION_VERSION` (bumped by ADR-0118 /
+                    // issue 1984; the boundary record is a per-record frame
+                    // and tracks the same version as the records emitted by
+                    // the derive macro).
+                    out[pos] = $crate::__macro_internals::INPUTS_SECTION_VERSION;
+                    pos += 1;
+                    let mut i = 0;
+                    while i < BOUNDARY_LEN {
+                        out[pos] = BOUNDARY_BYTES[i];
+                        pos += 1;
+                        i += 1;
+                    }
+                    const MANIFEST_LEN: usize = <$listed>::__AETHER_INPUTS_MANIFEST_LEN;
+                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] =
+                        <$listed>::__AETHER_INPUTS_MANIFEST;
+                    let mut j = 0;
+                    while j < MANIFEST_LEN {
+                        out[pos] = MANIFEST_BYTES[j];
+                        pos += 1;
+                        j += 1;
+                    }
+                }
+            )+
+            let _ = pos;
+            out
+        };
+    };
+
     // Reconstruct one inline child by matching its persisted type tag
     // against the module's exported types, then, only when none matches,
     // against its private types (ADR-0114 §5). A matching candidate
@@ -1682,67 +1766,20 @@ macro_rules! __export_multi_internal {
         static __AETHER_INLINE: $crate::wasm::inline::Registry =
             $crate::wasm::inline::Registry::new();
 
-        // ADR-0096: per-actor `aether.kinds.inputs` section. Each
-        // exported type's records are preceded by an
-        // `ActorBoundary { namespace }` record (version-tagged like
-        // every other record) so the host's
-        // `read_actor_inputs_from_bytes` regroups the flat record
-        // stream into one capability set per type. The default type is
-        // first. A single-actor `export!` never reaches this arm, so
-        // the boundary-free single-actor layout stays byte-identical.
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        const __AETHER_MULTI_INPUTS_LEN: usize = 0usize $(
-            + 1
-            + $crate::__macro_internals::canonical::inputs_actor_boundary_len(
-                <$component as $crate::Addressable>::NAMESPACE,
-            )
-            + <$component>::__AETHER_INPUTS_MANIFEST_LEN
-        )+;
+        // ADR-0096: per-actor `aether.kinds.inputs` section, one
+        // `ActorBoundary`-led group per exported type, the default type
+        // first, so the host's `read_actor_inputs_from_bytes` regroups the
+        // flat record stream into one capability set per type. A
+        // single-actor `export!` never reaches this arm, so the
+        // boundary-free single-actor layout stays byte-identical.
+        $crate::__export_internal!(
+            @grouped_inputs __AETHER_MULTI_INPUTS_LEN, __AETHER_INPUTS_SECTION,
+            "aether.kinds.inputs" ; $($component),+
+        );
 
-        #[cfg(all(target_family = "wasm", not(feature = "library")))]
-        #[unsafe(link_section = "aether.kinds.inputs")]
-        static __AETHER_INPUTS_SECTION: [u8; __AETHER_MULTI_INPUTS_LEN] = {
-            let mut out = [0u8; __AETHER_MULTI_INPUTS_LEN];
-            let mut pos = 0usize;
-            $(
-                {
-                    // The per-type `ActorBoundary` record, then that
-                    // type's own `aether.kinds.inputs` manifest bytes.
-                    const BOUNDARY_LEN: usize =
-                        $crate::__macro_internals::canonical::inputs_actor_boundary_len(
-                            <$component as $crate::Addressable>::NAMESPACE,
-                        );
-                    const BOUNDARY_BYTES: [u8; BOUNDARY_LEN] =
-                        $crate::__macro_internals::canonical::write_inputs_actor_boundary::<BOUNDARY_LEN>(
-                            <$component as $crate::Addressable>::NAMESPACE,
-                        );
-                    // Per-record section version byte — a token reference
-                    // to `INPUTS_SECTION_VERSION` (bumped by ADR-0118 /
-                    // issue 1984; the multi-actor boundary record is a
-                    // per-record frame and tracks the same version as the
-                    // single-actor records emitted by the derive macro).
-                    out[pos] = $crate::__macro_internals::INPUTS_SECTION_VERSION;
-                    pos += 1;
-                    let mut i = 0;
-                    while i < BOUNDARY_LEN {
-                        out[pos] = BOUNDARY_BYTES[i];
-                        pos += 1;
-                        i += 1;
-                    }
-                    const MANIFEST_LEN: usize = <$component>::__AETHER_INPUTS_MANIFEST_LEN;
-                    const MANIFEST_BYTES: [u8; MANIFEST_LEN] =
-                        <$component>::__AETHER_INPUTS_MANIFEST;
-                    let mut j = 0;
-                    while j < MANIFEST_LEN {
-                        out[pos] = MANIFEST_BYTES[j];
-                        pos += 1;
-                        j += 1;
-                    }
-                }
-            )+
-            let _ = pos;
-            out
-        };
+        // Issue 6590: the private inline children's groups, in their own
+        // section so no reader of `aether.kinds.inputs` sees them.
+        $crate::__export_internal!(@private_inputs $($private),*);
 
         // ADR-0166: concatenate the associated lineage bytes for exactly the
         // types selected by this `export!` invocation. Unlike inputs, lineage

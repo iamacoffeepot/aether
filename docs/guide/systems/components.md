@@ -394,7 +394,9 @@ that can be spawned inline — a `composable` actor, or a `child_of` a type in t
 same module — and refuses with the same message before anything in the module
 runs. Such an actor's `Embedded` dependency would sit beneath its spawner, which
 does not exist while the module loads, so it cannot be proven live then and the
-load refuses.
+load refuses. A private child, listed under `export!`'s `private = [..]`, is
+checked the same way, so a module whose private child depends on an absent
+actor does not load.
 
 ## Where to read more
 
