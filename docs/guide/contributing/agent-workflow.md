@@ -163,7 +163,8 @@ worktree from that exact commit:
 - Codex and Claude Code alike: `.agents/worktrees/issue-<N>`.
 
 The implementation follows the Plan literally, runs focused verification plus
-`cargo fmt -- --check` and `cargo clippy --workspace --all-targets -- -D warnings`, reviews
+`cargo fmt -- --check` and
+`cargo clippy --workspace --all-targets --all-features -- -D warnings`, reviews
 the complete diff, computes priced surface overflow, then plain-pushes and opens
 a draft PR that closes the issue. Existing artifacts are possible live ownership
 claims and require a verified resume, never opportunistic deletion or

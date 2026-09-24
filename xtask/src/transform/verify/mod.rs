@@ -349,10 +349,12 @@ fn doctest_schedule(schedule: TestSchedule<'_>) -> Option<TestSchedule<'_>> {
 /// does not descend into a private module without it (#4694). `--keep-going`
 /// keeps cargo scheduling past the first failing crate (#4690), so one run
 /// reports every *independent* unit rather than stopping at one.
-/// `--all-features` (#4836) is what the `Rustdoc` job also passes: a module
-/// behind a non-default feature is otherwise never compiled by `cargo doc`,
-/// so a denied lint inside it never runs, and the job stays green over code
-/// it has not actually looked at.
+/// `verify.clippy`, `verify.docs` and `verify.test` all pass `--all-features`
+/// (#4836, #6524): a module behind a non-default feature is otherwise never
+/// compiled, so neither its lints nor its rustdoc lints run, and the gate
+/// stays green over code it has not actually looked at. On a narrowed run it
+/// also makes each selected package compile with all its own features,
+/// whatever else the closure happens to select.
 ///
 /// **`verify.clippy` does not deny warnings, and that is the point** (#4706).
 /// `-D warnings` makes a lint a compile error, so a lib that trips one is never
@@ -383,7 +385,14 @@ fn compiled_member(id: &str) -> Option<VerifyInvocation> {
     match id {
         "verify.clippy" => Some(VerifyInvocation {
             program: "cargo",
-            args: &["clippy", "--workspace", "--all-targets", "--keep-going", "--message-format=json"],
+            args: &[
+                "clippy",
+                "--workspace",
+                "--all-targets",
+                "--all-features",
+                "--keep-going",
+                "--message-format=json",
+            ],
             env: &[],
             requires: &["cargo", "cargo-clippy"],
             requires_targets: &[],
@@ -3738,6 +3747,7 @@ mod tests {
             owned(&[
                 "clippy",
                 "--all-targets",
+                "--all-features",
                 "--keep-going",
                 "--message-format=json",
                 "-p",
