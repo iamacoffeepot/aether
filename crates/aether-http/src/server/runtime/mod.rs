@@ -113,8 +113,6 @@ impl NativeActor for HttpServerCapability {
     const NAMESPACE: &'static str = "aether.http.server";
 
     fn init(config: HttpServerConfig, ctx: &mut NativeInitCtx<'_>) -> Result<HttpSupervisorState, BootError> {
-        let mailer: Arc<Mailer> = ctx.mailer();
-
         // ADR-0155 §3: the cap is always composed and always claims its
         // mailbox; the resolved `enabled` flag gates only what Start does.
         // Disabled — claim the mailbox, bind no socket, spawn no accept
@@ -127,7 +125,7 @@ impl NativeActor for HttpServerCapability {
                 target: "aether_http::server",
                 "http server composed disabled (enabled = false); claiming mailbox, binding no socket",
             );
-            return Ok(HttpSupervisorState::disabled(config, mailer));
+            return Ok(HttpSupervisorState::disabled(config));
         }
 
         let listener = TcpListener::bind(&config.bind_addr).map_err(|e| BootError::Other(Box::new(e)))?;
@@ -189,7 +187,6 @@ impl NativeActor for HttpServerCapability {
             config,
             routes: Arc::new(RwLock::new(RouteTable::default())),
             live_connections: Arc::new(AtomicUsize::new(0)),
-            mailer,
             listener_port: port,
             accept_shutdown,
             accept_thread: Some(accept_thread),

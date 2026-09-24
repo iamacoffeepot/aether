@@ -30,12 +30,12 @@ use std::sync::{Arc, Mutex};
 // Imports for the `#[cfg(test)]` `RouteInventorySink` loopback fixture
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
-use aether_actor::{Manual, actor};
+use aether_actor::{Manual, OutboundReply, actor};
 use aether_inventory::kinds::ResolvedName;
 use aether_rpc::{CallSettled, ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult};
-use aether_substrate::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
+use aether_substrate::{Erased, Subname};
 /// The canned live vocabulary a [`RouteInventorySink`] replies with, plus
 /// a counter of how many refresh RPCs it has fielded (issue 2672), and the
 /// one engine the sink registers for. Shared by value into the fixture so a
@@ -59,16 +59,15 @@ pub(super) struct RouteLoopbackParams {
 ///
 /// Lives at file root (not nested in `mod tests`) so the `#[actor]`
 /// macro's marker emission stays addressable, mirroring the engines-cap's
-/// own `ReplySink`. On a `ForwardEnvelope` it pushes the reply and the
-/// `CallSettled` terminal straight back to the forwarding server,
-/// correlation preserved, so the forwarded wire call closes the way a
+/// own `ReplySink`. On a `ForwardEnvelope` it replies with the canned
+/// vocabulary and the `CallSettled` terminal through its inbound, under the
+/// forward's correlation, so the forwarded wire call closes the way a
 /// proxy's `CallSettled` would. It registers from `wire`, during the
 /// chassis wire pass, before any test connects.
 pub(super) struct RouteInventorySink {
     engine: EngineId,
     reply: ListKindsResult,
     calls: Arc<AtomicUsize>,
-    mailer: Arc<Mailer>,
 }
 
 #[derive(Clone)]
@@ -240,16 +239,8 @@ impl NativeActor for RouteInventorySink {
     type Params = RouteLoopbackParams;
     const NAMESPACE: &'static str = "aether.test.route_inventory";
 
-    fn init((): (), params: RouteLoopbackParams, ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
-        Ok(Self {
-            engine: params.engine,
-            reply: params.reply,
-            calls: params.calls,
-            // Cached like the real proxy does: its replies must reach the
-            // forwarding server under the inbound correlation, which
-            // `NativeCtx` sends would overwrite with this actor as sender.
-            mailer: ctx.mailer(),
-        })
+    fn init((): (), params: RouteLoopbackParams, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+        Ok(Self { engine: params.engine, reply: params.reply, calls: params.calls })
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
@@ -260,34 +251,14 @@ impl NativeActor for RouteInventorySink {
     #[allow(clippy::unused_self)] // aether-suppression-request: a test double acts on no registration answer
     fn on_route_registered(&mut self, _ctx: &mut NativeCtx<'_>, _mail: RegisterEngineRouteResult) {}
 
-    #[handler::single]
-    fn on_forward(&mut self, ctx: &mut NativeCtx<'_>, _mail: ForwardEnvelope) {
-        use aether_substrate::mail::{Mail, Source, SourceAddr};
-
+    #[handler::manual]
+    fn on_forward(&mut self, ctx: &mut NativeCtx<'_, Erased, Manual>, _mail: ForwardEnvelope) {
         self.calls.fetch_add(1, Ordering::Relaxed);
-        let reply_to = ctx.reply_target();
-        // A forwarded call always carries a Component reply-to (the
-        // forwarding server); without one there's nowhere to stream to.
-        let SourceAddr::Component(target) = reply_to.addr else {
-            return;
-        };
-        let correlation = reply_to.correlation_id;
-
-        // ReplyEvent: the canned live vocabulary. The server matches it to
-        // the in-flight wire call by the preserved correlation.
-        self.mailer.push(
-            Mail::new(target, <ListKindsResult as Kind>::ID, self.reply.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-        );
-        // ReplyEnd: a forwarded call has no local chain to settle, so the
-        // server's `engine = Some` path waits on this explicit terminal
-        // (in production the proxy lifts the substrate's `ReplyEnd` into
-        // it). Pushed after the reply so the server writes the ReplyEvent
-        // frame first, then closes on the CallSettled.
-        self.mailer.push(
-            Mail::new(target, <CallSettled as Kind>::ID, CallSettled::Ok.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
-        );
+        // The reply is the ReplyEvent the server matches to the in-flight
+        // wire call by the echoed correlation; the CallSettled terminal then
+        // closes the forwarded call, which has no local chain to settle.
+        ctx.reply(&self.reply);
+        ctx.reply(&CallSettled::Ok);
     }
 }
 
@@ -374,9 +345,8 @@ pub(super) fn boot_hub_with_inventory(extras: &[KindDescriptor]) -> (PassiveChas
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
         .with_actor_configured::<FleetServer>((), FleetConfig::default())
-        // The inventory cap pulls `Arc::clone(ctx.mailer().registry())`
-        // in `init`, so it sees the same `Registry` we just wrote
-        // the extra kinds into.
+        // The inventory cap answers through its ctx read verbs over the
+        // chassis registry, so it sees the extra kinds we just wrote.
         .with_actor::<InventoryCapability>(())
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
