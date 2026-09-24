@@ -1329,10 +1329,11 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::envelope::Envelope;
     use aether_substrate::chassis::inbox::SettlingInbox;
-    use aether_substrate::mail::registry::{MailDispatch, OwnedDispatch};
+    use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, Registry};
     use aether_substrate::mail::{EgressEvent, MailRef};
     use aether_substrate::testing::{
-        boot_authority, decode_reply, manual_dispatch_ctx, session_sender, test_mailer_and_rx, unrouted_binding,
+        decode_reply, fresh_substrate_and_rx, manual_dispatch_ctx, registered_ref, session_sender, test_mailer_and_rx,
+        unrouted_binding,
     };
     use std::sync::mpsc;
 
@@ -1428,32 +1429,20 @@ mod tests {
         }
     }
 
-    /// Register an inline observer inbox on the test mailer, returning its
-    /// id and the kinds it has recorded. The witness is mail (issue 5965),
-    /// so the test stages the same shape the harness does — an inline
-    /// recorder under a fresh name — rather than sharing a mutex with
-    /// the cap.
-    fn test_observer(mailer: &Arc<Mailer>) -> (MailboxId, Arc<Mutex<Vec<KindId>>>) {
+    /// Point the state's witness channel at a fresh recorder, returning the
+    /// kinds it has recorded. The witness is mail (issue 5965), so the test
+    /// stages a recorder inbox under a fresh name rather than sharing a mutex
+    /// with the cap: the inbox is registered through `testing::registered_ref`,
+    /// and the cap sends its witness through the stored proof.
+    fn observe_via_mail(registry: &Registry, state: &mut RenderCapabilityState) -> Arc<Mutex<Vec<KindId>>> {
         let kinds = Arc::new(Mutex::new(Vec::<KindId>::new()));
         let kinds_for_handler = Arc::clone(&kinds);
-        let inbox = mailer.registry().register_inline(
-            &boot_authority(),
-            "test.render.observer",
-            Arc::new(move |dispatch: MailDispatch<'_>| {
-                kinds_for_handler.lock().expect("observer recorder is never poisoned").push(dispatch.kind);
-            }),
-        );
-        (inbox, kinds)
-    }
+        let recorder: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
+            kinds_for_handler.lock().expect("observer recorder is never poisoned").push(dispatch.kind);
+            dispatch.discharge();
+        });
 
-    /// Point the state's witness channel at a fresh inline observer inbox,
-    /// proven through a test ctx the way `wire` proves the params position,
-    /// returning the kinds the inbox has recorded.
-    fn observe_via_mail(mailer: &Arc<Mailer>, state: &mut RenderCapabilityState) -> Arc<Mutex<Vec<KindId>>> {
-        let (inbox, kinds) = test_observer(mailer);
-        let binding = ctx_binding(mailer);
-        let ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        state.observer = Some(ctx.resolve_live(inbox).expect("a freshly registered inline observer proves"));
+        state.observer = Some(registered_ref(registry, "test.render.observer", recorder));
         kinds
     }
 
@@ -1674,9 +1663,9 @@ mod tests {
     /// mail to the observer inbox (issue 5965).
     #[test]
     fn destroy_texture_removes_registry_entry() {
-        let (mailer, _rx) = test_mailer_and_rx();
+        let (registry, mailer, _rx) = fresh_substrate_and_rx();
         let mut state = headless_state(&mailer);
-        let observed = observe_via_mail(&mailer, &mut state);
+        let observed = observe_via_mail(&registry, &mut state);
         let texture_id = 7;
         state.textures.entries.insert(texture_id, test_staged_texture(vec![0xAB; 16]));
         let binding = ctx_binding(&mailer);
@@ -1754,9 +1743,9 @@ mod tests {
     /// Without a GPU.
     #[test]
     fn draw_shapes_accumulates_in_painter_order_and_observed() {
-        let (mailer, _rx) = test_mailer_and_rx();
+        let (registry, mailer, _rx) = fresh_substrate_and_rx();
         let mut state = headless_state(&mailer);
-        let observed = observe_via_mail(&mailer, &mut state);
+        let observed = observe_via_mail(&registry, &mut state);
         let binding = ctx_binding(&mailer);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let corner = |x: f32, y: f32| ScreenVertex { x, y, color: Rgba::WHITE };
