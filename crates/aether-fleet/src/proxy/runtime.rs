@@ -10,6 +10,7 @@
 //! group and joins the heartbeat thread, so the RAII teardown follows the
 //! fields onto the state.
 
+use super::config::ProxyTarget;
 use super::{FleetProxy, FleetProxyConfig};
 use crate::kinds::EngineHeartbeatTick;
 pub use crate::kinds::{EngineAlive, EngineDied};
@@ -28,6 +29,7 @@ pub use aether_substrate::mail::mailer::Mailer;
 pub use aether_substrate::mail::{Source, SourceAddr};
 pub use aether_substrate::runtime::trace::SettlementHold;
 pub use std::collections::HashMap;
+use std::mem;
 pub use std::process::Child;
 pub use std::sync::Arc;
 
@@ -64,7 +66,7 @@ pub struct FleetProxyState {
     /// `ReplyEnd` clears the entry.
     pub in_flight: HashMap<u64, Source>,
     /// The forked child substrate, when the engines cap spawned it
-    /// (see [`FleetProxyConfig::spawned`]). `Drop` terminates its
+    /// (see [`ProxyTarget::Forked`]). `Drop` terminates its
     /// process group + reaps it; `None` once taken or for an adopted
     /// substrate.
     pub spawned: Option<Child>,
@@ -204,37 +206,35 @@ impl NativeActor for FleetProxy {
         let mailer = ctx.mailer();
         let wake = ctx.self_wake::<RpcInboundReady>();
 
-        // A freshly-forked substrate (`spawned.is_some()`) may not
-        // have bound its RPC port yet, so the startup dial retries
-        // briefly. An adopted / externally-running substrate
-        // (`spawned.is_none()`) is dialed once — a refused
-        // connection there is a real error, not a startup race.
-        let retry = config.spawned.is_some();
-        let conn = match connect_proxy(
-            &config.rpc_addr,
-            move || wake.wake(&RpcInboundReady::default()),
-            retry,
-            config.connect_budget,
-            config.spawned.as_mut(),
-        ) {
-            Ok(conn) => conn,
-            Err(e) => {
-                // The proxy owns the child it was handed — a
-                // failed boot must not orphan the substrate, and the
-                // same group escalation `Drop` runs is what makes that
-                // true for whatever the substrate itself forked.
-                if let Some(mut child) = config.spawned.take() {
-                    terminate_child_group(&mut child);
+        // Take the target out of the config, leaving a childless husk, so
+        // the child moves into this proxy's state and the config's `Drop`
+        // has nothing left to terminate. A forked substrate is dialed only
+        // on the port it reports, while it lives; an adopted one once.
+        let mut target = mem::replace(&mut config.target, ProxyTarget::Adopted { rpc_addr: String::new() });
+        let (conn, addr) =
+            match connect_proxy(&mut target, move || wake.wake(&RpcInboundReady::default()), config.connect_budget) {
+                Ok(connected) => connected,
+                Err(e) => {
+                    // The proxy owns the child it was handed — a failed
+                    // boot must not orphan the substrate, and the same
+                    // group escalation `Drop` runs is what makes that
+                    // true for whatever the substrate itself forked.
+                    if let ProxyTarget::Forked { mut child, .. } = target {
+                        terminate_child_group(&mut child);
+                    }
+                    return Err(BootError::Other(Box::new(e)));
                 }
-                return Err(BootError::Other(Box::new(e)));
-            }
+            };
+        let spawned = match target {
+            ProxyTarget::Forked { child, .. } => Some(child),
+            ProxyTarget::Adopted { .. } => None,
         };
 
         tracing::info!(
             target: "aether_substrate::fleet_proxy",
             engine_id = ?config.engine_id,
-            addr = %config.rpc_addr,
-            spawned = config.spawned.is_some(),
+            addr = %addr,
+            spawned = spawned.is_some(),
             "engine proxy connected",
         );
 
@@ -256,7 +256,7 @@ impl NativeActor for FleetProxy {
             mailer,
             conn,
             in_flight: HashMap::new(),
-            spawned: config.spawned.take(),
+            spawned,
             missed_heartbeats: 0,
             miss_limit,
             heartbeat_seq: 0,

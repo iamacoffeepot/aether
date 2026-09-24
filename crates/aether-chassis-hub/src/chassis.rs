@@ -119,10 +119,12 @@ impl BootableChassis for HubChassis {
         let settlement = sources.resolve::<SettlementConfig>()?;
         // #3849: the hub always binds (unlike desktop / headless) — resolve the
         // RPC port off the source stack (argv `--rpc-port` > `AETHER_RPC_PORT` >
-        // `[rpc]` file) and fall back to `DEFAULT_RPC_PORT` when unset. Resolved
-        // before the stack is moved into the base, then composed as an explicit
-        // `with_actor_configured` override so the builder binds it.
-        let rpc_port = sources.resolve::<RpcServerConfig>()?.port.unwrap_or(DEFAULT_RPC_PORT);
+        // `[rpc]` file) and fall back to `DEFAULT_RPC_PORT` when unset; the
+        // config's other members, such as `port_file`, pass through as
+        // resolved. Resolved before the stack is moved into the base, then
+        // composed as an explicit `with_actor_configured` override so the
+        // builder binds it.
+        let rpc = sources.resolve::<RpcServerConfig>()?;
         // Install the shared base stratum by reusing `ChassisBase`'s own
         // `ComposeBase::install` — the drift-free single definition — even though
         // the hub's `Base` is the unit no-op.
@@ -137,7 +139,7 @@ impl BootableChassis for HubChassis {
                 },
                 bind: RpcBind::Boot,
             },
-            RpcServerConfig { port: Some(rpc_port) },
+            RpcServerConfig { port: Some(rpc.port.unwrap_or(DEFAULT_RPC_PORT)), ..rpc },
         ))
     }
 }

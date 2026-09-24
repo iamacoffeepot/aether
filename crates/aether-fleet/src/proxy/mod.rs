@@ -67,13 +67,13 @@ mod sinks;
 // `connect` / `heartbeat` modules and `server::runtime`), so it rides the
 // `runtime` gate to stay off a marker-only host build.
 #[cfg(not(target_family = "wasm"))]
-pub use config::FleetProxyConfig;
-#[cfg(not(target_family = "wasm"))]
 pub use config::HeartbeatParams;
+#[cfg(not(target_family = "wasm"))]
+pub use config::{FleetProxyConfig, ProxyTarget};
 
 // The engines cap (`aether.fleet`) classifies a failed `spawn_child`
-// with this to decide whether to re-fork on a fresh port (a stolen-port
-// child-exited death) or report a dead spawn. Native-only — it names
+// with this to decide whether to re-fork (a boot-error child-exited
+// death) or report a dead spawn. Native-only — it names
 // `SpawnError` / `BootError`.
 #[cfg(not(target_family = "wasm"))]
 pub use connect::is_reforkable_spawn_failure;
@@ -82,7 +82,7 @@ pub use connect::is_reforkable_spawn_failure;
 // tears down its child. Only the engines cap reads them; `proxy` is a
 // private module, so they reach no further than this crate.
 #[cfg(not(target_family = "wasm"))]
-pub use connect::{describe_exit, startup_exit_status};
+pub use connect::{describe_exit, read_reported_port, startup_exit_status};
 #[cfg(not(target_family = "wasm"))]
 pub use reap::terminate_child_group;
 
@@ -133,6 +133,7 @@ mod tests {
     #![allow(clippy::disallowed_methods)]
     use super::{
         DeathReason, FleetCapCells, FleetCapSink, FleetProxy, FleetProxyConfig, HeartbeatParams, ProxyReplySink,
+        ProxyTarget,
     };
     use aether_actor::Addressable;
     use aether_codec::frame::{read_frame, write_frame};
@@ -181,7 +182,7 @@ mod tests {
             .with_actor::<FleetCapSink>(FleetCapCells::default())
             .with_actor_configured::<RpcServerCapability>(
                 RpcServerParams { peer_kind: substrate_peer_kind(), bind: RpcBind::Boot },
-                RpcServerConfig { port: Some(0) },
+                RpcServerConfig { port: Some(0), port_file: None },
             )
             .build_passive()
             .expect("caps boot");
@@ -200,11 +201,10 @@ mod tests {
                 Subname::Named("e1"),
                 FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(1)),
-                    rpc_addr: format!("127.0.0.1:{port}"),
-                    spawned: None,
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
                     heartbeat: None,
-                    // Adopted substrate (`spawned: None`) is dialed once,
-                    // so the connect budget is inert here.
+                    // An adopted substrate is dialed once, so the
+                    // connect budget is inert here.
                     connect_budget: None,
                 },
                 (),
@@ -252,7 +252,10 @@ mod tests {
         let (registry, mailer) = fresh_substrate();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<FleetCapSink>(FleetCapCells::default())
-            .with_actor_configured::<RpcServerCapability>(unbound_rpc_params(), RpcServerConfig { port: None })
+            .with_actor_configured::<RpcServerCapability>(
+                unbound_rpc_params(),
+                RpcServerConfig { port: None, port_file: None },
+            )
             .build_passive()
             .expect("chassis carrying the proxy's dependencies boots");
 
@@ -266,8 +269,7 @@ mod tests {
                 Subname::Named("dead"),
                 FleetProxyConfig {
                     engine_id: EngineId(Uuid::from_u128(2)),
-                    rpc_addr: format!("127.0.0.1:{port}"),
-                    spawned: None,
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
                     heartbeat: None,
                     connect_budget: None,
                 },
@@ -339,7 +341,10 @@ mod tests {
         let cells = FleetCapCells::default();
         let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
             .with_actor::<FleetCapSink>(cells.clone())
-            .with_actor_configured::<RpcServerCapability>(unbound_rpc_params(), RpcServerConfig { port: None })
+            .with_actor_configured::<RpcServerCapability>(
+                unbound_rpc_params(),
+                RpcServerConfig { port: None, port_file: None },
+            )
             .build_passive()
             .expect("caps boot");
         let engine_id = EngineId(Uuid::from_u128(seed));
@@ -348,8 +353,7 @@ mod tests {
                 Subname::Named("e"),
                 FleetProxyConfig {
                     engine_id,
-                    rpc_addr: format!("127.0.0.1:{port}"),
-                    spawned: None,
+                    target: ProxyTarget::Adopted { rpc_addr: format!("127.0.0.1:{port}") },
                     heartbeat,
                     connect_budget: None,
                 },
