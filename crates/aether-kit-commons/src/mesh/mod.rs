@@ -169,7 +169,8 @@ impl WasmActor for MeshViewer {
     /// `aether.fs.read_result`; the parser is picked from the file
     /// extension at that point. The `aether.mesh.load_result` reply to
     /// the originator (issue 964) fires once the read settles and the
-    /// parse / mesh outcome is known — see `on_read_result`.
+    /// parse / mesh outcome is known — see `on_read_result`. The handler
+    /// is manual because the reply handle it keeps is answered from there.
     ///
     /// # Agent
     /// `namespace` is the short prefix with no `://` — `"save"`,
@@ -180,8 +181,8 @@ impl WasmActor for MeshViewer {
     // `msg: LoadMesh` matches the dispatch ABI (ADR-0033 / ADR-0038);
     // the load body delegates straight to `FsCapability` via `ctx`.
     #[allow(clippy::needless_pass_by_value, clippy::unused_self)]
-    #[handler::single]
-    fn on_load(&mut self, ctx: &mut WasmCtx<'_>, msg: LoadMesh) {
+    #[handler::manual]
+    fn on_load(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, msg: LoadMesh) {
         let context = MeshLoadContext { reply: ctx.reply_target(), namespace: msg.namespace, path: msg.path };
         tracing::info!(
             target: "aether_kit_commons",

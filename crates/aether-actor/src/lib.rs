@@ -80,10 +80,21 @@ pub use wasm::{
 // (native).
 
 /// Return code the `#[actor]`-synthesized dispatcher sends back up
-/// through `receive_p32` when a `#[handler]` arm matched (or the
-/// `#[fallback]` ran, which by definition handles anything). Propagated
-/// verbatim by the consumer's FFI shim.
+/// through `receive_p32` when a `#[handler::manual]` arm matched or the
+/// `#[fallback]` ran (which by definition handles anything). Either may
+/// keep the dispatch's reply handle and answer it later, so the handle
+/// stays live until answered. Propagated verbatim by the consumer's FFI
+/// shim; a guest built before [`DISPATCH_HANDLED_RELEASE`] existed
+/// returns this from every arm and so keeps every handle.
 pub const DISPATCH_HANDLED: u32 = 0;
+
+/// Return code for "a single-class `#[handler]` arm matched and returned".
+/// A single handler replies at most once, through the macro's `-> R`
+/// auto-reply, and cannot read its handle, so no reply can follow once it
+/// returns (ADR-0112); the substrate frees the dispatch's reply handle.
+/// Value 2 is the substrate's host-only `DISPATCH_DROPPED_OVERSIZE` and is
+/// never returned by a guest.
+pub const DISPATCH_HANDLED_RELEASE: u32 = 3;
 
 /// Return code for "no `#[handler]` matched and there's no `#[fallback]`"
 /// — the strict-receiver miss. Propagated through the FFI so the
