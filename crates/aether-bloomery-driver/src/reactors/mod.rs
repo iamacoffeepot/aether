@@ -40,10 +40,8 @@ pub enum RoutingRead {
     Steady,
     /// A warm page for the current activation.
     Warm,
-    /// A catch-up page for the current activation, folded from seq 1.
+    /// A catch-up page for the current activation, folded from its live-from.
     CatchUp,
-    /// A restart fold page through the watermark.
-    RestartFold,
     /// A restart warm page for the digest warming.
     RestartWarm,
 }
@@ -165,7 +163,9 @@ pub enum ActivationPhase {
 /// Owed catch-up in progress.
 #[derive(Debug)]
 pub struct CatchUp {
-    /// `Heads` folded from seq 1 through the last buffered entry, resolving each owed seq's `CallProgram`s.
+    /// `Heads` taken at `live_from - 1` from the journal view's head history,
+    /// then folded through the last buffered entry, resolving each owed seq's
+    /// `CallProgram`s.
     pub scratch: Heads,
     /// Next owed seq to deliver.
     pub next: u64,
@@ -274,7 +274,7 @@ impl SeqWork {
 /// Restart phase through `W`.
 #[derive(Debug)]
 pub enum RestartPhase {
-    /// Folding pages `1..=W` into routing `Heads` without delivering.
+    /// Taking routing `Heads` at `W` from the head history without delivering.
     Folding,
     /// Serially warming each selected digest through `W`.
     Warming {

@@ -1,15 +1,16 @@
 //! Restart: watermark replay, serial warm, and the rejection batch (ADR-0226 decision 9).
 //!
 //! The restart point `W` is the higher of the reaction and activation
-//! watermarks. Routing folds `1..=W` into its `Heads` without delivering,
-//! then loads and warms each digest a head selected at `W` is live under,
+//! watermarks. Routing takes its `Heads` at `W` from the journal view's head
+//! history without delivering or reading the journal, then loads and warms
+//! each digest a head selected at `W` is live under,
 //! serially and through `W`. A digest that fails to load or warm rejects
 //! the heads it serves in one batch caused by `W`; live routing starts at
 //! `W + 1`.
 
 use std::collections::VecDeque;
 
-use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes};
+use aether_bloomery_kinds::{ActivationRejected, Detail, Digest, DriverRecord, Head, JournalEntry, OpaqueBytes, Seq};
 use aether_bloomery_view::HeadActivation;
 
 use crate::core::{Command, PendingWrite, PlannedRecord, ProgramCore};
@@ -29,7 +30,7 @@ impl ProgramCore {
         }
     }
 
-    /// Take one restart step: fold toward `W`, then load and warm each live digest.
+    /// Take one restart step: take routing `Heads` at `W`, then load and warm each live digest.
     pub(crate) fn drive_restart(&mut self, out: &mut Vec<Command>) {
         let Some(restart) = self.routing.restart.as_ref() else {
             return;
@@ -42,15 +43,19 @@ impl ProgramCore {
         }
     }
 
-    /// Fold the next page toward `W`, then queue the digests heads selected at `W` are live under.
+    /// Set routing `Heads` to the journal view's `Heads` at `W`, then queue
+    /// the digests heads selected at `W` are live under.
     ///
     /// A selected head with no activation, or live under another digest, is
     /// a history the driver could not have written, so the core aborts.
     fn drive_restart_folding(&mut self, watermark: u64, out: &mut Vec<Command>) {
-        let cursor = self.routing.cursor();
-        if cursor < watermark {
-            self.emit_routing_read(cursor, RoutingRead::RestartFold, out);
-            return;
+        if self.routing.cursor() < watermark {
+            let Some(heads) = self.journal.history().heads_at(Seq(watermark)) else {
+                let cursor = self.journal.cursor();
+                self.abort(format!("restart point {watermark} is past the journal-view cursor {cursor}"), out);
+                return;
+            };
+            self.routing.heads = heads;
         }
         if !self.ensure_set_cached(out) {
             return;
@@ -108,20 +113,6 @@ impl ProgramCore {
                 {
                     *warming = None;
                 }
-            }
-        }
-    }
-
-    /// Fold one restart page into routing `Heads`, trimmed to `W`.
-    pub(crate) fn continue_restart_fold(&mut self, entries: Vec<JournalEntry>, out: &mut Vec<Command>) {
-        let Some(watermark) = self.routing.restart.as_ref().map(|restart| restart.watermark) else {
-            self.abort("restart fold page arrived with no restart in progress".to_string(), out);
-            return;
-        };
-        for entry in entries.into_iter().filter(|entry| entry.seq <= watermark) {
-            if let Err(error) = self.routing.heads.apply(&entry.to_entry()) {
-                self.abort(format!("restart fold rejected entry {}: {error}", entry.seq), out);
-                return;
             }
         }
     }
