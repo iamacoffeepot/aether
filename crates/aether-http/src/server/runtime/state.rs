@@ -145,11 +145,10 @@ pub struct HttpShardState {
     /// `request_timeout`, which stays the in-flight read + response
     /// deadline.
     pub keep_alive_timeout: Duration,
-    /// Cached `Arc<Mailer>` so the shard can validate a matched route's
-    /// registrant against the registry at dispatch time and subscribe to
-    /// settlement. The shard is single-threaded post-ADR-0038 so direct
-    /// storage is fine.
-    pub mailer: Arc<Mailer>,
+    /// Answers the reader threads' two route questions over the matched
+    /// member's proven reference — whether it is `Live` and whether it takes
+    /// the streamed body (ADR-0135 §2, ADR-0230). Every reader gets a clone.
+    pub probe: ActorProbe,
     /// Wakes this shard; every reader and writer sink holds a clone.
     pub wake: SelfWake<HttpInboundReady>,
     pub inbound_rx: mpsc::Receiver<InboundEvent>,
@@ -640,12 +639,8 @@ impl HttpShardState {
             ws_idle_timeout: self.ws_idle_timeout,
             ws_max_message_bytes: self.max_request_bytes,
         };
-        let shared = ReaderShared {
-            routes: Arc::clone(&self.routes),
-            peer: peer.to_string(),
-            registry: Arc::clone(self.mailer.registry()),
-            capabilities: Arc::clone(self.mailer.capability_registry()),
-        };
+        let shared =
+            ReaderShared { routes: Arc::clone(&self.routes), peer: peer.to_string(), probe: self.probe.clone() };
 
         // Per-connection transport reader below the mail layer — carries
         // inbound mail in; no inbound chain to inherit, no settlement

@@ -104,9 +104,10 @@ impl CapabilityRegistry {
     /// [`Self::accepts`], with the same answer: a departed actor's caps are
     /// removed at drop, so it accepts nothing.
     ///
-    /// The http server's request reader is the consumer: it holds route
-    /// members as references (ADR-0230) and reads whether the chosen member
-    /// takes a streamed request body.
+    /// [`ActorProbe`](crate::actor::native::ActorProbe) is the consumer, on
+    /// behalf of the http server's request reader: it holds route members as
+    /// references (ADR-0230) and reads whether the chosen member takes a
+    /// streamed request body.
     ///
     /// # Panics
     /// Panics if the internal lock is poisoned (see [`Self::accepts`]).

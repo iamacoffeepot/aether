@@ -200,7 +200,9 @@ an established boundary:
   `wake.spawn_sidecar(name, body)` from the `SelfWake<K>` that
   `ctx.self_wake::<K>()` returns, so a panic on one fails the chassis fast;
   they post bounded events to the actor and wake it through that handle,
-  never a stored mailbox id plus a mailer;
+  never a stored mailbox id plus a mailer; a sidecar that must check a peer
+  it holds a proof of reads the `ActorProbe` from `ctx.actor_probe()`, never
+  the registries;
 - `dispatch_blocking`/task completion holds settlement and returns results;
 - a cap-local queue bounds paid or expensive provider calls;
 - shutdown closes/detaches resources without indefinite joins on the dispatcher.

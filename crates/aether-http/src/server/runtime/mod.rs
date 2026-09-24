@@ -13,9 +13,9 @@
 //! table) and, in the concern submodules, the whole per-connection machine
 //! the dispatch shards run — [`HttpShardState`] and its reader/writer
 //! sidecars, parse/render, streaming, and websocket support. The sidecar
-//! threads capture only `Arc` / channel / self-wake clones — never an actor
-//! struct, a mailbox position, or a mailer — so the supervisor/shard split
-//! does not change what any thread captures.
+//! threads capture only `Arc` / channel / self-wake / probe clones — never an
+//! actor struct, a mailbox position, or a mailer — so the supervisor/shard
+//! split does not change what any thread captures.
 
 // `#[handler]` methods take their decoded payload by value per the ADR-0033
 // dispatch ABI; the macro-generated trampoline owns the decoded bytes so
@@ -37,11 +37,10 @@ pub use std::time::Duration;
 
 pub use aether_data::{Kind, KindId};
 pub use aether_substrate::actor::native::envelope::Envelope;
-pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone};
+pub use aether_substrate::actor::native::{
+    ActorProbe, NativeActor, NativeCtx, NativeInitCtx, SelfWake, SpawnOutcome, TaskDone,
+};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::CapabilityRegistry;
-pub use aether_substrate::mail::mailer::Mailer;
-pub use aether_substrate::mail::registry::Registry;
 
 // The shard's `#[runtime] impl` (super::shard::runtime) reaches the kind
 // vocabulary its moved handler bodies name through this module's glob, so

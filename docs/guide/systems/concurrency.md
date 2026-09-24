@@ -174,6 +174,11 @@ a stored mailbox id plus a mailer. The handle names no position and sends nothin
 but that one wake, and a wake after the actor has dropped does nothing
 ([ADR-0230](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0230-proven-actor-references.md)).
 
+A thread that must decide about a peer before it wakes its actor also holds the
+`ActorProbe` that `ctx.actor_probe()` returns on the `init` ctx. It answers
+whether the actor a proven reference names is `Live` now and whether it accepts a
+kind, and nothing else.
+
 ## Where to read more
 
 - The contracts this page implements — [Invariants & guarantees](../foundations/invariants.md).

@@ -42,7 +42,7 @@ impl NativeActor for HttpDispatchShard {
             max_header_bytes: seed.max_header_bytes,
             request_timeout: seed.request_timeout,
             keep_alive_timeout: seed.keep_alive_timeout,
-            mailer: ctx.mailer(),
+            probe: ctx.actor_probe(),
             wake: ctx.self_wake(),
             inbound_rx,
             inbound_tx: seed.inbound_tx,
