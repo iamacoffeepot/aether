@@ -61,7 +61,7 @@ pub struct NamespaceAddr {
 
 impl NamespaceAddr {
     /// Build an address from anything that converts into the two
-    /// strings — the sender-side shorthand `FsMailboxExt` and every
+    /// strings — what a direct `aether.fs.*` send and every
     /// asset-loading cap reach for.
     #[must_use]
     pub fn new(namespace: impl Into<String>, path: impl Into<String>) -> Self {
@@ -149,9 +149,9 @@ impl WriteResult {
 /// `aether.fs.copy` — copy a file from a raw host filesystem path
 /// (`from`) into a writable namespace address (`to`). `from` is an
 /// host path the substrate reads directly — it is not namespace-scoped.
-/// Current handlers perform no sender authorization, and wasm callers expose
-/// this kind through the ordinary `FsMailboxExt`; do not treat it as an
-/// operator-only boundary. `to` is a
+/// Current handlers perform no sender authorization, and any actor that
+/// declares `depends(FsCapability)` can send this kind directly; do not treat
+/// it as an operator-only boundary. `to` is a
 /// namespace-address struct; the write sandbox applies on the `to`
 /// side: a read-only or unknown namespace replies with `Forbidden` /
 /// `UnknownNamespace`. Reply: `CopyResult`.

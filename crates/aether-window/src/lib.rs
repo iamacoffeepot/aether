@@ -1,4 +1,4 @@
-//! `aether.window` actor identity, wire vocabulary, and sender facade.
+//! `aether.window` actor identity and wire vocabulary.
 //!
 //! [`WindowCapability`] is the neutral alias callers address; every chassis
 //! installs a runtime that claims the same `aether.window` mailbox. The
@@ -9,7 +9,7 @@
 //! child of the manager.
 
 // Handler methods take decoded request payloads by value as part of the
-// actor dispatch ABI; the facade also consumes owned request values.
+// actor dispatch ABI.
 #![allow(clippy::needless_pass_by_value)]
 
 pub mod kinds;
@@ -25,8 +25,8 @@ pub(crate) use kinds::{RetireWindow, WindowForwardContext};
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::validate_namespace_segment;
-use aether_actor::{MailboxForward, Publisher, Publishes, actor};
-use aether_data::{Kind, MailboxId};
+use aether_actor::{Publisher, Publishes, actor};
+use aether_data::Kind;
 use aether_kinds::{
     ImePreedit, Key, KeyRelease, Modifiers, MouseButton, MouseButtonRelease, MouseMove, MouseWheel, TextInput,
     WindowSize,
@@ -89,9 +89,8 @@ pub struct SyntheticWindowInstance;
 
 // The kinds the `aether.window` mailbox fans out to its selector-keyed
 // subscriber set, one `Publishes` impl each — the compile-time gate on
-// the flat `ctx.subscribe::<WindowCapability, K>()` verb and on
-// `WindowManagerMailboxExt::subscribe`. Device events and window
-// lifecycle both travel that one machinery, so both are listed.
+// the flat `ctx.subscribe::<WindowCapability, K>()` verb. Device events
+// and window lifecycle both travel that one machinery, so both are listed.
 //
 // These sit on the neutral `WindowCapability` identity rather than on
 // a runtime, because the published vocabulary belongs to the mailbox:
@@ -116,8 +115,8 @@ impl Publishes<WindowOpened> for WindowCapability {}
 impl Publishes<WindowClosed> for WindowCapability {}
 impl Publishes<WindowMenuActivated> for WindowCapability {}
 
-/// The flat subscribe verbs send the same self-addressed requests the
-/// [`WindowManagerMailboxExt`] facade sends, selecting every window.
+/// The flat subscribe verbs send these self-addressed requests, selecting
+/// every window.
 impl Publisher for WindowCapability {
     type Subscribe = SubscribeWindowSelf;
     type Unsubscribe = UnsubscribeWindowSelf;
@@ -136,102 +135,6 @@ impl Publisher for WindowCapability {
         UnsubscribeWindowSelf { selector: WindowSelector::All, kind: K::ID }
     }
 }
-
-/// Sender-side convenience methods for manager-owned window operations.
-pub trait WindowManagerMailboxExt: MailboxForward<WindowCapability> + Sized {
-    /// Request every live window in ascending id order.
-    fn list(&self) {
-        self.forward(&ListWindows);
-    }
-
-    /// Request creation of a new window.
-    fn create(&self, spec: WindowSpec) {
-        self.forward(&CreateWindow { spec });
-    }
-
-    /// Subscribe the calling actor to kind `K` for `selector`.
-    ///
-    /// `K` is gated on `WindowCapability: Publishes<K>`, so a kind this
-    /// cap never emits — a lifecycle stage, say — is a compile error
-    /// naming the capability that does publish it.
-    fn subscribe<K: Kind>(&self, selector: WindowSelector)
-    where
-        WindowCapability: Publishes<K>,
-    {
-        self.forward(&SubscribeWindowSelf { selector, kind: K::ID });
-    }
-
-    /// Subscribe an explicit mailbox to kind `K` for `selector`.
-    fn subscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId)
-    where
-        WindowCapability: Publishes<K>,
-    {
-        self.forward(&SubscribeWindow { selector, kind: K::ID, mailbox });
-    }
-
-    /// Remove the calling actor's kind-`K` subscription for `selector`.
-    fn unsubscribe<K: Kind>(&self, selector: WindowSelector)
-    where
-        WindowCapability: Publishes<K>,
-    {
-        self.forward(&UnsubscribeWindowSelf { selector, kind: K::ID });
-    }
-
-    /// Remove an explicit mailbox's kind-`K` subscription for `selector`.
-    fn unsubscribe_for<K: Kind>(&self, selector: WindowSelector, mailbox: MailboxId)
-    where
-        WindowCapability: Publishes<K>,
-    {
-        self.forward(&UnsubscribeWindow { selector, kind: K::ID, mailbox });
-    }
-
-    /// Remove an explicit mailbox from every window-event subscription.
-    fn unsubscribe_all(&self, mailbox: MailboxId) {
-        self.forward(&UnsubscribeAllWindows { mailbox });
-    }
-}
-
-impl<T: MailboxForward<WindowCapability>> WindowManagerMailboxExt for T {}
-
-/// Sender-side convenience methods for one resolved window endpoint.
-pub trait WindowMailboxExt: MailboxForward<WindowInstance> + Sized {
-    /// Request closure of this window.
-    fn close(&self) {
-        self.forward(&CloseWindow);
-    }
-
-    /// Change this window's presentation mode.
-    fn set_mode(&self, mode: WindowMode, width: Option<u32>, height: Option<u32>) {
-        self.forward(&SetWindowMode { mode, width, height });
-    }
-
-    /// Change this window's title.
-    fn set_title(&self, title: &str) {
-        self.forward(&SetWindowTitle { title: title.to_owned() });
-    }
-
-    /// Install this window's native menu bar.
-    fn set_menu(&self, menus: Vec<WindowMenu>) {
-        self.forward(&SetWindowMenu { menus });
-    }
-
-    /// Set this window's pointer shape.
-    fn set_cursor(&self, icon: CursorIcon) {
-        self.forward(&SetWindowCursor { icon });
-    }
-
-    /// Bring this window to the foreground.
-    fn focus(&self) {
-        self.forward(&FocusWindow);
-    }
-
-    /// Ask the platform to schedule this window for redraw.
-    fn request_redraw(&self) {
-        self.forward(&RequestWindowRedraw);
-    }
-}
-
-impl<T: MailboxForward<WindowInstance>> WindowMailboxExt for T {}
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 fn validate_window_name(name: &str) -> Result<(), String> {
@@ -253,37 +156,16 @@ pub use kinds::InjectWindowEvent;
 #[cfg(test)]
 mod tests {
     use super::{
-        CloseWindow, FocusWindow, ListWindows, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode,
-        SetWindowTitle, WindowCapability, WindowInstance, WindowMailboxExt, WindowManagerMailboxExt,
+        CloseWindow, FocusWindow, RequestWindowRedraw, SetWindowCursor, SetWindowMenu, SetWindowMode, SetWindowTitle,
+        WindowCapability, WindowInstance,
     };
-    use aether_actor::{Addressable, HandlesKind, WasmActorMailbox, WasmActorMailboxWithContext};
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
+    use aether_actor::{Addressable, HandlesKind};
 
-    fn assert_facade<T: WindowMailboxExt>() {}
-    fn assert_manager_facade<T: WindowManagerMailboxExt>() {}
     fn assert_handles<K>()
     where
         K: aether_data::Kind,
         WindowInstance: HandlesKind<K>,
     {
-    }
-
-    #[test]
-    fn neutral_facade_is_available_to_wasm_senders() {
-        assert_facade::<WasmActorMailbox<'static, WindowInstance>>();
-        assert_facade::<WasmActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
-        assert_manager_facade::<WasmActorMailbox<'static, WindowCapability>>();
-        assert_manager_facade::<WasmActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
-    }
-
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    #[test]
-    fn neutral_facade_is_available_to_native_senders() {
-        assert_facade::<NativeActorMailbox<'static, WindowInstance>>();
-        assert_facade::<NativeActorMailboxWithContext<'static, 'static, WindowInstance, ListWindows>>();
-        assert_manager_facade::<NativeActorMailbox<'static, WindowCapability>>();
-        assert_manager_facade::<NativeActorMailboxWithContext<'static, 'static, WindowCapability, ListWindows>>();
     }
 
     #[test]

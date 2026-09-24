@@ -27,10 +27,6 @@ pub use config::HttpConfig;
 #[cfg(feature = "runtime")]
 pub use config::{HttpConfigLayer, HttpOverlay};
 
-// `Fetch` / `HttpMethod` are the payload `HttpMailboxExt` assembles.
-use crate::kinds::{Fetch, HttpMethod};
-use aether_actor::MailboxForward;
-
 /// Default response-body cap when `AETHER_HTTP_MAX_BODY_BYTES` is
 /// unset. 16MB matches ADR-0043 §3.
 pub const DEFAULT_MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
@@ -50,62 +46,6 @@ pub const DEFAULT_MAX_IN_FLIGHT_PER_SENDER: usize = 4;
 /// `AETHER_HTTP_MAX_IN_FLIGHT_TOTAL` is unset (ADR-0158 §4). 32 is
 /// eight senders at full per-sender budget before the ceiling engages.
 pub const DEFAULT_MAX_IN_FLIGHT_TOTAL: usize = 32;
-
-/// Sender-side facade for actors addressed via
-/// `ctx.actor::<HttpCapability>()`.
-///
-/// Lifts the two most common HTTP verbs to a typed method so callers
-/// stop reconstructing `Fetch { method: HttpMethod::Get, headers:
-/// vec![], body: vec![], timeout_ms: None, .. }` for a basic
-/// request. Same shape and rationale as `aether_fs::FsMailboxExt`.
-///
-/// All methods are fire-and-forget. Replies arrive as
-/// `aether.http.fetch_result`. The facade mints `request_id: 0` (its
-/// no-options callers don't distinguish concurrent same-URL replies);
-/// a caller that needs the ADR-0158 §6 correlation stamps its own
-/// `request_id` through the generic `send(&Fetch { .. })` escape hatch
-/// below.
-///
-/// For requests that need custom headers, body, method, or a
-/// per-request timeout, the generic escape hatch is unchanged:
-/// `mailbox.send(&Fetch { ... })` still works because the cap
-/// declares `HandlesKind<Fetch>`. The facade only exists for the
-/// no-options cases that don't benefit from spelling out a five-
-/// field struct.
-///
-/// Blanket-impl'd over [`MailboxForward<HttpCapability>`], so it reaches every
-/// handle `ctx.actor::<HttpCapability>()` can return — the wasm and native
-/// mailboxes and their typed request-context adapters alike — from one set of
-/// bodies.
-pub trait HttpMailboxExt: MailboxForward<HttpCapability> {
-    /// Mail `aether.http.fetch { request_id: 0, url, method: Get, headers: [], body: [], timeout_ms: None }`
-    /// to the cap. Uses the chassis default timeout.
-    fn get(&self, url: &str) {
-        self.forward(&Fetch {
-            request_id: 0,
-            url: url.into(),
-            method: HttpMethod::Get,
-            headers: Vec::new(),
-            body: Vec::new(),
-            timeout_ms: None,
-        });
-    }
-
-    /// Mail `aether.http.fetch { request_id: 0, url, method: Post, headers: [], body, timeout_ms: None }`
-    /// to the cap. Uses the chassis default timeout.
-    fn post(&self, url: &str, body: &[u8]) {
-        self.forward(&Fetch {
-            request_id: 0,
-            url: url.into(),
-            method: HttpMethod::Post,
-            headers: Vec::new(),
-            body: body.to_vec(),
-            timeout_ms: None,
-        });
-    }
-}
-
-impl<T: MailboxForward<HttpCapability>> HttpMailboxExt for T {}
 
 /// `aether.http` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),

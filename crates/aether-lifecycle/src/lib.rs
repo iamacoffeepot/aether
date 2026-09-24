@@ -6,11 +6,10 @@
 //! capability owns everything else: the lifecycle graph
 //! ([`LifecycleGraphData`] and its typestate builder, a graph of
 //! `{ stage_kind, next, optional quit }` edges), the subscriber table keyed by
-//! stage kind and its fan-out ([`LifecycleMailboxExt`] is the send-side
-//! facade), the [`LifecycleConfig`] init config, and the settlement gating. It
-//! is a singleton, so its namespace is reachable from wasm: a component
-//! subscribes to a stage with
-//! `ctx.actor::<LifecycleCapability>().subscribe::<Render>()`.
+//! stage kind and its fan-out, the [`LifecycleConfig`] init config, and the
+//! settlement gating. It is a singleton, so its namespace is reachable from
+//! wasm: a component subscribes to a stage with
+//! `ctx.subscribe::<LifecycleCapability, Render>()`.
 //!
 //! On each advance the capability:
 //!
@@ -48,7 +47,6 @@ use graph::LifecycleStateData;
 pub use graph::{BuildError, LifecycleGraphBuilder, LifecycleGraphData, NoOpen, OpenNoNext, OpenWithNext};
 
 mod subscribers;
-pub use subscribers::LifecycleMailboxExt;
 
 // The settlement state machine and the boot-config both name the
 // runtime-only `LifecycleCapabilityState`, so both live under the `runtime`

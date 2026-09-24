@@ -10,7 +10,7 @@ publish = false
 # the concrete `HeadlessWindowCapability` identity + its fail-fast
 # `Err`-replying default runtime (`runtime/mod.rs`), with desktop and synthetic
 # alternatives under keyed runtime children. The crate also owns the public multi-window request,
-# reply, lifecycle, selector, and sender-facade surface; only the shared
+# reply, lifecycle, and selector surface; only the shared
 # `WindowId` and `WindowMode` values live in `aether-kinds`.
 #
 # Unlike the pure-leaf `aether-clipboard`, this crate has an inbound

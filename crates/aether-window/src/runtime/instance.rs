@@ -231,7 +231,7 @@ pub struct HeadlessWindowInstanceState;
 /// the set, and these two identities compile in the marker-only build where
 /// this whole runtime module is `cfg`-ed away — so an inherited handler would
 /// take the endpoint's control markers with it and break every typed
-/// `WindowMailboxExt` send from a wasm guest.
+/// window-control send from a wasm guest.
 #[runtime]
 impl NativeActor for HeadlessWindowInstance {
     type State = HeadlessWindowInstanceState;
