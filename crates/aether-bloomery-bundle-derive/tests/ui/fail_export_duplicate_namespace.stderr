@@ -4,8 +4,8 @@ error: duplicate reactor NAMESPACE `test.bloomery.export.dup`
 21 | #[reactor]
    | ^^^^^^^^^^
 ...
-31 | export!(First, Second, generators = [aether_bloomery_bundle::bundle]);
-   | --------------------------------------------------------------------- in this macro invocation
+31 | export!(public = [First, Second], generators = [aether_bloomery_bundle::bundle]);
+   | -------------------------------------------------------------------------------- in this macro invocation
    |
    = note: this error originates in the macro `$crate::__export_collect` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)
 

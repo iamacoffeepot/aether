@@ -1,5 +1,5 @@
 //! Issue 1977 (ADR-0114 amendment) cluster-addressing matrix fixture. A
-//! multi-actor module — `export!(MatrixParent, MatrixChild)` — whose entry
+//! multi-actor module — `export!(public = [MatrixParent, MatrixChild])` — whose entry
 //! `MatrixParent` forms a small cluster: it spawns two co-located inline
 //! children (`a` and `b`) in `wire`. On a `RunMatrix` command (sent over the
 //! wire) the parent drives every in-cluster addressing direction in place,
@@ -161,7 +161,7 @@ pub struct MatrixParent;
 // so its `Embedded` seed is the trampoline and the fold lands beside it under
 // the shared component host. An inline child's seed is its slot parent, which
 // is why the child reads the reference back instead of minting its own.
-#[actor(depends(SourceObserver))]
+#[actor(depends(SourceObserver), spawns(MatrixChild))]
 impl WasmActor for MatrixParent {
     const NAMESPACE: &'static str = "test.matrix.parent";
 

@@ -1,7 +1,7 @@
 //! Reactor-bundle fixture: two reactors share one views owner inside a
 //! digest-loaded root, and both publish the triggering tree as a `SetHead`.
 //!
-//! Authors declare reactors and guards. `export!(…, generators = [aether_bloomery_bundle::bundle])`
+//! Authors declare reactors and guards. `export!(public = […], generators = [aether_bloomery_bundle::bundle])`
 //! generates one root at [`aether_bloomery_kinds::BUNDLE_NAMESPACE`]. Load it
 //! under the journal artifact digest with empty config.
 
@@ -122,4 +122,4 @@ impl Reactor for SourceWitness {
     }
 }
 
-aether_actor::export!(SourcePublisher, SourceWitness, generators = [aether_bloomery_bundle::bundle],);
+aether_actor::export!(public = [SourcePublisher, SourceWitness], generators = [aether_bloomery_bundle::bundle]);

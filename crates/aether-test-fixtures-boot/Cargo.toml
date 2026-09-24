@@ -7,7 +7,7 @@ publish = false
 
 # ADR-0147 fixture: a multi-actor module with an unconditional `boot =` slot.
 # One boot actor (`Boot`) plus two ordinary selectable actors (`WidgetA`,
-# `WidgetB`), exported via `export!(boot = Boot, WidgetA, WidgetB)` (no
+# `WidgetB`), exported via `export!(boot = Boot, public = [WidgetA, WidgetB])` (no
 # `default =` — selector loads only, keeping the fixture minimal). Standalone
 # (not in the main `aether-test-fixtures-bundle`, which is one cdylib shared
 # across dozens of unrelated scenario tests) so the new host boot machinery's

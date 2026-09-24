@@ -16,6 +16,6 @@ impl WasmActor for Probe {
     fn on_other(&mut self, _ctx: &mut WasmCtx<'_>, _mail: aether_actor::Mail<'_>) {}
 }
 
-export!(Probe, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Probe], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

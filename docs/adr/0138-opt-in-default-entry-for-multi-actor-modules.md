@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — opt-in default entry for multi-actor modules in `crates/aether-component/src/component/runtime/load.rs`, #2736)
 - **Date:** 2026-07-07
+- **Amended:** 2026-09-24 — `export!` takes keyed entries only; the opt-in default is spelled `export!(default = A, public = [B, …])`, and the defaultless form `export!(public = [A, B, …])` (issue 6584).
 
 ## Context
 

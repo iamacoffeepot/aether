@@ -1,14 +1,14 @@
 //! The main test-fixture bundle: the bulk of the workspace's wasm
 //! fixtures consolidated into one ADR-0096 multi-actor module. One
 //! `src/<name>.rs` module per former fixture; a single
-//! `export!(default = Probe, …)` packs all of
+//! `export!(default = Probe, public = […], private = […])` packs all of
 //! them into one cdylib, with `Probe` the opted-in default (ADR-0138) so a
 //! bare `load` of `aether_test_fixtures_bundle.wasm` instantiates it. The
 //! integration tests load this one wasm and select an in-bundle actor with
 //! `export: Some("<NAMESPACE>")`.
 //!
 //! The `InlineChild` / `InlineDespawnChild` inline children ride in
-//! `inline_child` under the `export!` list's `private = [..]` slot: each
+//! `inline_child` under the `export!` call's `private = [..]` key: each
 //! parent constructs its child in-process and a replace rebuilds it, but the
 //! host never instantiates it by selector (issue 6136). The typed↔reshaped
 //! replace pair is *not* here: a cross-module `replace_component` needs two
@@ -68,48 +68,50 @@ pub use ui_widget::UiWidget;
 // actors are reachable by their `NAMESPACE` export selector.
 aether_actor::export!(
     default = Probe,
-    ProbeWithConfig,
-    PaintProbe,
-    QuietProbe,
-    RootManager,
-    Panel,
-    ParentPeerCaller,
-    ParentPeerTarget,
-    Cube,
-    EditorRegionProbe,
-    MatSource,
-    UiWidget,
-    HttpHandler,
-    StreamingHttpHandler,
-    RoutedHttpHandler,
-    RoutedStreamingHttpHandler,
-    WebSocketHandler,
-    SourceObserver,
-    SourceForwarder,
-    MatrixParent,
-    MatrixChild,
-    InlineParent,
-    InlineStatefulParent,
-    InlineStatefulChild,
-    InlineDespawnParent,
-    InlineConfiguredParent,
-    InlineConfiguredChild,
-    NestedLineageParent,
-    NestedLineageChild,
-    NestedLineageLeaf,
-    NestedDetachedLeaf,
-    InlineTagParent,
-    Counter,
-    Sidecar,
-    RehydrateTrap,
-    TcpLoadProbe,
-    DependentProbe,
-    CarryRequester,
-    ReplyHolder,
-    ContractBase,
-    ContractDropped,
-    ContractChanged,
-    ContractExtended,
+    public = [
+        ProbeWithConfig,
+        PaintProbe,
+        QuietProbe,
+        RootManager,
+        Panel,
+        ParentPeerCaller,
+        ParentPeerTarget,
+        Cube,
+        EditorRegionProbe,
+        MatSource,
+        UiWidget,
+        HttpHandler,
+        StreamingHttpHandler,
+        RoutedHttpHandler,
+        RoutedStreamingHttpHandler,
+        WebSocketHandler,
+        SourceObserver,
+        SourceForwarder,
+        MatrixParent,
+        MatrixChild,
+        InlineParent,
+        InlineStatefulParent,
+        InlineStatefulChild,
+        InlineDespawnParent,
+        InlineConfiguredParent,
+        InlineConfiguredChild,
+        NestedLineageParent,
+        NestedLineageChild,
+        NestedLineageLeaf,
+        NestedDetachedLeaf,
+        InlineTagParent,
+        Counter,
+        Sidecar,
+        RehydrateTrap,
+        TcpLoadProbe,
+        DependentProbe,
+        CarryRequester,
+        ReplyHolder,
+        ContractBase,
+        ContractDropped,
+        ContractChanged,
+        ContractExtended,
+    ],
     private = [InlineChild, InlineDespawnChild],
 );
 

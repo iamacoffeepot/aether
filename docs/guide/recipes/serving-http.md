@@ -121,7 +121,7 @@ impl WasmActor for Web {
     }
 }
 
-aether_actor::export!(Web);
+aether_actor::export!(public = [Web]);
 ```
 
 `#[handler::single]` replies by *returning* its kind, as above.

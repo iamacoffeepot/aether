@@ -1,6 +1,6 @@
 //! ADR-0147 module-boot slot scenarios (`aether-test-fixtures-boot`).
 //!
-//! The fixture module exports `export!(boot = Boot, WidgetA, WidgetB)`: `Boot`
+//! The fixture module exports `export!(boot = Boot, public = [WidgetA, WidgetB])`: `Boot`
 //! is the unconditional boot actor, `WidgetA` / `WidgetB` are ordinary
 //! selectable exports. `Boot` broadcasts `BOOT_OBSERVED` from `wire` (once per
 //! instance) and `BOOT_TORN_DOWN` from `unwire` (once at teardown), so these

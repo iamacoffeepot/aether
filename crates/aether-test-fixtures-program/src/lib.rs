@@ -159,7 +159,7 @@ impl Program for ReadUncited {
     }
 }
 
-export!(Summarize, Refuse, FetchBody, Stall, ReadUncited, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Summarize, Refuse, FetchBody, Stall, ReadUncited], generators = [aether_bloomery_bundle::bundle],);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;

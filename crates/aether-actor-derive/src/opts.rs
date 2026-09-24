@@ -40,6 +40,13 @@ pub struct ActorOpts {
     /// keyless (`One` / `Embedded`) actors are declarable — a keyed `R` is a
     /// trait-bound compile error on the emitted impl, not a macro error here.
     pub depends: Vec<syn::TypePath>,
+    /// ADR-0114: the inline children this Wasm actor spawns through the typed
+    /// verbs, from one `spawns(A, B, …)` list. Each listed type emits
+    /// `unsafe impl Spawns<C> for Self`, which the verbs require, and a
+    /// `Rebuildable<M>` bound on the hidden `__aether_listed_children::<M>`,
+    /// which every `export!` listing this actor calls for its own module, so
+    /// that `export!` must list every declared child.
+    pub spawns: Vec<syn::TypePath>,
     /// ADR-0166: this instanced Wasm actor may be composed beneath any Wasm
     /// parent exported from the same resident module.
     pub composable: bool,
@@ -125,16 +132,11 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
             }
             Ok(())
         } else if meta.path.is_ident("depends") {
-            // ADR-0230 (issue 6557): one list per actor. Empty lists are
-            // refused, so a non-empty slot means `depends` was already written.
-            if !opts.depends.is_empty() {
-                return Err(meta.error(
-                    "`depends` is written once, as a list — merge this into the first `depends(...)`: \
-                     `depends(A, B)`",
-                ));
-            }
-            opts.depends = parse_depends_list(&meta)?;
-            Ok(())
+            // ADR-0230 (issue 6557): one list per actor.
+            parse_type_list_once(&meta, &mut opts.depends, "depends", "RenderCapability", "FsCapability")
+        } else if meta.path.is_ident("spawns") {
+            // ADR-0114 (issue 6583): one list per actor, like `depends`.
+            parse_type_list_once(&meta, &mut opts.spawns, "spawns", "Label", "Button")
         } else if !meta.input.peek(syn::Token![=]) {
             // ADR-0123: a bare positional module path names the runtime module
             // the struct-hosted `#[actor]` reads off disk (default `runtime`) —
@@ -153,7 +155,8 @@ pub fn parse_actor_opts(attr: TokenStream2) -> syn::Result<ActorOpts> {
         } else {
             Err(meta.error(
                 "unrecognised #[actor] argument; expected `singleton`, `instanced`, \
-                 `root`, `child_of(TypePath)`, `depends(TypePath)`, `composable`, `handler_set(TraitPath)`, \
+                 `root`, `child_of(TypePath)`, `depends(TypePath)`, `spawns(TypePath)`, `composable`, \
+                 `handler_set(TraitPath)`, \
                  `runtime_feature = \"name\"`, or a bare runtime module path",
             ))
         }
@@ -182,30 +185,56 @@ fn push_actor_type_entry(meta: &meta::ParseNestedMeta, slot: &mut Vec<syn::TypeP
     Ok(())
 }
 
-/// Parse the `depends(A, B, …)` list (ADR-0230): at least one actor type
-/// path, comma-separated, trailing comma allowed, each type named once.
-/// Declaration order is kept, so it is the order of the emitted
-/// `unsafe impl DependsOn<R>` items and `Dependency` records.
-fn parse_depends_list(meta: &meta::ParseNestedMeta) -> syn::Result<Vec<syn::TypePath>> {
+/// Parse a `depends` / `spawns` list into `slot`, refusing a second list for
+/// the same option. Empty lists are refused, so a non-empty slot means the
+/// option was already written.
+fn parse_type_list_once(
+    meta: &meta::ParseNestedMeta,
+    slot: &mut Vec<syn::TypePath>,
+    option: &str,
+    first: &str,
+    second: &str,
+) -> syn::Result<()> {
+    if !slot.is_empty() {
+        return Err(meta.error(format!(
+            "`{option}` is written once, as a list — merge this into the first `{option}(...)`: `{option}(A, B)`"
+        )));
+    }
+    *slot = parse_type_list(meta, option, first, second)?;
+    Ok(())
+}
+
+/// Parse one `option(A, B, …)` type list — `depends` (ADR-0230) or `spawns`
+/// (ADR-0114): at least one actor type path, comma-separated, trailing comma
+/// allowed, each type named once. Declaration order is kept, so it is the
+/// order of the emitted `unsafe impl` items and, for `depends`, the
+/// `Dependency` records.
+/// `first` and `second` are the example types the error messages show.
+fn parse_type_list(
+    meta: &meta::ParseNestedMeta,
+    option: &str,
+    first: &str,
+    second: &str,
+) -> syn::Result<Vec<syn::TypePath>> {
     let content;
     syn::parenthesized!(content in meta.input);
     if content.is_empty() {
         return Err(
-            meta.error("`depends` expects at least one actor type path, for example `depends(RenderCapability)`")
+            meta.error(format!("`{option}` expects at least one actor type path, for example `{option}({first})`"))
         );
     }
     let list_error = || {
-        content.error(
-            "`depends` expects a comma-separated list of actor type paths, \
-             for example `depends(RenderCapability, FsCapability)`",
-        )
+        content.error(format!(
+            "`{option}` expects a comma-separated list of actor type paths, \
+             for example `{option}({first}, {second})`"
+        ))
     };
 
     let mut list: Vec<syn::TypePath> = Vec::new();
     while !content.is_empty() {
         let target: syn::TypePath = content.parse().map_err(|_| list_error())?;
         if contains_type(&list, &target) {
-            return Err(syn::Error::new_spanned(&target, "duplicate identical `depends` entry in #[actor]"));
+            return Err(syn::Error::new_spanned(&target, format!("duplicate identical `{option}` entry in #[actor]")));
         }
         list.push(target);
         if !content.is_empty() {
@@ -216,7 +245,7 @@ fn parse_depends_list(meta: &meta::ParseNestedMeta) -> syn::Result<Vec<syn::Type
 }
 
 /// Whether `slot` already names `target`, compared by token spelling — the
-/// one definition of "identical" `child_of` and `depends` share.
+/// one definition of "identical" `child_of`, `depends` and `spawns` share.
 fn contains_type(slot: &[syn::TypePath], target: &syn::TypePath) -> bool {
     let target_tokens = target.to_token_stream().to_string();
     slot.iter().any(|existing| existing.to_token_stream().to_string() == target_tokens)

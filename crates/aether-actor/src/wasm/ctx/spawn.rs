@@ -12,7 +12,7 @@ use crate::model::{Addressable, ChildOf, Instanced, NamespaceError, Subname, val
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, Rebuildable, WasmActor};
+use crate::wasm::{ActorInitError, ErasedWasmActor, ModuleChild, Spawns, WasmActor};
 use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -159,20 +159,22 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// [`Self::despawn_inline_child`] takes, and [`InlineChild::id`] the key
     /// for a registry lookup (a slot table keyed on `MailboxId`).
     ///
-    /// `C` must be listed by its module's `export!`, exported or under
-    /// `private = [..]` ([`Rebuildable`]), so a replace can rebuild it.
+    /// `P` must declare `C` in its `#[actor(spawns(..))]` ([`Spawns`]), and
+    /// every `export!` that lists `P` must list `C`, exported or under
+    /// `private = [..]` ([`Rebuildable`](crate::Rebuildable)), so a replace
+    /// can rebuild it.
     pub fn spawn_inline_child<P, C>(
         &self,
         subname: Subname<'_>,
         config: &C::Config,
     ) -> Result<InlineChild<C>, SpawnError>
     where
-        P: WasmActor,
+        P: WasmActor + Spawns<C>,
         // `ErasedWasmActor` is the boxing seam every `#[actor]` type emits
         // (ADR-0096) — the registry stores the child as `dyn
         // ErasedWasmActor`, so the bound is the mechanical realisation of
         // "reuse the existing erasure" (no new child-dispatch trait).
-        C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor + Rebuildable,
+        C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor,
         // iamacoffeepot/aether#2311: `C::init` returns the runtime state, boxed
         // as the erased child (`State = Self` for an un-split component).
         <C as WasmActor>::State: ErasedWasmActor,
@@ -209,16 +211,19 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// returns [`SpawnError::ParentIdentityUnavailable`] before any host call:
     /// the parent is read rather than named, not skipped.
     ///
-    /// `C` must be listed by its module's `export!`, exported or under
-    /// `private = [..]` ([`Rebuildable`]), so a replace can rebuild it.
+    /// The ctx's actor `A` must declare `C` in its `#[actor(spawns(..))]`
+    /// ([`Spawns`]), and every `export!` that lists `A` must list `C`,
+    /// exported or under `private = [..]`
+    /// ([`Rebuildable`](crate::Rebuildable)), so a replace can rebuild it.
     pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
     where
         // The erasure bounds are `spawn_inline_child`'s, for the same reason:
         // the registry stores the child as `dyn ErasedWasmActor`. They stay
         // explicit rather than folded into `ModuleChild`, which is a placement
         // *permission* (ADR-0166) and should not also assert a boxing seam.
-        C: ModuleChild + ErasedWasmActor + Rebuildable,
+        C: ModuleChild + ErasedWasmActor,
         <C as WasmActor>::State: ErasedWasmActor,
+        A: Spawns<C>,
     {
         self.spawn_parent()?;
         self.install_inline::<C>(subname, config)

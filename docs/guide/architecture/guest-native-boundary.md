@@ -43,17 +43,17 @@ normally feature-gated so a type-only consumer does not link the implementation.
 A wasm module may export several actor identities. Do not infer a default from
 declaration order:
 
-- `export!(default = Main, Helper, …)` declares `Main` as the default and
-  emits the namespace compatibility metadata.
-- `export!(Main, Helper, …)` is defaultless. A loader must select an exported
-  actor; a bare load is an error.
+- `export!(default = Main, public = [Helper, …])` declares `Main` as the
+  default and emits the namespace compatibility metadata.
+- `export!(public = [Main, Helper, …])` is defaultless. A loader must select an
+  exported actor; a bare load is an error.
 
 This rule prevents a harmless reordering from changing what a selector loads.
 It is governed by accepted ADR-0138 and enforced by the export manifest and
 component loader.
 
-A `boot = Boot` slot may precede either form (`export!(boot = Boot, default =
-Main, …)` or `export!(boot = Boot, Helper, …)`). The boot type is instantiated
+A `boot = Boot` key may join either form (`export!(boot = Boot, default = Main,
+public = […])` or `export!(boot = Boot, public = [Helper, …])`). The boot type is instantiated
 once per loaded module whatever selector the caller names, and is not itself
 selectable; it is governed by accepted ADR-0147.
 

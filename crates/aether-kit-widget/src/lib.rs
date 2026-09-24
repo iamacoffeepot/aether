@@ -58,24 +58,24 @@ pub mod theme;
 
 pub use editor::EditorShell;
 pub use editor_region::EditorRegion;
-pub use panel::{ChildLayout, SpawnedChild, WidgetPanel, content_frame, spawn_widget_child};
+pub use panel::{ChildLayout, SpawnedChild, SpawnsWidgets, WidgetPanel, content_frame, spawn_widget_child};
 pub use scroll::ScrollWidget;
 pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 
 // A cdylib carries one `export!` (the shared init/receive FFI entry); the macro
 // emits the wasm32 FFI shims and the `aether.kinds` custom section for every
-// listed actor. This is a grab-bag widget module (ADR-0138), so the bare list
-// designates NO default: every actor is selector-only by `module@actor`
+// listed actor. This is a grab-bag widget module (ADR-0138), so the `public`
+// list names NO `default`: every actor is selector-only by `module@actor`
 // selector (`aether_kit_widget@aether.kit.widget.*` /
 // `aether_kit_widget@aether.kit.widget.editor`), never by list position. ADR-0114
 // §5 reconstructs inline children from this same list, so every instanced
 // composable widget — including Dropdown, TabStrip, MenuBar, Tooltip, Toast,
 // Dialog, and Splitter — must appear in both cfg arms; omitting one drops that
 // type from named load and from replace_component reconstruct. The `behavior`
-// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` so
-// the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag; the two
-// invocations are cfg-exclusive, keeping the ordinary build's exported set
-// (and its `aether.kinds` section) unchanged.
+// feature (ADR-0137, issue 2687) appends `aether-behavior`'s `BehaviorHost` to
+// `public` so the panel's `WidgetKind::BehaviorHost` arm can spawn it by tag and
+// a replace rebuilds it; the two invocations are cfg-exclusive, keeping the
+// ordinary build's exported set (and its `aether.kinds` section) unchanged.
 //
 // The rule is **every stock widget**, not a chosen few: a widget the panel can
 // spawn by `WidgetKind` is a widget a host can also load on its own by
@@ -87,66 +87,72 @@ pub use theme::{SetTheme, TextInk, TextRole, Theme, ThemeState};
 // crate's `library` feature, so a consuming cdylib (aether-kit's workbench) links
 // the widget `WasmActor` impls for inline-spawn — enabling `library` — without
 // inheriting a second copy of the `receive_p32` / `init` FFI shims that would
-// collide with its own `export!`. The call sites stay bare.
+// collide with its own `export!`. The call sites stay the same either way.
 #[cfg(not(feature = "behavior"))]
 aether_actor::export!(
-    Widget,
-    ScrollWidget,
-    set::SliderWidget,
-    set::TextFieldWidget,
-    set::TextAreaWidget,
-    set::RadioGroupWidget,
-    set::ButtonWidget,
-    set::LabelWidget,
-    set::ImageWidget,
-    set::VirtualListWidget,
-    set::ToggleWidget,
-    set::SegmentedWidget,
-    set::NumericWidget,
-    set::DropdownWidget,
-    set::TabStripWidget,
-    set::MenuBarWidget,
-    set::DialogWidget,
-    set::ToastWidget,
-    set::TooltipWidget,
-    set::SplitterWidget,
-    EditorShell,
-    EditorRegion,
-    WidgetPanel
+    public = [
+        Widget,
+        ScrollWidget,
+        set::SliderWidget,
+        set::TextFieldWidget,
+        set::TextAreaWidget,
+        set::RadioGroupWidget,
+        set::ButtonWidget,
+        set::LabelWidget,
+        set::ImageWidget,
+        set::VirtualListWidget,
+        set::ToggleWidget,
+        set::SegmentedWidget,
+        set::NumericWidget,
+        set::DropdownWidget,
+        set::TabStripWidget,
+        set::MenuBarWidget,
+        set::DialogWidget,
+        set::ToastWidget,
+        set::TooltipWidget,
+        set::SplitterWidget,
+        EditorShell,
+        EditorRegion,
+        WidgetPanel,
+    ]
 );
 
 #[cfg(feature = "behavior")]
 aether_actor::export!(
-    Widget,
-    ScrollWidget,
-    set::SliderWidget,
-    set::TextFieldWidget,
-    set::TextAreaWidget,
-    set::RadioGroupWidget,
-    set::ButtonWidget,
-    set::LabelWidget,
-    set::ImageWidget,
-    set::VirtualListWidget,
-    set::ToggleWidget,
-    set::SegmentedWidget,
-    set::NumericWidget,
-    set::DropdownWidget,
-    set::TabStripWidget,
-    set::MenuBarWidget,
-    set::DialogWidget,
-    set::ToastWidget,
-    set::TooltipWidget,
-    set::SplitterWidget,
-    EditorShell,
-    EditorRegion,
-    WidgetPanel,
-    // ADR-0137: the behavior host is re-exported from `aether-behavior`, so it
-    // is exported without the `Rebuildable` marker the orphan rule forbids
-    // this crate to implement; the panel spawns it by tag, not typed.
-    foreign = [aether_behavior::BehaviorHost],
+    public = [
+        Widget,
+        ScrollWidget,
+        set::SliderWidget,
+        set::TextFieldWidget,
+        set::TextAreaWidget,
+        set::RadioGroupWidget,
+        set::ButtonWidget,
+        set::LabelWidget,
+        set::ImageWidget,
+        set::VirtualListWidget,
+        set::ToggleWidget,
+        set::SegmentedWidget,
+        set::NumericWidget,
+        set::DropdownWidget,
+        set::TabStripWidget,
+        set::MenuBarWidget,
+        set::DialogWidget,
+        set::ToastWidget,
+        set::TooltipWidget,
+        set::SplitterWidget,
+        EditorShell,
+        EditorRegion,
+        WidgetPanel,
+        // ADR-0137: the behavior host is re-exported from `aether-behavior`. The
+        // rebuild marker is per module, so this `export!` lists it like any local
+        // actor; the panel spawns it by tag, not typed.
+        aether_behavior::BehaviorHost,
+    ]
 );
 
-use aether_actor::{ActorInitError, Addressable, DependsOn, Manual, Subname, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{
+    ActorInitError, Addressable, DependsOn, Manual, Spawns, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
+};
 use aether_data::Kind;
 use aether_kinds::{ClipRect, QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
@@ -235,7 +241,7 @@ impl Widget {
     /// A child whose subname fails validation or whose config fails to
     /// decode is skipped with a warn — its slot is never registered, so
     /// the completion counter stays honest.
-    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: Spawns<Self>>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -266,7 +272,7 @@ impl Widget {
     /// composite, lays down own chrome, then polls each child in layout
     /// order. A leaf (no children) is already complete, so it finishes on
     /// the spot; a node with children finishes later, from `on_draw_list`.
-    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability>>(
+    fn drive_frame<A: DependsOn<RenderCapability> + DependsOn<TextCapability> + Spawns<Self>>(
         &mut self,
         ctx: &mut WasmCtx<'_, A, Manual>,
     ) {
@@ -1441,7 +1447,7 @@ mod tests {
 /// render sender: the root emits every widget's solid/textured draws in
 /// structural depth-first order, grouping only adjacent compatible items, so
 /// a background drawn as root chrome sits under the children by construction.
-#[actor(instanced, composable, depends(LifecycleCapability, RenderCapability, TextCapability))]
+#[actor(instanced, composable, depends(LifecycleCapability, RenderCapability, TextCapability), spawns(Widget))]
 impl WasmActor for Widget {
     type Config = WidgetConfig;
     const NAMESPACE: &'static str = "aether.kit.widget";

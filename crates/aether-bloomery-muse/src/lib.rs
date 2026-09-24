@@ -51,4 +51,4 @@ pub use input::{
 pub use program::MuseTurn;
 pub use result::{HttpStatus, HttpStatusError, TurnOutcome, TurnResult, TurnUsage};
 
-aether_actor::export!(MuseTurn, generators = [aether_bloomery_bundle::bundle]);
+aether_actor::export!(public = [MuseTurn], generators = [aether_bloomery_bundle::bundle]);

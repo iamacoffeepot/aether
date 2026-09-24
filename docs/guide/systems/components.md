@@ -28,10 +28,13 @@ Authoring a component is authoring an actor (`#[actor] impl WasmActor for C`), p
 one line that doesn't exist on the native side:
 
 ```rust
-aether_actor::export!(Hello);
+aether_actor::export!(public = [Hello]);
 ```
 
-This is **required** — without it the wasm has no FFI exports and the substrate
+Every entry is keyed — `public = [..]`, `default = A`, `boot = B`,
+`private = [..]`, `generators = [..]` — in any order, each key once; a bare or
+mixed call is a compile error that shows the keyed spelling. This line is
+**required** — without it the wasm has no FFI exports and the substrate
 can't drive the actor. It emits the `#[no_mangle]` entry points the host calls
 across the boundary (`init`, `wire`, `receive_p32`, `unwire`) and two **wasm
 custom sections**:
@@ -56,14 +59,17 @@ through the in-process transport rather than the FFI path.
 A crate can export more than one actor type ([ADR-0096](https://github.com/iamacoffeepot/aether/blob/main/docs/adr/0096-multi-actor-wasm-modules.md)):
 
 ```rust
-aether_actor::export!(default = RootManager, Panel, Toolbar);
+aether_actor::export!(default = RootManager, public = [Panel, Toolbar]);
 ```
 
 The module then carries every listed type's code behind one FFI surface, and the
 load path picks which type an instance becomes (below). Only `default = RootManager`
-makes it the default for a bare load and emits `aether.namespace`. A plain
-`export!(RootManager, Panel, Toolbar)` is deliberately defaultless: the loader
-requires an actor selection and declaration order has no meaning (ADR-0138).
+makes it the default for a bare load and emits `aether.namespace`; a `default` or
+`boot` type is not listed again under `public`. A plain
+`export!(public = [RootManager, Panel, Toolbar])` is deliberately defaultless: the
+loader requires an actor selection and declaration order has no meaning
+(ADR-0138). A module that exports exactly one actor, `export!(public = [Hello])`,
+still loads without a selector.
 The `aether.kinds.inputs`
 manifest grows to one handler group per exported type, each tagged with its
 namespace, so the loader and `describe_component` read each type's surface
@@ -71,7 +77,7 @@ separately. Grouping actors that belong together — a subsystem's coordinator a
 panels it manages, say — into one module is the intended use: it ships and versions
 them as a unit, and lets a running instance spawn its siblings ([below](#spawning-siblings)).
 
-Optional trailing `generators = [aether_bloomery_bundle::bundle]` names
+The `generators = [aether_bloomery_bundle::bundle]` key names
 the one bloomery export generator. `export!` stays the only author entry;
 `bundle` is a function-like macro hook, not a second export macro and not a
 runtime trait. `#[actor]`, `#[program]`, and `#[reactor]` emit a same-name
@@ -91,8 +97,8 @@ writes `aether.bloomery.reactors`. Each role keeps its own state. Program
 `NAME`s are unique and `Mode::Pure`; reactor `NAMESPACE`s are unique string
 literals, checked with `#[rule]` idents as `ReactorName` / `RuleName`.
 Envelopes stay on their original types in `actors`; their other extensions
-are not copied onto the root. `type Alias = T` is not followed. No-generator
-`export!` forms are unchanged. The root takes no config and is not a `boot`
+are not copied onto the root. `type Alias = T` is not followed. The pipeline
+ends in one keyed no-generator `export!`. The root takes no config and is not a `boot`
 actor; neither `boot` nor `default` may name a program or reactor. When
 `export!` names no `default`, the generated root becomes the default, so
 `export: Some("aether.bloomery.bundle")` resolves.
@@ -100,10 +106,7 @@ actor; neither `boot` nor `default` may name a program or reactor. When
 ```rust
 aether_actor::export!(
     default = Probe,
-    ProbeWithConfig,
-    Summarize,
-    SourcePublisher,
-    SourceWitness,
+    public = [ProbeWithConfig, Summarize, SourcePublisher, SourceWitness],
     generators = [aether_bloomery_bundle::bundle],
 );
 ```
@@ -220,17 +223,26 @@ but its generated export resolver rejects unknown exports, non-instanced
 actors, and actors without an exact-or-`composable` relationship to the actual
 runtime parent before allocating an alias.
 
-The typed inline verbs spawn only a type the module's `export!` lists, because
-that list is the set a hot reload rebuilds. A child the host should never load
-by selector goes in the `private` slot:
+A spawner declares the children it spawns through the typed inline verbs in
+`#[actor(spawns(..))]`, and every `export!` that lists the spawner must list
+each declared child, because that list is the set a hot reload rebuilds. A
+child the host should never load by selector goes under `private = [..]`:
 
 ```rust
-aether_actor::export!(default = RootManager, Sibling, private = [Panel]);
+#[actor(spawns(Panel))]
+impl WasmActor for RootManager { /* … spawns Panel inline … */ }
+
+aether_actor::export!(default = RootManager, public = [Sibling], private = [Panel]);
 ```
 
-An inline spawn of a type neither exported nor listed there fails to compile
-with "`Panel` is spawned as an inline child, but no `export!` lists it", and the
-note names the `private = [..]` slot.
+Both halves are compile errors. A typed inline spawn of a child the spawner does
+not declare fails at the spawn site with "`RootManager` spawns `Panel` inline but
+does not declare it", and the note names `spawns(..)`. A declared child the
+`export!` lists neither under `public` nor under `private` fails at the `export!`
+with "`Panel` is spawned inline by an actor this `export!` lists, but this
+`export!` does not list it", and the note names `private = [..]`. The check holds
+for another crate's actors too: a re-exported actor is an ordinary `public`
+entry, and the `export!` must list every child it declares.
 
 `Subname::Counter` has the host assign a bare monotonic counter — `0`, `1`, … —
 for when you'll track it by the returned `MailboxId`; `Subname::Named("inventory")`
@@ -306,7 +318,7 @@ impl WasmActor for MyComponent {
     }
 }
 
-aether_actor::export!(MyComponent);
+aether_actor::export!(public = [MyComponent]);
 ```
 
 `aether.component.replace` compiles the candidate, resolves its manifest/export,
@@ -316,7 +328,9 @@ is still installed. Only then does the old instance run `unwire` and
 bundle, and only after that is it installed and the old instance dropped. A
 component that leaves both state hooks at their defaults swaps cleanly and comes
 back fresh from `init`. Resident inline children are rebuilt from the module's
-exported types and its `export!` `private` list, each under its old alias.
+exported types and its `export!` `private` list, each under its old alias; the
+`spawns(..)` check guarantees that list names every child a listed actor can
+spawn inline.
 There is no mailbox freeze/drain phase in this binding-stable implementation;
 queued mail remains on the trampoline's inbox, and
 the wire field `drain_timeout_ms` is accepted for compatibility but ignored.

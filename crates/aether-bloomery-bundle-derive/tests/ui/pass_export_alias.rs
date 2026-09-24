@@ -24,6 +24,6 @@ mod inner {
 
 use inner::Publisher as Alias;
 
-export!(Alias, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Alias], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

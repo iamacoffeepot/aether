@@ -43,6 +43,6 @@ impl Program for Listed {
     }
 }
 
-export!(Probe, Listed, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Probe, Listed], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

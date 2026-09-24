@@ -56,7 +56,7 @@ impl Program for Two {
     }
 }
 
-export!(One, Two, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [One, Two], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {
     let _ = aether_bloomery_bundle::BUNDLE_NAMESPACE;
