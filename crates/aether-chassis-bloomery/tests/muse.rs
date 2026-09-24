@@ -1,5 +1,7 @@
 //! End-to-end: one `muse.turn` Sampled call on the shipped bloomery composition, answered by a loopback stub server
-//! when the harness allows its host, and recorded as a refused turn when the deny-by-default allowlist holds.
+//! when the harness allows its host, recorded as a refused turn when the deny-by-default allowlist holds, and
+//! refused before dialing when the binary's own flags bind an engine secret to a host the turn reaches over plain
+//! http.
 
 use std::error::Error;
 use std::fs;
@@ -16,9 +18,11 @@ use aether_bloomery_kinds::{
 use aether_bloomery_muse::{
     Endpoint, ModelName, OutputBudget, ReasoningEffort, Role, TurnInput, TurnItem, TurnItems, TurnOutcome, TurnResult,
 };
+use aether_chassis_bloomery::BloomeryCli;
 use aether_data::Kind;
-use aether_harness_bloomery::{BloomeryHarness, Record};
+use aether_harness_bloomery::{BloomeryHarness, Record, SeededJournal};
 use aether_harness_substrate::test_helpers::require_wasm;
+use clap::Parser;
 
 /// The recorded responses-API reply the stub server sends.
 const COMPLETED: &[u8] = include_bytes!("../../aether-bloomery-muse/fixtures/completed.json");
@@ -32,6 +36,9 @@ const ITEMS: [(Role, &str); 2] = [(Role::Developer, "Be brief."), (Role::User, "
 /// How long the stub waits for the engine to dial. Longer than the harness's own thirty-second reply bound, so a
 /// call that never dials panics with the harness's message rather than the stub's.
 const STUB_PATIENCE: Duration = Duration::from_secs(45);
+
+/// The obviously fake secret value the bound-secret scenario binds. No record may carry it.
+const FAKE_SECRET: &str = "fake-muse-value-for-test";
 
 /// A seed holding the `muse` bundle under [`MUSE`], the conversation's texts, and a turn input posting to one
 /// endpoint.
@@ -227,5 +234,80 @@ fn an_empty_allowlist_records_a_refused_turn_without_dialing() -> Result<(), Box
         ],
     );
     assert!(nothing_dialed(&listener)?, "a denied fetch opens no connection");
+    Ok(())
+}
+
+#[cfg(unix)]
+#[test]
+fn a_bound_secret_refuses_a_plain_http_turn_without_dialing() -> Result<(), Box<dyn Error>> {
+    // Catches the binary's `--secrets-dir` / `--http-secrets` flags not reaching the bloomery's `aether.http` (the
+    // turn dials the stub, or is refused `AllowlistDenied`), a bound secret sent over cleartext, and the value
+    // leaking into the recorded fault or anywhere else in the journal.
+    use std::fs::OpenOptions;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let listener = TcpListener::bind("127.0.0.1:0")?;
+    let Some(seed) = seed(&format!("http://{}/v1/responses", listener.local_addr()?))? else {
+        return Ok(());
+    };
+    let (call, requested) = turn(&seed)?;
+    let journal = SeededJournal::new([seed.batch]);
+    let scratch = journal.journal_path().parent().expect("the seed journal sits in a directory").to_path_buf();
+    let secrets = scratch.join("secrets");
+    fs::create_dir(&secrets)?;
+    OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(secrets.join("muse"))?
+        .write_all(FAKE_SECRET.as_bytes())?;
+
+    let secrets_dir = secrets.display().to_string();
+    let cli = BloomeryCli::try_parse_from([
+        "aether-bloomery",
+        "--secrets-dir",
+        &secrets_dir,
+        "--http-allowlist",
+        "127.0.0.1",
+        "--http-secrets",
+        "127.0.0.1/bearer=muse",
+    ])?;
+    let mut harness = journal.boot_with_argv(cli);
+
+    let outcome = harness.call(&call);
+    let CallOutcome::Fault { key: 1, seq: 3, fault } = outcome else {
+        panic!("expected the turn's Fault at seq 3, got {outcome:?}");
+    };
+    let FaultReason::Refused { reason } = &fault.reason else {
+        panic!("expected a refused turn, got {:?}", fault.reason);
+    };
+    assert!(!reason.as_str().contains(FAKE_SECRET), "the recorded fault never carries the secret value");
+    assert_eq!(
+        reason.as_str(),
+        concat!(
+            r#"InvalidUrl("plain http to 127.0.0.1 refused: "#,
+            r#"a secret is bound to this host, and secrets travel only over https")"#,
+        ),
+    );
+    harness.assert_appended(
+        Seq(1),
+        &[
+            Record::equal(None, requested.clone()),
+            Record::equal(
+                Some(Seq(2)),
+                Fault { program: requested.program, input: requested.input, reason: fault.reason.clone() },
+            ),
+        ],
+    );
+    assert!(nothing_dialed(&listener)?, "a refused fetch opens no connection");
+
+    for entry in fs::read_dir(&scratch)? {
+        let path = entry?.path();
+        if path.file_name().is_some_and(|name| name.to_string_lossy().starts_with("journal.sqlite")) {
+            let bytes = fs::read(&path)?;
+            let leaked = bytes.windows(FAKE_SECRET.len()).any(|window| window == FAKE_SECRET.as_bytes());
+            assert!(!leaked, "{} carries the secret value", path.display());
+        }
+    }
     Ok(())
 }

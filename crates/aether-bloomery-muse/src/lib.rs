@@ -12,8 +12,11 @@
 //!
 //! The program sets no credential header, and no credential enters a kind,
 //! the journal, the recorded closure, the bundle, or mail the program builds.
-//! A credential comes from the engine's credential mechanism (ADR-0234),
-//! never from the program.
+//! A credential comes from the engine secrets mechanism (ADR-0235), never from
+//! the program: the operator binds the endpoint's host with the http
+//! capability's `--http-secrets` knob beside `--http-allowlist` and
+//! `--secrets-dir`, and `aether.http` attaches the bound header to requests for
+//! exactly that host, over HTTPS only.
 
 /// Implement [`aether_data::Invariant`], `Display`, and `Error` for error
 /// enums that carry a `const fn reason(self) -> &'static str`.

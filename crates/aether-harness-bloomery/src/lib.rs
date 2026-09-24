@@ -5,13 +5,14 @@
 //! [`Batch`](aether_bloomery_journal::Batch)es appended in order to a scratch
 //! journal before boot; the `Ref`s staging returns are the handles its
 //! expected values cite. Its **drive** is the mail it sends the mounted
-//! journal owner and bundle driver — [`BloomeryHarness::call`],
-//! [`BloomeryHarness::move_head`], and [`BloomeryHarness::settle`], which
-//! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather
-//! than sleeping. Its **expectation** is the record sequence the loop
-//! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
-//! view the scenario folds over the actual journal
-//! ([`SeededJournal::fold`]). The seed owns those reads because it owns the
+//! journal owner and bundle driver — [`BloomeryHarness::call`] (or
+//! [`BloomeryHarness::call_within`] for a call that may outlast the default
+//! reply bound), [`BloomeryHarness::move_head`], and
+//! [`BloomeryHarness::settle`], which follows the `AwaitProcessed` →
+//! `Processed` protocol to quiescence rather than sleeping. Its
+//! **expectation** is the record sequence the loop appended
+//! ([`SeededJournal::assert_appended`] over [`Record`]s), plus any view the
+//! scenario folds over the actual journal ([`SeededJournal::fold`]). The seed owns those reads because it owns the
 //! journal file, so they work the same whether the in-process chassis wrote
 //! it or a forked `aether-bloomery` did; [`BloomeryHarness`] forwards each one
 //! to the seed it booted over.
@@ -26,7 +27,10 @@
 //! owner and the driver through the proven references the mount took back —
 //! never by path. Config resolves hermetically, never from the process
 //! environment, so HTTP egress stays deny-all unless a scenario opens hosts
-//! with [`BloomeryHarness::start_allowing`]. It never resolves a dist
+//! with [`BloomeryHarness::start_allowing`], or boots with the
+//! `aether-bloomery` binary's own flags through
+//! [`SeededJournal::boot_with_argv`] — the one way to bind an engine secret
+//! (`--secrets-dir`, `--http-secrets`). It never resolves a dist
 //! artifact: a scenario that needs fixture wasm reads it through
 //! `aether_harness_substrate::test_helpers::require_wasm` and stages the
 //! bytes itself.
@@ -56,9 +60,10 @@ pub use seed::SeededJournal;
 /// sink every request names as its reply target.
 ///
 /// Built by [`BloomeryHarness::start`] (or [`BloomeryHarness::start_allowing`]
-/// when the scenario opens HTTP egress), or by [`SeededJournal::boot`] when a
-/// scenario must observe the journal file before boot. Dropping the harness
-/// tears the chassis down before the scratch directory is removed.
+/// when the scenario opens HTTP egress), or by [`SeededJournal::boot`] /
+/// [`SeededJournal::boot_with_argv`] when a scenario must observe the journal
+/// file before boot or stage the binary's flags. Dropping the harness tears
+/// the chassis down before the scratch directory is removed.
 pub struct BloomeryHarness {
     chassis: BuiltChassis<BloomeryChassis>,
     mounted: Mounted,
