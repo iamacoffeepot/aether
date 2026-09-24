@@ -13,12 +13,13 @@ use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::chassis::ctx::ChassisCtx;
 use crate::chassis::inbox::{ReplyLineage, SettlingInbox};
 use crate::mail::mailer::Mailer;
-use crate::mail::registry::RegistrySubscription;
+use crate::mail::registry::{AddressResolutionError, RegistrySubscription};
 use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
 use aether_actor::{CallerScope, RequestContextTable};
+use aether_data::{ActorPath, KindDescriptor};
 
 impl NativeBinding {
     /// Build a fresh transport. Pair `self_mailbox` with the id the
@@ -253,6 +254,24 @@ impl NativeBinding {
     /// [`NativeCtx::kind_label`](crate::actor::native::ctx::NativeCtx::kind_label).
     pub(crate) fn kind_label(&self, kind: KindId) -> String {
         self.mailer.kind_label(kind)
+    }
+
+    /// Every registered kind descriptor from the wired registry. The path
+    /// behind [`NativeCtx::kind_descriptors`](crate::actor::native::ctx::NativeCtx::kind_descriptors).
+    pub(crate) fn kind_descriptors(&self) -> Vec<KindDescriptor> {
+        self.mailer.kind_descriptors()
+    }
+
+    /// The origin name of one tagged id. The path behind
+    /// [`NativeCtx::tagged_id_name`](crate::actor::native::ctx::NativeCtx::tagged_id_name).
+    pub(crate) fn tagged_id_name(&self, tagged: &str) -> Option<String> {
+        self.mailer.tagged_id_name(tagged)
+    }
+
+    /// The canonical path of the live actor an address names. The path behind
+    /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
+    pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+        self.mailer.canonical_path(address)
     }
 
     /// The first declared dependency with no `Live` route for a child placed

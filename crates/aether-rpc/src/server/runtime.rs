@@ -49,7 +49,6 @@ pub use aether_substrate::MonitorHandle;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::{HashMap, HashSet};
 pub use std::io;
 pub use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
@@ -187,12 +186,6 @@ pub struct RpcServerState {
     /// proxy departs, and the owner of its in-flight correlations. Kept in
     /// step with [`Self::engine_routes`]; neither map is ever scanned.
     pub route_owners: HashMap<ErasedActorRef, RouteOwner>,
-    /// Cached `Arc<Mailer>` for the `Call` dispatcher's settlement
-    /// subscription: it reads the chassis settlement registry and passes
-    /// the same Arc into `subscribe_settlement_mail`. Init grabs it from
-    /// `NativeInitCtx::mailer()`; the cap is single-threaded post-ADR-0038
-    /// so direct storage is fine.
-    pub mailer: Arc<Mailer>,
     /// The bound address, or `None` when the cap was composed disabled
     /// (ADR-0155 §3): a disabled server claims its mailbox but never
     /// binds, so there is no address to reconnect for teardown and no
@@ -214,14 +207,13 @@ impl RpcServerState {
     /// A state with no listener: every map empty, no bound address, no
     /// accept thread. `init` starts from this for every mode; a bound
     /// server then starts accepting through [`Self::start_accepting`].
-    fn unbound(peer_kind: PeerKind, wake: SelfWake<RpcInboundReady>, mailer: Arc<Mailer>) -> Self {
+    fn unbound(peer_kind: PeerKind, wake: SelfWake<RpcInboundReady>) -> Self {
         let (inbound_tx, inbound_rx) = mpsc::channel::<InboundEvent>();
         Self {
             peer_kind,
             wake,
             engine_routes: HashMap::new(),
             route_owners: HashMap::new(),
-            mailer,
             bind_addr: None,
             listener_port: 0,
             accept_shutdown: Arc::new(AtomicBool::new(false)),
@@ -655,7 +647,7 @@ impl NativeActor for RpcServerCapability {
         params: RpcServerParams,
         ctx: &mut NativeInitCtx<'_>,
     ) -> Result<RpcServerState, BootError> {
-        let mut state = RpcServerState::unbound(params.peer_kind, ctx.self_wake::<RpcInboundReady>(), ctx.mailer());
+        let mut state = RpcServerState::unbound(params.peer_kind, ctx.self_wake::<RpcInboundReady>());
 
         // ADR-0155 §3: the cap is always composed and always claims its
         // mailbox; the resolved port gates only what Start does. A `None`

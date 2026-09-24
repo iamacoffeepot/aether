@@ -27,13 +27,15 @@ use crate::mail::cost::CostTable;
 use crate::mail::outbound::HubOutbound;
 use crate::mail::registry::effect::ACTIVATION_BARRIER_KIND;
 use crate::mail::registry::{
-    CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry, RegistryQueueMetrics,
-    RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
+    AddressResolutionError, CapturedDisposition, MailDispatch, OwnedDispatch, ParkAdmission, Registry,
+    RegistryQueueMetrics, RegistrySubscription, RouteContinuation, RouteEndpoint, RouteRelayHandle,
 };
 use crate::mail::{Mail, Source, SourceAddr};
+use crate::runtime::thread_name;
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
-use aether_data::{Kind, KindId};
+use aether_data::tagged_id::{self, Tag};
+use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
 use std::sync::OnceLock;
 
@@ -324,6 +326,37 @@ impl Mailer {
     /// [`NativeCtx::kind_label`](crate::actor::native::ctx::NativeCtx::kind_label).
     pub(crate) fn kind_label(&self, kind: KindId) -> String {
         self.registry.kind_label(kind)
+    }
+
+    /// Every registered kind descriptor, sorted by name, as
+    /// [`Registry::list_kind_descriptors`] returns them. The crate-private
+    /// path behind
+    /// [`NativeCtx::kind_descriptors`](crate::actor::native::ctx::NativeCtx::kind_descriptors).
+    pub(crate) fn kind_descriptors(&self) -> Vec<KindDescriptor> {
+        self.registry.list_kind_descriptors()
+    }
+
+    /// The origin name of one ADR-0064 tagged id, looked up in the one table
+    /// its tag names: the process thread-name registry for `thr-…`, this
+    /// registry's route names for `mbx-…`, its kind names for `knd-…`. A miss,
+    /// another tag, or malformed text is `None`. The crate-private path behind
+    /// [`NativeCtx::tagged_id_name`](crate::actor::native::ctx::NativeCtx::tagged_id_name).
+    pub(crate) fn tagged_id_name(&self, tagged: &str) -> Option<String> {
+        let raw = tagged_id::decode(tagged).ok()?;
+        match tagged_id::tag_of(raw) {
+            Some(Tag::Thread) => thread_name::resolve_runtime(raw),
+            Some(Tag::Mailbox) => self.registry.mailbox_name(aether_data::MailboxId(raw)),
+            Some(Tag::Kind) => self.registry.kind_name(KindId(raw)),
+            _ => None,
+        }
+    }
+
+    /// The canonical path of the live actor `address` names, through
+    /// [`Registry::resolve_address`], keeping only the path. The
+    /// crate-private path behind
+    /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
+    pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
+        self.registry.resolve_address(address).map(|resolved| resolved.canonical_path)
     }
 
     /// The first declared dependency with no `Live` route for a child placed
