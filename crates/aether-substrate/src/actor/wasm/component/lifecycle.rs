@@ -57,11 +57,24 @@ impl Component {
     /// The next send correlation and the next reply-lineage id this guest
     /// would mint, recorded by the component trampoline when the guest
     /// leaves its slot (unload or replace) so the slot's next occupant
-    /// resumes both through [`ComponentCtx::resume_correlations`]
-    /// (ADR-0139 §3, #6422).
+    /// resumes both through [`Self::resume_correlations`] (ADR-0139 §3,
+    /// #6422). Also read from a replacement that failed to rehydrate, so the
+    /// reinstated guest resumes past it (#6134).
     #[must_use]
     pub fn correlation_cursor(&self) -> CorrelationCursor {
         self.store.data().correlation_cursor()
+    }
+
+    /// Continue this mailbox's send correlation and reply-lineage sequences
+    /// from a guest that left the slot, so this guest never mints a request
+    /// id or a reply `MailId` that one already used (ADR-0139 §3, #6422).
+    /// Only ever raises either counter. The consumer is the component
+    /// trampoline's replace: it calls this after [`Self::instantiate`] (which
+    /// cannot send) and before `on_rehydrate` or the first delivery, and
+    /// again on the reinstated guest when a replacement fails to rehydrate
+    /// (#6134).
+    pub fn resume_correlations(&mut self, cursor: CorrelationCursor) {
+        self.store.data_mut().resume_correlations(cursor);
     }
 
     /// Move out the guest's reply table — its pending handles and the next
@@ -79,7 +92,8 @@ impl Component {
     /// numbers new handles past it (#6409). The consumer is the component
     /// trampoline; call it after [`Self::instantiate`] succeeds and before
     /// the first delivery or `on_rehydrate`, while this instance's own
-    /// table is still empty.
+    /// table is still empty, or on a guest reinstated after its replacement
+    /// failed to rehydrate, whose table was moved out (#6134).
     pub fn resume_replies(&mut self, replies: PendingReplies) {
         self.store.data_mut().resume_replies(replies);
     }

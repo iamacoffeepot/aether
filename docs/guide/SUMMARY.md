@@ -83,6 +83,7 @@
   - [Adding a chassis capability](recipes/adding-a-chassis-capability.md)
   - [Wiring an MCP tool](recipes/wiring-an-mcp-tool.md)
   - [Writing a component](recipes/writing-a-component.md)
+  - [Addressing a peer you cannot depend on](recipes/addressing-a-peer-you-cannot-depend-on.md)
   - [Writing a behavior](recipes/writing-a-behavior.md)
   - [Serving HTTP from a component](recipes/serving-http.md)
   - [Supervising the hub with systemd](recipes/supervising-the-hub.md)
