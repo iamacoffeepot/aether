@@ -255,7 +255,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = ProcessCapabilityState::from_parts(HashMap::new(), env::temp_dir(), 4);
         let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b""));
         drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
@@ -279,7 +279,7 @@ mod tests {
         let allowlist = HashMap::from([("cat".to_owned(), PathBuf::from("/bin/cat"))]);
         let mut state = ProcessCapabilityState::from_parts(allowlist, env::temp_dir(), 4);
         let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether"));
         // The worker runs cat against the piped stdin and pushes the

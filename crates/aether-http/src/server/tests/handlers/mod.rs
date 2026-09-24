@@ -11,6 +11,7 @@
 //! double-claim handlers stay on the raw registration surface, so a
 //! macro regression cannot mask a registration-semantics one.
 
+use aether_actor::Reaches;
 use aether_data::Kind;
 use aether_substrate::actor::native::NativeCtx;
 
@@ -36,7 +37,7 @@ pub(super) use streaming::{
 /// Bind the calling handler as the `/` catch-all (ADR-0130) — the
 /// shared replacement for the retired `handler_mailbox` default, so a
 /// route-unmatched request reaches that handler.
-fn bind_catch_all(ctx: &mut NativeCtx<'_>) {
+fn bind_catch_all<A: Reaches<HttpServerCapability>>(ctx: &mut NativeCtx<'_, A>) {
     ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
         prefix: "/".to_string(),
         method: None,
