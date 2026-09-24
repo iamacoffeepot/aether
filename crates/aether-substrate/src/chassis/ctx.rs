@@ -5,6 +5,7 @@
 //! live in `chassis::error`; the cross-flavour [`Envelope`] shape lives
 //! in `actor::native::envelope`.
 
+use std::collections::HashMap;
 use std::sync::mpsc;
 use std::sync::{Arc, Weak};
 
@@ -398,7 +399,7 @@ pub struct ChassisCtx<'a> {
     claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
     /// ADR-0155 §4: driver-as-actor mailboxes reserved at the Claim stage
     /// by [`crate::chassis::builder::DriverCapability::claim`] (via
-    /// [`Self::claim_driver_mailbox`]), stashed here so the driver's
+    /// [`Self::claim_driver_mailbox`]), stashed here keyed by namespace so the driver's
     /// Start-stage `boot` can recover the live [`MailboxClaim`] — inbox,
     /// actor slots, wake slot — through
     /// [`crate::chassis::builder::DriverCtx::take_claimed_mailbox`]. The
@@ -409,7 +410,7 @@ pub struct ChassisCtx<'a> {
     /// whose driver claims nothing (the default no-op hook), and drained by
     /// the describe path — which reads only the claimed namespaces off the
     /// registry — when it drops.
-    reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
+    reserved_driver_mailboxes: &'a mut HashMap<String, MailboxClaim>,
     /// Issue 607 Phase 3b (ADR-0079): the chassis's
     /// [`crate::Spawner`], cloned into every booted actor's
     /// [`crate::NativeBinding`] (via [`crate::NativeBinding::from_ctx`])
@@ -439,7 +440,7 @@ impl<'a> ChassisCtx<'a> {
         aborter: &'a Arc<dyn FatalAborter>,
         claimed_actor_mailboxes: &'a mut Vec<MailboxId>,
         spawner: &'a Arc<crate::Spawner>,
-        reserved_driver_mailboxes: &'a mut Vec<(String, MailboxClaim)>,
+        reserved_driver_mailboxes: &'a mut HashMap<String, MailboxClaim>,
         references: &'a ComposedReferences,
     ) -> Self {
         Self {
@@ -529,10 +530,13 @@ impl<'a> ChassisCtx<'a> {
     /// namespace lands in the registry the same way a passive cap's claim
     /// does, so it appears in the claim-derived describe roster; the
     /// [`MailboxId`] also lands in `claimed_actor_mailboxes`, exactly as it
-    /// would have when the driver claimed the inbox inline at Start.
+    /// would have when the driver claimed the inbox inline at Start. A
+    /// repeated name fails in the claim with
+    /// [`BootError::MailboxAlreadyClaimed`] before it reaches the stash, so a
+    /// reservation never overwrites another.
     pub fn claim_driver_mailbox(&mut self, name: &str) -> Result<(), BootError> {
         let claim = self.claim_mailbox_with_override(name)?;
-        self.reserved_driver_mailboxes.push((name.to_owned(), claim));
+        self.reserved_driver_mailboxes.insert(name.to_owned(), claim);
         Ok(())
     }
 
@@ -544,8 +548,7 @@ impl<'a> ChassisCtx<'a> {
     /// Start path; a chassis whose driver claims nothing never populates the
     /// stash, so this always returns `None` there.
     pub(crate) fn take_claimed_mailbox(&mut self, name: &str) -> Option<MailboxClaim> {
-        let idx = self.reserved_driver_mailboxes.iter().position(|(n, _)| n == name)?;
-        Some(self.reserved_driver_mailboxes.swap_remove(idx).1)
+        self.reserved_driver_mailboxes.remove(name)
     }
 
     /// Variant of [`Self::claim_mailbox`] that returns a strong
@@ -740,7 +743,7 @@ mod tests {
         let (registry, mailer, spawner, aborter, _pool) = test_infra();
         let mut fallback: Option<FallbackRouter> = None;
         let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-        let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+        let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
         let references = ComposedReferences::default();
         let mut ctx = ChassisCtx::new(
             &registry,
@@ -836,7 +839,7 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
             let references = ComposedReferences::default();
             let mut ctx = ChassisCtx::new(
                 &registry,
@@ -876,7 +879,7 @@ mod tests {
         {
             let mut fallback: Option<FallbackRouter> = None;
             let mut claimed_actor_mailboxes: Vec<MailboxId> = Vec::new();
-            let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+            let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
             let references = ComposedReferences::default();
             let mut ctx = ChassisCtx::new(
                 &registry,

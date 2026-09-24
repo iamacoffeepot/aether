@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -53,7 +54,7 @@ pub(super) struct BootedPassives {
     /// wake slot via `DriverCtx::take_claimed_mailbox`. Empty for a chassis
     /// whose driver claims nothing (the default no-op hook) and for the
     /// no-driver `build_passive` path.
-    pub(super) reserved_driver_mailboxes: Vec<(String, MailboxClaim)>,
+    pub(super) reserved_driver_mailboxes: HashMap<String, MailboxClaim>,
     /// ADR-0230: the proven reference of every root actor this chassis
     /// composed, recorded by the boot that published its `Live` route —
     /// each singleton capability's `spawn` pass here, and each pumped actor
@@ -222,7 +223,7 @@ pub(super) fn boot_passives(
     // ADR-0155 §4: the driver Claim hook stashes its reserved mailboxes here;
     // moved onto `BootedPassives` at return so the driver's Start-stage boot
     // recovers them.
-    let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+    let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
     let references = ComposedReferences::default();
     let actor_registry: Arc<crate::ActorRegistry> = Arc::new(crate::ActorRegistry::new());
     // Issue 635 PR C: stand up the worker pool before any cap boots.
@@ -364,7 +365,7 @@ pub(super) fn boot_passives(
         // ADR-0155 §4: `cleanup_after_failure` never touches driver-reserved
         // mailboxes (they belong to the driver's Claim hook, not a passive),
         // so the ctx borrows a throwaway stash the rollback drops.
-        let mut reserved_driver_mailboxes: Vec<(String, MailboxClaim)> = Vec::new();
+        let mut reserved_driver_mailboxes: HashMap<String, MailboxClaim> = HashMap::new();
         for boot in booted.into_iter().rev() {
             let mut ctx = ChassisCtx::new(
                 registry,
