@@ -30,9 +30,11 @@
 //! # Config
 //!
 //! [`ControllerConfig`] (init-config, ADR-0090) selects the target camera
-//! name, the mode, and the per-tick rates and clamps — control-scheme
-//! variation is config, not code. A bare load boots
-//! [`ControllerConfig::default()`].
+//! name, the mode, the per-tick rates and clamps, and an optional initial
+//! orbit pose ([`ControllerConfig::seed`]) — control-scheme variation is
+//! config, not code. The seed replaces the compiled baseline pose in the
+//! shadow itself, so a subject framed at boot stays framed once the keys
+//! take over. A bare load boots [`ControllerConfig::default()`].
 //!
 //! # Mail surface
 //!
@@ -58,7 +60,8 @@ use crate::camera::{CameraComponent, CameraOrbitSet, CameraTopdownSet, OrbitPara
 
 /// Compiled baseline orbit pose the controller seeds into the target camera:
 /// a three-quarter overhead look at the world origin, far enough back to frame
-/// a scene. Auto-advance is pinned off at seed time (`speed: Some(0.0)`).
+/// a scene, used when the config carries no [`ControllerConfig::seed`].
+/// Auto-advance is pinned off at seed time (`speed: Some(0.0)`).
 const SEED_TARGET: [f32; 3] = [0.0, 0.0, 0.0];
 const SEED_DISTANCE: f32 = 12.0;
 /// Negative pitch places the eye above the target looking down (see
@@ -128,12 +131,20 @@ impl WasmActor for CameraController {
 
     fn init(config: ControllerConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
         let shadow = match config.mode {
-            ControllerMode::Orbit => Shadow::Orbit(OrbitShadow {
-                target: Vec3::new(SEED_TARGET[0], SEED_TARGET[1], SEED_TARGET[2]),
-                yaw: SEED_YAW,
-                pitch: SEED_PITCH,
-                distance: SEED_DISTANCE,
-            }),
+            ControllerMode::Orbit => {
+                let seed = config.seed.unwrap_or(OrbitSeed {
+                    target: SEED_TARGET,
+                    yaw: SEED_YAW,
+                    pitch: SEED_PITCH,
+                    distance: SEED_DISTANCE,
+                });
+                Shadow::Orbit(OrbitShadow {
+                    target: Vec3::from_array(seed.target),
+                    yaw: seed.yaw,
+                    pitch: seed.pitch,
+                    distance: seed.distance,
+                })
+            }
             ControllerMode::Topdown => Shadow::Topdown(TopdownShadow {
                 center: Vec2::new(SEED_CENTER[0], SEED_CENTER[1]),
                 extent: SEED_EXTENT,

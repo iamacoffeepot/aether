@@ -15,12 +15,11 @@ use crate::mail::ReplyHandle;
 use crate::model::ctx::Erased;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode, Single};
 use crate::model::{
-    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Reaches, Singleton,
+    Addressable, CallerAddressable, CallerScope, CallerScoped, DependencyResolver, DependsOn, Singleton,
 };
 use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::bridge::mail;
 use crate::wasm::inline::Registry;
-use crate::wasm::mailbox::WasmActorMailbox;
 use alloc::string::String;
 
 /// Per-receive (and post-init `wire` / pre-shutdown `unwire`)
@@ -255,30 +254,19 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         MailboxId(self.mailbox)
     }
 
-    /// Singleton sender shortcut. Returns a ctx-bound [`WasmActorMailbox`]
-    /// addressing the unique instance of receiver actor `R`, carrying this
-    /// actor's own id as the send's `from` (issue 1987) and a borrow of
-    /// the inline registry the send routes through.
-    #[must_use]
-    pub fn actor<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R>
-    where
-        A: Reaches<R>,
-    {
-        self.singleton_handle::<R>()
-    }
-
     /// Proven reference to a declared dependency (ADR-0230): mints an
-    /// [`ActorRef`] for the position [`Self::actor`] folds for `R`, with no
-    /// host call — the load was refused unless `R` was `Live`, so the answer
-    /// is already known. Bounded `A: DependsOn<R>` directly, so it does not
-    /// exist on the erased ctx.
+    /// [`ActorRef`] for the position `R`'s resolver folds from the
+    /// root / current / parent routing scope it selects, with no host call —
+    /// the load was refused unless `R` was `Live`, so the answer is already
+    /// known. Bounded `A: DependsOn<R>` directly, so it does not exist on the
+    /// erased ctx. Every flat typed send routes to this position.
     #[must_use]
     pub fn actor_ref<R: Singleton + CallerAddressable>(&self) -> ActorRef<R>
     where
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        ActorRef::new(self.singleton_handle::<R>().mailbox_id())
+        ActorRef::new(R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()))
     }
 
     /// The envelope sender as a proven [`ErasedActorRef`]: mints the dispatch
@@ -291,26 +279,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[must_use]
     pub fn sender(&self) -> Option<ErasedActorRef> {
         self.source
-    }
-
-    /// Typed singleton handle construction: the shared body behind
-    /// [`Self::actor`] and [`Self::actor_ref`]. Folds `R::NAMESPACE` under the
-    /// resolver-selected root/current/parent routing scope.
-    #[must_use]
-    pub(crate) fn singleton_handle<R: Singleton + CallerAddressable>(&self) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::new(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            self.mailbox,
-            self.inline,
-        )
-    }
-
-    /// Send through a proven [`ActorRef`]: returns a ctx-bound [`WasmActorMailbox`]
-    /// addressing the reference's id, carrying this actor's own id as the send's
-    /// `from` and a borrow of the inline registry the send routes through.
-    #[must_use]
-    pub fn to<R: Addressable>(&self, target: &ActorRef<R>) -> WasmActorMailbox<'_, R> {
-        WasmActorMailbox::new(target.id().0, self.mailbox, self.inline)
     }
 
     /// ADR-0063 fail-fast: bring the substrate down with `reason`.

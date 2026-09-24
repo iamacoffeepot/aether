@@ -10,55 +10,27 @@
 //! FFI bodies call `crate::wasm::bridge::mail::send_mail`, native bodies hit
 //! `NativeBinding`'s inherent `send_mail`.
 //!
-//! `actor::<R>()` retired from this trait because the returned
-//! typed-mailbox handle was per-side. The wasm ctx keeps it as an inherent
-//! method returning [`crate::wasm::WasmActorMailbox<R>`]; the native ctx
-//! sends through its flat verbs instead and has no handle. Generic-bounded
-//! code that needs cross-impl sends uses the trait's [`MailSender::send`]
-//! / [`MailSender::send_many`] methods.
+//! The typed sends are not on this trait. Each ctx typed by its actor carries
+//! them as inherent flat verbs (`ctx.send::<R>` and its siblings), bounded on
+//! the actor's declared dependency (ADR-0232), and sends through a held proof
+//! with its inherent `send_to`. What stays here is the by-proof detached send
+//! and the correlation accessor, which the stored HTTP stream handles reach
+//! through the trait.
 
 use aether_data::ActorMail;
 
-use crate::model::{CallerAddressable, HandlesKind, Singleton};
 use crate::reference::ErasedActorRef;
 
-/// Outbound-mail surface every actor ctx exposes.
+/// Outbound-mail surface every actor ctx exposes: the correlation accessor
+/// and the by-proof detached send.
 ///
-/// `R: Singleton + CallerAddressable + HandlesKind<K>` is the compile-time
-/// gate: trying to send a kind the receiver doesn't handle is rejected at the
-/// call site, not silently warn-dropped at runtime. The receiver's resolver
-/// selects which runtime routing mailbox seeds `R::resolve` (ADR-0099 §5,
-/// ADR-0119): root-pinned actors ignore lineage, caller-relative children use
-/// the current mailbox, and an [`Embedded`](crate::Embedded) peer uses the
-/// logical parent mailbox. This is the same lineage-aware path
-/// `ctx.actor::<R>()` walks, so a hosted receiver routes to the folded id, not
-/// the flat `hash(R::NAMESPACE)`. The tagged mailbox already preserves every
-/// routing bit a later fold consumes; no untagged carry or lookup is needed.
-/// Wire shape (cast or structured) follows `Kind::encode_into_bytes` (issue
-/// #240).
+/// The typed sends live on each ctx as inherent flat verbs rather than here.
+/// A flat verb compiles only on a ctx typed by an actor that declares the
+/// receiver `R` with `#[actor(depends(R))]`, and only for a kind `R` handles,
+/// so an undeclared or wrong-kind send is rejected at the call site rather
+/// than warn-dropped at runtime (ADR-0232). Wire shape (cast or structured)
+/// follows `Kind::encode_into_bytes` (issue #240).
 pub trait MailSender {
-    /// Send a single payload of kind `K` to the singleton instance of
-    /// receiver actor `R`, resolved via `R::resolve` against the routing scope
-    /// selected by its resolver (ADR-0099 §5).
-    ///
-    /// Inherits the handler's in-flight causal chain by default
-    /// (ADR-0080 §7): the recipient's work settles back into the
-    /// caller's chain, so an outbound send now arms a settlement
-    /// obligation rather than truncating the trace at the send. The
-    /// rare fire-and-forget send that should start its own chain goes
-    /// through [`Self::send_detached`].
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail;
-
-    /// Send a slice of cast-shape payloads as a contiguous batch.
-    /// Cast-only — structured kinds have no efficient batched wire shape.
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit;
-
     /// Correlation id the host minted for this actor's most recent
     /// outbound `send_mail` (ADR-0042). `0` before any send.
     /// Universal mail-level metadata — every send mints a
@@ -68,46 +40,27 @@ pub trait MailSender {
     /// correlation when the reply arrives in a later handler invocation.
     fn prev_correlation(&self) -> u64;
 
-    /// ADR-0080 §7 fire-and-forget escape hatch: send `payload` to `R`
-    /// without inheriting the caller's in-flight causal chain. The
-    /// recipient processes the mail as the root of a new tree.
+    /// Fire-and-forget send of `payload` to the proven `target`, minting a
+    /// fresh causal root rather than inheriting the caller's in-flight chain
+    /// (ADR-0080 §7).
     ///
-    /// **Fire-and-forget only.** Detached sends mint no parent linkage,
-    /// so any reply the recipient issues inherits the *recipient's*
-    /// tree rather than the sender's. Reply-correlated requests always
-    /// go through [`Self::send`].
+    /// The send grid crosses typed / by-proof with inherit / detached. The
+    /// typed cells are each ctx's inherent flat verbs (`send::<R>` and
+    /// `send_detached::<R>`, bounded on a declared dependency); the by-proof
+    /// cells are the inherent `send_to` and this method, its detached
+    /// partner. There is no by-name column, because text is not a proof
+    /// (ADR-0230). The by-proof cell takes the dispatch-stamped proof rather
+    /// than a position anyone can compute, so a hand-built id does not reach
+    /// it. Its motivating consumer is the stored stream handle that answers
+    /// whoever dispatched to a handler (ADR-0133): the counterparty is
+    /// `ctx.sender()`, captured at runtime, so a typed `R` can't name it and a
+    /// fresh root is wanted per send. The kind is unchecked because that
+    /// counterparty is deliberately untyped — a mock or a middleware stands in
+    /// for the cap.
     ///
-    /// Required rather than defaulted: every implementation must explicitly
-    /// choose the causal behavior that mints a fresh root for detached mail.
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail;
-
-    /// By-id counterpart to [`Self::send_detached`]: fire-and-forget send
-    /// of `payload` to the proven `target`, minting a fresh causal root
-    /// rather than inheriting the caller's in-flight chain (ADR-0080 §7).
-    ///
-    /// This fills the last cell of the send grid — typed / by-proof crossed
-    /// with inherit / detached. [`Self::send`] and [`Self::send_detached`]
-    /// are the typed pair; there is no by-name column, because text is not
-    /// a proof (ADR-0230). The inherit-by-proof send is each ctx's inherent
-    /// `send_to`, and this is its detached partner. The by-proof cell takes the
-    /// dispatch-stamped proof (ADR-0230) rather than a position anyone can
-    /// compute, so a hand-built
-    /// [`MailboxId`](aether_data::MailboxId) does not reach it; the inherent
-    /// `send_to` is its inherit twin and narrows the same way when its
-    /// consumer migrates. Its motivating consumer remains the stored stream
-    /// handle that answers whoever dispatched to a handler (ADR-0133): the
-    /// counterparty is `ctx.sender()`, captured at runtime, so a typed `R`
-    /// can't name it and a fresh root is wanted per send. The kind is
-    /// unchecked because that counterparty is deliberately untyped — a mock
-    /// or a middleware stands in for the cap.
-    ///
-    /// **Fire-and-forget only.** Same contract as [`Self::send_detached`]:
-    /// the send mints no parent linkage, so any reply the recipient issues
-    /// inherits the *recipient's* tree rather than the sender's. Reply-
-    /// correlated requests do not use it.
+    /// **Fire-and-forget only.** A detached send mints no parent linkage, so
+    /// any reply the recipient issues inherits the *recipient's* tree rather
+    /// than the sender's. Reply-correlated requests do not use it.
     ///
     /// Required rather than defaulted: there is no by-id inherit method on
     /// this trait to delegate to (the inherit-by-id send is the per-ctx

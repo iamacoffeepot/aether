@@ -30,7 +30,6 @@ pub mod slot;
 use aether_data::{ActorId, Kind, MailboxId, Tag, fold_lineage, with_tag};
 
 pub use self::contract::{Contract, Contracts, ReplyShape, Silent, SilentRow, Undeclared};
-use self::ctx::Erased;
 pub use self::publish::{Publisher, Publishes};
 pub use self::sendable::SendableTo;
 
@@ -254,9 +253,9 @@ impl DependencyResolver for Embedded {
 
 /// An actor that can be addressed by bare type from a peer's ctx, because its
 /// [`Resolver`](Addressable::Resolver) is [`CallerScoped`] (ADR-0119
-/// amendment). Bounds every carry-passing send surface —
-/// [`MailSender::send`](crate::MailSender::send), `ctx.actor::<R>()`, and their
-/// batched / detached siblings — beside the cardinality marker.
+/// amendment). Bounds every flat typed send verb (`ctx.send::<R>` and its
+/// batched / tracked / detached siblings) and `ctx.actor_ref::<R>()` beside
+/// the cardinality marker.
 ///
 /// Auto-implemented from the resolver with the constraint in **supertrait
 /// position** so it elaborates to call sites, the same mechanism
@@ -306,7 +305,7 @@ pub trait Addressable: Sized + Send + 'static {
     /// `caller_carry` (ADR-0099 §5), produced by delegating to the selected
     /// [`Resolver`](Self::Resolver). Declared once here, never overridden —
     /// variation lives in the chosen resolver, not in this method (ADR-0119).
-    /// `ctx.actor::<R>()` calls this with `()`; a spawn places a keyed
+    /// `ctx.actor_ref::<R>()` calls this with `()`; a spawn places a keyed
     /// instance by calling it with the borrowed subname.
     #[must_use]
     fn resolve(caller_carry: u64, args: <Self::Resolver as Resolve>::Args<'_>) -> MailboxId {
@@ -325,7 +324,7 @@ pub trait Root: Addressable {}
 /// The mailbox of a root-pinned singleton, resolved with no caller in hand.
 ///
 /// Boot and driver code addresses a chassis capability before any actor ctx
-/// exists, so it cannot reach the target through `ctx.actor::<C>()`. It gets
+/// exists, so there is no flat verb to reach the target through. It gets
 /// the same address anyway: [`One`] pins to the root and ignores the caller's
 /// carry (ADR-0099 §3), so the seed is the empty carry and the answer is
 /// the depth-1 fixed point — `resolve` stays the single derivation rather
@@ -451,74 +450,6 @@ where
 {
 }
 
-mod reaches_sealed {
-    /// Private supertrait sealing [`super::Reaches`] — only the two impls in
-    /// the parent module can implement it, so the set of ctx actors that may
-    /// address `R` through `ctx.actor` is closed.
-    pub trait Sealed<R> {}
-}
-
-/// A ctx whose actor parameter is `Self` may address `R` through `ctx.actor`
-/// (ADR-0230).
-///
-/// Sealed: the only implementors are [`Erased`], which reaches every singleton
-/// `R` (the old door, kept until the contract step), and every
-/// `A: Addressable + DependsOn<R>`, whose load was refused unless `R` was
-/// `Live`. The same call text that was the old door on an erased ctx is the
-/// proven one on a typed ctx.
-///
-/// A helper that calls `ctx.actor::<R>()` states its need as
-/// `fn draw<A: Reaches<RenderCapability>>(ctx: &mut WasmCtx<'_, A>)`: an erased
-/// caller satisfies it today, and a caller typed by its actor satisfies it
-/// exactly when that actor declares `depends(R)`. A helper that calls a flat
-/// verb (`ctx.send::<R>`) states `A: DependsOn<R>` instead, since the erased
-/// ctx has no flat send.
-///
-/// The [`Addressable`] bound is spelled out even though [`DependsOn`] implies
-/// it as a supertrait: without it the two impls overlap. A downstream crate
-/// could write `unsafe impl DependsOn<Local> for Erased` — the local `R` satisfies
-/// the orphan rule — but it cannot write `impl Addressable for Erased`, a
-/// foreign trait for a foreign type, and this crate writes neither. So
-/// [`Erased`] provably never satisfies the blanket impl's bounds.
-///
-/// A typed ctx calling `actor::<R>()` for an `R` it has not declared does not
-/// type-check:
-///
-/// ```compile_fail,E0277
-/// use aether_actor::{Addressable, One, WasmCtx};
-///
-/// struct Undeclared;
-///
-/// impl Addressable for Undeclared {
-///     const NAMESPACE: &'static str = "example.undeclared";
-///     type Resolver = One;
-/// }
-///
-/// struct Lonely;
-///
-/// impl Addressable for Lonely {
-///     const NAMESPACE: &'static str = "example.lonely";
-///     type Resolver = One;
-/// }
-///
-/// fn missing_dependency(ctx: &WasmCtx<'_, Lonely>) {
-///     let _ = ctx.actor::<Undeclared>();
-/// }
-/// ```
-pub trait Reaches<R: Singleton + CallerAddressable>: reaches_sealed::Sealed<R> {}
-
-impl<R: Singleton + CallerAddressable> reaches_sealed::Sealed<R> for Erased {}
-impl<R: Singleton + CallerAddressable> Reaches<R> for Erased {}
-
-impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> reaches_sealed::Sealed<R> for A where
-    R::Resolver: DependencyResolver
-{
-}
-impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> Reaches<R> for A where
-    R::Resolver: DependencyResolver
-{
-}
-
 /// The boot/teardown capability an actor composes onto its identity
 /// (iamacoffeepot/aether#2048). The lifecycle was declared twice —
 /// once on [`crate::WasmActor`] (wasm/guest) and once on
@@ -548,7 +479,7 @@ impl<A: Addressable + DependsOn<R>, R: Singleton + CallerAddressable> Reaches<R>
 /// `type InitCtx<'a> = WasmInitCtx<'a>; type Ctx<'a> = WasmCtx<'a, Self>;` (or
 /// the native pair, `NativeCtx<'a, Self>`), so a `wire`/`unwire` hook receives
 /// a ctx typed by its actor and reaches the concrete ctx's inherent methods
-/// (`ctx.actor::<R>().send(&p)`) with no generic bound at the call site. `InitError` is pinned per transport subtrait
+/// (`ctx.send::<R>(&p)`) with no generic bound at the call site. `InitError` is pinned per transport subtrait
 /// (`WasmActor: Lifecycle<_, InitError = ActorInitError>`), so existing generic
 /// call sites keep seeing a concrete error type.
 pub trait Lifecycle<S> {
@@ -618,10 +549,10 @@ pub trait Lifecycle<S> {
 ///
 /// Root-scoped singletons — every chassis cap, including catch-alls like
 /// `BroadcastCapability` — have full name `== NAMESPACE`, so a sender
-/// type-addresses them with `ctx.actor::<R>()`. A singleton hosted inside a
-/// parent resolves from the runtime-retained parent mailbox. A loaded
-/// component is reached by type: `ctx.actor::<R>()` folds its default load
-/// name (`R::NAMESPACE`). Replica 0 claims the bare base name and the rest
+/// declares the root cap as a dependency and mails it by type with
+/// `ctx.send::<R>(&k)`. A singleton hosted inside a parent resolves from the
+/// runtime-retained parent mailbox. A loaded component is reached by type:
+/// `ctx.actor_ref::<R>()` folds its default load name (`R::NAMESPACE`). Replica 0 claims the bare base name and the rest
 /// are `base-1`, `base-2`, …, so the bare type reaches the first; any other
 /// replica is reached through the reference its load proved.
 ///
@@ -745,9 +676,10 @@ pub fn validate_namespace_segment(s: &str) -> Result<(), NamespaceError> {
 /// `#[actor]` proc-macro alongside the dispatch table — one impl per
 /// handler kind. Authors never write these by hand.
 ///
-/// Gates `ActorMailbox<'_, R, T>::send::<K>` (constructed via
-/// `ctx.actor::<R>()` or `ctx.to(&reference)`) so the compiler
-/// rejects sends to a kind the receiver doesn't handle.
+/// Gates [`SendableTo<R>`] on the flat typed send verbs (`ctx.send::<R>`)
+/// and [`Target<K>`](crate::Target) on [`ActorRef<R>`](crate::ActorRef)
+/// (`ctx.send_to(&reference, &k)`), so the compiler rejects sends to a kind
+/// the receiver doesn't handle.
 /// The single source of truth is the handler list on the actor's
 /// `impl` block; adding a `#[handler]` updates senders' compile-time
 /// checks automatically. ADR-0075 §Decision 1.

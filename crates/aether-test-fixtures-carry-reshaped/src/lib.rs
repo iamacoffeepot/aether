@@ -35,7 +35,7 @@ impl WasmActor for CarryRequester {
     #[handler::single]
     fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult) {
         if ctx.take_context::<CarriedContext>().is_some_and(|context| context.tag == reply.tag) {
-            ctx.actor::<SubstrateHarnessObserver>().send(&CarriedReplyMatched);
+            ctx.send::<SubstrateHarnessObserver>(&CarriedReplyMatched);
         }
     }
 }

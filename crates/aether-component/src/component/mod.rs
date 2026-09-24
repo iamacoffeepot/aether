@@ -112,13 +112,7 @@ mod runtime;
 
 #[cfg(test)]
 mod tests {
-    // These tests construct the host carry and assert the canonical
-    // trampoline-address fold against the flat name hash — the primitive is
-    // the reference value under test, not sibling-cap addressing.
-    #![allow(clippy::disallowed_methods)]
-    use aether_actor::wasm::NO_INBOUND_SOURCE;
-    use aether_actor::wasm::inline::Registry as InlineRegistry;
-    use aether_actor::{Addressable, Embedded, Erased, Manual, Resolve, WasmCtx};
+    use aether_actor::{Addressable, Embedded};
     use aether_substrate::mail::registry::{Registry, noop_handler};
     use aether_substrate::testing::boot_authority;
 
@@ -134,48 +128,15 @@ mod tests {
 
     /// Tripwire: a loaded component's id is the ADR-0099 §3 lineage fold over
     /// `[aether.component, aether.embedded:<name>]`, and the cap registers its
-    /// trampoline at that id. Bare-type addressing from a co-hosted ctx and the
-    /// declared host-to-trampoline edge must therefore both land on it — a
-    /// change to the fold that misses either one splits the address the host
-    /// registers from the address senders compute.
+    /// trampoline at that id. The bare-type fold a co-hosted caller computes
+    /// from its runtime parent and the declared host-to-trampoline edge must
+    /// therefore both land on it — a change to the fold that misses either one
+    /// splits the address the host registers from the address senders compute.
     #[test]
     fn typed_route_composes_the_canonical_trampoline_address() {
-        // The ctx binding (sender + inline registry) is irrelevant to id
-        // resolution, so a throwaway registry and a zero sender suffice
-        // (issue 1987).
-        let registry = InlineRegistry::new();
         let parent = ComponentHostCapability::resolve(0, ());
-        let caller = Embedded::resolve(parent.0, "test.component.caller", ());
-        registry.set_self_id(caller.0);
-        registry.set_parent_id(parent.0);
-        let trampoline = WasmTrampoline::resolve(parent.0, Guest::NAMESPACE);
-        let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller.0, &registry, NO_INBOUND_SOURCE);
 
-        assert_eq!(ctx.actor::<Guest>().mailbox_id(), trampoline);
-    }
-
-    /// Tripwire: typed lookup follows the parent mailbox injected into each
-    /// runtime instance, not the caller's own. The same guest type therefore
-    /// resolves beneath nested host instances and changes address when
-    /// re-parented.
-    #[test]
-    fn typed_lookup_follows_nested_and_reparented_runtime_parents() {
-        let parent_a = aether_data::mailbox_id_from_path("test.root/test.composite:a");
-        let parent_b = aether_data::mailbox_id_from_path("test.root/test.composite:b");
-        let caller_a = Embedded::resolve(parent_a.0, "caller", ());
-        let caller_b = Embedded::resolve(parent_b.0, "caller", ());
-        let registry_a = InlineRegistry::new();
-        registry_a.set_self_id(caller_a.0);
-        registry_a.set_parent_id(parent_a.0);
-        let registry_b = InlineRegistry::new();
-        registry_b.set_self_id(caller_b.0);
-        registry_b.set_parent_id(parent_b.0);
-        let ctx_a: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller_a.0, &registry_a, NO_INBOUND_SOURCE);
-        let ctx_b: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(caller_b.0, &registry_b, NO_INBOUND_SOURCE);
-
-        assert_eq!(ctx_a.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_a.0, Guest::NAMESPACE, ()));
-        assert_eq!(ctx_b.actor::<Guest>().mailbox_id(), Embedded::resolve(parent_b.0, Guest::NAMESPACE, ()));
-        assert_ne!(ctx_a.actor::<Guest>().mailbox_id(), ctx_b.actor::<Guest>().mailbox_id());
+        assert_eq!(<Guest as Addressable>::resolve(parent.0, ()), WasmTrampoline::resolve(parent.0, Guest::NAMESPACE));
     }
 
     /// The external registry boundary expands short component paths

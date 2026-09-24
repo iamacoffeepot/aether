@@ -1,0 +1,23 @@
+{
+  "chassis": "desktop",
+  "title": "aether",
+  "components": [
+    {
+      "package": "aether-kit",
+      "export": "aether.kit.camera"
+    },
+    {
+      "package": "aether-kit",
+      "export": "aether.kit.camera-controller",
+      "config_json": "controller.json"
+    },
+    {
+      "package": "aether-kit",
+      "export": "aether.kit.mesh"
+    },
+    {
+      "package": "aether-demo",
+      "export": "aether.demo"
+    }
+  ]
+}

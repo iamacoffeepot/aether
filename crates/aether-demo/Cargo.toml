@@ -1,0 +1,42 @@
+[package]
+name = "aether-demo"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# The release demo's bring-up: one throwaway wasm actor that, loaded last in
+# the demo's boot list, sends the kit mesh viewer the same `aether.kit.mesh.load`
+# an operator would. The depot spec, the boot manifest, the controller's
+# init-config and the README live beside this file, so the whole demo is one
+# deletable directory. The `rlib` lets the tests name the actor type.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+# The demo names `MeshViewer` by bare type to declare it a dependency and send
+# it the load, so it needs the kit's actor impls. `library` strips the kit's own
+# `export!` entry surface (one `export!` per wasm module), leaving the impls
+# without a second `receive_p32` / `init` colliding with this crate's.
+# `xtask dist` builds each component package in its own cargo invocation, so
+# the feature cannot unify into the kit's own cdylib build.
+aether-kit = { path = "../aether-kit", features = ["library"] }
+aether-kinds = { path = "../aether-kinds" }
+tracing = { workspace = true, default-features = false }
+
+# `tests/boot.rs` boots the checked-in boot manifest on the real headless
+# chassis; `tests/scenario.rs` drives the same composition through a rendering
+# `SubstrateHarness` and reads the checked-in controller config.
+[dev-dependencies]
+aether-chassis = { path = "../aether-chassis" }
+aether-chassis-headless = { path = "../aether-chassis-headless" }
+aether-substrate = { path = "../aether-substrate" }
+aether-data = { path = "../aether-data" }
+aether-harness-substrate = { path = "../aether-harness-substrate" }
+aether-harness-substrate-capture = { path = "../aether-harness-substrate-capture" }
+clap = { workspace = true }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true

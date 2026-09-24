@@ -11,7 +11,7 @@
 //! (where the centroid-vs-normal test is well-defined for the shape).
 
 use aether_math::Vec3;
-use aether_mesh::{mesh, parse};
+use aether_mesh::{MeshError, mesh, parse};
 use std::collections::BTreeSet;
 
 fn tri_normal(tri: &aether_mesh::Triangle) -> Vec3 {
@@ -138,19 +138,31 @@ fn wedge_uses_six_unique_vertices() {
 // sphere
 
 #[test]
-fn sphere_triangle_count_matches_lathe_pole_collapse() {
-    // n+1 profile points, n profile edges. Two pole edges (first +
-    // last) emit 1 tri/segment; the remaining n-2 edges emit
-    // 2 tris/segment. Total = (2*(n-2) + 2) * segments = (2n - 2) * n.
-    // For subdivisions = 8: (16 - 2) * 8 = 112.
-    let ast = parse("(sphere 1 8 :color 0)").expect("test setup: sphere DSL parses");
-    assert_eq!(mesh(&ast).expect("test setup: sphere meshes").len(), (2 * 8 - 2) * 8);
+fn sphere_triangle_count_is_icosphere_face_count() {
+    // Every icosphere face lies on its own plane, so cleanup merges
+    // nothing and each level keeps exactly 20 * 4^level triangles.
+    // Level 2 at radius 0.2 is the globe in `examples/lamp_post.dsl`.
+    for (text, level) in [
+        ("(sphere 1 0 :color 0)", 0),
+        ("(sphere 1 1 :color 0)", 1),
+        ("(sphere 0.2 2 :color 0)", 2),
+        ("(sphere 1 3 :color 0)", 3),
+    ] {
+        let ast = parse(text).expect("test setup: sphere DSL parses");
+        assert_eq!(mesh(&ast).expect("sphere meshes").len(), 20 * 4_usize.pow(level), "{text}");
+    }
+}
+
+#[test]
+fn sphere_subdivisions_above_cap_is_an_error() {
+    let ast = parse("(sphere 1 5 :color 0)").expect("test setup: sphere DSL parses");
+    assert!(matches!(mesh(&ast), Err(MeshError::SphereSubdivisionsTooHigh { subdivisions: 5, max: 4 })));
 }
 
 #[test]
 fn sphere_vertices_lie_on_radius() {
     let radius: f32 = 1.5;
-    let ast = parse("(sphere 1.5 12 :color 0)").expect("test setup: sphere DSL parses");
+    let ast = parse("(sphere 1.5 3 :color 0)").expect("test setup: sphere DSL parses");
     let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         for v in tri.vertices {
@@ -162,7 +174,7 @@ fn sphere_vertices_lie_on_radius() {
 
 #[test]
 fn sphere_outward_normals() {
-    let ast = parse("(sphere 1 12 :color 0)").expect("test setup: sphere DSL parses");
+    let ast = parse("(sphere 1 3 :color 0)").expect("test setup: sphere DSL parses");
     let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         let n = tri_normal(tri);
@@ -228,30 +240,34 @@ fn extrude_with_under_three_profile_points_emits_nothing() {
 // mirror
 
 #[test]
-fn mirror_x_reflects_box_across_yz_plane() {
-    // Box centered at (5, 0, 0), mirrored across YZ plane → centered
-    // at (-5, 0, 0).
+fn mirror_x_emits_box_and_its_reflection() {
+    // Box centered at (5, 0, 0), mirrored across the YZ plane: the
+    // original stays at (5, 0, 0) and its reflection lands at (-5, 0, 0).
     let ast = parse("(mirror x (translate (5 0 0) (box 1 1 1 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
-    assert_eq!(tris.len(), 12);
-    for tri in &tris {
-        for v in tri.vertices {
-            assert!(v.x >= -5.51 && v.x <= -4.49, "mirror-x vertex x out of range: {v:?}");
-        }
-    }
+    assert_eq!(tris.len(), 24);
+    let original = tris.iter().filter(|tri| tri.vertices.iter().all(|v| v.x >= 4.49 && v.x <= 5.51)).count();
+    let reflected = tris.iter().filter(|tri| tri.vertices.iter().all(|v| v.x >= -5.51 && v.x <= -4.49)).count();
+    assert_eq!(original, 12, "original box triangles");
+    assert_eq!(reflected, 12, "reflected box triangles");
 }
 
 #[test]
 fn mirror_preserves_outward_winding() {
-    // After reflection + winding swap, normals should still point
-    // outward of the reflected box (toward the new centroid at -5).
+    // Both copies stay outward-wound: each triangle's normal points
+    // away from the center of the box it belongs to — (5, 0, 0) for the
+    // original, (-5, 0, 0) for the re-wound reflection.
     let ast = parse("(mirror x (translate (5 0 0) (box 2 2 2 :color 0)))").expect("test setup: mirror DSL parses");
     let tris = mesh(&ast).expect("test setup: mirrored box meshes");
     for tri in &tris {
         let n = tri_normal(tri);
         let c = tri_centroid(tri);
-        // Reflected box center is at (-5, 0, 0); outward = c - center.
-        let outward = [c.x + 5.0, c.y, c.z];
+        let center_x = if c.x > 0.0 {
+            5.0
+        } else {
+            -5.0
+        };
+        let outward = [c.x - center_x, c.y, c.z];
         let dot = n.z.mul_add(outward[2], n.x.mul_add(outward[0], n.y * outward[1]));
         assert!(dot > 0.0, "mirror face normal points inward for triangle {tri:?}");
     }
@@ -296,7 +312,7 @@ fn round_trip_full_v1_vocab() {
         (cylinder 1 2 12 :color 0)
         (cone 0.5 1 8 :color 1)
         (wedge 1 1 1 :color 2)
-        (sphere 0.7 8 :color 3)
+        (sphere 0.7 2 :color 3)
         (extrude ((-1 -1) (1 -1) (1 1) (-1 1)) 0.5 :color 4)
         (mirror x (translate (2 0 0) (box 1 1 1 :color 5)))
         (array 3 (1.5 0 0) (box 0.5 0.5 0.5 :color 6)))";

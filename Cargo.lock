@@ -518,6 +518,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-demo"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-chassis",
+ "aether-chassis-headless",
+ "aether-data",
+ "aether-harness-substrate",
+ "aether-harness-substrate-capture",
+ "aether-kinds",
+ "aether-kit",
+ "aether-substrate",
+ "clap",
+ "serde_json",
+ "tracing",
+]
+
+[[package]]
 name = "aether-derive"
 version = "0.3.0-alpha"
 dependencies = [
