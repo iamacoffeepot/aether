@@ -61,9 +61,7 @@ impl Reactor for Witness {
 
 export!(
     default = Probe,
-    Publisher,
-    Witness,
-    Sink,
+    public = [Publisher, Witness, Sink],
     generators = [aether_bloomery_bundle::bundle],
 );
 

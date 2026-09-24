@@ -1,6 +1,6 @@
 //! ADR-0096 / ADR-0097 fixture: a multi-actor module. Two `WasmActor`
-//! types in one crate, exported together via `export!(RootManager,
-//! Panel)`. Proves multi-type coexistence in a single wasm module (no
+//! types in one crate, exported together via `export!(public = [RootManager,
+//! Panel])`. Proves multi-type coexistence in a single wasm module (no
 //! duplicate-symbol collision, which ADR-0014 §4 previously forbade),
 //! that the entry type (the first export, `RootManager`) loads through
 //! an unmodified host, that the host can select the non-entry export

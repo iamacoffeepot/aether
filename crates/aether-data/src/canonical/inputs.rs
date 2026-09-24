@@ -135,7 +135,7 @@ pub const fn inputs_actor_boundary_len(namespace: &str) -> usize {
 /// Serialize an `InputsRecord::ActorBoundary` into a fixed-size array
 /// sized by `inputs_actor_boundary_len`. Exact aether-wire shape for
 /// `InputsRecord::ActorBoundary { namespace }` — the per-actor group
-/// marker `export!(A, B, …)` writes ahead of each type's records.
+/// marker `export!(public = [A, B, …])` writes ahead of each type's records.
 #[must_use]
 pub const fn write_inputs_actor_boundary<const N: usize>(namespace: &str) -> [u8; N] {
     let mut out = [0u8; N];

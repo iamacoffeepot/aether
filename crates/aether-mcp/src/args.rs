@@ -624,7 +624,7 @@ pub struct LoadComponentArgs {
     /// multi-actor module, named by its `Addressable::NAMESPACE` (e.g.
     /// `"ui.panel"`). Omit only when the module declares a default: the
     /// sole type in a single-actor module or the type selected by
-    /// `export!(default = A, ...)`. A defaultless `export!(A, B, ...)`
+    /// `export!(default = A, ...)`. A defaultless `export!(public = [A, B, ...])`
     /// requires an explicit selection. A `module@actor` selector
     /// populates this from its `@actor` half. An export the module doesn't
     /// declare comes back as a `LoadResult::Err`.

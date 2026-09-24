@@ -426,7 +426,8 @@ fn reconstruct_does_not_run_wire() {
 fn spawn_inline_rejects_unavailable_parent_identity_before_host_call() {
     let registry = Registry::new();
     registry.set_self_id(0x7010);
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x7010, &registry, NO_INBOUND_SOURCE);
+    let mut erased: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x7010, &registry, NO_INBOUND_SOURCE);
+    let ctx = erased.__for_actor::<NestingParent>();
 
     let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());
     assert!(
@@ -448,7 +449,8 @@ fn spawn_inline_accepts_any_recorded_parent_type() {
     let registry = Registry::new();
     registry.set_self_id(0x7020);
     registry.set_entry_actor_tag(ActorTypeTag::of::<LifecycleProbe>());
-    let ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x7020, &registry, NO_INBOUND_SOURCE);
+    let mut erased: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(0x7020, &registry, NO_INBOUND_SOURCE);
+    let ctx = erased.__for_actor::<LifecycleProbe>();
 
     let result = ctx.spawn_inline::<SucceedingChild>(Subname::Named("bad:name"), &());
     assert!(

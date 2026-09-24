@@ -46,4 +46,4 @@ impl WasmActor for InputLogger {
     fn on_mouse_move(&mut self, _ctx: &mut WasmCtx<'_>, _m: MouseMove) {}
 }
 
-aether_actor::export!(InputLogger);
+aether_actor::export!(public = [InputLogger]);

@@ -34,7 +34,7 @@ pub fn pieces(reactors: &[ReactorEntry]) -> RolePieces {
     let items = quote! {
         #(#sections)*
     };
-    RolePieces { field_name: format_ident!("reactors"), field, init, handlers, items }
+    RolePieces { field_name: format_ident!("reactors"), field, init, handlers, items, spawns: Vec::new() }
 }
 
 fn expand_handlers(reactor: &TokenStream2) -> TokenStream2 {

@@ -2,7 +2,7 @@
 
 use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
-use syn::{FnArg, ImplItem, Pat, Type};
+use syn::{FnArg, ImplItem, Pat, ReturnType, Type};
 
 use crate::check::ApiBinding;
 use crate::export_desc::emit_program_export_desc;
@@ -10,7 +10,7 @@ use crate::parse::ProgramDef;
 
 pub fn expand(def: ProgramDef) -> TokenStream2 {
     let export_desc = emit_program_export_desc(&def);
-    let ProgramDef { mut item, self_ty, name: _, intent: _, input: _, result: _, async_run, sampled, apis } = def;
+    let ProgramDef { mut item, self_ty, name: _, intent: _, async_run, sampled, apis } = def;
     let run = item
         .items
         .iter()
@@ -53,6 +53,9 @@ fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[Ap
     let input = &run.sig.inputs[0];
     let env_ident = env_ident(&run.sig.inputs[1]);
     let env_ty = owned_env_type(&run.sig.inputs[1]);
+    let ReturnType::Type(_, output) = &run.sig.output else {
+        unreachable!("parse requires an async run's return type");
+    };
     let target_checks = apis.iter().map(|ApiBinding { ty, name, .. }| {
         quote! {
             const _: () = ::aether_bloomery_program::__macro_internals::check_target::<
@@ -80,9 +83,7 @@ fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[Ap
             fn run(
                 #input,
                 mut #env_ident: #env_ty,
-            ) -> impl ::core::future::Future<
-                Output = ::core::result::Result<Self::Result, ::aether_bloomery_program::Refusal>,
-            > + Send + 'static {
+            ) -> impl ::core::future::Future<Output = #output> + Send + 'static {
                 async move {
                     #(#bindings)*
                     #block

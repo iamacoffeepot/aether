@@ -85,8 +85,7 @@ macro_rules! RequireSentinel {
 }
 export!(
     default = Probe,
-    Publisher,
-    Witness,
+    public = [Publisher, Witness],
     generators = [InjectSentinel, RequireSentinel, aether_bloomery_bundle::bundle],
 );
 fn main() {}

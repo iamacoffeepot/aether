@@ -18,6 +18,6 @@ impl WasmActor for Probe {
 
 type Alias = Probe;
 
-export!(Alias, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Alias], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

@@ -1,0 +1,25 @@
+error: `async fn run` must return `Result<Self::Result, Refusal>`
+  --> tests/ui/fail_async_run_no_return.rs:26:5
+   |
+26 |     async fn run(input: Self::Input, _env: &mut Env<Async>) {
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `aether_bloomery_kinds::Mode`
+ --> tests/ui/fail_async_run_no_return.rs:1:5
+  |
+1 | use aether_bloomery_kinds::Mode;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused imports: `Async` and `Env`
+ --> tests/ui/fail_async_run_no_return.rs:2:31
+  |
+2 | use aether_bloomery_program::{Async, Env, Program, program};
+  |                               ^^^^^  ^^^
+
+warning: unused import: `Program`
+ --> tests/ui/fail_async_run_no_return.rs:2:43
+  |
+2 | use aether_bloomery_program::{Async, Env, Program, program};
+  |                                           ^^^^^^^

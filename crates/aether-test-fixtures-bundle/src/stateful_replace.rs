@@ -1,8 +1,8 @@
 //! ADR-0101 fixture: a multi-actor module whose entry export carries
 //! state across `replace_component` through the `on_dehydrate` /
 //! `on_rehydrate` lifecycle hooks. Those hooks are now `WasmActor`
-//! defaults (no `Replaceable` subtrait, no `export!(X, replaceable)`
-//! flag), so a boxed multi-actor instance preserves state across a swap
+//! defaults (no `Replaceable` subtrait, no `replaceable` flag on
+//! `export!`), so a boxed multi-actor instance preserves state across a swap
 //! exactly as a single-actor one does — the case the multi-actor arm
 //! used to drop by shipping the hooks as no-ops.
 //!
@@ -13,7 +13,7 @@
 //! with the same wasm at the same mailbox id keeps the count instead of
 //! resetting to the fresh-`init` zero. `Sidecar` is a second trivial
 //! export that makes this a genuine multi-actor module
-//! (`export!(Counter, Sidecar)`), exercising the boxed `ErasedWasmActor`
+//! (`export!(public = [Counter, Sidecar])`), exercising the boxed `ErasedWasmActor`
 //! hot-swap path.
 //!
 //! `RehydrateTrap` is a failure-injection export (#6134): it keeps every

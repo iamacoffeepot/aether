@@ -72,6 +72,12 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
                 "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
             ));
         }
+        if !opts.spawns.is_empty() {
+            return Err(syn::Error::new_spanned(
+                &item.self_ty,
+                "`spawns(...)` declares Wasm inline children; native actors spawn through `spawn_child`",
+            ));
+        }
         validate_native_placement(&item.self_ty, opts)?;
         reject_generic_native_lineage(&item.generics, opts)?;
     }
@@ -1305,6 +1311,12 @@ pub fn expand_struct_hosted_actor(item: &ItemStruct, opts: &ActorOpts) -> syn::R
         return Err(syn::Error::new_spanned(
             &item.ident,
             "`composable` is available only to instanced Wasm actors; native actors must declare exact `child_of(...)` permissions",
+        ));
+    }
+    if !opts.spawns.is_empty() {
+        return Err(syn::Error::new_spanned(
+            &item.ident,
+            "`spawns(...)` declares Wasm inline children; native actors spawn through `spawn_child`",
         ));
     }
     validate_native_placement(&item.ident, opts)?;

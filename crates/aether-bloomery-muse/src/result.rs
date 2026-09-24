@@ -113,8 +113,12 @@ pub enum TurnOutcome {
     Incomplete { text: Ref<Utf8Text>, reason: Detail, usage: TurnUsage },
     /// The model refused; the refusal text is kept instead of an answer.
     Declined { refusal: Ref<Utf8Text>, usage: TurnUsage },
-    /// A non-2xx status, or a vendor status of `failed` or `cancelled`. The vendor's error is in the body.
+    /// A non-transient non-2xx status, or a vendor status of `failed` or `cancelled`. The vendor's error is in the body.
     Rejected,
+    /// The vendor refused for now (rate limit or overload); nothing was bought, and a new request may succeed.
+    ///
+    /// `retry_after_secs` is the vendor's `Retry-After` delay in seconds, when it sent one as a number.
+    Transient { retry_after_secs: Option<u32> },
     /// A 2xx body that does not read as a finished response. The body is kept.
     Unreadable,
 }

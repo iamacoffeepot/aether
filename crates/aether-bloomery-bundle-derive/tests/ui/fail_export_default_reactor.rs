@@ -32,10 +32,6 @@ impl Reactor for Publisher {
     }
 }
 
-export!(
-    default = Publisher,
-    Sink,
-    generators = [aether_bloomery_bundle::bundle],
-);
+export!(default = Publisher, public = [Sink], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

@@ -29,4 +29,4 @@ pub use kinds::{AnthropicError, CliSend, CliSendResult, Message, MessagesSend, M
 // `aether.process` edge capabilities.
 mod component;
 pub use component::{AnthropicComponent, AnthropicComponentConfig, DEFAULT_CLI_BINARY};
-aether_actor::export!(AnthropicComponent);
+aether_actor::export!(public = [AnthropicComponent]);

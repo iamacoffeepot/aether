@@ -83,7 +83,7 @@ impl Program for Exec {
     }
 }
 
-export!(FetchOne, FetchTwo, Exec, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [FetchOne, FetchTwo, Exec], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {
     let _ = aether_bloomery_bundle::BUNDLE_NAMESPACE;

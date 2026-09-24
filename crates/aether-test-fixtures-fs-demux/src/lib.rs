@@ -167,7 +167,7 @@ impl FsDemux {
 /// `wire` and otherwise ignores mail.
 pub struct InlineFsDemuxParent;
 
-#[actor]
+#[actor(spawns(InlineFsDemuxChild))]
 impl WasmActor for InlineFsDemuxParent {
     const NAMESPACE: &'static str = "test.inline.fs_demux_parent";
 
@@ -216,4 +216,4 @@ impl WasmActor for InlineFsDemuxChild {
 
 // No default: both consumers load by export selector. The inline child is
 // private, rebuilt on a replace but never loaded by selector (issue 6136).
-aether_actor::export!(FsDemux, InlineFsDemuxParent, private = [InlineFsDemuxChild]);
+aether_actor::export!(public = [FsDemux, InlineFsDemuxParent], private = [InlineFsDemuxChild]);

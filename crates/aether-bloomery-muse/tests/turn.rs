@@ -9,9 +9,10 @@ use aether_bloomery_muse::{
 };
 use aether_bloomery_program::{AsyncSession, Pending, PendingCall, PollResult, Program, Started, start_async};
 use aether_data::{Kind, Storage};
-use aether_http::{Fetch, FetchResult, HttpError};
+use aether_http::{Fetch, FetchResult, HttpError, HttpHeader};
 
 const COMPLETED: &str = include_str!("../fixtures/completed.json");
+const OVERLOADED: &str = include_str!("../fixtures/overloaded.json");
 const URL: &str = "https://example.test/v1/responses";
 
 /// Start one turn whose closure carries the input and every cited text, and
@@ -79,6 +80,37 @@ fn a_turn_sends_one_fetch_and_stages_the_reply_it_cites() -> Result<(), Box<dyn 
         "the body and the text are staged, and the result cites them"
     );
     assert_eq!(recorded.body(), Ref::of_bytes(COMPLETED.as_bytes()));
+    Ok(())
+}
+
+#[test]
+fn a_transient_refusal_is_recorded_once_with_its_retry_after() -> Result<(), Box<dyn Error>> {
+    // Catches the `Retry-After` header not threaded from the fetch reply into the record, an overload
+    // recorded as terminal, the refusal body dropped, and a hidden in-run retry.
+    let (mut session, pending) = start_turn()?;
+    let reply = FetchResult::Ok {
+        request_id: 1,
+        url: URL.into(),
+        status: 503,
+        headers: vec![HttpHeader { name: "Retry-After".into(), value: "7".into() }],
+        body: OVERLOADED.as_bytes().to_vec(),
+    };
+    session.fulfill_send(&pending, FetchResult::ID, reply.encode_into_bytes());
+    let (result, staged) = match session.poll() {
+        PollResult::Finished(Invoked::Completed { seq: 7, result, staged }) => (result, staged),
+        other => panic!("expected the turn to complete after its one fetch, with no second send; got {other:?}"),
+    };
+
+    let result_artifact = staged.iter().find(|artifact| artifact.digest() == result).ok_or("result is staged")?;
+    let recorded = TurnResult::decode_storage(result_artifact.bytes())?.value;
+    assert_eq!(*recorded.outcome(), TurnOutcome::Transient { retry_after_secs: Some(7) });
+    assert_eq!(recorded.status().get(), 503);
+    assert_eq!(recorded.body(), Ref::of_bytes(OVERLOADED.as_bytes()));
+    assert_eq!(
+        staged,
+        vec![EncodedArtifact::opaque_bytes(OVERLOADED.as_bytes()), EncodedArtifact::new(&recorded)?],
+        "the body is staged, and the result cites it"
+    );
     Ok(())
 }
 

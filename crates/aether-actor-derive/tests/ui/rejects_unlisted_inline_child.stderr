@@ -1,57 +1,47 @@
-error[E0277]: `Exact` is spawned as an inline child, but no `export!` lists it
-  --> tests/ui/rejects_unlisted_inline_child.rs:51:46
+error[E0277]: `Exact` is spawned inline by an actor this `export!` lists, but this `export!` does not list it
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
-51 |     let _ = ctx.spawn_inline_child::<Parent, Exact>(Subname::Named("exact"), &());
-   |                 ------------------           ^^^^^ not listed by this module's `export!`
-   |                 |
-   |                 required by a bound introduced by this call
+64 |     aether_actor::export!(public = [super::Parent]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not listed by this module's `export!`
    |
-help: the trait `Rebuildable` is not implemented for `Exact`
-  --> tests/ui/rejects_unlisted_inline_child.rs:22:1
+help: the trait `Rebuildable<__AetherModule>` is not implemented for `Exact`
+  --> tests/ui/rejects_unlisted_inline_child.rs:23:1
    |
-22 | struct Exact;
+23 | struct Exact;
    | ^^^^^^^^^^^^
-   = note: list it in `export!(…, private = [Exact])` so a replace can rebuild it, or export it
-help: the trait `Rebuildable` is implemented for `Parent`
-  --> tests/ui/rejects_unlisted_inline_child.rs:61:5
+   = note: list it under `private = [Exact]` in this `export!` so a replace can rebuild it, or export it
+help: the trait `Rebuildable<__AetherModule>` is implemented for `Parent`
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
-61 |     aether_actor::export!(super::Parent);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline_child`
-  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/spawn.rs
+64 |     aether_actor::export!(public = [super::Parent]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `Parent::__aether_listed_children`
+  --> tests/ui/rejects_unlisted_inline_child.rs:11:1
    |
-   |     pub fn spawn_inline_child<P, C>(
-   |            ------------------ required by a bound in this associated function
-...
-   |         C: ChildOf<P> + Instanced + WasmActor + ErasedWasmActor + Rebuildable,
-   |                                                                   ^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline_child`
-   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the macro `aether_actor::export` (in Nightly builds, run with -Z macro-backtrace for more info)
+11 | #[actor(spawns(Exact, Composable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Parent::__aether_listed_children`
+   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: `Composable` is spawned as an inline child, but no `export!` lists it
-  --> tests/ui/rejects_unlisted_inline_child.rs:52:32
+error[E0277]: `Composable` is spawned inline by an actor this `export!` lists, but this `export!` does not list it
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
-52 |     let _ = ctx.spawn_inline::<Composable>(Subname::Named("composable"), &());
-   |                 ------------   ^^^^^^^^^^ not listed by this module's `export!`
-   |                 |
-   |                 required by a bound introduced by this call
+64 |     aether_actor::export!(public = [super::Parent]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ not listed by this module's `export!`
    |
-help: the trait `Rebuildable` is not implemented for `Composable`
-  --> tests/ui/rejects_unlisted_inline_child.rs:36:1
+help: the trait `Rebuildable<__AetherModule>` is not implemented for `Composable`
+  --> tests/ui/rejects_unlisted_inline_child.rs:37:1
    |
-36 | struct Composable;
+37 | struct Composable;
    | ^^^^^^^^^^^^^^^^^
-   = note: list it in `export!(…, private = [Composable])` so a replace can rebuild it, or export it
-help: the trait `Rebuildable` is implemented for `Parent`
-  --> tests/ui/rejects_unlisted_inline_child.rs:61:5
+   = note: list it under `private = [Composable]` in this `export!` so a replace can rebuild it, or export it
+help: the trait `Rebuildable<__AetherModule>` is implemented for `Parent`
+  --> tests/ui/rejects_unlisted_inline_child.rs:64:5
    |
-61 |     aether_actor::export!(super::Parent);
-   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-note: required by a bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline`
-  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/spawn.rs
+64 |     aether_actor::export!(public = [super::Parent]);
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+note: required by a bound in `Parent::__aether_listed_children`
+  --> tests/ui/rejects_unlisted_inline_child.rs:11:1
    |
-   |     pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
-   |            ------------ required by a bound in this associated function
-...
-   |         C: ModuleChild + ErasedWasmActor + Rebuildable,
-   |                                            ^^^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline`
-   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the macro `aether_actor::export` (in Nightly builds, run with -Z macro-backtrace for more info)
+11 | #[actor(spawns(Exact, Composable))]
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ required by this bound in `Parent::__aether_listed_children`
+   = note: this error originates in the macro `$crate::__export_internal` which comes from the expansion of the attribute macro `actor` (in Nightly builds, run with -Z macro-backtrace for more info)

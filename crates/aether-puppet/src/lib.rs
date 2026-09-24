@@ -1724,4 +1724,4 @@ mod control_tests {
     }
 }
 
-aether_actor::export!(Puppet, Idle, Turntable);
+aether_actor::export!(public = [Puppet, Idle, Turntable]);

@@ -1,5 +1,11 @@
-//! Finish an `export!` generator pipeline by emitting a no-generator `export!`,
-//! carrying the pipeline's `private` list into its `private = [..]` slot.
+//! Finish an `export!` generator pipeline by emitting one keyed, no-generator
+//! `export!`: `boot = B, default = D, public = [..], private = [..]`, with an
+//! absent `boot` or `default` and an empty `public` or `private` omitted. The
+//! pipeline's exported set still carries `boot` and `default`, so their first
+//! occurrence is removed from `public`; a second one means the author listed
+//! the type under `default` (or `boot`) and again under `public`, which is
+//! refused here because the direct path refuses it too (a conflicting marker
+//! impl).
 
 use proc_macro2::{Span, TokenStream as TokenStream2, TokenTree};
 use quote::quote;
@@ -86,37 +92,30 @@ fn parse_export_types(input: ParseStream<'_>) -> syn::Result<Vec<Type>> {
 
 fn expand(input: EmitInput) -> syn::Result<TokenStream2> {
     let EmitInput { boot, default, types, private } = input;
-    let private = (!private.is_empty()).then(|| quote! { private = [#(#private),*], });
-    let rest: Vec<&Type> = types
-        .iter()
-        .filter(|ty| default.as_ref().is_none_or(|default| !type_in(default, ty)))
-        .filter(|ty| boot.as_ref().is_none_or(|boot| !type_in(boot, ty)))
-        .collect();
-    Ok(match (boot.as_ref(), default.as_ref()) {
-        (Some(boot), Some(default)) => {
-            quote! { ::aether_actor::export!(boot = #boot, default = #default, #(#rest,)* #private); }
+    let mut rest: Vec<&Type> = types.iter().collect();
+    for (key, slot) in [("default", default.as_ref()), ("boot", boot.as_ref())] {
+        let Some(slot) = slot else {
+            continue;
+        };
+        if let Some(first) = rest.iter().position(|ty| type_in(slot, ty)) {
+            rest.remove(first);
         }
-        (None, Some(default)) => {
-            quote! { ::aether_actor::export!(default = #default, #(#rest,)* #private); }
-        }
-        (Some(_), None) if rest.is_empty() => {
-            return Err(syn::Error::new(
-                Span::call_site(),
-                "export! boot-only modules need at least one non-boot export",
+        if rest.iter().any(|ty| type_in(slot, ty)) {
+            return Err(syn::Error::new_spanned(
+                slot,
+                format!("`{}` is listed under `{key}` and again under `public`; list it once", quote!(#slot)),
             ));
         }
-        (Some(boot), None) => {
-            quote! { ::aether_actor::export!(boot = #boot, #(#rest,)* #private); }
-        }
-        (None, None) if rest.len() == 1 => {
-            let ty = rest[0];
-            private.map_or_else(
-                || quote! { ::aether_actor::export!(#ty); },
-                |private| quote! { ::aether_actor::export!(#ty, #private); },
-            )
-        }
-        (None, None) => quote! { ::aether_actor::export!(#(#rest,)* #private); },
-    })
+    }
+    if boot.is_some() && default.is_none() && rest.is_empty() {
+        return Err(syn::Error::new(Span::call_site(), "export! boot-only modules need at least one non-boot export"));
+    }
+
+    let boot = boot.map(|boot| quote! { boot = #boot, });
+    let default = default.map(|default| quote! { default = #default, });
+    let public = (!rest.is_empty()).then(|| quote! { public = [#(#rest),*], });
+    let private = (!private.is_empty()).then(|| quote! { private = [#(#private),*], });
+    Ok(quote! { ::aether_actor::export! { #boot #default #public #private } })
 }
 
 fn type_in(needle: &Type, haystack: &Type) -> bool {

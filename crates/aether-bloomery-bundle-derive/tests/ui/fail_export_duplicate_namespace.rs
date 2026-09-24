@@ -28,6 +28,6 @@ impl Reactor for Second {
     }
 }
 
-export!(First, Second, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [First, Second], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

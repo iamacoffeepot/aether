@@ -393,7 +393,7 @@ mod engine {
     ///
     /// - `namespaces` — every exported actor's `Addressable::NAMESPACE`. A
     ///   single-actor module yields one; a multi-actor module
-    ///   (`export!(A, B, …)`) yields one per type, the default type first.
+    ///   (`export!(public = [A, B, …])`) yields one per type, the default type first.
     /// - `actors` — one [`ComponentActor`] per exported actor type, the
     ///   `module@actor` selector axis (ADR-0096 export selector).
     /// - `handled_kinds` — the union of every actor's handled `KindId`s
@@ -403,7 +403,7 @@ mod engine {
     ///   short string (`"<tool> <version>; …"`), or empty when absent.
     /// - `default_entry` — the bare-load default actor's namespace per
     ///   ADR-0138; `None` for a defaultless multi-actor module (built with
-    ///   a bare `export!(A, B, …)`), `Some(ns)` for a single-actor module
+    ///   `export!(public = [A, B, …])`), `Some(ns)` for a single-actor module
     ///   or a multi-actor module that opted in via `export!(default = A, …)`.
     #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Eq)]
     pub struct ComponentManifest {
@@ -657,7 +657,7 @@ mod control_plane {
         /// `None` loads the module's **default** type — the single type a
         /// single-actor module has, or the `export!(default = A, …)` opt-in
         /// on a multi-actor module. A defaultless multi-actor module (a
-        /// bare `export!(A, B, …)`) has no default, so `None` against it is a
+        /// `export!(public = [A, B, …])`) has no default, so `None` against it is a
         /// clean `LoadResult::Err` that names the exports (ADR-0138). An
         /// export that the module doesn't declare is likewise a clean
         /// `LoadResult::Err`.
