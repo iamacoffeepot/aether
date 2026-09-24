@@ -20,11 +20,15 @@ use aether_math::Vec2;
 
 use crate::composite::Composite;
 use crate::focus::{Focus, FocusEligibility, FocusRect};
-use crate::panel::{ChildLayout, SpawnedChild, spawn_widget_child};
+use crate::panel::{ChildLayout, SpawnedChild, SpawnsWidgets, spawn_widget_child};
+use crate::set::{
+    ButtonWidget, DropdownWidget, ImageWidget, LabelWidget, MenuBarWidget, NumericWidget, RadioGroupWidget,
+    SegmentedWidget, SliderWidget, TabStripWidget, TextAreaWidget, TextFieldWidget, ToggleWidget, VirtualListWidget,
+};
 use crate::theme::SetTheme;
 use crate::{
-    Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, WidgetChildSpec,
-    WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
+    Collect, ScrollConfig, ScrollDelta, ScrollExtent, ScrollOffset, ScrollOutcome, ScrollResidual, Widget,
+    WidgetChildSpec, WidgetClipRect, WidgetControlState, WidgetDrawList, WidgetFrame,
 };
 use crate::{FrameDischarge, accept_open_child_list, flush_membership};
 
@@ -194,7 +198,7 @@ fn clipped_focus_rect(viewport: &WidgetFrame, child: &WidgetFrame) -> Option<Foc
 }
 
 impl ScrollWidget {
-    fn ensure_spawned<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn ensure_spawned<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         if self.spawned {
             return;
         }
@@ -269,7 +273,7 @@ impl ScrollWidget {
         }
     }
 
-    fn drive_frame<A>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
+    fn drive_frame<A: SpawnsWidgets>(&mut self, ctx: &mut WasmCtx<'_, A, Manual>) {
         self.ensure_spawned(ctx);
         flush_membership(&mut self.composite, ctx);
         self.composite.begin_frame();
@@ -317,7 +321,28 @@ impl ScrollWidget {
 /// Stateful scroll viewport. Spawned through `WidgetKind::Scroll`; its parent
 /// assigns a `WidgetFrame`, sends `Collect`, and routes wheel input by cursor
 /// hit testing. The actor emits `ScrollOutcome` and any exact residual upward.
-#[actor(instanced, composable)]
+#[actor(
+    instanced,
+    composable,
+    spawns(
+        LabelWidget,
+        ImageWidget,
+        SliderWidget,
+        RadioGroupWidget,
+        TextFieldWidget,
+        TextAreaWidget,
+        ButtonWidget,
+        VirtualListWidget,
+        Widget,
+        ScrollWidget,
+        ToggleWidget,
+        SegmentedWidget,
+        NumericWidget,
+        DropdownWidget,
+        TabStripWidget,
+        MenuBarWidget
+    )
+)]
 impl WasmActor for ScrollWidget {
     type Config = ScrollConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.scroll";
@@ -362,7 +387,7 @@ impl WasmActor for ScrollWidget {
     }
 
     #[handler::manual]
-    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _collect: Collect) {
+    fn on_collect(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, _collect: Collect) {
         self.drive_frame(ctx);
     }
 

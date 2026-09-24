@@ -253,7 +253,7 @@ impl ComponentHostCapabilityState {
             });
         }
 
-        // A single-actor module (`export!(A)`) carries no actor boundaries, so
+        // A single-actor module (`export!(public = [A])`) carries no actor boundaries, so
         // its one implicit group is unnamed; its sole export is still nameable
         // by the namespace its `aether.namespace` section declares, and it is
         // instantiated exactly as the unselected default load would be.

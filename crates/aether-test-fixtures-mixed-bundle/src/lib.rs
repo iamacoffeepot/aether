@@ -51,6 +51,6 @@ impl Reactor for MixedCaller {
     }
 }
 
-export!(Summarize, MixedCaller, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [Summarize, MixedCaller], generators = [aether_bloomery_bundle::bundle]);
 
 const _: Summarize = Summarize;

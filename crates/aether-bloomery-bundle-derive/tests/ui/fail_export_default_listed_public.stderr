@@ -1,0 +1,15 @@
+error: `Probe` is listed under `default` and again under `public`; list it once
+  --> tests/ui/fail_export_default_listed_public.rs:36:1
+   |
+36 | export!(default = Probe, public = [Probe, Publisher], generators = [aether_bloomery_bundle::bundle]);
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the macro `$crate::__export_parse` which comes from the expansion of the macro `export` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `Reactor`
+ --> tests/ui/fail_export_default_listed_public.rs:6:31
+  |
+6 | use aether_bloomery_reactor::{Reactor, reactor};
+  |                               ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

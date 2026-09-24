@@ -38,6 +38,6 @@ mod two {
     }
 }
 
-export!(one::Publisher, two::Publisher, generators = [aether_bloomery_bundle::bundle]);
+export!(public = [one::Publisher, two::Publisher], generators = [aether_bloomery_bundle::bundle]);
 
 fn main() {}

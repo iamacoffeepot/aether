@@ -62,10 +62,6 @@ impl crate::WasmDispatch<Self> for FailingChild {
     }
 }
 
-// SAFETY: the host unit tests stand in for `export!`, which marks every
-// listed type; no rebuild arm runs in these tests.
-unsafe impl crate::Rebuildable for FailingChild {}
-
 impl ErasedWasmActor for FailingChild {
     fn erased_namespace(&self) -> &'static str {
         Self::NAMESPACE
@@ -129,10 +125,6 @@ impl crate::WasmDispatch<Self> for SucceedingChild {
 }
 
 impl HandlesKind<()> for SucceedingChild {}
-
-// SAFETY: the host unit tests stand in for `export!`, which marks every
-// listed type; no rebuild arm runs in these tests.
-unsafe impl crate::Rebuildable for SucceedingChild {}
 
 impl ErasedWasmActor for SucceedingChild {
     fn erased_namespace(&self) -> &'static str {
@@ -361,6 +353,16 @@ impl WasmActor for NestingParent {
 
 impl ChildOf<NestingParent> for FailingChild {}
 impl ChildOf<NestingParent> for StubChild {}
+
+// The host unit tests stand in for `#[actor(spawns(..))]`, which emits these
+// declarations for the typed inline spawn verbs.
+// SAFETY: no `export!` runs in these tests, so there is no coverage check to
+// skip and no rebuild arm to miss a child.
+unsafe impl crate::Spawns<FailingChild> for NestingParent {}
+// SAFETY: as above.
+unsafe impl crate::Spawns<SucceedingChild> for NestingParent {}
+// SAFETY: as above.
+unsafe impl crate::Spawns<SucceedingChild> for LifecycleProbe {}
 
 impl crate::WasmDispatch<Self> for NestingParent {
     fn dispatch(_state: &mut Self, _ctx: &mut WasmCtx<'_, Erased, Manual>, _mail: Mail<'_>) -> u32 {

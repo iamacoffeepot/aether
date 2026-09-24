@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (hosted-actor addressing later revised by [ADR-0099](0099-actor-identity-and-addressing.md); the actor-type tag here is reused as the ActorId; the default-entry clause of §3 later superseded by [ADR-0138](0138-opt-in-default-entry-for-multi-actor-modules.md))
 - **Date:** 2026-06-06
+- **Amended:** 2026-09-24 — `export!` takes keyed entries only; the multi-actor form is spelled `export!(public = [A, B, …])` (issue 6584).
 
 ## Context
 

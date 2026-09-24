@@ -1,0 +1,43 @@
+error[E0277]: `Parent` spawns `Exact` inline but does not declare it
+  --> tests/ui/rejects_undeclared_inline_child.rs:52:38
+   |
+52 |     let _ = ctx.spawn_inline_child::<Parent, Exact>(Subname::Named("exact"), &());
+   |                 ------------------   ^^^^^^ `Exact` is not in `Parent`'s `spawns(..)`
+   |                 |
+   |                 required by a bound introduced by this call
+   |
+help: the trait `Spawns<Exact>` is not implemented for `Parent`
+  --> tests/ui/rejects_undeclared_inline_child.rs:9:1
+   |
+ 9 | struct Parent;
+   | ^^^^^^^^^^^^^
+   = note: add `Exact` to `spawns(..)` in `Parent`'s `#[actor(..)]`
+note: required by a bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline_child`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/spawn.rs
+   |
+   |     pub fn spawn_inline_child<P, C>(
+   |            ------------------ required by a bound in this associated function
+...
+   |         P: WasmActor + Spawns<C>,
+   |                        ^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline_child`
+
+error[E0277]: `Parent` spawns `Composable` inline but does not declare it
+  --> tests/ui/rejects_undeclared_inline_child.rs:53:17
+   |
+53 |     let _ = ctx.spawn_inline::<Composable>(Subname::Named("composable"), &());
+   |                 ^^^^^^^^^^^^ `Composable` is not in `Parent`'s `spawns(..)`
+   |
+help: the trait `Spawns<Composable>` is not implemented for `Parent`
+  --> tests/ui/rejects_undeclared_inline_child.rs:9:1
+   |
+ 9 | struct Parent;
+   | ^^^^^^^^^^^^^
+   = note: add `Composable` to `spawns(..)` in `Parent`'s `#[actor(..)]`
+note: required by a bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline`
+  --> $WORKSPACE/crates/aether-actor/src/wasm/ctx/spawn.rs
+   |
+   |     pub fn spawn_inline<C>(&self, subname: Subname<'_>, config: &C::Config) -> Result<InlineChild<C>, SpawnError>
+   |            ------------ required by a bound in this associated function
+...
+   |         A: Spawns<C>,
+   |            ^^^^^^^^^ required by this bound in `aether_actor::wasm::ctx::spawn::<impl WasmCtx<'_, A, M>>::spawn_inline`

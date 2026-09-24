@@ -1,4 +1,5 @@
-// A mixed module must not use a reactor as the ordinary default.
+// A `default` type is exported already, so listing it again under `public` is
+// refused by name rather than silently deduplicated by the generator pipeline.
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor, export};
 use aether_bloomery_kinds::{Head, HeadMoved, SetHead, Tree};
@@ -6,14 +7,14 @@ use aether_bloomery_reactor::{Reactor, reactor};
 
 const PUBLISHED: Head<Tree> = Head::new("published");
 
-pub struct Sink;
+pub struct Probe;
 
 #[actor]
-impl WasmActor for Sink {
-    const NAMESPACE: &'static str = "test.bloomery.export.default_sink";
+impl WasmActor for Probe {
+    const NAMESPACE: &'static str = "test.bloomery.export.default_public_probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Sink)
+        Ok(Probe)
     }
 
     #[fallback]
@@ -24,7 +25,7 @@ struct Publisher;
 
 #[reactor]
 impl Reactor for Publisher {
-    const NAMESPACE: &'static str = "test.bloomery.export.default_publisher";
+    const NAMESPACE: &'static str = "test.bloomery.export.default_public_publisher";
 
     #[rule]
     fn publish(&self, change: HeadMoved<Tree>) -> SetHead {
@@ -32,6 +33,8 @@ impl Reactor for Publisher {
     }
 }
 
-export!(default = Publisher, public = [Sink], generators = [aether_bloomery_bundle::bundle]);
+export!(default = Probe, public = [Probe, Publisher], generators = [aether_bloomery_bundle::bundle]);
 
-fn main() {}
+fn main() {
+    let _ = Probe;
+}

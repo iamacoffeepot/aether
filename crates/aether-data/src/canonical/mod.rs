@@ -427,7 +427,7 @@ mod tests {
 
     #[test]
     fn inputs_actor_boundary_const_round_trips() {
-        // ADR-0096: `export!(A, B, …)` writes one `ActorBoundary` record
+        // ADR-0096: `export!(public = [A, B, …])` writes one `ActorBoundary` record
         // per exported type; the const-eval bytes must decode to
         // `InputsRecord::ActorBoundary` byte-for-byte so the substrate
         // reader groups the flat record stream back by namespace.

@@ -1,6 +1,6 @@
 //! `probe` bundle — the entry `Probe` fixture plus the ADR-0090 c1
 //! `ProbeWithConfig` typed-config fixture, exported together via
-//! `export!(Probe, ProbeWithConfig)` (ADR-0096, issue 1994).
+//! `export!(default = Probe, public = [ProbeWithConfig])` (ADR-0096, issue 1994).
 //!
 //! # `Probe`
 //!

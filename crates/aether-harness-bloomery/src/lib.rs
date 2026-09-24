@@ -5,14 +5,13 @@
 //! [`Batch`](aether_bloomery_journal::Batch)es appended in order to a scratch
 //! journal before boot; the `Ref`s staging returns are the handles its
 //! expected values cite. Its **drive** is the mail it sends the mounted
-//! journal owner and bundle driver — [`BloomeryHarness::call`] (or
-//! [`BloomeryHarness::call_within`] for a call that may outlast the default
-//! reply bound), [`BloomeryHarness::move_head`], and
-//! [`BloomeryHarness::settle`], which follows the `AwaitProcessed` →
-//! `Processed` protocol to quiescence rather than sleeping. Its
-//! **expectation** is the record sequence the loop appended
-//! ([`SeededJournal::assert_appended`] over [`Record`]s), plus any view the
-//! scenario folds over the actual journal ([`SeededJournal::fold`]). The seed owns those reads because it owns the
+//! journal owner and bundle driver — [`BloomeryHarness::call`],
+//! [`BloomeryHarness::move_head`], and [`BloomeryHarness::settle`], which
+//! follows the `AwaitProcessed` → `Processed` protocol to quiescence rather
+//! than sleeping. Its **expectation** is the record sequence the loop
+//! appended ([`SeededJournal::assert_appended`] over [`Record`]s), plus any
+//! view the scenario folds over the actual journal
+//! ([`SeededJournal::fold`]). The seed owns those reads because it owns the
 //! journal file, so they work the same whether the in-process chassis wrote
 //! it or a forked `aether-bloomery` did; [`BloomeryHarness`] forwards each one
 //! to the seed it booted over.

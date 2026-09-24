@@ -1,7 +1,7 @@
 error: cannot find macro `Plain` in this scope
- --> tests/ui/fail_export_missing_desc.rs:7:9
+ --> tests/ui/fail_export_missing_desc.rs:7:19
   |
-7 | export!(Plain, generators = [aether_bloomery_bundle::bundle]);
-  |         ^^^^^
+7 | export!(public = [Plain], generators = [aether_bloomery_bundle::bundle]);
+  |                   ^^^^^
   |
   = note: `Plain` is in scope, but it is a struct, not a macro

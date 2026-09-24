@@ -1,7 +1,7 @@
 //! `inline_child` bundle — the ADR-0114 inline-child fixtures for the
 //! basic, stateful, and despawn scenarios, exported together via
-//! `export!(InlineParent, InlineStatefulParent, InlineStatefulChild,
-//! InlineDespawnParent)` (ADR-0096, issue 1994).
+//! `export!(public = [InlineParent, InlineStatefulParent, InlineStatefulChild,
+//! InlineDespawnParent])` (ADR-0096, issue 1994).
 //!
 //! # `InlineParent` (entry)
 //!
@@ -113,7 +113,7 @@ fn reply_who<A>(ctx: &mut WasmCtx<'_, A, Manual>, who: u32) {
 /// child in `wire`.
 pub struct InlineParent;
 
-#[actor]
+#[actor(spawns(InlineChild))]
 impl WasmActor for InlineParent {
     const NAMESPACE: &'static str = "test.inline.parent";
 
@@ -164,7 +164,7 @@ impl WasmActor for InlineChild {
 /// `export: Some("test.inline.stateful_parent")`.
 pub struct InlineStatefulParent;
 
-#[actor]
+#[actor(spawns(InlineStatefulChild))]
 impl WasmActor for InlineStatefulParent {
     const NAMESPACE: &'static str = "test.inline.stateful_parent";
 
@@ -247,7 +247,7 @@ pub struct InlineDespawnParent {
     child: Option<ErasedActorRef>,
 }
 
-#[actor]
+#[actor(spawns(InlineDespawnChild))]
 impl WasmActor for InlineDespawnParent {
     const NAMESPACE: &'static str = "test.inline.despawn_parent";
 
@@ -317,7 +317,7 @@ impl WasmActor for InlineDespawnChild {
 /// `export: Some("test.inline.configured_parent")`.
 pub struct InlineConfiguredParent;
 
-#[actor]
+#[actor(spawns(InlineConfiguredChild))]
 impl WasmActor for InlineConfiguredParent {
     const NAMESPACE: &'static str = "test.inline.configured_parent";
 
@@ -400,7 +400,7 @@ impl WasmActor for InlineConfiguredChild {
 /// the first alias is still only locally prepared.
 pub struct NestedLineageParent;
 
-#[actor]
+#[actor(spawns(NestedLineageChild))]
 impl WasmActor for NestedLineageParent {
     const NAMESPACE: &'static str = "test.inline.nested_parent";
 
@@ -421,7 +421,7 @@ impl WasmActor for NestedLineageParent {
 /// resolves the leaf from the reconstructed logical tree for teardown.
 pub struct NestedLineageChild;
 
-#[actor(instanced, child_of(NestedLineageParent))]
+#[actor(instanced, child_of(NestedLineageParent), spawns(NestedLineageLeaf))]
 impl WasmActor for NestedLineageChild {
     const NAMESPACE: &'static str = "test.inline.nested_child";
 

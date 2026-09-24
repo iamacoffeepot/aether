@@ -22,4 +22,5 @@ fn ui() {
     t.compile_fail("tests/ui/fail_export_default_reactor.rs");
     t.compile_fail("tests/ui/fail_export_duplicate_namespace.rs");
     t.compile_fail("tests/ui/fail_export_type_alias.rs");
+    t.compile_fail("tests/ui/fail_export_default_listed_public.rs");
 }
