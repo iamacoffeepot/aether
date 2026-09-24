@@ -154,12 +154,14 @@ impl SetTransport {
     }
 
     /// The inbound-mail parameters the dispatch method takes, in the shape the
-    /// adopter's own dispatch seam already holds them: wasm hands the whole
-    /// `Mail<'_>` through, native has already split the envelope into a kind id
-    /// and a payload slice by the time `Dispatch::dispatch` runs.
+    /// adopter's own dispatch seam already holds them: wasm lends the whole
+    /// `Mail<'_>` for the duration of the call, so on a miss the adopter's
+    /// `#[fallback]` tail can still take it (#6569); native has already split
+    /// the envelope into a kind id and a payload slice by the time
+    /// `Dispatch::dispatch` runs.
     fn mail_params(self) -> TokenStream2 {
         match self {
-            Self::Wasm => quote! { __aether_mail: ::aether_actor::Mail<'_> },
+            Self::Wasm => quote! { __aether_mail: &::aether_actor::Mail<'_> },
             Self::Native => quote! {
                 __aether_kind: ::aether_substrate::mail::KindId,
                 __aether_payload: &[u8],

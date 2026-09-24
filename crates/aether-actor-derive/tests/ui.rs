@@ -355,6 +355,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "accepts_cfg_gated_handler_wasm",
     "accepts_generic_local",
     "accepts_handler_set_wasm",
+    "accepts_handler_set_with_fallback_wasm",
     "accepts_manual_handler_wasm",
     "accepts_minimal_actor",
     "accepts_omitted_ctx_actor_is_self_wasm",
