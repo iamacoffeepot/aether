@@ -60,17 +60,15 @@ impl WasmActor for CarryRequester {
 
     #[handler::single]
     fn on_run(&mut self, ctx: &mut WasmCtx<'_>, run: RunCarriedRequest) {
-        let _ = ctx
-            .actor::<ReplyHolder>()
-            .with_context(&CarriedContext { tag: run.tag })
-            .send(&CarriedRequest { tag: run.tag });
+        let _ =
+            ctx.send_with_context::<ReplyHolder>(&CarriedRequest { tag: run.tag }, &CarriedContext { tag: run.tag });
     }
 
     #[handler::single]
     fn on_reply(&mut self, ctx: &mut WasmCtx<'_>, reply: CarriedRequestResult) {
         match ctx.take_context::<CarriedContext>() {
             Some(context) if context.tag == reply.tag => {
-                ctx.actor::<SubstrateHarnessObserver>().send(&CarriedReplyMatched);
+                ctx.send::<SubstrateHarnessObserver>(&CarriedReplyMatched);
             }
             other => tracing::warn!(
                 target: "test.carry.requester",

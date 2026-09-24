@@ -240,7 +240,7 @@ impl Dispatch<Self> for CommitParent {
         }
         if kind.0 == CloseBurst::ID.0 {
             for child in state.live.drain(..) {
-                ctx.to(&child).send(&CloseChild::default());
+                ctx.send_to(child, &CloseChild::default());
             }
             return Some(());
         }

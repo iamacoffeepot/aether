@@ -26,7 +26,6 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{QuadSpace, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgba;
 use aether_render::{DrawShapes, RenderCapability, Shape};
 use aether_test_fixtures_kinds::UiWidgetConfig;
@@ -48,7 +47,7 @@ impl WasmActor for UiWidget {
     /// `aether.lifecycle` (ADR-0082) — the same path a real per-frame
     /// widget uses to be driven each frame.
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
     /// One widget's per-frame work. In the cached profile the draw is
@@ -76,6 +75,6 @@ impl WasmActor for UiWidget {
                 texture: None,
             });
         }
-        ctx.actor::<RenderCapability>().send(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes });
+        ctx.send::<RenderCapability>(&DrawShapes { space: QuadSpace::Screen, clip: None, shapes });
     }
 }
