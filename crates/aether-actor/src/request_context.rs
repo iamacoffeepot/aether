@@ -6,25 +6,42 @@
 //!
 //! Request ids are monotonic per mailbox (ADR-0139 §3): a native actor mints
 //! them from its binding's counter, and a wasm guest's counter carries across
-//! `replace_component`. The smallest stored id is therefore the oldest
-//! context, so capacity eviction pops the first key.
+//! `replace_component`. An id never repeats within a mailbox's life, so a
+//! reply that arrives after its context was taken finds no entry, never a
+//! newer request's context.
+//!
+//! The table never drops a stored context, because a context can hold the
+//! caller's reply target. It reserves room on its first insert, reuses the
+//! room a take frees, and grows when more requests are in flight than that
+//! room holds. Each time the live count passes a new high-water mark, the
+//! table's owner logs a warning, so a peer that never replies shows up as
+//! warnings and memory growth, never as a lost reply.
 //!
 //! The snapshot keeps the layout older SDKs wrote: `next_seq`, `count`, then
-//! per entry `request`, `kind`, `insert_seq`, `len`, `bytes`. The table no
-//! longer tracks insertion sequence, so restore ignores both sequence fields.
+//! per entry `request`, `kind`, `insert_seq`, `len`, `bytes`. The table does
+//! not track insertion sequence, so restore ignores both sequence fields.
 //! The writer sets `next_seq` to the entry count and each `insert_seq` to the
 //! entry's position in id order, which an older reader takes as the same age
 //! order. Keeping the layout, rather than bumping the envelope version, lets
 //! snapshots cross in both directions: an older reader treats an unknown
 //! version as plain user state.
 
-use alloc::collections::BTreeMap;
 use alloc::vec::Vec;
+use core::hash::{BuildHasher, Hasher};
 
 use aether_data::{Kind, KindId, RequestId, Source};
+use hashbrown::HashMap;
 
-/// Default per-actor cap on remembered request contexts.
-const REQUEST_CONTEXT_CAPACITY: usize = 1024;
+/// Room for request contexts each actor reserves on its first insert. A take
+/// frees its room for the next insert; the table grows past this when more
+/// requests are in flight, and each high-water mark it passes (this count,
+/// then each doubling) logs a warning.
+const PREALLOCATED_REQUEST_CONTEXTS: usize = 256;
+
+/// The smallest snapshot entry: `request`, `kind` and `insert_seq` at 8 bytes
+/// each plus a 4-byte payload length. Restore bounds a claimed count by it
+/// before reserving anything.
+const SNAPSHOT_ENTRY_MIN_BYTES: usize = 28;
 
 const ENVELOPE_VERSION: u32 = 0xAEC0_0001;
 const ENVELOPE_MAGIC: &[u8; 8] = b"AECTX001";
@@ -35,17 +52,51 @@ struct RequestContextEntry {
     bytes: Vec<u8>,
 }
 
+/// Fixed multiplicative hash over a request id. The actor mints its own
+/// request ids, so nothing needs a seeded hash.
+#[derive(Clone, Copy, Default, Debug)]
+struct RequestIdHasher(u64);
+
+impl BuildHasher for RequestIdHasher {
+    type Hasher = Self;
+
+    fn build_hasher(&self) -> Self {
+        Self(0)
+    }
+}
+
+impl Hasher for RequestIdHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            self.write_u64(u64::from(byte));
+        }
+    }
+
+    fn write_u64(&mut self, value: u64) {
+        self.0 = (self.0 ^ value).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    }
+
+    fn finish(&self) -> u64 {
+        self.0
+    }
+}
+
 /// Per-actor request-context table.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestContextTable {
-    entries: BTreeMap<RequestId, RequestContextEntry>,
-    capacity: usize,
+    entries: HashMap<RequestId, RequestContextEntry, RequestIdHasher>,
+    preallocated: usize,
+    next_warning: usize,
 }
 
 impl RequestContextTable {
     #[must_use]
     pub const fn new() -> Self {
-        Self { entries: BTreeMap::new(), capacity: REQUEST_CONTEXT_CAPACITY }
+        Self {
+            entries: HashMap::with_hasher(RequestIdHasher(0)),
+            preallocated: PREALLOCATED_REQUEST_CONTEXTS,
+            next_warning: PREALLOCATED_REQUEST_CONTEXTS,
+        }
     }
 
     #[must_use]
@@ -62,27 +113,36 @@ impl RequestContextTable {
 
     /// Store a context under `request`, replacing any older entry for the same
     /// correlation id. A no-correlation request is ignored because no reply can
-    /// recover it exactly. A new request on a full table evicts the oldest
-    /// context, the one with the smallest request id.
+    /// recover it exactly. A new request never displaces a stored one: the
+    /// first insert reserves the preallocated room, and the table grows when
+    /// that room is full.
     pub fn insert<C: Kind>(&mut self, request: RequestId, context: &C) {
         if request.0 == Source::NO_CORRELATION {
             tracing::warn!(kind = C::NAME, "request context not stored: request has no correlation id",);
             return;
         }
 
-        if !self.entries.contains_key(&request)
-            && self.entries.len() >= self.capacity
-            && let Some((dropped_request, dropped)) = self.entries.pop_first()
-        {
-            tracing::warn!(
-                request = dropped_request.0,
-                kind = dropped.kind.0,
-                age = request.0.saturating_sub(dropped_request.0),
-                "request context table full; dropped oldest context",
-            );
+        if self.entries.capacity() == 0 {
+            self.entries.reserve(self.preallocated);
+        }
+        self.entries.insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes() });
+    }
+
+    /// The live count, once each time it passes the next high-water mark; the
+    /// mark starts at the preallocated room and doubles past each count it
+    /// reports, so a burst warns a few times and a leak keeps warning as it
+    /// grows. The two table owners call it after an insert and log the
+    /// warning.
+    pub fn high_water(&mut self) -> Option<usize> {
+        let live = self.entries.len();
+        if live <= self.next_warning {
+            return None;
         }
 
-        self.entries.insert(request, RequestContextEntry { kind: C::ID, bytes: context.encode_into_bytes() });
+        while self.next_warning < live {
+            self.next_warning = self.next_warning.saturating_mul(2).max(1);
+        }
+        Some(live)
     }
 
     /// Remove and decode the context associated with `request`.
@@ -107,10 +167,13 @@ impl RequestContextTable {
 
     #[must_use]
     pub fn snapshot_bytes(&self) -> Vec<u8> {
+        let mut entries: Vec<_> = self.entries.iter().collect();
+        entries.sort_unstable_by_key(|(request, _)| **request);
+
         let mut out = Vec::new();
-        push_u64(&mut out, self.entries.len() as u64);
-        push_len(&mut out, self.entries.len());
-        for (position, (request, entry)) in (0_u64..).zip(&self.entries) {
+        push_u64(&mut out, entries.len() as u64);
+        push_len(&mut out, entries.len());
+        for (position, (request, entry)) in (0_u64..).zip(entries) {
             push_u64(&mut out, request.0);
             push_u64(&mut out, entry.kind.0);
             push_u64(&mut out, position);
@@ -125,11 +188,12 @@ impl RequestContextTable {
         let (Some(_next_seq), Some(count)) = (take_u64(&mut cursor), take_u32(&mut cursor)) else {
             return false;
         };
-        if count as usize > self.capacity {
+        let count = count as usize;
+        if count > cursor.len() / SNAPSHOT_ENTRY_MIN_BYTES {
             return false;
         }
 
-        let mut entries = BTreeMap::new();
+        let mut entries = HashMap::with_capacity_and_hasher(count.max(self.preallocated), RequestIdHasher(0));
         for _ in 0..count {
             let (Some(request), Some(kind), Some(_insert_seq), Some(len)) =
                 (take_u64(&mut cursor), take_u64(&mut cursor), take_u64(&mut cursor), take_u32(&mut cursor))
@@ -301,26 +365,45 @@ mod tests {
         assert_eq!(table.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
-    /// Request ids are monotonic per mailbox, so the smallest id is the
-    /// oldest context. Eviction must pick it after a take and a snapshot
-    /// restore, when larger ids arrive on a full table.
+    /// A new request on a table past its preallocated room must grow the
+    /// table, never evict or overwrite a stored context: a context can hold
+    /// the reply its caller is owed.
     #[test]
-    fn eviction_drops_the_smallest_request_id() {
-        let mut table = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
-        table.insert(RequestId(100), &TestContext { value: 0 });
-        table.insert(RequestId(101), &TestContext { value: 1 });
-        table.insert(RequestId(102), &TestContext { value: 2 });
-        assert_eq!(table.take::<TestContext>(RequestId(101)), Some(TestContext { value: 1 }));
+    fn a_full_table_grows_and_keeps_every_context() {
+        let mut table = RequestContextTable { preallocated: 3, ..RequestContextTable::new() };
+        for value in 0..7 {
+            table.insert(RequestId(100 + u64::from(value)), &TestContext { value });
+        }
 
-        let mut restored = RequestContextTable { capacity: 3, ..RequestContextTable::new() };
-        assert!(restored.restore_snapshot_bytes(&table.snapshot_bytes()));
-        restored.insert(RequestId(103), &TestContext { value: 3 });
-        restored.insert(RequestId(104), &TestContext { value: 4 });
+        for value in 0..7 {
+            assert_eq!(table.take::<TestContext>(RequestId(100 + u64::from(value))), Some(TestContext { value }));
+        }
+    }
 
-        assert_eq!(restored.take::<TestContext>(RequestId(100)), None, "the oldest context is evicted");
-        assert_eq!(restored.take::<TestContext>(RequestId(102)), Some(TestContext { value: 2 }));
-        assert_eq!(restored.take::<TestContext>(RequestId(103)), Some(TestContext { value: 3 }));
-        assert_eq!(restored.take::<TestContext>(RequestId(104)), Some(TestContext { value: 4 }));
+    /// The high-water warning fires once per doubling past the preallocated
+    /// room: not on every insert (a log flood under a burst), not never (a
+    /// leak stays invisible), and not again after a drain re-arms it.
+    #[test]
+    fn high_water_warns_once_per_doubling() {
+        let mut table = RequestContextTable { preallocated: 2, next_warning: 2, ..RequestContextTable::new() };
+        let marks: Vec<_> = (1..=5)
+            .map(|request| {
+                table.insert(RequestId(request), &TestContext { value: 0 });
+                table.high_water()
+            })
+            .collect();
+        assert_eq!(marks, [None, None, Some(3), None, Some(5)]);
+
+        for request in 1..=5 {
+            assert!(table.take::<TestContext>(RequestId(request)).is_some());
+        }
+        let refilled: Vec<_> = (6..=10)
+            .map(|request| {
+                table.insert(RequestId(request), &TestContext { value: 0 });
+                table.high_water()
+            })
+            .collect();
+        assert_eq!(refilled, [None; 5]);
     }
 
     /// An older SDK wrote entries in insertion order with its own sequence
@@ -356,17 +439,36 @@ mod tests {
         assert_eq!(restored.take::<TestContext>(RequestId(7)), Some(TestContext { value: 42 }));
     }
 
+    /// A grown table carries across replace: a snapshot larger than the
+    /// successor's preallocated room restores in full.
     #[test]
-    fn restore_snapshot_rejects_count_over_capacity_before_reserve() {
+    fn restore_accepts_a_snapshot_larger_than_the_reservation() {
+        let mut table = RequestContextTable::new();
+        for value in 1..=4 {
+            table.insert(RequestId(u64::from(value)), &TestContext { value });
+        }
+
+        let mut restored = RequestContextTable { preallocated: 3, ..RequestContextTable::new() };
+        assert!(restored.restore_snapshot_bytes(&table.snapshot_bytes()));
+        for value in 1..=4 {
+            assert_eq!(restored.take::<TestContext>(RequestId(u64::from(value))), Some(TestContext { value }));
+        }
+    }
+
+    /// A corrupt count cannot force a huge reservation: a header claiming more
+    /// entries than its payload could hold is refused before anything is
+    /// reserved, and the existing table is left untouched.
+    #[test]
+    fn restore_rejects_a_count_the_payload_cannot_hold() {
         let mut table = RequestContextTable::new();
         table.insert(RequestId(7), &TestContext { value: 42 });
         let before = table.clone();
         let mut bytes = Vec::new();
         push_u64(&mut bytes, 9);
-        push_len(&mut bytes, table.capacity + 1);
+        push_u32(&mut bytes, u32::MAX);
 
         assert!(!table.restore_snapshot_bytes(&bytes));
-        assert_eq!(table, before, "an over-capacity snapshot leaves existing contexts untouched");
+        assert_eq!(table, before);
     }
 
     #[test]

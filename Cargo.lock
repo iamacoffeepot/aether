@@ -48,6 +48,7 @@ dependencies = [
  "aether-test-fixtures-kinds",
  "aether-window",
  "bytemuck",
+ "hashbrown 0.16.1",
  "inventory",
  "serde",
  "tracing",
