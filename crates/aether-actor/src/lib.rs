@@ -13,7 +13,7 @@
 //! - [`wasm`]: the guest binding layer. [`wasm::bridge`] holds the dispatch
 //!   functions, [`WasmActor`] is the trait a component implements (including
 //!   the `on_dehydrate` / `on_rehydrate` hot-swap hooks, ADR-0101),
-//!   [`WasmActorMailbox`] is the actor-typed sender chain, and [`export!`]
+//!   [`WasmCtx`] carries the flat send verbs, and [`export!`]
 //!   pins the `init` / `receive` / lifecycle FFI exports plus the
 //!   `aether.kinds.inputs` and `aether.namespace` custom-section statics.
 //!
@@ -51,16 +51,16 @@ pub use model::slot::Slot;
 pub use model::{
     Actor, Addressable, CallerAddressable, CallerScope, CallerScoped, ChildOf, Contract, Contracts, DependencyResolver,
     DependsOn, EMBEDDED_SCOPE, Embedded, EmbeddedMany, HandlesKind, Instanced, Lifecycle, Many,
-    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publisher, Publishes, Reaches, Replies, ReplyShape, Resolve, Root,
+    NAMESPACE_SEGMENT_MAX_LEN, NamespaceError, One, Publisher, Publishes, Replies, ReplyShape, Resolve, Root,
     SendableTo, Silent, SilentRow, Singleton, Subname, Undeclared, root_mailbox, validate_namespace_segment,
 };
 #[doc(hidden)]
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
 pub use reference::{ActorRef, ErasedActorRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
-// Issue 665: the wasm actor-typed handle lives next to its transport,
-// [`wasm::WasmActorMailbox<R>`]; native actors send through the flat verbs
-// on `aether_substrate::actor::native::NativeCtx` and hold no handle.
+// Both transports send through flat verbs and hold no typed handle: wasm
+// actors through [`WasmCtx`], native actors through
+// `aether_substrate::actor::native::NativeCtx`.
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see
@@ -68,8 +68,7 @@ pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 // an extra `wasm::` segment.
 pub use wasm::{
     ActorInitError, ActorTypeTag, ErasedWasmActor, InlineChild, ModuleChild, Rebuildable, RelativeMailbox, Sends,
-    SpawnError, Spawns, WasmActor, WasmActorMailbox, WasmActorMailboxWithContext, WasmCtx, WasmDispatch, WasmDropCtx,
-    WasmInitCtx, WireCtx,
+    SpawnError, Spawns, WasmActor, WasmCtx, WasmDispatch, WasmDropCtx, WasmInitCtx, WireCtx,
 };
 
 // Issue 665 retired `MailTransport` and its `MailTransportTrait`

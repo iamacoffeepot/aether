@@ -2,19 +2,17 @@
 //! declared dependency, and through a held reference) and the
 //! [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
-use aether_data::{ActorMail, Kind, RequestId};
+use aether_data::{ActorMail, Kind, RequestId, Source};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::outbound_reply::OutboundReply;
 use crate::model::ctx::reply_mode::{Manual, ReplyMode};
-use crate::model::{
-    Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, HandlesKind, SendableTo, Singleton,
-};
+use crate::model::{CallerAddressable, DependencyResolver, DependsOn, SendableTo, Singleton};
 use crate::reference::{ErasedActorRef, Target};
 use crate::wasm::bridge::mail;
-use crate::wasm::inline::ChainMode;
+use crate::wasm::inline::{ChainMode, RouteDecision};
 
 impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Issue 1987: send `payload` through a held reference, threading this
@@ -29,8 +27,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// proof. Routes through the inline registry and inherits the handler's
     /// causal chain like every ctx send.
     pub fn send_to<K: ActorMail>(&mut self, target: impl Target<K>, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(target.erased().id().0, K::ID.0, &bytes, 1, ChainMode::Inherit, self.mailbox);
+        self.push(target.erased().id().0, payload, ChainMode::Inherit);
     }
 
     /// Send `payload` to the declared dependency `R` (ADR-0232 §1–§2),
@@ -39,7 +36,8 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
     /// names only `R`, the kind is inferred from the payload. The erased ctx
-    /// has no flat send. Routes exactly as `ctx.actor::<R>().send(..)` does.
+    /// has no flat send. The recipient is the position [`Self::actor_ref`]
+    /// folds for `R`.
     ///
     /// Its consumers are the puppet motors' pose sends (`aether.puppet-idle`,
     /// `aether.puppet-turntable`) and the cube fixture's camera send.
@@ -48,13 +46,14 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.singleton_handle::<R>().push(payload);
+        self.push(self.actor_ref::<R>().id().0, payload, ChainMode::Inherit);
     }
 
     /// Send a slice of cast payloads to the declared dependency `R` as one
     /// contiguous batch, inheriting the handler's causal chain like
-    /// [`Self::send`]. Cast-only — see
-    /// [`MailSender::send_many`] for the wire-shape rationale.
+    /// [`Self::send`]. Cast-only: a structured kind has no efficient batched
+    /// wire shape, so the payloads cross as one contiguous byte slice with
+    /// their count.
     ///
     /// Its consumer is the cube fixture, which emits its twelve triangles as
     /// one batch.
@@ -63,7 +62,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.singleton_handle::<R>().push_many(payloads);
+        self.push_many(self.actor_ref::<R>().id().0, payloads);
     }
 
     /// Send a request to the declared dependency `R` and return the
@@ -79,7 +78,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.singleton_handle::<R>().push_tracked(payload)
+        self.push_tracked(self.actor_ref::<R>().id().0, payload)
     }
 
     /// Send a request to the declared dependency `R` and store `context`
@@ -99,7 +98,11 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.singleton_handle::<R>().push_with_context(payload, context)
+        let request = self.push_tracked(self.actor_ref::<R>().id().0, payload);
+        if request.0 != Source::NO_CORRELATION {
+            self.inline.insert_request_context(request, context);
+        }
+        request
     }
 
     /// Send `payload` to the declared dependency `R` on a fresh causal chain,
@@ -107,9 +110,10 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     ///
     /// Compiles only on a ctx typed by an actor that declares `R` with
     /// `#[actor(depends(R))]`, and only for a kind `R` handles; the turbofish
-    /// names only `R`, the kind is inferred from the payload. Routes exactly as
-    /// `ctx.actor::<R>().send_detached(..)` does. A send the running chain
-    /// caused inherits it through [`Self::send`] instead.
+    /// names only `R`, the kind is inferred from the payload. The recipient is
+    /// the position [`Self::actor_ref`] folds for `R`, as for [`Self::send`]. A
+    /// send the running chain caused inherits it through [`Self::send`]
+    /// instead.
     ///
     /// **Fire-and-forget only.** A detached send mints no parent linkage, so
     /// any reply the recipient issues roots in the recipient's tree rather
@@ -122,7 +126,54 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
         A: DependsOn<R>,
         R::Resolver: DependencyResolver,
     {
-        self.singleton_handle::<R>().push_detached(payload);
+        self.push(self.actor_ref::<R>().id().0, payload, ChainMode::Detached);
+    }
+
+    /// The one routing call every single-payload `WasmCtx` send funnels
+    /// through: encode `payload` and hand it to the inline registry with
+    /// `chain`, stamping this actor as the sender (issue 1987). A
+    /// cluster-member recipient dispatches in place; any other hands off to
+    /// the host (ADR-0114 addressing amendment).
+    fn push<K: ActorMail>(&self, recipient: u64, payload: &K, chain: ChainMode) {
+        let bytes = payload.encode_into_bytes();
+        self.inline.route_or_enqueue(recipient, K::ID.0, &bytes, 1, chain, self.mailbox);
+    }
+
+    /// The batch form of [`Self::push`]: the cast payloads cross as one
+    /// contiguous slice with their count, inheriting the handler's chain.
+    fn push_many<K: ActorMail + bytemuck::NoUninit>(&self, recipient: u64, payloads: &[K]) {
+        let bytes: &[u8] = bytemuck::cast_slice(payloads);
+        self.inline.route_or_enqueue(
+            recipient,
+            K::ID.0,
+            bytes,
+            payloads.len() as u32,
+            ChainMode::Inherit,
+            self.mailbox,
+        );
+    }
+
+    /// [`Self::push`] with the chain inherited, returning the correlation id
+    /// the host minted for the send. An inline-cluster local send never
+    /// leaves the guest, so no host correlation exists for it: that path
+    /// warn-logs and returns the no-correlation sentinel rather than reading
+    /// a stale `prev_correlation_p32` value.
+    fn push_tracked<K: ActorMail>(&self, recipient: u64, payload: &K) -> RequestId {
+        match self.inline.route_decision(recipient) {
+            RouteDecision::Local => {
+                self.push(recipient, payload, ChainMode::Inherit);
+                tracing::warn!(
+                    kind = <K as Kind>::NAME,
+                    recipient,
+                    "send_tracked on an inline-cluster local route has no host correlation",
+                );
+                RequestId(Source::NO_CORRELATION)
+            }
+            RouteDecision::Remote => {
+                self.push(recipient, payload, ChainMode::Inherit);
+                RequestId(mail::prev_correlation())
+            }
+        }
     }
 }
 
@@ -134,62 +185,13 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
 // `self_id` match the recipient is always `Remote`, so the path is identical
 // to a bare `mail::send_mail`.
 impl<A, M: ReplyMode> MailSender for WasmCtx<'_, A, M> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Inherit,
-            self.mailbox,
-        );
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        self.inline.route_or_enqueue(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-            ChainMode::Inherit,
-            self.mailbox,
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()
     }
 
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            ChainMode::Detached,
-            self.mailbox,
-        );
-    }
-
     // By-id detached send: the inherent `send_to` with `ChainMode::Detached`.
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
-        let bytes = payload.encode_into_bytes();
-        self.inline.route_or_enqueue(target.id().0, K::ID.0, &bytes, 1, ChainMode::Detached, self.mailbox);
+        self.push(target.id().0, payload, ChainMode::Detached);
     }
 }
 

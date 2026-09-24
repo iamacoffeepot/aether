@@ -357,8 +357,8 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     // transport reads the marker: the widget family addresses its members
     // parent-to-child by name through `RelativeMailbox::send<K: ActorMail>`, which
     // carries no `HandlesKind` bound. The scoped consequence is that a wasm
-    // set's kinds are not sendable through the typed resolver
-    // (`ctx.actor::<R>().send(&k)`).
+    // set's kinds are not sendable through the typed flat verbs
+    // (`ctx.send::<R>(&k)`, through `SendableTo<R>`).
     let lineage_manifest_consts = build_actor_lineage_manifest_consts(self_ty, opts);
     let kind_retention_statics = build_kinds_section_retention_statics(self_ty, &handlers, config_kind_ty);
 
@@ -380,7 +380,7 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     let const_tokens = consts.iter();
     // ADR-0119: an FFI/wasm component is embedded — it resolves under the
     // reserved `aether.embedded` scope. Default `Embedded` (keyless ⇒
-    // `Singleton`, reached by `ctx.actor::<R>()`); `#[actor(instanced)]`
+    // `Singleton`, reached by `ctx.send::<R>(..)`); `#[actor(instanced)]`
     // selects `EmbeddedMany` for a spawn-sibling child (ADR-0097). Cardinality
     // is derived from the resolver; nothing emits `impl Singleton` here.
     let resolver_ty = if matches!(opts.cardinality, Some(ActorCardinality::Instanced)) {
@@ -448,10 +448,10 @@ pub fn expand_wasm_actor(item: ItemImpl, opts: &ActorOpts) -> syn::Result<TokenS
     };
 
     // ADR-0075: emit one `impl HandlesKind<K> for Self {}` per handler
-    // kind. Auto-generated marker impls gate
-    // `ActorMailbox<'_, R, T>::send::<K>` (constructed via
-    // `ctx.actor::<R>()` or `ctx.to(&reference)`) so wrong-kind
-    // sends are compile errors at the call site. The handler list above
+    // kind. Auto-generated marker impls gate `SendableTo<R>` on the flat
+    // typed verbs (`ctx.send::<R>(&k)`) and `Target<K>` on `ActorRef<R>`
+    // (`ctx.send_to(&reference, &k)`), so wrong-kind sends are compile
+    // errors at the call site. The handler list above
     // is the single source of truth — adding a `#[handler]` automatically
     // updates senders' compile-time checks.
     let handles_kind_impls = handlers.iter().map(|h| {
@@ -843,7 +843,8 @@ fn erase_ctx_unless_named(sig: &syn::Signature) -> TokenStream2 {
 ///     (extracted from the impl block so the `NativeActor: Actor`
 ///     supertrait bound is satisfied).
 ///   - `impl HandlesKind<K> for X` per `#[handler]` method — the
-///     compile-time gate `MailSender::send::<R, K>` consults.
+///     compile-time gate the flat typed verbs consult through
+///     `SendableTo<R>`.
 ///   - `impl NativeActor for X { type Config; fn init }` (the user's
 ///     bodies, attribute-stripped).
 ///   - `impl ::aether_substrate::NativeDispatch for X` whose body is

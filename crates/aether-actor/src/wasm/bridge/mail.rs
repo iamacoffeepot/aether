@@ -26,7 +26,7 @@ use crate::wasm::raw;
 /// for schema-shaped kinds — `Kind::encode_into_bytes` already
 /// resolves which). `count` is `1` for a single send and N for a
 /// batch (cast-only — structured kinds have no efficient batched wire
-/// shape, see `WasmActorMailbox::send_many`).
+/// shape, see `WasmCtx::send_many`).
 ///
 /// `detached` carries the ADR-0080 §7 lineage signal. `false` (the
 /// default `send` path) lets the host stamp the in-flight
@@ -46,9 +46,9 @@ use crate::wasm::raw;
 /// lookup miss. Other non-zero values are reserved for future
 /// host-side failure surfaces.
 ///
-/// Not `#[must_use]`: the public ctx surfaces (`MailSender::send`,
-/// `MailSender::send_detached`, `OutboundReply::reply`, etc.) are
-/// trait-defined as fire-and-forget and have no return channel for
+/// Not `#[must_use]`: the public ctx surfaces (the flat `send` verbs,
+/// `MailSender::send_detached_to`, `OutboundReply::reply`, etc.) are
+/// defined as fire-and-forget and have no return channel for
 /// a lookup-miss status. The substrate warn-drops unknown
 /// recipients on its side, which is the diagnostic path; the guest
 /// can't surface the status anywhere meaningful.

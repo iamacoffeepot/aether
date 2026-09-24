@@ -15,7 +15,7 @@ use crate::wasm::inline::{ChainMode, Registry};
 /// up in the per-component inline registry, never folded) plus the registry
 /// the send routes through.
 ///
-/// Unlike [`WasmActorMailbox`](crate::WasmActorMailbox) this carries no receiver type and no
+/// Unlike an [`ActorRef<R>`](crate::ActorRef) this carries no receiver type and no
 /// `R: HandlesKind<K>` bound — relative addressing is positional, so the
 /// target's handler set is not known at the call site. The send routes through
 /// the inline registry's cluster router: a cluster-member recipient (which a

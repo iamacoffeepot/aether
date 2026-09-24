@@ -1,6 +1,7 @@
 //! Proven references for declared dependencies: on a ctx upgraded with
-//! `__for_actor::<Dependent>()`, `actor_ref::<Dep>()` mints the position
-//! `actor::<Dep>()` folds, for a `One` and for an `Embedded` dependency.
+//! `__for_actor::<Dependent>()`, `actor_ref::<Dep>()` mints the position the
+//! dependency's resolver folds from the caller scope it selects, for a `One`
+//! and for an `Embedded` dependency.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx};
 use crate::mail::Mail;
@@ -39,19 +40,20 @@ impl Addressable for EmbeddedDep {
     type Resolver = Embedded;
 }
 
-/// `actor_ref` and `actor` share one derivation: the reference proves the
-/// folded position for both declarable strategies. Owned logic: the shared
-/// `singleton_handle` fold behind `actor` and `actor_ref`.
+/// The reference proves the resolver's fold for both declarable strategies:
+/// `One` ignores the caller's carry, and `Embedded` seeds from the logical
+/// parent rather than the ctx's own mailbox. Owned logic: the caller-scope
+/// selection in `actor_ref`.
 #[test]
-fn actor_ref_mints_the_position_actor_folds_for_one_and_embedded_dependencies() {
+fn actor_ref_mints_the_resolver_fold_for_one_and_embedded_dependencies() {
     let registry = Registry::new();
     registry.set_self_id(0xC000);
     registry.set_parent_id(0xC001);
     let mut ctx = WasmCtx::__new(0xC000, &registry, NO_INBOUND_SOURCE);
     let ctx = ctx.__for_actor::<Dependent>();
 
-    assert_eq!(ctx.actor_ref::<OneDep>().id(), ctx.actor::<OneDep>().mailbox_id());
-    assert_eq!(ctx.actor_ref::<EmbeddedDep>().id(), ctx.actor::<EmbeddedDep>().mailbox_id());
+    assert_eq!(ctx.actor_ref::<OneDep>().id(), OneDep::resolve(0xC000, ()));
+    assert_eq!(ctx.actor_ref::<EmbeddedDep>().id(), EmbeddedDep::resolve(0xC001, ()));
 }
 
 /// `sender` mints the threaded dispatch source: `None` for
