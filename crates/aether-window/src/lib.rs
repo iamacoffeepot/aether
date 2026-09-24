@@ -54,8 +54,9 @@ pub struct HeadlessWindowCapability;
 
 /// Platform-neutral compatibility alias for the headless window identity.
 ///
-/// Consumers use `ctx.actor::<WindowCapability>()` regardless of the
-/// chassis-specific runtime that owns the shared mailbox namespace.
+/// Consumers declare `depends(WindowCapability)` and send with
+/// `ctx.send::<WindowCapability>(..)` regardless of the chassis-specific
+/// runtime that owns the shared mailbox namespace.
 pub use HeadlessWindowCapability as WindowCapability;
 
 /// Fail-fast headless identity for one named window endpoint.

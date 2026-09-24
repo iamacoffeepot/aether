@@ -10,7 +10,7 @@
 use std::collections::VecDeque;
 use std::sync::mpsc::Sender;
 
-use aether_actor::{Reaches, actor};
+use aether_actor::{DependsOn, actor};
 use aether_component::ComponentHostCapability;
 use aether_kinds::LoadResult;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -78,14 +78,14 @@ impl NativeActor for Autoloader {
 
 impl Autoloader {
     /// Send the next component's load, or report success once none remain.
-    fn send_next<A: Reaches<ComponentHostCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
+    fn send_next<A: DependsOn<ComponentHostCapability>>(&mut self, ctx: &mut NativeCtx<'_, A>) {
         let Some(component) = self.remaining.pop_front() else {
             self.finish(Ok(self.loaded));
             return;
         };
         self.in_flight =
             component.name.clone().or_else(|| component.export.clone()).unwrap_or_else(|| format!("#{}", self.loaded));
-        ctx.actor::<ComponentHostCapability>().send(&component.load_request());
+        ctx.send::<ComponentHostCapability>(&component.load_request());
     }
 
     /// Send the outcome and drop the sender, so the report is sent once.

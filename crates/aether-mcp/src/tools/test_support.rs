@@ -118,7 +118,7 @@ impl NativeActor for AddressRouteSink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
@@ -244,7 +244,7 @@ impl NativeActor for ScriptedRouteSink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
@@ -327,7 +327,7 @@ impl NativeActor for RouteInventorySink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
