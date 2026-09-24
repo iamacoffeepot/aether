@@ -12,10 +12,11 @@
 //!    patches, so a reader whose extension dispatch drops `.obj` refuses it
 //!    into the actor log and the window stays empty.
 //! 3. `demo/puppet.json` says what the puppet's `Config` kind can hear.
-//!    The file is read here rather than restated, so a renamed or dropped
-//!    field fails this test instead of failing the first stranger who runs
-//!    the demo. `demo/turntable.json` is read the same way for the framing
-//!    it puts the camera at.
+//!    The file is read here rather than restated, and encoded through the
+//!    same schema codec every boot path encodes it through, so a renamed,
+//!    dropped, or newly required field fails this test instead of failing
+//!    the first stranger who runs the demo. `demo/turntable.json` is read
+//!    the same way for the framing it puts the camera at.
 //!
 //! Nothing here re-tests the drawing itself — `draws_scenario` owns that.
 //! The assertion is coverage for the same reason it is there: a fraction of
@@ -32,7 +33,7 @@ use std::fs;
 use std::path::Path;
 
 use aether_actor::ActorRef;
-use aether_data::Kind;
+use aether_data::{Kind, Schema};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_harness_substrate_capture::visual::{background_top_left, coverage, decode_png};
 use aether_harness_substrate_capture::{
@@ -89,6 +90,23 @@ fn load_puppet(harness: &mut SubstrateHarness, wasm_path: &Path, config: &Puppet
         })
         .unwrap_or_else(|error| panic!("load_component(puppet): {error}"))
         .0
+}
+
+/// The packaged demo boots its configs through `aether_codec::encode_schema`
+/// — a boot manifest, `load_component`'s `config_path`, `cargo xtask
+/// package` — which reads the JSON against the kind's schema rather than
+/// through serde, so a file serde accepts can still fail to boot. No
+/// harness and no GPU, so it runs on every host.
+#[test]
+fn the_demo_configs_encode_through_the_boot_codec() {
+    let puppet: serde_json::Value = serde_json::from_str(PUPPET_CONFIG_JSON).expect("demo/puppet.json is JSON");
+    let turntable: serde_json::Value =
+        serde_json::from_str(TURNTABLE_CONFIG_JSON).expect("demo/turntable.json is JSON");
+
+    aether_codec::encode_schema(&puppet, &<PuppetConfig as Schema>::SCHEMA)
+        .unwrap_or_else(|error| panic!("demo/puppet.json does not encode as a PuppetConfig: {error}"));
+    aether_codec::encode_schema(&turntable, &<TurntableConfig as Schema>::SCHEMA)
+        .unwrap_or_else(|error| panic!("demo/turntable.json does not encode as a TurntableConfig: {error}"));
 }
 
 #[test]

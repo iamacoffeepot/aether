@@ -785,6 +785,17 @@ impl WasmActor for Puppet {
     const NAMESPACE: &'static str = "aether.puppet";
 
     fn init(config: PuppetConfig, _ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        let mut settings = extract::Settings::default();
+        if let Some(hatch) = config.hatch {
+            if !hatch.is_solvable() {
+                return Err(ActorInitError::from(
+                    "the configured hatch style is not solvable: every field must be finite, every spacing \
+                     positive, and the light non-zero",
+                ));
+            }
+            hatch.apply(&mut settings);
+        }
+
         Ok(Self {
             subject_at_boot: config.subject,
             subject: None,
@@ -815,7 +826,7 @@ impl WasmActor for Puppet {
             posed_at: None,
             transforms: Vec::new(),
             bones: deform::bone_uniform(&[]),
-            settings: extract::Settings::default(),
+            settings,
             hatch: hatch::Choice::default(),
             easel: easel::Easel::default(),
             strokes: strokes::Strokes::default(),

@@ -27,7 +27,9 @@
 //      - String / Bytes / Vec / Map: `u32` little-endian count, then
 //        elements (maps in ascending encoded-key byte order)
 //      - [T; N]: concatenated encoded elements (no count)
-//      - Option<T>: presence byte, then T if Some
+//      - Option<T>: presence byte, then T if Some; a struct field of
+//        this type whose key the JSON object omits encodes as None,
+//        the same bytes an explicit `null` produces
 //      - enum selector: `u32` little-endian (the variant index)
 //      - struct: concatenated field bytes in declaration order
 //
@@ -221,7 +223,8 @@ fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut V
         SchemaType::Struct { fields, .. } => {
             // Wire struct: concatenated field bytes in declaration
             // order. Reject unexpected keys (typo defense) and require
-            // every field to be present.
+            // every field to be present, except an `Option` field,
+            // whose absence encodes as `None`.
             let obj = value
                 .as_object()
                 .ok_or_else(|| EncodeError::TypeMismatch { field: path.to_owned(), expected: "object" })?;
@@ -231,10 +234,8 @@ fn encode_wire_value(value: &Value, schema: &SchemaType, path: &str, out: &mut V
                 }
             }
             for field in fields.iter() {
-                let v =
-                    obj.get(&*field.name).ok_or_else(|| EncodeError::MissingField(format!("{path}.{}", field.name)))?;
                 let field_path = format!("{path}.{}", field.name);
-                encode_wire_value(v, &field.ty, &field_path, out)?;
+                encode_named_field(obj, field, field_path, out)?;
             }
             Ok(())
         }
@@ -505,14 +506,31 @@ fn encode_enum_body(body: &Value, variant: &EnumVariant, path: &str, out: &mut V
                 }
             }
             for field in fields.iter() {
-                let v = obj
-                    .get(&*field.name)
-                    .ok_or_else(|| EncodeError::MissingField(format!("{path}::{name}.{}", field.name)))?;
                 let nested = format!("{path}::{name}.{}", field.name);
-                encode_wire_value(v, &field.ty, &nested, out)?;
+                encode_named_field(obj, field, nested, out)?;
             }
             Ok(())
         }
+    }
+}
+
+/// Encode one named field of a wire struct or struct variant from its
+/// JSON object. An absent key is `MissingField` unless the field is an
+/// `Option`: then absence has one meaning, `None`, and encodes as the
+/// presence byte `0` an explicit `null` would write.
+fn encode_named_field(
+    obj: &serde_json::Map<String, Value>,
+    field: &NamedField,
+    field_path: String,
+    out: &mut Vec<u8>,
+) -> Result<(), EncodeError> {
+    match (obj.get(&*field.name), &field.ty) {
+        (Some(v), ty) => encode_wire_value(v, ty, &field_path, out),
+        (None, SchemaType::Option(_)) => {
+            out.push(0);
+            Ok(())
+        }
+        (None, _) => Err(EncodeError::MissingField(field_path)),
     }
 }
 
@@ -920,6 +938,17 @@ mod tests {
     }
 
     #[derive(Serialize, Deserialize)]
+    struct WireOptionalName {
+        id: String,
+        name: Option<String>,
+    }
+
+    #[derive(Serialize, Deserialize)]
+    enum WireOptionalVariant {
+        Named { name: Option<String> },
+    }
+
+    #[derive(Serialize, Deserialize)]
     struct WireVec {
         tags: Vec<String>,
     }
@@ -997,6 +1026,36 @@ mod tests {
         let none = WireOption { name: None };
         let none_bytes = encode_schema(&json!({"name": null}), &schema).expect("test setup: encode none(name)");
         assert_eq!(none_bytes, wire::to_vec(&none).expect("test setup: wire reference none"));
+    }
+
+    #[test]
+    fn wire_option_field_omitted_encodes_as_none() {
+        let schema = structured_struct(vec![
+            NamedField { name: "id".into(), ty: SchemaType::String },
+            NamedField { name: "name".into(), ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)) },
+        ]);
+        let none = WireOptionalName { id: "puppet".into(), name: None };
+        let bytes = encode_schema(&json!({"id": "puppet"}), &schema).expect("an omitted option field encodes");
+        assert_eq!(bytes, wire::to_vec(&none).expect("test setup: wire reference none"));
+
+        let err = encode_schema(&json!({"name": "Aether"}), &schema).expect_err("an omitted required field refuses");
+        assert!(matches!(err, EncodeError::MissingField(n) if n == "$.id"));
+    }
+
+    #[test]
+    fn struct_variant_option_field_omitted_encodes_as_none() {
+        let schema = enum_schema(vec![EnumVariant::Struct {
+            name: "Named".into(),
+            discriminant: 0,
+            fields: vec![NamedField {
+                name: "name".into(),
+                ty: SchemaType::Option(SchemaCell::owned(SchemaType::String)),
+            }]
+            .into(),
+        }]);
+        let none = WireOptionalVariant::Named { name: None };
+        let bytes = encode_schema(&json!({"Named": {}}), &schema).expect("an omitted variant option field encodes");
+        assert_eq!(bytes, wire::to_vec(&none).expect("test setup: wire reference named none"));
     }
 
     #[test]

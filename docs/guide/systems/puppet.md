@@ -66,8 +66,9 @@ again and answers the original caller with the real result.
 
 The same load can be named as init-config instead of mail, which is how a
 shipped package comes up with a subject on screen and no operator in the room.
-The `aether.puppet.config` kind carries one optional field, `subject`, whose
-value is exactly an `aether.puppet.load`:
+The `aether.puppet.config` kind carries two optional fields, `subject` and
+`hatch`, and an omitted field means `None`. `subject` is exactly an
+`aether.puppet.load`:
 
 ```json
 {
@@ -87,6 +88,12 @@ entry's `config_json` (`docs/guide/building/distribution.md`). The puppet
 issues the reads from `wire`, so the load stays asynchronous and the mail path
 remains the way to swap subjects at runtime. `demo/` is a worked example: that
 config plus the turntable's, in both a depot spec and a boot manifest.
+
+`hatch` is exactly an `aether.puppet.hatch`, applied before the first frame so
+a package can ship a drawing style without mailing one. Omitted, the puppet
+draws the authored style. A style the mail would refuse — a field that is not
+finite, a spacing that is not positive, a light of zero length — refuses the
+load instead, because at instantiation there is no earlier style to keep.
 
 ## The painter's box
 
