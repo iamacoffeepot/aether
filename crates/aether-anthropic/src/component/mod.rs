@@ -32,9 +32,7 @@ mod error;
 pub use config::{AnthropicComponentConfig, DEFAULT_CLI_BINARY};
 use config::{RequestContext, SendPath};
 
-use aether_actor::{
-    ActorInitError, Erased, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Manual, OutboundReply, ReplyHandle, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_http::{Fetch, FetchResult, HttpCapability, HttpHeader, HttpMethod};
 use aether_process::{ProcessCapability, Run, RunResult};
 
@@ -90,7 +88,7 @@ impl WasmActor for AnthropicComponent {
     /// neither dispatches a fetch. Otherwise submits the fetch immediately; the
     /// reply lands when the edge round-trip settles.
     #[handler::manual]
-    fn on_messages_send(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: MessagesSend) {
+    fn on_messages_send(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, mail: MessagesSend) {
         let reply = ctx.reply_target();
         let request_id = mail.request_id;
 
@@ -142,7 +140,7 @@ impl WasmActor for AnthropicComponent {
             model: mail.model,
             timeout_millis: self.config.timeout_millis,
         };
-        let _ = ctx.actor::<HttpCapability>().send_with_context(&fetch, &context);
+        let _ = ctx.send_with_context::<HttpCapability>(&fetch, &context);
     }
 
     /// Request a completion through the `claude` subprocess via
@@ -156,7 +154,7 @@ impl WasmActor for AnthropicComponent {
     /// subscription, so it works with no API key; an allowlist that omits the
     /// CLI binary yields `Err { CliNotFound }`.
     #[handler::manual]
-    fn on_cli_send(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, mail: CliSend) {
+    fn on_cli_send(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, mail: CliSend) {
         let reply = ctx.reply_target();
         let request_id = mail.request_id;
 
@@ -195,7 +193,7 @@ impl WasmActor for AnthropicComponent {
             model: mail.model,
             timeout_millis: self.config.timeout_millis,
         };
-        let _ = ctx.actor::<ProcessCapability>().send_with_context(&run, &context);
+        let _ = ctx.send_with_context::<ProcessCapability>(&run, &context);
     }
 
     /// Recover the Messages request context and reply the parsed completion (or
@@ -207,7 +205,7 @@ impl WasmActor for AnthropicComponent {
     // state, so they read no `self`; the `&mut self` is the dispatch ABI.
     #[allow(clippy::unused_self)]
     #[handler::manual]
-    fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: FetchResult) {
+    fn on_fetch_result(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, result: FetchResult) {
         let Some(context) = ctx.take_context::<RequestContext>() else {
             return;
         };
@@ -235,7 +233,7 @@ impl WasmActor for AnthropicComponent {
     /// Substrate-driven; do not send manually.
     #[allow(clippy::unused_self)]
     #[handler::manual]
-    fn on_run_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, result: RunResult) {
+    fn on_run_result(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, result: RunResult) {
         let Some(context) = ctx.take_context::<RequestContext>() else {
             return;
         };
