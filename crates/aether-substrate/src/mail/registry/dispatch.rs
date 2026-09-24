@@ -2,6 +2,7 @@ use std::fmt;
 #[cfg(debug_assertions)]
 use std::{cell::Cell, thread};
 
+use aether_actor::ErasedActorRef;
 use aether_kinds::trace::Nanos;
 
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
@@ -36,7 +37,7 @@ pub fn test_dispatch(kind: KindId, payload: &[u8], count: u32) -> MailDispatch<'
 /// terse without each rebuilding the full struct literal.
 #[cfg(test)]
 pub fn test_owned_dispatch(kind: KindId, payload: &[u8], count: u32) -> OwnedDispatch {
-    OwnedDispatch::disarmed(
+    OwnedDispatch::disarmed_at(
         kind,
         None,
         Source::NONE,
@@ -316,9 +317,9 @@ impl OwnedDispatch {
     /// Construct an `OwnedDispatch` whose ADR-0094 obligation is
     /// **disarmed** — dropping it without discharge/transfer does not
     /// panic. For test/helper mints, the `noop` handler, and seeds that
-    /// carry no real settlement lineage. `recipient` is stored on the
-    /// dispatch (and names the never-firing guard's mailbox in debug);
-    /// pass `MailboxId(0)` when none is meaningful.
+    /// carry no real settlement lineage. `recipient` is the proof of the
+    /// mailbox the dispatch was routed to; its position is stored on the
+    /// dispatch (and names the never-firing guard's mailbox in debug).
     ///
     /// `pub` (not `pub(crate)`) because integration tests and sibling
     /// crates' (the per-cap crates') tests mint dispatches directly to
@@ -328,6 +329,40 @@ impl OwnedDispatch {
     #[must_use]
     #[allow(clippy::too_many_arguments)]
     pub fn disarmed(
+        kind: KindId,
+        origin: Option<String>,
+        sender: Source,
+        payload: MailRef,
+        count: u32,
+        mail_id: MailId,
+        root: MailId,
+        parent_mail: Option<MailId>,
+        t_enqueue: Nanos,
+        enqueue_depth: u32,
+        recipient: ErasedActorRef,
+    ) -> Self {
+        Self::disarmed_at(
+            kind,
+            origin,
+            sender,
+            payload,
+            count,
+            mail_id,
+            root,
+            parent_mail,
+            t_enqueue,
+            enqueue_depth,
+            recipient.id(),
+        )
+    }
+
+    /// The positional form of [`Self::disarmed`], for substrate-internal
+    /// mints that hold no proof of their recipient: a bootstrap seed
+    /// before its actor is live, the `after_init` seed, and the crate's
+    /// own tests. Same ADR-0094 disarmed obligation.
+    #[must_use]
+    #[allow(clippy::too_many_arguments)] // aether-suppression-request: the positional form of `disarmed`, which carries the same eleven envelope fields
+    pub(crate) fn disarmed_at(
         kind: KindId,
         origin: Option<String>,
         sender: Source,
