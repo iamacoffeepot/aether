@@ -372,7 +372,9 @@ it with `testing::registered_ref`, which returns the peer's reference, and
 A test that needs a local component as the inbound's sender takes the
 `Source`, and the chain root when it needs one, from a mail its
 `registered_binding` binding actually sent, and writes a root that is only a
-token as `MailId { correlation_id: n, ..MailId::NONE }`.
+token as `testing::token_root(n)`, so it names no mailbox. The in-flight
+lineage a `NativeCtx` constructor takes is optional: `None` for a context with
+no inbound chain, `Some(root)` for one running inside a chain.
 
 Three tests anchor the deferred-reply flow:
 `load_font_forwards_read_with_context` drives `on_load_font` and asserts the

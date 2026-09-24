@@ -194,7 +194,7 @@ mod tests {
         let mut q = TaskQueue::new(2);
         // Three submits against a bound of 2: two dispatch, one queues.
         for cid in 1..=3 {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(cid), MailId::NONE, root_id(cid));
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(cid), None, Some(root_id(cid)));
             q.submit(&mut ctx, move || Answer { value: cid });
         }
         assert_eq!(q.in_flight(), 2, "two dispatched under the bound of 2");
@@ -218,11 +218,11 @@ mod tests {
         let root_a = root_id(1);
         let root_b = root_id(2);
         {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(1), MailId::NONE, root_a);
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(1), None, Some(root_a));
             q.submit(&mut ctx, || Answer { value: 1 });
         }
         {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(2), MailId::NONE, root_b);
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(2), None, Some(root_b));
             q.submit(&mut ctx, || Answer { value: 2 });
         }
         assert_eq!(q.in_flight(), 1);
@@ -236,7 +236,7 @@ mod tests {
         // First completion: drains the queued request, dispatching it.
         // `in_flight` stays 1 (one freed, one dispatched), pending empties.
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             q.on_complete(&mut ctx);
         }
         assert_eq!(q.in_flight(), 1, "one freed, one drained -> still 1 in flight");
@@ -249,7 +249,7 @@ mod tests {
 
         // Second completion: nothing queued, so the slot frees.
         {
-            let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
             q.on_complete(&mut ctx);
         }
         assert_eq!(q.in_flight(), 0, "in-flight returns to 0 once the queue is empty");

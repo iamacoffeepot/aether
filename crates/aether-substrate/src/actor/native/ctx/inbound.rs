@@ -72,20 +72,20 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
     /// ADR-0080 §5: the [`MailId`] of the mail currently being
     /// dispatched. Read by outbound `send` paths to stamp
-    /// `parent_mail` on child mail. `MailId::NONE` when the ctx was
+    /// `parent_mail` on child mail. `None` when the ctx was
     /// built without an inbound (close hook, init, chassis-pushed).
     #[must_use]
-    pub fn in_flight_mail_id(&self) -> MailId {
+    pub fn in_flight_mail_id(&self) -> Option<MailId> {
         self.in_flight_mail_id
     }
 
     /// ADR-0080 §5: the root [`MailId`] of the causal chain this
     /// handler is running in. Read by outbound `send` paths to inherit
     /// `root` on child mail so descendants share the chain. The
-    /// chassis-root case (no inbound) leaves this `MailId::NONE` and
+    /// chassis-root case (no inbound) leaves this `None` and
     /// `NativeBinding::send_mail_with_lineage` mints a fresh root.
     #[must_use]
-    pub fn in_flight_root(&self) -> MailId {
+    pub fn in_flight_root(&self) -> Option<MailId> {
         self.in_flight_root
     }
 
@@ -123,8 +123,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     pub fn sender(&self) -> Option<ErasedActorRef> {
         match self.source.addr {
             SourceAddr::Component(id) => Some(Registry::structural_erased(id)),
-            SourceAddr::None if self.in_reply_to().is_some() && self.in_flight_mail_id != MailId::NONE => {
-                Some(Registry::structural_erased(self.in_flight_mail_id.sender))
+            SourceAddr::None if self.in_reply_to().is_some() => {
+                self.in_flight_mail_id.map(|id| Registry::structural_erased(id.sender))
             }
             _ => None,
         }
@@ -169,7 +169,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// rather than a guard that gates nothing.
     #[must_use]
     pub fn acquire_settlement_hold(&self) -> Option<SettlementHold> {
-        self.mailer().acquire_settlement_hold(self.held_chain())
+        self.held_chain().map(|root| self.mailer().acquire_settlement_hold(root))
     }
 
     /// The chain a hold taken from this context gates: the in-flight root
@@ -177,11 +177,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     /// context to exist. Exactly one of the two is ever set — a ctx with an
     /// inbound is never a `wire` ctx — so the precedence is a formality that
     /// keeps the rule readable rather than a real disambiguation.
-    fn held_chain(&self) -> MailId {
-        if self.in_flight_root == MailId::NONE {
-            self.causing_chain
-        } else {
-            self.in_flight_root
-        }
+    fn held_chain(&self) -> Option<MailId> {
+        self.in_flight_root.or(self.causing_chain)
     }
 }

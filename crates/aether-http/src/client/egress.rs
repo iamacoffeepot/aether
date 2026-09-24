@@ -228,7 +228,7 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::mail::registry::{Registry, noop_handler};
-    use aether_substrate::testing::{fresh_substrate, registered_binding, registered_ref};
+    use aether_substrate::testing::{fresh_substrate, registered_binding, registered_ref, token_root};
     use std::sync::Arc;
 
     /// A `#[repr(C)]` `Pod` reply kind the worker produces. Hand-rolled `Kind`
@@ -253,7 +253,7 @@ mod tests {
     /// chain's hold accounting separate — the value a cap handler reads from
     /// `ctx.in_flight_root()`.
     fn root_id(cid: u64) -> MailId {
-        MailId { correlation_id: cid, ..MailId::NONE }
+        token_root(cid)
     }
 
     fn session_reply_to(corr: u64) -> Source {
@@ -276,12 +276,12 @@ mod tests {
     }
 
     fn submit(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>, cid: u64) {
-        let mut ctx = NativeCtx::new(binding, session_reply_to(cid), MailId::NONE, root_id(cid));
+        let mut ctx = NativeCtx::new(binding, session_reply_to(cid), None, Some(root_id(cid)));
         q.submit(&mut ctx, sender, move || Answer { value: cid });
     }
 
     fn complete(q: &mut PerSenderEgress, binding: &Arc<NativeBinding>, sender: Option<ErasedActorRef>) {
-        let mut ctx = NativeCtx::new(binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(binding, Source::NONE, None, None);
         q.on_complete(&mut ctx, sender);
     }
 
@@ -426,11 +426,11 @@ mod tests {
         let root_a = root_id(1);
         let root_b = root_id(2);
         {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(1), MailId::NONE, root_a);
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(1), None, Some(root_a));
             q.submit(&mut ctx, sender, || Answer { value: 1 });
         }
         {
-            let mut ctx = NativeCtx::new(&binding, session_reply_to(2), MailId::NONE, root_b);
+            let mut ctx = NativeCtx::new(&binding, session_reply_to(2), None, Some(root_b));
             q.submit(&mut ctx, sender, || Answer { value: 2 });
         }
         assert_eq!(q.pending_for(sender), 1, "the second request queued behind the budget of 1");

@@ -661,7 +661,7 @@ mod tests {
         Arc, CreateTexture, CreateTextureResult, NativeCtx, QuadSpace, Read, ReadResult, Source, TextCapabilityState,
         UpdateTexture,
     };
-    use aether_data::{Kind, MailId, SessionToken, SourceAddr, Uuid};
+    use aether_data::{Kind, SessionToken, SourceAddr, Uuid};
     use aether_fs::{FsError, NamespaceAddr};
     use aether_math::Rgba;
     use aether_render::DrawTexturedQuads;
@@ -691,7 +691,7 @@ mod tests {
         size_pixels: f32,
         origin: [f32; 2],
     ) {
-        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), None, None);
         TextCapability::on_draw_text(
             state,
             &mut ctx,
@@ -708,7 +708,7 @@ mod tests {
     }
 
     fn draw_batch(state: &mut TextCapabilityState, binding: &Arc<NativeBinding>, items: Vec<DrawText>) {
-        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(binding, session_sender(), None, None);
         TextCapability::on_draw_batch(state, &mut ctx, DrawTextBatch { items });
     }
 
@@ -728,7 +728,7 @@ mod tests {
     fn load_font_forwards_read_with_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -742,7 +742,7 @@ mod tests {
     fn read_err_replies_load_font_err_via_request_context() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -751,8 +751,7 @@ mod tests {
         // Skip the forwarded read.
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -771,12 +770,8 @@ mod tests {
         let first_session = SessionToken(Uuid::from_u128(1));
         let second_session = SessionToken(Uuid::from_u128(2));
 
-        let mut first_ctx = NativeCtx::new_for_actor(
-            &binding,
-            Source::to(SourceAddr::Session(first_session)),
-            MailId::NONE,
-            MailId::NONE,
-        );
+        let mut first_ctx =
+            NativeCtx::new_for_actor(&binding, Source::to(SourceAddr::Session(first_session)), None, None);
         TextCapability::on_load_font(
             &mut state,
             &mut first_ctx,
@@ -784,12 +779,8 @@ mod tests {
         );
         let first_correlation = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut second_ctx = NativeCtx::new_for_actor(
-            &binding,
-            Source::to(SourceAddr::Session(second_session)),
-            MailId::NONE,
-            MailId::NONE,
-        );
+        let mut second_ctx =
+            NativeCtx::new_for_actor(&binding, Source::to(SourceAddr::Session(second_session)), None, None);
         TextCapability::on_load_font(
             &mut state,
             &mut second_ctx,
@@ -797,8 +788,7 @@ mod tests {
         );
         let second_correlation = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut second_reply_ctx =
-            NativeCtx::new_for_actor(&binding, fs_reply_source(second_correlation), MailId::NONE, MailId::NONE);
+        let mut second_reply_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(second_correlation), None, None);
         TextCapability::on_read_result(
             &mut state,
             &mut second_reply_ctx,
@@ -808,8 +798,7 @@ mod tests {
         assert_eq!(session, second_session);
         assert!(matches!(reply, LoadFontResult::Err { .. }), "second reply should be the fs error");
 
-        let mut first_reply_ctx =
-            NativeCtx::new_for_actor(&binding, fs_reply_source(first_correlation), MailId::NONE, MailId::NONE);
+        let mut first_reply_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(first_correlation), None, None);
         TextCapability::on_read_result(
             &mut state,
             &mut first_reply_ctx,
@@ -824,7 +813,7 @@ mod tests {
     fn malformed_font_bytes_reply_err() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_load_font(
             &mut state,
             &mut ctx,
@@ -832,8 +821,7 @@ mod tests {
         );
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,
@@ -853,7 +841,7 @@ mod tests {
     fn load_font_bytes_registers_memory_font() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_load_font_bytes(
             &mut state,
             &mut ctx,
@@ -877,7 +865,7 @@ mod tests {
     fn malformed_load_font_bytes_replies_err() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_load_font_bytes(
             &mut state,
             &mut ctx,
@@ -926,7 +914,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 7 });
         }
         assert_eq!(state.atlas_texture_id, Some(7));
@@ -945,7 +933,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 3 });
         }
         assert_eq!(state.atlas_texture_id, Some(3));
@@ -1062,7 +1050,7 @@ mod tests {
         state.atlas_create_inflight = true;
         let (binding, rx) = ctx_binding();
         {
-            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
             TextCapability::on_create_texture_result(&mut state, &mut ctx, CreateTextureResult::Ok { texture_id: 1 });
         }
         assert_eq!(state.atlas_texture_id, Some(1));
@@ -1193,7 +1181,7 @@ mod tests {
         state.fonts.insert(0, Arc::new(test_font()));
         let (binding, rx) = ctx_binding();
 
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(0) });
         match decode_session_reply::<FontMetricsResult>(&rx) {
             FontMetricsResult::Ok { metrics } => {
@@ -1203,7 +1191,7 @@ mod tests {
             FontMetricsResult::Err { error } => panic!("expected Ok: {error}"),
         }
 
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_font_metrics(&mut state, &mut ctx, FontMetricsRequest { font: FontRef::Id(99) });
         match decode_session_reply::<FontMetricsResult>(&rx) {
             FontMetricsResult::Err { error } => assert!(error.contains("99")),
@@ -1219,7 +1207,7 @@ mod tests {
     fn font_metrics_by_path_loads_on_miss() {
         let mut state = TextCapabilityState::new();
         let (binding, rx) = ctx_binding();
-        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, session_sender(), None, None);
         TextCapability::on_font_metrics(
             &mut state,
             &mut ctx,
@@ -1227,8 +1215,7 @@ mod tests {
         );
         let correlation_id = assert_next_send_kind::<Read>(&binding, &rx);
 
-        let mut read_ctx =
-            NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE);
+        let mut read_ctx = NativeCtx::new_for_actor(&binding, fs_reply_source(correlation_id), None, None);
         TextCapability::on_read_result(
             &mut state,
             &mut read_ctx,

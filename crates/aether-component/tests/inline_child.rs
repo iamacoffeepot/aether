@@ -46,7 +46,7 @@ fn key(text: &str) -> LoadName {
 /// addressable (iamacoffeepot/aether#4186). The load reply rides the
 /// trampoline birth's own `SpawnOutcome`, while the child's alias is a
 /// *second* registry-owner batch the trampoline stages from its `wire`
-/// hook — and `wire` runs on a ctx rooted at `MailId::NONE`, so that batch
+/// hook — and `wire` runs on a ctx with no root, so that batch
 /// holds no chain and the load's settlement never covered it. ADR-0165's
 /// activation suffix submits the batch and deliberately does not wait for
 /// the owner to apply it, so nothing orders the alias against the reply.

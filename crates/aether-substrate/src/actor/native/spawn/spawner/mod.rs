@@ -263,7 +263,7 @@ impl Spawner {
             .expect("the chassis boot installs its settlement registry on the mailer")
             .subscribe_settlement(root);
 
-        let mail = Mail::new(recipient, kind, payload, 1).with_lineage(root, root, None);
+        let mail = Mail::new(recipient, kind, payload, 1).with_lineage(Some(root), Some(root), None);
         self.mailer.push(match reply {
             Some(reply) => mail.with_reply_to(reply_source(reply)),
             None => mail,

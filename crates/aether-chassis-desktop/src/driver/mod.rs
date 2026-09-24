@@ -190,7 +190,7 @@ impl DesktopRenderIntegration {
                 aether_kinds::LifecycleAdvance { delta_micros }.encode_into_bytes(),
                 1,
             )
-            .with_lineage(advance_root, advance_root, None)
+            .with_lineage(Some(advance_root), Some(advance_root), None)
             .with_reply_to(reply_to),
         );
         advance_root

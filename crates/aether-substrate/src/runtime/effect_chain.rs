@@ -40,15 +40,15 @@ pub enum EffectChain {
 impl EffectChain {
     /// The chain a hold taken under this declaration would gate.
     ///
-    /// [`MailId::NONE`] for both chainless arms, which
+    /// `None` for both chainless arms, and
     /// [`acquire_settlement_hold`](super::trace::TraceHandle::acquire_settlement_hold)
-    /// answers with `None` (ADR-0168 §2) — so declaring a case cannot
+    /// takes only a real chain (ADR-0168 §2) — so declaring a case cannot
     /// manufacture a hold, and the two facts cannot drift apart.
     #[must_use]
-    pub fn held_root(self) -> MailId {
+    pub fn held_root(self) -> Option<MailId> {
         match self {
-            Self::Held(root) => root,
-            Self::Uncaused(_) | Self::OrderedBy(_) => MailId::NONE,
+            Self::Held(root) => Some(root),
+            Self::Uncaused(_) | Self::OrderedBy(_) => None,
         }
     }
 }
@@ -71,6 +71,11 @@ pub enum Uncaused {
     /// than one it describes wrongly; this declaration makes the absence
     /// visible without pretending to order it.
     CloseTail,
+    /// The staging handler ran on a turn that dispatches no mail — a pumped
+    /// host turn or a native callback — so no chain caused the birth. The
+    /// ADR-0168 amendment names this case: `stage_with` receiving no root
+    /// from a `host_turn`.
+    ChainlessTurn,
 }
 
 /// The device ordering an effect that takes no settlement hold.

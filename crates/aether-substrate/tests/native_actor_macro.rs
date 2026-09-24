@@ -32,8 +32,8 @@ use aether_data::{Kind, Source, SourceAddr};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::envelope::Envelope;
 use aether_substrate::actor::native::{Pending, TaskDone};
+use aether_substrate::mail::MailRef;
 use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch};
-use aether_substrate::mail::{MailId, MailRef};
 use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, RecordingAborter};
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
 use aether_substrate::{
@@ -108,8 +108,8 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payloa
         Source::NONE,
         MailRef::from(bytes),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -201,8 +201,8 @@ fn seize_and_run_dispatches_seed_in_place() {
         Source::NONE,
         MailRef::from(payload),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
         Nanos(0),
@@ -822,7 +822,7 @@ fn a_cfg_gated_set_handler_leaves_no_dispatch_artifact_in_an_adopter() {
     let binding = unrouted_binding(&mailer);
     let mut adopter = CfgGatedSetAdopter { seen: AtomicU32::new(0) };
     let mut ctx: NativeCtx<'_, CfgGatedSetAdopter, Manual> =
-        NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
     let handled = <CfgGatedSetAdopter as CfgGatedSet>::__aether_handler_set_dispatch(
         &mut adopter,
@@ -1247,8 +1247,8 @@ fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: ErasedActo
         reply_to,
         MailRef::from(bytes),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -1435,7 +1435,7 @@ fn manual_handler_replies_through_ctx() {
         // ADR-0112: the dispatch seam carries the `Manual` ctx, and issue 4158
         // types it by the dispatching actor — `new_for_actor` builds both,
         // with the mode read off `dispatch`'s own signature.
-        let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, None, None);
         let handled = <ManualReplyCap as Dispatch<ManualReplyCap>>::dispatch(
             &mut cap,
             &mut ctx,

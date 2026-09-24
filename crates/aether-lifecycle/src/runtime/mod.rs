@@ -564,10 +564,13 @@ impl NativeActor for LifecycleCapability {
         // Subscribe settlement on the inbound's chain root. The
         // broadcast subtree is part of that chain; settlement fires
         // once the inbound's `Finished` event drops the in-flight
-        // count to zero (which includes every fan-out descendant).
-        let root = ctx.in_flight_root();
+        // count to zero (which includes every fan-out descendant). An
+        // advance that carries no chain has nothing to wait on and takes
+        // the fire-and-advance branch.
         let reply_to = ctx.reply_target();
-        if ctx.subscribe_settlement::<Settled>(root) {
+        if let Some(root) = ctx.in_flight_root()
+            && ctx.subscribe_settlement::<Settled>(root)
+        {
             state.pending = Some(PendingAdvance {
                 root,
                 completed_kind: broadcast,
@@ -577,9 +580,9 @@ impl NativeActor for LifecycleCapability {
                 started: Instant::now(),
             });
         } else {
-            // No settlement registry wired (test harness without
-            // tracing). Fall back to fire-and-advance: reply
-            // immediately and mutate state inline.
+            // No chain to wait on, or no settlement registry wired (test
+            // harness without tracing). Fall back to fire-and-advance:
+            // reply immediately and mutate state inline.
             if is_terminal {
                 state.terminal_reached = true;
             } else {
@@ -661,7 +664,7 @@ mod tests {
         // seeded through the explicit wire form, which proves each
         // registered id at receipt; the purge takes the same raw ids.
         use aether_substrate::mail::registry::noop_handler;
-        use aether_substrate::mail::{MailId, MailboxId, Source};
+        use aether_substrate::mail::{MailboxId, Source};
         use aether_substrate::testing::{boot_authority, fresh_substrate};
 
         let (registry, mailer) = fresh_substrate();
@@ -673,7 +676,7 @@ mod tests {
         let present = <Present as Kind>::ID;
         let transport = unrouted_binding(&mailer);
         let mut subscribe = |stage: KindId, mailbox: MailboxId| {
-            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, None, None);
             let reply = LifecycleCapability::on_subscribe(
                 &mut cap,
                 &mut ctx,
@@ -685,7 +688,7 @@ mod tests {
         subscribe(render, survivor);
         subscribe(present, dropped);
 
-        let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, None, None);
         LifecycleCapability::on_unsubscribe_all(&mut cap, &mut ctx, LifecycleUnsubscribeAll { mailbox: dropped.0 });
 
         assert!(!subscribed(&cap, render, DataMailboxId(dropped.0)), "dropped mailbox must leave the Render stage");
@@ -706,7 +709,7 @@ mod tests {
     #[test]
     fn explicit_subscribe_proves_the_mailbox_and_refuses_an_unproven_one() {
         use aether_substrate::mail::registry::noop_handler;
-        use aether_substrate::mail::{MailId, MailboxId, Source};
+        use aether_substrate::mail::{MailboxId, Source};
         use aether_substrate::testing::{boot_authority, fresh_substrate};
 
         let (registry, mailer) = fresh_substrate();
@@ -720,7 +723,7 @@ mod tests {
         let render = <Render as Kind>::ID;
         let transport = unrouted_binding(&mailer);
         let mut subscribe = |mailbox: MailboxId| {
-            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&transport, Source::NONE, None, None);
             LifecycleCapability::on_subscribe(
                 &mut cap,
                 &mut ctx,
@@ -756,14 +759,14 @@ mod tests {
     #[test]
     fn subscribe_self_rejects_non_component_source() {
         use aether_data::{SessionToken, Uuid};
-        use aether_substrate::mail::{MailId, Source, SourceAddr};
+        use aether_substrate::mail::{Source, SourceAddr};
 
         let mut cap = test_cap(Duration::from_millis(ADVANCE_TIMEOUT_MS_DEFAULT));
         let render = <Render as Kind>::ID;
 
         let transport = unrouted_binding(&cap.mailer);
         let source = Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xFEED))));
-        let mut ctx = NativeCtx::new_for_actor(&transport, source, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, source, None, None);
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, LifecycleSubscribeSelf { stage: render.0 });
 
         assert!(
@@ -784,8 +787,8 @@ mod tests {
     fn subscribe_via_native_mailbox_lands_calling_actor_in_stage_set() {
         use std::sync::mpsc;
 
+        use aether_substrate::mail::Source;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-        use aether_substrate::mail::{MailId, Source};
 
         use crate::LifecycleMailboxExt;
         use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
@@ -811,7 +814,7 @@ mod tests {
         // sends carry `Source::Component` of that inbox's mailbox.
         let caller = "test.lifecycle.caller";
         let (tx_binding, sender) = registered_binding(&registry, &mailer, caller, noop_handler());
-        NativeCtx::new_dispatching(&tx_binding, Source::NONE, MailId::NONE, MailId::NONE)
+        NativeCtx::new_dispatching(&tx_binding, Source::NONE, None, None)
             .actor::<LifecycleCapability>()
             .subscribe::<Tick>();
         tx_binding.flush_outbound();
@@ -827,7 +830,7 @@ mod tests {
         // Tick stage set.
         let mut cap = tick_start_graph_cap();
         let cap_transport = unrouted_binding(&cap.mailer);
-        let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&cap_transport, source, None, None);
         assert_eq!(ctx.sender(), Some(sender), "the host stamps the calling actor as the Source");
         LifecycleCapability::on_subscribe_self(&mut cap, &mut ctx, decoded);
 

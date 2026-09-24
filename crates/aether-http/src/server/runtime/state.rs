@@ -715,7 +715,9 @@ impl HttpShardState {
         {
             conn.ws_pending_key = ws_key;
         }
-        let mail_id = ctx.send_envelope_detached_to(handler, kind, payload);
+        let Some(mail_id) = ctx.send_envelope_detached_to(handler, kind, payload) else {
+            return;
+        };
         // Safety net (ADR-0108 §5): if the chain settles with no
         // response, `on_settled` answers `502`. Best-effort — a chassis
         // without the settlement registry still serves the reply path.

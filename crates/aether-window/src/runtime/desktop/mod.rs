@@ -1016,10 +1016,10 @@ mod tests {
     use aether_substrate::Registry;
     use aether_substrate::actor::native::SpawnError;
     use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
-    use aether_substrate::mail::{MailId, Source};
-    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, unrouted_binding};
+    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, token_root, unrouted_binding};
 
     use super::*;
     // The subscription request kinds moved to the `WindowSubscriptions` set,
@@ -1081,7 +1081,7 @@ mod tests {
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let mut state = test_state();
         let (binding, mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let unknown = MailboxId(0xBAD);
 
         assert!(matches!(
@@ -1187,7 +1187,7 @@ mod tests {
         insert_window(&mut state, WindowId(9), "nine", false);
         insert_window(&mut state, WindowId(2), "two", false);
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
         let ListWindowsResult::Ok { windows } = DesktopWindowCapability::on_list(&mut state, &mut ctx, ListWindows)
         else {
@@ -1206,7 +1206,7 @@ mod tests {
     fn a_reserved_window_child_is_not_enumerable_and_rolls_back_when_its_birth_fails() {
         let mut state = test_state();
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let id = predicted_window_id("tools");
 
         assert!(state.queue_create(spec("tools", "Tools"), None, true).is_ok(), "reserve the create");
@@ -1256,7 +1256,7 @@ mod tests {
         insert_window(&mut state, WindowId(1), "first", true);
         insert_window(&mut state, WindowId(2), "second", false);
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         let effects = state.finish_window_close(WindowId(1), &mut ctx);
 
@@ -1269,7 +1269,7 @@ mod tests {
         let mut state = test_state();
         insert_window(&mut state, WindowId(1), "first", true);
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         let effects = state.finish_window_close(WindowId(1), &mut ctx);
 
@@ -1284,7 +1284,7 @@ mod tests {
         assert!(state.queue_create(spec("replacement", "Replacement"), None, false).is_ok());
         let replacement = predicted_window_id("replacement");
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         assert!(state.finish_window_close(WindowId(1), &mut ctx).is_empty());
         assert!(state.shutdown_when_idle);
@@ -1313,12 +1313,8 @@ mod tests {
         let (binding, _mailer) = test_ctx();
         // Attachment stages the window's child birth, so the ctx names the cap
         // it would parent under — the same one the pumped host turn supplies.
-        let mut ctx = NativeCtx::<'_, DesktopWindowCapability, Single>::new_for_actor(
-            &binding,
-            Source::NONE,
-            MailId::NONE,
-            MailId::NONE,
-        );
+        let mut ctx =
+            NativeCtx::<'_, DesktopWindowCapability, Single>::new_for_actor(&binding, Source::NONE, None, None);
 
         let effects = state.finish_window_attachment(id, Err("render attach failed".to_owned()), &mut ctx);
 
@@ -1342,18 +1338,18 @@ mod tests {
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
         let (binding, manager) = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
         let mut state = test_state();
-        let root = MailId { correlation_id: 7, ..MailId::NONE };
-        let parent = MailId { correlation_id: 9, ..MailId::NONE };
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
+        let root = token_root(7);
+        let parent = token_root(9);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, Some(parent), Some(root));
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
         state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });
         drop(ctx);
 
         let dispatch = rx.recv().expect("direct subscriber receives the event");
-        assert_eq!(dispatch.root, root);
+        assert_eq!(dispatch.root, Some(root));
         assert_eq!(dispatch.parent_mail, Some(parent));
-        assert_eq!(NativeCtx::new(&binding, dispatch.sender, MailId::NONE, MailId::NONE).sender(), Some(manager));
+        assert_eq!(NativeCtx::new(&binding, dispatch.sender, None, None).sender(), Some(manager));
         assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: WindowId(5), code: 41 }),);
     }
 
@@ -1411,7 +1407,7 @@ mod tests {
             }) as Arc<dyn InboxHandler>,
         );
         let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new(&binding, Source::NONE, None, None);
 
         let mut state = test_state();
         let id = WindowId(1);

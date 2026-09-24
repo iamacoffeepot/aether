@@ -300,15 +300,17 @@ impl InboundMail {
         self.env.payload.bytes()
     }
 
-    /// The mail's producer-minted identity (ADR-0080 §1).
+    /// The mail's producer-minted identity (ADR-0080 §1), `None` for
+    /// mail no producer stamped.
     #[must_use]
-    pub fn mail_id(&self) -> MailId {
+    pub fn mail_id(&self) -> Option<MailId> {
         self.env.mail_id
     }
 
-    /// The root of the mail's causal chain (ADR-0080 §5).
+    /// The root of the mail's causal chain (ADR-0080 §5), `None` for mail
+    /// that carries no chain.
     #[must_use]
-    pub fn root(&self) -> MailId {
+    pub fn root(&self) -> Option<MailId> {
         self.env.root
     }
 
@@ -332,14 +334,10 @@ impl InboundMail {
     pub fn reply<K: Kind>(&self, result: &K) -> bool {
         let correlation = self.reply_counter.mint();
         let reply_id = MailId::new(self.self_mailbox, correlation);
-        // ADR-0080 §5: collapse a NONE parent to `None` (chassis-root /
-        // lineage-less inbound), mirroring `NativeCtx::outbound_parent`.
-        let parent = if self.env.mail_id == MailId::NONE {
-            None
-        } else {
-            Some(self.env.mail_id)
-        };
-        self.mailer.send_reply(self.env.sender, result, reply_id, self.env.root, parent)
+        // ADR-0080 §5: the inbound is the reply's parent, and a chassis-root
+        // / lineage-less inbound gives it none, mirroring
+        // `NativeCtx::outbound_parent`.
+        self.mailer.send_reply(self.env.sender, result, Some(reply_id), self.env.root, self.env.mail_id)
     }
 }
 
@@ -347,9 +345,9 @@ impl Drop for InboundMail {
     fn drop(&mut self) {
         // ADR-0080 §2 settlement discharge, then ADR-0094 guard disarm —
         // the same two-step the standard `dispatch_one` tail runs.
-        // `record_finished` no-ops on `MailId::NONE`, so a lineage-less
-        // inbound settles nothing (parity with the chassis-internal push
-        // sentinel); the guard was minted disarmed for that case too.
+        // `record_finished` no-ops on an absent mail id, so a lineage-less
+        // inbound settles nothing; the guard was minted disarmed for that
+        // case too.
         self.mailer.record_finished(self.env.mail_id, self.env.root);
         self.env.discharge();
     }
@@ -398,8 +396,8 @@ mod tests {
     }
 
     /// An obligation-armed envelope addressed at `id` (armed iff
-    /// `mail_id != NONE`, matching the production `route_mail` Inbox arm).
-    fn armed_env(id: MailboxId, mail_id: MailId, root: MailId, sender: Source) -> Envelope {
+    /// `mail_id` is present, matching the production `route_mail` Inbox arm).
+    fn armed_env(id: MailboxId, mail_id: Option<MailId>, root: Option<MailId>, sender: Source) -> Envelope {
         OwnedDispatch::armed(
             KindId(7),
             None,
@@ -430,7 +428,7 @@ mod tests {
             let root = MailId::new(id, 1);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, MailId::new(id, 11), root, Source::NONE)).unwrap();
+            tx.send(armed_env(id, Some(MailId::new(id, 11)), Some(root), Source::NONE)).unwrap();
             let mail = inbox.try_next().expect("one queued");
             let _ = mail.payload();
             drop(mail);
@@ -444,7 +442,7 @@ mod tests {
             let root = MailId::new(id, 2);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, MailId::new(id, 12), root, Source::NONE)).unwrap();
+            tx.send(armed_env(id, Some(MailId::new(id, 12)), Some(root), Source::NONE)).unwrap();
             drop(inbox.try_next().expect("one queued"));
             settle.recv().expect("unmatched-drop arm settles the root");
         }
@@ -456,7 +454,7 @@ mod tests {
             let root = MailId::new(id, 3);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, MailId::new(id, 13), root, Source::NONE)).unwrap();
+            tx.send(armed_env(id, Some(MailId::new(id, 13)), Some(root), Source::NONE)).unwrap();
             inbox.drain(|_mail| {});
             settle.recv().expect("drain arm settles the root");
         }
@@ -468,17 +466,18 @@ mod tests {
             let root = MailId::new(id, 4);
             mailer.record_sent_inflight(root);
             let settle = settlement.subscribe_settlement(root);
-            tx.send(armed_env(id, MailId::new(id, 14), root, Source::NONE)).unwrap();
+            tx.send(armed_env(id, Some(MailId::new(id, 14)), Some(root), Source::NONE)).unwrap();
             drop(inbox);
             settle.recv().expect("teardown drain settles the queued root");
         }
     }
 
-    /// A `MailId::NONE` inbound carries no settlement obligation: dropping
-    /// its guard records no `Finished` (parity with `record_finished`'s
-    /// NONE no-op) and the disarmed guard never panics.
+    /// An inbound with no mail id carries no settlement obligation:
+    /// dropping its guard records no `Finished` (parity with
+    /// `record_finished`'s absent-id no-op) and the disarmed guard never
+    /// panics.
     #[test]
-    fn none_mail_id_is_a_noop() {
+    fn absent_mail_id_is_a_noop() {
         let (_registry, mailer, settlement) = test_env();
         let id = MailboxId(0x107);
         let guard_root = MailId::new(id, 9);
@@ -487,10 +486,10 @@ mod tests {
 
         let (tx, rx) = mpsc::channel();
         let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
-        tx.send(armed_env(id, MailId::NONE, guard_root, Source::NONE)).unwrap();
-        // Drop without reading — a NONE inbound must not settle anything.
+        tx.send(armed_env(id, None, Some(guard_root), Source::NONE)).unwrap();
+        // Drop without reading — an inbound with no mail id must not settle anything.
         drop(inbox.try_next().expect("one queued"));
-        assert!(guard_rx.try_recv().is_err(), "a NONE inbound discharges no root");
+        assert!(guard_rx.try_recv().is_err(), "an inbound with no mail id discharges no root");
     }
 
     /// ADR-0080 §6: a reply's `Sent` is recorded before the inbound's
@@ -520,7 +519,7 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
-        tx.send(armed_env(id, MailId::new(id, 21), root, sender)).unwrap();
+        tx.send(armed_env(id, Some(MailId::new(id, 21)), Some(root), sender)).unwrap();
 
         let mail = inbox.try_next().expect("one queued");
         assert!(
@@ -538,7 +537,7 @@ mod tests {
         let reply_env = rrx.recv().expect("reply routed to the target inbox");
         let reply_id = reply_env.mail_id;
         reply_env.discharge();
-        mailer.record_finished(reply_id, root);
+        mailer.record_finished(reply_id, Some(root));
         settle.recv().expect("root settles after the reply finishes");
     }
 
@@ -562,17 +561,18 @@ mod tests {
         let (tx, rx) = mpsc::channel();
         let inbox = SettlingInbox::new_at(id, rx, Arc::clone(&mailer));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 1);
-        // A lineage-less inbound (root NONE) still mints a high-space
+        // A lineage-less inbound (no root) still mints a high-space
         // reply id — the id space is the drain's, not the inbound's.
-        tx.send(armed_env(id, MailId::NONE, MailId::NONE, sender)).unwrap();
+        tx.send(armed_env(id, None, None, sender)).unwrap();
 
         let mail = inbox.try_next().expect("one queued");
         mail.reply(&LifecycleAdvanceComplete { completed: 0, next: 0 });
         drop(mail);
 
         let reply_env = rrx.recv().expect("reply routed");
-        assert!(reply_env.mail_id.correlation_id >= ReplyLineage::BASE, "reply id sits in the reply-lineage space");
-        assert_eq!(reply_env.mail_id.sender, id, "reply id is stamped with the claimed mailbox");
+        let reply_id = reply_env.mail_id.expect("a reply always carries its own id");
+        assert!(reply_id.correlation_id >= ReplyLineage::BASE, "reply id sits in the reply-lineage space");
+        assert_eq!(reply_id.sender, id, "reply id is stamped with the claimed mailbox");
         reply_env.discharge();
     }
 
@@ -636,7 +636,7 @@ mod tests {
             // ADR-0112 / issue 4158: drive the macro dispatch seam, which
             // carries the `Manual` ctx typed by the dispatching actor — build
             // it via `new_for_actor`, not the actor-less `new_dispatching`.
-            let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::new_for_actor(&binding, caller_reply_to, None, None);
             let handled = <ReplyProbe as Dispatch<ReplyProbe>>::dispatch(
                 &mut cap,
                 &mut ctx,
@@ -658,30 +658,25 @@ mod tests {
     /// envelope out of the ctx, so the dispatcher's settlement tail
     /// (`take_raw_inbound`) sees `None` and does not also discharge it.
     /// One envelope in one place — the detector is `Option::is_some`, so a
-    /// double-settle is structurally unrepresentable. A `MailId::NONE`
-    /// inbound carries no obligation, so the guard's drop is a clean
+    /// double-settle is structurally unrepresentable. An inbound with no
+    /// mail id carries no obligation, so the guard's drop is a clean
     /// no-op; this asserts the ownership mechanics, not settlement.
     #[test]
     fn take_inbound_moves_the_single_envelope_out_of_the_ctx() {
         let (_registry, mailer, _settlement) = test_env();
         let id = MailboxId(0x1757_0001);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
-        let env = armed_env(id, MailId::NONE, MailId::NONE, Source::NONE);
-        let mut ctx = NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(
-            &binding,
-            Source::NONE,
-            MailId::NONE,
-            MailId::NONE,
-            env,
-        );
+        let env = armed_env(id, None, None, Source::NONE);
+        let mut ctx =
+            NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(&binding, Source::NONE, None, None, env);
 
         let guard = ctx.take_inbound();
         assert!(
             ctx.take_raw_inbound().is_none(),
             "take_inbound moved the single envelope out — the tail sees None and never re-settles",
         );
-        // NONE obligation: dropping the retained guard records nothing and
-        // never panics (parity with `record_finished`'s NONE no-op).
+        // No obligation: dropping the retained guard records nothing and
+        // never panics (parity with `record_finished`'s absent-id no-op).
         drop(guard);
     }
 
@@ -699,9 +694,14 @@ mod tests {
         let id = MailboxId(0x1757_0002);
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let mail_id = MailId::new(id, 7);
-        let env = armed_env(id, mail_id, mail_id, Source::NONE);
-        let ctx =
-            NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(&binding, Source::NONE, mail_id, mail_id, env);
+        let env = armed_env(id, Some(mail_id), Some(mail_id), Source::NONE);
+        let ctx = NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(
+            &binding,
+            Source::NONE,
+            Some(mail_id),
+            Some(mail_id),
+            env,
+        );
         // Drop the ctx without taking the inbound — the single armed
         // envelope is dropped *inside* the ctx, so its ADR-0094 guard
         // panics rather than leaking.
@@ -740,12 +740,12 @@ mod tests {
 
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), id));
         let sender = Source::with_correlation(SourceAddr::Component(reply_target), 7);
-        let env = armed_env(id, MailId::new(id, 21), root, sender);
+        let env = armed_env(id, Some(MailId::new(id, 21)), Some(root), sender);
         let mut ctx = NativeCtx::<'_, crate::Erased, crate::Manual>::with_inbound(
             &binding,
             sender,
-            MailId::new(id, 21),
-            root,
+            Some(MailId::new(id, 21)),
+            Some(root),
             env,
         );
 
@@ -783,7 +783,7 @@ mod tests {
         let reply_env = rrx.recv().expect("reply routed to the target inbox");
         let reply_id = reply_env.mail_id;
         reply_env.discharge();
-        mailer.record_finished(reply_id, root);
+        mailer.record_finished(reply_id, Some(root));
         settle.recv().expect("root settles once the deferred reply finishes");
         assert!(settle.try_recv().is_err(), "the chain settles exactly once — no double-settle");
     }

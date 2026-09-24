@@ -19,8 +19,7 @@ use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::blocking::IntoDeferredReply;
 use crate::actor::native::spawn::activation::NativeSpawnFinalizer;
 use crate::mail::{MailId, Source};
-use crate::runtime::effect_chain::{EffectChain, OrderingDevice};
-use crate::runtime::trace::SettlementHold;
+use crate::runtime::effect_chain::{EffectChain, OrderingDevice, Uncaused};
 
 use super::reservation::ChildReservationKey;
 use super::{SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Subname};
@@ -38,12 +37,14 @@ use super::{SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Subname};
 pub struct HandlerSpawnBuilder<'ctx, A: Instanced + NativeActor> {
     inner: SpawnBuilder<'ctx, A>,
     parent_binding: Arc<NativeBinding>,
-    completion_root: MailId,
+    completion_root: Option<MailId>,
     completion_reply_to: Source,
     /// ADR-0168 §3: what orders this birth's effects. Defaults to the
     /// calling handler's chain, which is the answer for every staging site
-    /// that runs on a dispatched mail turn; [`Self::ordered_by`] replaces it
-    /// where a device other than a hold does the ordering.
+    /// that runs on a dispatched mail turn, and to
+    /// [`Uncaused::ChainlessTurn`] on a turn that dispatches none;
+    /// [`Self::ordered_by`] replaces it where a device other than a hold
+    /// does the ordering.
     chain: EffectChain,
 }
 
@@ -51,10 +52,11 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
     pub(crate) fn new(
         inner: SpawnBuilder<'ctx, A>,
         parent_binding: Arc<NativeBinding>,
-        completion_root: MailId,
+        completion_root: Option<MailId>,
         completion_reply_to: Source,
     ) -> Self {
-        Self { inner, parent_binding, completion_root, completion_reply_to, chain: EffectChain::Held(completion_root) }
+        let chain = completion_root.map_or(EffectChain::Uncaused(Uncaused::ChainlessTurn), EffectChain::Held);
+        Self { inner, parent_binding, completion_root, completion_reply_to, chain }
     }
 
     /// Declare that a device other than a settlement hold orders this birth
@@ -124,7 +126,7 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             .ok_or_else(|| SpawnError::SubnameInUse { full_name: identity.canonical_name.to_string() })?;
         let staged = spawner.build::<A>(identity, config, params, after_init)?;
         let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(
-            spawner.mailer().acquire_settlement_hold(completion_root),
+            completion_root.map(|root| spawner.mailer().acquire_settlement_hold(root)),
             completion_reply_to,
             context,
         );
@@ -199,7 +201,8 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
         // The inherited debt names the chain that caused this birth — the
         // successor's own ctx no longer holds it, and the newborn's `wire`
         // hook needs it to cover a birth-completing effect (ADR-0168 §1).
-        let chain = EffectChain::Held(hold.as_ref().map_or(MailId::NONE, SettlementHold::root));
+        let chain =
+            hold.as_ref().map_or(EffectChain::Uncaused(Uncaused::ChainlessTurn), |hold| EffectChain::Held(hold.root()));
         let completion = parent_binding.dispatch_arm::<SpawnOutcome<A>, C>(hold, reply_to, context);
         let receipt = SpawnReceipt {
             mailbox_id: staged.identity.id,

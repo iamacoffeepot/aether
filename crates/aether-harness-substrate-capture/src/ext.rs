@@ -14,7 +14,7 @@ use std::any::Any;
 use std::sync::Arc;
 
 use aether_actor::ErasedActorRef;
-use aether_data::{Kind, MailId};
+use aether_data::Kind;
 use aether_harness_substrate::{
     ExecutionError, FrameHook, HarnessOp, RenderHookWiring, SubstrateHarness, SubstrateHarnessBuilder,
 };
@@ -89,11 +89,7 @@ impl FrameHook for GpuFrameHook {
         // settlement obligation): the harness awaits the capture reply / the
         // advance's `LifecycleAdvanceComplete`, not the frame itself.
         let payload = Frame { replay_cache_when_idle, windows: Vec::new() }.encode_into_bytes();
-        self.mailer.push(Mail::new(self.render_mailbox, <Frame as Kind>::ID, payload, 1).with_lineage(
-            MailId::NONE,
-            MailId::NONE,
-            None,
-        ));
+        self.mailer.push(Mail::new(self.render_mailbox, <Frame as Kind>::ID, payload, 1));
         self.slot.drain_available();
     }
 

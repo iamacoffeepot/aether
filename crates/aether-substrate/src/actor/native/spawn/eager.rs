@@ -20,7 +20,7 @@ use crate::actor::native::NativeActor;
 use crate::actor::native::envelope::Envelope;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::mail::registry::Registry;
-use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
+use crate::mail::{KindId, MailRef, MailboxId, Source};
 
 use super::spawner::Spawner;
 use super::spawner::commit::SpawnCommit;
@@ -144,20 +144,20 @@ impl<'ctx, A: Instanced + NativeActor> SpawnBuilder<'ctx, A> {
     {
         let payload = mail.encode_into_bytes();
         let kind = KindId(<K as Kind>::ID.0);
-        // ADR-0094: the bootstrap seed carries no settlement lineage
-        // (`MailId::NONE`), so it is built *disarmed* — there is no
-        // obligation to discharge (and `dispatch_one` no-ops its
-        // `record_finished` on `NONE` anyway).
+        // ADR-0094: the bootstrap seed carries no settlement lineage,
+        // so it is built *disarmed* — there is no obligation to discharge
+        // (and `dispatch_one` no-ops its `record_finished` on an absent
+        // mail id anyway).
         let env = Envelope::disarmed_at(
             kind,
             None,
             self.sender,
             MailRef::from(payload),
             1,
-            MailId::NONE,
-            MailId::NONE,
             None,
-            // Bootstrap seed carries no lineage (`MailId::NONE`), so it
+            None,
+            None,
+            // Bootstrap seed carries no lineage, so it
             // never folds into a traced tree node — no deposit instant to
             // record (iamacoffeepot/aether#1134).
             Nanos(0),

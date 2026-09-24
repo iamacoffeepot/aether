@@ -750,9 +750,8 @@ impl Drop for BlobWork {
             // A worker that drained a group runs `take_or_close` until the
             // buffer is empty and then closes it, so a fully-drained group
             // yields an empty Vec here — the drained and dropped paths are
-            // mutually exclusive per mail. `record_finished` no-ops on
-            // `MailId::NONE`, so a lineage-less mail settles nothing (parity
-            // with the chassis-root push sentinel). No obligation guard to
+            // mutually exclusive per mail. `record_finished` no-ops on an
+            // absent mail id, so a lineage-less mail settles nothing. No obligation guard to
             // disarm: blob mail is a plain `Mail`, not an `OwnedDispatch`;
             // arming happens at demux time inside `dispatch_one` or
             // `route_mail`, never on the buffered `Mail` itself.
@@ -1318,7 +1317,11 @@ mod tests {
         let mail_id = MailId::new(producer, 11);
         let mut index = FxHashMap::default();
         blob.append_flush(
-            vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1).with_lineage(mail_id, root, None)],
+            vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1).with_lineage(
+                Some(mail_id),
+                Some(root),
+                None,
+            )],
             &mut index,
         );
 
@@ -1328,7 +1331,7 @@ mod tests {
         settle.recv().expect("dropped blob records Finished for un-demuxed mail");
     }
 
-    /// A `BlobWork` dropped with a `MailId::NONE` mail settles nothing — the
+    /// A `BlobWork` dropped with a lineage-less mail settles nothing — the
     /// no-op parity `record_finished` provides for lineage-less mail.
     #[test]
     fn dropped_blob_none_mail_id_settles_nothing() {
@@ -1344,12 +1347,12 @@ mod tests {
 
         let blob = BlobWork::empty(4, Arc::clone(&mailer), wake_sink(&injector));
         let mut index = FxHashMap::default();
-        // Mail with MailId::NONE — no lineage stamped.
+        // Mail with no lineage stamped.
         blob.append_flush(vec![Mail::new(recipient, KindId(7), MailRef::from(vec![0u8]), 1)], &mut index);
 
         drop(blob);
 
-        assert!(guard_rx.try_recv().is_err(), "MailId::NONE mail does not settle any root");
+        assert!(guard_rx.try_recv().is_err(), "a lineage-less mail does not settle any root");
     }
 
     /// End-to-end under a live multi-worker pool: a wide fan-out recruits

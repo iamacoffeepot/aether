@@ -53,19 +53,19 @@ fn handle_send_inherits_chain_detached_mints_fresh() {
 
     // Default `send` inherits the caller's chain.
     {
-        let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.to(&reference).send(&CastOnly { code: 1 });
         // ctx drops here → `flush_outbound` routes the buffered send.
     }
     let inherited = rx.try_recv().expect("default send routed at flush");
     assert_eq!(inherited.recipient, recipient, "send addresses the reference's id");
-    assert_eq!(inherited.root, in_flight_root, "send inherits the caller's root");
+    assert_eq!(inherited.root, Some(in_flight_root), "send inherits the caller's root");
     assert_eq!(inherited.parent_mail, Some(in_flight_mail), "send's parent is the in-flight mail");
-    assert_ne!(inherited.mail_id, in_flight_mail, "the outbound mail_id is fresh");
+    assert_ne!(inherited.mail_id, Some(in_flight_mail), "the outbound mail_id is fresh");
 
     // `send_detached` opens a fresh chain despite the in-flight lineage.
     {
-        let ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.to(&reference).send_detached(&CastOnly { code: 2 });
     }
     let detached = rx.try_recv().expect("detached send routed at flush");
@@ -106,24 +106,24 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
     let source = Source::with_correlation(SourceAddr::None, 0);
 
     {
-        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let mut ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.send_to(reference, &CastOnly { code: 1 });
     }
     let sent = rx.try_recv().expect("send_to routed at flush");
     assert_eq!(sent.recipient, recipient, "send_to addresses the reference's id");
-    assert_eq!(sent.root, in_flight_root, "send_to inherits the caller's root");
+    assert_eq!(sent.root, Some(in_flight_root), "send_to inherits the caller's root");
     assert_eq!(sent.parent_mail, Some(in_flight_mail), "send_to's parent is the in-flight mail");
 
     let inherited_context = NativeRequestContext { value: 21 };
     let inherited_id = {
-        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let mut ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         let borrowed = &reference;
         ctx.send_to_with_context(borrowed, &CastOnly { code: 2 }, &inherited_context)
     };
     let inherited = rx.try_recv().expect("send_to_with_context routed at flush");
-    assert_eq!(inherited.mail_id, inherited_id, "the returned id is the routed mail's");
+    assert_eq!(inherited.mail_id, Some(inherited_id), "the returned id is the routed mail's");
     assert_eq!(inherited.recipient, recipient, "send_to_with_context addresses the reference's id");
-    assert_eq!(inherited.root, in_flight_root, "send_to_with_context inherits the caller's root");
+    assert_eq!(inherited.root, Some(in_flight_root), "send_to_with_context inherits the caller's root");
     assert_eq!(inherited.parent_mail, Some(in_flight_mail), "send_to_with_context's parent is the in-flight mail");
     assert_eq!(
         binding.take_request_context::<NativeRequestContext>(RequestId(inherited_id.correlation_id)),
@@ -133,11 +133,11 @@ fn send_to_family_inherits_or_detaches_and_stores_context() {
 
     let detached_context = NativeRequestContext { value: 34 };
     let detached_id = {
-        let mut ctx = NativeCtx::new(&binding, source, in_flight_mail, in_flight_root);
+        let mut ctx = NativeCtx::new(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.send_detached_to_with_context(reference.erase(), &CastOnly { code: 3 }, &detached_context)
     };
     let detached = rx.try_recv().expect("send_detached_to_with_context routed at flush");
-    assert_eq!(detached.mail_id, detached_id, "the returned id is the routed mail's");
+    assert_eq!(detached.mail_id, Some(detached_id), "the returned id is the routed mail's");
     assert_eq!(detached.recipient, recipient, "send_detached_to_with_context addresses the proof's id");
     assert!(detached.parent_mail.is_none(), "send_detached_to_with_context carries no parent edge");
     assert_eq!(detached.root, detached.mail_id, "send_detached_to_with_context is its own root");
@@ -190,7 +190,7 @@ fn flat_send_detached_reaches_the_declared_dependency_on_a_fresh_chain() {
 
     {
         let mut ctx: NativeCtx<'_, Dependent, Single> =
-            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+            NativeCtx::new_for_actor(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.send_detached::<StubActor>(&CastOnly { code: 5 });
     }
     let detached = rx.try_recv().expect("flat send_detached routed at flush");
@@ -231,24 +231,24 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
 
     {
         let mut ctx: NativeCtx<'_, Dependent, Single> =
-            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+            NativeCtx::new_for_actor(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.send::<StubActor>(&CastOnly { code: 6 });
     }
     let sent = rx.try_recv().expect("flat send routed at flush");
     assert_eq!(sent.recipient, recipient, "flat send addresses the declared dependency");
-    assert_eq!(sent.root, in_flight_root, "flat send inherits the caller's root");
+    assert_eq!(sent.root, Some(in_flight_root), "flat send inherits the caller's root");
     assert_eq!(sent.parent_mail, Some(in_flight_mail), "flat send's parent is the in-flight mail");
 
     let context = NativeRequestContext { value: 55 };
     let context_id = {
         let mut ctx: NativeCtx<'_, Dependent, Single> =
-            NativeCtx::new_for_actor(&binding, source, in_flight_mail, in_flight_root);
+            NativeCtx::new_for_actor(&binding, source, Some(in_flight_mail), Some(in_flight_root));
         ctx.send_with_context::<StubActor>(&CastOnly { code: 7 }, &context)
     };
     let with_context = rx.try_recv().expect("flat send_with_context routed at flush");
-    assert_eq!(with_context.mail_id, context_id, "the returned id is the routed mail's");
+    assert_eq!(with_context.mail_id, Some(context_id), "the returned id is the routed mail's");
     assert_eq!(with_context.recipient, recipient, "flat send_with_context addresses the declared dependency");
-    assert_eq!(with_context.root, in_flight_root, "flat send_with_context inherits the caller's root");
+    assert_eq!(with_context.root, Some(in_flight_root), "flat send_with_context inherits the caller's root");
     assert_eq!(with_context.parent_mail, Some(in_flight_mail), "flat send_with_context's parent is the in-flight mail");
     assert_eq!(
         binding.take_request_context::<NativeRequestContext>(RequestId(context_id.correlation_id)),
@@ -258,7 +258,7 @@ fn flat_send_and_send_with_context_reach_the_declared_dependency_on_the_handlers
 }
 
 /// ADR-0233: the raw-kind verbs are the native door no `ActorMail` bound
-/// guards, so each refuses an engine-only kind, returning `MailId::NONE` and
+/// guards, so each refuses an engine-only kind, returning no mail id and
 /// routing nothing, while an ordinary kind through the same verb still
 /// arrives. Catches a native actor forging a departure notice by its id.
 #[test]
@@ -286,14 +286,14 @@ fn raw_send_of_an_engine_only_kind_is_refused() {
     let notice = MonitorNotice.encode_into_bytes();
 
     {
-        let ctx: NativeCtx<'_, Erased, Single> = NativeCtx::new(&binding, source, MailId::NONE, MailId::NONE);
+        let ctx: NativeCtx<'_, Erased, Single> = NativeCtx::new(&binding, source, None, None);
         let tracked = ctx.send_envelope_tracked_to(sink, MonitorNotice::ID, &notice);
         let detached = ctx.send_envelope_detached_to(sink, MonitorNotice::ID, &notice);
-        assert_eq!(tracked, MailId::NONE, "the tracked raw verb refuses engine-only mail");
-        assert_eq!(detached, MailId::NONE, "the detached raw verb refuses engine-only mail");
+        assert_eq!(tracked, None, "the tracked raw verb refuses engine-only mail");
+        assert_eq!(detached, None, "the detached raw verb refuses engine-only mail");
 
         let control = ctx.send_envelope_detached_to(sink, CastOnly::ID, &CastOnly { code: 8 }.encode_into_bytes());
-        assert_ne!(control, MailId::NONE, "an ordinary kind still sends");
+        assert!(control.is_some(), "an ordinary kind still sends");
     }
 
     let arrived = rx.try_recv().expect("the ordinary kind routed at flush");
@@ -326,7 +326,7 @@ fn _assert_cast_kind_repliable(
 ) {
     OutboundReply::reply(ctx, &CastOnly { code: 2 });
     OutboundReply::reply_to(ctx, sender, &CastOnly { code: 3 });
-    ctx.reply_to_target(sender, &CastOnly { code: 4 }, MailId::NONE, None);
+    ctx.reply_to_target(sender, &CastOnly { code: 4 }, None, None);
 
     let (task_resolve, task_resolve_with, task_resolve_value, task_resolve_err) = task_dones;
     deferred.reply(task_ctx, &CastOnly { code: 5 });

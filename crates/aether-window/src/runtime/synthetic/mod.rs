@@ -324,9 +324,9 @@ mod tests {
     use aether_kinds::Key;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
+    use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::MailDispatch;
-    use aether_substrate::mail::{MailId, Source};
     use aether_substrate::testing::{boot_authority, unrouted_binding};
 
     use super::*;
@@ -392,7 +392,7 @@ mod tests {
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let (binding, mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let mut state = test_state();
         let unknown = MailboxId(0xBAD);
 
@@ -473,7 +473,7 @@ mod tests {
     #[test]
     fn name_is_stable_after_title_mutation() {
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let mut state = test_state();
         let id = WindowId(7);
         state.windows.insert(

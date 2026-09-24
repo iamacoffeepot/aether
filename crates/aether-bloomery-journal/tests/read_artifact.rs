@@ -10,7 +10,7 @@ use aether_bloomery_journal::{Batch, Journal, JournalActor, Seq};
 use aether_bloomery_kinds::{
     Digest, Head, OpaqueBytes, ReactorSet, ReadArtifact, ReadArtifactResult, Utf8Text, artifact_blob, artifact_digest,
 };
-use aether_data::{Kind, MailId, MailboxId, Source, SourceAddr, Storage, StorageData};
+use aether_data::{Kind, MailboxId, Source, SourceAddr, Storage, StorageData};
 use aether_kinds::trace::Nanos;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::mail::MailRef;
@@ -66,8 +66,8 @@ fn request<R, K: Kind>(registry: &Registry, target: ActorRef<R>, caller: Mailbox
         Source::with_correlation(SourceAddr::Component(caller), correlation),
         MailRef::from(mail.encode_into_bytes()),
         1,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,

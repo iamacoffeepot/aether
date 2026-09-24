@@ -52,7 +52,7 @@ pub const ACTIVATION_BARRIER_KIND: KindId = KindId(u64::MAX);
 pub fn barrier_token(mail: &Mail) -> Option<ActivationToken> {
     if mail.kind != ACTIVATION_BARRIER_KIND
         || mail.payload.bytes().len() != size_of::<u64>()
-        || mail.mail_id.sender != mail.recipient
+        || mail.mail_id.is_none_or(|mail_id| mail_id.sender != mail.recipient)
         || !matches!(mail.reply_to.addr, SourceAddr::Component(sender) if sender == mail.recipient)
     {
         return None;

@@ -124,13 +124,12 @@ pub struct ComponentCtx {
     /// ADR-0080 §5 in-flight inbound `MailId`. Set by
     /// [`super::Component::deliver`] before invoking the guest's
     /// `receive_p32` shim so any [`ComponentCtx::send`] the guest
-    /// triggers stamps `parent_mail = Some(in_flight_mail_id)` and
-    /// `inherited_root = Some(in_flight_root)`. Cleared back to
-    /// [`MailId::NONE`] when `receive_p32` returns. Issue
-    /// iamacoffeepot/aether#722.
-    in_flight_mail_id: Cell<MailId>,
+    /// triggers stamps `parent_mail = in_flight_mail_id` and
+    /// `inherited_root = in_flight_root`. Cleared back to `None` when
+    /// `receive_p32` returns. Issue iamacoffeepot/aether#722.
+    in_flight_mail_id: Cell<Option<MailId>>,
     /// ADR-0080 §5 in-flight inbound `root`. See `in_flight_mail_id`.
-    in_flight_root: Cell<MailId>,
+    in_flight_root: Cell<Option<MailId>>,
     /// Issue iamacoffeepot/aether#1465: lineage-`MailId` counter for
     /// [`ComponentCtx::reply`]. A reply echoes the inbound correlation
     /// on its `reply_to` (so it correlates home), but its own trace
@@ -237,8 +236,8 @@ impl ComponentCtx {
             binding: None,
             correlation_counter: Cell::new(1),
             reply_correlation: Cell::new(Source::NO_CORRELATION),
-            in_flight_mail_id: Cell::new(MailId::NONE),
-            in_flight_root: Cell::new(MailId::NONE),
+            in_flight_mail_id: Cell::new(None),
+            in_flight_root: Cell::new(None),
             reply_lineage_counter: Cell::new(REPLY_LINEAGE_BASE),
             pending_spawns: Vec::new(),
             pending_aliases: Vec::new(),
@@ -514,25 +513,20 @@ impl ComponentCtx {
     ) {
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): the in-flight
         // cells were populated by `Component::deliver` for guest-triggered
-        // sends (and remain `NONE` for substrate-internal call sites that
+        // sends (and remain `None` for substrate-internal call sites that
         // bypass `deliver`, e.g. test fixtures). ADR-0080 §7: a detached
         // send ignores them and opens its own chain.
         let (parent_mail, inherited_root) = if force_detach {
             (None, None)
         } else {
-            let parent_mail = match self.in_flight_mail_id.get() {
-                id if id == MailId::NONE => None,
-                id => Some(id),
-            };
-            let inherited_root = match self.in_flight_root.get() {
-                id if id == MailId::NONE => None,
-                id => Some(id),
-            };
-            (parent_mail, inherited_root)
+            (self.in_flight_mail_id.get(), self.in_flight_root.get())
         };
         let root = inherited_root.unwrap_or(mail_id);
-        let mail =
-            Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(mail_id, root, parent_mail);
+        let mail = Mail::new(recipient, kind, payload, count).with_reply_to(reply_to).with_lineage(
+            Some(mail_id),
+            Some(root),
+            parent_mail,
+        );
 
         // ADR-0165: guest `wire` runs before this actor's route is
         // authoritatively Live. A trampoline-backed ctx therefore offers its
@@ -647,10 +641,10 @@ impl ComponentCtx {
     /// [`Self::send`] will read for `parent_mail` + `inherited_root`.
     /// Called by [`super::Component::deliver`] right before the guest's
     /// `receive_p32` shim runs. Pre-issue-722 `ComponentCtx::send`
-    /// stamped [`MailId::NONE`]; setting these cells ahead of the call
+    /// stamped no parent; setting these cells ahead of the call
     /// makes guest-triggered sends visible to the trace observer with
     /// the correct parent edge.
-    pub(crate) fn set_in_flight(&self, mail_id: MailId, root: MailId) {
+    pub(crate) fn set_in_flight(&self, mail_id: Option<MailId>, root: Option<MailId>) {
         self.in_flight_mail_id.set(mail_id);
         self.in_flight_root.set(root);
     }
@@ -672,8 +666,8 @@ impl ComponentCtx {
     /// Clear the in-flight context after the guest's `receive_p32`
     /// shim returns. Symmetric with [`Self::set_in_flight`].
     pub(crate) fn clear_in_flight(&self) {
-        self.in_flight_mail_id.set(MailId::NONE);
-        self.in_flight_root.set(MailId::NONE);
+        self.in_flight_mail_id.set(None);
+        self.in_flight_root.set(None);
         self.reply_correlation.set(Source::NO_CORRELATION);
     }
 }

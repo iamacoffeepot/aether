@@ -89,14 +89,14 @@ pub struct Mail {
     /// before pushing through `Mailer`. PR 2 stamps it inert (no
     /// trace-event consumer reads it yet); PR 2's `TraceObserver` hooks
     /// emit `TraceEvent::Sent { mail_id, .. }` against this value.
-    /// `MailId::NONE` for legacy paths that haven't migrated.
-    pub mail_id: MailId,
+    /// `None` for mail no producer stamped.
+    pub mail_id: Option<MailId>,
     /// ADR-0080 §5: the root of this mail's causal chain — the
     /// originating mail's `mail_id` for the chain. Inherited from the
     /// sender's in-flight handler context; for chassis-root sends
     /// (`Tick`, lifecycle, externally-bridged), `root == mail_id`.
-    /// `MailId::NONE` for legacy paths.
-    pub root: MailId,
+    /// `None` for mail that carries no chain.
+    pub root: Option<MailId>,
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends. The receiver's parent in the causal graph.
     pub parent_mail: Option<MailId>,
@@ -111,8 +111,8 @@ impl Mail {
             payload: payload.into(),
             count,
             reply_to: Source::NONE,
-            mail_id: MailId::NONE,
-            root: MailId::NONE,
+            mail_id: None,
+            root: None,
             parent_mail: None,
         }
     }
@@ -134,10 +134,11 @@ impl Mail {
     /// paths (`NativeBinding::send_mail`, `Mailer::send_reply`,
     /// chassis-root push sites) call this immediately after minting — a
     /// reply joins the caller's chain by inheriting its `root` / `parent`
-    /// (#1695). Mail with no lineage stamped retains `MailId::NONE`
-    /// defaults.
+    /// (#1695). Each field is carried as given, so a forwarding site
+    /// passes a carrier's lineage through unchanged; mail with no lineage
+    /// stamped keeps `None` in all three.
     #[must_use]
-    pub fn with_lineage(mut self, mail_id: MailId, root: MailId, parent_mail: Option<MailId>) -> Self {
+    pub fn with_lineage(mut self, mail_id: Option<MailId>, root: Option<MailId>, parent_mail: Option<MailId>) -> Self {
         self.mail_id = mail_id;
         self.root = root;
         self.parent_mail = parent_mail;

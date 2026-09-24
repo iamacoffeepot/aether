@@ -13,9 +13,9 @@ impl NativeBinding {
     /// caller's causal chain: it inherits the handler's `root` and
     /// `parent`, and its `Sent` is recorded against that root (keeping
     /// the §6 hold contract exact — a synchronous reply's `Sent`
-    /// precedes the replying handler's `Finished`). `root == MailId::NONE`
-    /// (a reply from a ctx with no inbound chain) stamps the `NONE`
-    /// triple and skips the producer hook.
+    /// precedes the replying handler's `Finished`). An absent `root`
+    /// (a reply from a ctx with no inbound chain) stamps no root and
+    /// skips the producer hook.
     ///
     /// The per-handler [`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx) supplies `root` /
     /// `parent` from its in-flight context (`in_flight_root` /
@@ -23,13 +23,18 @@ impl NativeBinding {
     /// `SettlementHold`'s root. Issue 665 retired the FFI-shaped
     /// `reply_mail` stub the prior `MailTransport` impl carried; this
     /// typed entry is the only reply API native actors reach for.
-    pub(crate) fn send_reply_for_handler<K>(&self, sender: Source, payload: &K, root: MailId, parent: Option<MailId>)
-    where
+    pub(crate) fn send_reply_for_handler<K>(
+        &self,
+        sender: Source,
+        payload: &K,
+        root: Option<MailId>,
+        parent: Option<MailId>,
+    ) where
         K: ActorMail,
     {
         let correlation = self.reply_lineage.mint();
         let reply_id = MailId::new(self.self_mailbox(), correlation);
-        self.mailer.send_reply(sender, payload, reply_id, root, parent);
+        self.mailer.send_reply(sender, payload, Some(reply_id), root, parent);
     }
 
     /// Store request context for a just-minted outbound request, warning
@@ -105,22 +110,22 @@ mod tests {
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 55);
 
         {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, request, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(request), Some(root));
             OutboundReply::reply(&mut ctx, &Tick::default());
             // ctx drops here; the reply already routed eagerly via the
             // Mailer (replies are not buffered), so the flush is a no-op.
         }
 
         let reply = reply_rx.try_recv().expect("reply routed to the caller");
-        assert_eq!(reply.root, root, "reply inherits the caller's root");
+        assert_eq!(reply.root, Some(root), "reply inherits the caller's root");
         assert_eq!(reply.parent_mail, Some(request), "reply's parent is the handled request");
-        assert_ne!(reply.mail_id, MailId::NONE, "reply carries a real mail id");
-        assert_eq!(reply.mail_id.sender, actor_mailbox, "reply id is minted in the replier's id space");
+        let reply_id = reply.mail_id.expect("reply carries a real mail id");
+        assert_eq!(reply_id.sender, actor_mailbox, "reply id is minted in the replier's id space");
 
         // The reply's Sent keeps the caller root live (the bare forwarding
         // sink records no Finished); the matching Finished reclaims it.
         assert_eq!(counter.live_roots(), 1, "the reply's Sent holds the caller chain open");
-        mailer.record_finished(reply.mail_id, root);
+        mailer.record_finished(Some(reply_id), Some(root));
         assert_eq!(counter.live_roots(), 0, "the reply's Finished balances its Sent exactly");
     }
 
@@ -145,7 +150,7 @@ mod tests {
         let root = MailId::new(MailboxId(0xC0), 1);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(root), Some(root));
             OutboundReply::reply(&mut ctx, &Tick::default());
             OutboundReply::reply(&mut ctx, &Tick::default());
         }
@@ -175,13 +180,13 @@ mod tests {
         let root = MailId::new(MailboxId(0xC0), 1);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 7);
         {
-            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, root, root);
+            let mut ctx = NativeCtx::new_dispatching(&binding, caller_source, Some(root), Some(root));
             OutboundReply::reply(&mut ctx, &Tick::default());
         }
 
         let reply_env = reply_rx.try_recv().expect("reply routed to the caller");
         assert!(
-            reply_env.mail_id.correlation_id >= ReplyLineage::BASE,
+            reply_env.mail_id.is_some_and(|id| id.correlation_id >= ReplyLineage::BASE),
             "reply id sits in the disjoint reply-lineage space",
         );
         assert_eq!(binding.prev_correlation(), 0, "minting a reply must not advance the send correlation counter");

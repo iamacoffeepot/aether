@@ -235,7 +235,7 @@ impl Mailer {
     /// the root's emit-time `in_flight` count and fires `Settled` on the
     /// zero-transition. (The `Finished` trace event itself is pushed into
     /// the recipient's ring by the dispatch loop.)
-    pub fn record_finished(&self, mail_id: aether_data::MailId, root: aether_data::MailId) {
+    pub fn record_finished(&self, mail_id: Option<aether_data::MailId>, root: Option<aether_data::MailId>) {
         self.trace_handle.record_finished(mail_id, root);
     }
 
@@ -244,10 +244,11 @@ impl Mailer {
     /// every `Mailer` carries a real handle so the contract is
     /// structural.
     ///
-    /// `None` for `MailId::NONE` — no chain, therefore no hold (ADR-0168
-    /// §2). The caller decides what an effect with no causing chain does.
+    /// `root` is a real chain by type (ADR-0168 §2): a caller with no
+    /// causing chain holds nothing and decides itself what its effect
+    /// does.
     #[must_use = "a SettlementHold gates root settlement; storing _ silently fires Release"]
-    pub fn acquire_settlement_hold(&self, root: aether_data::MailId) -> Option<SettlementHold> {
+    pub fn acquire_settlement_hold(&self, root: aether_data::MailId) -> SettlementHold {
         self.trace_handle.acquire_settlement_hold(root)
     }
 
@@ -283,7 +284,7 @@ impl Mailer {
     ) -> aether_data::MailId {
         let mail_id = aether_data::MailId::new(aether_data::MailboxId::CHASSIS_MAILBOX_ID, correlation_id);
         self.record_sent(mail_id, mail_id, None, aether_data::MailboxId::CHASSIS_MAILBOX_ID, recipient, kind);
-        self.push(Mail::new(recipient, kind, payload, count).with_lineage(mail_id, mail_id, None));
+        self.push(Mail::new(recipient, kind, payload, count).with_lineage(Some(mail_id), Some(mail_id), None));
         mail_id
     }
 
@@ -401,7 +402,7 @@ impl Mailer {
 
     /// Route a `*Result` reply to `sender` with a single encode and **no
     /// inherited lineage** — the reply opens as a fresh, lineage-less mail
-    /// (the `MailId::NONE` triple), detached from any caller settlement
+    /// (no id, root, or parent), detached from any caller settlement
     /// chain. The name says so loudly: detachment is a deliberate choice,
     /// not the default a short name invites.
     ///
@@ -421,14 +422,14 @@ impl Mailer {
     /// unchained form silently detaches it from the caller's settlement
     /// window — the bug class #1701 fixed for handler replies.
     ///
-    /// Equivalent to [`Self::send_reply`] with a `NONE`
+    /// Equivalent to [`Self::send_reply`] with an absent lineage
     /// triple — the bare form is the lineage form's chassis-root case,
     /// as `NativeBinding::send_mail_with_lineage` is with `None` / `None`.
     pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,
     {
-        self.send_reply(sender, result, aether_data::MailId::NONE, aether_data::MailId::NONE, None)
+        self.send_reply(sender, result, None, None, None)
     }
 
     /// ADR-0080 §5/§6: route a `*Result` reply that joins the caller's
@@ -451,16 +452,17 @@ impl Mailer {
     /// recorded before the replying handler's own `Finished`, so the
     /// caller's chain stays open until the reply's `Finished` lands. The
     /// replier is `reply_id.sender` — minted in its own id space by
-    /// `NativeBinding::send_reply_for_handler`. A `MailId::NONE`
-    /// `reply_id` skips the hook and stamps the `NONE` triple,
-    /// reproducing the pre-lineage reply shape for callers without a
-    /// handler chain (the bare [`Self::send_reply_unchained`]).
+    /// `NativeBinding::send_reply_for_handler`. The hook runs only when
+    /// both `reply_id` and `root` are present; an absent `reply_id`
+    /// stamps no lineage, reproducing the pre-lineage reply shape for
+    /// callers without a handler chain (the bare
+    /// [`Self::send_reply_unchained`]).
     pub fn send_reply<K>(
         &self,
         sender: Source,
         result: &K,
-        reply_id: aether_data::MailId,
-        root: aether_data::MailId,
+        reply_id: Option<aether_data::MailId>,
+        root: Option<aether_data::MailId>,
         parent: Option<aether_data::MailId>,
     ) -> bool
     where
@@ -472,8 +474,7 @@ impl Mailer {
                 // The replier minted `reply_id` in its own id space, so its
                 // sender half is the replying actor: stamped on the session
                 // reply for an embedder to read (ADR-0230 §3).
-                let stamp =
-                    (reply_id != aether_data::MailId::NONE).then(|| Registry::structural_erased(reply_id.sender));
+                let stamp = reply_id.map(|id| Registry::structural_erased(id.sender));
                 self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply_stamped(sender, result, stamp))
             }
             SourceAddr::Component(mailbox) => {
@@ -487,9 +488,11 @@ impl Mailer {
                 let reply_to = Source::with_correlation(SourceAddr::None, sender.correlation_id);
                 // ADR-0080 §2 producer hook: record the reply's `Sent`
                 // before pushing it, so the caller's `root` counts the
-                // reply in-flight until its `Finished`. Skipped for the
-                // `NONE` reply id (the bare `send_reply_unchained` path).
-                if reply_id != aether_data::MailId::NONE {
+                // reply in-flight until its `Finished`. Skipped when the
+                // reply carries no id (the bare `send_reply_unchained`
+                // path) or no root, since a rootless `Sent` counts against
+                // no chain.
+                if let (Some(reply_id), Some(root)) = (reply_id, root) {
                     self.record_sent(reply_id, root, parent, reply_id.sender, mailbox, K::ID);
                 }
                 self.push(
@@ -526,7 +529,7 @@ fn route_mail(mail: Mail, mailer: &Mailer) {
         // chains drain (issue 838). Today the only chassis-addressed
         // kind is `Settled` itself, which is pushed bare without
         // lineage by `TraceDispatchCapability::fire_settled`, so the
-        // `MailId::NONE` short-circuit inside `record_finished`
+        // absent-id short-circuit inside `record_finished`
         // no-ops. Stamped kinds (future debugger / describe_tree
         // replies) get the symmetric `Received`/`Finished` bracket.
         let inbound_mail_id = mail.mail_id;
@@ -777,7 +780,7 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
                     );
                 }
                 // The synthesized reply is a fresh un-lineaged mail
-                // (`MailId::NONE`); the inbound still records `Finished`
+                // (no mail id); the inbound still records `Finished`
                 // so its settlement chain balances (issue 838).
                 mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
                 return;
@@ -1114,10 +1117,10 @@ mod tests {
 
     /// #1695 / ADR-0080 §5/§6: a `Component`-addressed reply routed
     /// through `send_reply` carries the caller's `root` +
-    /// `parent` and a real (non-`NONE`) `mail_id`, and records the
+    /// `parent` and a real `mail_id`, and records the
     /// reply's `Sent` against the caller root so the chain stays open
     /// until the reply's `Finished` (the conformance fix — replies were
-    /// lineage-less `MailId::NONE` mail). The follow-up `record_finished`
+    /// lineage-less mail). The follow-up `record_finished`
     /// (standing in for the recipient dispatcher) balances that `Sent`
     /// exactly, reclaiming the root cell.
     #[test]
@@ -1126,7 +1129,7 @@ mod tests {
 
         // Capture the delivered reply's lineage triple off the
         // `OwnedDispatch` the inbox receives.
-        type CapturedLineage = Arc<RwLock<Vec<(MailId, MailId, Option<MailId>)>>>;
+        type CapturedLineage = Arc<RwLock<Vec<(Option<MailId>, Option<MailId>, Option<MailId>)>>>;
 
         let (registry, mailer) = make_mailer();
         let captured: CapturedLineage = Arc::new(RwLock::new(Vec::new()));
@@ -1153,8 +1156,8 @@ mod tests {
         let sent = mailer.send_reply(
             Source::with_correlation(SourceAddr::Component(sink_id), 7),
             &CastReply { code: 1, flag: 2, _pad: 0 },
-            reply_id,
-            root,
+            Some(reply_id),
+            Some(root),
             Some(parent),
         );
         assert!(sent, "Component reply target routes");
@@ -1163,7 +1166,7 @@ mod tests {
         assert_eq!(captured.len(), 1, "one reply delivered");
         assert_eq!(
             captured[0],
-            (reply_id, root, Some(parent)),
+            (Some(reply_id), Some(root), Some(parent)),
             "reply carries the caller's root + parent and a real mail id"
         );
 
@@ -1174,7 +1177,7 @@ mod tests {
         // The recipient's dispatcher would record the matching `Finished`;
         // doing so here drives the root to zero and reclaims the cell —
         // proving the reply's `Sent` is balanced, not a leak.
-        mailer.record_finished(reply_id, root);
+        mailer.record_finished(Some(reply_id), Some(root));
         assert_eq!(counter.live_roots(), 0, "the reply's Finished balances its Sent exactly");
     }
 
@@ -1223,7 +1226,7 @@ mod tests {
 
     /// Issue 838 diff 2 (re-pointed to settlement by ADR-0086 Phase 3c):
     /// exhaustive meta-test asserting every `Mailer::push` short-circuit
-    /// either balances a stamped (non-NONE) chain's `Sent` with a
+    /// either balances a stamped chain's `Sent` with a
     /// `Finished` (so the chain settles) or correctly declines to. The
     /// Registry-backed cases exercise every current endpoint-facade result,
     /// while the remaining cases cover each `route_mail` short-circuit.
@@ -1281,7 +1284,11 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inline(&boot_authority(), "test.meta.sink", sink.inline_handler());
-                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1297,7 +1304,11 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let sink = CapturingSink::new();
                     let id = registry.register_inbox(&boot_authority(), "test.meta.closure", sink.inbox_handler());
-                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1312,7 +1323,11 @@ mod tests {
                     let rx = settle_probe(&mailer, mail_id);
                     let id = registry.register_inbox(&boot_authority(), "test.meta.dropped", Arc::new(|_| {}));
                     let _ = registry.drop_mailbox(&boot_authority(), id).expect("drop");
-                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(mail_id, mail_id, None));
+                    mailer.push(Mail::new(id, KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1325,10 +1340,11 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
-                    mailer.push(
-                        Mail::new(MailboxId(0xDEAD_BEEF_0001), KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(MailboxId(0xDEAD_BEEF_0001), KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1344,10 +1360,11 @@ mod tests {
                     let registry = Arc::new(Registry::new());
                     let mailer = Mailer::new(registry).with_outbound(outbound);
                     let rx = settle_probe(&mailer, mail_id);
-                    mailer.push(
-                        Mail::new(MailboxId(0xDEAD_BEEF_0002), KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(MailboxId(0xDEAD_BEEF_0002), KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1361,10 +1378,11 @@ mod tests {
                     let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
                     mailer.install_chassis_router(Box::new(|_| {}));
-                    mailer.push(
-                        Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },
@@ -1377,10 +1395,11 @@ mod tests {
                     let mail_id = MailId::new(sender, 1);
                     let (_registry, mailer) = make_mailer();
                     let rx = settle_probe(&mailer, mail_id);
-                    mailer.push(
-                        Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1)
-                            .with_lineage(mail_id, mail_id, None),
-                    );
+                    mailer.push(Mail::new(MailboxId::CHASSIS_MAILBOX_ID, KindId(0xFEED), vec![], 1).with_lineage(
+                        Some(mail_id),
+                        Some(mail_id),
+                        None,
+                    ));
                     rx.try_recv().is_ok()
                 }),
             },

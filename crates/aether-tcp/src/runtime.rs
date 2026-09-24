@@ -519,7 +519,7 @@ impl NativeActor for TcpCapability {
         };
         // Fire the parked unbind reply if one was waiting.
         if let Some(PendingUnbind { sender, hold, listener_name }) = entry.pending_unbind {
-            let root = hold.as_ref().map_or(aether_data::MailId::NONE, SettlementHold::root);
+            let root = hold.as_ref().map(SettlementHold::root);
             ctx.reply_to_target(sender, &UnbindListenerResult::Ok { listener_name }, root, None);
             drop(hold);
         }

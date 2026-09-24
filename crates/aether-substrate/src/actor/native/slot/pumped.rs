@@ -37,7 +37,6 @@ use crate::actor::native::local;
 use crate::actor::registry::ActorRegistry;
 use crate::mail::{MailboxId, Source};
 use crate::runtime::effect_chain::{EffectChain, Uncaused};
-use aether_data::MailId;
 
 /// The externally-pumped dispatch home for a native actor (ADR-0160 §1).
 /// See the [module docs](self) for how it relates to the pooled
@@ -126,7 +125,7 @@ where
         let binding = &self.binding;
         let slots = &self.slots;
         Some(local::with_stamped(slots, || {
-            let mut ctx = NativeCtx::<'_, A, Single>::new_for_actor(binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut ctx = NativeCtx::<'_, A, Single>::new_for_actor(binding, Source::NONE, None, None);
             turn(actor, &mut ctx)
         }))
     }
@@ -162,7 +161,7 @@ where
         // Phase 3: the `unwire` hook, under this actor's stamped slots so any
         // final `tracing::*` / `Local<T>` access resolves to its rings.
         local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, MailId::NONE, MailId::NONE);
+            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, None, None);
             A::unwire(actor.as_mut(), &mut close_ctx);
         });
         // iamacoffeepot/aether#3051: the close hook is the last phase allowed
@@ -452,20 +451,22 @@ mod tests {
         fx.mailer.record_sent_inflight(root);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 0x99);
         let bytes = Ping { seq: 7 }.encode_into_bytes();
-        fx.mailer.push(
-            Mail::new(self_id, Ping::ID, bytes, 1).with_reply_to(caller_source).with_lineage(mail_id, root, None),
-        );
+        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_reply_to(caller_source).with_lineage(
+            Some(mail_id),
+            Some(root),
+            None,
+        ));
 
         slot.drain_available();
 
         let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the -> Pong reply routed to the caller");
         assert_eq!(reply.kind, Pong::ID, "the reply carries the handler's declared return kind");
-        assert_eq!(reply.root, root, "the reply joins the inbound's causal chain");
+        assert_eq!(reply.root, Some(root), "the reply joins the inbound's causal chain");
         let pong = Pong::decode_from_bytes(reply.payload.bytes()).expect("reply decodes");
         assert_eq!(pong, Pong { seq: 7 }, "the value the handler returned is what was replied");
 
         // Finish the reply so the chain settles and bookkeeping balances.
-        fx.mailer.record_finished(reply.mail_id, root);
+        fx.mailer.record_finished(reply.mail_id, Some(root));
     }
 
     /// ADR-0160 §1 (re-homes the desktop framework-arm test): a `LogTail`
@@ -486,18 +487,18 @@ mod tests {
         fx.mailer.record_sent_inflight(root);
         let caller_source = Source::with_correlation(SourceAddr::Component(caller), 0x33);
         let bytes = LogTail { max: 8, min_level: None, since: None, contains: None }.encode_into_bytes();
-        fx.mailer.push(
-            Mail::new(self_id, <LogTail as Kind>::ID, bytes, 1)
-                .with_reply_to(caller_source)
-                .with_lineage(mail_id, root, None),
-        );
+        fx.mailer.push(Mail::new(self_id, <LogTail as Kind>::ID, bytes, 1).with_reply_to(caller_source).with_lineage(
+            Some(mail_id),
+            Some(root),
+            None,
+        ));
 
         slot.drain_available();
 
         let reply = reply_rx.recv_timeout(Duration::from_secs(2)).expect("the framework arm replied to the caller");
         assert_eq!(reply.kind, <LogTailResult as Kind>::ID, "the framework arm replied a LogTailResult");
-        assert_eq!(reply.root, root, "the framework-arm reply joins the inbound's chain");
-        fx.mailer.record_finished(reply.mail_id, root);
+        assert_eq!(reply.root, Some(root), "the framework-arm reply joins the inbound's chain");
+        fx.mailer.record_finished(reply.mail_id, Some(root));
     }
 
     /// ADR-0160 §1 tripwire: two pumped drains fold two cost samples into
@@ -510,11 +511,11 @@ mod tests {
         let self_id = MailboxId(0x_0DED_0003);
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
-        // Two disarmed pings (NONE lineage — no reply target, no settlement
+        // Two disarmed pings (no lineage — no reply target, no settlement
         // to balance); the run's only observable is the cost fold.
         for _ in 0..2 {
             let bytes = Ping { seq: 1 }.encode_into_bytes();
-            fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(MailId::NONE, MailId::NONE, None));
+            fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(None, None, None));
         }
 
         slot.drain_available();
@@ -551,7 +552,7 @@ mod tests {
         fx.mailer.record_sent_inflight(root);
         let settle = fx.settlement.subscribe_settlement(root);
         let bytes = Ping { seq: 5 }.encode_into_bytes();
-        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(mail_id, root, None));
+        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(Some(mail_id), Some(root), None));
 
         slot.shutdown();
 
@@ -588,7 +589,11 @@ mod tests {
         let settle = fx.settlement.subscribe_settlement(root);
         let sender = Source::with_correlation(SourceAddr::Component(target), 7);
         let bytes = Defer { seq: 1 }.encode_into_bytes();
-        fx.mailer.push(Mail::new(self_id, Defer::ID, bytes, 1).with_reply_to(sender).with_lineage(mail_id, root, None));
+        fx.mailer.push(Mail::new(self_id, Defer::ID, bytes, 1).with_reply_to(sender).with_lineage(
+            Some(mail_id),
+            Some(root),
+            None,
+        ));
 
         slot.drain_available();
 
@@ -606,16 +611,17 @@ mod tests {
         worker.join().expect("worker thread joins");
 
         let reply = reply_rx.recv().expect("the deferred reply routed to the target inbox");
+        let reply_id = reply.mail_id.expect("a reply always carries its own id");
         assert!(
-            reply.mail_id.correlation_id >= ReplyLineage::BASE,
+            reply_id.correlation_id >= ReplyLineage::BASE,
             "the deferred reply mints in the disjoint reply-lineage space",
         );
-        assert_eq!(reply.mail_id.sender, self_id, "the deferred reply id is stamped with the pumped mailbox");
+        assert_eq!(reply_id.sender, self_id, "the deferred reply id is stamped with the pumped mailbox");
 
         // The reply's Sent held the chain open; finishing it settles the root
         // exactly once.
         assert!(settle.try_recv().is_err(), "the reply's Sent still holds the chain open");
-        fx.mailer.record_finished(reply.mail_id, root);
+        fx.mailer.record_finished(reply.mail_id, Some(root));
         settle.recv().expect("the root settles once the deferred reply finishes");
     }
 
@@ -646,9 +652,9 @@ mod tests {
 
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, None);
 
-        // A disarmed EmitReq (NONE lineage) triggers the peer send.
+        // A disarmed EmitReq (no lineage) triggers the peer send.
         let bytes = EmitReq { seq: 1 }.encode_into_bytes();
-        fx.mailer.push(Mail::new(self_id, EmitReq::ID, bytes, 1).with_lineage(MailId::NONE, MailId::NONE, None));
+        fx.mailer.push(Mail::new(self_id, EmitReq::ID, bytes, 1).with_lineage(None, None, None));
 
         slot.drain_available();
 
@@ -717,14 +723,14 @@ mod tests {
         let trace = slot
             .host_turn(|_, _| ActorTraceRing::try_with(ActorTraceRing::snapshot).expect("trace ring is stamped"))
             .expect("the slot remains live");
-        let sent: Vec<(MailId, MailId)> = trace
+        let sent: Vec<(Option<MailId>, Option<MailId>)> = trace
             .iter()
             .filter_map(|entry| match &entry.event {
                 TraceEvent::Sent { mail_id, root, parent_mail, sender, recipient, kind, .. }
                     if *sender == self_id && *recipient == peer_id && *kind == Poke::ID =>
                 {
                     assert!(parent_mail.is_none(), "host-turn Sent traces have no parent");
-                    Some((*mail_id, *root))
+                    Some((Some(*mail_id), Some(*root)))
                 }
                 _ => None,
             })
@@ -795,16 +801,16 @@ mod tests {
         let mailer = Arc::clone(&fx.mailer);
         let producer = thread::spawn(move || {
             for seq in 0..IDLE_PINGS {
-                // Disarmed (NONE lineage): arrival keeps the pump busy but
+                // Disarmed (no lineage): arrival keeps the pump busy but
                 // carries no settlement obligation.
                 let bytes = Ping { seq }.encode_into_bytes();
-                mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(MailId::NONE, MailId::NONE, None));
+                mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(None, None, None));
                 thread::sleep(Duration::from_millis(1));
             }
             // The settling Ping, pushed last, with real lineage on `root`.
             let mail_id = MailId::new(self_id, 2);
             let bytes = Ping { seq: IDLE_PINGS }.encode_into_bytes();
-            mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(mail_id, root, None));
+            mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(Some(mail_id), Some(root), None));
         });
 
         let outcome = await_settlement_pumped(
@@ -850,7 +856,7 @@ mod tests {
         // Pushing it fires the slot's `Mail` wake — the only thing that can
         // drain it while the driver blocks below.
         let bytes = Ping { seq: 3 }.encode_into_bytes();
-        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(mail_id, root, None));
+        fx.mailer.push(Mail::new(self_id, Ping::ID, bytes, 1).with_lineage(Some(mail_id), Some(root), None));
 
         let outcome = await_settlement_pumped(
             &wake_rx,

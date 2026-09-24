@@ -280,9 +280,7 @@ impl TraceHandle {
     /// exact and never fires early, per ADR-0082) and defers the `Sent`
     /// *trace* event to flush via [`Self::record_sent_event_at`].
     pub fn record_sent_inflight(&self, root: MailId) {
-        if root != MailId::NONE {
-            self.settlement_counter.record_sent(root);
-        }
+        self.settlement_counter.record_sent(root);
     }
 
     /// ADR-0080 §2 settlement hook for the `Finished` event, called by
@@ -295,14 +293,16 @@ impl TraceHandle {
     /// `fire_settled` notification — which may resolve mail subscribers
     /// inline — runs unstamped.)
     ///
-    /// No-op when `mail_id == MailId::NONE` — the structural recursion
-    /// break per ADR-0080 §7 for chassis-internal mail minted without
-    /// lineage.
-    pub fn record_finished(&self, mail_id: MailId, root: MailId) {
-        if mail_id == MailId::NONE {
+    /// No-op when `mail_id` is `None` — the structural recursion break
+    /// per ADR-0080 §7 for chassis-internal mail minted without lineage.
+    /// A mail with an id but no `root` counts against no chain.
+    pub fn record_finished(&self, mail_id: Option<MailId>, root: Option<MailId>) {
+        if mail_id.is_none() {
             return;
         }
-        if root != MailId::NONE && self.settlement_counter.record_finished(root) {
+        if let Some(root) = root
+            && self.settlement_counter.record_finished(root)
+        {
             self.fire_settled(root);
         }
     }
@@ -322,17 +322,14 @@ impl TraceHandle {
     /// worker thread (via the `InheritCtx<A>` ctor) ties release to the
     /// worker's lifetime.
     ///
-    /// `None` when `root` is [`MailId::NONE`] — there is no chain to hold,
-    /// so there is no hold to hand back (ADR-0168 §2). The caller states
-    /// what it does with that case instead of receiving a guard that
-    /// reads like a working hold and gates nothing.
+    /// `root` is a real chain by type (ADR-0168 §2): a caller whose chain
+    /// may be absent writes `root.map(|root| handle.acquire_settlement_hold(root))`
+    /// and states what it does with the absent case itself, rather than
+    /// receiving a guard that reads like a working hold and gates nothing.
     #[must_use = "a SettlementHold gates root settlement; storing _ silently releases it"]
-    pub fn acquire_settlement_hold(&self, root: MailId) -> Option<SettlementHold> {
-        if root == MailId::NONE {
-            return None;
-        }
+    pub fn acquire_settlement_hold(&self, root: MailId) -> SettlementHold {
         self.settlement_counter.record_hold_open(root);
-        Some(SettlementHold { handle: self.clone(), root })
+        SettlementHold { handle: self.clone(), root }
     }
 }
 
@@ -350,7 +347,7 @@ impl Default for TraceHandle {
 /// paired `hold`/`release` mismatch is structurally impossible.
 ///
 /// A `SettlementHold` always names a real root. The acquire is the sole
-/// constructor and answers [`MailId::NONE`] with `None`, so a hold that
+/// constructor and takes a `MailId`, never an absent one, so a hold that
 /// holds nothing is not a value this type can take (ADR-0168 §2).
 #[derive(Debug)]
 pub struct SettlementHold {
@@ -369,8 +366,8 @@ impl SettlementHold {
 
 impl Drop for SettlementHold {
     fn drop(&mut self) {
-        // `root` is never `MailId::NONE` — the acquire returns `None`
-        // rather than building a guard over an absent chain.
+        // `root` is always a real chain — the acquire takes a `MailId`,
+        // so no guard is ever built over an absent one.
         if self.handle.settlement_counter.record_release(self.root) {
             self.handle.fire_settled(self.root);
         }
@@ -407,7 +404,7 @@ mod tests {
         handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
         assert!(rx.try_recv().is_err(), "must not settle before Finished");
 
-        handle.record_finished(root, root);
+        handle.record_finished(Some(root), Some(root));
         assert!(rx.try_recv().is_ok(), "emit-time counter must fire Settled on the Finished zero-transition");
         assert_eq!(handle.settlement_counter().live_roots(), 0, "cell reclaimed");
     }
@@ -423,7 +420,7 @@ mod tests {
 
         let hold = handle.acquire_settlement_hold(root);
         handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
-        handle.record_finished(root, root);
+        handle.record_finished(Some(root), Some(root));
         assert!(rx.try_recv().is_err(), "an open hold must keep the root from settling");
 
         drop(hold);
@@ -431,16 +428,18 @@ mod tests {
         assert_eq!(handle.settlement_counter().live_roots(), 0);
     }
 
-    /// `MailId::NONE` is the recursion-break sentinel and never carries
-    /// settlement accounting: a NONE-rooted event must not touch the
-    /// counter or fire.
+    /// ADR-0080 §7's recursion break: a `Finished` with no mail id, or
+    /// with an id but no root, carries no settlement accounting. Catches
+    /// a `None` arm that falls back to the mail id as the root (or counts
+    /// the finish anywhere): the subscriber on that id would fire, or the
+    /// counter would open a cell.
     #[test]
-    fn none_root_carries_no_settlement() {
+    fn lineage_less_finish_settles_nothing() {
         let (handle, registry) = handle_with_registry();
-        let rx = registry.subscribe_settlement(MailId::NONE);
-        handle.record_sent(MailId::NONE, MailId::NONE, None, MailboxId(1), MailboxId(2), KindId(3));
-        handle.record_finished(mid(1, 1), MailId::NONE);
-        assert!(rx.try_recv().is_err(), "NONE root must never settle");
+        let rx = registry.subscribe_settlement(mid(1, 1));
+        handle.record_finished(None, None);
+        handle.record_finished(Some(mid(1, 1)), None);
+        assert!(rx.try_recv().is_err(), "a finish with no root must never settle");
         assert_eq!(handle.settlement_counter().live_roots(), 0);
     }
 
@@ -453,7 +452,7 @@ mod tests {
         let handle = TraceHandle::new();
         let root = mid(3, 3);
         handle.record_sent(root, root, None, MailboxId(1), MailboxId(2), KindId(3));
-        handle.record_finished(root, root);
+        handle.record_finished(Some(root), Some(root));
         assert_eq!(handle.settlement_counter().live_roots(), 0, "still reclaimed");
     }
 }

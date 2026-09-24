@@ -7,7 +7,7 @@ use aether_actor::runtime;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_actor::{DependsOn, Manual, ReplyMode, handler_set};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_data::{Kind, MailId};
+use aether_data::Kind;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_substrate::InboundMail;
 
@@ -23,16 +23,19 @@ use crate::{
     SetWindowMode, SetWindowModeResult, SetWindowTitle, SetWindowTitleResult,
 };
 
-/// Retained public requests for one concrete forwarding child.
+/// Retained public requests for one concrete forwarding child, keyed by a
+/// child-local request number. A public request need not carry a lineage id,
+/// so the key is minted here rather than read off the inbound.
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 pub struct WindowInstanceState {
-    pending: HashMap<MailId, InboundMail>,
+    pending: HashMap<u64, InboundMail>,
+    next_request: u64,
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 impl WindowInstanceState {
     pub(super) fn new() -> Self {
-        Self { pending: HashMap::new() }
+        Self { pending: HashMap::new(), next_request: 0 }
     }
 }
 
@@ -43,13 +46,14 @@ pub(super) fn forward<A: DependsOn<WindowCapability>>(
     command: WindowCommand,
 ) {
     let inbound = ctx.take_inbound();
-    let mail_id = inbound.mail_id();
-    if state.pending.insert(mail_id, inbound).is_some() {
-        ctx.fatal_abort(format!("duplicate retained window request {mail_id:?}"));
+    let request = state.next_request;
+    state.next_request = request.wrapping_add(1);
+    if state.pending.insert(request, inbound).is_some() {
+        ctx.fatal_abort(format!("duplicate retained window request {request}"));
     }
     let _ = ctx.send_with_context::<WindowCapability>(
         &ApplyWindowCommand { window: WindowId(ctx.self_id().0), command },
-        &WindowForwardContext { inbound: mail_id },
+        &WindowForwardContext { request },
     );
 }
 
@@ -62,8 +66,8 @@ pub(super) fn complete<A, M: ReplyMode>(
     let Some(context) = ctx.take_context::<WindowForwardContext>() else {
         ctx.fatal_abort("window child received an uncorrelated manager result".to_owned());
     };
-    let Some(inbound) = state.pending.remove(&context.inbound) else {
-        ctx.fatal_abort(format!("window child has no retained request {:?}", context.inbound));
+    let Some(inbound) = state.pending.remove(&context.request) else {
+        ctx.fatal_abort(format!("window child has no retained request {}", context.request));
     };
 
     let close_succeeded = match result {
@@ -290,8 +294,8 @@ mod tests {
     use aether_data::Kind;
     use aether_substrate::Registry;
     use aether_substrate::actor::native::{Dispatch, NativeCtx};
+    use aether_substrate::mail::Source;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::{MailId, Source};
     use aether_substrate::testing::unrouted_binding;
 
     use super::super::HeadlessWindowCapabilityState;
@@ -313,8 +317,8 @@ mod tests {
     fn headless_refuses_the_native_chrome_ops_at_both_identities_rather_than_dropping_them() {
         let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
         let binding = unrouted_binding(&mailer);
-        let mut capability_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let mut instance_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut capability_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut instance_ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
 
         for advertised in [
             <HeadlessWindowCapability as Dispatch<HeadlessWindowCapabilityState>>::capabilities(),

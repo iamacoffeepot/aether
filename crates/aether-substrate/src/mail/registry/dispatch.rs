@@ -8,7 +8,7 @@ use aether_kinds::trace::Nanos;
 use crate::mail::{KindId, MailId, MailRef, MailboxId, Source};
 
 /// Test-only helper that builds a [`MailDispatch`] with empty
-/// `origin` / `Source::NONE` / `MailId::NONE` defaults from the
+/// `origin` / `Source::NONE` / no-lineage defaults from the
 /// minimum positional args. Used by chassis and capability tests
 /// that drive a registered handler synchronously without going
 /// through the full `Mail` → `Mailer::push` path.
@@ -20,8 +20,8 @@ pub fn test_dispatch(kind: KindId, payload: &[u8], count: u32) -> MailDispatch<'
         sender: Source::NONE,
         payload,
         count,
-        mail_id: MailId::NONE,
-        root: MailId::NONE,
+        mail_id: None,
+        root: None,
         parent_mail: None,
     }
 }
@@ -30,7 +30,7 @@ pub fn test_dispatch(kind: KindId, payload: &[u8], count: u32) -> MailDispatch<'
 /// poke an `Inbox` handler directly through
 /// [`InboxHandler::enqueue`] — the trait's owned-dispatch contract
 /// makes the borrowed [`test_dispatch`] unsuitable. Same defaults
-/// (empty origin, `Source::NONE`, `MailId::NONE`).
+/// (empty origin, `Source::NONE`, no lineage).
 ///
 /// Issue iamacoffeepot/aether#848 PR 2: added alongside the
 /// [`OwnedDispatch`] migration so cap-side dispatcher tests stay
@@ -43,8 +43,8 @@ pub fn test_owned_dispatch(kind: KindId, payload: &[u8], count: u32) -> OwnedDis
         Source::NONE,
         MailRef::from(payload.to_vec()),
         count,
-        MailId::NONE,
-        MailId::NONE,
+        None,
+        None,
         None,
         Nanos(0),
         0,
@@ -85,10 +85,11 @@ pub struct MailDispatch<'a> {
     /// Kind-implied item count.
     pub count: u32,
     /// ADR-0080 §1: the producer-minted identity of this mail.
-    /// `MailId::NONE` for legacy paths that haven't migrated.
-    pub mail_id: MailId,
-    /// ADR-0080 §5: the root of this mail's causal chain.
-    pub root: MailId,
+    /// `None` for mail no producer stamped.
+    pub mail_id: Option<MailId>,
+    /// ADR-0080 §5: the root of this mail's causal chain, `None` for
+    /// mail that carries no chain.
+    pub root: Option<MailId>,
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends.
     pub parent_mail: Option<MailId>,
@@ -118,7 +119,7 @@ pub struct MailDispatch<'a> {
 #[cfg(debug_assertions)]
 #[derive(Debug)]
 struct ObligationGuard {
-    mail_id: MailId,
+    mail_id: Option<MailId>,
     kind: KindId,
     mailbox: MailboxId,
     armed: Cell<bool>,
@@ -130,23 +131,23 @@ impl ObligationGuard {
     /// eventually drains this `OwnedDispatch` must `discharge()` it
     /// (record `Finished`) or `mark_transferred()` it (hand it onward).
     ///
-    /// A `MailId::NONE` dispatch carries **no** settlement obligation:
-    /// `TraceHandle::record_finished` no-ops on `MailId::NONE` (the
-    /// recursion-break sentinel that chassis-internal fire-and-forget
-    /// pushes — RPC self-pokes like `aether.rpc.inbound_ready`, window
-    /// pushes — stamp). Arming such a dispatch would mint a *false*
+    /// A dispatch with no mail id carries **no** settlement obligation:
+    /// `TraceHandle::record_finished` no-ops on an absent mail id (the
+    /// recursion break for chassis-internal fire-and-forget pushes — RPC
+    /// self-pokes like `aether.rpc.inbound_ready`, window pushes — which
+    /// stamp no lineage). Arming such a dispatch would mint a *false*
     /// obligation: nothing discharges it (correctly), so the guard would
     /// then panic on drop. Mint disarmed in that case so the guard's arm
-    /// condition matches `record_finished`'s NONE no-op exactly — a
+    /// condition matches `record_finished`'s absent-id no-op exactly — a
     /// dispatch carries a guard obligation iff it carries a real
     /// settlement obligation (ADR-0094, issue 1326).
-    fn armed(mail_id: MailId, kind: KindId, mailbox: MailboxId) -> Self {
-        Self { mail_id, kind, mailbox, armed: Cell::new(mail_id != MailId::NONE) }
+    fn armed(mail_id: Option<MailId>, kind: KindId, mailbox: MailboxId) -> Self {
+        Self { mail_id, kind, mailbox, armed: Cell::new(mail_id.is_some()) }
     }
 
     /// A guard that carries no obligation — test/helper mints and the
     /// disarmed result of a `Clone`.
-    fn disarmed(mail_id: MailId, kind: KindId, mailbox: MailboxId) -> Self {
+    fn disarmed(mail_id: Option<MailId>, kind: KindId, mailbox: MailboxId) -> Self {
         Self { mail_id, kind, mailbox, armed: Cell::new(false) }
     }
 
@@ -227,10 +228,11 @@ pub struct OwnedDispatch {
     /// Kind-implied item count.
     pub count: u32,
     /// ADR-0080 §1: the producer-minted identity of this mail.
-    /// `MailId::NONE` for legacy paths that haven't migrated.
-    pub mail_id: MailId,
-    /// ADR-0080 §5: the root of this mail's causal chain.
-    pub root: MailId,
+    /// `None` for mail no producer stamped.
+    pub mail_id: Option<MailId>,
+    /// ADR-0080 §5: the root of this mail's causal chain, `None` for
+    /// mail that carries no chain.
+    pub root: Option<MailId>,
     /// ADR-0080 §5: the in-flight mail at the sender, or `None` for
     /// chassis-root sends.
     pub parent_mail: Option<MailId>,
@@ -288,8 +290,8 @@ impl OwnedDispatch {
         sender: Source,
         payload: MailRef,
         count: u32,
-        mail_id: MailId,
-        root: MailId,
+        mail_id: Option<MailId>,
+        root: Option<MailId>,
         parent_mail: Option<MailId>,
         t_enqueue: Nanos,
         enqueue_depth: u32,
@@ -334,8 +336,8 @@ impl OwnedDispatch {
         sender: Source,
         payload: MailRef,
         count: u32,
-        mail_id: MailId,
-        root: MailId,
+        mail_id: Option<MailId>,
+        root: Option<MailId>,
         parent_mail: Option<MailId>,
         t_enqueue: Nanos,
         enqueue_depth: u32,
@@ -368,8 +370,8 @@ impl OwnedDispatch {
         sender: Source,
         payload: MailRef,
         count: u32,
-        mail_id: MailId,
-        root: MailId,
+        mail_id: Option<MailId>,
+        root: Option<MailId>,
         parent_mail: Option<MailId>,
         t_enqueue: Nanos,
         enqueue_depth: u32,

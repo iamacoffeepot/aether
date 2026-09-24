@@ -204,7 +204,7 @@ fn resolve_allowlist(tokens: &HashSet<String>) -> HashMap<String, PathBuf> {
 mod tests {
     use super::{ProcessCapability, ProcessCapabilityState, RunOutcome, outcome_to_result, resolve_allowlist};
     use crate::kinds::{ProcessError, Run, RunResult};
-    use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
+    use aether_data::{SessionToken, Source, SourceAddr, Uuid};
     use aether_substrate::actor::native::ctx::NativeCtx;
     use aether_substrate::testing::{
         decode_session_reply, drive_task_completion, test_mailer_and_rx, unrouted_binding,
@@ -255,7 +255,7 @@ mod tests {
         let (mailer, rx) = test_mailer_and_rx();
         let mut state = ProcessCapabilityState::from_parts(HashMap::new(), env::temp_dir(), 4);
         let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b""));
         drive_task_completion::<ProcessCapability>(&mut state, &transport, &rx);
@@ -279,7 +279,7 @@ mod tests {
         let allowlist = HashMap::from([("cat".to_owned(), PathBuf::from("/bin/cat"))]);
         let mut state = ProcessCapabilityState::from_parts(allowlist, env::temp_dir(), 4);
         let transport = unrouted_binding(&mailer);
-        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&transport, session_sender(), None, None);
 
         ProcessCapability::on_run(&mut state, &mut ctx, run("cat", b"hello aether"));
         // The worker runs cat against the piped stdin and pushes the

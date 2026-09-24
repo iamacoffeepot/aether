@@ -93,7 +93,7 @@ impl Registry {
                         let token = barrier_token(&mail);
                         mailer.record_finished(mail.mail_id, mail.root);
                         if let Some(token) = token {
-                            readiness.push((mail.recipient, token, Some(mail.mail_id)));
+                            readiness.push((mail.recipient, token, mail.mail_id));
                         }
                     } else if let Some(continuation) = Self::capture_mail_locked(&mut inner, mail) {
                         after_lock.push(AfterLock::Route(continuation));

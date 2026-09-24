@@ -170,26 +170,18 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     }
 
     /// ADR-0080 §5: derive the `parent_mail` to stamp on outbound
-    /// mail from this ctx's in-flight context. `MailId::NONE` collapses
-    /// to `None` (chassis-root or close/init ctx).
+    /// mail from this ctx's in-flight context: `None` for a chassis-root
+    /// or close/init ctx.
     pub(crate) fn outbound_parent(&self) -> Option<MailId> {
-        if self.in_flight_mail_id == MailId::NONE {
-            None
-        } else {
-            Some(self.in_flight_mail_id)
-        }
+        self.in_flight_mail_id
     }
 
     /// ADR-0080 §5: derive the inherited `root` to stamp on outbound
-    /// mail from this ctx's in-flight context. `MailId::NONE` collapses
-    /// to `None`, in which case `NativeBinding::send_mail_with_lineage`
-    /// mints a fresh root from the outbound's own `mail_id`.
+    /// mail from this ctx's in-flight context. `None` when there is none,
+    /// in which case `NativeBinding::send_mail_with_lineage` mints a fresh
+    /// root from the outbound's own `mail_id`.
     pub(crate) fn outbound_root(&self) -> Option<MailId> {
-        if self.in_flight_root == MailId::NONE {
-            None
-        } else {
-            Some(self.in_flight_root)
-        }
+        self.in_flight_root
     }
 
     /// The `(parent, root)` pair a [`NativeActorMailbox`] captures at

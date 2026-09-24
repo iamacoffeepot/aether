@@ -254,12 +254,7 @@ where
     /// the close hook resolves to this actor's slots.
     fn run_close_hook(&self, actor: &mut Box<A::State>) {
         local::with_stamped(&self.slots, || {
-            let mut close_ctx = NativeCtx::new_for_actor(
-                &self.binding,
-                Source::NONE,
-                aether_data::MailId::NONE,
-                aether_data::MailId::NONE,
-            );
+            let mut close_ctx = NativeCtx::new_for_actor(&self.binding, Source::NONE, None, None);
             A::unwire(actor.as_mut(), &mut close_ctx);
         });
     }
@@ -570,19 +565,24 @@ where
         // cost fold below reuses the existing trace bracket — no new
         // timestamp on the hot path.
         let t_received = th.now_nanos();
-        th.push_trace_ring(
-            root,
-            TraceEvent::Received {
-                mail_id,
-                t: t_received,
-                // iamacoffeepot/aether#1134: surface the deposit instant +
-                // scheduler backlog the producer stamped at `route_mail`,
-                // so the hop splits into send→enqueue + queue residence.
-                t_enqueue,
-                enqueue_depth,
-                thread_id,
-            },
-        );
+        // A lineage-less envelope writes no ring entry: with no root, no
+        // trace walk could reach it.
+        let traced = mail_id.zip(root);
+        if let Some((mail_id, root)) = traced {
+            th.push_trace_ring(
+                root,
+                TraceEvent::Received {
+                    mail_id,
+                    t: t_received,
+                    // iamacoffeepot/aether#1134: surface the deposit instant +
+                    // scheduler backlog the producer stamped at `route_mail`,
+                    // so the hop splits into send→enqueue + queue residence.
+                    t_enqueue,
+                    enqueue_depth,
+                    thread_id,
+                },
+            );
+        }
         // #1757 / ADR-0094: the dispatched envelope lives in exactly one
         // place — `ctx.inbound`. The dispatch arms read a disarmed *view*
         // (a `MailRef`-only clone whose obligation never fires), so the
@@ -619,7 +619,9 @@ where
         // parent's `Finished`.
         drop(ctx);
         let t_finished = th.now_nanos();
-        th.push_trace_ring(root, TraceEvent::Finished { mail_id, t: t_finished });
+        if let Some((mail_id, root)) = traced {
+            th.push_trace_ring(root, TraceEvent::Finished { mail_id, t: t_finished });
+        }
         // iamacoffeepot/aether#1128: fold this handler's execution time into
         // its per-handler EWMA (lock-free through the per-actor cache;
         // framework / fallback kinds skipped). Measure-only. See
@@ -682,11 +684,7 @@ pub fn finalize_close_and_fan_out(
     self_id: MailboxId,
     chain: EffectChain,
 ) {
-    debug_assert_eq!(
-        chain.held_root(),
-        aether_data::MailId::NONE,
-        "the close tail runs past its chain's Finished, so it can hold nothing",
-    );
+    debug_assert!(chain.held_root().is_none(), "the close tail runs past its chain's Finished, so it can hold nothing");
     let watchers = actor_registry.close_actor(self_id);
     binding.release_parent_child_reservation();
     notify_departure(binding, self_id, watchers);

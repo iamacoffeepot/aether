@@ -25,7 +25,7 @@ pub(super) enum LifecycleReplyOutcome {
 /// with the framework drain: dropping `mail` on either arm settles.
 ///
 /// On the per-frame path the reply rides a bare, lineage-less `Settled`
-/// notice, so its `root` is `MailId::NONE` and the drop's `record_finished`
+/// notice, so it carries no `root` and the drop's `record_finished`
 /// is a counter no-op; the live obligation it discharges is the debug
 /// guard the real `route_mail` Inbox arm armed.
 //
@@ -64,8 +64,8 @@ mod tests {
     /// the registered inbox (the production `route_mail` Inbox arm arms the
     /// guard), then drive `consume_lifecycle_reply` over it and assert the
     /// guard is disarmed (no abort on drop) AND the settlement counter
-    /// balances — on both a non-`NONE`-root reply (the discharge is the
-    /// sole `Finished`, so the root settles) and the `NONE`-root per-frame
+    /// balances — on both a rooted reply (the discharge is the
+    /// sole `Finished`, so the root settles) and the rootless per-frame
     /// reply (a counter no-op). Pre-#1704 the armed guard aborted the
     /// process when the consume site dropped the envelope without
     /// `discharge`.
@@ -103,23 +103,29 @@ mod tests {
         // Both replies address the reply mailbox by the source a real
         // envelope from it carries: it mails itself once, and dropping that
         // guard settles the self-send's own chain.
-        NativeCtx::new(&reply_binding, Source::NONE, MailId::NONE, MailId::NONE)
+        NativeCtx::new(&reply_binding, Source::NONE, None, None)
             .send_to(reply_ref, &LifecycleAdvanceComplete { completed: 0, next: 0 });
         let sender = inbox.try_next().expect("the reply mailbox's own mail").sender();
 
         let cap_mailbox = root_mailbox::<aether_lifecycle::LifecycleCapability>();
 
-        // (1) Non-`NONE`-root reply (the degraded `on_advance` inline-reply
+        // (1) Rooted reply (the degraded `on_advance` inline-reply
         // shape): the producer hook records the reply's `Sent` against
         // `root`, and the `InboundMail` guard's `Drop` inside
         // `consume_lifecycle_reply` is the sole `Finished`, so the root
         // settles.
         let root = MailId::new(cap_mailbox, 1);
-        // 1<<63 is the disjoint reply-lineage base (#1701) — a non-`NONE`
+        // 1<<63 is the disjoint reply-lineage base (#1701) — a present
         // mail_id, so the real Inbox arm arms the obligation guard.
         let armed_reply_id = MailId::new(cap_mailbox, 1 << 63);
         let settle_rx = settlement.subscribe_settlement(root);
-        mailer.send_reply(sender, &LifecycleAdvanceComplete { completed: 1, next: 42 }, armed_reply_id, root, None);
+        mailer.send_reply(
+            sender,
+            &LifecycleAdvanceComplete { completed: 1, next: 42 },
+            Some(armed_reply_id),
+            Some(root),
+            None,
+        );
         let mail = inbox.try_next().expect("armed reply routed to the inbox");
         match consume_lifecycle_reply(mail) {
             LifecycleReplyOutcome::Complete(next) => {
@@ -129,7 +135,7 @@ mod tests {
         }
         settle_rx.recv().expect("the guard's Finished balances the reply's Sent and settles the root");
 
-        // (2) `NONE`-root reply (the real per-frame deferred path, replying
+        // (2) Rootless reply (the real per-frame deferred path, replying
         // to a bare lineage-less `Settled` notice): the producer's
         // `record_sent_inflight` no-ops, the drop's `record_finished` is a
         // counter no-op, and the armed guard is still disarmed so the
@@ -139,8 +145,8 @@ mod tests {
         mailer.send_reply(
             sender,
             &LifecycleAdvanceComplete { completed: 2, next: 0 },
-            armed_reply_id_2,
-            MailId::NONE,
+            Some(armed_reply_id_2),
+            None,
             None,
         );
         let mail_2 = inbox.try_next().expect("second armed reply routed to the inbox");

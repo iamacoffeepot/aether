@@ -67,7 +67,10 @@ impl HttpShardState {
             return;
         };
         let payload = HttpRequestStreamEnd { stream_id }.encode_into_bytes();
-        let mail_id = ctx.send_envelope_detached_to(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload);
+        let Some(mail_id) = ctx.send_envelope_detached_to(stream.handler, <HttpRequestStreamEnd as Kind>::ID, &payload)
+        else {
+            return;
+        };
         let _ = ctx.subscribe_settlement::<Settled>(mail_id);
         self.in_flight.insert(
             mail_id.correlation_id,

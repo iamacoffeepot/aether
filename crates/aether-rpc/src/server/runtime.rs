@@ -506,8 +506,13 @@ impl RpcServerState {
             };
             let forward =
                 ForwardEnvelope { recipient: envelope.to.path, kind: envelope.kind, payload: envelope.payload };
-            let mail_id =
-                ctx.send_envelope_detached_to(route, <ForwardEnvelope as Kind>::ID, &forward.encode_into_bytes());
+            // `ForwardEnvelope` is not engine-only, so the send always mints
+            // an id; the engine-only envelope inside it was refused above.
+            let Some(mail_id) =
+                ctx.send_envelope_detached_to(route, <ForwardEnvelope as Kind>::ID, &forward.encode_into_bytes())
+            else {
+                return;
+            };
             if let Some(wire_cid) = cid {
                 let correlation = mail_id.correlation_id;
                 self.in_flight.insert(correlation, InFlight { conn_id, wire_cid, route: Some(route) });

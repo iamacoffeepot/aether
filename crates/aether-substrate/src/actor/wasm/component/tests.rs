@@ -36,7 +36,7 @@ use std::time::Duration;
 
 /// Captured `(mail_id, root, parent_mail)` triple for the
 /// lineage-propagation tests in this module.
-type LineageCapture = Arc<Mutex<Vec<(MailId, MailId, Option<MailId>)>>>;
+type LineageCapture = Arc<Mutex<Vec<(Option<MailId>, Option<MailId>, Option<MailId>)>>>;
 
 /// Build an inbox handler that captures every dispatched mail's lineage
 /// triple into a shared `Vec`, discharging each dispatch (ADR-0094:
@@ -1428,15 +1428,16 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
     // when the wasm guest's on_tick handler fires its outbound.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 7);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x99)), 42);
-    ctx.set_in_flight(inbound_mail, inbound_root);
+    ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![1, 2, 3], 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
     let (mail_id, root, parent) = captured[0];
+    let mail_id = mail_id.expect("a component send stamps its mail id");
     assert_eq!(parent, Some(inbound_mail), "parent_mail must point at inbound");
-    assert_eq!(root, inbound_root, "root must inherit from inbound chain");
+    assert_eq!(root, Some(inbound_root), "root must inherit from inbound chain");
     // The minted mail_id is fresh — sender = self, correlation
     // from the per-component counter (starts at 1 for the first send).
     assert_eq!(mail_id.sender, sender);
@@ -1462,8 +1463,9 @@ fn send_without_in_flight_mints_fresh_root_chain() {
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1);
     let (mail_id, root, parent) = captured[0];
+    let mail_id = mail_id.expect("a component send stamps its mail id");
     assert!(parent.is_none(), "no inbound -> no parent edge");
-    assert_eq!(root, mail_id, "fresh chain: root == mail_id");
+    assert_eq!(root, Some(mail_id), "fresh chain: root == mail_id");
     assert_eq!(mail_id.sender, sender);
 }
 
@@ -1486,15 +1488,16 @@ fn send_detached_mints_fresh_chain_despite_in_flight() {
     // Set an in-flight chain the default `send` would inherit.
     let inbound_root = MailId::new(MailboxId::CHASSIS_MAILBOX_ID, 9);
     let inbound_mail = MailId::new(MailboxId(aether_data::with_tag(Tag::Mailbox, 0x77)), 13);
-    ctx.set_in_flight(inbound_mail, inbound_root);
+    ctx.set_in_flight(Some(inbound_mail), Some(inbound_root));
 
     ctx.send_detached(sink_id, aether_data::KindId(0xF00D), vec![7, 8], 1, sender);
 
     let captured = captured.lock().unwrap();
     assert_eq!(captured.len(), 1, "sink should have been called once");
     let (mail_id, root, parent) = captured[0];
+    let mail_id = mail_id.expect("a component send stamps its mail id");
     assert!(parent.is_none(), "detached send carries no parent edge despite in-flight");
-    assert_eq!(root, mail_id, "detached send is its own root");
+    assert_eq!(root, Some(mail_id), "detached send is its own root");
     assert_eq!(mail_id.sender, sender);
 }
 
@@ -1653,7 +1656,7 @@ fn send_stamps_self_when_recipient_is_own_mailbox() {
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, sender);
 
     let captured = captured.lock().unwrap();
-    let (mail_id, _root, _parent) = captured[0];
+    let mail_id = captured[0].0.expect("a component send stamps its mail id");
     assert_eq!(mail_id.sender, sender, "origin stamps the component's own id when from == self");
 }
 
@@ -1673,7 +1676,7 @@ fn send_stamps_alias_when_recipient_is_inline_child() {
     ctx.send(sink_id, aether_data::KindId(0xABCD), vec![], 1, alias);
 
     let captured = captured.lock().unwrap();
-    let (mail_id, _root, _parent) = captured[0];
+    let mail_id = captured[0].0.expect("a component send stamps its mail id");
     assert_eq!(mail_id.sender, alias, "origin stamps the alias (dispatch identity) when from is a child");
     assert_ne!(mail_id.sender, sender, "the child's send must not stamp the parent component");
 }

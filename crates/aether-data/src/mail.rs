@@ -25,9 +25,10 @@ use crate::{EngineId, MailboxId, Schema, SessionToken};
 ///
 /// `sender` is [`MailboxId::CHASSIS_MAILBOX_ID`] for chassis-originated
 /// mail (the reserved name `"aether.chassis"`, issue iamacoffeepot/aether#725).
-/// Per-actor mints use the owning actor's `MailboxId`. The
-/// [`MailId::NONE`] sentinel below carries the zero id instead — "no
-/// inbound mail" is structurally distinct from "chassis as sender".
+/// Per-actor mints use the owning actor's `MailboxId`. A mail with no
+/// lineage carries no `MailId` at all — the substrate's carriers hold
+/// `Option<MailId>` — so "no inbound mail" is structurally distinct from
+/// "chassis as sender".
 ///
 /// Serde-serializable so the ADR-0080 `TraceEvent` (and its
 /// structured `TraceRingEntry`, the per-actor ring's wire element)
@@ -71,12 +72,6 @@ impl<'de> WireDecode<'de> for MailId {
 }
 
 impl MailId {
-    /// Sentinel for "not yet stamped" / "chassis root". The PR 2
-    /// dispatch path treats this value as the chassis-as-originator
-    /// marker. Its wire encoding is the
-    /// pair `(0, 0)`: a zero sender id and a zero correlation id.
-    pub const NONE: Self = Self { sender: MailboxId(0), correlation_id: 0 };
-
     /// Construct a `MailId` from a sender mailbox and correlation id.
     /// Producer paths (`NativeBinding::send_mail`, plus the future
     /// drainer and chassis-pushed sites) call this immediately after

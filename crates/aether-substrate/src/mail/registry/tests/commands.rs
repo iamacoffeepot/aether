@@ -627,8 +627,7 @@ fn owner_completion_reentry_requeues_and_preserves_depth_metric() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let completion =
-        binding.dispatch_arm::<RegistryBatchResult, _>(mailer.acquire_settlement_hold(MailId::NONE), Source::NONE, ());
+    let completion = binding.dispatch_arm::<RegistryBatchResult, _>(None, Source::NONE, ());
     let dispatch_id = completion.dispatch_id();
     assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
 
@@ -696,8 +695,7 @@ fn deferred_batch_owner_close_wakes_exactly_once_with_public_error() {
         WakeSink::detached(),
         RegistryQueueCapacities::default(),
     );
-    let completion =
-        binding.dispatch_arm::<RegistryBatchResult, _>(mailer.acquire_settlement_hold(MailId::NONE), Source::NONE, ());
+    let completion = binding.dispatch_arm::<RegistryBatchResult, _>(None, Source::NONE, ());
     let dispatch_id = completion.dispatch_id();
     assert!(registry.submit_deferred(RegistryBatch::register_kinds(Vec::new()).into_effects(), completion));
 

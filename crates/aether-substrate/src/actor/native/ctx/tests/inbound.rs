@@ -3,7 +3,7 @@
 
 use std::sync::Arc;
 
-use aether_data::{MailId, MailboxId, RequestId};
+use aether_data::{MailboxId, RequestId};
 
 use crate::actor::native::NativeCtx;
 use crate::actor::native::binding::NativeBinding;
@@ -21,7 +21,7 @@ fn native_ctx_take_context_consumes_stored_reply_context() {
     binding.store_request_context(RequestId(77), &NativeRequestContext { value: 9 });
 
     let reply_source = Source::with_correlation(SourceAddr::None, 77);
-    let mut ctx = NativeCtx::new(&binding, reply_source, MailId::NONE, MailId::NONE);
+    let mut ctx = NativeCtx::new(&binding, reply_source, None, None);
 
     assert_eq!(ctx.take_context::<NativeRequestContext>(), Some(NativeRequestContext { value: 9 }));
     assert_eq!(ctx.take_context::<NativeRequestContext>(), None);

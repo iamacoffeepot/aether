@@ -21,7 +21,8 @@ use aether_fs::{FsError, NamespaceAddr};
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::testing::{
     assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-    fresh_substrate, fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, unrouted_binding,
+    fresh_substrate, fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, token_root,
+    unrouted_binding,
 };
 use aether_substrate::{EgressEvent, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
 use crossbeam_queue::ArrayQueue;
@@ -31,7 +32,7 @@ use std::time::Duration;
 const TEST_RATE: f32 = 48_000.0;
 
 fn read_result_ctx<A>(transport: &Arc<NativeBinding>, correlation_id: u64) -> NativeCtx<'_, A, Manual> {
-    NativeCtx::new_for_actor(transport, fs_reply_source(correlation_id), MailId::NONE, MailId::NONE)
+    NativeCtx::new_for_actor(transport, fs_reply_source(correlation_id), None, None)
 }
 
 /// Build a cap with a live event queue but no cpal worker — the
@@ -58,7 +59,7 @@ fn ramp(len: usize) -> Vec<f32> {
     (0..len).map(|i| (i as f32 / len as f32) - 0.5).collect()
 }
 fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, session_sender(), MailId::NONE, MailId::NONE)
+    NativeCtx::new_for_actor(transport, session_sender(), None, None)
 }
 
 /// ADR-0112: a `Manual` ctx for directly calling `#[handler::manual]`
@@ -66,7 +67,7 @@ fn load_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A> {
 /// in the `Manual` mode, so the method's `OutboundReply` surface is
 /// available.
 fn manual_ctx<A>(transport: &Arc<NativeBinding>) -> NativeCtx<'_, A, Manual> {
-    NativeCtx::new_for_actor(transport, session_sender(), MailId::NONE, MailId::NONE)
+    NativeCtx::new_for_actor(transport, session_sender(), None, None)
 }
 
 mod instrument;

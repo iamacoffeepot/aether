@@ -571,14 +571,14 @@ fn stamped_source(registry: &Registry, mailer: &Arc<Mailer>, name: &str) -> Sour
         }) as Arc<dyn InboxHandler>,
     );
 
-    NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE).send_to(reference, &SetMasterGain { gain: 1.0 });
+    NativeCtx::new(&binding, Source::NONE, None, None).send_to(reference, &SetMasterGain { gain: 1.0 });
     dispatch_rx.recv_timeout(Duration::from_secs(2)).expect("the sender's own mail reached its inbox").sender
 }
 
 /// The handler ctx for an inbound whose envelope carried `source`, typed by
 /// the handler's actor.
 fn sender_ctx<A>(transport: &Arc<NativeBinding>, source: Source) -> NativeCtx<'_, A> {
-    NativeCtx::new_for_actor(transport, source, MailId::NONE, MailId::NONE)
+    NativeCtx::new_for_actor(transport, source, None, None)
 }
 
 // Regression (issue 6522): two local components are two senders. A

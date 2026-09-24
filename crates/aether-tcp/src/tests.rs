@@ -102,7 +102,7 @@ fn session_reply() -> Source {
     Source::to(SourceAddr::Session(SessionToken(Uuid::from_u128(0xfeed))))
 }
 
-fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, source: Source, root: MailId) {
+fn enqueue<K: Kind>(registry: &Arc<Registry>, target: ErasedActorRef, mail: &K, source: Source, root: Option<MailId>) {
     let MailboxEntry::Inbox { handler, .. } = registry.entry(target).expect("cap entry") else {
         panic!("expected mailbox entry");
     };
@@ -213,7 +213,7 @@ where
     K: Kind,
     R: Kind,
 {
-    enqueue(registry, target, mail, session_reply(), MailId::NONE);
+    enqueue(registry, target, mail, session_reply(), None);
 
     let deadline = Instant::now() + Duration::from_secs(2);
     let frame = loop {
@@ -380,14 +380,14 @@ fn duplicate_staged_listener_name_keeps_one_socket_and_rejects_the_other() {
         tcp,
         &BindListener { addr: addr_alpha.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_alpha), 1),
-        MailId::NONE,
+        None,
     );
     enqueue(
         &registry,
         tcp,
         &BindListener { addr: addr_beta.to_string(), name: Some(LISTENER_NAME.into()), consumer: None },
         Source::with_correlation(SourceAddr::Session(session_beta), 2),
-        MailId::NONE,
+        None,
     );
 
     let mut replies = Vec::new();
@@ -543,7 +543,7 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
         tcp,
         &BindListener { addr: "127.0.0.1:0".into(), name: Some("duplicate-unbind".into()), consumer: None },
         session_reply(),
-        MailId::NONE,
+        None,
     );
     let EgressEvent::ToSession { payload, .. } = pump_for_reply(&mut cap, &rx, "the bind reply") else {
         panic!("expected the bind reply to a session");
@@ -556,8 +556,8 @@ fn duplicate_unbind_preserves_the_first_parked_reply() {
     let first_session = SessionToken(Uuid::from_u128(0x3051_0001));
     let duplicate_session = SessionToken(Uuid::from_u128(0x3051_0002));
     let unbind = UnbindListener { listener_name: listener_name.clone() };
-    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(first_session), 1), MailId::NONE);
-    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(duplicate_session), 2), MailId::NONE);
+    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(first_session), 1), None);
+    enqueue(&registry, tcp, &unbind, Source::with_correlation(SourceAddr::Session(duplicate_session), 2), None);
 
     let mut first_reply = None;
     let mut duplicate_reply = None;
@@ -651,13 +651,7 @@ fn connect_roundtrip_spawns_writable_session() {
             LoadName::new(&session_name).expect("session name is a load name"),
         )
         .expect("the connect-side session is live");
-    enqueue(
-        &registry,
-        session.erase(),
-        &SessionWrite { bytes: b"connect-roundtrip".to_vec() },
-        session_reply(),
-        MailId::NONE,
-    );
+    enqueue(&registry, session.erase(), &SessionWrite { bytes: b"connect-roundtrip".to_vec() }, session_reply(), None);
 
     assert_eq!(server_thread.join().expect("loopback server thread completes"), *b"connect-roundtrip");
 }
