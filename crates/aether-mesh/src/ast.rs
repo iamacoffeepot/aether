@@ -31,6 +31,11 @@ pub enum Node {
         z: f32,
         color: u32,
     },
+    /// Icosphere of `radius` (ADR-0026). `subdivisions` is the
+    /// refinement level: 0 is the icosahedron (20 faces) and each level
+    /// multiplies the face count by 4. A level above
+    /// [`MAX_SPHERE_SUBDIVISIONS`](crate::mesh::MAX_SPHERE_SUBDIVISIONS)
+    /// is a mesh error.
     Sphere {
         radius: f32,
         subdivisions: u32,

@@ -90,6 +90,10 @@ angle passed to the math layer in radians. `mirror` accepts only the symbols
 `x`, `y`, or `z`, and emits its child plus the child's reflection across that
 axis-plane through the local origin.
 
+`sphere` takes a radius and an icosphere refinement level: level 0 is the
+20-face icosahedron and each level quadruples the faces, up to a cap of 4
+(5120 faces); a higher level is a mesh error.
+
 `sweep` takes a 2D profile and a 3D waypoint path. Optional `:scales` must have
 exactly one scalar per waypoint. It is capped by default; `:open true` omits
 the end caps. The mesher transports a frame along the path and stitches
@@ -186,8 +190,9 @@ the shared reply type is in
   A non-simple loop, surviving twin edge, or unrepaired T-junction in logs
   means the canonical output may be damaged.
 - The parser and evaluator have no authored-complexity budget or nesting-depth
-  cap. Large segment/subdivision/array counts or deeply nested trees can spend
-  substantial CPU, memory, or stack. Validate or bound generated input at the
+  cap. The one bounded count is the `sphere` level, capped at 4 because its
+  face count grows exponentially. Large segment/array counts or deeply nested
+  trees can spend substantial CPU, memory, or stack. Validate or bound generated input at the
   producer when it is not trusted.
 - `serialize` assumes a valid finite in-memory AST and panics if asked to print
   a non-finite float. Parsed non-finite geometry is rejected later at the

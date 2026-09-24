@@ -11,7 +11,7 @@
 //! (where the centroid-vs-normal test is well-defined for the shape).
 
 use aether_math::Vec3;
-use aether_mesh::{mesh, parse};
+use aether_mesh::{MeshError, mesh, parse};
 use std::collections::BTreeSet;
 
 fn tri_normal(tri: &aether_mesh::Triangle) -> Vec3 {
@@ -138,19 +138,31 @@ fn wedge_uses_six_unique_vertices() {
 // sphere
 
 #[test]
-fn sphere_triangle_count_matches_lathe_pole_collapse() {
-    // n+1 profile points, n profile edges. Two pole edges (first +
-    // last) emit 1 tri/segment; the remaining n-2 edges emit
-    // 2 tris/segment. Total = (2*(n-2) + 2) * segments = (2n - 2) * n.
-    // For subdivisions = 8: (16 - 2) * 8 = 112.
-    let ast = parse("(sphere 1 8 :color 0)").expect("test setup: sphere DSL parses");
-    assert_eq!(mesh(&ast).expect("test setup: sphere meshes").len(), (2 * 8 - 2) * 8);
+fn sphere_triangle_count_is_icosphere_face_count() {
+    // Every icosphere face lies on its own plane, so cleanup merges
+    // nothing and each level keeps exactly 20 * 4^level triangles.
+    // Level 2 at radius 0.2 is the globe in `examples/lamp_post.dsl`.
+    for (text, level) in [
+        ("(sphere 1 0 :color 0)", 0),
+        ("(sphere 1 1 :color 0)", 1),
+        ("(sphere 0.2 2 :color 0)", 2),
+        ("(sphere 1 3 :color 0)", 3),
+    ] {
+        let ast = parse(text).expect("test setup: sphere DSL parses");
+        assert_eq!(mesh(&ast).expect("sphere meshes").len(), 20 * 4_usize.pow(level), "{text}");
+    }
+}
+
+#[test]
+fn sphere_subdivisions_above_cap_is_an_error() {
+    let ast = parse("(sphere 1 5 :color 0)").expect("test setup: sphere DSL parses");
+    assert!(matches!(mesh(&ast), Err(MeshError::SphereSubdivisionsTooHigh { subdivisions: 5, max: 4 })));
 }
 
 #[test]
 fn sphere_vertices_lie_on_radius() {
     let radius: f32 = 1.5;
-    let ast = parse("(sphere 1.5 12 :color 0)").expect("test setup: sphere DSL parses");
+    let ast = parse("(sphere 1.5 3 :color 0)").expect("test setup: sphere DSL parses");
     let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         for v in tri.vertices {
@@ -162,7 +174,7 @@ fn sphere_vertices_lie_on_radius() {
 
 #[test]
 fn sphere_outward_normals() {
-    let ast = parse("(sphere 1 12 :color 0)").expect("test setup: sphere DSL parses");
+    let ast = parse("(sphere 1 3 :color 0)").expect("test setup: sphere DSL parses");
     let tris = mesh(&ast).expect("test setup: sphere meshes");
     for tri in &tris {
         let n = tri_normal(tri);
@@ -300,7 +312,7 @@ fn round_trip_full_v1_vocab() {
         (cylinder 1 2 12 :color 0)
         (cone 0.5 1 8 :color 1)
         (wedge 1 1 1 :color 2)
-        (sphere 0.7 8 :color 3)
+        (sphere 0.7 2 :color 3)
         (extrude ((-1 -1) (1 -1) (1 1) (-1 1)) 0.5 :color 4)
         (mirror x (translate (2 0 0) (box 1 1 1 :color 5)))
         (array 3 (1.5 0 0) (box 0.5 0.5 0.5 :color 6)))";
