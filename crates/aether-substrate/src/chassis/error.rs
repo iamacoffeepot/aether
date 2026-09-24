@@ -9,6 +9,7 @@ use std::fmt;
 #[cfg(feature = "wasm")]
 use std::io;
 
+use crate::config::SecretError;
 use crate::mail::registry::NameConflict;
 
 /// Failure modes capability boot can raise. Per ADR-0063, any boot
@@ -71,6 +72,15 @@ impl StdError for BootError {
 impl From<NameConflict> for BootError {
     fn from(e: NameConflict) -> Self {
         Self::MailboxAlreadyClaimed { name: e.name }
+    }
+}
+
+/// A consumer's secrets failed to load in `init` (ADR-0235): a bound secret
+/// with no `--secrets-dir`, or a secret file a loader rule refused. The
+/// error names the key, secret, path, and rule, never the value.
+impl From<SecretError> for BootError {
+    fn from(e: SecretError) -> Self {
+        Self::Other(Box::new(e))
     }
 }
 

@@ -14,6 +14,9 @@
 //! - Response size capped at `AETHER_HTTP_MAX_BODY_BYTES` (16MB).
 //! - Default request timeout 30s, per-request override via
 //!   `Fetch.timeout_ms`.
+//! - Operator-bound secret headers (ADR-0235, `--http-secrets`): attached by
+//!   the cap for one exact HTTPS host, after the allowlist check, replacing a
+//!   caller-set header of the same name. Actors never see or choose a value.
 
 mod config;
 
@@ -138,3 +141,10 @@ mod runtime;
 // is its only consumer.
 #[cfg(feature = "runtime")]
 mod egress;
+
+// ADR-0235: the host secret table — each bound secret keyed by exact host and
+// header, and the per-request header build that attaches it. Native-only (it
+// holds `aether_substrate` `Secret`s), so it rides the `runtime` gate beside
+// `runtime.rs`, its only consumer.
+#[cfg(feature = "runtime")]
+mod secrets;

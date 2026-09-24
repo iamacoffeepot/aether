@@ -31,7 +31,8 @@ mod stage_argv;
 ///
 /// `env_prefix` joins with the upper-snake field name to form the env
 /// key (`AETHER_HTTP_TIMEOUT_MS`). Override per-field via `env = "..."`
-/// for unprefixed keys (`GEMINI_API_KEY`). `cli_prefix` joins with the
+/// for a historical name (`AETHER_HTTP_DISABLE` on a field named
+/// `disabled`). `cli_prefix` joins with the
 /// hyphen-lower field name to form the long flag (`--http-timeout-ms`).
 ///
 /// ## Field attributes
@@ -53,7 +54,16 @@ mod stage_argv;
 ///   `default` in `from_layer` (requires a `default`); for a knob where
 ///   `0` is degenerate, e.g. a concurrency bound that would deadlock.
 /// - `#[config(env = "...")]` — per-field env-name override (used for
-///   un-prefixed keys like `GEMINI_API_KEY`).
+///   historical or un-prefixed key names).
+/// - `#[config(secrets)]` — the field is an
+///   `aether_substrate::config::SecretRefs` (ADR-0235): a comma list of
+///   `<key>=<secret-name>` naming the secrets the cap binds, never their
+///   values. The env side auto-wires
+///   `aether_substrate::config::parse_secret_refs` (every name validated, a
+///   garbage value a hard boot error), the default is empty, and the
+///   emitted `ConfigMember::resolve` binds the refs to the source stack's
+///   `--secrets-dir` so `init` can `load()` them. Any other field type, or
+///   a `default` / `parse` beside it, is a compile error.
 ///
 /// ## Type-driven emission (no explicit hint)
 ///

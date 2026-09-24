@@ -14,6 +14,7 @@
 // Parent-level items this module names. `HttpCapability` is the impl's `Self`
 // type and `HttpConfig` is named by `init`'s signature.
 use super::egress::PerSenderEgress;
+use super::secrets::{HostSecrets, request_headers};
 use super::{HttpCapability, HttpConfig};
 use aether_actor::{ErasedActorRef, runtime};
 
@@ -124,11 +125,12 @@ impl NativeActor for HttpCapability {
 
     /// Build the HTTP adapter and the per-sender egress dispatcher from the
     /// resolved config. The adapter is built immediately so configuration
-    /// errors surface at chassis-builder time, not at first fetch.
+    /// errors — a bound secret that fails to load or bind (ADR-0235) among
+    /// them — surface at chassis-builder time, not at first fetch.
     fn init(config: HttpConfig, _ctx: &mut NativeInitCtx<'_>) -> Result<HttpCapabilityState, BootError> {
         let default_timeout = config.default_timeout;
         let egress = PerSenderEgress::new(config.max_in_flight_per_sender, config.max_in_flight_total);
-        Ok(HttpCapabilityState { adapter: build_http_adapter(config), default_timeout, egress })
+        Ok(HttpCapabilityState { adapter: build_http_adapter(config)?, default_timeout, egress })
     }
 
     /// Accept a fetch request and dispatch it off the dispatcher thread
@@ -176,16 +178,17 @@ impl NativeActor for HttpCapability {
 }
 
 /// `ureq`-backed adapter. Holds the shared agent, the initial-host allowlist
-/// (empty = deny all), the response cap, and the `require_https`
-/// flag. Thread-safe: `ureq::Agent` is cheaply cloneable and
-/// internally synchronised, so the same adapter drives the cap from
-/// one dispatch thread today and would parallelise cleanly behind a
-/// multi-thread dispatcher later.
+/// (empty = deny all), the response cap, the `require_https` flag, and the
+/// operator-bound host secrets (ADR-0235). Thread-safe: `ureq::Agent` is
+/// cheaply cloneable and internally synchronised, so the same adapter drives
+/// the cap from one dispatch thread today and would parallelise cleanly behind
+/// a multi-thread dispatcher later.
 pub struct UreqHttpAdapter {
     agent: ureq::Agent,
     allowlist: HashSet<String>,
     require_https: bool,
     max_body_bytes: usize,
+    secrets: HostSecrets,
 }
 
 /// Redirect budget for [`UreqHttpAdapter::fetch`]'s hand-rolled follow loop
@@ -301,7 +304,7 @@ impl UreqHttpAdapter {
     /// [`build_http_adapter`] for env-derived construction;
     /// tests build adapters directly to avoid env contamination.
     #[must_use]
-    pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize) -> Self {
+    pub fn new(allowlist: HashSet<String>, require_https: bool, max_body_bytes: usize, secrets: HostSecrets) -> Self {
         // Auto-redirect-following is off (`max_redirects(0)`): `fetch` runs
         // its own follow loop so every hop — not just the initial URL — is
         // re-validated against `allowlist` and `require_https` before it is
@@ -310,7 +313,7 @@ impl UreqHttpAdapter {
         // redirects), so an unfollowed 3xx returns as an ordinary response.
         let config = ureq::Agent::config_builder().http_status_as_error(false).max_redirects(0).build();
         let agent = ureq::Agent::new_with_config(config);
-        Self { agent, allowlist, require_https, max_body_bytes }
+        Self { agent, allowlist, require_https, max_body_bytes, secrets }
     }
 
     /// Validate one URL against `require_https` + the allowlist and issue
@@ -318,6 +321,11 @@ impl UreqHttpAdapter {
     /// [`HttpAdapter::fetch`]; this runs the same gate the initial URL gets,
     /// for whichever URL — initial or a re-validated redirect target — is
     /// current.
+    ///
+    /// ADR-0235 §6: after that gate, a plain-`http` URL to a host with a
+    /// bound secret is refused, so a secret never travels in cleartext; then
+    /// the hop's headers are built for its own host, attaching that host's
+    /// bound secrets and nothing another host bound.
     fn fetch_once(
         &self,
         url: &str,
@@ -337,34 +345,24 @@ impl UreqHttpAdapter {
         let host = parsed.host_str().ok_or_else(|| HttpError::InvalidUrl("no host in url".to_string()))?;
         check_allowlist(&self.allowlist, host)?;
 
+        if parsed.scheme() != "https" && self.secrets.binds(host) {
+            return Err(HttpError::InvalidUrl(format!(
+                "plain http to {host} refused: a secret is bound to this host, and secrets travel only over https"
+            )));
+        }
+
         if body.len() > self.max_body_bytes {
             return Err(HttpError::BodyTooLarge);
         }
 
+        // Host header is derived from the URL by ureq; `request_headers`
+        // strips any caller-set Host so it can't be used to bypass the
+        // allowlist (component requests allowlisted A, TLS SNI is A, but
+        // `Host: B` routes the vhost to B server-side), defaults User-Agent
+        // to `aether/<version>`, and attaches this host's bound secrets.
         let mut builder = Request::builder().method(http_method_to_http_crate(method)).uri(url);
-
-        // Host header is derived from the URL by ureq; reject any
-        // caller-set Host so it can't be used to bypass the
-        // allowlist (component requests allowlisted A, TLS SNI is A,
-        // but `Host: B` routes the vhost to B server-side). User-
-        // Agent defaults to `aether/<version>` if not set.
-        let mut saw_user_agent = false;
-        for h in headers {
-            if h.name.eq_ignore_ascii_case("host") {
-                tracing::warn!(
-                    target: "aether_http",
-                    value = %h.value,
-                    "stripping caller-set Host header",
-                );
-                continue;
-            }
-            if h.name.eq_ignore_ascii_case("user-agent") {
-                saw_user_agent = true;
-            }
-            builder = builder.header(&h.name, &h.value);
-        }
-        if !saw_user_agent {
-            builder = builder.header("User-Agent", concat!("aether/", env!("CARGO_PKG_VERSION")));
+        for (name, value) in request_headers(headers, &self.secrets, host)? {
+            builder = builder.header(name, value);
         }
 
         let http_req = builder.body(body.to_vec()).map_err(|e| HttpError::InvalidUrl(format!("{e}")))?;
@@ -458,30 +456,41 @@ fn ureq_error_to_http_error(e: ureq::Error) -> HttpError {
     }
 }
 
-/// Build an HTTP adapter from explicit configuration.
-pub fn build_http_adapter(config: HttpConfig) -> Arc<dyn HttpAdapter> {
+/// Build an HTTP adapter from explicit configuration. An enabled cap loads
+/// the secrets its `--http-secrets` knob binds and builds the host table
+/// (ADR-0235); a disabled cap loads nothing.
+///
+/// # Errors
+///
+/// A boot error when a bound secret fails to load (no `--secrets-dir`, or a
+/// file a loader rule refuses) or its binding is refused (a host outside the
+/// allowlist, a bad header name, a second binding for one host and header).
+pub fn build_http_adapter(config: HttpConfig) -> Result<Arc<dyn HttpAdapter>, BootError> {
     if config.disabled {
         tracing::info!(
             target: "aether_http",
             "http adapter disabled — every fetch replies Disabled",
         );
-        return Arc::new(DisabledHttpAdapter);
+        return Ok(Arc::new(DisabledHttpAdapter));
     }
 
+    let secrets = HostSecrets::bind(config.secrets.load()?, &config.allowlist)?;
     tracing::info!(
         target: "aether_http",
         allowlist_size = config.allowlist.len(),
         require_https = config.require_https,
         max_body_bytes = config.max_body_bytes,
+        secret_hosts = ?secrets.hosts(),
         "http adapter configured",
     );
 
-    Arc::new(UreqHttpAdapter::new(config.allowlist, config.require_https, config.max_body_bytes))
+    Ok(Arc::new(UreqHttpAdapter::new(config.allowlist, config.require_https, config.max_body_bytes, secrets)))
 }
 
 #[cfg(all(test, feature = "runtime"))]
 mod tests {
     use super::{FetchRequest, FetchResponse, HttpAdapter, HttpCapabilityState, UreqHttpAdapter, build_http_adapter};
+    use crate::client::secrets::HostSecrets;
     use crate::client::{DEFAULT_MAX_BODY_BYTES, HttpCapability, HttpConfig};
     use crate::kinds::{Fetch, FetchResult, HttpError, HttpHeader, HttpMethod};
     use aether_substrate::actor::native::ctx::NativeCtx;
@@ -536,7 +545,7 @@ mod tests {
 
     #[test]
     fn allowlist_empty_rejects_every_host() {
-        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
+        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES, HostSecrets::default());
         let resp = adapter.fetch(FetchRequest {
             url: "https://api.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -551,7 +560,7 @@ mod tests {
     fn allowlist_miss_returns_denied_without_making_request() {
         let mut allowlist = HashSet::new();
         allowlist.insert("allowed.example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
+        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES, HostSecrets::default());
         let resp = adapter.fetch(FetchRequest {
             url: "https://denied.example.com/".to_string(),
             method: HttpMethod::Get,
@@ -564,7 +573,7 @@ mod tests {
 
     #[test]
     fn invalid_url_returns_invalid_url_variant() {
-        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES);
+        let adapter = UreqHttpAdapter::new(HashSet::new(), false, DEFAULT_MAX_BODY_BYTES, HostSecrets::default());
         let resp = adapter.fetch(FetchRequest {
             url: "not-a-url".to_string(),
             method: HttpMethod::Get,
@@ -579,7 +588,7 @@ mod tests {
     fn require_https_rejects_http_scheme() {
         let mut allowlist = HashSet::new();
         allowlist.insert("example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES);
+        let adapter = UreqHttpAdapter::new(allowlist, true, DEFAULT_MAX_BODY_BYTES, HostSecrets::default());
         let resp = adapter.fetch(FetchRequest {
             url: "http://example.com/".to_string(),
             method: HttpMethod::Get,
@@ -594,7 +603,7 @@ mod tests {
     fn oversize_request_body_returns_body_too_large() {
         let mut allowlist = HashSet::new();
         allowlist.insert("example.com".to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, false, 10);
+        let adapter = UreqHttpAdapter::new(allowlist, false, 10, HostSecrets::default());
         let resp = adapter.fetch(FetchRequest {
             url: "https://example.com/".to_string(),
             method: HttpMethod::Post,
@@ -734,7 +743,7 @@ mod tests {
     #[test]
     fn build_http_adapter_with_disable_returns_disabled() {
         let cfg = HttpConfig { disabled: true, ..HttpConfig::default() };
-        let a = build_http_adapter(cfg);
+        let a = build_http_adapter(cfg).expect("a disabled adapter builds");
         let resp = a.fetch(FetchRequest {
             url: "https://example.com/".to_string(),
             method: HttpMethod::Get,
@@ -872,6 +881,54 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_to_a_bound_host_is_refused_before_dialing() {
+        use aether_substrate::config::{Secret, SecretName, Secrets};
+        use std::io::ErrorKind;
+        use std::net::TcpListener;
+
+        // A loopback listener stands in for the bound host. If the adapter
+        // dialed it, the connection would sit in the accept queue (and the
+        // fetch would time out waiting for a reply rather than fail fast).
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback listener");
+        listener.set_nonblocking(true).expect("nonblocking listener");
+        let addr = listener.local_addr().expect("listener local addr");
+        let host = addr.ip().to_string();
+
+        let allowlist = HashSet::from([host.clone()]);
+        let name = SecretName::try_from("fake").expect("valid test name");
+        let bound = Secrets::from_entries(vec![(
+            format!("{host}/x-api-key"),
+            name,
+            Secret::new("fake-cleartext-value".to_owned()),
+        )]);
+        let secrets = HostSecrets::bind(bound, &allowlist).expect("binding is valid");
+        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES, secrets);
+
+        let resp = adapter.fetch(FetchRequest {
+            url: format!("http://{addr}/"),
+            method: HttpMethod::Get,
+            headers: vec![],
+            body: vec![],
+            timeout: Duration::from_secs(2),
+        });
+
+        match resp {
+            Err(HttpError::InvalidUrl(detail)) => {
+                assert!(!detail.contains("fake-cleartext-value"), "the refusal never carries the value: {detail}");
+            }
+            Err(other) => panic!("expected InvalidUrl for plain http to a bound host, got Err({other:?})"),
+            Ok(response) => {
+                panic!("expected InvalidUrl for plain http to a bound host, got status {}", response.status)
+            }
+        }
+        let accepted = listener.accept();
+        assert!(
+            matches!(&accepted, Err(error) if error.kind() == ErrorKind::WouldBlock),
+            "the adapter must not dial a bound host over plain http: {accepted:?}",
+        );
+    }
+
+    #[test]
     #[allow(clippy::disallowed_methods)] // test-only loopback server thread; no actor lineage or runtime work.
     fn redirect_to_denied_host_end_to_end_never_connects_onward() {
         use std::io::{Read, Write};
@@ -899,7 +956,7 @@ mod tests {
 
         let mut allowlist = HashSet::new();
         allowlist.insert(addr.ip().to_string());
-        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES);
+        let adapter = UreqHttpAdapter::new(allowlist, false, DEFAULT_MAX_BODY_BYTES, HostSecrets::default());
 
         let resp = adapter.fetch(FetchRequest {
             url: format!("http://{addr}/"),

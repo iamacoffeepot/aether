@@ -29,6 +29,7 @@ pub mod settlement_table;
 
 use crate::chassis::builder::{BuiltChassis, DriverCapability};
 use crate::chassis::error::BootError;
+use crate::config::SecretsDir;
 
 // The boot ceremony (`BootableChassis` + the describe / config helpers) is
 // only meaningful when the substrate runtime is linked: it stands up a
@@ -404,19 +405,22 @@ pub fn describe_manifest<C: BootableChassis>(provenance: &BuildProvenance) -> Re
 ///
 /// Returns [`BootError`] when env resolution or substrate boot fails.
 #[cfg(feature = "wasm")]
-pub fn config_dump<C: BootableChassis>() -> Result<String, BootError> {
-    Ok(config_manifest::<C>()?.dump(&C::residual_knobs()))
+pub fn config_dump<C: BootableChassis>(secrets: Option<&SecretsDir>) -> Result<String, BootError> {
+    Ok(config_manifest::<C>()?.dump(&C::residual_knobs(), secrets))
 }
 
 /// The prelude flags a chassis CLI root exposes before boot. Each names an
 /// exit-before-Init discovery mode; a chassis whose CLI lacks one passes
 /// `false` for it.
 #[derive(Debug, Clone, Copy)]
-pub struct PreludeFlags {
+pub struct PreludeFlags<'a> {
     /// `--describe` (ADR-0115): print the [`BinaryManifest`] JSON and exit.
     pub describe: bool,
     /// `--print-config` (ADR-0090 §4): print the config discovery dump and exit.
     pub print_config: bool,
+    /// The located `--secrets-dir` (ADR-0235), whose names and statuses the
+    /// `--print-config` dump lists; `None` when the flag is absent.
+    pub secrets: Option<&'a SecretsDir>,
 }
 
 /// Whether the prelude handled the invocation (it printed a discovery dump and
@@ -463,11 +467,11 @@ impl PreludeAction {
 // each bin, so it prints here, before the tracing subscriber is installed.
 #[allow(clippy::print_stdout)]
 pub fn run_chassis_prelude<C: BootableChassis>(
-    flags: PreludeFlags,
+    flags: PreludeFlags<'_>,
     provenance: &BuildProvenance,
 ) -> Result<PreludeAction, BootError> {
     if flags.print_config {
-        print!("{}", config_dump::<C>()?);
+        print!("{}", config_dump::<C>(flags.secrets)?);
         return Ok(PreludeAction::Handled);
     }
     if flags.describe {
@@ -527,9 +531,11 @@ mod prelude_tests {
         // flag is set — it returns `Boot` and hands the boot back to the binary
         // rather than resolving env / composing (both side-effectful). Reordering
         // the ceremony ahead of the flag check fires `PanicChassis`'s seams.
-        let action =
-            run_chassis_prelude::<PanicChassis>(PreludeFlags { describe: false, print_config: false }, &provenance())
-                .expect("no-flag prelude is infallible — it touches no substrate");
+        let action = run_chassis_prelude::<PanicChassis>(
+            PreludeFlags { describe: false, print_config: false, secrets: None },
+            &provenance(),
+        )
+        .expect("no-flag prelude is infallible — it touches no substrate");
         assert_eq!(action, PreludeAction::Boot);
         assert!(!action.is_handled(), "Boot is the not-handled action");
     }

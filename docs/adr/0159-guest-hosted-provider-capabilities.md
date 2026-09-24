@@ -113,3 +113,17 @@ The companion refactor (issue #3893) drops `AnthropicCapability` / `GeminiCapabi
 - **Chassis refactor** (issue #3893): remove the provider caps from default composition and retire the native runtime halves plus the `aether-contentgen` transport once both components reach parity.
 - **Parked, future hardening**: secret-reference headers, so the plaintext key never enters guest memory (§5).
 - **Parked, named non-goals**: egress token streaming (buffered replies match today's behavior); a guest-reachable `dispatch_blocking_p32` (ADR-0093 §7's deferred FFI superset — desirable, one system reusable for wasm and native, but not needed for this arc).
+
+## Amendments
+
+### 2026-09-23: §5 and its parked item are superseded by ADR-0235
+
+[ADR-0235](0235-secrets-are-named-files-held-only-by-native-capabilities.md)
+supersedes §5 (API keys ride init-config bytes) and the parked "secret-reference
+headers" follow-up. A key no longer rides init-config bytes or enters guest
+memory: it is a named file in the `--secrets-dir` directory, bound by the
+operator on `aether.http` by exact HTTPS host (`--http-secrets
+api.anthropic.com/x-api-key=<secret-name>`), and attached by the http cap. The
+component never names a secret, so the parked design — the component naming a
+key by handle — is resolved differently rather than built. `aether-anthropic`'s
+`AnthropicComponentConfig` drops its `api_key` field.

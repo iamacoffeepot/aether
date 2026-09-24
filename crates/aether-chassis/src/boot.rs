@@ -39,7 +39,7 @@ use aether_substrate::chassis::{
 use aether_substrate::config::{
     ConfigError, ConfigMember, ConfigProvenance, ConfigSources, DEFAULT_REGISTRY_OWNER_QUEUE_CAPACITY,
     DEFAULT_REGISTRY_RELAY_QUEUE_CAPACITY, KnobKind, KnobRecord, RegistryQueueCapacities, RingCapacities,
-    SchedulerTuning, validate_env,
+    SchedulerTuning, SecretsDir, validate_env,
 };
 use aether_substrate::runtime::log_install::apply_filter;
 
@@ -1122,7 +1122,8 @@ pub fn build_provenance() -> BuildProvenance {
 /// Returns [`BootError`] when env resolution, substrate boot, the claim pass, or
 /// manifest serialization fails.
 pub fn run_describe_prelude<C: BootableChassis>(meta: &ChassisMeta) -> Result<PreludeAction, BootError> {
-    let flags = PreludeFlags { describe: meta.describe, print_config: meta.print_config };
+    let secrets = SecretsDir::locate(meta.secrets_dir.clone())?;
+    let flags = PreludeFlags { describe: meta.describe, print_config: meta.print_config, secrets: secrets.as_ref() };
     run_chassis_prelude::<C>(flags, &build_provenance())
 }
 

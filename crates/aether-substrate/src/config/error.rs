@@ -72,6 +72,15 @@ pub enum ConfigError {
         /// The `type_name` of the staged argv layer that no composed member consumed.
         type_name: String,
     },
+    /// ADR-0235 §2: the `--secrets-dir` path is not an absolute path naming a
+    /// directory. The operator asked for this source, so a bad one fails boot
+    /// rather than leaving the engine without the secrets it binds.
+    SecretsDir {
+        /// The path `--secrets-dir` supplied.
+        path: PathBuf,
+        /// The rule the path broke.
+        rule: &'static str,
+    },
 }
 
 impl ConfigError {
@@ -144,6 +153,10 @@ impl fmt::Display for ConfigError {
                      flattened into a CLI root the chassis never composes? removed cap? wrong type?)"
                 )
             }
+            Self::SecretsDir { path, rule } => {
+                let path = path.display();
+                write!(f, "--secrets-dir {path} is unusable: {rule}")
+            }
         }
     }
 }
@@ -154,7 +167,7 @@ impl StdError for ConfigError {
             Self::UnparseableKnown { source, .. }
             | Self::ConfigFile { source, .. }
             | Self::ConfigSection { source, .. } => Some(&**source),
-            Self::OrphanOverride { .. } | Self::OrphanArgv { .. } => None,
+            Self::OrphanOverride { .. } | Self::OrphanArgv { .. } | Self::SecretsDir { .. } => None,
         }
     }
 }

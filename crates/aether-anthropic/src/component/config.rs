@@ -2,9 +2,12 @@
 //! component (ADR-0159).
 //!
 //! [`AnthropicComponentConfig`] is the ADR-0090 init-config the loader hands
-//! `init`: the API key, the disable flag, the per-request timeout, and the
-//! logical name the CLI backend runs through `aether.process.run`. Keys ride
-//! init-config bytes — the ADR-0159 §5 recorded interim posture.
+//! `init`: the disable flag, the per-request timeout, and the logical name the
+//! CLI backend runs through `aether.process.run`. It carries no API key: the
+//! operator binds the key on `aether.http` as
+//! `--http-secrets api.anthropic.com/x-api-key=<secret-name>` (ADR-0235, which
+//! supersedes ADR-0159 §5), and the http cap attaches it to each Messages
+//! fetch. The component never holds, reads, or names the key.
 //!
 //! [`RequestContext`] is the kind-typed context a request handler stashes with
 //! `send_with_context` and the reply handler recovers with `take_context`
@@ -31,17 +34,14 @@ pub const DEFAULT_CLI_BINARY: &str = "claude";
 /// Encode one of these to the component's `Config` shape and pass it as the
 /// `config` bytes of the `aether.component.load` that instantiates the
 /// component (or `load_component`'s `config_path`). Omitting config bytes
-/// boots [`AnthropicComponentConfig::default()`] — no key, so
-/// `aether.anthropic.messages.send` replies `Unauthorized` while
-/// `aether.anthropic.cli.send` still routes through `aether.process`.
+/// boots [`AnthropicComponentConfig::default()`]. The Messages API key is not
+/// config: the operator binds it on `aether.http` as
+/// `api.anthropic.com/x-api-key=<secret-name>` (ADR-0235), and with no binding
+/// the vendor's 401 reaches `aether.anthropic.messages.send` as `Unauthorized`.
 #[aether_data::kind(name = "aether.anthropic.config")]
 pub struct AnthropicComponentConfig {
-    /// Anthropic Messages API key placed on the `x-api-key` header of each
-    /// `aether.http.fetch`. `None` (or `disabled`) leaves the Messages
-    /// backend replying `Unauthorized`; the CLI backend never uses it.
-    pub api_key: Option<String>,
-    /// Disable the Messages backend even when a key is present — Messages
-    /// requests reply `Unauthorized`, the CLI path still routes.
+    /// Disable the Messages backend — Messages requests reply `Unauthorized`
+    /// without a fetch; the CLI path still routes.
     pub disabled: bool,
     /// Per-request timeout in milliseconds for both backends. `0` selects the
     /// component's built-in default (`DEFAULT_TIMEOUT_MILLIS`) for the Messages
@@ -54,12 +54,7 @@ pub struct AnthropicComponentConfig {
 
 impl Default for AnthropicComponentConfig {
     fn default() -> Self {
-        Self {
-            api_key: None,
-            disabled: false,
-            timeout_millis: DEFAULT_TIMEOUT_MILLIS,
-            cli_binary: String::from(DEFAULT_CLI_BINARY),
-        }
+        Self { disabled: false, timeout_millis: DEFAULT_TIMEOUT_MILLIS, cli_binary: String::from(DEFAULT_CLI_BINARY) }
     }
 }
 

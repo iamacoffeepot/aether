@@ -11,8 +11,9 @@ publish = false
 # pure request/response logic plus its init-config. The component reaches HTTPS
 # through `aether.http.fetch` (the Messages backend) and the `claude` subprocess
 # through `aether.process.run` (the CLI backend), addressing both edge caps by
-# mail — so it owns no socket and holds the API key in its init-config. It is a
-# pure leaf: no other cap depends on it.
+# mail — so it owns no socket and never holds the Messages API key: the operator
+# binds it on `aether.http` (`--http-secrets`, ADR-0235), which attaches it to
+# the fetch. It is a pure leaf: no other cap depends on it.
 #
 # The native cap half (the chassis-owned actor identity, the `ureq` Messages
 # backend, the `claude` subprocess adapter, the task-queue runtime, and the

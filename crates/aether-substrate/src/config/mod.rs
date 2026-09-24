@@ -38,7 +38,7 @@
 //! bundle's `cli.rs` `pub use`s them), the `FromArgvThenEnv` impl,
 //! and inherent `from_env()` / `from_argv_then_env(argv)` shims. Per-
 //! field hints (`default`, `parse`, `env`, `cli_long`, `ms_duration`,
-//! `csv_set`, `nonzero`, `layer_field`) cover the wire shapes; the
+//! `csv_set`, `nonzero`, `layer_field`, `secrets`) cover the wire shapes; the
 //! container `skip_from_layer` opt-out lets a cap hand-write
 //! `from_layer` when its defaults are runtime-computed (the
 //! `NamespaceRoots` case). `csv_set` auto-wires
@@ -80,6 +80,7 @@ mod known_keys;
 mod manifest;
 mod member;
 mod resolve;
+mod secrets;
 mod settlement;
 mod sources;
 #[cfg(test)]
@@ -95,6 +96,7 @@ pub use known_keys::{KnobKind, KnobRecord, KnownKeys, known_keys, validate_env};
 pub use manifest::ConfigManifest;
 pub use member::{ConfigMember, ConfigMemberRecord};
 pub use resolve::{FromArgvThenEnv, file_section, parse_csv_set};
+pub use secrets::{Secret, SecretError, SecretName, SecretRefs, Secrets, SecretsDir, parse_secret_refs};
 // The derive-emitted `SettlementConfigLayer` rides along for the chassis
 // config-dump registry (`chassis_known_keys`), which enumerates every knob's
 // `META`; the `SettlementOverlay` rides along so the chassis CLI roots can
