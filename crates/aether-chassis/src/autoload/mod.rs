@@ -7,7 +7,10 @@
 //! `spawn_substrate` path). `boot_standard` loads the list right after
 //! `.build()`, one component at a time in list order, and waits for each to
 //! answer its load before the RPC server binds (issue #6413), so an engine a
-//! caller can reach already has every boot component live. The loads target
+//! caller can reach already has every boot component live. Each wait is
+//! bounded by the chassis's boot-load budget (issue #6637): a load that never
+//! answers fails the boot naming its component rather than holding the engine
+//! short of serving forever. The loads target
 //! the generic `aether.component` mailbox — the same address the hub's
 //! `load_component` and the substrate harness load through — which is what
 //! makes the mechanism chassis-agnostic.
@@ -15,8 +18,10 @@
 mod loader;
 
 use std::io;
+use std::mem;
 use std::path::Path;
-use std::sync::mpsc;
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError};
+use std::time::Duration;
 
 use aether_kinds::{LoadComponent, replica_load_name};
 use aether_substrate::Subname;
@@ -28,7 +33,7 @@ use aether_substrate::config::ConfigError;
 
 use crate::boot_manifest::{self, PackedComponent};
 
-use loader::{Autoloader, AutoloaderParams};
+use loader::{Autoloader, AutoloaderParams, LoadAnswer};
 
 /// A component to auto-load on boot — its wasm bytes, optional init-config
 /// bytes (ADR-0090; empty for none), and the optional load name / export
@@ -47,6 +52,12 @@ impl AutoloadComponent {
     /// same request the hub's `load_component` and the substrate harness send.
     fn load_request(self) -> LoadComponent {
         LoadComponent { wasm: self.wasm, name: self.name, config: self.config, export: self.export }
+    }
+
+    /// How a boot failure names this component: its `name`, else its
+    /// `export`, else `#<index>` for its position in the boot list.
+    fn label(&self, index: usize) -> String {
+        self.name.clone().or_else(|| self.export.clone()).unwrap_or_else(|| format!("#{index}"))
     }
 }
 
@@ -155,43 +166,98 @@ pub fn expand_replicas(packed: PackedComponent) -> Result<Vec<AutoloadComponent>
 }
 
 /// Load every boot component in list order and wait until each has answered
-/// its load `Ok` (issue #6413).
+/// its load `Ok` (issue #6413), each within `budget` (issue #6637).
 ///
-/// With an empty list this returns at once. Otherwise it spawns the loader at
-/// the chassis root, handing it the list and the sending half of a channel,
-/// and blocks the calling (chassis) thread on the receiving half. The loader
-/// sends one load at a time, so the components come up in manifest order and
-/// a failure names its entry with no correlation map.
+/// With an empty list this returns at once. Otherwise it labels the
+/// components, spawns the loader at the chassis root, handing it the list and
+/// the sending half of a channel, and blocks the calling (chassis) thread on
+/// the receiving half, one answer per load. The loader sends one load at a
+/// time, so the components come up in manifest order and the answer awaited
+/// next always belongs to the next label: a failure or a timeout names its
+/// entry with no correlation map. A `budget` of `None` waits forever.
+///
+/// The chassis is handed back once every load has answered. On a timeout it
+/// is leaked rather than dropped, because its teardown would wait on the load
+/// still in flight.
 ///
 /// # Errors
 ///
 /// Returns [`BootError::Other`] when the loader cannot be spawned, when a boot
 /// component fails to load (naming the entry and the component host's error),
-/// or when the loader stops before every component has answered.
+/// when a boot component's load does not answer within `budget` (naming the
+/// entry and how many loaded before it), or when the loader stops before every
+/// component has answered.
 pub(crate) fn load_boot_components<C: Chassis>(
-    built: &BuiltChassis<C>,
+    built: BuiltChassis<C>,
     components: Vec<AutoloadComponent>,
-) -> Result<(), BootError> {
+    budget: Option<Duration>,
+) -> Result<BuiltChassis<C>, BootError> {
     if components.is_empty() {
-        return Ok(());
+        return Ok(built);
     }
 
-    let (report, outcome) = mpsc::channel();
+    let labels: Vec<String> = components.iter().enumerate().map(|(index, component)| component.label(index)).collect();
+    let (report, answers) = mpsc::channel();
     built
         .spawn_actor::<Autoloader>(Subname::Named("boot"), (), AutoloaderParams { components, report })
         .finish()
         .map_err(|error| boot_failed(format!("spawning the boot loader: {error:?}")))?;
 
-    match outcome.recv() {
-        Ok(Ok(loaded)) => {
-            tracing::info!(loaded, "every boot component answered its load");
-            Ok(())
+    match await_boot_loads(&labels, &answers, budget) {
+        Ok(()) => {
+            tracing::info!(loaded = labels.len(), "every boot component answered its load");
+            Ok(built)
         }
-        Ok(Err(message)) => Err(boot_failed(message)),
-        Err(mpsc::RecvError) => {
-            Err(boot_failed("the boot loader stopped before every boot component answered".to_owned()))
+        Err(BootWaitError::Failed(message)) => Err(boot_failed(message)),
+        Err(BootWaitError::TimedOut(message)) => {
+            // The load that never answered may still hold a worker (a guest
+            // `init` that never returns), and the orderly teardown joins every
+            // starting actor, so dropping the chassis would hang in place of
+            // the error. Leak it instead: the boot is failing and the process
+            // exits on this error.
+            mem::forget(built);
+            Err(boot_failed(message))
         }
     }
+}
+
+/// How the boot wait stopped short of every load answering `Ok`.
+enum BootWaitError {
+    /// A load answered `Err`, or the loader stopped: nothing is left in
+    /// flight, so the chassis tears down normally.
+    Failed(String),
+    /// A load did not answer within the budget and may still be running.
+    TimedOut(String),
+}
+
+/// Wait for one answer per label, in order, each within `budget` (`None`
+/// waits forever), and name the label the boot stopped on: its load's error,
+/// its timeout with how many loaded before it, or the loader stopping while
+/// it was awaited.
+fn await_boot_loads(
+    labels: &[String],
+    answers: &Receiver<LoadAnswer>,
+    budget: Option<Duration>,
+) -> Result<(), BootWaitError> {
+    for (loaded, label) in labels.iter().enumerate() {
+        let answer = match budget {
+            Some(budget) => answers.recv_timeout(budget).map_err(|error| match error {
+                RecvTimeoutError::Timeout => BootWaitError::TimedOut(format!(
+                    "boot component {label} did not answer its load within {budget:?} ({loaded} of {} loaded)",
+                    labels.len(),
+                )),
+                RecvTimeoutError::Disconnected => BootWaitError::Failed(loader_stopped(label)),
+            })?,
+            None => answers.recv().map_err(|_| BootWaitError::Failed(loader_stopped(label)))?,
+        };
+        answer.map_err(|error| BootWaitError::Failed(format!("boot component {label}: {error}")))?;
+    }
+    Ok(())
+}
+
+/// The message for a loader that stopped while `label`'s answer was awaited.
+fn loader_stopped(label: &str) -> String {
+    format!("the boot loader stopped while boot component {label} was loading")
 }
 
 /// Box a boot-load failure message into [`BootError::Other`].
@@ -243,6 +309,22 @@ mod tests {
         assert_eq!(entries[0].name.as_deref(), Some("handler"));
         assert_eq!(entries[0].wasm, vec![0, 1, 2, 3]);
         assert_eq!(entries[0].config, vec![9, 9, 9]);
+    }
+
+    #[test]
+    fn boot_wait_names_the_load_that_never_answers() {
+        // The first load answers and the second never does: the wait must
+        // expire and name the stuck entry with its progress, where an
+        // unbounded wait would hold the boot forever.
+        let labels = vec!["first".to_owned(), "stuck".to_owned()];
+        let (report, answers) = mpsc::channel();
+        report.send(Ok(())).expect("receiver is alive");
+        let Err(BootWaitError::TimedOut(error)) = await_boot_loads(&labels, &answers, Some(Duration::from_millis(50)))
+        else {
+            panic!("a load that never answers must time the wait out");
+        };
+        assert!(error.contains("stuck"), "the error names the stuck load: {error}");
+        assert!(error.contains("1 of 2"), "the error counts the loads before it: {error}");
     }
 
     #[test]
