@@ -21,13 +21,13 @@ filter = "(package(=aether-component) | package(=aether-fleet) | package(=aether
 retries = 1
 
 # A heavy binary iamacoffeepot/aether#3768 sized against the chassis
-# bundle's 180s cap: `widget_render_interaction` (aether-kit-widget) cold-loads
+# bundle's 180s cap: `widget_render_interaction` (aether-widget) cold-loads
 # the widget wasm plus a font and runs multi-capture verdicts. The default 60s
 # class cap would be a silent tightening under CI's software-rasterizer
 # contention; widen it to the same 300s backstop as `fleetharness_replace`
 # below.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit-widget) & binary(widget_render_interaction)"
+filter = "package(=aether-widget) & binary(widget_render_interaction)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
 # Every binary under `crates/aether-kit/tests/` cold-loads and compiles

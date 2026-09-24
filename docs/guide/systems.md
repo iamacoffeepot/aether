@@ -63,7 +63,7 @@ For the media and product-tools overview, start with
 | [Window](systems/window.md) | window lifecycle, mode/title, menu and cursor chrome, unsupported replies |
 | [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
 
-Native capabilities own devices; kit actors compose them into product behavior.
+Native capabilities own devices; guest actors (`aether-kit`'s camera and mesh viewer, the widget set) compose them into product behavior.
 
 ## Fleet and operation
 

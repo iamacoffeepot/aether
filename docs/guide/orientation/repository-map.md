@@ -12,12 +12,12 @@ process profiles, binaries, packaging     aether-chassis, aether-chassis-*
 operator bridge                                       aether-mcp
 test harnesses                                        aether-harness-*
 procedural macros                                     *-derive crates
-reusable guest actors shipped with the engine        aether-kit, aether-kit-widget
+reusable guest actors shipped with the engine        aether-kit, aether-widget
 journal-driven programs and reactors (bloomery)      aether-bloomery-*
 ```
 
 The list is also the order to read it in. Everything above `aether-kit` and
-`aether-kit-widget` is the engine; the remaining rows hold consumers that happen
+`aether-widget` is the engine; the remaining rows hold consumers that happen
 to live in the same workspace.
 
 ## Foundation crates
@@ -80,12 +80,12 @@ server.
 | Crate | Owns |
 |---|---|
 | `aether-kit` | common standalone reference actors: camera + camera-controller, mesh viewer |
-| `aether-kit-widget` | reusable widget set and the `EditorShell` composition arbiter |
+| `aether-widget` | reusable widget set and the `EditorShell` composition arbiter |
 | `aether-mesh` | mesh DSL, parsing/serialization, cleanup, polygon tessellation, surface nets, shared eye-facing stroke ribbon geometry |
 | `aether-demo` | the release demo: its bring-up component (`aether.demo`, which sends the kit mesh viewer its load at boot), depot spec, boot manifest, and controller config |
 
 These crates are valuable examples, but “in tree” does not mean “native.” The
-`aether-kit` and `aether-kit-widget` crates are actor code hosted by the same
+`aether-kit` and `aether-widget` crates are actor code hosted by the same
 component machinery available to other guest modules.
 
 ## Bloomery crates
@@ -149,7 +149,7 @@ uses the nightly fuzzing toolchain.
 | Add an MCP operation | `aether-mcp/src/tools` and `args.rs` | underlying capability kinds and hub RPC behavior |
 | Change one-shot subprocess execution | `aether-process` | chassis installation, allowlist/confinement config, settlement behavior |
 | Change in-process or real-process test support | `aether-harness-substrate`, `aether-harness-substrate-capture`, `aether-harness-fleet`, or `aether-harness-bloomery` | the consuming scenario's chassis and artifact requirements |
-| Add a reusable guest actor | `aether-kit`, `aether-kit-widget`, or a new component crate | `aether-actor`, export/cardinality rules |
+| Add a reusable guest actor | `aether-kit`, `aether-widget`, or a new component crate | `aether-actor`, export/cardinality rules |
 | Change a process profile | `aether-chassis-<chassis>` | config layers, linked capabilities, packaging |
 | Change a wire shape | owning kind plus `aether-data`/`aether-codec` | compatibility fixtures and any RPC framing |
 

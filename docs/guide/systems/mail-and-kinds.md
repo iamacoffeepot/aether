@@ -245,7 +245,7 @@ aether.<family>.config                     capability boot config
   `set_master_gain`. A bare verb leaf is fine where the family already supplies
   the noun — `aether.fs.read`, `aether.fs.write` — but the verb still leads.
 - **Events read `<noun>_<past participle>`**: `aether.tcp.session_closed`,
-  `aether.kit.widget.state_changed`. Carrying the noun is what keeps an event
+  `aether.widget.state_changed`. Carrying the noun is what keeps an event
   clear of the command that causes it. `aether.window.close` against
   `aether.window.closed` is the shape to avoid: one letter apart, and a typo in
   either direction routes silently to the wrong kind.

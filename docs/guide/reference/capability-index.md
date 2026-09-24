@@ -70,8 +70,8 @@ ownership before adding to the shared crate.
 | Family | Actor layer | Guide |
 |---|---|---|
 | `aether.kit.camera*` | camera/controller actors | [Rendering and camera](../systems/rendering.md) |
-| `aether.kit.widget*` | widgets, focus, scrolling, panel/editor composition | [Widgets](../systems/widgets.md) |
 | `aether.kit.mesh*` | DSL/OBJ loading and display | [Mesh authoring](../systems/mesh-authoring.md) |
+| `aether.widget*` | widgets, focus, scrolling, panel/editor composition | [Widgets](../systems/widgets.md) |
 | `aether.behavior*` | behavior host config and live script swap | [Behaviors](../systems/behaviors.md) |
 
 These are hosted actor APIs. Their presence depends on which component export

@@ -37,13 +37,13 @@ use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::keycode::{KEY_DOWN, KEY_TAB};
 use aether_kinds::mouse_button::LEFT;
 use aether_kinds::{Key, LoadComponent, LogTailResult, MouseButton, MouseButtonRelease, MouseMove, Tick, WindowId};
-use aether_kit_widget::set::RadioGroupWidget;
-use aether_kit_widget::{
+use aether_render::HeadlessRenderCapability;
+use aether_text::TextCapability;
+use aether_widget::set::RadioGroupWidget;
+use aether_widget::{
     BehaviorHostSpec, PanelConfig, RadioConfig, ScriptRef, SetWidgetState, SliderConfig, Theme, Widget,
     WidgetChildSpec, WidgetControlState, WidgetKind, WidgetPanel,
 };
-use aether_render::HeadlessRenderCapability;
-use aether_text::TextCapability;
 
 /// Local twin of `aether_behavior::host::SetScript` (`aether.behavior.set_script`),
 /// so the swap steps (S4/S5) drive the host without a dev-dependency on the
@@ -95,7 +95,7 @@ fn behavior_host(harness: &SubstrateHarness, panel: ActorRef<WidgetPanel>) -> Ac
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a slider
 /// over `0..=255`, its initial script inline. The host spawns the wrapped
 /// slider in `wire`, so the first tick brings the whole slot up.
-fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script: Vec<u8>) -> ActorRef<WidgetPanel> {
+fn load_panel_with_host(harness: &mut SubstrateHarness, widget_wasm: &[u8], script: Vec<u8>) -> ActorRef<WidgetPanel> {
     let wrapped_config = SliderConfig {
         min: 0.0,
         max: 255.0,
@@ -107,7 +107,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
     .encode_into_bytes();
     load_panel_with_host_spec(
         harness,
-        kit_wasm,
+        widget_wasm,
         &BehaviorHostSpec {
             wrapped: WidgetKind::Slider,
             wrapped_config,
@@ -122,7 +122,7 @@ fn load_panel_with_host(harness: &mut SubstrateHarness, kit_wasm: &[u8], script:
 /// Load the reference panel with a single `BehaviorHost` slot wrapping a
 /// three-option radio, no script, and zero fuel/trap knobs (the host's real
 /// defaults). The host spawns the wrapped radio in `wire`.
-fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) -> ActorRef<WidgetPanel> {
+fn load_panel_with_radio_host(harness: &mut SubstrateHarness, widget_wasm: &[u8]) -> ActorRef<WidgetPanel> {
     let wrapped_config = RadioConfig {
         options: vec!["First".to_owned(), "Second".to_owned(), "Third".to_owned()],
         initial: 0,
@@ -132,7 +132,7 @@ fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) -
     .encode_into_bytes();
     load_panel_with_host_spec(
         harness,
-        kit_wasm,
+        widget_wasm,
         &BehaviorHostSpec {
             wrapped: WidgetKind::Radio,
             wrapped_config,
@@ -146,7 +146,7 @@ fn load_panel_with_radio_host(harness: &mut SubstrateHarness, kit_wasm: &[u8]) -
 
 fn load_panel_with_host_spec(
     harness: &mut SubstrateHarness,
-    kit_wasm: &[u8],
+    widget_wasm: &[u8],
     host_spec: &BehaviorHostSpec,
 ) -> ActorRef<WidgetPanel> {
     let config = PanelConfig {
@@ -168,10 +168,10 @@ fn load_panel_with_host_spec(
     };
     let (panel, path) = harness
         .load::<WidgetPanel>(LoadComponent {
-            wasm: kit_wasm.to_vec(),
+            wasm: widget_wasm.to_vec(),
             name: Some("panel".to_owned()),
             config: config.encode_into_bytes(),
-            export: Some("aether.kit.widget.panel".to_owned()),
+            export: Some("aether.widget.panel".to_owned()),
         })
         .unwrap_or_else(|error| panic!("load WidgetPanel root: {error}"));
     assert!(path.to_string().ends_with(":panel"), "the panel root should register under :panel; got {path}");
@@ -264,8 +264,8 @@ fn swap_script(harness: &mut SubstrateHarness, panel: ActorRef<WidgetPanel>, lab
 fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     // The host-carrying widget variant (`--features behavior`, wasmi linked in),
     // built to its own stem by `cargo xtask dist` so the stock
-    // `aether_kit_widget.wasm` the other scenarios load stays lean (issue 2688).
-    let Some(kit_path) = require_wasm("aether_kit_widget_behavior") else {
+    // `aether_widget.wasm` the other scenarios load stays lean (issue 2688).
+    let Some(widget_path) = require_wasm("aether_widget_behavior") else {
         return;
     };
     let Some(intercept_path) = require_wasm("intercept_slider") else {
@@ -277,7 +277,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
     let Some(trap_path) = require_wasm("trap_script") else {
         return;
     };
-    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
+    let widget_wasm = fs::read(&widget_path).expect("read widget wasm");
     let intercept = fs::read(&intercept_path).expect("read intercept_slider wasm");
     let v2 = fs::read(&v2_path).expect("read intercept_slider_v2 wasm");
     let trap = fs::read(&trap_path).expect("read trap_script wasm");
@@ -290,7 +290,7 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
         .with_component_host()
         .build()
         .expect("boot");
-    let panel = load_panel_with_host(&mut harness, &kit_wasm, intercept);
+    let panel = load_panel_with_host(&mut harness, &widget_wasm, intercept);
 
     // First tick spawns the host, which spawns + frames the wrapped slider.
     // Then S1/S2/S3: one drag through the `intercept_slider` script.
@@ -372,10 +372,10 @@ fn behavior_host_intercepts_consumes_carries_state_and_fails_open() {
 /// (no spawned actor) cannot satisfy the exact index.
 #[test]
 fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
-    let Some(kit_path) = require_wasm("aether_kit_widget_behavior") else {
+    let Some(widget_path) = require_wasm("aether_widget_behavior") else {
         return;
     };
-    let kit_wasm = fs::read(&kit_path).expect("read kit wasm");
+    let widget_wasm = fs::read(&widget_path).expect("read widget wasm");
 
     let mut harness = SubstrateHarness::builder()
         .namespace_roots(test_namespace_roots(init_save_sandbox("behavior-host")))
@@ -385,7 +385,7 @@ fn behavior_host_converts_radio_wrap_and_passthroughs_nested_state() {
         .with_component_host()
         .build()
         .expect("boot");
-    let panel = load_panel_with_radio_host(&mut harness, &kit_wasm);
+    let panel = load_panel_with_radio_host(&mut harness, &widget_wasm);
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
 
     harness

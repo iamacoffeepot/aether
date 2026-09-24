@@ -185,7 +185,7 @@ fn build_bundle(
     // Build host-carrying variants FIRST (issue 2688): the feature build
     // clobbers `<stem>.wasm`, so we copy it to `<stem>_behavior.wasm` and then
     // let the stock component loop below rebuild `<stem>.wasm` lean. Only the
-    // behavior-host scenario loads the `_behavior` stem; every other kit
+    // behavior-host scenario loads the `_behavior` stem; every other widget
     // consumer keeps the small stock wasm.
     for variant in variants {
         let plan = BuildPlan { package: variant.package.clone(), examples: false, features: variant.features.clone() };
@@ -304,14 +304,14 @@ mod tests {
             assert!(stems.contains(expected), "behavior discovery dropped {expected}; found {stems:?}");
         }
 
-        // The disjointness guard: `aether-kit-widget` declares an optional
+        // The disjointness guard: `aether-widget` declares an optional
         // `aether-behavior` dep (its `behavior` feature) AND an unconditional
         // `aether-actor` dep, and `cargo metadata` lists optional deps — so a
         // rule keyed on `aether-behavior` alone would sweep the widget crate in.
         // The `aether-actor`-absence guard keeps it a component, not a behavior.
         assert!(
-            !stems.contains("aether_kit_widget"),
-            "the actor-absence guard must exclude aether-kit-widget (a component) from behaviors; \
+            !stems.contains("aether_widget"),
+            "the actor-absence guard must exclude aether-widget (a component) from behaviors; \
              found {stems:?}",
         );
 

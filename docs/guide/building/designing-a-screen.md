@@ -1,6 +1,6 @@
 # Designing a screen
 
-The widget kit gives you controls. It does not give you a screen. A panel
+The widget set gives you controls. It does not give you a screen. A panel
 built by mapping every fact to a label and every verb to a button, stacked in
 one column at one row height, is a terminal with buttons: it passes the letter
 of "real widgets" and fails everything a person actually uses a screen for.
@@ -118,7 +118,7 @@ every time.
 | Parallel content sets, one viewed at a time | Tabs, one row, 1–2 word labels | "Tab labels should usually be 1-2 words"; "prominently highlight the selected tab" ([NN/g tabs](https://www.nngroup.com/articles/tabs-used-right/)) |
 | Secondary detail under an always-visible primary | Expander | "Some primary content should always be visible, but related secondary content may be hidden until needed" (WinUI expander) |
 | Content the reader needs most of | **Not** an accordion | "Accordions should be avoided when your audience needs most or all of the content on the page" ([NN/g accordions](https://www.nngroup.com/articles/accordions-complex-content/)) |
-| A value whose meaning the reader may not carry | **Tooltip** (`TooltipWidget`), sections divided by a rule, wrapped at a reading measure | Hover explains, in a neat measured box; the host owns the dwell and the words, the kit owns the box |
+| A value whose meaning the reader may not carry | **Tooltip** (`TooltipWidget`), sections divided by a rule, wrapped at a reading measure | Hover explains, in a neat measured box; the host owns the dwell and the words, the widget set owns the box |
 | An explanation of whatever the pointer is *resting on* in a list | The widget's own hover report — `VirtualListHover` from a list, `DropdownHover` from an open dropdown's list — anchored on the row rectangle it carries | Both draw their rows outside the root's hit table, so the widget says which row the pointer is on and where that row is; a host redoing the geometry is wrong the moment the list scrolls under a pointer that has not moved |
 | A refusal or a confirmation | **Toast region** (`ToastWidget`), one per screen, coloured by severity | Notices have one place, one severity colour each (never the accent), and leave on their own after a few seconds |
 | A split between two regions the reader sets | **Splitter** (`SplitterWidget`), two lit pixels over a generous strip | Keep an affordance the reader has learned; the pointer says what a drag will do — the widget reports the hover, the host sets the cursor |
@@ -256,7 +256,7 @@ and each is the general form of a specific complaint.
 - **Native where the platform has it.** Menus, cursors, the application's
   name in the platform's own chrome, the window title: use the platform's
   mechanism on a chassis that has one (a native menu bar on the desktop),
-  and draw the kit's version only where there is none. A person expects the
+  and draw the widget set's version only where there is none. A person expects the
   platform's shape and finds the in-window copy strange, however correct.
   (Nielsen: consistency and standards.)
 - **Every text control honours the platform's editing conventions.**
@@ -337,7 +337,7 @@ and each is the general form of a specific complaint.
   go; when they ask for its *look* to change, change the look.
 - **A box is sized from measured text, never from a character count.**
   A plate, a tooltip, a toast, a list cell: its width comes from the
-  face's real advances (the kit measures through its font metrics), not
+  face's real advances (the widget set measures through its font metrics), not
   from characters times an average. Over a proportional face the average
   is wrong by a glyph every few words, and the text walks out of the box
   the estimate drew. If the measure is not available yet, draw nothing
@@ -350,10 +350,10 @@ and each is the general form of a specific complaint.
   outlined; the ones a reader rarely wants are text. A verb that throws work
   away — delete, discard, reset — is outlined in the **error** colour, not
   filled, so the loudest thing on the screen is never the destructive one. A
-  dialog's action row is one filled confirm and a text cancel. In the kit this
+  dialog's action row is one filled confirm and a text cancel. In the widget set this
   is `ButtonConfig { emphasis, tone }`; the rank changes the look and nothing
   about the size or the target. **A rank is only a rank if its face reads**:
-  the kit measures each one against the surface it stands on (WCAG 1.4.11's
+  the widget set measures each one against the surface it stands on (WCAG 1.4.11's
   3.0), because a quiet verb whose plate is a fifth of a step off the plate
   behind it is not quiet, it is invisible — which is a `Cancel` a reader
   cannot find on a dialog. (Owner, round 8: "a single yellow button for
@@ -367,7 +367,7 @@ and each is the general form of a specific complaint.
   control's face and for large text. A list row is the case that catches
   people out — it draws four fills (plain, pointed at, chosen, chosen and
   pointed at), so an ink chosen on the plain one can be two thirds of the way
-  to invisible on the brightest. `Theme::contrast_ratio` is in the kit so this
+  to invisible on the brightest. `Theme::contrast_ratio` is in the widget crate so this
   is a number in a test rather than an opinion in a review. (Owner, round 11:
   "Cancel button is blending in with the background of the new item modal.")
 - **A vocabulary told apart by colour needs colours, not a colour.** When a
@@ -376,7 +376,7 @@ and each is the general form of a specific complaint.
   the ink has to be *what the word names*, mapped in one function so the same
   tag is the same colour everywhere. Tags are inks on words, never plates: a
   row of four plates fights the selection for the row it sits in. The colours
-  are measured like every other (`TextInk`, the kit's hue set). (Owner, round
+  are measured like every other (`TextInk`, the widget set's hue set). (Owner, round
   12: "Spell tags are all the same colour regardless of tag.")
 - **Controls bound to one row are one block, and the block ends where the row
   does.** Two verbs on a row sit edge to edge with nothing between them and the
@@ -391,10 +391,10 @@ and each is the general form of a specific complaint.
   when the data implies one ("Wander of Kinetic Blast Ranger" from weapon,
   skill, and class), offer it rather than an empty field.
 
-## What the kit provides for this method
+## What the widget set provides for this method
 
-The method leans on kit surfaces rather than consumer-local reimplementations.
-Almost all of them are in `aether-kit-widget` today:
+The method leans on widget-set surfaces rather than consumer-local reimplementations.
+Almost all of them are in `aether-widget` today:
 
 - **Theme**: `Theme::text_size_pixels(TextRole)` is the type scale with named
   roles, `Theme::space(steps)` is the spacing scale, `selection` and
@@ -410,7 +410,7 @@ Almost all of them are in `aether-kit-widget` today:
   `set::virtual_list` with its empty state and a genuine no-selection state.
   The transient surfaces a screen composes over its own content —
   `set::tooltip`, `set::toast`, `set::splitter`, `set::dialog`, and
-  `set::popover` — are in the kit too, so a second screen does not hand-roll
+  `set::popover` — are in the widget crate too, so a second screen does not hand-roll
   them.
 - **Text**: `aether-text` reports real font metrics (`FontMetrics`,
   `GlyphAdvance`), so a consumer asks for a measurement instead of counting
