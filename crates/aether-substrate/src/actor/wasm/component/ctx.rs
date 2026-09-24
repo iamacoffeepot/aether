@@ -29,12 +29,12 @@ pub struct CorrelationCursor {
     reply_lineage: u64,
 }
 
-/// A mailbox's pending reply handles and the next handle its guest issues.
-/// Taken from a guest leaving its slot with
+/// A mailbox's held reply handles and the free-slot queue its guest's next
+/// handles come from. Taken from a guest leaving its slot with
 /// [`super::Component::take_pending_replies`] and installed on the slot's next
 /// occupant with [`super::Component::resume_replies`], so a handle stays
 /// answerable to its own requester across replace, refill and a failed start,
-/// and a replacement never reissues a number still pending (#6409). Opaque: it
+/// and a replacement never reissues a handle still held (#6409). Opaque: it
 /// has no public constructor, accessor or codec, so it can only come from a
 /// live component. Neither `Clone` nor `Copy`: two tables holding the same
 /// handle would answer one request twice.
@@ -61,14 +61,16 @@ pub struct ComponentCtx {
     /// `HubOutbound::disconnected` when no hub is attached — sends
     /// silently drop, matching the broadcast semantics.
     pub outbound: Arc<HubOutbound>,
-    /// ADR-0013 + ADR-0017: handle→entry map populated by
+    /// ADR-0013 + ADR-0017: handle→entry slab populated by
     /// `Component::deliver` whenever an inbound mail has a meaningful
     /// reply target — a Claude session (`ReplyEntry::Session`) or
     /// another component (`ReplyEntry::Component`). The guest
     /// receives an opaque `u32` handle as the 4th param on its
     /// `receive` shim and passes it back to `reply_mail`; the
     /// substrate routes either over `HubOutbound` or back through
-    /// `Mailer` based on the variant. One table per mailbox slot, not
+    /// `Mailer` based on the variant. An entry is freed when the guest
+    /// answers it, or when `deliver` sees a single-class or unhandled
+    /// dispatch return (#6412). One table per mailbox slot, not
     /// per instance: the component trampoline carries it to the slot's
     /// next occupant as [`PendingReplies`] (#6409).
     pub reply_table: ReplyTable,

@@ -127,7 +127,10 @@ tries each type in turn. Keep contexts small: stash routing
 bookkeeping such as the caller's reply handle, origin, or parse mode; keep bulky
 domain state in actor fields and put only an id in the context. A reply handle
 kept in a context stays answerable across `replace_component`: the mailbox's
-pending replies move to the replacement with it.
+pending replies move to the replacement with it. Only a `#[handler::manual]`
+handler can read and keep its reply handle; a single handler's handle is freed
+when it returns. A component whose held handles keep growing logs a warning
+naming it.
 
 The lower-level `send_tracked(&request)` / `ctx.in_reply_to()` pair is still
 available when the request id itself is the domain key. `in_reply_to()` returns
