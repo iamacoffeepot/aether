@@ -21,6 +21,7 @@
 
 use std::sync::Arc;
 
+use crate::actor::native::ActorProbe;
 use crate::chassis::settlement::SettlementRegistry;
 use crate::mail::capability::CapabilityRegistry;
 use crate::mail::cost::CostTable;
@@ -415,6 +416,11 @@ impl Mailer {
     /// how [`Self::registry`] surfaces the routing table.
     pub fn capability_registry(&self) -> &Arc<CapabilityRegistry> {
         &self.capability_registry
+    }
+
+    /// The crate-private builder behind [`NativeInitCtx::actor_probe`](crate::actor::native::NativeInitCtx::actor_probe).
+    pub(crate) fn actor_probe(&self) -> ActorProbe {
+        ActorProbe::new(Arc::clone(&self.registry), Arc::clone(&self.capability_registry))
     }
 
     /// Borrow the wired [`CostTable`] (iamacoffeepot/aether#1128). The

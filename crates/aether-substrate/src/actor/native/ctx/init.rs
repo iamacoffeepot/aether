@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use aether_data::{ActorMail, MailboxId};
 
+use crate::actor::native::ActorProbe;
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::mail::mailer::Mailer;
@@ -82,6 +83,15 @@ impl<'a> NativeInitCtx<'a> {
     #[must_use]
     pub fn self_wake<K: ActorMail>(&self) -> SelfWake<K> {
         SelfWake::new(self.binding)
+    }
+
+    /// An [`ActorProbe`] for a thread this cap spawns during `init` that must
+    /// decide about a peer it holds a proof of without a round trip through
+    /// this actor. Like [`Self::self_wake`], it names no position and grants
+    /// no send.
+    #[must_use]
+    pub fn actor_probe(&self) -> ActorProbe {
+        self.mailer.actor_probe()
     }
 
     /// Issue 629 / Phase A: publish a sub-handle bundle for cross-
