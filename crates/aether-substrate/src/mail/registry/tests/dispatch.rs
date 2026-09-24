@@ -104,7 +104,7 @@ fn discharged_dispatch_does_not_panic() {
 #[test]
 fn dispatch_carries_routed_recipient() {
     let recipient = MailboxId(0xABCD);
-    let env = OwnedDispatch::disarmed(
+    let env = OwnedDispatch::disarmed_at(
         KindId(7),
         None,
         Source::NONE,
@@ -150,7 +150,7 @@ fn transferred_dispatch_does_not_panic() {
 /// drop even without discharge.
 #[test]
 fn disarmed_dispatch_does_not_panic() {
-    let env = OwnedDispatch::disarmed(
+    let env = OwnedDispatch::disarmed_at(
         KindId(7),
         None,
         Source::NONE,
