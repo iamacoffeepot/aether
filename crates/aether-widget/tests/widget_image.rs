@@ -171,7 +171,7 @@ fn image_fit_state_and_replacement_hold_through_real_wasm() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = widget_caps(
         SubstrateHarness::builder()
             .size(48, 40)

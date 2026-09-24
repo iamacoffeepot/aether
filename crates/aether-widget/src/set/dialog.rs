@@ -37,7 +37,7 @@
 //!
 //! # Resizing
 //!
-//! By the handle the kit already has. The host frames a
+//! By the handle the widget set already has. The host frames a
 //! [`SplitterWidget`](super::SplitterWidget) with `bare: true` over the
 //! plate's right edge, another over its bottom edge, and a third over the
 //! bottom-right corner (`SplitterAxis::Corner`), and re-frames the dialog on
@@ -123,7 +123,7 @@ impl DialogWidget {
 
     /// How much vertical room the rule under the title takes: the hairline
     /// plus one spacing unit either side — the same band the tooltip's section
-    /// rules occupy, so a division reads the same wherever the kit draws one.
+    /// rules occupy, so a division reads the same wherever the widget set draws one.
     /// Zero without a title, which is what there would be a rule under.
     fn rule_band(&self) -> f32 {
         if self.title.is_empty() {

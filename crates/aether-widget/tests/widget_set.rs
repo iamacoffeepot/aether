@@ -2,7 +2,7 @@
 //!
 //! Load the reference `WidgetPanel` root, drive it with synthetic pointer and
 //! keyboard input, and assert the value-up events reach the panel end-to-end —
-//! the kit-owned routing (`Focus` hit-test / drag-capture / Tab cycle), the
+//! the widget-crate-owned routing (`Focus` hit-test / drag-capture / Tab cycle), the
 //! slider drag-value math, radio selection, and text editing all working
 //! through the real inline-cluster FIFO drain, not just the unit tests over
 //! the helper structs. The panel logs each value-up into its per-actor log
@@ -143,7 +143,7 @@ fn panel_routes_input_to_widgets_and_reports_values_up() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 220);
     let panel = load_panel(&mut harness, &wasm);
 
@@ -216,7 +216,7 @@ fn load_result_lineage_reaches_builtin_button_state_externally() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 220);
     let panel = load_panel(&mut harness, &wasm);
     let unavailable = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -468,7 +468,7 @@ fn panel_stacks_declared_children_in_order() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 220);
     let panel = load_panel_with(&mut harness, &wasm, vec![slider_spec("first", 40.0), slider_spec("second", 40.0)]);
 
@@ -510,7 +510,7 @@ fn virtual_list_pages_clicks_and_blocks_read_only_disabled_changes() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 150);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![virtual_list_spec("inventory", read_only)]);
@@ -633,7 +633,7 @@ fn panel_routes_availability_read_only_reverse_tab_and_button_keys() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 140);
 
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
@@ -679,7 +679,7 @@ fn read_only_radio_blocks_pointer_and_keyboard_until_enabled() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 100);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", read_only)]);
@@ -732,7 +732,7 @@ fn radio_up_down_clamps_at_the_ends_without_endpoint_events() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 100);
     let panel = load_panel_with(&mut harness, &wasm, vec![radio_spec("choice", WidgetControlState::default())]);
 
@@ -846,7 +846,7 @@ fn live_state_changes_cancel_button_arm_and_slider_drag() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 90);
     let panel = load_panel_with(
         &mut harness,
@@ -890,7 +890,7 @@ fn read_only_text_field_blocks_activation_until_enabled() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 80);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(&mut harness, &wasm, vec![text_field_spec("locked", "locked", read_only)]);
@@ -944,7 +944,7 @@ fn tab_cycle_does_not_leave_stale_shift_on_refocused_field() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 80);
     let panel = load_panel_with(
         &mut harness,
@@ -997,7 +997,7 @@ fn pointer_focus_inherits_already_held_ctrl() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 80);
     let panel =
         load_panel_with(&mut harness, &wasm, vec![text_field_spec("field", "prior", WidgetControlState::default())]);
@@ -1041,7 +1041,7 @@ fn availability_focus_move_inherits_already_held_ctrl() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 80);
     let panel = load_panel_with(
         &mut harness,
@@ -1145,7 +1145,7 @@ fn empty_virtual_list_becomes_eligible_when_populated() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,
@@ -1254,7 +1254,7 @@ fn emptying_a_live_virtual_list_drops_routing_and_does_not_rearm() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,
@@ -1356,7 +1356,7 @@ fn populating_disabled_or_hidden_virtual_list_stays_out_of_routing() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 320);
     let disabled = WidgetControlState { enabled: false, ..WidgetControlState::default() };
     let hidden = WidgetControlState { visible: false, ..WidgetControlState::default() };
@@ -1456,7 +1456,7 @@ fn read_only_populated_virtual_list_hovers_and_focuses_without_mutating() {
     let Some(wasm_path) = require_wasm("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 180);
     let read_only = WidgetControlState { read_only: true, ..WidgetControlState::default() };
     let panel = load_panel_with(
@@ -1530,7 +1530,7 @@ fn behavior_host_empty_virtual_list_becomes_eligible_when_populated() {
     let Some(wasm_path) = require_wasm("aether_widget_behavior") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(240, 180);
     let panel = load_panel_with(
         &mut harness,

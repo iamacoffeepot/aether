@@ -103,7 +103,7 @@ fn input<K: Kind>(synthetic: ActorRef<SyntheticWindowCapability>, mail: &K) -> H
 
 #[test]
 fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
-    let (Some(kit_wasm), Some(fixtures_wasm)) =
+    let (Some(widget_wasm), Some(fixtures_wasm)) =
         (require_wasm("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
@@ -113,7 +113,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
     b_lanes.wheel = false;
     load_shell(
         &mut harness,
-        &kit_wasm,
+        &widget_wasm,
         vec![region("region-a", 0.0, RegionInputLanes::ALL), region("region-b", 100.0, b_lanes)],
     );
 
@@ -181,7 +181,7 @@ fn first_press_owns_cross_region_drag_and_lanes_filter_at_the_hit_region() {
 
 #[test]
 fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
-    let (Some(kit_wasm), Some(fixtures_wasm)) =
+    let (Some(widget_wasm), Some(fixtures_wasm)) =
         (require_wasm("aether_widget"), require_wasm("aether_test_fixtures_bundle"))
     else {
         return;
@@ -191,7 +191,7 @@ fn focus_activation_and_reserved_cycle_route_each_keyboard_lane_once() {
     let mut b = region("focus-b", 100.0, RegionInputLanes::ALL);
     b.activation_chord =
         Some(EditorKeyChord { key_code: KEY_BACKQUOTE, shift: false, ctrl: false, alt: false, meta: false });
-    load_shell(&mut harness, &kit_wasm, vec![a, b]);
+    load_shell(&mut harness, &widget_wasm, vec![a, b]);
 
     let region_a = load_probe(&mut harness, &fixtures_wasm, "focus-a");
     let region_b = load_probe(&mut harness, &fixtures_wasm, "focus-b");

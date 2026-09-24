@@ -212,7 +212,7 @@ pub enum TextRole {
 /// run drew before the field existed.
 ///
 /// The tier rungs are a **generic four-step ladder**, numbered rather than
-/// named because the kit does not know what they rank: anything ordered — a
+/// named because the widget set does not know what they rank: anything ordered — a
 /// drop's rarity, a tier list, a plan's confidence — writes its names in them.
 /// What the four rungs *mean* belongs to the host, which maps its own
 /// vocabulary onto them in one function; what they look like, and that each

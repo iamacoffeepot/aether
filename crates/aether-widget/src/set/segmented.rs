@@ -133,7 +133,7 @@ impl SegmentedWidget {
     /// label wider than its bucket was **overpainted** by the next segment's
     /// plate, and a three-option row in a 240-pixel pane showed `Raise terr`
     /// with no mark saying it had been cut. Every other single-line control in
-    /// the kit cuts with [`elide_to_width`] for exactly this reason (the
+    /// the widget set cuts with [`elide_to_width`] for exactly this reason (the
     /// label, the button ladder, the tab strip, the list rows); this is the
     /// same rule in the last fixed-bucket place it was missing.
     ///
@@ -439,7 +439,7 @@ mod tests {
     // a label wider than its bucket is overpainted at the boundary rather than
     // merely overlapping, and the reader sees `Raise terr` with nothing saying
     // it was cut. Pins every run inside its own bucket's padded box, and pins
-    // that an over-long one carries the kit's ellipsis.
+    // that an over-long one carries the widget set's ellipsis.
     #[test]
     fn an_option_label_is_elided_into_its_own_bucket() {
         let control = measured(&["Raise terrain", "Lower terrain", "Smooth"], 240.0);

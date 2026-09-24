@@ -1177,7 +1177,7 @@ fn spawn_behavior_host<A>(ctx: &mut WasmCtx<'_, A, Manual>, spec: &WidgetChildSp
 }
 
 /// The `behavior`-feature-off stub: a `WidgetKind::BehaviorHost` slot needs the
-/// host actor, which is only linked under the kit's `behavior` feature.
+/// host actor, which is only linked under the widget crate's `behavior` feature.
 #[cfg(not(feature = "behavior"))]
 fn spawn_behavior_host<A>(
     _ctx: &mut WasmCtx<'_, A, Manual>,
@@ -1187,7 +1187,7 @@ fn spawn_behavior_host<A>(
     tracing::warn!(
         target: "aether_widget",
         subname = %spec.subname,
-        "WidgetKind::BehaviorHost needs the kit `behavior` feature; slot skipped",
+        "WidgetKind::BehaviorHost needs the widget crate's `behavior` feature; slot skipped",
     );
     None
 }

@@ -79,7 +79,7 @@ impl LabelWidget {
     }
 
     /// The run this label draws and the width it comes to: the whole text
-    /// while it fits its frame, and the text **elided** with the kit's
+    /// while it fits its frame, and the text **elided** with the widget set's
     /// ellipsis when it does not.
     ///
     /// The label was the one text widget that let the root's slot clip do

@@ -14,7 +14,7 @@
 //!
 //! # Why this is a module and not a widget
 //!
-//! A popover **hosts other children**, and in this kit hosting interactive
+//! A popover **hosts other children**, and in this widget set hosting interactive
 //! children is a *root's* job, not a widget's. Pointer and keyboard routing,
 //! hit rectangles, focus traversal, and drag capture all live in the root's
 //! [`Focus`](crate::focus::Focus) table over the root's own direct children

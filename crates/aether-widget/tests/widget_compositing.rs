@@ -193,7 +193,7 @@ fn leaf_config(width: f32, height: f32, color: Rgba) -> Vec<u8> {
     .encode_into_bytes()
 }
 
-/// Load the `Widget` root export from the kit wasm under the name `panel`,
+/// Load the `Widget` root export from the widget wasm under the name `panel`,
 /// carrying `config`, and block on `LoadResult` so the root is
 /// instantiated before the capture frame runs.
 fn load_panel(harness: &mut SubstrateHarness, wasm: &[u8], config: &WidgetConfig) {
@@ -281,7 +281,7 @@ fn flat_panel_is_one_sender_with_chrome_under_children() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(64, 48);
 
     // Root chrome fills the middle (8,8)-(56,40); two leaves sit inside it
@@ -356,7 +356,7 @@ fn nested_tree_draws_in_depth_first_order() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(64, 48);
 
     // Interior node b: green chrome (0,0,20,20), one white leaf b1 inset at
@@ -449,7 +449,7 @@ fn nested_local_clips_forward_exact_runs_and_contain_oversized_pixels() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
 
     let leaf_clip = WidgetClipRect { x: 6.0, y: 5.0, width: 10.0, height: 8.0 };
     let root_clip = WidgetClipRect { x: 12.0, y: 10.0, width: 20.0, height: 16.0 };
@@ -538,7 +538,7 @@ fn textured_items_preserve_nested_order_clips_uvs_and_pixels() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = bench(64, 48);
     let texture_id = create_four_color_texture(&mut harness);
 
@@ -699,7 +699,7 @@ fn scroll_composition_offsets_content_and_contains_pixels_on_every_viewport_edge
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let content = WidgetConfig {
         root: false,
         chrome: vec![quad(0.0, 0.0, 40.0, 32.0, RED), quad(12.0, 12.0, 8.0, 8.0, GREEN)],

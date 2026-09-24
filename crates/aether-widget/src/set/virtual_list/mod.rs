@@ -22,7 +22,7 @@
 //! two-item list into a pair of slabs and its selected row into a half-screen
 //! block.
 //!
-//! The list measures, like every other content-sized widget in the kit. It
+//! The list measures, like every other content-sized widget in the set. It
 //! drives the same single-flight font-metrics request the label and the
 //! tooltip do, and once the theme font's advances land it elides a row too
 //! long for its frame with an ellipsis rather than letting the slot clip cut
@@ -56,7 +56,7 @@
 //! still pointer. The scroll bar's gutter is not a row, so a thumb drag reports
 //! nothing rather than the row it happens to pass.
 //!
-//! A pointed-at row draws a face of its own: the kit's hover wash over the
+//! A pointed-at row draws a face of its own: the widget set's hover wash over the
 //! plain surface, the same one a dropdown's open list has always drawn under
 //! the pointer. It composes with the selection rather than replacing it — a
 //! chosen row under the pointer is the selection carrying that wash — so all
@@ -97,7 +97,7 @@
 //! Round-9 note 4 — "skills should be removed via 'x' button bound to row",
 //! drawn as `"Spark" ——— [Change gem][x]`. A row's `actions` are
 //! [`RowAction`](crate::RowAction)s, and the list draws each as a real button at the row's right
-//! end: the kit's own button face (`push_button_face` in `set`), so one
+//! end: the widget set's own button face (`push_button_face` in `set`), so one
 //! emphasis ladder, one elision rule, and one hover answer serve a verb whether
 //! it stands in a slot of its own or inside a row this widget owns.
 //!
@@ -122,7 +122,7 @@
 //! selection: the whole reason a verb is on the row is that removing the third
 //! skill should not cost a select first.
 //!
-//! Row verbs are **pointer-first**. The kit's keyboard traversal moves between
+//! Row verbs are **pointer-first**. The widget set's keyboard traversal moves between
 //! widgets (the root's Tab, `WidgetPanel::on_key`) and a list is one stop whose
 //! arrows and page keys are its selection; there is no focus traversal *into* a
 //! row, so nothing here binds a key to a verb. A host that needs the keyboard
@@ -593,7 +593,7 @@ impl WasmActor for VirtualListWidget {
     /// The wheel moves the realized window and nothing else — the reader is
     /// looking, not choosing. Positive `delta_y` is a roll away from the
     /// reader, which moves the content down and the window up: the same
-    /// negation the kit's scroll actor applies.
+    /// negation the widget set's scroll actor applies.
     #[handler::single]
     fn on_mouse_wheel(&mut self, ctx: &mut WasmCtx<'_>, wheel: MouseWheel) {
         if self.state.is_available() {

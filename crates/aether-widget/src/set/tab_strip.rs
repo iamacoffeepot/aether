@@ -461,7 +461,7 @@ impl TabStripWidget {
     /// is plated, so with every label in the same ink the only thing saying
     /// which content the reader is looking at is a hairline they have to go
     /// find. Letting the unselected labels recede is the same move the rest of
-    /// the kit makes with `text_muted` — a caption, a placeholder, a hint —
+    /// the widget set makes with `text_muted` — a caption, a placeholder, a hint —
     /// and it keeps the strip's meaning in ink rather than spending a fill on
     /// it.
     fn label_ink(&self, index: usize) -> Rgba {

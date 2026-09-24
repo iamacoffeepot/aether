@@ -211,7 +211,7 @@ fn named_load_exported_widget_defaults_adopters_succeeds() {
         let Some(wasm_path) = require_wasm(stem) else {
             continue;
         };
-        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let wasm = fs::read(&wasm_path).expect("read widget wasm");
         let mut harness = bench(64, 48);
         for case in exported_adopters() {
             let name = load_named(&mut harness, &wasm, &case);
@@ -234,7 +234,7 @@ fn numeric_focus_lost_commits_the_typed_buffer() {
         let Some(wasm_path) = require_wasm(stem) else {
             continue;
         };
-        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let wasm = fs::read(&wasm_path).expect("read widget wasm");
         let mut harness = bench(240, 80);
         let panel = load_panel_with(
             &mut harness,
@@ -301,7 +301,7 @@ fn virtual_list_hover_lost_clears_the_hovered_row() {
         let Some(wasm_path) = require_wasm(stem) else {
             continue;
         };
-        let wasm = fs::read(&wasm_path).expect("read kit wasm");
+        let wasm = fs::read(&wasm_path).expect("read widget wasm");
         let mut harness = bench(240, 120);
         let panel = load_panel_with(
             &mut harness,

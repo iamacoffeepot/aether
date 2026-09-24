@@ -1495,7 +1495,7 @@ tab's run in `theme.text_primary`, every other one's in `theme.text_muted` —
 so both shapes say which tab is live in ink first and differ only in the colour
 of the underline. With no plate to carry the pointer's answer, a hovered or
 pressed tab draws the role-agnostic `hover_overlay` / `pressed_overlay` as its
-whole background. A share too narrow for its label elides it with the kit's
+whole background. A share too narrow for its label elides it with the widget set's
 ellipsis and centres the run in the share, the same rule the fitted chips
 follow.
 
@@ -1857,7 +1857,7 @@ button its `WidgetDrawList::intrinsic` — `[label width + 2 × pad, row height]
 — so a layout can size a slot to the label it holds; like the image widget's
 natural size, the reference panel does not yet consume it. A frame *narrower*
 than that intrinsic elides the label into the frame before centering it, so the
-margins stay equal at any width and a label that did not fit ends in the kit's
+margins stay equal at any width and a label that did not fit ends in the widget set's
 elision mark rather than on a glyph the root's slot clip sliced in half.
 
 TextField and TextArea share the same UTF-8-safe edit, selection, and IME

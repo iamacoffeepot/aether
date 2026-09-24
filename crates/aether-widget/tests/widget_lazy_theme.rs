@@ -200,7 +200,7 @@ fn early_set_theme_restyles_the_first_collect_plate() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = color_bench();
     let panel = load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
     send_theme(&mut harness, panel, accent_theme(RESTYLE_RED));
@@ -229,7 +229,7 @@ fn early_theme_updates_latest_win_on_the_first_collect() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = color_bench();
     let panel = load_panel(&mut harness, &wasm, vec![filled_button("apply", Theme::DEFAULT)]);
     send_theme(&mut harness, panel, accent_theme(RESTYLE_RED));
@@ -260,7 +260,7 @@ fn first_collect_keeps_explicit_child_themes_when_nothing_was_fanned() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = color_bench();
     load_panel(
         &mut harness,
@@ -307,7 +307,7 @@ fn nested_scroll_forwards_early_theme_before_the_first_collect() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let viewport = ScrollExtent { width_pixels: PANEL_WIDTH, height_pixels: row_height() };
     let inner = scroll_child("inner", viewport, viewport, filled_button("apply", Theme::DEFAULT));
     let outer = scroll_child("outer", viewport, viewport, inner);
@@ -344,7 +344,7 @@ fn early_load_font_result_survives_lazy_spawn_and_renders_glyphs_after_priming()
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let sandbox = init_save_sandbox("widget-lazy-theme");
     let roots = NamespaceRoots { save: sandbox.to_path_buf(), assets: assets_dir(), config: sandbox.to_path_buf() };
     let mut harness = widget_caps(

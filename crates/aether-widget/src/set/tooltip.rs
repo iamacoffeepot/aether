@@ -75,7 +75,7 @@
 //! and they are opposites on purpose:
 //!
 //! - A line that **wrapped** is one thought that ran out of measure. Its
-//!   continuation rows start flush with its first row — the kit's default,
+//!   continuation rows start flush with its first row — the widget set's default,
 //!   [`TooltipConfig::hanging_indent_pixels`] at `0` — because a wrapped
 //!   sentence indented in the middle reads as a new item beginning.
 //! - A **new paragraph** is a new thought, and takes a blank row. A
@@ -233,7 +233,7 @@ impl TooltipWidget {
         )
     }
 
-    /// The measure the text wraps at: the configured maximum, or the kit's
+    /// The measure the text wraps at: the configured maximum, or the widget set's
     /// reading width at the caption size when the config asks for none.
     fn wrap_width(&self) -> f32 {
         if self.max_width_pixels.is_finite() && self.max_width_pixels > 0.0 {

@@ -24,7 +24,7 @@ impl VirtualListWidget {
     /// The fill one row draws, from the two facts that can be true of it.
     ///
     /// Four faces, and the ladder between them is the point. A row the pointer
-    /// is on takes the kit's role-agnostic hover wash over the plain surface —
+    /// is on takes the widget set's role-agnostic hover wash over the plain surface —
     /// the same face a dropdown's open list has always drawn under the pointer,
     /// so the two lists answer a pointer alike. A chosen row is the selection
     /// role, a *state* rather than a wash. Chosen **and** pointed at composes

@@ -90,7 +90,7 @@ fn panel_address() -> String {
     format!("aether.component/{}:panel", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
+/// The widget crate's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
 /// the directory the test runs in (cargo and nextest set that to this
 /// crate's root), falling back to the compile-time path for a caller
 /// running from elsewhere. Runtime-first because a lane-cached test binary
@@ -238,11 +238,11 @@ fn panel_glyphs_sit_inside_their_row_frames() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
 
-    // `assets://` points at the kit assets dir (where the TTF lives);
+    // `assets://` points at the widget crate's assets dir (where the TTF lives);
     // `save://` / `config://` sink into a per-process sandbox tempdir.
-    // Composition: GPU captures + kit wasm loads + `aether.text` glyph
+    // Composition: GPU captures + widget wasm loads + `aether.text` glyph
     // rasterization (its font fetch rides `aether.fs`, composed from the
     // namespace roots). All mail is addressed directly, so no input fan-out.
     let sandbox = init_save_sandbox("widget-text-alignment");

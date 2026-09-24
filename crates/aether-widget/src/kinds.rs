@@ -82,7 +82,7 @@ pub struct ChildrenChanged {
 /// [`WidgetChildSpec`] it is local to the parent that owns the child slot.
 /// Composition translates item clips with their geometry and intersects them
 /// with parent-local slot clips until the root holds one effective rectangle
-/// in screen-pixel coordinates. Only the root converts this kit-owned type to
+/// in screen-pixel coordinates. Only the root converts this widget-owned type to
 /// the framebuffer-only `aether_kinds::ClipRect`.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq)]
 pub struct WidgetClipRect {
@@ -291,7 +291,7 @@ pub enum WidgetDrawItem {
         clip: Option<WidgetClipRect>,
     },
     /// One flat triangle — three corners in the widget's local pixels,
-    /// each with its own linear RGBA — the kit's caret and arrowhead. A
+    /// each with its own linear RGBA — the widget set's caret and arrowhead. A
     /// mark on the control it sits in, never something standing over text,
     /// so it casts no hole.
     Triangle { a: ScreenVertex, b: ScreenVertex, c: ScreenVertex, clip: Option<WidgetClipRect> },
@@ -604,7 +604,7 @@ impl Default for ScrollConfig {
 /// one tag that lets a single spec type serve both the homogeneous
 /// compositing [`WidgetConfig`] tree (every child a `Composite`) and the
 /// heterogeneous reference panel (a leaf per widget type). The spawnable set
-/// is closed and kit-owned — every variant maps to a compile-time
+/// is closed and crate-owned — every variant maps to a compile-time
 /// `spawn_inline_child::<P, A>` call — so the dispatch match is exhaustive and
 /// an unknown widget is a compile error, not a runtime failure.
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -629,7 +629,7 @@ pub enum WidgetKind {
     /// 2687) — `config` decodes as [`BehaviorHostSpec`] (the wrapped widget's
     /// kind + config plus the script), and the panel spawns the host by tag
     /// (`aether-behavior`'s `BehaviorHost`) instead of a widget. Only spawnable
-    /// under the kit's `behavior` feature; without it the slot is skipped.
+    /// under the widget crate's `behavior` feature; without it the slot is skipped.
     BehaviorHost,
     /// A static image — `config` decodes as [`ImageConfig`]. Not focusable.
     /// Appended to preserve the established wire discriminants above.
@@ -675,7 +675,7 @@ impl WidgetKind {
     /// (`Composite`, `Scroll`, `BehaviorHost`), which are not stock leaves a
     /// behavior host can wrap. The trunk-reachable producer for
     /// `aether_behavior::host::ChildSpec::type_tag` when composing a
-    /// `HostConfig` directly, outside the kit's `WidgetKind::BehaviorHost`
+    /// `HostConfig` directly, outside the widget crate's `WidgetKind::BehaviorHost`
     /// spawn arm — the concrete widget actor types are `runtime`-gated and
     /// not re-exported, so this computes each widget type's
     /// `ActorId::singleton` from its namespace literal rather than naming
@@ -703,7 +703,7 @@ impl WidgetKind {
     }
 }
 
-/// Where a wrapped host's script comes from — the kit-local mirror of
+/// Where a wrapped host's script comes from — the widget crate's local mirror of
 /// `aether_behavior`'s `ScriptSource`, carried in a [`BehaviorHostSpec`] so the
 /// trunk (always compiled) names no `aether-behavior` type. The `behavior`
 /// arm maps it across.
@@ -1130,7 +1130,7 @@ impl From<&str> for InkedSpan {
 /// The list draws it as a real button at the row's right edge, with the same
 /// [`ButtonEmphasis`] / [`ButtonTone`] ladder, the same measured-label-plus-two-pads
 /// width, the same elision and the same hover / pressed answer a
-/// [`ButtonConfig`] draws with — it is the kit's button face, drawn inside a row
+/// [`ButtonConfig`] draws with — it is the widget set's button face, drawn inside a row
 /// the list owns rather than in a slot a layout gave it. A press on one reports
 /// [`VirtualListActivated`] and leaves the selection alone; a press anywhere else
 /// on the row selects as it always did.
@@ -1451,7 +1451,7 @@ impl VirtualListConfig {
     /// list's own, where the same pair comes out of the frame instead.
     ///
     /// This is the number a host reserves the column with — it lays out
-    /// before any draw list arrives, and the track's own width is the kit's,
+    /// before any draw list arrives, and the track's own width is the widget's,
     /// so a host counting it itself would be copying a constant that can
     /// move.
     #[must_use]
@@ -2213,7 +2213,7 @@ pub struct ToastConfig {
     /// unless a host asks for another.
     ///
     /// Round-4 note 15 is one word long: "toast text can be larger." The size
-    /// is a *theme* fact, not a toast fact — the kit has one type scale and a
+    /// is a *theme* fact, not a toast fact — the widget set has one type scale and a
     /// widget names its step on it rather than carrying a pixel size of its
     /// own — so the region takes a role and the theme resolves it. The whole
     /// plate follows: the line box, the wrap measure, and therefore how far
@@ -2269,7 +2269,7 @@ pub struct TooltipIcon {
 /// that stands before them, and the two presentation escapes a hover card
 /// needs.
 ///
-/// Every option is `None` by default, which is the kit's own rule — the
+/// Every option is `None` by default, which is the widget set's own rule — the
 /// plate's first line is the name and is set at [`TextRole::Body`] in the
 /// primary ink, every line after it at [`TextRole::Caption`] in the muted
 /// one. A host overrides `ink` for the lines it needs to *distinguish*: which
@@ -2279,7 +2279,7 @@ pub struct TooltipIcon {
 #[derive(aether_data::Schema, Serialize, Deserialize, Debug, Clone, PartialEq, Default)]
 pub struct TooltipLine {
     pub text: String,
-    /// The type step this line is set at, or `None` for the kit's rule.
+    /// The type step this line is set at, or `None` for the widget set's rule.
     #[serde(default)]
     pub role: Option<TextRole>,
     /// The ink this line is drawn in, or `None` for the role's own ink.
@@ -2369,7 +2369,7 @@ pub struct TooltipShed {
 
 /// `aether.widget.tooltip.config` — an anchored plate explaining the
 /// thing the pointer is on. `sections` are drawn in order with a rule between
-/// them, wrapped at `max_width_pixels` (`0` takes the kit's reading measure,
+/// them, wrapped at `max_width_pixels` (`0` takes the widget set's reading measure,
 /// [`crate::set::reveal_wrap_width`]); `side` is the side of the anchor the
 /// plate prefers
 /// and `bounds` is the region it must stay inside, which it flips across the
@@ -2384,7 +2384,7 @@ pub struct TooltipConfig {
     /// The widest the text may run before it wraps. `0` (the default) takes
     /// [`crate::set::reveal_wrap_width`] at the caption size — the same
     /// reading measure
-    /// the hover reveal plate uses, so the two look like one kit.
+    /// the hover reveal plate uses, so the two look like one set.
     #[serde(default)]
     pub max_width_pixels: f32,
     /// The tallest the plate may stand. `0` (the default) is no budget at
@@ -2394,7 +2394,7 @@ pub struct TooltipConfig {
     #[serde(default)]
     pub max_height_pixels: f32,
     /// How far the continuation rows of a wrapped line are inset. `0` — the
-    /// default, and what the kit's own plates use — is a **flush** block: a
+    /// default, and what the widget set's own plates use — is a **flush** block: a
     /// sentence that wrapped stays aligned with the row it started on. A
     /// hanging indent is the opt-in for
     /// the one case that wants it: a list of stats, where an inset

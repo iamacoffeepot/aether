@@ -530,14 +530,14 @@ impl LaterFills {
 /// size — an em, which no Latin face in normal use exceeds. It bounds the box
 /// a run occupies from its origin, and errs wide on purpose: too wide costs a
 /// batch when a fill happens to sit beside a run, while too narrow would stop
-/// a fill covering the run's tail from clipping it. The kit's other estimate,
+/// a fill covering the run's tail from clipping it. The widget set's other estimate,
 /// `set::APPROX_ADVANCE_RATIO`, aims at the middle instead, because a caret
 /// placed too far right is as wrong as one placed too far left.
 const GLYPH_ADVANCE_CEILING: f32 = 1.0;
 
 /// How thin a fill has to be to read as a mark on the text it crosses rather
 /// than something standing over it, as a fraction of the draw size. Half a
-/// draw size is well above every stroke the kit draws over a run — a caret and
+/// draw size is well above every stroke the widget set draws over a run — a caret and
 /// an IME underline are one pixel, a rule and a focus ring two — and well
 /// below the shortest thing that stands over a line, which is a row.
 const HAIRLINE_RATIO: f32 = 0.5;
@@ -593,7 +593,7 @@ fn glyph_box(x: f32, y: f32, text: &str, size_pixels: f32) -> WidgetClipRect {
 ///
 /// A run with **no clip of its own** takes part on the same terms: it is cut
 /// against its own [`glyph_box`], and keeps its unbounded scissor only while
-/// nothing cuts it. Most of the kit's overlay text is authored that way — a
+/// nothing cuts it. Most of the widget set's overlay text is authored that way — a
 /// label's hover reveal, a dropdown's open rows, a tooltip's lines — and
 /// `Composite::flatten` never stamps a slot clip onto an escaped overlay, so
 /// skipping it here would let the reveal plate's words print through the list
@@ -1161,7 +1161,7 @@ mod tests {
     #[test]
     fn an_unclipped_run_is_cut_by_the_fill_raised_over_it() {
         // Tripwire: a run authored with no clip of its own is still occluded
-        // by what is drawn after it. Every glyph run the kit raises into the
+        // by what is drawn after it. Every glyph run the widget set raises into the
         // overlay lane is authored that way — a label's overflow reveal, a
         // dropdown's open rows, a tooltip's lines — and the flatten never
         // stamps a slot clip onto an escaped overlay, so a run that skipped

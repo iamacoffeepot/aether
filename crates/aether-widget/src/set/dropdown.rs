@@ -357,7 +357,7 @@ impl DropdownWidget {
     ///
     /// Whole while the measurement is outstanding, the frame or two before
     /// there is a width to elide against — the same rule every measured run
-    /// in the kit follows, since a guessed width cuts the wrong word.
+    /// in the widget set follows, since a guessed width cuts the wrong word.
     fn closed_row_run(&self, text: &str) -> String {
         let size = self.theme.label_size_pixels;
         self.font_metrics.resolved().map_or_else(

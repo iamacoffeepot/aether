@@ -35,7 +35,7 @@
 //!   inside its region ([`place_plate`]), shared by the tooltip and the
 //!   popover.
 //! - [`popover`] — a plate hosting *other* children over the primary view.
-//!   Hosting interactive children is a root's job in this kit, so a popover
+//!   Hosting interactive children is a root's job in this widget set, so a popover
 //!   is a value a root owns ([`Popover`]) rather than an actor; the module
 //!   doc says why.
 //!
@@ -1099,7 +1099,7 @@ fn single_line_edit_draw_items(edit: &SingleLineEdit<'_>) -> Vec<WidgetDrawItem>
 }
 
 /// How far below a `Screen` draw's origin `aether.text` puts the baseline, as
-/// a fraction of the draw size: the font's ascent. The kit ships (and every
+/// a fraction of the draw size: the font's ascent. The widget crate ships (and every
 /// stock widget draws with) `RobotoMono`, whose hhea ascent is `2146 / 2048`
 /// em — well over one em, which is why an origin computed as if the line were
 /// `size_pixels` tall sank the glyphs.
@@ -1284,7 +1284,7 @@ pub fn text_origin_y(row_top: f32, row_height: f32, size_pixels: f32) -> f32 {
     size_pixels.mul_add(-FONT_ASCENT_RATIO, text_baseline_y(row_top, row_height, size_pixels))
 }
 
-/// How wide the kit lets a hover reveal or a tooltip run before it wraps, in
+/// How wide the widget set lets a hover reveal or a tooltip run before it wraps, in
 /// body characters. A reading measure, not a limit the content chose: past
 /// roughly this the eye loses the line it is on coming back from the right
 /// edge, and a plate that is one enormously long line reads as text that broke

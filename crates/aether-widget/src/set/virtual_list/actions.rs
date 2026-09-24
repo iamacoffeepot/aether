@@ -1,5 +1,5 @@
 //! The verbs a row carries: the block's width, where each face stands, and
-//! how one draws. A verb is the kit's own button face inside a row this
+//! how one draws. A verb is the widget set's own button face inside a row this
 //! widget owns, so one emphasis ladder and one hover answer serve it whether
 //! it stands in a slot of its own or on a row.
 

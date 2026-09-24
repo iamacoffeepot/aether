@@ -159,7 +159,7 @@ fn nested_child_address(parent: &str, subname: &str) -> String {
     format!("{parent}/{}:{subname}", aether_component::WasmTrampoline::NAMESPACE)
 }
 
-/// The kit's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
+/// The widget crate's `assets/` dir — where `RobotoMono.ttf` ships, resolved under
 /// the directory the test runs in (cargo and nextest set that to this
 /// crate's root), falling back to the compile-time path for a caller
 /// running from elsewhere. Runtime-first because a lane-cached test binary
@@ -172,10 +172,10 @@ fn assets_dir() -> PathBuf {
     }
 }
 
-/// Boot a chassis whose `assets://` points at the kit assets dir (the TTF)
+/// Boot a chassis whose `assets://` points at the widget crate's assets dir (the TTF)
 /// and whose `save://` / `config://` sink into a per-process sandbox tempdir.
 ///
-/// Composition: GPU captures + kit / fixture wasm loads, synthetic window
+/// Composition: GPU captures + widget / fixture wasm loads, synthetic window
 /// fan-out, `aether.text` glyph rasterization
 /// (fonts fetched via `aether.fs`, composed from the roots), and the
 /// deterministic in-memory clipboard the copy/cut/paste scenarios read back.
@@ -1174,7 +1174,7 @@ fn panel_renders_every_text_row_inside_its_frame() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     boot_panel(&mut harness, &wasm);
 
@@ -1253,7 +1253,7 @@ fn slider_drag_renders_fill_at_track_fraction() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1294,19 +1294,19 @@ fn slider_drag_renders_fill_at_track_fraction() {
 
 #[test]
 fn editor_shell_keeps_a_real_panel_drag_owned_across_a_peer_region() {
-    let (Some(kit_wasm_path), Some(fixtures_wasm_path)) =
+    let (Some(widget_wasm_path), Some(fixtures_wasm_path)) =
         (require_runtime("aether_widget"), require_runtime("aether_test_fixtures_bundle"))
     else {
         return;
     };
-    let kit_wasm = fs::read(&kit_wasm_path).expect("read kit wasm");
+    let widget_wasm = fs::read(&widget_wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let font_id = load_font(&mut harness);
 
     // Shell first: the editor region declares the shell, so it is refused
     // until the shell is live, and the probe announces into nothing before it.
-    load_editor_shell(&mut harness, &kit_wasm);
-    let panel = load_editor_region(&mut harness, &kit_wasm, font_id, vec![text_field_child("field", "abcd")]);
+    load_editor_shell(&mut harness, &widget_wasm);
+    let panel = load_editor_region(&mut harness, &widget_wasm, font_id, vec![text_field_child("field", "abcd")]);
     warm_panel(&mut harness, panel);
     let probe = load_editor_probe(&mut harness, &fixtures_wasm_path);
     let synthetic = harness.actor_ref::<SyntheticWindowCapability>();
@@ -1368,7 +1368,7 @@ fn radio_click_moves_marker_into_clicked_row() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1436,7 +1436,7 @@ fn text_field_backspace_shrinks_glyphs_and_commits_trimmed() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1523,7 +1523,7 @@ fn button_press_renders_pressed_state_and_reports_click() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1584,7 +1584,7 @@ fn focus_ring_follows_tab() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1647,7 +1647,7 @@ fn hovering_overflowing_text_reveals_it_on_an_overlay_plate() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let label = |subname: &str, text: &str| WidgetChildSpec {
         subname: subname.to_owned(),
         kind: WidgetKind::Label,
@@ -1770,7 +1770,7 @@ fn a_press_on_nothing_focusable_clears_focus() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel(&mut harness, &wasm);
 
@@ -1822,7 +1822,7 @@ fn text_field_selection_and_ime_render_measured_bands_and_commit() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
 
     let font_id = load_font(&mut harness);
@@ -2052,7 +2052,7 @@ fn text_area_scrolls_selects_composes_and_commits_measured_lines() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
 
     let font_id = load_font(&mut harness);
@@ -2331,7 +2331,7 @@ fn control_state_drives_exact_overlay_batches_and_runtime_updates() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
 
     let panel = boot_panel_with_children(&mut harness, &wasm, control_state_children());
@@ -2427,7 +2427,7 @@ fn a_pointer_press_leaves_no_focus_ring_while_tab_traversal_draws_one() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
 
     let children = vec![
@@ -2718,7 +2718,7 @@ fn toggle_segmented_and_numeric_complete_the_real_panel_contract() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel_with_children(&mut harness, &wasm, advanced_control_children());
 
@@ -2734,7 +2734,7 @@ fn resident_label_glyphs_forward_the_exact_parent_row_clip() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     boot_panel(&mut harness, &wasm);
 
@@ -2771,7 +2771,7 @@ fn nested_scroll_relays_live_font_theme_to_real_label_glyphs() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let label = WidgetChildSpec {
         subname: "theme_label".to_owned(),
         kind: WidgetKind::Label,
@@ -2839,7 +2839,7 @@ fn nested_scroll_routes_residuals_independently_and_clips_pixels_under_capture()
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let red = Rgba::new(0.90, 0.05, 0.05, 1.0);
     let green = Rgba::new(0.05, 0.90, 0.05, 1.0);
     let yellow = Rgba::new(0.90, 0.90, 0.05, 1.0);
@@ -3035,7 +3035,7 @@ fn virtual_list_bounds_realization_and_renders_selection_state() {
     let Some(wasm_path) = require_runtime("aether_widget") else {
         return;
     };
-    let wasm = fs::read(&wasm_path).expect("read kit wasm");
+    let wasm = fs::read(&wasm_path).expect("read widget wasm");
     let mut harness = build_bench();
     let panel = boot_panel_with_children(
         &mut harness,
