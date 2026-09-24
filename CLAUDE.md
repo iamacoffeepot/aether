@@ -141,7 +141,7 @@ aether_actor::export!(public = [CameraComponent]);         // required; emits wa
 
 ## Local checks and CI
 
-GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` has no branch protection: `CI pass` (the `ci.yml` aggregate) is the verdict to wait on, and `Lint title` checks the PR title. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
+GitHub Actions is the full build engine. Before opening or updating an implementation PR, run `cargo fmt -- --check` and `cargo clippy --workspace --all-targets --all-features -- -D warnings`; the expensive build/test/package matrix belongs to CI unless the issue asks for local proof. `main` is protected by the `Protect main` ruleset: changes land only through a pull request, force pushes and deletion are refused, no one bypasses it, and no review is required. `CI pass` (the `ci.yml` aggregate) is the verdict to wait on and `Lint title` checks the PR title, but the ruleset does not enforce either. Those checks prove the tree and title, not direct review, thread resolution, or landing authority.
 
 The working loop opens a PR, watches the current head, and repairs deterministic failures. `scripts/wave-status.sh --wait <PR>` polls until `CI pass` concludes; a fix pushed to the same branch supersedes the old run.
 
