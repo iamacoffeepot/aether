@@ -149,11 +149,82 @@ const RAW: &str = r#"
 /*
 #[expect(dead_code)]
 */
-#[cfg_attr(test, allow(dead_code))]
+#[cfg_attr(test, derive(Debug))]
 fn baseline() {}
 ''',
         )
         head = self.repo.commit("non suppressions")
+
+        self.assertEqual(self.repo.scan(base, head), [])
+
+    def test_cfg_attr_allow_expect_and_ignore_are_found(self) -> None:
+        self.repo.write("src/lib.rs", "fn baseline() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write(
+            "src/lib.rs",
+            """#[cfg_attr(not(any(test, feature = "test-support")), expect(clippy::unnecessary_wraps))] // aether-suppression-request: fixture
+#![cfg_attr(test, allow(clippy::print_stderr))]
+#[cfg_attr(unix, cfg_attr(test, allow(dead_code)))]
+#[cfg_attr(test, derive(Debug), expect(unused))]
+#[cfg_attr(miri, ignore)]
+#[cfg_attr(miri, ignore = "slow")]
+fn baseline() {}
+""",
+        )
+        head = self.repo.commit("cfg_attr suppressions")
+
+        findings = self.repo.scan(base, head)
+
+        self.assertEqual(
+            [(item.line, item.token) for item in findings],
+            [
+                (1, "expect(clippy::unnecessary_wraps)"),
+                (2, "allow(clippy::print_stderr)"),
+                (3, "allow(dead_code)"),
+                (4, "expect(unused)"),
+                (5, "ignore"),
+                (6, "ignore"),
+            ],
+        )
+        self.assertEqual(findings[0].request(), "fixture")
+
+    def test_new_multiline_cfg_attr_reports_once(self) -> None:
+        self.repo.write("src/lib.rs", "fn baseline() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write(
+            "src/lib.rs",
+            """#[cfg_attr(
+    test,
+    allow(dead_code),
+)]
+fn baseline() {}
+""",
+        )
+        head = self.repo.commit("multiline cfg_attr")
+
+        findings = self.repo.scan(base, head)
+
+        self.assertEqual([(item.line, item.token) for item in findings], [(1, "allow(dead_code)")])
+
+    def test_cfg_attr_without_a_suppression_is_clean(self) -> None:
+        self.repo.write("src/lib.rs", "fn baseline() {}\n")
+        base = self.repo.commit("base")
+        self.repo.write(
+            "src/lib.rs",
+            """#[cfg_attr(feature = "runtime", config(env = "AETHER_X", parse = parse_dir))]
+struct One;
+#[cfg_attr(
+    feature = "runtime",
+    config(env = "AETHER_X", parse = parse_dir)
+)]
+struct Two;
+#[cfg_attr(test, derive(Debug))]
+struct Three;
+#[cfg_attr(test, config(allow(dead_code)))]
+fn baseline() {}
+""",
+        )
+        head = self.repo.commit("unrelated cfg_attr")
 
         self.assertEqual(self.repo.scan(base, head), [])
 
@@ -476,6 +547,28 @@ ignored = ["changed-but-unrelated"]
                     )
                 },
                 [],
+            ),
+            (
+                "cfg(test) module cfg_attr unwrap allow",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\nmod tests {\n    #[cfg_attr(test, allow(clippy::unwrap_used))]\n    fn t() {}\n}\n"
+                    )
+                },
+                [],
+            ),
+            (
+                "cfg_attr carrying a second suppression is not the unwrap idiom",
+                {
+                    "src/lib.rs": (
+                        "#[cfg(test)]\n"
+                        "mod tests {\n"
+                        "    #[cfg_attr(test, allow(clippy::unwrap_used), expect(dead_code))]\n"
+                        "    fn t() {}\n"
+                        "}\n"
+                    )
+                },
+                [("src/lib.rs", 3)],
             ),
             (
                 "production unwrap allow",
