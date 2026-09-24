@@ -2,23 +2,28 @@
 //!
 //! [`ProgramCore::start`] is the only constructor, and it returns the first
 //! journal read, so no core exists that has not begun catching up.
-//! [`ProgramCore::call`] accepts one [`Call`];
+//! [`ProgramCore::call`] accepts one [`Call`], and
+//! [`ProgramCore::fetch_artifact`] one bundle root's fetch-on-miss;
 //! the shell stores its deferred reply under the returned [`CallerId`]
 //! before it performs the commands. Each command kind has one typed reply
 //! method, and a reply whose ticket the core is not waiting on returns no
 //! commands.
 
+mod artifacts;
 mod command;
 mod journal;
 mod ticket;
 
+use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, VecDeque};
 
 use aether_bloomery_kinds::{
     AppendRecordsResult, Call, CallOutcome, CallRefusal, ClosureLimit, Detail, Digest, DriverRecord, Fault,
-    FaultReason, Invoked, ProgramRef, ReadArtifactResult, ReadClosureResult, ReadEvents, ReadEventsResult, Seq,
+    FaultReason, Invoked, ProgramRef, ReadArtifact, ReadArtifactResult, ReadClosureResult, ReadEvents,
+    ReadEventsResult, Seq,
 };
 
+use self::artifacts::{ARTIFACT_CACHE_BYTES, ArtifactCache};
 use crate::bundles::BundleTable;
 use crate::programs::DigestQueue;
 use crate::reactors::{CommittedRouting, Routing};
@@ -40,6 +45,8 @@ pub enum ArtifactRead {
     ReactorSet(Digest),
     /// The destination of the `SetHead` the current seq is checking.
     SetHeadDestination,
+    /// One digest bundle roots fetched on a miss, shared by every waiting fetch.
+    Fetch(Digest),
 }
 
 /// One committed `Requested` whose pipeline has not started yet.
@@ -66,6 +73,10 @@ pub struct ProgramCore {
     pub(crate) waiters: BTreeMap<u64, (u64, Vec<CallerId>)>,
     pub(crate) activations: BTreeMap<u64, Activation>,
     pub(crate) artifact_reads: BTreeMap<ArtifactTicket, ArtifactRead>,
+    /// Found artifacts reused by fetches and `SetHead` destination checks.
+    pub(crate) artifacts: ArtifactCache,
+    /// Fetches waiting on each digest's one in-flight read, in arrival order.
+    pub(crate) fetching: BTreeMap<Digest, Vec<CallerId>>,
     pub(crate) closure_reads: BTreeMap<ClosureTicket, (Digest, u64)>,
     pub(crate) loads: BTreeMap<LoadTicket, Digest>,
     pub(crate) invokes: BTreeMap<InvokeTicket, (Digest, u64)>,
@@ -88,6 +99,8 @@ impl ProgramCore {
             waiters: BTreeMap::new(),
             activations: BTreeMap::new(),
             artifact_reads: BTreeMap::new(),
+            artifacts: ArtifactCache::with_budget(ARTIFACT_CACHE_BYTES),
+            fetching: BTreeMap::new(),
             closure_reads: BTreeMap::new(),
             loads: BTreeMap::new(),
             invokes: BTreeMap::new(),
@@ -112,6 +125,36 @@ impl ProgramCore {
             }
         } else {
             self.held.push_back((caller, call));
+        }
+        (caller, out)
+    }
+
+    /// Accept one bundle root's fetch-on-miss. The returned [`CallerId`]
+    /// identifies the fetch for its exactly-once [`Fetched`](Command::Fetched).
+    ///
+    /// A cached artifact answers at once. Otherwise the fetch waits on the
+    /// digest's one journal read, which it issues when none is in flight.
+    /// Fetches do not wait for the journal fold.
+    pub fn fetch_artifact(&mut self, request: ReadArtifact) -> (CallerId, Vec<Command>) {
+        let caller = self.mint(CallerId::mint);
+        let mut out = Vec::new();
+        if self.aborted {
+            return (caller, out);
+        }
+        let digest = request.digest;
+        if let Some((kind, bytes)) = self.artifacts.get(digest) {
+            let result = ReadArtifactResult::Found { digest, kind, bytes: bytes.to_vec() };
+            out.push(Command::Fetched { caller, result });
+            return (caller, out);
+        }
+        match self.fetching.entry(digest) {
+            Entry::Occupied(waiters) => waiters.into_mut().push(caller),
+            Entry::Vacant(waiters) => {
+                waiters.insert(vec![caller]);
+                let ticket = self.mint(ArtifactTicket::mint);
+                self.artifact_reads.insert(ticket, ArtifactRead::Fetch(digest));
+                out.push(Command::ReadArtifact { ticket, request });
+            }
         }
         (caller, out)
     }
@@ -169,7 +212,7 @@ impl ProgramCore {
         out
     }
 
-    /// Feed one bundle artifact reply. Unknown tickets return no commands.
+    /// Feed one artifact reply. Unknown tickets return no commands.
     pub fn on_artifact(&mut self, ticket: ArtifactTicket, result: ReadArtifactResult) -> Vec<Command> {
         let mut out = Vec::new();
         if self.aborted {
@@ -188,8 +231,22 @@ impl ProgramCore {
             ArtifactRead::SetHeadDestination => {
                 self.continue_destination_artifact(result, &mut out);
             }
+            ArtifactRead::Fetch(digest) => {
+                self.continue_fetch(digest, result, &mut out);
+            }
         }
         out
+    }
+
+    /// Answer every fetch waiting on `digest`, in arrival order, and cache a
+    /// found artifact. A missing or failed read is answered and not kept.
+    fn continue_fetch(&mut self, digest: Digest, result: ReadArtifactResult, out: &mut Vec<Command>) {
+        for caller in self.fetching.remove(&digest).unwrap_or_default() {
+            out.push(Command::Fetched { caller, result: result.clone() });
+        }
+        if let ReadArtifactResult::Found { kind, bytes, .. } = result {
+            self.artifacts.insert(digest, kind, bytes);
+        }
     }
 
     /// Feed one closure reply. Unknown tickets return no commands.
