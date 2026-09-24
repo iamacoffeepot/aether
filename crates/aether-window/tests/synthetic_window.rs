@@ -13,10 +13,10 @@ use aether_actor::Addressable;
 use aether_data::LoadName;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_window::{
-    CreateWindow, CreateWindowResult, CursorIcon, ListWindows, ListWindowsResult, SetWindowCursor,
-    SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowTitle, SetWindowTitleResult,
-    SyntheticWindowCapability, SyntheticWindowInstance, WindowCapability, WindowId, WindowInstance, WindowMenu,
-    WindowMode, WindowSpec,
+    ApplyWindowCommand, ApplyWindowCommandResult, CreateWindow, CreateWindowResult, CursorIcon, ListWindows,
+    ListWindowsResult, SetWindowCursor, SetWindowCursorResult, SetWindowMenu, SetWindowMenuResult, SetWindowTitle,
+    SetWindowTitleResult, SyntheticWindowCapability, SyntheticWindowInstance, WindowCapability, WindowCommand,
+    WindowId, WindowInstance, WindowMenu, WindowMode, WindowSpec,
 };
 
 /// Local twin of the runtime's crate-private `RetireWindow`
@@ -157,6 +157,38 @@ fn root_addressed_commands_reach_the_sole_window_and_refuse_when_it_is_ambiguous
         BTreeMap::from([("main", "Routed"), ("palette", "Tools")]),
         "the routed command applied to the sole window and the refused one applied to nothing",
     );
+}
+
+/// The manager applies a forwarded command only to the window whose child
+/// sent it, resolved from the host-stamped sender. The harness is live and is
+/// no window's child, so its command is refused with the command's own `Err`
+/// and applies to nothing, even with exactly one window it could have picked.
+#[test]
+fn a_forwarded_command_from_a_non_child_sender_is_refused() {
+    let mut harness = SubstrateHarness::start().expect("boot synthetic harness");
+    let manager = harness.actor_ref::<SyntheticWindowCapability>();
+    let report = harness
+        .execute(vec![
+            ("created", HarnessOp::send_and_await_reply(&manager, &CreateWindow { spec: spec("main", "Main") })),
+            (
+                "forged",
+                HarnessOp::send_and_await_reply(
+                    &manager,
+                    &ApplyWindowCommand { command: WindowCommand::SetTitle { title: "Forged".to_owned() } },
+                ),
+            ),
+            ("listed", HarnessOp::send_and_await_reply(&manager, &ListWindows)),
+        ])
+        .expect("the forged command settles");
+
+    assert!(matches!(
+        report.reply::<ApplyWindowCommandResult>("forged"),
+        Ok(ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { .. }))
+    ));
+    let Ok(ListWindowsResult::Ok { windows }) = report.reply::<ListWindowsResult>("listed") else {
+        panic!("synthetic list succeeds");
+    };
+    assert_eq!(windows.iter().map(|window| window.title.as_str()).collect::<Vec<_>>(), ["Main"]);
 }
 
 /// A new per-window command has four places to be wired — the endpoint's

@@ -14,6 +14,8 @@ use aether_data::MailboxId;
 use crate::actor::native::NativeActor;
 use crate::actor::native::identity::ActorRuntimeIdentity;
 use crate::actor::native::spawn::{HandlerSpawnBuilder, SpawnBuilder, Subname};
+#[cfg(feature = "wasm")]
+use crate::actor::wasm::kind_manifest::Dependency;
 use crate::mail::{Source, SourceAddr};
 
 use super::NativeCtx;
@@ -106,5 +108,23 @@ impl<M: ReplyMode, A: NativeActor> NativeCtx<'_, A, M> {
         let parent = ActorRuntimeIdentity::new(parent, None, parent.0, parent_name);
         let builder = SpawnBuilder::new_child(Arc::clone(spawner), subname, config, params, sender, parent);
         HandlerSpawnBuilder::new(builder, Arc::clone(self.binding), self.in_flight_root, self.reply_target())
+    }
+
+    /// The namespace of the first declared dependency with no `Live` route
+    /// for a child placed under the calling actor, or `None` when every entry
+    /// is live: [`Registry::missing_dependency`](crate::mail::registry::Registry::missing_dependency)
+    /// with this ctx's actor as the placement parent. A `One` entry folds from
+    /// the root and an `Embedded` entry folds beneath this actor. It is a read
+    /// and nothing else: no ordering, no retry, no wait.
+    ///
+    /// The dependencies are a wasm module's, which arrive per module; a
+    /// native birth checks its own at spawn. Like [`Self::spawn_child`] the
+    /// parent is the ctx's own actor, so the erased ctx has no spelling of it.
+    /// Its consumers are the component host's module boot, which spawns the
+    /// boot trampoline under the host, and its host-placed load.
+    #[cfg(feature = "wasm")]
+    #[must_use]
+    pub fn missing_child_dependency<'d>(&self, dependencies: &'d [Dependency]) -> Option<&'d str> {
+        self.binding.missing_child_dependency(dependencies.iter().map(|d| (d.resolver, d.namespace.as_str())))
     }
 }

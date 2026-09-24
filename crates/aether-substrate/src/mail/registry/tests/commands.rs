@@ -30,9 +30,7 @@ use crate::runtime::lifecycle::{FatalAborter, PanicAborter};
 use crate::scheduler::{BatchBudget, CycleResult, Drainable, Pool, PoolConfig, WakeSink};
 use crate::testing::boot_authority as auth;
 
-use super::support::{
-    InventorySubscriber, activation_barrier, prepared_test_spawn, starting_token, traced_unknown_mail,
-};
+use super::support::{activation_barrier, prepared_test_spawn, starting_token, traced_unknown_mail};
 
 struct DiscardProbeActivation {
     dropped: crossbeam_channel::Sender<thread::ThreadId>,
@@ -409,7 +407,7 @@ fn owner_inventory_publication_only_invokes_inline_on_the_relay_turn() {
             wakes_for_handler.fetch_add(1, Ordering::SeqCst);
         }),
     );
-    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, Arc::clone(&mailer));
+    let subscription = registry.subscribe_inventory(target, Arc::clone(&mailer));
 
     assert_eq!(wakes.load(Ordering::SeqCst), 1, "initial subscription notification remains synchronous");
     let initial = registry.inventory();

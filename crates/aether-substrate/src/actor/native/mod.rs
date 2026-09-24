@@ -85,7 +85,6 @@ pub use ctx::{Erased, ExportedHandles, NativeCtx, NativeInitCtx};
 pub use envelope::Envelope;
 pub use offload::blocking::{DeferredReply, DispatchId, IntoDeferredReply, Pending, TaskCompletionWake, TaskDone};
 pub use offload::self_wake::SelfWake;
-pub use offload::thread::{InheritCtx, RootCtx};
 pub use slot::pumped::PumpedSlot;
 pub use spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, SpawnOutcome, SpawnReceipt, Spawner, Subname};
 // iamacoffeepot/aether#3707: the cap-level rate-limit/queue helper over the

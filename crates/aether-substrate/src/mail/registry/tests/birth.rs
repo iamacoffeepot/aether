@@ -25,8 +25,7 @@ use crate::scheduler::{Pool, PoolConfig, SeizeHandle, WakeSink};
 use crate::testing::boot_authority as auth;
 
 use super::support::{
-    InventorySubscriber, activation_barrier, inventory_subscription_fixture, prepared_test_spawn, starting_token,
-    traced_unknown_mail,
+    activation_barrier, inventory_subscription_fixture, prepared_test_spawn, starting_token, traced_unknown_mail,
 };
 
 #[test]
@@ -237,7 +236,7 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     }
 
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
-    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, Arc::clone(&mailer));
+    let subscription = registry.subscribe_inventory(target, Arc::clone(&mailer));
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial inventory wake");
     let acknowledged = registry.inventory();
     subscription.acknowledge(acknowledged.mailbox_generation, acknowledged.kind_generation);

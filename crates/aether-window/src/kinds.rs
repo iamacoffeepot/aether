@@ -218,7 +218,10 @@ pub enum RequestWindowRedrawResult {
     Err { error: String },
 }
 
-/// Manager-private id-bearing command forwarded by one window child.
+/// Manager-private command forwarded by one window child. It names no window:
+/// the manager resolves the window from the child's stamped sender against the
+/// children it tracks, and refuses a command from any other sender with the
+/// command's own `Err`.
 ///
 /// `internal` names who sends it — a window child to its own manager, never a
 /// peer — not whether the type can be named. The manager identity's always-on
@@ -229,7 +232,6 @@ pub enum RequestWindowRedrawResult {
 /// construct.
 #[aether_data::kind(name = "aether.window.internal.apply_command", eq)]
 pub struct ApplyWindowCommand {
-    pub window: WindowId,
     pub command: WindowCommand,
 }
 

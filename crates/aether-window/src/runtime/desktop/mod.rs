@@ -929,15 +929,21 @@ impl NativeActor for DesktopWindowCapability {
     #[handler::manual]
     fn on_apply_command(state: &mut Self::State, ctx: &mut NativeCtx<'_, Erased, Manual>, mail: ApplyWindowCommand) {
         let reply = ctx.take_inbound();
+        let Some(id) = ctx.sender().and_then(|sender| state.child_windows.get(&sender).copied()) else {
+            reply.reply(
+                &mail.command.refused("window command from an actor that is not a live window child".to_owned()),
+            );
+            return;
+        };
         if matches!(mail.command, WindowCommand::Close) {
-            if let Err((error, reply)) = state.queue_close(mail.window, Some(Box::new(reply)))
+            if let Err((error, reply)) = state.queue_close(id, Some(Box::new(reply)))
                 && let Some(reply) = reply
             {
                 reply.reply(&ApplyWindowCommandResult::Close(CloseWindowResult::Err { error }));
             }
             return;
         }
-        reply.reply(&state.apply_at_window(mail.window, mail.command));
+        reply.reply(&state.apply_at_window(id, mail.command));
     }
 
     #[handler::single]

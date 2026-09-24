@@ -27,16 +27,6 @@ use crate::mail::{BoundaryMail, boundary};
 use super::NativeCtx;
 
 impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
-    /// The actor's own [`MailboxId`] — the handler-ctx mirror of
-    /// [`NativeInitCtx::self_id`](super::NativeInitCtx::self_id). A cap that subscribes settlement or
-    /// keys a per-instance table from inside a handler needs its own
-    /// address without caching it from `init`; the deferred-reply route
-    /// glue (ADR-0154) is the motivating consumer.
-    #[must_use]
-    pub fn self_id(&self) -> MailboxId {
-        self.binding.self_mailbox()
-    }
-
     /// Proven reference to a declared dependency (ADR-0230): mints an
     /// [`ActorRef`] for the position `R`'s resolver folds beneath this
     /// binding's scope, with no registry read — the load was refused unless `R` was `Live`, so the
@@ -131,7 +121,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// ADR-0080 §5: derive the inherited `root` to stamp on outbound
     /// mail from this ctx's in-flight context. `None` when there is none,
-    /// in which case `NativeBinding::send_mail_with_lineage` mints a fresh
+    /// in which case `NativeBinding::push_envelope_buffered` mints a fresh
     /// root from the outbound's own `mail_id`.
     pub(crate) fn outbound_root(&self) -> Option<MailId> {
         self.in_flight_root

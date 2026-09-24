@@ -18,7 +18,7 @@ use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
-use aether_actor::{CallerScope, HandlesKind, RegistryChanged, RequestContextTable};
+use aether_actor::{CallerScope, RequestContextTable};
 use aether_data::{ActorPath, KindDescriptor};
 
 impl NativeBinding {
@@ -207,8 +207,8 @@ impl NativeBinding {
 
     /// Subscribe this actor to the registry's inventory changes. The path
     /// behind [`NativeCtx::subscribe_inventory`](crate::actor::native::ctx::NativeCtx::subscribe_inventory).
-    pub(crate) fn subscribe_inventory<A: HandlesKind<RegistryChanged>>(&self) -> RegistrySubscription {
-        self.mailer.subscribe_inventory_for::<A>(self.self_mailbox())
+    pub(crate) fn subscribe_inventory(&self) -> RegistrySubscription {
+        self.mailer.subscribe_inventory_for(self.self_mailbox())
     }
 
     /// This actor's lineage carry (ADR-0099 §3) — the rolling fold
@@ -272,6 +272,17 @@ impl NativeBinding {
     /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
     pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
         self.mailer.canonical_path(address)
+    }
+
+    /// The first declared dependency with no `Live` route for a child placed
+    /// under this binding's actor. The path behind
+    /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).
+    #[cfg(feature = "wasm")]
+    pub(crate) fn missing_child_dependency<'a>(
+        &self,
+        dependencies: impl IntoIterator<Item = (u8, &'a str)>,
+    ) -> Option<&'a str> {
+        self.mailer.missing_dependency_under(self.self_mailbox(), dependencies)
     }
 
     /// #1757: the actor's reply-lineage allocator (a shared-counter

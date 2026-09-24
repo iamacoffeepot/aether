@@ -45,7 +45,6 @@ pub(super) fn component_ctx_with_binding(
     sender: MailboxId,
 ) -> (ComponentCtx, Arc<NativeBinding>) {
     let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), sender));
-    let mut ctx = ComponentCtx::new(sender, registry, mailer, HubOutbound::disconnected());
-    ctx.install_binding(Arc::clone(&binding));
+    let ctx = ComponentCtx::new(Arc::clone(&binding), registry, mailer, HubOutbound::disconnected());
     (ctx, binding)
 }

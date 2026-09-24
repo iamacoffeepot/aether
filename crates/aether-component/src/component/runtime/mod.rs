@@ -490,7 +490,7 @@ mod tests {
 
     use aether_substrate::mail::outbound::EgressEvent;
     use aether_substrate::mail::registry::noop_handler;
-    use aether_substrate::testing::boot_authority;
+    use aether_substrate::testing::{boot_authority, registered_binding};
 
     use super::*;
 
@@ -500,15 +500,18 @@ mod tests {
         let (outbound, rx) = HubOutbound::attached_loopback();
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(Arc::clone(&outbound)));
         let engine = Arc::new(Engine::default());
-        let subscriber =
-            registry.register_inbox(&boot_authority(), "test.component.inventory-subscriber", noop_handler());
+        let (binding, _subscriber) =
+            registered_binding(&registry, &mailer, "test.component.inventory-subscriber", noop_handler());
         let mut state = ComponentHostCapabilityState {
             linker: Arc::new(Linker::new(&engine)),
             engine,
             registry: Arc::clone(&registry),
             mailer: Arc::clone(&mailer),
             outbound,
-            registry_subscription: Some(registry.subscribe_inventory::<ComponentHostCapability>(subscriber, mailer)),
+            registry_subscription: Some(
+                NativeCtx::<ComponentHostCapability>::new_for_actor(&binding, Source::NONE, None, None)
+                    .subscribe_inventory(),
+            ),
             last_egressed_inventory: None,
             default_name_counter: 0,
             module_cache: ModuleCache::default(),

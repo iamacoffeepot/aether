@@ -15,7 +15,6 @@ use super::{BootError, NativeActor, NativeCtx, NativeInitCtx, unsupported};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use crate::{
     ApplyWindowCommand, ApplyWindowCommandResult, RetireWindow, WindowCapability, WindowCommand, WindowForwardContext,
-    WindowId,
 };
 use crate::{
     CloseWindow, CloseWindowResult, FocusWindow, FocusWindowResult, HeadlessWindowInstance, RequestWindowRedraw,
@@ -51,10 +50,8 @@ pub(super) fn forward<A: DependsOn<WindowCapability>>(
     if state.pending.insert(request, inbound).is_some() {
         ctx.fatal_abort(format!("duplicate retained window request {request}"));
     }
-    let _ = ctx.send_with_context::<WindowCapability>(
-        &ApplyWindowCommand { window: WindowId(ctx.self_id().0), command },
-        &WindowForwardContext { request },
-    );
+    let _ =
+        ctx.send_with_context::<WindowCapability>(&ApplyWindowCommand { command }, &WindowForwardContext { request });
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]

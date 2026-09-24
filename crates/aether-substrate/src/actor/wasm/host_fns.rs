@@ -181,8 +181,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 let Some(n) = caller
                     .data()
                     .binding
-                    .as_ref()
-                    .and_then(|binding| binding.spawner())
+                    .spawner()
                     .map(|spawner| spawner.next_counter())
                 else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no spawner on the binding (counter subname unresolvable)");
@@ -197,12 +196,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // `spawn_child::<WasmTrampoline>` runs (it carries the
             // trampoline's binding carry), so the synchronous prediction
             // matches the registered id.
-            let Some(trampoline_carry) =
-                caller.data().binding.as_ref().map(|binding| binding.carry())
-            else {
-                tracing::warn!(target: "aether_substrate::component", "spawn_sibling: no binding on the trampoline (cannot fold sibling id)");
-                return 0;
-            };
+            let trampoline_carry = caller.data().binding.carry();
             let sibling_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
             let mailbox_id = aether_data::with_tag(
                 aether_data::Tag::Mailbox,
@@ -289,8 +283,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 let Some(n) = caller
                     .data()
                     .binding
-                    .as_ref()
-                    .and_then(|binding| binding.spawner())
+                    .spawner()
                     .map(|spawner| spawner.next_counter())
                 else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_sibling_scoped: no spawner on the binding (counter subname unresolvable)");
@@ -335,7 +328,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
     // instanced(aether.embedded, subname)))` — the same fold a detached
     // sibling renders post-#1920 (so the synchronous prediction matches a
     // `Call`-by-name resolution). On any host-side error (no memory, OOB,
-    // bad UTF-8, no binding/spawner, or missing parent name) it warn-logs and
+    // bad UTF-8, no spawner, or missing parent name) it warn-logs and
     // returns 0 without staging — the child simply never becomes addressable.
     linker.func_wrap(
         "aether",
@@ -380,8 +373,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 let Some(n) = caller
                     .data()
                     .binding
-                    .as_ref()
-                    .and_then(|binding| binding.spawner())
+                    .spawner()
                     .map(|spawner| spawner.next_counter())
                 else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: no spawner on the binding (counter subname unresolvable)");
@@ -394,10 +386,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
             // ADR-0099 §3: fold the alias id onto the parent trampoline's
             // lineage carry — identical to `spawn_sibling`'s fold, so the
             // id matches a written-name `Call` resolution.
-            let Some(parent_carry) = ctx.binding.as_ref().map(|binding| binding.carry()) else {
-                tracing::warn!(target: "aether_substrate::component", "spawn_inline_child: no binding on the trampoline (cannot fold alias id)");
-                return 0;
-            };
+            let parent_carry = ctx.binding.carry();
             let child_node = aether_data::ActorId::instanced(TRAMPOLINE_NAMESPACE, &full_subname);
             let alias_id = MailboxId(aether_data::with_tag(
                 aether_data::Tag::Mailbox,
@@ -474,8 +463,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 let Some(n) = caller
                     .data()
                     .binding
-                    .as_ref()
-                    .and_then(|binding| binding.spawner())
+                    .spawner()
                     .map(|spawner| spawner.next_counter())
                 else {
                     tracing::warn!(target: "aether_substrate::component", "spawn_inline_child_scoped: no spawner on the binding (counter subname unresolvable)");
