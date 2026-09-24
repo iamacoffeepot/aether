@@ -677,29 +677,26 @@ impl WidgetKind {
     /// `aether_behavior::host::ChildSpec::type_tag` when composing a
     /// `HostConfig` directly, outside the kit's `WidgetKind::BehaviorHost`
     /// spawn arm — the concrete widget actor types are `runtime`-gated and
-    /// not re-exported, so this hashes the actor namespace literals
-    /// directly rather than naming the types.
+    /// not re-exported, so this computes each widget type's
+    /// `ActorId::singleton` from its namespace literal rather than naming
+    /// the types.
     #[must_use]
-    // Id-constant definition for stock widget types whose actors are
-    // `runtime`-gated; the runtime tripwire binds it to
-    // `ActorTypeTag::of::<W>()`.
-    #[allow(clippy::disallowed_methods)]
     pub const fn type_tag(self) -> Option<u64> {
         let tag = match self {
-            Self::Label => aether_data::mailbox_id_from_name("aether.kit.widget.label").0,
-            Self::Image => aether_data::mailbox_id_from_name("aether.kit.widget.image").0,
-            Self::Slider => aether_data::mailbox_id_from_name("aether.kit.widget.slider").0,
-            Self::Radio => aether_data::mailbox_id_from_name("aether.kit.widget.radio").0,
-            Self::TextField => aether_data::mailbox_id_from_name("aether.kit.widget.text_field").0,
-            Self::TextArea => aether_data::mailbox_id_from_name("aether.kit.widget.text_area").0,
-            Self::Button => aether_data::mailbox_id_from_name("aether.kit.widget.button").0,
-            Self::VirtualList => aether_data::mailbox_id_from_name("aether.kit.widget.virtual_list").0,
-            Self::Toggle => aether_data::mailbox_id_from_name("aether.kit.widget.toggle").0,
-            Self::Segmented => aether_data::mailbox_id_from_name("aether.kit.widget.segmented").0,
-            Self::Numeric => aether_data::mailbox_id_from_name("aether.kit.widget.numeric").0,
-            Self::Dropdown => aether_data::mailbox_id_from_name("aether.kit.widget.dropdown").0,
-            Self::TabStrip => aether_data::mailbox_id_from_name("aether.kit.widget.tab_strip").0,
-            Self::MenuBar => aether_data::mailbox_id_from_name("aether.kit.widget.menu_bar").0,
+            Self::Label => aether_data::ActorId::singleton("aether.kit.widget.label").0,
+            Self::Image => aether_data::ActorId::singleton("aether.kit.widget.image").0,
+            Self::Slider => aether_data::ActorId::singleton("aether.kit.widget.slider").0,
+            Self::Radio => aether_data::ActorId::singleton("aether.kit.widget.radio").0,
+            Self::TextField => aether_data::ActorId::singleton("aether.kit.widget.text_field").0,
+            Self::TextArea => aether_data::ActorId::singleton("aether.kit.widget.text_area").0,
+            Self::Button => aether_data::ActorId::singleton("aether.kit.widget.button").0,
+            Self::VirtualList => aether_data::ActorId::singleton("aether.kit.widget.virtual_list").0,
+            Self::Toggle => aether_data::ActorId::singleton("aether.kit.widget.toggle").0,
+            Self::Segmented => aether_data::ActorId::singleton("aether.kit.widget.segmented").0,
+            Self::Numeric => aether_data::ActorId::singleton("aether.kit.widget.numeric").0,
+            Self::Dropdown => aether_data::ActorId::singleton("aether.kit.widget.dropdown").0,
+            Self::TabStrip => aether_data::ActorId::singleton("aether.kit.widget.tab_strip").0,
+            Self::MenuBar => aether_data::ActorId::singleton("aether.kit.widget.menu_bar").0,
             Self::Composite | Self::Scroll | Self::BehaviorHost => return None,
         };
         Some(tag)

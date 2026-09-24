@@ -6,8 +6,8 @@ use std::sync::Arc;
 
 use super::NativeBinding;
 use super::outbound::OutboundBuffer;
-use super::pending::{ComponentOrigin, PendingBirthWork, PendingOwnerBatchWork, PendingPayload, component_origin};
-use crate::mail::registry::effect::{EffectBatch, RegistryEffect};
+use super::pending::{ComponentOrigin, PendingOwnerBatchWork, PendingPayload, component_origin};
+use crate::mail::registry::effect::{EffectBatch, PreparedSpawnCommit, RegistryEffect};
 use crate::mail::{KindId, Mail, MailRef, MailboxId};
 
 #[cfg(feature = "wasm")]
@@ -77,7 +77,7 @@ impl NativeBinding {
         let (routed, component_origins, births, owner_batches): (
             Vec<Mail>,
             Vec<ComponentOrigin>,
-            Vec<PendingBirthWork>,
+            Vec<PreparedSpawnCommit>,
             Vec<PendingOwnerBatchWork>,
         ) = {
             let mut buf = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
@@ -152,24 +152,10 @@ impl NativeBinding {
             }
         }
 
-        let routed = if births.is_empty() {
-            routed
-        } else {
-            let mut routed = routed.into_iter().map(Some).collect::<Vec<_>>();
-            let mut effects = Vec::with_capacity(births.len());
-            for mut birth in births {
-                for mail in routed.iter_mut().skip(birth.after_mail) {
-                    if mail.as_ref().is_some_and(|mail| mail.recipient == birth.recipient) {
-                        let mail = mail.take().expect("matched same-flush child mail remains present");
-                        birth.commit.retain_after_init(mail);
-                    }
-                }
-                effects.push(RegistryEffect::PreparedSpawn(birth.commit));
-            }
+        if !births.is_empty() {
             let registry = self.spawner.as_ref().expect("staged births require a spawner").registry();
-            drop(registry.submit(EffectBatch::new(effects)));
-            routed.into_iter().flatten().collect()
-        };
+            drop(registry.submit(EffectBatch::new(births.into_iter().map(RegistryEffect::PreparedSpawn).collect())));
+        }
 
         self.route_pending_mails(routed, &component_origins);
     }

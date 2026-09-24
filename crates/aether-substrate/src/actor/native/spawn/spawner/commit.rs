@@ -106,12 +106,8 @@ impl Spawner {
     {
         let mailbox_id = staged.identity.id;
         let (decided, birth) = crossbeam_channel::bounded(1);
-        let finalizer = NativeSpawnFinalizer::external(
-            decided,
-            mailbox_id,
-            Arc::clone(&staged.identity.canonical_name),
-            Arc::clone(&self.mailer),
-        );
+        let finalizer =
+            NativeSpawnFinalizer::external(decided, mailbox_id, Arc::clone(&staged.identity.canonical_name));
         let commit = self.prepare_commit(staged, Some(finalizer), EffectChain::Uncaused(Uncaused::EmbedderCall));
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
