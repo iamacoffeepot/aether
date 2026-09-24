@@ -44,8 +44,6 @@ pub enum Tag {
 pub struct ProgramMeta {
     pub name: LitStr,
     pub intent: LitStr,
-    pub input: Type,
-    pub result: Type,
     pub async_run: bool,
     pub sampled: bool,
     /// Canonical API names (`Http`, `Process`): each resolves through the
@@ -90,8 +88,6 @@ impl Parse for ProgramMeta {
     fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
         let mut name = None;
         let mut intent = None;
-        let mut input_ty = None;
-        let mut result = None;
         let mut async_run = false;
         let mut sampled = false;
         let mut apis = Vec::new();
@@ -123,8 +119,6 @@ impl Parse for ProgramMeta {
                     let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
                     apis = names.into_iter().collect();
                 }
-                "input" => input_ty = Some(input.parse()?),
-                "result" => result = Some(input.parse()?),
                 "async_run" => {
                     let value: LitBool = input.parse()?;
                     async_run = value.value();
@@ -140,8 +134,6 @@ impl Parse for ProgramMeta {
         Ok(Self {
             name: name.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing name"))?,
             intent: intent.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing intent"))?,
-            input: input_ty.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing input"))?,
-            result: result.ok_or_else(|| syn::Error::new(Span::call_site(), "program extension missing result"))?,
             async_run,
             sampled,
             apis,

@@ -1,6 +1,6 @@
 //! Signature restrictions owned by `#[program]`.
 
-use syn::{FnArg, GenericArgument, Ident, PathArguments, Signature, Type};
+use syn::{FnArg, GenericArgument, Ident, PathArguments, ReturnType, Signature, Type};
 
 pub enum EnvMarker {
     Sync,
@@ -18,6 +18,15 @@ pub fn pair_run_with_env(sig: &Signature) -> syn::Result<bool> {
         }
         (false, EnvMarker::Async) => Err(syn::Error::new_spanned(env_ty, "#[program] fn run requires Env<Sync>")),
     }
+}
+
+/// An async `run` writes its return type, as a sync `run` does; the expansion
+/// re-emits it as the future's `Output`.
+pub fn require_async_return(sig: &Signature) -> syn::Result<()> {
+    if matches!(sig.output, ReturnType::Default) {
+        return Err(syn::Error::new_spanned(sig, "`async fn run` must return `Result<Self::Result, Refusal>`"));
+    }
+    Ok(())
 }
 
 pub fn reject_run_receiver(sig: &Signature) -> syn::Result<()> {
