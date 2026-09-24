@@ -18,7 +18,7 @@ use aether_actor::local::ActorSlots;
 use aether_actor::log::ActorLogRing;
 use aether_actor::trace::ActorTraceRing;
 use aether_actor::{Instanced, validate_namespace_segment};
-use aether_data::{ActorId, Tag, fold_lineage, with_tag};
+use aether_data::{ActorId, ActorPath, Tag, fold_lineage, with_tag};
 
 use crate::actor::native::binding::NativeBinding;
 use crate::actor::native::dependencies::check_declared;
@@ -28,7 +28,7 @@ use crate::actor::native::local;
 use crate::actor::native::spawn::activation::{LegacyPreparedActivation, NativeSpawnFinalizer};
 use crate::actor::native::{ExportedHandles, NativeActor, NativeInitCtx};
 use crate::mail::cost::{CostCell, CostCells};
-use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedRoute, PreparedSpawnCommit};
+use crate::mail::registry::effect::{PreparedCostCells, PreparedMail, PreparedSpawnCommit};
 use crate::mail::{KindId, Mail, MailboxId};
 use crate::runtime::effect_chain::EffectChain;
 
@@ -36,12 +36,13 @@ use super::super::{SpawnError, Subname};
 use super::Spawner;
 
 /// Identity resolved before construction starts. The canonical name is a
-/// display/reverse-map value; `id` remains the lineage-folded route key.
+/// proven ADR-0166 path, the display/reverse-map value; `id` remains the
+/// lineage-folded route key.
 pub(in crate::actor::native::spawn) struct SpawnIdentity {
     pub(in crate::actor::native::spawn) id: MailboxId,
     pub(in crate::actor::native::spawn) parent: Option<MailboxId>,
     pub(in crate::actor::native::spawn) carry: u64,
-    pub(in crate::actor::native::spawn) canonical_name: Arc<str>,
+    pub(in crate::actor::native::spawn) canonical_name: ActorPath,
     pub(in crate::actor::native::spawn) subname: String,
 }
 
@@ -84,17 +85,20 @@ impl Spawner {
         //    parent's registered name. Top-level (no parent) is the
         //    depth-1 fixed point: the node is the root of its own
         //    lineage, so it keeps the flat `{NAMESPACE}:{subname}` id.
+        //    The rendered name is proven here, where it is formed: the
+        //    subname and namespace are already segments, so what can still
+        //    fail is a lineage over the scope caps.
         let child_actor = ActorId::instanced(A::NAMESPACE, &subname);
-        let (parent_mailbox, carry, full_name) = parent.map_or_else(
-            || (None, child_actor.0, Arc::from(format!("{}:{}", A::NAMESPACE, subname))),
+        let (parent_mailbox, carry, rendered) = parent.map_or_else(
+            || (None, child_actor.0, format!("{}:{subname}", A::NAMESPACE)),
             |parent| {
-                let carry = fold_lineage(parent.carry(), child_actor);
-                let name: Arc<str> = Arc::from(format!("{}/{}:{}", parent.canonical_name(), A::NAMESPACE, subname));
-                (Some(parent.mailbox()), carry, name)
+                let rendered = format!("{}/{}:{subname}", parent.canonical_name(), A::NAMESPACE);
+                (Some(parent.mailbox()), fold_lineage(parent.carry(), child_actor), rendered)
             },
         );
+        let canonical_name = ActorPath::new(&rendered).map_err(SpawnError::PathInvalid)?;
         let id = MailboxId(with_tag(Tag::Mailbox, carry));
-        Ok(SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name: full_name, subname })
+        Ok(SpawnIdentity { id, parent: parent_mailbox, carry, canonical_name, subname })
     }
 
     /// Legacy eager preflight. Handler staging deliberately uses only
@@ -143,7 +147,7 @@ impl Spawner {
             parent,
             // The child's lineage carry — its descendants fold onto it.
             carry,
-            Arc::clone(&canonical_name),
+            canonical_name.clone(),
             Arc::clone(&self.aborter),
             // Pass the chassis's `Spawner` through so the spawned
             // actor can in turn `ctx.spawn_child` from its own
@@ -269,7 +273,8 @@ impl Spawner {
             None => activation,
         };
         PreparedSpawnCommit::new(
-            PreparedRoute::with_id(id, canonical_name.to_string()),
+            id,
+            canonical_name,
             Box::new(activation),
             PreparedCostCells::new(Arc::clone(self.mailer.cost_table()), costs),
             after_init,

@@ -192,7 +192,7 @@ pub(super) fn finalized_probe(
         parent_reservation,
         deferred,
         staged.identity.id,
-        Arc::clone(&staged.identity.canonical_name),
+        staged.identity.canonical_name.clone(),
         Arc::downgrade(&staged.transport),
     );
 

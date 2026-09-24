@@ -130,7 +130,7 @@ fn ctx_spawn_child_routes_through_handler() {
                     .stage()
                     .expect("spawn_child local preparation must succeed");
                 assert!(
-                    ctx.mailer().registry().lookup(&receipt.canonical_name).is_none(),
+                    ctx.mailer().registry().lookup(receipt.canonical_name.as_str()).is_none(),
                     "staging performs no global route write before handler flush"
                 );
                 let duplicate = ctx

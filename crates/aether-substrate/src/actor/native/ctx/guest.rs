@@ -62,14 +62,14 @@ impl<M: ReplyMode, A: GuestHost> NativeCtx<'_, A, M> {
     ///
     /// # Panics
     ///
-    /// When the binding is untyped, or its canonical name is not an ADR-0166
-    /// path. Every production birth builds a typed binding whose canonical
-    /// name is the path its route was published under, so either is a broken
-    /// invariant, not an answer (ADR-0063).
+    /// When the binding is untyped. Every production birth builds a typed
+    /// binding, so this is a broken invariant, not an answer (ADR-0063).
     #[must_use]
     pub fn path(&self) -> ActorPath {
-        let identity = self.binding.runtime_identity().expect("NativeCtx::path requires a typed production binding");
-        ActorPath::new(identity.canonical_name())
-            .expect("a typed binding's canonical name is the ADR-0166 path its route was published under")
+        self.binding
+            .runtime_identity()
+            .expect("NativeCtx::path requires a typed production binding")
+            .canonical_name()
+            .clone()
     }
 }

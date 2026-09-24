@@ -7,7 +7,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aether_actor::RegistryChanged;
-use aether_data::Kind;
+use aether_data::{ActorPath, Kind};
 use aether_data::{KindDescriptor, MailboxDescriptor, SchemaType};
 
 use crate::actor::native::offload::blocking::DeferredCompletion;
@@ -192,7 +192,8 @@ impl PreparedMail {
 
 /// Private move-only birth committed by the registry owner.
 pub struct PreparedSpawnCommit {
-    pub(crate) route: PreparedRoute,
+    pub(crate) id: MailboxId,
+    pub(crate) canonical_name: ActorPath,
     activation: PreparedActivationGuard,
     pub(crate) costs: PreparedCostCells,
     pub(crate) after_init: Vec<PreparedMail>,
@@ -227,12 +228,13 @@ impl Drop for PreparedActivationGuard {
 
 impl PreparedSpawnCommit {
     pub(crate) fn new(
-        route: PreparedRoute,
+        id: MailboxId,
+        canonical_name: ActorPath,
         activation: Box<dyn PreparedSpawnActivation>,
         costs: PreparedCostCells,
         after_init: Vec<PreparedMail>,
     ) -> Self {
-        Self { route, activation: PreparedActivationGuard(Some(activation)), costs, after_init }
+        Self { id, canonical_name, activation: PreparedActivationGuard(Some(activation)), costs, after_init }
     }
 
     pub fn take_activation(&mut self) -> Box<dyn PreparedSpawnActivation> {
@@ -254,7 +256,7 @@ impl PreparedSpawnCommit {
     /// conflict before [`PreparedSpawnActivation::reserve`], which is where
     /// the retired-name answer would otherwise come from.
     pub(super) fn route_conflict_failure(&self) -> PreparedSpawnFailure {
-        let full_name = self.route.canonical_name.clone();
+        let full_name = self.canonical_name.to_string();
         if self.activation.id_is_retired() {
             PreparedSpawnFailure::SubnameRetired { full_name }
         } else {

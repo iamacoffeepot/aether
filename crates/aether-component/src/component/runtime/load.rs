@@ -34,15 +34,6 @@ fn content_hash_hex(wasm: &[u8]) -> String {
     out
 }
 
-/// A spawn outcome's canonical lineage as an [`ActorPath`]. The registry
-/// accepted the name, so a refusal here means the lineage and the address
-/// grammar disagree; the load reports it rather than handing out an
-/// unaddressable component.
-fn canonical_path(canonical_name: &str) -> Result<ActorPath, String> {
-    ActorPath::new(canonical_name)
-        .map_err(|error| format!("loaded component's lineage {canonical_name:?} is not an actor path: {error}"))
-}
-
 pub(super) struct PreparedLoad {
     capabilities: ComponentCapabilities,
     dependencies: Vec<Dependency>,
@@ -62,7 +53,7 @@ pub(super) struct PreparedLoad {
 #[derive(Clone)]
 enum LoadPlacement {
     ComponentHost,
-    Under { parent: MailboxId, canonical_name: Arc<str> },
+    Under { parent: MailboxId, canonical_name: ActorPath },
 }
 
 impl PreparedLoad {
@@ -179,10 +170,17 @@ impl ComponentHostCapabilityState {
     }
 
     pub fn begin_load_under<A>(&mut self, ctx: &mut NativeCtx<'_, A, Manual>, payload: LoadComponentUnder) {
+        // ADR-0230 §1: the parent must be `Live`. A `Starting` parent resolves
+        // as an address but does not prove, so a child is never staged beneath
+        // an unborn parent; the proven route names its own canonical path.
         let resolved = ActorPath::new(&payload.parent)
             .map_err(|error| error.to_string())
-            .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()));
-        let parent = match resolved {
+            .and_then(|parent| self.registry.resolve_address(&parent).map_err(|error| error.to_string()))
+            .and_then(|resolved| match ctx.resolve_live(resolved.mailbox_id) {
+                Ok(reference) => Ok((resolved.mailbox_id, ctx.actor_path(reference))),
+                Err(_) => Err(format!("{} is not live", resolved.canonical_path)),
+            });
+        let (parent, canonical_name) = match resolved {
             Ok(parent) => parent,
             Err(error) => {
                 ctx.reply(&LoadResult::Err {
@@ -191,11 +189,7 @@ impl ComponentHostCapabilityState {
                 return;
             }
         };
-        self.begin_load_at(
-            ctx,
-            payload.load,
-            LoadPlacement::Under { parent: parent.mailbox_id, canonical_name: Arc::from(parent.canonical_path) },
-        );
+        self.begin_load_at(ctx, payload.load, LoadPlacement::Under { parent, canonical_name });
     }
 
     fn begin_load_at<A>(
@@ -561,17 +555,12 @@ impl ComponentHostCapabilityState {
         if let Some(hash) = &boot_hash {
             self.settle_boot_request(ctx, hash, Some(child.erase()));
         }
-        let path = canonical_path(&done.output().canonical_name);
-        match path {
-            // ADR-0230 §3: the loaded trampoline answers the requester itself,
-            // so the reply's stamped sender is the reference the requester
-            // keeps; the host hands it the owed reply rather than replying.
-            Ok(path) => {
-                let capabilities = load.capabilities.clone();
-                done.hand_off(ctx, &child, &LoadDelivered { path, capabilities });
-            }
-            Err(error) => done.resolve_with(ctx, move |_, _| LoadResult::Err { error }),
-        }
+        // ADR-0230 §3: the loaded trampoline answers the requester itself, so
+        // the reply's stamped sender is the reference the requester keeps; the
+        // host hands it the owed reply rather than replying.
+        let path = done.output().canonical_name.clone();
+        let capabilities = load.capabilities.clone();
+        done.hand_off(ctx, &child, &LoadDelivered { path, capabilities });
     }
 
     /// Record a module's Live boot under its content hash, indexing its

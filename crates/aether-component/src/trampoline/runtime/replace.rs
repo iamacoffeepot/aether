@@ -9,7 +9,9 @@ use aether_data::ActorPath;
 use aether_data::canonical::kind_id_from_parts;
 use aether_kinds::{ComponentCapabilities, ReplaceComponent, ReplaceResult};
 use aether_substrate::actor::native::spawn::Subname;
-use aether_substrate::actor::native::{NativeCtx, RegistryBatch, RegistryBatchResult, SpawnOutcome, TaskDone};
+use aether_substrate::actor::native::{
+    NativeCtx, RegistryBatch, RegistryBatchResult, SpawnError, SpawnOutcome, TaskDone,
+};
 use aether_substrate::actor::wasm::asset_manifest;
 use aether_substrate::actor::wasm::component::{Component, ComponentCtx, PendingSpawn, StateBundle};
 use aether_substrate::actor::wasm::kind_manifest;
@@ -100,10 +102,12 @@ impl WasmTrampolineState {
             // it indexes its own asset load window from the same content.
             wasm_bytes: Arc::clone(&self.wasm_bytes),
         };
-        if let Err(e) = ctx
-            .spawn_child_scoped::<WasmTrampoline>(
+        // The parent name is the wasm cluster's rendering, possibly a
+        // not-yet-published inline alias, so it is proven here at receipt.
+        let staged = ActorPath::new(&pending.parent_name).map_err(SpawnError::PathInvalid).and_then(|parent_name| {
+            ctx.spawn_child_scoped::<WasmTrampoline>(
                 pending.parent,
-                Arc::from(pending.parent_name.as_str()),
+                parent_name,
                 Subname::Named(&pending.subname),
                 config,
                 (),
@@ -112,7 +116,8 @@ impl WasmTrampolineState {
                 parent_name: pending.parent_name.clone(),
                 subname: pending.subname.clone(),
             })
-        {
+        });
+        if let Err(e) = staged {
             tracing::warn!(
                 target: "aether_component",
                 parent = %pending.parent_name,

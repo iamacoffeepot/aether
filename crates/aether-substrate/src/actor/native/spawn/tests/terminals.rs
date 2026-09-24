@@ -4,7 +4,7 @@
 use std::sync::Arc;
 
 use aether_actor::{ActorRef, Instanced};
-use aether_data::Kind as _;
+use aether_data::{ActorPath, Kind as _};
 
 use crate::actor::native::NativeActor;
 use crate::actor::native::spawn::{HandlerSpawnBuilder, SpawnBuilder, SpawnError, Subname};
@@ -55,7 +55,7 @@ fn spawn_terminals_stay_split<'ctx, A: Instanced + NativeActor>(
     let _: &'static str = staged_only_named.finish_with_name();
 
     let _: EagerTerminal<'ctx, A, ActorRef<A>> = SpawnBuilder::finish;
-    let _: EagerTerminal<'ctx, A, (ActorRef<A>, String)> = SpawnBuilder::finish_with_name;
+    let _: EagerTerminal<'ctx, A, (ActorRef<A>, ActorPath)> = SpawnBuilder::finish_with_name;
 }
 
 #[test]
