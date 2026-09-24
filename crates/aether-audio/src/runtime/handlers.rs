@@ -6,7 +6,7 @@ use super::sample::SampleBank;
 use super::{
     AudioCapabilityState, AudioEvent, AudioLoadContext, BankAssemblyContext, BankAssemblyOutput, DecodeOutput,
     FsCapability, Manual, NativeCtx, ReadResult, SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS, TaskDone,
-    TrackDecodeContext, sender_mailbox_id,
+    TrackDecodeContext, TrackLoad,
 };
 // Keep the runtime trampoline's existing `Read` re-export live after the
 // operation sites move from raw request construction to `FsMailboxExt`.
@@ -25,7 +25,7 @@ impl AudioCapabilityState {
             return;
         };
         let ev = AudioEvent::NoteOn {
-            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
+            sender: ctx.sender(),
             pitch: mail.pitch,
             velocity: mail.velocity,
             instrument_id: mail.instrument_id,
@@ -43,11 +43,7 @@ impl AudioCapabilityState {
         let Some(s) = self.sender.as_ref() else {
             return;
         };
-        let ev = AudioEvent::NoteOff {
-            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
-            pitch: mail.pitch,
-            instrument_id: mail.instrument_id,
-        };
+        let ev = AudioEvent::NoteOff { sender: ctx.sender(), pitch: mail.pitch, instrument_id: mail.instrument_id };
         if s.push(ev).is_err() {
             tracing::warn!(
                 target: "aether_substrate::audio",
@@ -109,8 +105,7 @@ impl AudioCapabilityState {
                 error: "audio pipeline not initialised on this desktop substrate".to_owned(),
             };
         };
-        let sender_mailbox = sender_mailbox_id(ctx.reply_target());
-        let _ = s.push(AudioEvent::SetSenderGain { sender_mailbox, gain: applied });
+        let _ = s.push(AudioEvent::SetSenderGain { sender: ctx.sender(), gain: applied });
         tracing::info!(
             target: "aether_substrate::audio",
             requested = mail.gain,
@@ -149,7 +144,7 @@ impl AudioCapabilityState {
         // fits u32, so the accepted count never truncates.
         #[allow(clippy::cast_possible_truncation)]
         let accepted = mail.events.len() as u32;
-        let ev = AudioEvent::Schedule { sender_mailbox: sender_mailbox_id(ctx.reply_target()), events: mail.events };
+        let ev = AudioEvent::Schedule { sender: ctx.sender(), events: mail.events };
         if sender.push(ev).is_err() {
             return ScheduleResult::Err { error: "audio event queue full — schedule dropped".to_owned() };
         }
@@ -169,10 +164,26 @@ impl AudioCapabilityState {
             return;
         }
 
-        let source = ctx.reply_target();
-        let sender_mailbox = sender_mailbox_id(source);
-        let context =
-            AudioLoadContext::Track { source, sender_mailbox, lane: mail.lane, gain: mail.gain, looping: mail.looping };
+        let Some(load_id) = self.track_load_ids.allocate() else {
+            ctx.reply(&PlayTrackResult::Err {
+                namespace: mail.namespace,
+                path: mail.path,
+                lane: mail.lane,
+                error: "this session has run out of track-load ids".to_owned(),
+            });
+            return;
+        };
+        self.track_loads.insert(
+            load_id,
+            TrackLoad {
+                source: ctx.reply_target(),
+                sender: ctx.sender(),
+                lane: mail.lane,
+                gain: mail.gain,
+                looping: mail.looping,
+            },
+        );
+        let context = AudioLoadContext::Track { load_id };
 
         // Forward the read to the single fs resolver (ADR-0041) — the
         // reply (`ReadResult`) routes back to this cap's own mailbox,
@@ -192,8 +203,11 @@ impl AudioCapabilityState {
         };
         match mail {
             ReadResult::Ok { addr, bytes } => match context {
-                track @ AudioLoadContext::Track { .. } => {
-                    self.start_track_decode(ctx, track, addr.namespace, addr.path, bytes);
+                AudioLoadContext::Track { load_id } => {
+                    let Some(load) = self.track_loads.remove(&load_id) else {
+                        return;
+                    };
+                    self.start_track_decode(ctx, load, addr.namespace, addr.path, bytes);
                 }
                 AudioLoadContext::Instrument { source } => {
                     self.on_sfz_loaded(ctx, source, addr.namespace, addr.path, &bytes);
@@ -206,8 +220,14 @@ impl AudioCapabilityState {
                 let reason = format!("file read failed: {error:?}");
                 let NamespaceAddr { namespace, path } = addr;
                 match context {
-                    AudioLoadContext::Track { source, lane, .. } => {
-                        ctx.reply_to(source, &PlayTrackResult::Err { namespace, path, lane, error: reason });
+                    AudioLoadContext::Track { load_id } => {
+                        let Some(load) = self.track_loads.remove(&load_id) else {
+                            return;
+                        };
+                        ctx.reply_to(
+                            load.source,
+                            &PlayTrackResult::Err { namespace, path, lane: load.lane, error: reason },
+                        );
                     }
                     AudioLoadContext::Instrument { source } => {
                         ctx.reply_to(source, &LoadInstrumentResult::Err { namespace, path, error: reason });
@@ -232,7 +252,7 @@ impl AudioCapabilityState {
                 let cx = done.context();
                 if let Some(sender) = self.sender.as_ref() {
                     let event = AudioEvent::TrackStart {
-                        sender_mailbox: cx.sender_mailbox,
+                        sender: cx.sender,
                         lane: cx.lane.clone(),
                         namespace: cx.namespace.clone(),
                         path: cx.path.clone(),
@@ -271,12 +291,8 @@ impl AudioCapabilityState {
         let Some(sender) = self.sender.as_ref() else {
             return;
         };
-        let event = AudioEvent::TrackStop {
-            sender_mailbox: sender_mailbox_id(ctx.reply_target()),
-            lane: mail.lane,
-            namespace: mail.namespace,
-            path: mail.path,
-        };
+        let event =
+            AudioEvent::TrackStop { sender: ctx.sender(), lane: mail.lane, namespace: mail.namespace, path: mail.path };
         if sender.push(event).is_err() {
             tracing::warn!(
                 target: "aether_substrate::audio",

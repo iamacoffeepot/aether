@@ -1,4 +1,5 @@
 use super::*;
+use aether_actor::ErasedActorRef;
 
 // ADR-0103 track lane. The synth-side tests drive `Synth` directly
 // (the same pattern as the note tests); the cap-handler tests drive
@@ -16,7 +17,7 @@ fn ramp_pcm(len: usize) -> Arc<[f32]> {
 
 fn track_start(pcm: Arc<[f32]>, looping: bool) -> AudioEvent {
     AudioEvent::TrackStart {
-        sender_mailbox: MailboxId(1),
+        sender: None,
         lane: None,
         namespace: "assets".to_owned(),
         path: "track.wav".to_owned(),
@@ -69,7 +70,7 @@ fn stop_track_fades_then_retires() {
     // 48kHz): the track fades out and retires.
     sender
         .push(AudioEvent::TrackStop {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             lane: None,
             namespace: "assets".to_owned(),
             path: "track.wav".to_owned(),
@@ -85,16 +86,8 @@ fn track_does_not_count_against_max_voices() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     // Saturate the voice pool.
-    for i in 0..(MAX_VOICES as u64 + 8) {
-        sender
-            .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(i + 1),
-                pitch: 60,
-                velocity: 100,
-                instrument_id: 0,
-                pan: 0,
-            })
-            .unwrap();
+    for _ in 0..MAX_VOICES + 8 {
+        sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: 0, pan: 0 }).unwrap();
     }
     // A track plays alongside without being stolen or counted.
     sender.push(track_start(ramp_pcm(4_800), true)).unwrap();
@@ -119,9 +112,9 @@ fn replay_same_key_restarts_single_track() {
 /// A `TrackStart` at an explicit sender + lane over the shared
 /// `(namespace, path)` — the key components the collision fix
 /// folds together.
-fn keyed_track_start(sender_mailbox: MailboxId, lane: Option<&str>, pcm: Arc<[f32]>) -> AudioEvent {
+fn keyed_track_start(sender: Option<ErasedActorRef>, lane: Option<&str>, pcm: Arc<[f32]>) -> AudioEvent {
     AudioEvent::TrackStart {
-        sender_mailbox,
+        sender,
         lane: lane.map(str::to_owned),
         namespace: "assets".to_owned(),
         path: "track.wav".to_owned(),
@@ -135,17 +128,17 @@ fn keyed_track_start(sender_mailbox: MailboxId, lane: Option<&str>, pcm: Arc<[f3
 fn distinct_lanes_under_one_sender_play_independently() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
-    // Two senders that collapse to the same MailboxId(0) (MCP
-    // sessions) play the same path under distinct lanes.
-    sender.push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(4_800))).unwrap();
-    sender.push(keyed_track_start(MailboxId(0), Some("b"), ramp_pcm(4_800))).unwrap();
+    // Two callers that share the `None` sender key (session mail)
+    // play the same path under distinct lanes.
+    sender.push(keyed_track_start(None, Some("a"), ramp_pcm(4_800))).unwrap();
+    sender.push(keyed_track_start(None, Some("b"), ramp_pcm(4_800))).unwrap();
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);
     assert_eq!(synth.track_count(), 2, "distinct lanes must not alias to one track");
     // Stopping lane a leaves lane b sounding.
     sender
         .push(AudioEvent::TrackStop {
-            sender_mailbox: MailboxId(0),
+            sender: None,
             lane: Some("a".to_owned()),
             namespace: "assets".to_owned(),
             path: "track.wav".to_owned(),
@@ -161,7 +154,7 @@ fn same_sender_and_lane_replays_single_track() {
     let (sender, queue) = new_event_channel();
     let mut synth = Synth::new(queue, TEST_RATE);
     for _ in 0..3 {
-        sender.push(keyed_track_start(MailboxId(0), Some("a"), ramp_pcm(256))).unwrap();
+        sender.push(keyed_track_start(None, Some("a"), ramp_pcm(256))).unwrap();
     }
     let mut buf = vec![0.0f32; 64];
     synth.fill(&mut buf, 1);

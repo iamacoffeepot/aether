@@ -17,7 +17,6 @@
 use std::sync::mpsc;
 use std::thread::JoinHandle;
 
-use aether_data::{MailboxId, Source, SourceAddr};
 use aether_substrate::session_ids::SessionIds;
 
 use aether_actor::runtime;
@@ -76,30 +75,12 @@ pub use aether_substrate::chassis::error::BootError;
 
 pub use self::event::AudioEvent;
 pub use self::instrument::builtin_id_ceiling;
-pub use self::load::AudioLoadContext;
+pub use self::load::{AudioLoadContext, TrackLoad};
 pub use self::sample::{BankAssemblyContext, BankAssemblyOutput};
 pub use self::schedule::{SCHEDULE_MAX_EVENTS, SCHEDULE_MAX_MILLIS};
 pub use self::track::{DecodeOutput, TrackDecodeContext};
 use self::worker::spawn_audio_worker;
 pub use aether_fs::{FsCapability, Read, ReadResult};
-
-/// Extract the sender's mailbox id for voice-table keying. Component
-/// senders come through as `EngineMailbox { mailbox_id }`; Claude
-/// sessions and substrate-internal pushes (which shouldn't reach the
-/// audio cap in practice) collapse to id `0`, sharing one voice
-/// slot per (instrument, pitch).
-/// The track/voice key's sender component, read from the mail
-/// envelope's reply target. Only an `EngineMailbox` source carries a
-/// distinct id; every other source — MCP sessions, substrate-internal
-/// mail — collapses to `MailboxId(0)`. Callers that share this id
-/// disambiguate their tracks with the payload's `lane` field rather
-/// than the sender (ADR-0103 keying).
-pub fn sender_mailbox_id(sender: Source) -> MailboxId {
-    match sender.addr {
-        SourceAddr::EngineMailbox { mailbox_id, .. } => mailbox_id,
-        _ => MailboxId(0),
-    }
-}
 
 /// `aether.audio` runtime state (ADR-0039 / ADR-0103 identity/runtime split).
 /// Owns the producer side of the synth event queue plus the cpal worker
@@ -120,6 +101,11 @@ pub struct AudioCapabilityState {
     pub assemblies: HashMap<u64, BankAssembly>,
     /// Monotonic source of [`BankAssembly`] keys.
     pub assembly_ids: SessionIds<u64>,
+    /// `play_track` loads whose WAV read is in flight, keyed by a minted
+    /// load id. Each entry lives exactly as long as its read.
+    pub track_loads: HashMap<u64, TrackLoad>,
+    /// Monotonic source of [`TrackLoad`] keys.
+    pub track_load_ids: SessionIds<u64>,
     /// Source of the instrument ids loaded banks are assigned — starts at
     /// `BUILTINS.len()` and counts up in load order (ADR-0103 §4),
     /// matching the synth's append-only bank table. The synth addresses a
@@ -138,6 +124,8 @@ impl AudioCapabilityState {
             sample_rate: None,
             assemblies: HashMap::new(),
             assembly_ids: SessionIds::new(),
+            track_loads: HashMap::new(),
+            track_load_ids: SessionIds::new(),
             instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
             thread: None,
             shutdown: None,
@@ -187,6 +175,8 @@ impl NativeActor for AudioCapability {
                 sample_rate: Some(sample_rate as f32),
                 assemblies: HashMap::new(),
                 assembly_ids: SessionIds::new(),
+                track_loads: HashMap::new(),
+                track_load_ids: SessionIds::new(),
                 instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
                 thread: Some(thread),
                 shutdown: Some(shutdown),

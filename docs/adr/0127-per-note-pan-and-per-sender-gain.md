@@ -2,6 +2,7 @@
 
 - **Status:** Accepted (shipped — per-note pan and per-sender gain in `crates/aether-audio/src/runtime/voice.rs` and `crates/aether-audio/src/runtime/synth.rs`)
 - **Date:** 2026-07-03
+- **Amended:** 2026-09-23 — the sender key is the proven envelope sender (`Option<ErasedActorRef>`, ADR-0230), and every local component is its own sender; see issue #6522.
 
 ## Context
 
@@ -25,7 +26,7 @@ The field is required on the wire. The schema codec is strict — a JSON `note_o
 
 ### Per-sender gain
 
-A new control kind `aether.audio.set_sender_gain { gain: f32 }`, replying `aether.audio.set_sender_gain_result` (`Ok { applied_gain }` / `Err { error }`), sets a linear level trim keyed by the envelope sender — the same `sender_mailbox` component that keys voices. The synth holds a `HashMap<MailboxId, f32>` (absent = unity `1.0`) and multiplies each voice's contribution by its sender's gain at mix time. The lookup is resolved once per `fill` block per voice, not per sample, so the gain is live — a `set_sender_gain` ducks or lifts a sender's already-sounding voices, matching `set_master_gain`'s live semantics — without a hash probe in the hot loop.
+A new control kind `aether.audio.set_sender_gain { gain: f32 }`, replying `aether.audio.set_sender_gain_result` (`Ok { applied_gain }` / `Err { error }`), sets a linear level trim keyed by the proven envelope sender — the same sender key that keys voices. The synth holds a `HashMap<Option<ErasedActorRef>, f32>` (absent = unity `1.0`) and multiplies each voice's contribution by its sender's gain at mix time. The lookup is resolved once per `fill` block per voice, not per sample, so the gain is live — a `set_sender_gain` ducks or lifts a sender's already-sounding voices, matching `set_master_gain`'s live semantics — without a hash probe in the hot loop.
 
 `gain` clamps to `0.0..=4.0`. Values above unity are allowed on purpose: lifting the melody above the accompaniment is the motivating use, and the mixer's existing `tanh` soft clip catches any resulting overshoot. This is a wider range than `set_master_gain`'s `0.0..=1.0` clamp by design — master gain is the final limiter into the device, per-sender gain is a relative balance trim behind it.
 
@@ -44,7 +45,7 @@ This amends ADR-0039 §3: the substrate now applies a per-sender level trim and 
 - A score gains real balance and width: the melody sits above the accompaniment via `set_sender_gain`, and voices spread across the image via per-note `pan`, both without perturbing timbre the way velocity does.
 - The wire change is a required-field add on a cast kind plus one new control kind. A `note_on` / scheduled `On` that omits `pan` fails loudly at encode; every in-tree consumer recompiles against the kind crate, and `describe_kinds` surfaces the new field and kind to MCP callers automatically.
 - The synth grows a per-sender gain table bounded by the number of live senders, and the render loop grows a per-channel split (two accumulators, a per-voice pan-gain pair, a per-block gain resolve). No new locking — the table and the pan state are callback-owned like the voice pool.
-- Mono sinks are unaffected (pan collapses back to mono). Per-sender gain sent from an MCP session collapses to `MailboxId(0)` — all MCP-originated notes share one sender entry, so from MCP `set_sender_gain` is effectively a single extra global knob; real per-sender balance needs distinct component senders (a score-player per line), which is the intended shape.
+- Mono sinks are unaffected (pan collapses back to mono). Per-sender gain sent from an MCP session shares one sender entry — all MCP-originated notes arrive from the RPC server and share its key, so from MCP `set_sender_gain` is effectively a single extra global knob; real per-sender balance needs distinct component senders (a score-player per line), which is the intended shape.
 - Tracks and sampled instruments stay mono point-sources; pan places them but cannot restore stereo width until ADR-0103's stereo lane is un-parked. The `tanh` soft clip now runs per channel rather than once per frame.
 
 ## Alternatives considered

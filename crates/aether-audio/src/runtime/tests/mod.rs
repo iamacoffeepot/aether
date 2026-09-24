@@ -16,12 +16,12 @@ use super::voice::{
     MAX_VOICES, OscVoice, PartialBankVoice, STEAL_RELEASE_SECS, VoiceKernel, build_builtin_kernel, voice_seed,
 };
 use super::*;
-use aether_data::{MailId, MailboxId, SessionToken, Source, SourceAddr, Uuid};
+use aether_data::{MailId, SessionToken, Source, SourceAddr, Uuid};
 use aether_fs::{FsError, NamespaceAddr};
 use aether_substrate::actor::native::binding::NativeBinding;
 use aether_substrate::testing::{
     assert_next_send_kind, decode_session_reply, decode_session_reply_with_session, drive_task_completion,
-    fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, unrouted_binding,
+    fresh_substrate, fs_reply_source, registered_binding, session_sender, test_mailer_and_rx, unrouted_binding,
 };
 use aether_substrate::{EgressEvent, Erased, HubOutbound, InboxHandler, Mailer, OwnedDispatch, Registry};
 use crossbeam_queue::ArrayQueue;
@@ -44,6 +44,8 @@ fn live_cap() -> (AudioCapabilityState, Arc<ArrayQueue<AudioEvent>>) {
         sample_rate: Some(TEST_RATE),
         assemblies: HashMap::new(),
         assembly_ids: SessionIds::new(),
+        track_loads: HashMap::new(),
+        track_load_ids: SessionIds::new(),
         instrument_ids: SessionIds::range(builtin_id_ceiling(), u8::MAX),
         thread: None,
         shutdown: None,
