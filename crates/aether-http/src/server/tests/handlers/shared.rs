@@ -32,7 +32,7 @@ macro_rules! shared_routed_handler {
             }
 
             fn wire(_state: &mut $state, ctx: &mut NativeCtx<'_>) {
-                $(ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+                $(ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
                     prefix: $prefix.to_string(),
                     method: $method,
                     kind: <$kind as Kind>::ID,
