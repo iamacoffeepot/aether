@@ -369,6 +369,10 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
 A test that needs a proven peer (a subscriber, a sender, a shard) registers
 it with `testing::registered_ref`, which returns the peer's reference, and
 `testing::registered_binding` returns the binding beside its own reference.
+A test that needs a local component as the inbound's sender takes the
+`Source`, and the chain root when it needs one, from a mail its
+`registered_binding` binding actually sent, and writes a root that is only a
+token as `MailId { correlation_id: n, ..MailId::NONE }`.
 
 Three tests anchor the deferred-reply flow:
 `load_font_forwards_read_with_context` drives `on_load_font` and asserts the
