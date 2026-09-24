@@ -37,7 +37,7 @@ use aether_substrate::runtime::lifecycle::{FatalAbortRecord, PanicAborter, Recor
 use aether_substrate::testing::{TestChassis, bare_substrate, boot_authority, unrouted_binding};
 use aether_substrate::{
     Addressable, BootError, Builder, Dispatch, Erased, Manual, NativeActor, NativeCtx, NativeInitCtx, PassiveChassis,
-    Registry, mail::MailboxId,
+    Registry,
 };
 use std::thread;
 
@@ -112,7 +112,7 @@ fn push_envelope<K: Kind>(registry: &Registry, recipient: ErasedActorRef, payloa
         None,
         Nanos(0),
         0,
-        MailboxId(0),
+        recipient,
     ));
 }
 
@@ -206,7 +206,7 @@ fn seize_and_run_dispatches_seed_in_place() {
         // The #1135 contract: a direct-dispatched seed has residence ≈ 0.
         Nanos(0),
         0,
-        MailboxId(0),
+        id,
     );
     slot.seize_and_run(seed, BatchBudget::standard());
 
@@ -1184,7 +1184,7 @@ fn push_envelope_replying_to<K: Kind>(registry: &Registry, recipient: ErasedActo
         None,
         Nanos(0),
         0,
-        MailboxId(0),
+        recipient,
     ));
 }
 
