@@ -247,7 +247,6 @@ mod tests {
                 next_engine_seq: 1,
                 heartbeat: None,
                 connect_budget: None,
-                spawn_attempts: 1,
                 fleet_store_root: root.join("engines"),
                 recently_died: VecDeque::new(),
                 store,
@@ -385,7 +384,7 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
-    /// Owner rejection is distinct from an init/refork failure: it consumes
+    /// Owner rejection is distinct from an init failure: it consumes
     /// the pending record, never exposes a live row, and records one
     /// id-bearing `SpawnFailed` result for the caller.
     #[test]
@@ -441,8 +440,7 @@ mod tests {
     /// a cap that forked it straight back would make `terminate_substrate`
     /// unable to do the one thing it exists for. `SpawnFailed` is
     /// excluded for a different reason — no supervised engine ever
-    /// existed to recover — and `on_spawn`'s own bounded re-fork owns
-    /// that retry, so a restart here would double it.
+    /// existed to recover.
     #[test]
     fn restart_supervision_acts_on_crash_and_eviction_only() {
         let crashed = DeathReason::Crashed { detail: "connection closed".to_owned() };

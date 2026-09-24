@@ -10,7 +10,7 @@ Before opening or updating an implementation PR, run:
 
 ```sh
 cargo fmt -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 In a multi-worktree checkout with `sccache` installed, run those commands
@@ -19,13 +19,15 @@ sharing build outputs:
 
 ```sh
 scripts/cargo-cached.sh fmt -- --check
-scripts/cargo-cached.sh clippy --workspace --all-targets -- -D warnings
+scripts/cargo-cached.sh clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 Both spell `--workspace`. The root manifest's `default-members` is the engine —
 a bare `cargo build` or `cargo clippy` skips `xtask` and the wasm test
 fixtures — while the CI clippy gate compiles every member, so an unflagged
-local run is quiet about crates the gate still judges.
+local run is quiet about crates the gate still judges. Both also spell
+`--all-features` to match the gate, which lints every feature so that code
+behind a non-default feature is linted too.
 
 `scripts/cargo-cached.sh` always uses the current worktree's `target/`
 directory and disables Cargo incremental compilation. It deliberately
@@ -264,7 +266,7 @@ Choose the smallest command that crosses the changed boundary:
 | One crate | `cargo test -p <crate>` or `cargo check -p <crate>` |
 | Added-suppression diff | `python3 scripts/check-suppressions.py` |
 | Formatting | `cargo fmt -- --check` |
-| Lints | `cargo clippy --workspace --all-targets -- -D warnings` |
+| Lints | `cargo clippy --workspace --all-targets --all-features -- -D warnings` |
 | Doc comments and intra-doc links | `cargo doc --workspace --no-deps --document-private-items --all-features --keep-going` |
 | Wasm/component boundary | the owning fixture/build command from CI |
 | SubstrateHarness behavior | focused integration test target |

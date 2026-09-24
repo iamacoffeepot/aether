@@ -71,12 +71,6 @@ pub use config::HeartbeatParams;
 #[cfg(not(target_family = "wasm"))]
 pub use config::{FleetProxyConfig, ProxyTarget};
 
-// The engines cap (`aether.fleet`) classifies a failed `spawn_child`
-// with this to decide whether to re-fork (a boot-error child-exited
-// death) or report a dead spawn. Native-only — it names
-// `SpawnError` / `BootError`.
-#[cfg(not(target_family = "wasm"))]
-pub use connect::is_reforkable_spawn_failure;
 // A failed spawn's detail names the startup exit it saw, and a fork whose
 // stderr capture cannot start is torn down the way a failed proxy init
 // tears down its child. Only the engines cap reads them; `proxy` is a
