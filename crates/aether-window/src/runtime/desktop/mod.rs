@@ -1017,8 +1017,8 @@ mod tests {
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::registry::{InboxHandler, MailDispatch, OwnedDispatch, noop_handler};
-    use aether_substrate::mail::{MailId, Source, SourceAddr};
-    use aether_substrate::testing::{boot_authority, registered_binding, unrouted_binding};
+    use aether_substrate::mail::{MailId, Source};
+    use aether_substrate::testing::{boot_authority, registered_binding, registered_ref, unrouted_binding};
 
     use super::*;
     // The subscription request kinds moved to the `WindowSubscriptions` set,
@@ -1330,8 +1330,8 @@ mod tests {
     fn direct_publication_preserves_source_and_causal_lineage() {
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let inbox = registry.register_inbox(
-            &boot_authority(),
+        let subscriber = registered_ref(
+            &registry,
             "test.window.subscriber",
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();
@@ -1339,13 +1339,11 @@ mod tests {
             }) as Arc<dyn InboxHandler>,
         );
         let mailer = Arc::new(Mailer::new(Arc::clone(&registry)));
-        let binding = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
-        let manager = registry.lookup("test.window.manager").expect("test setup: the manager is registered");
+        let (binding, manager) = registered_binding(&registry, &mailer, "test.window.manager", noop_handler());
         let mut state = test_state();
         let root = MailId::new(MailboxId(0x100), 7);
         let parent = MailId::new(MailboxId(0x200), 9);
         let mut ctx = NativeCtx::new(&binding, Source::NONE, parent, root);
-        let subscriber = ctx.resolve_live(inbox).expect("the registered subscriber proves");
         state.subscribers.subscribe(&mut ctx, crate::WindowSelector::All, Key::ID, subscriber);
 
         state.publish(&mut ctx, WindowId(5), &Key { window: WindowId(5), code: 41 });
@@ -1354,7 +1352,7 @@ mod tests {
         let dispatch = rx.recv().expect("direct subscriber receives the event");
         assert_eq!(dispatch.root, root);
         assert_eq!(dispatch.parent_mail, Some(parent));
-        assert_eq!(dispatch.sender.addr, SourceAddr::Component(manager));
+        assert_eq!(NativeCtx::new(&binding, dispatch.sender, MailId::NONE, MailId::NONE).sender(), Some(manager));
         assert_eq!(Key::decode_from_bytes(dispatch.payload.bytes()), Some(Key { window: WindowId(5), code: 41 }),);
     }
 
@@ -1403,8 +1401,8 @@ mod tests {
 
         let registry = Arc::new(Registry::new());
         let (tx, rx) = mpsc::channel();
-        let inbox = registry.register_inbox(
-            &boot_authority(),
+        let subscriber = registered_ref(
+            &registry,
             "test.window.pixel-space",
             Arc::new(move |dispatch: OwnedDispatch| {
                 dispatch.discharge();
@@ -1413,7 +1411,6 @@ mod tests {
         );
         let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let subscriber = ctx.resolve_live(inbox).expect("the registered subscriber proves");
 
         let mut state = test_state();
         let id = WindowId(1);

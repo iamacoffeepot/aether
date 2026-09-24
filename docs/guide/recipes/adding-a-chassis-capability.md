@@ -366,6 +366,10 @@ native cap has nothing to cross-compile.) Text's in-crate pattern, in its
    turn), and assert what it *replied* with
    `decode_session_reply::<R>(&rx)`.
 
+A test that needs a proven peer (a subscriber, a sender, a shard) registers
+it with `testing::registered_ref`, which returns the peer's reference, and
+`testing::registered_binding` returns the binding beside its own reference.
+
 Three tests anchor the deferred-reply flow:
 `load_font_forwards_read_with_context` drives `on_load_font` and asserts the
 forwarded `aether.fs.read` has a nonzero correlation id;

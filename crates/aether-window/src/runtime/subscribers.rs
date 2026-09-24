@@ -185,26 +185,24 @@ mod tests {
     use aether_substrate::Registry;
     use aether_substrate::actor::native::binding::NativeBinding;
     use aether_substrate::mail::mailer::Mailer;
-    use aether_substrate::mail::registry::MailDispatch;
+    use aether_substrate::mail::registry::noop_handler;
     use aether_substrate::mail::{MailId, Source, SourceAddr};
-    use aether_substrate::testing::{boot_authority, unrouted_binding};
+    use aether_substrate::testing::{registered_ref, unrouted_binding};
 
     use super::*;
 
-    fn fixture() -> (WindowSubscribers, Arc<NativeBinding>, Arc<Mailer>) {
-        let mailer = Arc::new(Mailer::new(Arc::new(Registry::new())));
-        let binding = unrouted_binding(&mailer);
+    fn fixture() -> (WindowSubscribers, Arc<NativeBinding>, Arc<Registry>) {
+        let registry = Arc::new(Registry::new());
+        let binding = unrouted_binding(&Arc::new(Mailer::new(Arc::clone(&registry))));
 
-        (WindowSubscribers::new(), binding, mailer)
+        (WindowSubscribers::new(), binding, registry)
     }
 
-    /// Register a named inline mailbox and prove it through the ctx verb.
+    /// Register a named test-local mailbox and return its proven reference.
     /// `aether-window` cannot construct an `ErasedActorRef` at all, so this is
     /// the only way a row reaches the table — the gate working.
-    fn proven(mailer: &Mailer, ctx: &NativeCtx<'_>, name: &str) -> ErasedActorRef {
-        let position = mailer.registry().register_inline(&boot_authority(), name, Arc::new(|_: MailDispatch<'_>| {}));
-
-        ctx.resolve_live(position).expect("a freshly registered inline mailbox proves")
+    fn proven(registry: &Registry, name: &str) -> ErasedActorRef {
+        registered_ref(registry, name, noop_handler())
     }
 
     /// The reflexive forms read their subscriber off the host-stamped
@@ -228,9 +226,9 @@ mod tests {
 
     #[test]
     fn one_selector_routes_only_the_selected_window() {
-        let (mut subscribers, binding, mailer) = fixture();
+        let (mut subscribers, binding, registry) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let subscriber = proven(&mailer, &ctx, "test.subscribers.one");
+        let subscriber = proven(&registry, "test.subscribers.one");
 
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(1)), Key::ID, subscriber);
 
@@ -240,9 +238,9 @@ mod tests {
 
     #[test]
     fn all_selector_is_prospective() {
-        let (mut subscribers, binding, mailer) = fixture();
+        let (mut subscribers, binding, registry) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let subscriber = proven(&mailer, &ctx, "test.subscribers.all");
+        let subscriber = proven(&registry, "test.subscribers.all");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, MouseMove::ID, subscriber);
 
@@ -252,10 +250,10 @@ mod tests {
 
     #[test]
     fn all_and_one_union_deduplicates_the_same_mailbox() {
-        let (mut subscribers, binding, mailer) = fixture();
+        let (mut subscribers, binding, registry) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let subscriber = proven(&mailer, &ctx, "test.subscribers.union");
-        let other = proven(&mailer, &ctx, "test.subscribers.union.other");
+        let subscriber = proven(&registry, "test.subscribers.union");
+        let other = proven(&registry, "test.subscribers.union.other");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, subscriber);
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(7)), Key::ID, subscriber);
@@ -266,10 +264,10 @@ mod tests {
 
     #[test]
     fn unsubscribe_and_bulk_cleanup_preserve_other_routes() {
-        let (mut subscribers, binding, mailer) = fixture();
+        let (mut subscribers, binding, registry) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let subscriber = proven(&mailer, &ctx, "test.subscribers.cleanup");
-        let other = proven(&mailer, &ctx, "test.subscribers.cleanup.other");
+        let subscriber = proven(&registry, "test.subscribers.cleanup");
+        let other = proven(&registry, "test.subscribers.cleanup.other");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, subscriber);
         subscribers.subscribe(&mut ctx, WindowSelector::One(WindowId(3)), Key::ID, subscriber);
@@ -284,10 +282,10 @@ mod tests {
 
     #[test]
     fn monitor_cleanup_purges_only_the_departed_mailbox_from_every_route() {
-        let (mut subscribers, binding, mailer) = fixture();
+        let (mut subscribers, binding, registry) = fixture();
         let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
-        let departed = proven(&mailer, &ctx, "test.subscribers.departed");
-        let survivor = proven(&mailer, &ctx, "test.subscribers.survivor");
+        let departed = proven(&registry, "test.subscribers.departed");
+        let survivor = proven(&registry, "test.subscribers.survivor");
 
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, departed);
         subscribers.subscribe(&mut ctx, WindowSelector::All, Key::ID, survivor);
