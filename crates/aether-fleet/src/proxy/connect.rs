@@ -4,8 +4,8 @@
 //! Native-only (owns the outbound `RpcConnection`).
 
 use super::config::ProxyTarget;
-use aether_rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection};
-use aether_substrate::actor::native::SpawnError;
+use aether_rpc::{PeerKind, RpcClient, RpcClientError, RpcConnection, RpcInboundReady};
+use aether_substrate::actor::native::{SelfWake, SpawnError};
 use aether_substrate::chassis::error::BootError;
 #[cfg(test)]
 use std::cell::Cell;
@@ -86,9 +86,11 @@ impl StdError for ProxyConnectError {
     }
 }
 
-/// Dial the substrate `target` names, handing each attempt a clone of
-/// the `on_frame` wake closure the reader sidecar fires after every
-/// inbound frame, and return the connection with the address it reached.
+/// Dial the substrate `target` names and return the connection with the
+/// address it reached. The reader thread is a sidecar of the proxy that
+/// minted `wake` ([`RpcClient::connect_fail_fast`]), so a reader panic stops
+/// the chassis (ADR-0063), and it wakes the proxy through `wake` after every
+/// inbound frame.
 ///
 /// An [`ProxyTarget::Adopted`] substrate is dialed once: a refused
 /// connection there is a real error, not a startup race.
@@ -107,19 +109,17 @@ impl StdError for ProxyConnectError {
 /// the peer answered, just wrongly.
 pub fn connect_proxy(
     target: &mut ProxyTarget,
-    on_frame: impl Fn() + Clone + Send + 'static,
+    wake: &SelfWake<RpcInboundReady>,
     budget: Option<Duration>,
 ) -> Result<(RpcConnection, String), ProxyConnectError> {
     // `None` budget → no deadline (wait forever); `Some(d)` → stop
     // waiting once `d` has elapsed.
     let deadline = budget.map(|d| Instant::now() + d);
     match target {
-        ProxyTarget::Adopted { rpc_addr } => {
-            dial(rpc_addr, on_frame, None, deadline).map(|conn| (conn, rpc_addr.clone()))
-        }
+        ProxyTarget::Adopted { rpc_addr } => dial(rpc_addr, wake, None, deadline).map(|conn| (conn, rpc_addr.clone())),
         ProxyTarget::Forked { child, port_file } => {
             let addr = format!("127.0.0.1:{}", await_reported_port(child, port_file, deadline)?);
-            let conn = dial(&addr, on_frame, Some(child), deadline)?;
+            let conn = dial(&addr, wake, Some(child), deadline)?;
             if let Some(status) = exit_status(child) {
                 return Err(ProxyConnectError::ChildExited { status });
             }
@@ -178,7 +178,7 @@ fn exit_status(child: &mut Child) -> Option<ExitStatus> {
 /// child has exited; without one the first error is the answer.
 fn dial(
     addr: &str,
-    on_frame: impl Fn() + Clone + Send + 'static,
+    wake: &SelfWake<RpcInboundReady>,
     mut child: Option<&mut Child>,
     deadline: Option<Instant>,
 ) -> Result<RpcConnection, ProxyConnectError> {
@@ -187,13 +187,13 @@ fn dial(
     loop {
         // The reader sidecar wakes the proxy after every inbound frame
         // so `on_inbound_ready` drains `conn.inbound` on the dispatcher
-        // thread. `RpcClient::connect` consumes the closure, so a retry
-        // needs a fresh clone.
-        let wake = on_frame.clone();
+        // thread. The connect consumes the closure, so a retry needs a
+        // fresh clone of the wake.
+        let frame_wake = wake.clone();
         #[cfg(test)]
         let reader_wake_for_frame = reader_wake.as_ref().map(Arc::clone);
         let on_frame = move || {
-            wake();
+            frame_wake.wake(&RpcInboundReady::default());
             #[cfg(test)]
             if let Some(reader_wake) = &reader_wake_for_frame {
                 let (seen, wake) = &**reader_wake;
@@ -201,12 +201,13 @@ fn dial(
                 wake.notify_one();
             }
         };
-        return match RpcClient::connect(
+        return match RpcClient::connect_fail_fast(
             addr,
             PeerKind::Client {
                 client_name: "aether.fleet.proxy".to_owned(),
                 client_version: env!("CARGO_PKG_VERSION").to_owned(),
             },
+            wake,
             on_frame,
         ) {
             Ok(conn) => {
@@ -279,9 +280,12 @@ fn is_transient_connect_error(e: &RpcClientError) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::proxy::FleetProxy;
     use aether_codec::frame::{read_frame, write_frame};
+    use aether_data::Source;
     use aether_rpc::{HelloAck, WIRE_VERSION, WireFrame};
-    use aether_substrate::testing::{cleanup, scratch_dir};
+    use aether_substrate::actor::native::NativeBinding;
+    use aether_substrate::testing::{cleanup, fresh_substrate, manual_dispatch_ctx, scratch_dir, unrouted_binding};
     use std::io::BufReader;
     use std::net::TcpListener;
     use std::path::PathBuf;
@@ -303,9 +307,10 @@ mod tests {
         let dir = scratch_dir("aether-fleet", "fast-fail");
         let mut target = forked(Command::new("true").spawn().expect("spawn a trivially-exiting child"), &dir);
         let budget = Duration::from_secs(30);
+        let (_binding, wake) = test_wake();
 
         let start = Instant::now();
-        let result = connect_proxy(&mut target, || {}, Some(budget));
+        let result = connect_proxy(&mut target, &wake, Some(budget));
         let elapsed = start.elapsed();
 
         assert_child_exited(&result);
@@ -322,8 +327,9 @@ mod tests {
     fn an_exited_child_that_reported_no_port_is_child_exited() {
         let dir = scratch_dir("aether-fleet", "no-report");
         let mut target = forked(exited_child(), &dir);
+        let (_binding, wake) = test_wake();
 
-        assert_child_exited(&connect_proxy(&mut target, || {}, Some(Duration::from_secs(5))));
+        assert_child_exited(&connect_proxy(&mut target, &wake, Some(Duration::from_secs(5))));
         cleanup(&dir);
     }
 
@@ -345,14 +351,24 @@ mod tests {
             unreachable!("forked builds a forked target")
         };
         fs::write(port_file, format!("{port}\n")).expect("write the port report");
+        let (_binding, wake) = test_wake();
 
         let result = thread::scope(|scope| {
             scope.spawn(|| answer_one_handshake(&foreign));
-            connect_proxy(&mut target, || {}, Some(Duration::from_secs(5)))
+            connect_proxy(&mut target, &wake, Some(Duration::from_secs(5)))
         });
 
         assert_child_exited(&result);
         cleanup(&dir);
+    }
+
+    /// A proxy wake over a test binding, returned beside the binding: the
+    /// wake holds it weakly, and a sidecar spawn refuses once it is gone.
+    fn test_wake() -> (Arc<NativeBinding>, SelfWake<RpcInboundReady>) {
+        let (_registry, mailer) = fresh_substrate();
+        let binding = unrouted_binding(&mailer);
+        let wake = manual_dispatch_ctx::<FleetProxy>(&binding, Source::NONE).self_wake();
+        (binding, wake)
     }
 
     /// A forked target over `child`, reporting through `rpc.port` in `dir`.
