@@ -374,7 +374,7 @@ impl ComponentHostCapabilityState {
         plan: PreparedBoot,
         first: BootSuccessor,
     ) {
-        if let Some(namespace) = missing_dependency(&self.registry, Some(ctx.self_id()), &plan.dependencies) {
+        if let Some(namespace) = ctx.missing_child_dependency(&plan.dependencies) {
             let error = dependency_refusal(&plan.namespace, namespace);
             match first {
                 BootSuccessor::Load(_) => {
@@ -416,11 +416,13 @@ impl ComponentHostCapabilityState {
         load: Arc<PreparedLoad>,
         boot_hash: Option<String>,
     ) {
-        let parent = match &load.placement {
-            LoadPlacement::ComponentHost => ctx.self_id(),
-            LoadPlacement::Under { parent, .. } => *parent,
+        let missing = match &load.placement {
+            LoadPlacement::ComponentHost => ctx.missing_child_dependency(&load.dependencies),
+            LoadPlacement::Under { parent, .. } => {
+                missing_dependency(&self.registry, Some(*parent), &load.dependencies)
+            }
         };
-        if let Some(namespace) = missing_dependency(&self.registry, Some(parent), &load.dependencies) {
+        if let Some(namespace) = missing {
             owed.reply(ctx, &LoadResult::Err { error: dependency_refusal(&load.name, namespace) });
             return;
         }

@@ -8,6 +8,6 @@
     "mailbox_id_from_path(": 46,
     "<recipient>.id() at a send": 0,
     "clippy::disallowed_methods": 166,
-    "ctx.self_id()": 4
+    "ctx.self_id()": 1
   }
 }

@@ -118,6 +118,27 @@ fn missing_declared_dependency_refuses_the_load() {
     assert_eq!(harness.count_observed(TICK_OBSERVED), baseline + 1, "the loaded dependent must answer mail");
 }
 
+/// A load the component host places beneath itself checks its dependencies
+/// with the host as the placement parent: an `Embedded` dependency folds
+/// beneath the host, so the dependent is refused while no target stands
+/// there and loads once one does. A check under no parent would refuse both
+/// loads, and a check that answered nothing would admit the first.
+#[test]
+fn host_placed_load_checks_dependencies_beneath_the_host() {
+    let Some((mut harness, wasm)) = fixture_harness() else {
+        return;
+    };
+
+    let LoadResult::Err { error } = load_result(&mut harness, &wasm, "dependent-alone", None, None, DEPENDENT_EXPORT)
+    else {
+        panic!("a host-placed load whose declared dependency is not live must be refused");
+    };
+    assert_eq!(error, format!("{DEPENDENT_EXPORT} depends on {TARGET_EXPORT}, which is not live"));
+
+    load_named(&mut harness, &wasm, "target", None, None, TARGET_EXPORT);
+    load_named(&mut harness, &wasm, "dependent", None, None, DEPENDENT_EXPORT);
+}
+
 #[test]
 fn replace_with_unmet_dependency_keeps_running_module() {
     let Some((mut harness, wasm)) = fixture_harness() else {

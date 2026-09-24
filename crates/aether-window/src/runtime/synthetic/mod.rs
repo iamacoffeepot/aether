@@ -109,6 +109,89 @@ impl SyntheticWindowCapabilityState {
         self.publish(ctx, id, &WindowOpened { window: window.clone() });
         answer(&mut reply, &CreateWindowResult::Ok { window });
     }
+
+    /// Apply one forwarded command to `window`, which the handler resolved
+    /// from the forwarding child's stamped sender.
+    fn apply_at_window<A>(
+        &mut self,
+        ctx: &mut NativeCtx<'_, A>,
+        window: WindowId,
+        command: WindowCommand,
+    ) -> ApplyWindowCommandResult {
+        match command {
+            WindowCommand::Close => {
+                if self.windows.remove(&window).is_none() {
+                    return ApplyWindowCommandResult::Close(CloseWindowResult::Err {
+                        error: format!("unknown window {window:?}"),
+                    });
+                }
+                self.publish(ctx, window, &WindowClosed { window });
+                ApplyWindowCommandResult::Close(CloseWindowResult::Ok)
+            }
+            WindowCommand::SetMode { mode, width, height } => {
+                let info = match self.window_mut(window) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error });
+                    }
+                };
+                info.mode.clone_from(&mode);
+                if matches!(mode, WindowMode::Windowed)
+                    && let (Some(width), Some(height)) = (width, height)
+                {
+                    info.width = width;
+                    info.height = height;
+                    info.occluded = width == 0 || height == 0;
+                }
+                ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok {
+                    mode,
+                    width: info.width,
+                    height: info.height,
+                })
+            }
+            WindowCommand::SetTitle { title } => {
+                let info = match self.window_mut(window) {
+                    Ok(info) => info,
+                    Err(error) => {
+                        return ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error });
+                    }
+                };
+                info.title.clone_from(&title);
+                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
+            }
+            // A deterministic runtime has no bar to install and no pointer to
+            // shape, so both accept for a live window and refuse for an
+            // unknown one — the liveness half is the whole of what a scenario
+            // can observe, and storing menus nothing reads back would be state
+            // with no reader.
+            WindowCommand::SetMenu { .. } if self.windows.contains_key(&window) => {
+                ApplyWindowCommandResult::SetMenu(SetWindowMenuResult::Ok)
+            }
+            WindowCommand::SetCursor { .. } if self.windows.contains_key(&window) => {
+                ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Ok)
+            }
+            command @ (WindowCommand::SetMenu { .. } | WindowCommand::SetCursor { .. }) => {
+                command.refused(format!("unknown window {window:?}"))
+            }
+            WindowCommand::Focus => {
+                if !self.windows.contains_key(&window) {
+                    return ApplyWindowCommandResult::Focus(FocusWindowResult::Err {
+                        error: format!("unknown window {window:?}"),
+                    });
+                }
+                for (id, info) in &mut self.windows {
+                    info.focused = *id == window;
+                }
+                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
+            }
+            WindowCommand::RequestRedraw => match self.windows.get(&window) {
+                Some(_) => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok),
+                None => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err {
+                    error: format!("unknown window {window:?}"),
+                }),
+            },
+        }
+    }
 }
 
 /// Discharge a reservation's deferred reply, if it owes one.
@@ -204,79 +287,10 @@ impl NativeActor for SyntheticWindowCapability {
         ctx: &mut NativeCtx<'_>,
         mail: ApplyWindowCommand,
     ) -> ApplyWindowCommandResult {
-        match mail.command {
-            WindowCommand::Close => {
-                if state.windows.remove(&mail.window).is_none() {
-                    return ApplyWindowCommandResult::Close(CloseWindowResult::Err {
-                        error: format!("unknown window {:?}", mail.window),
-                    });
-                }
-                state.publish(ctx, mail.window, &WindowClosed { window: mail.window });
-                ApplyWindowCommandResult::Close(CloseWindowResult::Ok)
-            }
-            WindowCommand::SetMode { mode, width, height } => {
-                let window = match state.window_mut(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        return ApplyWindowCommandResult::SetMode(SetWindowModeResult::Err { error });
-                    }
-                };
-                window.mode.clone_from(&mode);
-                if matches!(mode, WindowMode::Windowed)
-                    && let (Some(width), Some(height)) = (width, height)
-                {
-                    window.width = width;
-                    window.height = height;
-                    window.occluded = width == 0 || height == 0;
-                }
-                ApplyWindowCommandResult::SetMode(SetWindowModeResult::Ok {
-                    mode,
-                    width: window.width,
-                    height: window.height,
-                })
-            }
-            WindowCommand::SetTitle { title } => {
-                let window = match state.window_mut(mail.window) {
-                    Ok(window) => window,
-                    Err(error) => {
-                        return ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Err { error });
-                    }
-                };
-                window.title.clone_from(&title);
-                ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { title })
-            }
-            // A deterministic runtime has no bar to install and no pointer to
-            // shape, so both accept for a live window and refuse for an
-            // unknown one — the liveness half is the whole of what a scenario
-            // can observe, and storing menus nothing reads back would be state
-            // with no reader.
-            WindowCommand::SetMenu { .. } if state.windows.contains_key(&mail.window) => {
-                ApplyWindowCommandResult::SetMenu(SetWindowMenuResult::Ok)
-            }
-            WindowCommand::SetCursor { .. } if state.windows.contains_key(&mail.window) => {
-                ApplyWindowCommandResult::SetCursor(SetWindowCursorResult::Ok)
-            }
-            command @ (WindowCommand::SetMenu { .. } | WindowCommand::SetCursor { .. }) => {
-                command.refused(format!("unknown window {:?}", mail.window))
-            }
-            WindowCommand::Focus => {
-                if !state.windows.contains_key(&mail.window) {
-                    return ApplyWindowCommandResult::Focus(FocusWindowResult::Err {
-                        error: format!("unknown window {:?}", mail.window),
-                    });
-                }
-                for (id, window) in &mut state.windows {
-                    window.focused = *id == mail.window;
-                }
-                ApplyWindowCommandResult::Focus(FocusWindowResult::Ok)
-            }
-            WindowCommand::RequestRedraw => match state.windows.get(&mail.window) {
-                Some(_) => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Ok),
-                None => ApplyWindowCommandResult::RequestRedraw(RequestWindowRedrawResult::Err {
-                    error: format!("unknown window {:?}", mail.window),
-                }),
-            },
-        }
+        let Some(window) = ctx.sender().and_then(|sender| state.child_monitors.get(&sender).map(|(id, _)| *id)) else {
+            return mail.command.refused("window command from an actor that is not a live window child".to_owned());
+        };
+        state.apply_at_window(ctx, window, mail.command)
     }
 
     #[handler::single]
@@ -473,7 +487,7 @@ mod tests {
     #[test]
     fn name_is_stable_after_title_mutation() {
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
+        let mut ctx: NativeCtx<'_> = NativeCtx::new_for_actor(&binding, Source::NONE, None, None);
         let mut state = test_state();
         let id = WindowId(7);
         state.windows.insert(
@@ -491,11 +505,7 @@ mod tests {
         );
 
         assert!(matches!(
-            SyntheticWindowCapability::on_apply_command(
-                &mut state,
-                &mut ctx,
-                ApplyWindowCommand { window: id, command: WindowCommand::SetTitle { title: "Renamed".to_owned() } },
-            ),
+            state.apply_at_window(&mut ctx, id, WindowCommand::SetTitle { title: "Renamed".to_owned() }),
             ApplyWindowCommandResult::SetTitle(SetWindowTitleResult::Ok { .. })
         ));
 
