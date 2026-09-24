@@ -4,6 +4,7 @@
 
 use crate::actor::native::Dispatch;
 use crate::actor::native::ctx::NativeCtx;
+use crate::actor::native::envelope::Envelope;
 use crate::chassis::builder::Builder;
 use crate::mail::KindId;
 use crate::testing::{TestChassis, bare_substrate};
@@ -166,37 +167,25 @@ fn wire_pass_mail_crosses_actors(pinger_first: bool) {
     struct Pinger {
         wire_ran: Arc<AtomicU32>,
     }
-    impl Addressable for Pinger {
+
+    #[aether_actor::actor(root, depends(Ponger))]
+    impl NativeActor for Pinger {
         const NAMESPACE: &'static str = "test.barrier.pinger";
-        type Resolver = aether_actor::One;
-    }
-    impl aether_actor::Root for Pinger {}
-    impl aether_actor::Lifecycle<Self> for Pinger {
         type Config = ();
         type Params = Arc<AtomicU32>;
-        type InitError = BootError;
-        type InitCtx<'a> = NativeInitCtx<'a>;
-        type Ctx<'a> = NativeCtx<'a, Self>;
-        fn init((): (), params: Self::Params, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
+
+        fn init((): (), params: Arc<AtomicU32>, _ctx: &mut NativeInitCtx<'_>) -> Result<Self, BootError> {
             Ok(Self { wire_ran: params })
         }
-        fn wire(state: &mut Self, ctx: &mut NativeCtx<'_, Self>) {
-            // The send is deliberately undeclared, so the test can boot either actor first.
-            ctx.erase().actor::<Ponger>().send(&WireBarrierPing { tag: 1 });
-            state.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
+
+        fn wire(&mut self, ctx: &mut NativeCtx<'_, Self>) {
+            ctx.send::<Ponger>(&WireBarrierPing { tag: 1 });
+            self.wire_ran.fetch_add(1, AtomicOrdering::SeqCst);
         }
-    }
-    impl NativeActor for Pinger {
-        type State = Self;
-    }
-    impl Dispatch<Self> for Pinger {
-        fn dispatch(
-            _state: &mut Self,
-            _ctx: &mut NativeCtx<'_, Self, crate::Manual>,
-            _kind: KindId,
-            _payload: &[u8],
-        ) -> Option<()> {
-            None
+
+        #[fallback]
+        fn fallback(&mut self, _ctx: &mut NativeCtx<'_>, _env: &Envelope) {
+            let _ = self;
         }
     }
 

@@ -58,10 +58,9 @@ pub use model::{
 pub use reference::{__mint_actor_ref, __mint_erased_actor_ref};
 pub use reference::{ActorRef, ErasedActorRef, Target};
 pub use request_context::{RequestContextTable, split_state_envelope};
-// Issue 665: per-side actor-typed handles live next to their transport:
-// [`wasm::WasmActorMailbox<R>`] for wasm guests and
-// `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
-// native actors.
+// Issue 665: the wasm actor-typed handle lives next to its transport,
+// [`wasm::WasmActorMailbox<R>`]; native actors send through the flat verbs
+// on `aether_substrate::actor::native::NativeCtx` and hold no handle.
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see

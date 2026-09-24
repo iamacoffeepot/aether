@@ -8,16 +8,13 @@
 use std::any::{Any, TypeId};
 use std::sync::Arc;
 
-use aether_actor::{ActorRef, Addressable, CallerAddressable, CallerScoped, Erased, Reaches, Singleton};
-use aether_data::{ActorMail, MailId, MailboxId};
+use aether_data::{ActorMail, MailboxId};
 
 use crate::actor::native::binding::NativeBinding;
-use crate::actor::native::mailbox::NativeActorMailbox;
 use crate::actor::native::offload::self_wake::SelfWake;
 use crate::mail::mailer::Mailer;
 
 use super::ExportedHandles;
-use super::address::native_sender_methods;
 
 /// Boot-time context for [`Lifecycle::init`](aether_actor::Lifecycle::init). Carries a borrow of
 /// the actor's transport (for init-time mail), a borrow of the
@@ -28,7 +25,8 @@ use super::address::native_sender_methods;
 ///
 /// Issue 629 / Phase A: the legacy `peer::<A>() -> Arc<A>` accessor
 /// retired here (closes issue 628). Sibling caps communicate via mail
-/// at runtime ([`Self::actor`] returns a typed sender). Caps that genuinely need cross-thread state
+/// at runtime, from `wire` onward, through [`NativeCtx`](super::NativeCtx)'s send verbs; this ctx
+/// has none. Caps that genuinely need cross-thread state
 /// access from drivers / embedders publish a handle bundle via
 /// [`Self::publish_handle`] and the consumer retrieves it through
 /// [`crate::DriverCtx::handle`].
@@ -99,17 +97,6 @@ impl<'a> NativeInitCtx<'a> {
     pub fn publish_handle<H: Any + Send + Sync + 'static>(&mut self, handle: H) {
         self.handles.by_type.insert(TypeId::of::<H>(), Box::new(handle));
     }
-
-    /// Init has no inbound chain to inherit, so a handle built here is
-    /// always detached — the `(None, None)` counterpart of
-    /// [`NativeCtx::outbound_lineage`](super::NativeCtx::outbound_lineage) the `native_sender_methods!`
-    /// macro reads.
-    #[allow(clippy::unused_self)]
-    fn outbound_lineage(&self) -> (Option<MailId>, Option<MailId>) {
-        (None, None)
-    }
-
-    native_sender_methods!(Erased);
 }
 // Issue 703: NativeInitCtx no longer impls `MailSender`.
 // `init` is the sync constructor (ADR-0079) and must NOT mail —
