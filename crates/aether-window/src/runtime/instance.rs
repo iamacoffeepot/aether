@@ -5,7 +5,7 @@ use std::collections::HashMap;
 
 use aether_actor::runtime;
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-use aether_actor::{DependsOn, Manual, Reaches, ReplyMode, handler_set};
+use aether_actor::{DependsOn, Manual, ReplyMode, handler_set};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
 use aether_data::{Kind, MailId};
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
@@ -37,7 +37,7 @@ impl WindowInstanceState {
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]
-pub(super) fn forward<A: Reaches<WindowCapability>>(
+pub(super) fn forward<A: DependsOn<WindowCapability>>(
     state: &mut WindowInstanceState,
     ctx: &mut NativeCtx<'_, A, Manual>,
     command: WindowCommand,
@@ -47,10 +47,10 @@ pub(super) fn forward<A: Reaches<WindowCapability>>(
     if state.pending.insert(mail_id, inbound).is_some() {
         ctx.fatal_abort(format!("duplicate retained window request {mail_id:?}"));
     }
-    let _ = ctx
-        .actor::<WindowCapability>()
-        .with_context(&WindowForwardContext { inbound: mail_id })
-        .send(&ApplyWindowCommand { window: WindowId(ctx.self_id().0), command });
+    let _ = ctx.send_with_context::<WindowCapability>(
+        &ApplyWindowCommand { window: WindowId(ctx.self_id().0), command },
+        &WindowForwardContext { inbound: mail_id },
+    );
 }
 
 #[cfg(any(feature = "desktop", feature = "synthetic"))]

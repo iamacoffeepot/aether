@@ -139,7 +139,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             staged.identity.id,
             Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
-            Arc::clone(spawner.mailer()),
         );
         let commit = spawner.prepare_commit(staged, Some(finalizer), chain);
         parent_binding.stage_child_birth(commit);
@@ -213,7 +212,6 @@ impl<'ctx, A: Instanced + NativeActor> HandlerSpawnBuilder<'ctx, A> {
             staged.identity.id,
             Arc::clone(&staged.identity.canonical_name),
             Arc::downgrade(&staged.transport),
-            Arc::clone(spawner.mailer()),
         );
         parent_binding.stage_child_birth(spawner.prepare_commit(staged, Some(finalizer), chain));
         let _ = sender;

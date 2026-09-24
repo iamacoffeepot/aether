@@ -33,7 +33,6 @@ use super::{
 };
 use aether_actor::{HandlesKind, runtime};
 use aether_substrate::atomic_write::atomic_write;
-use aether_substrate::mail::ResolveLiveError;
 use aether_substrate::mail::boundary::is_engine_only;
 use aether_substrate::net::teardown_connect_addr;
 
@@ -42,7 +41,7 @@ use aether_substrate::net::teardown_connect_addr;
 // single `use runtime::*` glob. Types named only by the inherent helper
 // methods below ride the same wall (used locally here).
 pub use crate::kinds::{CallSettled, ForwardEnvelope, RegisterEngineRouteResult};
-pub use crate::{Hello, HelloAck, MailEnvelope, MailboxAddress, RpcError, WIRE_VERSION, WireFrame};
+pub use crate::{Hello, HelloAck, MailEnvelope, ReplyEnvelope, RpcError, WIRE_VERSION, WireFrame};
 pub use aether_actor::ErasedActorRef;
 pub use aether_codec::frame::{FrameError, write_frame};
 pub use aether_data::{EngineId, Kind};
@@ -50,7 +49,6 @@ pub use aether_substrate::MonitorHandle;
 pub use aether_substrate::actor::native::envelope::Envelope;
 pub use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx, SelfWake};
 pub use aether_substrate::chassis::error::BootError;
-pub use aether_substrate::mail::SourceAddr;
 pub use aether_substrate::mail::mailer::Mailer;
 pub use std::collections::{HashMap, HashSet};
 pub use std::io;
@@ -507,7 +505,7 @@ impl RpcServerState {
                 return;
             };
             let forward =
-                ForwardEnvelope { mailbox: envelope.to.mailbox, kind: envelope.kind, payload: envelope.payload };
+                ForwardEnvelope { recipient: envelope.to.path, kind: envelope.kind, payload: envelope.payload };
             let mail_id =
                 ctx.send_envelope_detached_to(route, <ForwardEnvelope as Kind>::ID, &forward.encode_into_bytes());
             if let Some(wire_cid) = cid {
@@ -519,38 +517,40 @@ impl RpcServerState {
             }
             return;
         }
-        // Prove the recipient once, at receipt (ADR-0230 section 3): the
-        // position crossed the wire and nothing upstream proved it. A
-        // position that does not prove `Live` dispatches nothing and closes
-        // the call with `ReplyEnd` `Err` rather than parking or dropping in
-        // the mailer. A dropped id and an unknown one stay distinct: the
-        // wire has no dropped variant, so the dropped refusal rides `Other`
-        // with the registry's text.
-        let recipient = match ctx.resolve_live(envelope.to.mailbox) {
-            Ok(recipient) => recipient,
-            Err(error) => {
+        // Resolve and prove the recipient's `ActorPath` on arrival
+        // (ADR-0230 section 3): this engine hosts it, so only this engine
+        // expands a short path, and nothing upstream computed a position for
+        // it. `accept_call` hands back an item that can only be delivered, so
+        // this server holds no proof it could keep. A path that does not
+        // resolve to a `Live` actor dispatches nothing and closes the call
+        // with `RpcError::NotPresent`, whatever the reason, rather than
+        // parking or dropping in the mailer.
+        let item = match ctx.accept_call(&envelope.to.path, envelope.kind, envelope.payload) {
+            Ok(item) => item,
+            Err(detail) => {
+                let path = envelope.to.path;
                 let Some(wire_cid) = cid else {
                     tracing::warn!(
                         target: "aether_substrate::rpc",
                         conn = conn_id,
-                        %error,
-                        "rpc call refused: recipient is not live",
+                        %path,
+                        %detail,
+                        "rpc call refused: recipient is not present",
                     );
                     return;
                 };
-                let refusal = match error {
-                    ResolveLiveError::Unknown(mailbox) => RpcError::UnknownMailbox { mailbox },
-                    ResolveLiveError::Dropped(_) => RpcError::Other { reason: error.to_string() },
-                };
-                self.write_frame_to(conn_id, &WireFrame::ReplyEnd { cid: wire_cid, result: Err(refusal) });
+                self.write_frame_to(
+                    conn_id,
+                    &WireFrame::ReplyEnd { cid: wire_cid, result: Err(RpcError::NotPresent { path, detail }) },
+                );
                 return;
             }
         };
 
-        // Dispatch the envelope as a fresh chain. The returned
-        // MailId is the new chain's root; if cid is Some, subscribe
-        // to its settlement to know when to write ReplyEnd.
-        let mail_id = ctx.send_envelope_detached_to(recipient, envelope.kind, &envelope.payload);
+        // Dispatch the item as a fresh chain. The returned MailId is the
+        // new chain's root; if cid is Some, subscribe to its settlement to
+        // know when to write ReplyEnd.
+        let mail_id = ctx.deliver_detached(item);
 
         let Some(wire_cid) = cid else {
             // Fire-and-forget at the wire layer. No bookkeeping.
@@ -911,7 +911,7 @@ impl NativeActor for RpcServerCapability {
         let Some(entry) = state.in_flight.get(&correlation).copied() else {
             tracing::debug!(
                 target: "aether_substrate::rpc",
-                kind = %ctx.mailer().registry().kind_label(env.kind),
+                kind = %ctx.kind_label(env.kind),
                 correlation,
                 "rpc reply with no matching in-flight call; dropping",
             );
@@ -926,7 +926,7 @@ impl NativeActor for RpcServerCapability {
         if env.kind == <CallSettled as Kind>::ID {
             let result = match CallSettled::decode_from_bytes(env.payload.bytes()) {
                 Some(CallSettled::Ok) => Ok(()),
-                Some(CallSettled::Err { error }) => Err(RpcError::Other { reason: error }),
+                Some(CallSettled::Err { error }) => Err(error),
                 None => Err(RpcError::Other { reason: "malformed CallSettled payload".into() }),
             };
             state.take_in_flight(correlation);
@@ -934,16 +934,7 @@ impl NativeActor for RpcServerCapability {
             return;
         }
 
-        let envelope = MailEnvelope {
-            to: MailboxAddress::local(ctx.self_id()),
-            from: match env.sender.addr {
-                SourceAddr::Component(id) => Some(MailboxAddress::local(id)),
-                _ => None,
-            },
-            kind: env.kind,
-            correlation_id: Some(entry.wire_cid),
-            payload: env.payload.bytes().to_vec(),
-        };
+        let envelope = ReplyEnvelope { kind: env.kind, payload: env.payload.bytes().to_vec() };
         state.write_frame_to(entry.conn_id, &WireFrame::ReplyEvent { cid: entry.wire_cid, envelope });
     }
 }

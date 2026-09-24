@@ -84,11 +84,11 @@ A per-engine MCP call crosses two distinct translations:
 ```text
 tool JSON
   → textual recipient resolution through selected engine inventory
-  → engine returns live mailbox id + canonical path
+  → engine returns the canonical path
   → schema-aware encode in aether-mcp
-  → WireFrame / MailEnvelope over hub RPC
-  → proxy selects engine
-  → child RPC server proves the recipient Live (ADR-0230)
+  → WireFrame / MailEnvelope naming the path over hub RPC
+  → proxy selects engine, sends the path on as written
+  → child RPC server resolves the path on arrival and proves it Live (ADR-0230)
   → scheduler dispatches typed bytes to an actor
   → reply and settlement events travel back
   → tool projects bounded JSON/evidence
@@ -100,9 +100,9 @@ inside the selected engine during address resolution. Canonical lineage and
 ADR-0166 short paths share that engine-owned seam; the MCP
 coordinator keeps no alias table and never hashes operator paths. A handler
 error or non-settling descendant happens
-after dispatch. A tagged id that names nothing live, or an actor still
-starting, is refused at the engine's RPC receipt and closes the call with
-`ReplyEnd` `Err`. Start diagnosis at the earliest layer supported by evidence;
+after dispatch. A path that names nothing live, or an actor still starting, is
+refused at the engine's RPC receipt and closes the call with `ReplyEnd`
+`Err(RpcError::NotPresent)` naming the path. Start diagnosis at the earliest layer supported by evidence;
 the [recovery runbook](../operating/recovery.md) is organized that way.
 
 ## Components at boot versus after boot

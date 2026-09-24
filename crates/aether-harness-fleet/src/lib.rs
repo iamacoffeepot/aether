@@ -33,8 +33,7 @@
 // The harness reads its process-level test knobs (AETHER_REQUIRE_RUNTIME,
 // the AETHER_HARNESS_FLEET_* budgets, AETHER_HARNESS_FLEET_HEADLESS_BIN)
 // straight from the environment — test-harness tuning, not cap config —
-// and hand-hashes wire mailbox paths (`mailbox_id_from_path`), the
-// sanctioned wire-`Call`-forwarding use.
+// and boots its hub as a deliberately bare test chassis (`Builder::new`).
 #![allow(clippy::disallowed_methods)]
 
 use std::collections::BTreeMap;
@@ -52,7 +51,7 @@ use std::time::{Duration, Instant};
 
 use aether_codec::frame::{FrameError, read_frame, write_frame};
 use aether_data::ActorPath;
-use aether_data::{EngineId, Kind, KindId, MailId, Uuid, mailbox_id_from_path};
+use aether_data::{EngineId, Kind, KindId, MailId, Uuid};
 use aether_fleet::{FleetConfig, FleetServer, RestartPolicy};
 use aether_kinds::NamedMail;
 use aether_kinds::descriptors;
@@ -65,8 +64,8 @@ use aether_kinds::{
     TerminateEngine, TerminateEngineResult, UploadBinary, UploadBinaryResult, UploadComponent, UploadComponentResult,
 };
 use aether_rpc::{
-    Hello, HelloAck, MailEnvelope, MailboxAddress, PeerKind, RpcBind, RpcError, RpcServerCapability, RpcServerConfig,
-    RpcServerHandle, RpcServerParams, WIRE_VERSION, WireFrame,
+    Hello, HelloAck, MailEnvelope, PeerKind, Recipient, ReplyEnvelope, RpcBind, RpcError, RpcServerCapability,
+    RpcServerConfig, RpcServerHandle, RpcServerParams, WIRE_VERSION, WireFrame,
 };
 use aether_substrate::chassis::builder::{Builder, PassiveChassis};
 use aether_substrate::mail::mailer::Mailer;
@@ -760,10 +759,12 @@ impl FleetHarness {
     }
 
     /// Route a mail to a recipient on a forked substrate and return the
-    /// reply envelopes (one per `ReplyEvent`). `recipient` is a mailbox
-    /// path — a chassis cap (`aether.fs`) or a loaded component's
-    /// lineage address (`aether.component/aether.embedded:<name>`).
-    pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<MailEnvelope>
+    /// reply envelopes (one per `ReplyEvent`). `recipient` is an
+    /// `ActorPath` in text — a chassis cap (`aether.fs`), a loaded
+    /// component's lineage address
+    /// (`aether.component/aether.embedded:<name>`), or an ADR-0166 short
+    /// path (`aether.component/:<name>`) the engine expands on arrival.
+    pub fn send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Vec<ReplyEnvelope>
     where
         K: Kind,
     {
@@ -772,9 +773,10 @@ impl FleetHarness {
 
     /// [`send`](Self::send) that returns a `ReplyEnd::Err` instead of
     /// panicking on it, for a call the test expects to fail — one whose
-    /// engine dies while it is in flight, or whose recipient does not prove
-    /// `Live` (ADR-0230) and is refused with `RpcError::UnknownMailbox`.
-    pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<MailEnvelope>, RpcError>
+    /// engine dies while it is in flight, or whose recipient path does not
+    /// resolve to a `Live` actor there (ADR-0230) and is refused with
+    /// `RpcError::NotPresent`.
+    pub fn try_send<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> Result<Vec<ReplyEnvelope>, RpcError>
     where
         K: Kind,
     {
@@ -790,7 +792,7 @@ impl FleetHarness {
     /// [`reply_cap`] backstop. The reply-wait is settlement-driven — a
     /// slow-but-healthy chain re-arms rather than dying on a wall-clock
     /// gate (issue 2064).
-    fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<MailEnvelope>
+    fn call<K>(&mut self, engine: Option<EngineId>, mailbox: &str, request: &K) -> Vec<ReplyEnvelope>
     where
         K: Kind,
     {
@@ -812,7 +814,7 @@ impl FleetHarness {
         request: &K,
         budget: Duration,
         gate: &str,
-    ) -> Vec<MailEnvelope>
+    ) -> Vec<ReplyEnvelope>
     where
         K: Kind,
     {
@@ -830,7 +832,7 @@ impl FleetHarness {
         request: &K,
         budget: Duration,
         gate: &str,
-    ) -> Result<Vec<MailEnvelope>, RpcError>
+    ) -> Result<Vec<ReplyEnvelope>, RpcError>
     where
         K: Kind,
     {
@@ -840,7 +842,7 @@ impl FleetHarness {
         self.write_call(cid, engine, mailbox, K::ID, request.encode_into_bytes())
             .expect("test setup: writing a Call frame to the hub succeeds");
 
-        let mut events: Vec<MailEnvelope> = Vec::new();
+        let mut events: Vec<ReplyEnvelope> = Vec::new();
         let start = Instant::now();
         loop {
             match read_frame(&mut self.stream) {
@@ -902,25 +904,25 @@ impl FleetHarness {
     /// asserting [`call`](Self::call) path and the best-effort
     /// [`terminate_quietly`](Self::terminate_quietly) drain; the caller
     /// decides whether a write error panics or is swallowed.
+    ///
+    /// `recipient` becomes the `Call`'s `ActorPath` as written, so the
+    /// engine that hosts it resolves it (ADR-0230 §3). A malformed path is
+    /// a scenario bug and panics naming the text.
     fn write_call(
         &mut self,
         cid: u64,
         engine: Option<EngineId>,
-        mailbox: &str,
+        recipient: &str,
         kind: KindId,
         payload: Vec<u8>,
     ) -> Result<(), FrameError> {
+        let path = ActorPath::new(recipient)
+            .unwrap_or_else(|error| panic!("call recipient {recipient:?} is not an actor path: {error}"));
         write_frame(
             &mut self.stream,
             &WireFrame::Call {
                 cid: Some(cid),
-                envelope: MailEnvelope {
-                    to: MailboxAddress { engine, mailbox: mailbox_id_from_path(mailbox) },
-                    from: None,
-                    kind,
-                    correlation_id: None,
-                    payload,
-                },
+                envelope: MailEnvelope { to: Recipient { engine, path }, kind, payload },
             },
         )
     }
@@ -1011,7 +1013,7 @@ impl FleetHarness {
     /// split off and decoded for the `root`, and the trailing events are
     /// the dispatched mail's correlated replies. Panics on an
     /// `Err`/undecodable ack, mirroring `single_reply`.
-    pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<MailEnvelope>)
+    pub fn send_traced<K>(&mut self, engine: EngineId, recipient: &str, mail: &K) -> (MailId, Vec<ReplyEnvelope>)
     where
         K: Kind,
     {
@@ -1144,7 +1146,7 @@ fn replace_target(address: &str) -> ActorPath {
     ActorPath::new(address).unwrap_or_else(|error| panic!("replace target {address:?} is not an actor path: {error}"))
 }
 
-fn single_reply(replies: &[MailEnvelope], label: &str) -> Vec<u8> {
+fn single_reply(replies: &[ReplyEnvelope], label: &str) -> Vec<u8> {
     match replies {
         [one] => one.payload.clone(),
         other => panic!("{label} expected exactly one reply event, got {}", other.len()),

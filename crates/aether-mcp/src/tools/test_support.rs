@@ -31,6 +31,7 @@ use std::sync::{Arc, Mutex};
 // (issue 2672). Brought into scope (rather than named by absolute path
 // inline) to satisfy the `clippy::absolute_paths` restriction.
 use aether_actor::actor;
+use aether_inventory::kinds::ResolvedName;
 use aether_rpc::{CallSettled, ForwardEnvelope, RegisterEngineRoute, RegisterEngineRouteResult};
 use aether_substrate::Subname;
 use aether_substrate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
@@ -75,18 +76,24 @@ pub(super) struct AddressRouteLoopbackParams {
     pub(super) engine: EngineId,
     pub(super) mailbox_id: MailboxId,
     pub(super) canonical_path: String,
+    /// Tagged id → the path `aether.inventory.resolve` answers for it; an id
+    /// absent here is answered with no name.
+    pub(super) names: HashMap<String, String>,
     pub(super) calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     pub(super) replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 }
 
-/// Routed-engine double for address-boundary tests. It returns a caller-chosen
-/// mailbox id that is deliberately unrelated to the supplied path, making any
-/// accidental local fold visible in the forwarded application envelope. It
+/// Routed-engine double for address-boundary tests. It answers
+/// `aether.inventory.resolve_address` with a caller-chosen canonical path
+/// that differs from the supplied text, and `aether.inventory.resolve` from a
+/// scripted id-to-path map, so a forwarded application envelope shows
+/// whether the client sent the engine's answer or its own text. It
 /// registers as the route for its one engine from `wire`, like a real proxy.
 pub(super) struct AddressRouteSink {
     engine: EngineId,
     mailbox_id: MailboxId,
     canonical_path: String,
+    names: HashMap<String, String>,
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
     mailer: Arc<Mailer>,
@@ -103,6 +110,7 @@ impl NativeActor for AddressRouteSink {
             engine: params.engine,
             mailbox_id: params.mailbox_id,
             canonical_path: params.canonical_path,
+            names: params.names,
             calls: params.calls,
             replies: params.replies,
             mailer: ctx.mailer(),
@@ -110,7 +118,7 @@ impl NativeActor for AddressRouteSink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
@@ -140,6 +148,14 @@ impl NativeActor for AddressRouteSink {
                     1,
                 )
                 .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
+            );
+        } else if mail.kind == Resolve::ID {
+            let request = Resolve::decode_from_bytes(&mail.payload).expect("test resolve request decodes");
+            let resolved =
+                request.ids.into_iter().map(|id| ResolvedName { name: self.names.get(&id).cloned(), id }).collect();
+            self.mailer.push(
+                Mail::new(target, ResolveResult::ID, ResolveResult { resolved }.encode_into_bytes(), 1)
+                    .with_reply_to(Source::with_correlation(SourceAddr::None, correlation)),
             );
         } else {
             let reply = self.replies.lock().expect("address-route replies mutex is never poisoned").pop_front();
@@ -228,7 +244,7 @@ impl NativeActor for ScriptedRouteSink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
@@ -311,7 +327,7 @@ impl NativeActor for RouteInventorySink {
     }
 
     fn wire(&mut self, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<RpcServerCapability>().send(&RegisterEngineRoute { engine_id: self.engine });
+        ctx.send::<RpcServerCapability>(&RegisterEngineRoute { engine_id: self.engine });
     }
 
     #[handler::single]
@@ -514,6 +530,19 @@ pub(super) fn boot_hub_with_address_route_replies(
     calls: Arc<Mutex<Vec<ForwardEnvelope>>>,
     replies: Arc<Mutex<VecDeque<ScriptedRouteReply>>>,
 ) -> (PassiveChassis<TestChassis>, u16) {
+    boot_hub_with_address_route(AddressRouteLoopbackParams {
+        engine,
+        mailbox_id,
+        canonical_path: canonical_path.to_owned(),
+        names: HashMap::new(),
+        calls,
+        replies,
+    })
+}
+
+/// Hub-shape chassis whose route for `params.engine` is an
+/// [`AddressRouteSink`], with every answer it gives scripted by `params`.
+pub(super) fn boot_hub_with_address_route(params: AddressRouteLoopbackParams) -> (PassiveChassis<TestChassis>, u16) {
     let registry = Arc::new(Registry::new());
     for descriptor in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(&boot_authority(), descriptor);
@@ -522,13 +551,7 @@ pub(super) fn boot_hub_with_address_route_replies(
     let mailer = Arc::new(Mailer::new(Arc::clone(&registry)).with_outbound(outbound));
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor::<TraceDispatchCapability>(())
-        .with_actor::<AddressRouteSink>(AddressRouteLoopbackParams {
-            engine,
-            mailbox_id,
-            canonical_path: canonical_path.to_owned(),
-            calls,
-            replies,
-        })
+        .with_actor::<AddressRouteSink>(params)
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
                 peer_kind: PeerKind::Substrate {

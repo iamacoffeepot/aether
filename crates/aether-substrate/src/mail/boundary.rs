@@ -1,13 +1,16 @@
 //! A mail bundle that crossed the boundary inside a payload, proven once.
 //!
 //! `DispatchTraced` and `CaptureFrame` carry a list of [`NamedMail`]s: each
-//! item names its recipient as an [`ActorPath`](aether_data::ActorPath), an
+//! item names its recipient as an [`ActorPath`], an
 //! address and nothing more. ADR-0230 section 3 makes the receiving engine
 //! prove that address once and send only through the proof, so a bundle is
-//! the same boundary inside a payload.
+//! the same boundary inside a payload, and a wire `Call` is the same boundary
+//! for one item: its recipient is an `ActorPath` the hosting engine proves on
+//! arrival.
 //! [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) proves every recipient
-//! before any item moves and hands back [`BoundaryMail`]s, which a holder can
-//! only deliver — through
+//! before any item moves, and
+//! [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call) proves a `Call`'s one.
+//! Both hand back [`BoundaryMail`]s, which a holder can only deliver — through
 //! [`NativeCtx::deliver_detached`](crate::actor::native::NativeCtx::deliver_detached)
 //! or [`NativeCtx::deliver_forwarded`](crate::actor::native::NativeCtx::deliver_forwarded).
 //! The proof never leaves the item and the item is never exportable, so a
@@ -16,13 +19,15 @@
 //!
 //! A bundle item names its kind as text, so no `ActorMail` bound can refuse
 //! engine-only mail on it (ADR-0233). [`is_engine_only`] is the check every
-//! door that carries only a raw `KindId` makes instead, and `accept` makes it
-//! for each item before proving the recipient.
+//! door that carries only a raw `KindId` makes instead: `accept` makes it for
+//! each item before proving the recipient, and the RPC server makes it for a
+//! wire `Call` before `accept_call`.
 
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
 use aether_actor::ErasedActorRef;
+use aether_data::ActorPath;
 use aether_data::name_inventory::engine_only_kinds;
 use aether_kinds::NamedMail;
 
@@ -33,9 +38,9 @@ use crate::mail::registry::Registry;
 /// boundary named, and the bytes the boundary encoded.
 ///
 /// No public constructor, no accessor, no `Clone`, and no serde, wire, or
-/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) is the only way to
-/// make one, and delivering it is
-/// the only thing a holder can do with it.
+/// `Schema` impl: [`NativeCtx::accept_bundle`](crate::actor::native::NativeCtx::accept_bundle) and
+/// [`NativeCtx::accept_call`](crate::actor::native::NativeCtx::accept_call) are the only ways to make one,
+/// and delivering it is the only thing a holder can do with it.
 #[derive(Debug)]
 pub struct BoundaryMail {
     pub(crate) recipient: ErasedActorRef,
@@ -66,16 +71,42 @@ pub(crate) fn accept(registry: &Registry, bundle: Vec<NamedMail>, label: &str) -
         if registry.kind_id(&item.kind_name).is_some_and(is_engine_only) {
             return Err(format!("engine-only kind {:?} in {label}", item.kind_name));
         }
-        let recipient = registry
-            .resolve_address(&item.recipient)
-            .map_err(|error| error.to_string())
-            .and_then(|resolved| registry.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string()))
+        let recipient = prove(registry, &item.recipient)
             .map_err(|error| format!("recipient `{}` in {label}: {error}", item.recipient))?;
         let kind =
             registry.kind_id(&item.kind_name).ok_or_else(|| format!("unknown kind {:?} in {label}", item.kind_name))?;
         accepted.push(BoundaryMail { recipient, kind, payload: item.payload });
     }
     Ok(accepted)
+}
+
+/// Prove one wire `Call`'s recipient (ADR-0230 §3): the one-item form of
+/// [`accept`], for a boundary that names its recipient by [`ActorPath`] and
+/// its kind by id.
+///
+/// The path resolves and is proven exactly as a bundle item's is, so a short
+/// path expands against this engine's declarations and an ambiguous one
+/// carries its candidate spellings. The kind is taken as the caller gave it:
+/// a wire `Call` carries no kind name to look up. On a refusal the error is
+/// the registry's diagnostic alone, which the RPC server carries to the
+/// caller as `RpcError::NotPresent`'s `detail` beside the path. It makes no
+/// engine-only check: the RPC server refuses the class (ADR-0233) before it
+/// forwards or calls this, so the wire door checks once.
+pub(crate) fn accept_call(
+    registry: &Registry,
+    recipient: &ActorPath,
+    kind: KindId,
+    payload: Vec<u8>,
+) -> Result<BoundaryMail, String> {
+    Ok(BoundaryMail { recipient: prove(registry, recipient)?, kind, payload })
+}
+
+/// Resolve `recipient` through [`Registry::resolve_address`] and prove the
+/// answered position at once through [`Registry::resolve_live`]. The position
+/// never leaves this function; each refusal is the registry's error text.
+fn prove(registry: &Registry, recipient: &ActorPath) -> Result<ErasedActorRef, String> {
+    let resolved = registry.resolve_address(recipient).map_err(|error| error.to_string())?;
+    registry.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string())
 }
 
 /// Whether `kind` is engine-only mail (ADR-0233): a statement only the engine

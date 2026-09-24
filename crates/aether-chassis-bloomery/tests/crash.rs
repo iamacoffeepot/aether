@@ -32,7 +32,7 @@ use aether_fleet::RestartPolicy;
 use aether_harness_bloomery::{Record, SeededJournal};
 use aether_harness_fleet::{FleetHarness, poll_until};
 use aether_harness_substrate::test_helpers::require_wasm;
-use aether_rpc::MailEnvelope;
+use aether_rpc::ReplyEnvelope;
 
 /// The bundle driver's canonical path. It is an instanced root, so no short
 /// `root/:disc` path anchors on it.
@@ -89,7 +89,7 @@ fn call(fleet: &mut FleetHarness, engine: EngineId, request: &Call) -> CallOutco
 }
 
 /// The one reply in `replies`, decoded as `K`.
-fn single<K: Kind>(replies: &[MailEnvelope]) -> K {
+fn single<K: Kind>(replies: &[ReplyEnvelope]) -> K {
     match replies {
         [reply] => K::decode_from_bytes(&reply.payload).unwrap_or_else(|| panic!("undecodable {}", K::NAME)),
         other => panic!("expected one {} reply, got {}", K::NAME, other.len()),

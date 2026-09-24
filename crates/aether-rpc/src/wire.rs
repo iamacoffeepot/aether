@@ -18,13 +18,15 @@
 //! The full design (peer model, dispatch flow, settlement signalling) is
 //! on issues 750 and 763.
 
-use aether_data::{EngineId, KindId, MailboxId};
+use aether_data::{ActorPath, EngineId, KindId};
 use serde::{Deserialize, Serialize};
 
 /// Wire-format version negotiated at handshake. Bump on any breaking
 /// shape change to [`WireFrame`] or its substructs; mismatched peers
-/// get kicked (no downgrade, no negotiation in v1 per issue 750).
-pub const WIRE_VERSION: u32 = 1;
+/// get kicked (no downgrade, no negotiation per issue 750). Version 2
+/// names a `Call`'s recipient by [`ActorPath`] and drops the address from
+/// replies (issue 6570).
+pub const WIRE_VERSION: u32 = 2;
 
 /// One frame on the wire. Length-prefix-framed via
 /// [`aether_codec::frame`]; wire-encoded body.
@@ -45,11 +47,11 @@ pub enum WireFrame {
         envelope: MailEnvelope,
     },
     /// One reply mail observed in the trace chain of `cid`'s call.
-    /// 0..n per cid; the server emits one for every mail addressed
-    /// back at the `RpcServer` mailbox with `correlation_id = cid`.
+    /// 0..n per cid; the server emits one for every reply mail that
+    /// comes back to it under the call's correlation.
     ReplyEvent {
         cid: u64,
-        envelope: MailEnvelope,
+        envelope: ReplyEnvelope,
     },
     /// Settlement notice for `cid` — the trace root of the original
     /// `Call` has settled (per ADR-0080). Exactly one per cid. After
@@ -115,60 +117,71 @@ pub struct KindDescriptor {
     pub name: String,
 }
 
-/// One mail envelope on the wire.
+/// One `Call`'s mail on the wire: who it is for, its kind, and its
+/// already-encoded bytes.
 ///
-/// `to` is the destination — `engine = None` means "this server's
-/// local actor system". The hub later cross-routes `engine = Some(_)`
-/// envelopes to the named substrate; for v1 the server rejects
-/// non-local targets with [`RpcError::UnsupportedTarget`].
-///
-/// `from` is `Some` when the originator wants replies (mail back at
-/// the `RpcServer` with `correlation_id = cid` round-trips to this
-/// peer); `None` is fire-and-forget at the envelope layer regardless
-/// of whether the outer `Call.cid` is set.
-///
-/// `correlation_id` is the mail-system correlation that responders
-/// use to `ctx.reply()` against. `RpcServer` sets this to the outer
-/// `Call.cid` on dispatch so any actor in the trace chain that
-/// replies routes back to the originating peer.
+/// The recipient is a [`Recipient`], an engine selection plus an
+/// [`ActorPath`]. The engine that hosts the recipient resolves the path
+/// when the `Call` arrives (ADR-0230 §3); nothing upstream computes a
+/// mailbox id for it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MailEnvelope {
-    pub to: MailboxAddress,
-    pub from: Option<MailboxAddress>,
+    pub to: Recipient,
     pub kind: KindId,
-    pub correlation_id: Option<u64>,
     #[serde(with = "aether_data::bytes")]
     pub payload: Vec<u8>,
 }
 
-/// Engine-aware mailbox address. `engine = None` resolves against the
-/// local actor system; `engine = Some(_)` is the hub-routing case
-/// (parked for v1, see [`RpcError::UnsupportedTarget`]).
-#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct MailboxAddress {
+/// A `Call`'s recipient: which engine, and the actor's [`ActorPath`] in it.
+///
+/// `engine = None` names the local actor system of the server the `Call`
+/// reached. `engine = Some(id)` asks a hub to relay the `Call` to that
+/// engine's proxy, which sends it on with the path as written, so only
+/// the hosting engine expands a short path. A path that does not resolve
+/// there to a `Live` actor closes the call with [`RpcError::NotPresent`].
+/// The path is valid by construction, so a malformed one fails the frame
+/// decode and never reaches resolution.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Recipient {
     pub engine: Option<EngineId>,
-    pub mailbox: MailboxId,
+    pub path: ActorPath,
 }
 
-impl MailboxAddress {
-    /// Address a local mailbox (no engine routing).
+impl Recipient {
+    /// A recipient in the local actor system of the server the `Call`
+    /// reaches (no engine routing).
     #[must_use]
-    pub const fn local(mailbox: MailboxId) -> Self {
-        Self { engine: None, mailbox }
+    pub const fn local(path: ActorPath) -> Self {
+        Self { engine: None, path }
     }
+}
+
+/// One reply mail on the wire: its kind and bytes, and no address. The
+/// `ReplyEvent`'s `cid` already says which call it answers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplyEnvelope {
+    pub kind: KindId,
+    #[serde(with = "aether_data::bytes")]
+    pub payload: Vec<u8>,
 }
 
 /// Reasons a `Call` can fail before the trace chain settles. v1 keeps
 /// the variant set small — most failures (handler panics, decode
 /// errors, etc.) surface as a `ReplyEvent` carrying a result kind
 /// from the responder, not an `RpcError`.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// It derives [`aether_data::Schema`] because the hub carries an engine's
+/// refusal back in `aether.rpc.call_settled` unchanged, so a caller that
+/// goes through the hub sees the same variant as one that dialed the
+/// engine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize, aether_data::Schema)]
 pub enum RpcError {
-    /// The target mailbox does not prove `Live` in this server's local
-    /// actor system: it was never registered, or it is still starting.
-    /// A dropped target is reported as `Other` carrying the registry's
-    /// text.
-    UnknownMailbox { mailbox: MailboxId },
+    /// The recipient's [`ActorPath`] does not resolve to a `Live` actor in
+    /// the engine that hosts it, whatever the reason: never registered,
+    /// still starting, dropped, or a short path that is ambiguous or names
+    /// no declared child. `detail` is that engine's diagnostic, including
+    /// ADR-0166's candidate spellings for an ambiguous hole.
+    NotPresent { path: ActorPath, detail: String },
     /// The kind id isn't in this server's kind registry.
     UnknownKind { kind: KindId },
     /// Target carried `engine = Some(_)` — cross-engine routing is

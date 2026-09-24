@@ -1,10 +1,11 @@
-// Test harness resolves echo/target actor mailboxes by their NAMESPACE to
-// address Call frames — reference id derivation, not sibling-cap addressing.
+// The test chassis are deliberately built bare with `Builder::new`, not
+// through the based boot path.
 #![allow(clippy::disallowed_methods)]
 use super::*;
-use crate::{Hello, HelloAck, PeerKind, WIRE_VERSION, WireFrame};
+use crate::{Hello, HelloAck, PeerKind, Recipient, WIRE_VERSION, WireFrame};
+use aether_actor::Addressable;
 use aether_codec::frame::{read_frame, write_frame};
-use aether_data::MailboxId;
+use aether_data::ActorPath;
 use aether_substrate::chassis::builder::Builder;
 use aether_substrate::chassis::builder::PassiveChassis;
 use aether_substrate::testing::{TestChassis, fresh_substrate};
@@ -13,10 +14,13 @@ use std::net::TcpStream;
 use std::sync::Arc;
 use std::time::Duration;
 
-/// A wire mailbox position no actor in these test chassis holds. The wire
-/// `MailboxAddress` requires a mailbox; the tests that address one need it
-/// to name nothing.
-const UNREGISTERED: MailboxId = MailboxId(0xdead_beef);
+/// An actor path no actor in these test chassis holds.
+const ABSENT: &str = "test.rpc.absent";
+
+/// The local recipient naming actor `A` by its namespace path.
+fn recipient_of<A: Addressable>() -> Recipient {
+    Recipient::local(ActorPath::new(A::NAMESPACE).expect("an actor namespace is a path"))
+}
 
 fn test_peer_kind() -> PeerKind {
     PeerKind::Substrate { engine_name: "test".into(), engine_version: "0.1.0".into(), kinds: vec![] }
@@ -148,8 +152,6 @@ fn handshake_hello_to_hello_ack_roundtrip() {
 /// hence no listener port) is published.
 #[test]
 fn disabled_rpc_server_claims_mailbox_and_binds_nothing() {
-    use aether_actor::Addressable;
-
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
         .with_actor_configured::<RpcServerCapability>(
@@ -252,10 +254,9 @@ fn ping_pong_roundtrip() {
 /// phase 2.
 #[test]
 fn call_echo_round_trip_event_then_end() {
+    use crate::MailEnvelope;
     use crate::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
-    use crate::{MailEnvelope, MailboxAddress};
-    use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use aether_data::Kind;
 
     let chassis = boot_with_echo_server();
 
@@ -265,16 +266,13 @@ fn call_echo_round_trip_event_then_end() {
     // Fire a Call against the echo actor. cid = 0xabc; the cap
     // correlates and ends with ReplyEnd matching the same cid.
     let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
-    let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: Some(0xabc),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(echo_mailbox),
-                from: None,
+                to: recipient_of::<TestEchoActor>(),
                 kind: <TestEchoRequest as Kind>::ID,
-                correlation_id: None,
                 payload: echo_payload,
             },
         },
@@ -306,29 +304,29 @@ fn call_echo_round_trip_event_then_end() {
     }
 }
 
-/// A `Call` whose recipient does not prove `Live` in the server's registry
-/// is refused at receipt (ADR-0230 section 3): nothing is dispatched and the
-/// call closes with `ReplyEnd` `Err(UnknownMailbox)`. Without the receipt
-/// check the mail parks in the mailer (a read timeout here) or drops and the
-/// call closes `Ok` with no reply events.
+/// A `Call` whose recipient path resolves to no actor in the server's
+/// registry is refused on arrival (ADR-0230 section 3): nothing is dispatched
+/// and the call closes with `ReplyEnd` `Err(NotPresent)` naming the sent
+/// path. Fails if the server dispatches, parks, or closes `Ok` for a path
+/// that resolves to nothing (a read timeout or an `Ok` end here), or reports
+/// it as some other variant.
 #[test]
-fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
+fn call_to_an_absent_path_closes_not_present() {
     use crate::server::test_echo::TestEchoRequest;
-    use crate::{MailEnvelope, MailboxAddress, RpcError};
+    use crate::{MailEnvelope, RpcError};
     use aether_data::Kind;
 
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
     complete_handshake(&mut stream);
 
+    let absent = ActorPath::new(ABSENT).expect("the absent fixture is a path");
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: Some(7),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(UNREGISTERED),
-                from: None,
+                to: Recipient::local(absent.clone()),
                 kind: <TestEchoRequest as Kind>::ID,
-                correlation_id: None,
                 payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
             },
         },
@@ -336,17 +334,19 @@ fn call_to_unregistered_mailbox_closes_with_unknown_mailbox() {
     .expect("test: write_frame Call to rpc server");
 
     let end: WireFrame = read_frame(&mut stream).expect("read ReplyEnd");
-    assert_eq!(end, WireFrame::ReplyEnd { cid: 7, result: Err(RpcError::UnknownMailbox { mailbox: UNREGISTERED }) });
+    assert!(
+        matches!(&end, WireFrame::ReplyEnd { cid: 7, result: Err(RpcError::NotPresent { path, .. }) } if *path == absent),
+        "an absent path closes NotPresent naming it: {end:?}",
+    );
 }
 
 /// ADR-0233: a wire `Call` carrying engine-only mail closes with `ReplyEnd`
-/// `Err(Other)` before any dispatch. The recipient is unregistered on
-/// purpose: a door that proved the recipient first would answer
-/// `UnknownMailbox` instead. Catches a wire client forging a departure
-/// notice or a settlement.
+/// `Err(Other)` before any dispatch. The recipient path is absent on purpose:
+/// a door that proved the recipient first would answer `NotPresent` instead.
+/// Catches a wire client forging a departure notice or a settlement.
 #[test]
 fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
-    use crate::{MailEnvelope, MailboxAddress, RpcError};
+    use crate::{MailEnvelope, RpcError};
     use aether_data::Kind;
     use aether_kinds::MonitorNotice;
 
@@ -358,10 +358,8 @@ fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
         &WireFrame::Call {
             cid: Some(13),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(UNREGISTERED),
-                from: None,
+                to: Recipient::local(ActorPath::new(ABSENT).expect("the absent fixture is a path")),
                 kind: <MonitorNotice as Kind>::ID,
-                correlation_id: None,
                 payload: MonitorNotice.encode_into_bytes(),
             },
         },
@@ -381,7 +379,7 @@ fn call_carrying_an_engine_only_kind_closes_with_err_before_dispatch() {
 #[test]
 fn engine_call_without_a_route_closes_with_unknown_engine() {
     use crate::server::test_echo::TestEchoRequest;
-    use crate::{MailEnvelope, MailboxAddress, RpcError};
+    use crate::{MailEnvelope, RpcError};
     use aether_data::{EngineId, Kind, Uuid};
 
     let (_chassis, mut stream) = boot_with_rpc_server_only(Duration::from_secs(5));
@@ -393,10 +391,11 @@ fn engine_call_without_a_route_closes_with_unknown_engine() {
         &WireFrame::Call {
             cid: Some(11),
             envelope: MailEnvelope {
-                to: MailboxAddress { engine: Some(engine), mailbox: UNREGISTERED },
-                from: None,
+                to: Recipient {
+                    engine: Some(engine),
+                    path: ActorPath::new(ABSENT).expect("the absent fixture is a path"),
+                },
                 kind: <TestEchoRequest as Kind>::ID,
-                correlation_id: None,
                 payload: TestEchoRequest { value: 1 }.encode_into_bytes(),
             },
         },
@@ -419,9 +418,8 @@ fn engine_call_without_a_route_closes_with_unknown_engine() {
 /// `Err` rides home as a `ReplyEvent` before the `ReplyEnd`.
 #[test]
 fn call_headless_window_list_err_reaches_component_reply() {
-    use crate::{MailEnvelope, MailboxAddress};
-    use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use crate::MailEnvelope;
+    use aether_data::Kind;
     use aether_window::{HeadlessWindowCapability, ListWindows, ListWindowsResult};
 
     let (registry, mailer) = fresh_substrate();
@@ -439,16 +437,13 @@ fn call_headless_window_list_err_reaches_component_reply() {
     complete_handshake(&mut stream);
 
     let payload = ListWindows.encode_into_bytes();
-    let window_mailbox = mailbox_id_from_name(<HeadlessWindowCapability as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: Some(0xdef),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(window_mailbox),
-                from: None,
+                to: recipient_of::<HeadlessWindowCapability>(),
                 kind: <ListWindows as Kind>::ID,
-                correlation_id: None,
                 payload,
             },
         },
@@ -494,24 +489,20 @@ fn call_headless_window_list_err_reaches_component_reply() {
 /// `ReplyEnd`, then the late reply dropped).
 #[test]
 fn call_deferred_echo_settles_after_reply() {
+    use crate::MailEnvelope;
     use crate::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-    use crate::{MailEnvelope, MailboxAddress};
-    use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use aether_data::Kind;
 
     let (_chassis, mut stream) = boot_with_deferred_echo(Duration::from_secs(5));
 
     let payload = DeferredEchoRequest { value: 99 }.encode_into_bytes();
-    let mailbox = mailbox_id_from_name(<DeferredEchoActor as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: Some(0xdef),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(mailbox),
-                from: None,
+                to: recipient_of::<DeferredEchoActor>(),
                 kind: <DeferredEchoRequest as Kind>::ID,
-                correlation_id: None,
                 payload,
             },
         },
@@ -568,11 +559,9 @@ fn call_deferred_echo_settles_after_reply() {
 /// behind 50ms sleeps); the test pairs by `value`.
 #[test]
 fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
+    use crate::MailEnvelope;
     use crate::server::test_echo::{DeferredEchoActor, DeferredEchoReply, DeferredEchoRequest};
-    use crate::{MailEnvelope, MailboxAddress};
-    use aether_actor::Addressable;
-    use aether_data::ActorPath;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use aether_data::Kind;
     use aether_kinds::NamedMail;
     use aether_kinds::trace::DispatchTraced;
     use aether_trace::TraceDispatchCapability;
@@ -601,17 +590,14 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
             },
         ],
     };
-    let trace_mailbox = mailbox_id_from_name(<TraceDispatchCapability as Addressable>::NAMESPACE);
     let payload = batch.encode_into_bytes();
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: Some(0xbeef),
             envelope: MailEnvelope {
-                to: MailboxAddress::local(trace_mailbox),
-                from: None,
+                to: recipient_of::<TraceDispatchCapability>(),
                 kind: <DispatchTraced as Kind>::ID,
-                correlation_id: None,
                 payload,
             },
         },
@@ -668,10 +654,9 @@ fn dispatch_traced_with_deferred_replies_routes_each_event_then_settles() {
 /// no stale `ReplyEvent` / `ReplyEnd` frames are in the way.
 #[test]
 fn call_without_cid_is_fire_and_forget() {
+    use crate::MailEnvelope;
     use crate::server::test_echo::{TestEchoActor, TestEchoRequest};
-    use crate::{MailEnvelope, MailboxAddress};
-    use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use aether_data::Kind;
 
     let (registry, mailer) = fresh_substrate();
     let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
@@ -690,16 +675,13 @@ fn call_without_cid_is_fire_and_forget() {
     // still reply, but with cid None there's no in-flight entry
     // so the reply has no matching correlation and gets dropped.
     let echo_payload = TestEchoRequest { value: 7 }.encode_into_bytes();
-    let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
     write_frame(
         &mut stream,
         &WireFrame::Call {
             cid: None,
             envelope: MailEnvelope {
-                to: MailboxAddress::local(echo_mailbox),
-                from: None,
+                to: recipient_of::<TestEchoActor>(),
                 kind: <TestEchoRequest as Kind>::ID,
-                correlation_id: None,
                 payload: echo_payload,
             },
         },
@@ -821,9 +803,8 @@ fn client_peer_kind() -> PeerKind {
 #[test]
 fn call_echo_round_trips_over_the_socket() {
     use crate::server::test_echo::{TestEchoActor, TestEchoReply, TestEchoRequest};
-    use crate::{MailEnvelope, MailboxAddress, RpcClient};
-    use aether_actor::Addressable;
-    use aether_data::{Kind, mailbox_id_from_name};
+    use crate::{MailEnvelope, RpcClient};
+    use aether_data::Kind;
 
     let chassis = boot_with_echo_server();
 
@@ -848,14 +829,11 @@ fn call_echo_round_trips_over_the_socket() {
     }
 
     let echo_payload = TestEchoRequest { value: 42 }.encode_into_bytes();
-    let echo_mailbox = mailbox_id_from_name(<TestEchoActor as Addressable>::NAMESPACE);
     let cid = conn
         .client
         .call(MailEnvelope {
-            to: MailboxAddress::local(echo_mailbox),
-            from: None,
+            to: recipient_of::<TestEchoActor>(),
             kind: <TestEchoRequest as Kind>::ID,
-            correlation_id: None,
             payload: echo_payload,
         })
         .expect("call writes");
