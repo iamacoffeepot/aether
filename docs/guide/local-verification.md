@@ -111,8 +111,9 @@ later non-owner body edit invalidates a previous sign-off until the owner edits
 the current body again. The sign-off changes only the exit status: findings
 remain in the job log.
 
-Branch protection currently requires two status checks: `CI pass` and `Lint
-title`. It does not configure required pull-request reviews. `CI pass` proves
+`main` is protected by the `Protect main` ruleset, which requires a pull request
+but no review and no status checks. `CI pass` and `Lint title` are the checks to
+wait on; the ruleset does not enforce them. `CI pass` proves
 the applicable tree checks; it does not prove direct inspection or lifecycle
 readiness. Those are separate direct-drive facts: the implementer directly
 inspects and repairs the exact current-head diff and appends a hidden

@@ -194,11 +194,11 @@ Keep these concepts separate:
 
 Do not infer a hosted workflow from a skill, script, historical workflow name,
 or prose description. Confirm that its `.github/workflows/*.yml` entry point is
-present in the checked-in tree, then verify current branch protection before
+present in the checked-in tree, then verify the current `main` ruleset before
 calling it a merge gate. Contributor lifecycle skills run directly and persist
-their own body, pull-request, review, and thread facts. Only `CI pass`
-and `Lint title` are required status checks, and required pull-request reviews
-are not configured.
+their own body, pull-request, review, and thread facts. The `Protect main`
+ruleset requires a pull request but no review and no status checks: `CI pass`
+and `Lint title` are the checks to wait on, not ones the ruleset enforces.
 
 The checked-in [Release workflow](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/release.yml)
 builds a package depot per platform on a bare-semver tag push and publishes

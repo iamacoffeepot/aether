@@ -170,9 +170,11 @@ a draft PR that closes the issue. Existing artifacts are possible live ownership
 claims and require a verified resume, never opportunistic deletion or
 recreation.
 
-GitHub Actions proves the build/test tree. `main` has no branch protection:
-`CI pass` and `Lint title` are the checks a head must pass before it lands, but
-nothing enforces them, and no pull-request review is required.
+GitHub Actions proves the build/test tree. `main` is protected by the
+`Protect main` ruleset: changes land only through a pull request, force pushes
+and deletion are refused, and no one bypasses it. No pull-request review is
+required. `CI pass` and `Lint title` are the checks a head must pass before it
+lands, but the ruleset does not enforce them.
 The checked-in [workflow README](https://github.com/iamacoffeepot/aether/blob/main/.github/workflows/README.md)
 owns the exact hosted inventory.
 
