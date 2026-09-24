@@ -210,6 +210,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "aether-bloomery-muse"
+version = "0.3.0-alpha"
+dependencies = [
+ "aether-actor",
+ "aether-bloomery-bundle",
+ "aether-bloomery-kinds",
+ "aether-bloomery-program",
+ "aether-data",
+ "aether-http",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "aether-bloomery-program"
 version = "0.3.0-alpha"
 dependencies = [
