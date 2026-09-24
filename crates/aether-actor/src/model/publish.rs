@@ -45,8 +45,7 @@ pub trait Publisher: Addressable {
 /// to its subscribers."
 ///
 /// Gates the flat `ctx.subscribe::<P, K>()` / `ctx.unsubscribe::<P, K>()`
-/// verbs and the `subscribe` / `unsubscribe` families on each publisher's own
-/// sender facade, so a subscription to a kind the cap never emits is an
+/// verbs, so a subscription to a kind the cap never emits is an
 /// `E0277` at the `wire` call site rather than a stored row that never
 /// fires. Subscribing the wrong cap is otherwise silent end to end: the
 /// row is accepted, the event is dropped at its source for want of a

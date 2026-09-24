@@ -17,7 +17,7 @@
 
 use core::marker::PhantomData;
 
-use aether_actor::{Addressable, HandlesKind, MailboxForward};
+use aether_actor::{Addressable, HandlesKind};
 use aether_data::{ActorMail, Kind, MailId, RequestId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -56,8 +56,8 @@ impl<R> Clone for NativeActorMailbox<'_, R> {
 /// subsequent sends.
 ///
 /// Built by [`NativeActorMailbox::with_context`]. The underlying mailbox is
-/// copied into the adapter while `context` stays borrowed, so callers can use
-/// capability facades without rebuilding the context at every send.
+/// copied into the adapter while `context` stays borrowed, so callers can send
+/// several requests without rebuilding the context at every send.
 pub struct NativeActorMailboxWithContext<'mailbox, 'context, R, C: Kind> {
     mailbox: NativeActorMailbox<'mailbox, R>,
     context: &'context C,
@@ -234,30 +234,5 @@ impl<R: Addressable> NativeActorMailbox<'_, R> {
         let mail_id = self.send_tracked(payload);
         self.binding.store_request_context(RequestId(mail_id.correlation_id), context);
         mail_id
-    }
-}
-
-// The native half of `aether_actor::MailboxForward` — the shim a capability's
-// sender facade sits on. The trait is declared in `aether-actor` beside the
-// wasm handles; these two impls belong here because `aether-substrate` owns the
-// native handles. Together the four make a cap's facade one blanket impl over
-// `MailboxForward<TheCap>` instead of one hand-written impl per handle shape.
-impl<R: Addressable> MailboxForward<R> for NativeActorMailbox<'_, R> {
-    fn forward<K>(&self, payload: &K)
-    where
-        R: HandlesKind<K>,
-        K: ActorMail,
-    {
-        self.send(payload);
-    }
-}
-
-impl<R: Addressable, C: Kind> MailboxForward<R> for NativeActorMailboxWithContext<'_, '_, R, C> {
-    fn forward<K>(&self, payload: &K)
-    where
-        R: HandlesKind<K>,
-        K: ActorMail,
-    {
-        let _ = self.send(payload);
     }
 }

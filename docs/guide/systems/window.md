@@ -50,34 +50,36 @@ with render, lifecycle, and shutdown; it does not interpret raw winit events.
 
 ## The public surface
 
-Consumers use `WindowCapability` and `WindowManagerMailboxExt` for list,
-create, and subscription operations. A single-window consumer mails the
+Consumers declare `depends(WindowCapability)` and send the list, create, and
+subscription kinds to the manager with `ctx.send::<WindowCapability>(..)` and
+`ctx.subscribe::<WindowCapability, K>()`. A single-window consumer mails the
 per-window operations to the manager too, which re-dispatches them at the sole
-window (see below). A window whose proof the caller holds takes them directly,
-through `WindowMailboxExt`. There is no by-name window lookup in actor code.
+window (see below). A window whose proof the caller holds takes them directly:
+`ctx.send_to(&window, &SetWindowTitle { .. })`. There is no by-name window
+lookup in actor code.
 
 ```rust
 use aether_kinds::{Key, WindowMode};
 use aether_window::{
-    RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowManagerMailboxExt,
-    WindowSelector, WindowSizeRequest, WindowSpec,
+    CreateWindow, ListWindows, RequestWindowRedraw, SetWindowTitle, WindowCapability, WindowSizeRequest,
+    WindowSpec,
 };
 
 // In an `#[actor(depends(WindowCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let windows = ctx.actor::<WindowCapability>();
-
-    windows.list();
-    windows.create(WindowSpec {
-        name: "inspector".to_owned(),
-        title: "Inspector".to_owned(),
-        mode: WindowMode::Windowed,
-        size: Some(WindowSizeRequest { width: 960, height: 540 }),
+    ctx.send::<WindowCapability>(&ListWindows);
+    ctx.send::<WindowCapability>(&CreateWindow {
+        spec: WindowSpec {
+            name: "inspector".to_owned(),
+            title: "Inspector".to_owned(),
+            mode: WindowMode::Windowed,
+            size: Some(WindowSizeRequest { width: 960, height: 540 }),
+        },
     });
-    windows.subscribe::<Key>(WindowSelector::All);
+    ctx.subscribe::<WindowCapability, Key>();
 
-    windows.send(&SetWindowTitle { title: "Aether".to_owned() });
-    windows.send(&RequestWindowRedraw);
+    ctx.send::<WindowCapability>(&SetWindowTitle { title: "Aether".to_owned() });
+    ctx.send::<WindowCapability>(&RequestWindowRedraw);
 }
 ```
 
@@ -169,19 +171,19 @@ future windows:
 ```rust
 // In an `#[actor(depends(WindowCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let windows = ctx.actor::<WindowCapability>();
-    windows.subscribe::<WindowOpened>(WindowSelector::All);
-    windows.subscribe::<WindowSize>(WindowSelector::All);
-    windows.subscribe::<MouseMove>(WindowSelector::One(self.viewport));
+    ctx.subscribe::<WindowCapability, WindowOpened>();
+    ctx.subscribe::<WindowCapability, WindowSize>();
+    ctx.send::<WindowCapability>(&SubscribeWindowSelf {
+        selector: WindowSelector::One(self.viewport),
+        kind: MouseMove::ID,
+    });
 }
 ```
 
-`WindowSelector::All` is prospective. If the same mailbox subscribes through
-both `All` and `One(id)`, recipient lookup unions the sets and sends one copy.
-The common reflexive methods subscribe the sending actor. Explicit
-`subscribe_for`/`unsubscribe_for` forms exist for forwarding to another local
-mailbox; the manager validates and monitors that mailbox, and removes all of
-its rows when it departs.
+The flat verb selects `WindowSelector::All`, which is prospective. If the same
+mailbox subscribes through both `All` and `One(id)`, recipient lookup unions the
+sets and sends one copy. Both forms subscribe the sending actor; the manager
+monitors it and removes all of its rows when it departs.
 
 Publication uses each kind's compile-time `K::ID`. There is no registry lookup,
 central input-kind list, or relay actor to update when a window event kind is

@@ -15,8 +15,14 @@ Both reply enums have explicit `Ok`/`Err` arms. Once a backend has initialized,
 a failed get/set is therefore an ordinary capability result, not a
 missing-response convention. Initialization is a separate boundary: creating
 the `System` backend happens during actor boot, and failure there returns
-`BootError` before any clipboard request can be handled. `ClipboardMailboxExt`
-provides typed helpers for wasm and native callers.
+`BootError` before any clipboard request can be handled.
+
+A caller that declares `depends(ClipboardCapability)` sends the request kind
+directly; the reply arrives at its handler for the matching result kind:
+
+```rust
+ctx.send::<ClipboardCapability>(&GetClipboardText);
+```
 
 ## Chassis behavior
 

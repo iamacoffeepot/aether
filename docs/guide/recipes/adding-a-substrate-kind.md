@@ -123,18 +123,18 @@ If several chassis claim the same namespace, add the contract everywhere. An
 unsupported backend should return the ordinary error reply rather than accept
 mail and never settle.
 
-## 5. Add sender ergonomics when repetition warrants it
+## 5. Callers send the kind directly
 
-A mailbox extension trait can lift repeated construction:
+A caller that declares `depends(ClipboardCapability)` sends the kind itself
+through the flat verb:
 
 ```rust
-pub trait ClipboardMailboxExt {
-    fn get_text(&self);
-}
+ctx.send::<ClipboardCapability>(&SetClipboardText { text: text.to_owned() });
 ```
 
-Implement it for wasm and native mailbox types as appropriate. Keep the raw
-kind public; the helper is ergonomics, not a second protocol.
+Keep the kind public; it is the whole sender surface. A capability adds no
+sender extension trait over the mailbox handle (ADR-0232 §7): a helper method
+per kind would be a second way to send the same mail beside the flat verb.
 
 ## 6. Verify the boundary
 

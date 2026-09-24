@@ -1,8 +1,9 @@
 //! Smoke component for input subscriptions. It subscribes to the
-//! substrate-published input kinds (`Key`, `MouseMove`, `MouseButton`) through
-//! the `aether.window` facade and gives each one a handler, which is all it
-//! takes to receive them: nothing subscribes on a component's behalf, so a
-//! component that wants input asks for it from `wire`.
+//! substrate-published input kinds (`Key`, `MouseMove`, `MouseButton`) on
+//! `aether.window` with the flat `ctx.subscribe` verb and gives each one a
+//! handler, which is all it takes to receive them: nothing subscribes on a
+//! component's behalf, so a component that wants input asks for it from
+//! `wire`.
 //!
 //! The handlers are empty. Running this component exercises the subscription
 //! and dispatch path end to end, visible in whatever tracing the substrate
@@ -17,7 +18,7 @@
 
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, MouseButton, MouseMove};
-use aether_window::{WindowCapability, WindowManagerMailboxExt, WindowSelector};
+use aether_window::WindowCapability;
 
 pub struct InputLogger;
 
@@ -30,10 +31,9 @@ impl WasmActor for InputLogger {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        let window = ctx.actor::<WindowCapability>();
-        window.subscribe::<Key>(WindowSelector::All);
-        window.subscribe::<MouseMove>(WindowSelector::All);
-        window.subscribe::<MouseButton>(WindowSelector::All);
+        ctx.subscribe::<WindowCapability, Key>();
+        ctx.subscribe::<WindowCapability, MouseMove>();
+        ctx.subscribe::<WindowCapability, MouseButton>();
     }
 
     #[handler::single]

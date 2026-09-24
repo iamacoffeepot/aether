@@ -20,7 +20,6 @@
 use aether_actor::{ActorInitError, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Ping, Pong, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_lifecycle::LifecycleMailboxExt;
 use aether_math::Rgb;
 use aether_render::{DrawTriangle, RenderCapability, Vertex};
 
@@ -49,7 +48,7 @@ impl WasmActor for Hello {
     }
 
     fn wire(&mut self, ctx: &mut aether_actor::WireCtx<'_, '_>) {
-        ctx.actor::<LifecycleCapability>().subscribe::<Tick>();
+        ctx.subscribe::<LifecycleCapability, Tick>();
     }
 
     /// Emits the configured triangle to the render capability every tick.
@@ -57,7 +56,7 @@ impl WasmActor for Hello {
     /// lifecycle, and the effect shows up in a captured frame.
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _tick: Tick) {
-        ctx.actor::<RenderCapability>().send(&TRIANGLE);
+        ctx.send::<RenderCapability>(&TRIANGLE);
     }
 
     /// Replies to a ping with a pong carrying the same sequence number, so a

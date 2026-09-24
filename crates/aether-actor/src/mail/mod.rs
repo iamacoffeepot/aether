@@ -17,7 +17,6 @@
 use alloc::vec::Vec;
 use core::slice;
 use serde::de::DeserializeOwned;
-pub mod facade;
 
 use core::marker::PhantomData;
 

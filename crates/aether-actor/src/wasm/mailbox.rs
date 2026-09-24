@@ -70,8 +70,8 @@ impl<R> Clone for WasmActorMailbox<'_, R> {
 /// sends.
 ///
 /// Built by [`WasmActorMailbox::with_context`]. The underlying mailbox is
-/// copied into the adapter while `context` stays borrowed, so callers can use
-/// capability facades without rebuilding the context at every send.
+/// copied into the adapter while `context` stays borrowed, so callers can send
+/// several requests without rebuilding the context at every send.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmActorMailboxWithContext<'mailbox, 'context, R, C: Kind> {
     mailbox: WasmActorMailbox<'mailbox, R>,
