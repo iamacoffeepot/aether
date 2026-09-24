@@ -108,10 +108,10 @@ mod runtime;
 // `use runtime::*` glob the `FleetServer` impl uses.
 
 /// Reply sink: records the latest reply of each engines-cap reply
-/// kind into shared cells so a unit test can drive a handler via
-/// `mailer.push` and observe what it replied. Lives at file root (not
-/// nested in `mod tests`) so the `#[actor]` macro's marker emission
-/// stays addressable.
+/// kind into shared cells so a unit test can drive a handler via the
+/// chassis's `send_for_reply` and observe what it replied. Lives at
+/// file root (not nested in `mod tests`) so the `#[actor]` macro's
+/// marker emission stays addressable.
 // `pub` rather than private because it's the `NativeActor::Config` of
 // the test `ReplySink` below, and the `#[actor]` macro's trait impl is
 // fully public — `#[cfg(test)]` keeps it out of the real public API.
@@ -159,8 +159,8 @@ impl NativeActor for ReplySink {
 
 #[cfg(test)]
 mod tests {
-    // Test harness resolves the server/sink actor mailboxes by their NAMESPACE
-    // for fixture wiring — reference id derivation, not sibling-cap addressing.
+    // The fixtures boot a bare `Builder::<TestChassis>::new` chassis to host
+    // the server and the reply sink — test wiring, not a production chassis.
     #![allow(clippy::disallowed_methods)]
     use super::runtime::{
         EngineEntry, FleetServerState, FleetSpawnContext, ProxySpawnOutcome, SpawnOrigin, SpawnRecipe, Supervision,
@@ -169,18 +169,17 @@ mod tests {
     use super::{FleetConfig, FleetServer, ReplyCells, ReplySink, RestartPolicy};
     use crate::kinds::{EngineAlive, EngineDied};
     use crate::store::{ArtifactKind, ArtifactStore, DEFAULT_DISK_BUDGET_BYTES, StoredManifest};
-    use aether_actor::Addressable;
-    use aether_data::{EngineId, Kind, Uuid, mailbox_id_from_name};
+    use aether_data::{EngineId, Kind, Uuid};
     use aether_kinds::descriptors;
     use aether_kinds::{
         BinaryManifest, BinarySelector, DeathReason, ListEngines, SpawnEngine, SpawnEngineResult, TerminateEngine,
         TerminateEngineResult,
     };
+    use aether_substrate::ReplyTarget;
     use aether_substrate::chassis::builder::{Builder, PassiveChassis};
     use aether_substrate::mail::mailer::Mailer;
     use aether_substrate::mail::outbound::HubOutbound;
     use aether_substrate::mail::registry::Registry;
-    use aether_substrate::mail::{Mail, Source, SourceAddr};
     use aether_substrate::testing::{TestChassis, boot_authority};
     use std::collections::{HashMap, VecDeque};
     use std::path::{Path, PathBuf};
@@ -189,9 +188,9 @@ mod tests {
     use std::{env, fs, process, thread};
 
     /// Boot a passive chassis hosting `FleetServer` + the reply sink.
-    /// Returns the chassis (kept alive for its dispatcher threads), the
-    /// mailer to push requests through, and the sink's cells.
-    fn boot() -> (PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+    /// Returns the chassis (kept alive for its dispatcher threads, and the
+    /// holder of both actors' proofs) and the sink's cells.
+    fn boot() -> (PassiveChassis<TestChassis>, ReplyCells) {
         let registry = Arc::new(Registry::new());
         for d in descriptors::all() {
             let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
@@ -204,12 +203,12 @@ mod tests {
         // `dirs::data_dir()` store. Heartbeat stays disabled (the `Default`);
         // only the store dir is overridden.
         let config = FleetConfig { binary_store_dir: Some(isolated_store_dir()), ..FleetConfig::default() };
-        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+        let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
             .with_actor_configured::<FleetServer>((), config)
             .with_actor::<ReplySink>(cells.clone())
             .build_passive()
             .expect("caps boot");
-        (chassis, mailer, cells)
+        (chassis, cells)
     }
 
     /// A unique per-call temp dir for the engines-cap unit tests' binary
@@ -269,12 +268,12 @@ mod tests {
     /// Drive one request kind at `aether.fleet`, reply-to the sink,
     /// and block until `probe` sees a recorded reply (or the deadline
     /// passes).
-    fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, probe: impl Fn() -> Option<T>) -> T {
-        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
-        let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
-        mailer.push(
-            Mail::new(server, K::ID, request.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
+    fn drive<K: Kind, T>(chassis: &PassiveChassis<TestChassis>, request: &K, probe: impl Fn() -> Option<T>) -> T {
+        chassis.send_for_reply(
+            chassis.actor_ref::<FleetServer>().erase(),
+            K::ID,
+            request.encode_into_bytes(),
+            ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: 1 },
         );
         let deadline = Instant::now() + Duration::from_secs(10);
         loop {
@@ -291,18 +290,28 @@ mod tests {
     /// earlier mail (single-threaded actor, in-order mailbox). Returns
     /// the full `ListEnginesResult` the cap reports afterward — both the
     /// live `engines` and the `recently_died` ring.
-    fn push_then_list<K: Kind>(mailer: &Arc<Mailer>, cells: &ReplyCells, fire: &K) -> aether_kinds::ListEnginesResult {
-        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
-        mailer.push(Mail::new(server, K::ID, fire.encode_into_bytes(), 1));
-        drive(mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
+    fn push_then_list<K: Kind>(
+        chassis: &PassiveChassis<TestChassis>,
+        cells: &ReplyCells,
+        fire: &K,
+    ) -> aether_kinds::ListEnginesResult {
+        drop(chassis.send_tracked(
+            chassis.actor_ref::<FleetServer>().erase(),
+            K::ID,
+            fire.encode_into_bytes(),
+            1,
+            None,
+        ));
+        drive(chassis, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take())
     }
 
     /// `on_list` on a fresh cap replies with an empty engine list.
     #[test]
     fn list_on_empty_cap_is_empty() {
-        let (_chassis, mailer, cells) = boot();
-        let result =
-            drive(&mailer, &ListEngines {}, || cells.list.lock().expect("test setup: list cell mutex poisoned").take());
+        let (chassis, cells) = boot();
+        let result = drive(&chassis, &ListEngines {}, || {
+            cells.list.lock().expect("test setup: list cell mutex poisoned").take()
+        });
         assert!(result.engines.is_empty(), "fresh cap supervises no engines");
     }
 
@@ -852,9 +861,9 @@ mod tests {
     /// fork is attempted (ADR-0115, #1954).
     #[test]
     fn spawn_with_missing_binary_replies_err() {
-        let (_chassis, mailer, cells) = boot();
+        let (chassis, cells) = boot();
         let result = drive(
-            &mailer,
+            &chassis,
             &SpawnEngine {
                 selector: BinarySelector {
                     query: Some("nonexistent-hash-or-name".to_owned()),
@@ -932,15 +941,15 @@ mod tests {
     /// `Err` rather than panicking.
     #[test]
     fn terminate_unknown_engine_replies_err() {
-        let (_chassis, mailer, cells) = boot();
+        let (chassis, cells) = boot();
 
-        let malformed = drive(&mailer, &TerminateEngine { engine_id: "not-a-uuid".to_owned() }, || {
+        let malformed = drive(&chassis, &TerminateEngine { engine_id: "not-a-uuid".to_owned() }, || {
             cells.terminate.lock().expect("test setup: terminate cell mutex poisoned").take()
         });
         assert!(matches!(malformed, TerminateEngineResult::Err { .. }), "a malformed engine_id should be rejected");
 
         let unknown =
-            drive(&mailer, &TerminateEngine { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() }, || {
+            drive(&chassis, &TerminateEngine { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() }, || {
                 cells.terminate.lock().expect("test setup: terminate cell mutex poisoned").take()
             });
         assert!(
@@ -959,10 +968,10 @@ mod tests {
     /// under the idempotent duplicate-`died` contract (issue 1906).
     #[test]
     fn engine_died_for_unknown_is_noop() {
-        let (_chassis, mailer, cells) = boot();
+        let (chassis, cells) = boot();
 
         let after_malformed = push_then_list(
-            &mailer,
+            &chassis,
             &cells,
             &EngineDied {
                 engine_id: "not-a-uuid".to_owned(),
@@ -973,7 +982,7 @@ mod tests {
         assert!(after_malformed.recently_died.is_empty(), "a malformed died records no phantom death");
 
         let after_unknown = push_then_list(
-            &mailer,
+            &chassis,
             &cells,
             &EngineDied {
                 engine_id: "00000000-0000-0000-0000-000000000000".to_owned(),
@@ -989,9 +998,9 @@ mod tests {
     /// must not resurrect the engine (issue 1339).
     #[test]
     fn engine_alive_for_unknown_is_noop() {
-        let (_chassis, mailer, cells) = boot();
+        let (chassis, cells) = boot();
         let after = push_then_list(
-            &mailer,
+            &chassis,
             &cells,
             &EngineAlive { engine_id: "00000000-0000-0000-0000-000000000000".to_owned() },
         );
