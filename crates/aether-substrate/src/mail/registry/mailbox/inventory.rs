@@ -28,8 +28,8 @@ pub(super) fn live_inventory(mailboxes: &FxHashMap<MailboxId, RouteRecord>) -> V
         })
         .map(|(id, route)| MailboxDescriptor {
             id: *id,
-            name: route.canonical_name.clone(),
-            category: categorise_mailbox_name(&route.canonical_name),
+            name: route.canonical_name.to_string(),
+            category: categorise_mailbox_name(route.canonical_name.as_str()),
         })
         .collect::<Vec<_>>();
     inventory.push(MailboxDescriptor {

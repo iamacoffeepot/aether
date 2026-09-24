@@ -105,9 +105,9 @@ impl Spawner {
         A: Instanced + NativeActor,
     {
         let mailbox_id = staged.identity.id;
+        let name = Arc::clone(&staged.identity.canonical_name);
         let (decided, birth) = crossbeam_channel::bounded(1);
-        let finalizer =
-            NativeSpawnFinalizer::external(decided, mailbox_id, Arc::clone(&staged.identity.canonical_name));
+        let finalizer = NativeSpawnFinalizer::external(decided, mailbox_id, Arc::clone(&name));
         let commit = self.prepare_commit(staged, Some(finalizer), EffectChain::Uncaused(Uncaused::EmbedderCall));
         if self.registry.submit(EffectBatch::new(vec![RegistryEffect::PreparedSpawn(commit)])).is_none() {
             return Err(SpawnError::OwnerClosed);
@@ -119,7 +119,7 @@ impl Spawner {
             Err(crossbeam_channel::RecvTimeoutError::Timeout) => {
                 tracing::warn!(
                     target: "aether_substrate::spawn",
-                    mailbox = %mailbox_id,
+                    actor = %name,
                     cap_millis = BIRTH_PATIENCE.as_millis(),
                     "post-seal spawn wedged: the owner accepted the birth but nothing decided it",
                 );

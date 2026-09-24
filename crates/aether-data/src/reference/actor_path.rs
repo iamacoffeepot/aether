@@ -79,6 +79,12 @@ impl ActorPath {
         Ok(Self(text.into()))
     }
 
+    /// The written text, exactly as it was validated.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
     /// The parsed view of the written text. Infallible, because the text was
     /// validated on the way in.
     #[must_use]

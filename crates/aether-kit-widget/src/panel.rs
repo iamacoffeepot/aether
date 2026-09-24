@@ -1486,12 +1486,11 @@ impl WasmActor for WidgetPanel {
     /// Observe one descendant scroll container's exact typed outcome. The
     /// `container` field remains authoritative after intermediate scroll
     /// actors relay the event unchanged.
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::manual]
     fn on_scroll_outcome(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, outcome: ScrollOutcome) {
         tracing::info!(
             target: "aether_kit_widget",
-            source = ctx.sender().map_or(0, |sender| sender.id().0),
+            widget = self.child_name(ctx.sender()),
             container = outcome.container.0,
             offset_x_pixels = outcome.offset.x_pixels,
             offset_y_pixels = outcome.offset.y_pixels,
@@ -1505,12 +1504,11 @@ impl WasmActor for WidgetPanel {
 
     /// The root is the terminal residual sink. Log every named axis field and
     /// drop the remainder; no second wheel-sign conversion occurs here.
-    #[allow(clippy::unused_self)] // actor handler ABI always receives state
     #[handler::manual]
     fn on_scroll_residual(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, residual: ScrollResidual) {
         tracing::info!(
             target: "aether_kit_widget",
-            source = ctx.sender().map_or(0, |sender| sender.id().0),
+            widget = self.child_name(ctx.sender()),
             residual_x_pixels = residual.x_pixels,
             residual_y_pixels = residual.y_pixels,
             "widget terminal scroll residual",

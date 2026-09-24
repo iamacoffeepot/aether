@@ -2,7 +2,7 @@
 //! declared dependency, and through a held reference) and the
 //! [`MailSender`] / [`OutboundReply`] impls on [`WasmCtx`].
 
-use aether_data::{ActorMail, Kind, RequestId, Source};
+use aether_data::{ActorMail, Kind, MailboxId, RequestId, Source};
 
 use super::WasmCtx;
 use crate::mail::ReplyHandle;
@@ -164,7 +164,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
                 self.push(recipient, payload, ChainMode::Inherit);
                 tracing::warn!(
                     kind = <K as Kind>::NAME,
-                    recipient,
+                    recipient = self.inline.subname_of(MailboxId(recipient)).as_deref(),
                     "send_tracked on an inline-cluster local route has no host correlation",
                 );
                 RequestId(Source::NO_CORRELATION)

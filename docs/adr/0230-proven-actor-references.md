@@ -8,6 +8,7 @@
 - **Amended:** 2026-09-24 — §3: a wire `Call` names its recipient by `ActorPath`; the engine that hosts the recipient resolves and proves it on arrival, an unresolved path is answered as not present (`RpcError::NotPresent`), and no mailbox id crosses the RPC wire as a recipient or in a reply.
 - **Amended:** 2026-09-24 — §3's module-load check reaches private inline children: the types `export!` lists under `private = [..]` are read from the module's `aether.kinds.inputs.private` section and checked like the exported inline-spawnable actors (#6590).
 - **Amended:** 2026-09-24 — §3's declared-dependency proof `DependsOn<R>` is an `unsafe trait` that only `#[actor(depends(..))]` implements; its safety contract is that the macro also records the dependency entry the pre-`init` check reads, and a hand-written safe impl is refused with `E0200` (#6614).
+- **Amended:** 2026-09-24 — §2: a proven reference's canonical `ActorPath` is readable through the host registry (`NativeCtx::actor_path`) for diagnostics, as text only, never a position or anything sendable; the registry proves each route's name against the ADR-0166 grammar when the route is first published, so the read cannot fail for a reference it minted (#6635).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
 stays how a position is *derived*; a derived position stops being something
@@ -136,8 +137,8 @@ pub struct ErasedActorRef { id: MailboxId }
 | `R::Key` | the discriminator is valid | the actor type's own fallible constructor and fallible decode | build an `Address` |
 | `Address<R>` | the description is well-formed; nothing about existence | `R::address()`, `R::address_at(key)`, `parent.child::<C>(key)`, `reference.address()` | be stored, mailed, configured, persisted; be resolved. The only reference form with a wire format. |
 | `ActorPath` | the text is a well-formed ADR-0166 address, canonical or short (with `:name` holes); nothing about existence or placement | its fallible constructor and fallible decode | be carried in a kind (`NamedMail.recipient`) and name a wire `Call`'s recipient, compared, displayed; become a position only inside the engine, through the host's `resolve_address` |
-| `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address` |
-| `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set |
+| `ActorRef<R>` | an `R` reached `Live` at this id, in this engine session | section 3 only | send, monitor, be held in actor memory, yield its `Address`, name its canonical path |
+| `ErasedActorRef` | some actor reached `Live` at this id | the envelope sender, including a monitor notice's sender; the registry's liveness read over a position that arrived in a payload | reply, monitor, be the target of an untyped send — inheriting, detached, or tracked, unchecked against a kind because the set it keys may be heterogeneous — be held in a capability's own table and keyed in an ordered set, name its canonical path |
 | `MailboxId` | nothing; it is a position | the fold, decode | be a registry key, be printed |
 
 `ActorRef::id()` is free and total. There is no function from a `MailboxId`

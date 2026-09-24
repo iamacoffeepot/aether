@@ -127,6 +127,15 @@ A `tracing::*` call from outside a handler — at module load, on a thread the
 actor spawned — is a host-side event by the rule above, so it won't appear in the
 ring. Keep diagnostic emits inside the handler if you want them queryable.
 
+**Naming another actor in a log line.** Name it by its actor path, never its
+mailbox id. A native capability that holds a proven reference records
+`actor = %ctx.actor_path(reference)`, which answers the actor's canonical path
+(`aether.component/aether.embedded:camera`) even after the actor has departed;
+a typed `ActorRef<R>` passes `reference.erase()`. An id that belongs to no
+route has no path, so it prints as its tagged `mbx-…` text, which
+`aether.inventory`'s `Resolve` can look up. Guest code names the members of its
+own inline cluster by their subnames, which it already holds.
+
 ## How to extend or reuse it
 
 The surface is intentionally fixed: every actor inherits the `aether.log.tail`

@@ -543,7 +543,7 @@ impl HttpSupervisorState {
                 self.unmonitorable.insert(subscriber);
                 tracing::warn!(
                     target: "aether_http::server",
-                    ?subscriber,
+                    holder = %ctx.actor_path(subscriber),
                     ?error,
                     "route holder is not monitorable; its routes cannot be purged when it departs",
                 );

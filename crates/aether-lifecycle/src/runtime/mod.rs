@@ -503,13 +503,20 @@ impl NativeActor for LifecycleCapability {
             // forever, then fall through to process *this* advance.
             if !state.pending_timed_out() {
                 let pending = state.pending.as_ref().expect("pending.is_some() checked above");
+                let fanout: Vec<String> = state
+                    .subscribers
+                    .get(&pending.completed_kind)
+                    .into_iter()
+                    .flatten()
+                    .map(|subscriber| ctx.actor_path(*subscriber).to_string())
+                    .collect();
                 tracing::warn!(
                     target: "aether_lifecycle",
                     current = ?state.current_state,
                     pending_root = ?pending.root,
                     pending_for_millis = pending.started.elapsed().as_millis(),
                     stuck_stage = %pending.completed_kind,
-                    fanout = ?state.subscribers.get(&pending.completed_kind),
+                    ?fanout,
                     "LifecycleAdvance received while a prior advance is still in flight; dropping"
                 );
                 return;

@@ -34,6 +34,7 @@ use crate::mail::{Mail, Source, SourceAddr};
 use crate::runtime::thread_name;
 use crate::runtime::trace::{SettlementHold, TraceHandle};
 use crate::scheduler::pending_depth;
+use aether_actor::ErasedActorRef;
 use aether_data::tagged_id::{self, Tag};
 use aether_data::{ActorPath, Kind, KindDescriptor, KindId};
 use aether_kinds::trace::{Nanos, TraceTail, TraceTailResult};
@@ -357,6 +358,22 @@ impl Mailer {
     /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
     pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
         self.registry.resolve_address(address).map(|resolved| resolved.canonical_path)
+    }
+
+    /// The canonical path of the route `reference` proves, as
+    /// [`Registry::actor_path`] reads it. The crate-private path behind
+    /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
+    ///
+    /// # Panics
+    ///
+    /// When the route table holds no record for `reference`: the registry
+    /// mints a reference only for a route that reached `Live`, keeps that
+    /// route's proven name through `Dropped`, and removes a route only when
+    /// its birth fails, so a missing record is a broken invariant (ADR-0063).
+    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+        self.registry
+            .actor_path(reference)
+            .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
     }
 
     /// The first declared dependency with no `Live` route for a child placed
@@ -742,9 +759,11 @@ fn route_tail(mail: Mail, disposition: CapturedDisposition, mailer: &Mailer) {
             mailer.trace_handle.record_finished(inbound_mail_id, inbound_root);
         }
         CapturedDisposition::Dropped => {
+            // A dropped route keeps its name, so the line names the actor
+            // rather than its position.
             tracing::warn!(
                 target: "aether_substrate::queue",
-                mailbox = %recipient,
+                actor = %mailer.registry.mailbox_name(recipient).unwrap_or_else(|| recipient.to_string()),
                 "mail to dropped mailbox — discarded",
             );
             // ADR-0080 §2: balance the `Sent` so settlement chains

@@ -239,7 +239,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 tracing::warn!(
                     target: "aether_substrate::component",
                     %parent,
-                    component = %caller.data().sender,
+                    component = %caller.data().actor_name(),
                     "spawn_sibling_scoped: parent is not an actor in this component cluster",
                 );
                 return 0;
@@ -426,7 +426,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 tracing::warn!(
                     target: "aether_substrate::component",
                     %parent,
-                    component = %caller.data().sender,
+                    component = %caller.data().actor_name(),
                     "spawn_inline_child_scoped: parent is not an actor in this component cluster",
                 );
                 return 0;
@@ -516,7 +516,7 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                 tracing::warn!(
                     target: "aether_substrate::component",
                     %alias,
-                    parent = %ctx.sender,
+                    parent = %ctx.actor_name(),
                     "despawn_inline_child: id is not this component's inline-child alias",
                 );
                 return 0;

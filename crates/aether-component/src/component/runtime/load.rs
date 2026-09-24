@@ -383,7 +383,7 @@ impl ComponentHostCapabilityState {
                 BootSuccessor::Replacement { pending, result } => {
                     tracing::warn!(
                         target: "aether_component",
-                        actor = ?pending.actor,
+                        actor = %ctx.actor_path(pending.actor),
                         %error,
                         "replace succeeded but the replacement module boot failed",
                     );
@@ -532,7 +532,7 @@ impl ComponentHostCapabilityState {
             BootSuccessor::Replacement { pending, result } => {
                 tracing::warn!(
                     target: "aether_component",
-                    actor = ?pending.actor,
+                    actor = %ctx.actor_path(pending.actor),
                     %error,
                     "replace succeeded but the replacement module boot failed",
                 );
@@ -705,7 +705,7 @@ impl ComponentHostCapabilityState {
         let plan = match self.prepare_replacement_boot(&pending.new_wasm) {
             Ok(plan) => plan,
             Err(error) => {
-                tracing::warn!(target: "aether_component", actor = ?pending.actor, %error, "replacement boot metadata could not be prepared");
+                tracing::warn!(target: "aether_component", actor = %ctx.actor_path(pending.actor), %error, "replacement boot metadata could not be prepared");
                 ctx.reply_to(pending.source, &result);
                 return;
             }

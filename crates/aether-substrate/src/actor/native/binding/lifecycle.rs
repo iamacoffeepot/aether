@@ -18,7 +18,7 @@ use crate::mail::{KindId, MailId, MailboxId};
 use crate::runtime::lifecycle::FatalAborter;
 #[cfg(any(test, feature = "test-support"))]
 use crate::runtime::lifecycle::PanicAborter;
-use aether_actor::{CallerScope, RequestContextTable};
+use aether_actor::{CallerScope, ErasedActorRef, RequestContextTable};
 use aether_data::{ActorPath, KindDescriptor};
 
 impl NativeBinding {
@@ -272,6 +272,12 @@ impl NativeBinding {
     /// [`NativeCtx::canonical_path`](crate::actor::native::ctx::NativeCtx::canonical_path).
     pub(crate) fn canonical_path(&self, address: &ActorPath) -> Result<String, AddressResolutionError> {
         self.mailer.canonical_path(address)
+    }
+
+    /// The canonical path of the route a reference proves. The path behind
+    /// [`NativeCtx::actor_path`](crate::actor::native::ctx::NativeCtx::actor_path).
+    pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
+        self.mailer.actor_path(reference)
     }
 
     /// The first declared dependency with no `Live` route for a child placed

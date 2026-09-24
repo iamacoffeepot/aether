@@ -175,6 +175,18 @@ pub fn registered_ref(registry: &Registry, name: &str, handler: Arc<dyn InboxHan
         .expect("a freshly registered inbox proves")
 }
 
+/// Retire the route `reference` proves the way `Registry::drop_mailbox`
+/// retires one: it goes `Dropped` and keeps its name. The substrate's own
+/// tests reach a departed peer through this, so none of them spells the
+/// position it reads.
+///
+/// # Panics
+/// Panics if the route is not live.
+#[cfg(test)]
+pub(crate) fn drop_ref(registry: &Registry, reference: ErasedActorRef) {
+    registry.drop_mailbox(&boot_authority(), reference.id()).expect("a live registered route drops");
+}
+
 /// Boot a `TestChassis` carrying exactly one cap `A` with `config`. The
 /// minimal-boot path a cap's dispatcher-thread test reaches for.
 pub fn boot_test_chassis_with<A>(
