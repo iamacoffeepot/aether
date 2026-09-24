@@ -12,11 +12,11 @@
 //! Deferred requests are addressed by their request kind, so the
 //! `send_with_context` `HandlesKind<K>` gate compile-checks the request against
 //! the recipient: [`Ctx::defer`] captures the request and
-//! [`DeferredRequest::to`] forwards it. One entry point serves both a native
-//! root singleton and an embedded/wasm component, because `to` resolves
-//! against the component host's carry — the carry an embedded id folds in and
-//! the caller's own cannot supply. Native, because the reply obligation and
-//! `reply_to` are native; behind the `runtime` feature.
+//! [`DeferredRequest::to`] forwards it. The recipient is a declared dependency
+//! of the router actor (`A: DependsOn<R>`), mailed through the proof that
+//! declaration mints (ADR-0232 §1), so a loaded embedded component is not a
+//! deferral target (ADR-0154 §2, amended). Native, because the reply
+//! obligation and `reply_to` are native; behind the `runtime` feature.
 //!
 //! The reply route recovers the requester the same way `take_context` does —
 //! by the reply's `in_reply_to` correlation, no correlation in any signature —
@@ -24,13 +24,12 @@
 //! `502` net; one that never settles, its request timeout. Neither needs
 //! anything here.
 
-use aether_actor::{HandlesKind, Manual, OutboundReply, Reaches, Singleton};
+use aether_actor::{CallerAddressable, DependencyResolver, DependsOn, HandlesKind, Manual, OutboundReply, Singleton};
 use aether_data::{ActorMail, Source};
-use aether_substrate::actor::native::{NativeActorMailbox, NativeCtx};
+use aether_substrate::actor::native::NativeCtx;
 
 use super::kinds::HttpServerResponse;
 use super::typed::{Ctx, Outcome};
-use aether_component::ComponentHostCapability;
 
 /// The requester's reply target, carried from a deferred route's request
 /// handler to its reply route through the ADR-0139 request-context table (a
@@ -43,51 +42,51 @@ pub struct DeferredSource {
     pub source: Source,
 }
 
-impl<A: Reaches<ComponentHostCapability>> Ctx<'_, NativeCtx<'_, A, Manual>> {
+impl<'transport, A> Ctx<'_, NativeCtx<'transport, A, Manual>> {
     /// Capture `request` and the requester's reply target for deferred
     /// forwarding; [`DeferredRequest::to`] names the singleton recipient and
     /// holds the route open until its reply lands (ADR-0154 §2). Reads
     /// `ctx.defer(&request).to::<R>()`.
     ///
-    /// `to` resolves `R` through the **component host's** handle with
-    /// [`hosted`](NativeActorMailbox::hosted), so the carry is the component
-    /// host's rather than the caller's, and one call site addresses both a
-    /// native root cap (whose [`One`](aether_actor::One) resolver ignores the
-    /// carry) and an embedded component (whose
-    /// [`Embedded`](aether_actor::Embedded) resolver folds it beneath the
-    /// component host, under the component's default load name). That is why
-    /// it is not `ctx.actor::<R>()`, which supplies the caller's carry and
-    /// therefore refuses an embedded target outright (ADR-0119 amendment).
+    /// The captured request borrows this ctx mutably until `to` forwards it,
+    /// so a route that defers binds its ctx `mut`. It can still read
+    /// `ctx.request()` while building the request it defers.
     #[must_use = "a deferred request does nothing until `.to::<R>()` forwards it"]
-    pub fn defer<'ctx, 'request, K: ActorMail>(&'ctx self, request: &'request K) -> DeferredRequest<'ctx, 'request, K> {
-        DeferredRequest { host: self.actor::<ComponentHostCapability>(), request, source: self.reply_target() }
+    pub fn defer<'ctx, 'request, K: ActorMail>(
+        &'ctx mut self,
+        request: &'request K,
+    ) -> DeferredRequest<'ctx, 'request, NativeCtx<'transport, A, Manual>, K> {
+        let source = self.reply_target();
+        DeferredRequest { ctx: &mut **self, request, source }
     }
 }
 
 /// A deferred route's captured request, produced by [`Ctx::defer`]: the
-/// component host mailbox, request, and requester's reply target.
-/// [`to`](Self::to) resolves the recipient and forwards the request while
-/// holding the route open.
-pub struct DeferredRequest<'ctx, 'request, K> {
-    host: NativeActorMailbox<'ctx, ComponentHostCapability>,
+/// router's transport ctx, the request, and the requester's reply target.
+/// [`to`](Self::to) forwards the request to its recipient while holding the
+/// route open.
+pub struct DeferredRequest<'ctx, 'request, C, K> {
+    ctx: &'ctx mut C,
     request: &'request K,
     source: Source,
 }
 
-impl<K: ActorMail> DeferredRequest<'_, '_, K> {
+impl<A, K: ActorMail> DeferredRequest<'_, '_, NativeCtx<'_, A, Manual>, K> {
     /// Forward this request to recipient `R` and hold the route open until its reply.
+    /// `R` is a declared dependency of the router actor (`A: DependsOn<R>`),
+    /// and `R: HandlesKind<K>` compile-checks this request kind against it.
     /// The send is *inherited* (ADR-0080 §7), so the request's chain stays open
     /// and the HTTP server does not `502` it before the reply;
     /// `send_with_context` stashes the requester's reply target for the paired
-    /// `#[http::reply]` route to answer through. `R: HandlesKind<K>`
-    /// compile-checks this request kind against the recipient.
+    /// `#[http::reply]` route to answer through.
     #[must_use]
     pub fn to<R>(self) -> Outcome
     where
-        R: Singleton + HandlesKind<K>,
+        R: Singleton + CallerAddressable + HandlesKind<K>,
+        R::Resolver: DependencyResolver,
+        A: DependsOn<R>,
     {
-        let recipient = self.host.hosted::<R>();
-        let _ = recipient.send_with_context(self.request, &DeferredSource { source: self.source });
+        let _ = self.ctx.send_with_context::<R>(self.request, &DeferredSource { source: self.source });
         Outcome::Deferred
     }
 }
