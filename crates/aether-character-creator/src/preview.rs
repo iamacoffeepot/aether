@@ -11,7 +11,7 @@
 
 use std::io::Cursor;
 
-use super::{Mesh, Vec3, disc_mesh, head_mesh, sphere_mesh};
+use super::{Mesh, Vec3, brow_mesh, disc_mesh, head_mesh, sphere_mesh};
 
 const SKIN: [u8; 3] = [181, 103, 77];
 const SCLERA: [u8; 3] = [232, 225, 207];
@@ -141,18 +141,35 @@ impl Canvas {
 /// Returns a PNG encoding error if the in-memory image cannot be encoded.
 pub fn render_head_preview_png(width: u32, height: u32) -> Result<Vec<u8>, png::EncodingError> {
     let mut canvas = Canvas::new(width as usize, height as usize);
-    let yaw = -0.10;
+    let yaw = -0.045;
     canvas.draw_mesh(&head_mesh(48, 64), Vec3::default(), Vec3::new(1.0, 1.0, 1.0), SKIN, yaw);
 
     let eye = sphere_mesh(18, 24);
-    for x in [-0.275, 0.275] {
-        canvas.draw_mesh(&eye, Vec3::new(x, 0.255, 0.695), Vec3::new(0.145, 0.105, 0.105), SCLERA, yaw);
+    for x in [-0.255, 0.255] {
+        canvas.draw_mesh(&eye, Vec3::new(x, 0.225, 0.590), Vec3::new(0.115, 0.055, 0.085), SCLERA, yaw);
     }
 
     let disc = disc_mesh(48);
-    for x in [-0.275, 0.275] {
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.255, 0.802), Vec3::new(0.055, 0.055, 0.055), IRIS, yaw);
-        canvas.draw_mesh(&disc, Vec3::new(x, 0.255, 0.804), Vec3::new(0.023, 0.023, 0.023), PUPIL, yaw);
+    for x in [-0.255, 0.255] {
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.677), Vec3::new(0.032, 0.032, 0.032), IRIS, yaw);
+        canvas.draw_mesh(&disc, Vec3::new(x, 0.225, 0.679), Vec3::new(0.014, 0.014, 0.014), PUPIL, yaw);
+    }
+
+    let skin_feature = sphere_mesh(18, 24);
+    for x in [-0.675, 0.675] {
+        canvas.draw_mesh(&skin_feature, Vec3::new(x, 0.035, -0.015), Vec3::new(0.08, 0.15, 0.055), SKIN, yaw);
+    }
+    canvas.draw_mesh(&skin_feature, Vec3::new(0.0, -0.86, -0.14), Vec3::new(0.29, 0.40, 0.27), SKIN, yaw);
+
+    let brow = brow_mesh(24);
+    for x in [-0.255, 0.255] {
+        canvas.draw_mesh(&brow, Vec3::new(x, 0.375, 0.682), Vec3::new(0.195, 0.11, 0.02), [46, 20, 14], yaw);
+        canvas.draw_mesh(&brow, Vec3::new(x, 0.247, 0.681), Vec3::new(0.122, 0.105, 0.02), SKIN, yaw);
+    }
+
+    canvas.draw_mesh(&disc, Vec3::new(0.0, -0.252, 0.665), Vec3::new(0.165, 0.018, 0.02), [56, 18, 17], yaw);
+    for x in [-0.065, 0.065] {
+        canvas.draw_mesh(&disc, Vec3::new(x, -0.055, 0.850), Vec3::new(0.016, 0.008, 0.01), PUPIL, yaw);
     }
 
     let mut png = Vec::new();

@@ -2,11 +2,14 @@
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::suboptimal_flops,
+    clippy::too_many_lines,
     reason = "the generator favors readable authored shape equations over opaque fused chains"
 )]
 
 use std::{
+    collections::HashMap,
     f32::consts::{PI, TAU},
+    mem,
     ops::{Add, Mul, Sub},
 };
 
@@ -65,6 +68,10 @@ impl Vec3 {
 
     fn length(self) -> f32 {
         self.x.mul_add(self.x, self.y.mul_add(self.y, self.z * self.z)).sqrt()
+    }
+
+    fn dot(self, other: Self) -> f32 {
+        self.x.mul_add(other.x, self.y.mul_add(other.y, self.z * other.z))
     }
 
     fn normalized(self) -> Self {
@@ -198,6 +205,7 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let head = head_mesh(48, 64);
     let eye = sphere_mesh(18, 24);
     let disc = disc_mesh(48);
+    let brow = brow_mesh(24);
     let mut buffer = BufferBuilder::default();
 
     let head_position = buffer.push_vec3(&head.positions, true);
@@ -219,6 +227,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
     let disc_uv = buffer.push_vec2(&disc.texture_coordinates);
     let disc_indices = buffer.push_indices(&disc.indices);
 
+    let brow_position = buffer.push_vec3(&brow.positions, true);
+    let brow_normal = buffer.push_vec3(&brow.normals, false);
+    let brow_uv = buffer.push_vec2(&brow.texture_coordinates);
+    let brow_indices = buffer.push_indices(&brow.indices);
+
     let targets = morph_accessors.iter().map(|accessor| json!({ "POSITION": accessor })).collect::<Vec<_>>();
     let target_names = MORPH_TARGETS.iter().map(|name| json!(name)).collect::<Vec<_>>();
     let weights = MORPH_TARGETS.iter().map(|_| json!(0.0)).collect::<Vec<_>>();
@@ -229,21 +242,33 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             "generator": "Aether AI parametric character generator 0.1"
         },
         "scene": 0,
-        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6] }],
+        "scenes": [{ "name": "CharacterHead", "nodes": [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16] }],
         "nodes": [
             { "name": "Head", "mesh": 0 },
-            { "name": "Eye.Left", "mesh": 1, "translation": [-0.275, 0.255, 0.695], "scale": [0.145, 0.105, 0.105] },
-            { "name": "Eye.Right", "mesh": 1, "translation": [0.275, 0.255, 0.695], "scale": [0.145, 0.105, 0.105] },
-            { "name": "Iris.Left", "mesh": 2, "translation": [-0.275, 0.255, 0.802], "scale": [0.055, 0.055, 0.055] },
-            { "name": "Iris.Right", "mesh": 2, "translation": [0.275, 0.255, 0.802], "scale": [0.055, 0.055, 0.055] },
-            { "name": "Pupil.Left", "mesh": 3, "translation": [-0.275, 0.255, 0.804], "scale": [0.023, 0.023, 0.023] },
-            { "name": "Pupil.Right", "mesh": 3, "translation": [0.275, 0.255, 0.804], "scale": [0.023, 0.023, 0.023] }
+            { "name": "Eye.Left", "mesh": 1, "translation": [-0.255, 0.225, 0.590], "scale": [0.115, 0.055, 0.085] },
+            { "name": "Eye.Right", "mesh": 1, "translation": [0.255, 0.225, 0.590], "scale": [0.115, 0.055, 0.085] },
+            { "name": "Iris.Left", "mesh": 2, "translation": [-0.255, 0.225, 0.677], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Iris.Right", "mesh": 2, "translation": [0.255, 0.225, 0.677], "scale": [0.032, 0.032, 0.032] },
+            { "name": "Pupil.Left", "mesh": 3, "translation": [-0.255, 0.225, 0.679], "scale": [0.014, 0.014, 0.014] },
+            { "name": "Pupil.Right", "mesh": 3, "translation": [0.255, 0.225, 0.679], "scale": [0.014, 0.014, 0.014] },
+            { "name": "Ear.Left", "mesh": 4, "translation": [-0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
+            { "name": "Ear.Right", "mesh": 4, "translation": [0.675, 0.035, -0.015], "scale": [0.08, 0.15, 0.055] },
+            { "name": "Brow.Left", "mesh": 5, "translation": [-0.255, 0.375, 0.682], "scale": [0.195, 0.11, 0.02] },
+            { "name": "Brow.Right", "mesh": 5, "translation": [0.255, 0.375, 0.682], "scale": [0.195, 0.11, 0.02] },
+            { "name": "UpperLid.Left", "mesh": 6, "translation": [-0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
+            { "name": "UpperLid.Right", "mesh": 6, "translation": [0.255, 0.247, 0.681], "scale": [0.122, 0.105, 0.02] },
+            { "name": "Neck", "mesh": 4, "translation": [0.0, -0.86, -0.14], "scale": [0.29, 0.40, 0.27] },
+            { "name": "MouthOpening", "mesh": 7, "translation": [0.0, -0.252, 0.665], "scale": [0.165, 0.018, 0.02] },
+            { "name": "Nostril.Left", "mesh": 3, "translation": [-0.065, -0.055, 0.850], "scale": [0.016, 0.008, 0.01] },
+            { "name": "Nostril.Right", "mesh": 3, "translation": [0.065, -0.055, 0.850], "scale": [0.016, 0.008, 0.01] }
         ],
         "materials": [
             material("Skin", [0.55, 0.28, 0.18, 1.0], 0.82),
             material("Sclera", [0.88, 0.85, 0.76, 1.0], 0.32),
             material("Iris", [0.08, 0.32, 0.34, 1.0], 0.48),
-            material("Pupil", [0.012, 0.016, 0.018, 1.0], 0.38)
+            material("Pupil", [0.012, 0.016, 0.018, 1.0], 0.38),
+            material("Brow", [0.09, 0.035, 0.022, 1.0], 0.92),
+            material("Mouth", [0.16, 0.035, 0.032, 1.0], 0.88)
         ],
         "meshes": [
             {
@@ -260,7 +285,11 @@ pub fn generate_head_glb() -> Result<Vec<u8>, serde_json::Error> {
             },
             mesh_json("Eyeball", eye_position, eye_normal, eye_uv, eye_indices, 1),
             mesh_json("Iris", disc_position, disc_normal, disc_uv, disc_indices, 2),
-            mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 3)
+            mesh_json("Pupil", disc_position, disc_normal, disc_uv, disc_indices, 3),
+            mesh_json("SkinFeature", eye_position, eye_normal, eye_uv, eye_indices, 0),
+            mesh_json("Brow", brow_position, brow_normal, brow_uv, brow_indices, 4),
+            mesh_json("Lid", brow_position, brow_normal, brow_uv, brow_indices, 0),
+            mesh_json("Mouth", disc_position, disc_normal, disc_uv, disc_indices, 5)
         ],
         "bufferViews": buffer.views,
         "accessors": buffer.accessors,
@@ -316,19 +345,8 @@ fn mesh_json(name: &str, position: usize, normal: usize, uv: usize, indices: usi
 }
 
 fn head_mesh(rings: u32, segments: u32) -> Mesh {
-    let mut positions = Vec::with_capacity(((rings + 1) * (segments + 1)) as usize);
-    let mut normals = Vec::with_capacity(positions.capacity());
-    let mut texture_coordinates = Vec::with_capacity(positions.capacity());
-    for ring in 0..=rings {
-        let theta = PI * ring as f32 / rings as f32;
-        for segment in 0..=segments {
-            let phi = TAU * segment as f32 / segments as f32;
-            positions.push(head_position(theta, phi));
-            normals.push(head_normal(theta, phi));
-            texture_coordinates.push(Vec2 { x: segment as f32 / segments as f32, y: ring as f32 / rings as f32 });
-        }
-    }
-    Mesh { positions, normals, texture_coordinates, indices: grid_indices(rings, segments) }
+    let resolution = rings.min(segments).max(24);
+    implicit_head_mesh(resolution)
 }
 
 fn sphere_mesh(rings: u32, segments: u32) -> Mesh {
@@ -364,6 +382,29 @@ fn disc_mesh(segments: u32) -> Mesh {
     Mesh { positions, normals, texture_coordinates, indices }
 }
 
+fn brow_mesh(segments: u32) -> Mesh {
+    let mut positions = Vec::with_capacity(((segments + 1) * 2) as usize);
+    let mut normals = Vec::with_capacity(positions.capacity());
+    let mut texture_coordinates = Vec::with_capacity(positions.capacity());
+    for segment in 0..=segments {
+        let t = segment as f32 / segments as f32;
+        let x = t.mul_add(2.0, -1.0);
+        let center_y = 0.22 * (1.0 - x * x);
+        let half_width = 0.16 * (0.35 + 0.65 * (PI * t).sin());
+        for (side, y) in [(0.0, center_y - half_width), (1.0, center_y + half_width)] {
+            positions.push(Vec3::new(x, y, 0.0));
+            normals.push(Vec3::new(0.0, 0.0, 1.0));
+            texture_coordinates.push(Vec2 { x: t, y: side });
+        }
+    }
+    let mut indices = Vec::with_capacity((segments * 6) as usize);
+    for segment in 0..segments {
+        let left = segment * 2;
+        indices.extend_from_slice(&[left, left + 2, left + 1, left + 1, left + 2, left + 3]);
+    }
+    Mesh { positions, normals, texture_coordinates, indices }
+}
+
 fn grid_indices(rings: u32, segments: u32) -> Vec<u32> {
     let mut indices = Vec::with_capacity((rings * segments * 6) as usize);
     let stride = segments + 1;
@@ -384,50 +425,175 @@ fn grid_indices(rings: u32, segments: u32) -> Vec<u32> {
     indices
 }
 
-fn head_position(theta: f32, phi: f32) -> Vec3 {
-    let vertical = theta.cos();
-    let radial = theta.sin();
-    let mut position = Vec3::new(radial * phi.cos() * 0.72, vertical * 1.02, radial * phi.sin() * 0.76);
-    let lower_face = ((-position.y + 0.06) / 0.86).clamp(0.0, 1.0);
-    position.x *= 1.0 - 0.13 * lower_face * lower_face;
+fn implicit_head_mesh(resolution: u32) -> Mesh {
+    const TETRAHEDRA: [[usize; 4]; 6] =
+        [[0, 5, 1, 6], [0, 1, 2, 6], [0, 2, 3, 6], [0, 3, 7, 6], [0, 7, 4, 6], [0, 4, 5, 6]];
+    const CORNERS: [[u32; 3]; 8] =
+        [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 1], [1, 0, 1], [1, 1, 1], [0, 1, 1]];
 
-    let front = ((position.z + 0.08) / 0.76).clamp(0.0, 1.0);
-    let nose_bridge = gaussian(position.x, position.y, 0.0, 0.18, 0.105, 0.34);
-    let nose_tip = gaussian(position.x, position.y, 0.0, 0.02, 0.17, 0.14);
-    let eye_sockets = gaussian(position.x, position.y, -0.275, 0.275, 0.19, 0.115)
-        + gaussian(position.x, position.y, 0.275, 0.275, 0.19, 0.115);
-    let brows = gaussian(position.x, position.y, -0.27, 0.42, 0.22, 0.07)
-        + gaussian(position.x, position.y, 0.27, 0.42, 0.22, 0.07);
-    let cheeks = gaussian(position.x, position.y, -0.37, -0.01, 0.22, 0.20)
-        + gaussian(position.x, position.y, 0.37, -0.01, 0.22, 0.20);
-    let upper_lip = gaussian(position.x, position.y, 0.0, -0.205, 0.25, 0.045);
-    let lower_lip = gaussian(position.x, position.y, 0.0, -0.285, 0.27, 0.055);
-    let mouth_seam = gaussian(position.x, position.y, 0.0, -0.245, 0.29, 0.018);
-    let chin = gaussian(position.x, position.y, 0.0, -0.58, 0.30, 0.18);
+    let minimum = Vec3::new(-0.82, -0.82, -0.70);
+    let maximum = Vec3::new(0.82, 0.96, 0.98);
+    let step = Vec3::new(
+        (maximum.x - minimum.x) / resolution as f32,
+        (maximum.y - minimum.y) / resolution as f32,
+        (maximum.z - minimum.z) / resolution as f32,
+    );
+    let mut mesh =
+        Mesh { positions: Vec::new(), normals: Vec::new(), texture_coordinates: Vec::new(), indices: Vec::new() };
 
-    position.z += front
-        * (0.045 + 0.25 * nose_bridge + 0.15 * nose_tip - 0.095 * eye_sockets
-            + 0.045 * brows
-            + 0.075 * cheeks
-            + 0.075 * upper_lip
-            + 0.09 * lower_lip
-            - 0.055 * mouth_seam
-            + 0.075 * chin);
-    position
+    for z in 0..resolution {
+        for y in 0..resolution {
+            for x in 0..resolution {
+                let mut points = [Vec3::default(); 8];
+                let mut values = [0.0; 8];
+                for (index, corner) in CORNERS.iter().enumerate() {
+                    let point = Vec3::new(
+                        minimum.x + (x + corner[0]) as f32 * step.x,
+                        minimum.y + (y + corner[1]) as f32 * step.y,
+                        minimum.z + (z + corner[2]) as f32 * step.z,
+                    );
+                    points[index] = point;
+                    values[index] = head_sdf(point);
+                }
+                for tetrahedron in TETRAHEDRA {
+                    polygonise_tetrahedron(&points, &values, tetrahedron, &mut mesh);
+                }
+            }
+        }
+    }
+    weld_mesh(mesh)
 }
 
-fn head_normal(theta: f32, phi: f32) -> Vec3 {
-    let epsilon = 0.001;
-    let before_theta = head_position((theta - epsilon).max(0.0), phi);
-    let after_theta = head_position((theta + epsilon).min(PI), phi);
-    let before_phi = head_position(theta, phi - epsilon);
-    let after_phi = head_position(theta, phi + epsilon);
-    let normal = (after_phi - before_phi).cross(after_theta - before_theta).normalized();
-    if normal.length() > 0.5 {
-        normal
-    } else {
-        head_position(theta, phi).normalized()
+fn weld_mesh(mesh: Mesh) -> Mesh {
+    let mut vertex_by_position = HashMap::new();
+    let mut welded = Mesh {
+        positions: Vec::with_capacity(mesh.positions.len() / 3),
+        normals: Vec::with_capacity(mesh.normals.len() / 3),
+        texture_coordinates: Vec::with_capacity(mesh.texture_coordinates.len() / 3),
+        indices: Vec::with_capacity(mesh.indices.len()),
+    };
+
+    for source_index in mesh.indices {
+        let source_index = source_index as usize;
+        let position = mesh.positions[source_index];
+        let key = [
+            (position.x * 100_000.0).round() as i32,
+            (position.y * 100_000.0).round() as i32,
+            (position.z * 100_000.0).round() as i32,
+        ];
+        let target_index = *vertex_by_position.entry(key).or_insert_with(|| {
+            let target_index = welded.positions.len() as u32;
+            welded.positions.push(position);
+            welded.normals.push(mesh.normals[source_index]);
+            welded.texture_coordinates.push(mesh.texture_coordinates[source_index]);
+            target_index
+        });
+        welded.indices.push(target_index);
     }
+
+    welded
+}
+
+fn polygonise_tetrahedron(points: &[Vec3; 8], values: &[f32; 8], tetrahedron: [usize; 4], mesh: &mut Mesh) {
+    const EDGES: [[usize; 2]; 6] = [[0, 1], [0, 2], [0, 3], [1, 2], [1, 3], [2, 3]];
+    let mut crossings = Vec::with_capacity(4);
+    for [start, end] in EDGES {
+        let start = tetrahedron[start];
+        let end = tetrahedron[end];
+        if (values[start] < 0.0) == (values[end] < 0.0) {
+            continue;
+        }
+        let amount = values[start] / (values[start] - values[end]);
+        crossings.push(points[start] + (points[end] - points[start]) * amount);
+    }
+    if crossings.len() < 3 {
+        return;
+    }
+
+    let center = crossings.iter().copied().fold(Vec3::default(), Add::add) * (1.0 / crossings.len() as f32);
+    let normal = head_normal(center);
+    let reference = if normal.y.abs() < 0.9 {
+        Vec3::new(0.0, 1.0, 0.0)
+    } else {
+        Vec3::new(1.0, 0.0, 0.0)
+    };
+    let tangent = reference.cross(normal).normalized();
+    let bitangent = normal.cross(tangent);
+    crossings.sort_by(|left, right| {
+        let left = *left - center;
+        let right = *right - center;
+        left.dot(bitangent).atan2(left.dot(tangent)).total_cmp(&right.dot(bitangent).atan2(right.dot(tangent)))
+    });
+
+    for index in 1..crossings.len() - 1 {
+        push_triangle(mesh, crossings[0], crossings[index], crossings[index + 1]);
+    }
+}
+
+fn push_triangle(mesh: &mut Mesh, a: Vec3, mut b: Vec3, mut c: Vec3) {
+    let center = (a + b + c) * (1.0 / 3.0);
+    if (b - a).cross(c - a).dot(head_normal(center)) < 0.0 {
+        mem::swap(&mut b, &mut c);
+    }
+    let base = mesh.positions.len() as u32;
+    for position in [a, b, c] {
+        mesh.positions.push(position);
+        mesh.normals.push(head_normal(position));
+        mesh.texture_coordinates.push(Vec2 {
+            x: 0.5 + position.x.atan2(position.z) / TAU,
+            y: ((position.y + 0.82) / 1.78).clamp(0.0, 1.0),
+        });
+    }
+    mesh.indices.extend_from_slice(&[base, base + 1, base + 2]);
+}
+
+fn head_sdf(point: Vec3) -> f32 {
+    let mut shape = ellipsoid_sdf(point, Vec3::new(0.0, 0.14, -0.03), Vec3::new(0.65, 0.79, 0.60));
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.18, 0.19), Vec3::new(0.57, 0.57, 0.47)), 0.14);
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.49, 0.32), Vec3::new(0.36, 0.30, 0.27)), 0.12);
+    for x in [-0.30, 0.30] {
+        shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.03, 0.48), Vec3::new(0.24, 0.20, 0.13)), 0.08);
+    }
+    shape = smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, 0.10, 0.61), Vec3::new(0.085, 0.23, 0.16)), 0.05);
+    shape =
+        smooth_union(shape, ellipsoid_sdf(point, Vec3::new(0.0, -0.07, 0.74), Vec3::new(0.115, 0.105, 0.115)), 0.045);
+    for x in [-0.085, 0.085] {
+        shape =
+            smooth_union(shape, ellipsoid_sdf(point, Vec3::new(x, -0.08, 0.69), Vec3::new(0.065, 0.055, 0.075)), 0.028);
+    }
+
+    for x in [-0.255, 0.255] {
+        let socket = ellipsoid_sdf(point, Vec3::new(x, 0.22, 0.58), Vec3::new(0.145, 0.080, 0.125));
+        shape = smooth_maximum(shape, -socket, 0.025);
+    }
+    let mouth = ellipsoid_sdf(point, Vec3::new(0.0, -0.27, 0.62), Vec3::new(0.19, 0.022, 0.06));
+    shape = smooth_maximum(shape, -mouth, 0.014);
+    shape
+}
+
+fn head_normal(point: Vec3) -> Vec3 {
+    let epsilon = 0.002;
+    Vec3::new(
+        head_sdf(point + Vec3::new(epsilon, 0.0, 0.0)) - head_sdf(point - Vec3::new(epsilon, 0.0, 0.0)),
+        head_sdf(point + Vec3::new(0.0, epsilon, 0.0)) - head_sdf(point - Vec3::new(0.0, epsilon, 0.0)),
+        head_sdf(point + Vec3::new(0.0, 0.0, epsilon)) - head_sdf(point - Vec3::new(0.0, 0.0, epsilon)),
+    )
+    .normalized()
+}
+
+fn ellipsoid_sdf(point: Vec3, center: Vec3, radii: Vec3) -> f32 {
+    let local = point - center;
+    let scaled = Vec3::new(local.x / radii.x, local.y / radii.y, local.z / radii.z);
+    (scaled.length() - 1.0) * radii.x.min(radii.y).min(radii.z)
+}
+
+fn smooth_union(left: f32, right: f32, radius: f32) -> f32 {
+    let blend = (0.5 + 0.5 * (right - left) / radius).clamp(0.0, 1.0);
+    right.mul_add(1.0 - blend, left * blend) - radius * blend * (1.0 - blend)
+}
+
+fn smooth_maximum(left: f32, right: f32, radius: f32) -> f32 {
+    -smooth_union(-left, -right, radius)
 }
 
 fn morph_deltas(name: &str, positions: &[Vec3]) -> Vec<Vec3> {

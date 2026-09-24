@@ -17,7 +17,8 @@ cargo run -p aether-character-creator --bin preview-head
 The preview command refuses to render when the checked-in GLB differs from a
 fresh generator run, keeping the image tied to the binary asset.
 
-The first asset includes a continuous head surface, separate procedural eyes,
-simple authored materials, and named facial morph targets. Later spike work can
-load the same file through Aether and connect its morph targets to creator
-controls.
+The asset includes a welded continuous facial surface with modeled eye sockets,
+cheeks, nose, mouth, jaw, and chin; separate procedural eyes, lids, brows, ears,
+and neck; authored materials; and ten named facial morph targets. Later spike
+work can load the same file through Aether and connect its morph targets to
+creator controls.
