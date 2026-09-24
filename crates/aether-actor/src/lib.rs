@@ -62,7 +62,6 @@ pub use request_context::{RequestContextTable, split_state_envelope};
 // [`wasm::WasmActorMailbox<R>`] for wasm guests and
 // `aether_substrate::actor::native::NativeActorMailbox<'a, R>` for
 // native actors.
-pub use mail::facade::MailboxForward;
 pub use mail::{Mail, NO_REPLY_HANDLE, PriorState, RegistryChanged, ReplyHandle};
 
 // Wasm surface promoted to the crate root so consumers see

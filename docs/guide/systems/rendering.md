@@ -281,14 +281,13 @@ hook:
 ```rust
 // In an `#[actor(depends(LifecycleCapability, RenderCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    let lifecycle = ctx.actor::<LifecycleCapability>();
-    lifecycle.subscribe::<Tick>();
-    lifecycle.subscribe::<Render>();
+    ctx.subscribe::<LifecycleCapability, Tick>();
+    ctx.subscribe::<LifecycleCapability, Render>();
 }
 
 #[handler::single]
 fn on_render(&mut self, ctx: &mut WasmCtx<'_>, _render: Render) {
-    ctx.actor::<RenderCapability>().send_many(&self.triangles);
+    ctx.send_many::<RenderCapability>(&self.triangles);
 }
 ```
 
@@ -297,7 +296,7 @@ A ctx that omits its actor is typed by it: the macro reads `WasmCtx<'_>` as
 with `depends(R)`. The actor is the first parameter, the reply mode the second
 (`WasmCtx<'_, Self, Manual>`); spell `WasmCtx<'_, Erased>` for the untyped view.
 
-Address the cap by type — `ctx.actor::<RenderCapability>()` — and send
+Address the cap by type — `ctx.send::<RenderCapability>(..)` — and send
 `DrawTriangle`s (and, if you're a camera, an `aether.view_projection`). On a chassis whose
 lifecycle graph omits `Render` (headless), subscribing to it rejects fail-fast at
 wire time, and the actor simply never submits — a no-op where there's no GPU

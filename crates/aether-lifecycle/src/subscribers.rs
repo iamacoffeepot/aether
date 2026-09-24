@@ -1,15 +1,15 @@
-//! Sender side + fan-out for the lifecycle cap. Holds the
-//! [`LifecycleMailboxExt`] facade callers reach through
-//! `ctx.actor::<LifecycleCapability>()` (always-on, both transports) and
-//! the native [`broadcast_to_subscribers`] fan-out the receive side calls
-//! once per advance, which pushes each stage payload to the proven
-//! references the cap's subscriber table holds (ADR-0230).
+//! Publisher surface + fan-out for the lifecycle cap. Holds the
+//! `Publishes` / `Publisher` impls the flat
+//! `ctx.subscribe::<LifecycleCapability, K>()` verb resolves through
+//! (always-on, both transports) and the native [`broadcast_to_subscribers`]
+//! fan-out the receive side calls once per advance, which pushes each stage
+//! payload to the proven references the cap's subscriber table holds
+//! (ADR-0230).
 
-use aether_actor::{MailboxForward, Publisher, Publishes};
-use aether_data::{Kind, MailboxId};
+use aether_actor::{Publisher, Publishes};
+use aether_data::Kind;
 use aether_kinds::{
-    InitCaps, InitComponents, LifecycleSubscribe, LifecycleSubscribeSelf, LifecycleUnsubscribe,
-    LifecycleUnsubscribeSelf, Present, Render, Shutdown, Tick,
+    InitCaps, InitComponents, LifecycleSubscribeSelf, LifecycleUnsubscribeSelf, Present, Render, Shutdown, Tick,
 };
 
 use super::LifecycleCapability;
@@ -27,9 +27,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 // The stage kinds this cap broadcasts to its subscriber set, one
 // `Publishes` impl each — the compile-time gate on the flat
-// `ctx.subscribe::<LifecycleCapability, K>()` verb and on
-// `LifecycleMailboxExt::subscribe`. The list is the ADR-0082 stage
-// vocabulary a chassis lifecycle graph can declare as a state; the
+// `ctx.subscribe::<LifecycleCapability, K>()` verb. The list is the
+// ADR-0082 stage vocabulary a chassis lifecycle graph can declare as a
+// state; the
 // runtime still fail-fasts on a stage *this* chassis's graph omits
 // (ADR-0082 §7), so the marker states what the cap can ever emit and
 // the reply states what it does emit here.
@@ -43,8 +43,9 @@ impl Publishes<Render> for LifecycleCapability {}
 impl Publishes<Present> for LifecycleCapability {}
 impl Publishes<Shutdown> for LifecycleCapability {}
 
-/// The flat subscribe verbs send the same self-addressed stage requests the
-/// [`LifecycleMailboxExt`] facade sends.
+/// The flat subscribe verbs send these self-addressed stage requests; the cap
+/// resolves the subscriber from the inbound's host-stamped `Source`
+/// (ADR-0083).
 impl Publisher for LifecycleCapability {
     type Subscribe = LifecycleSubscribeSelf;
     type Unsubscribe = LifecycleUnsubscribeSelf;
@@ -63,92 +64,6 @@ impl Publisher for LifecycleCapability {
         LifecycleUnsubscribeSelf { stage: K::ID.0 }
     }
 }
-
-/// Sender-side facade for callers addressing [`LifecycleCapability`]
-/// via `ctx.actor::<LifecycleCapability>()` (ADR-0082 §7, §12).
-///
-/// Lifts the stage-subscribe operations one indirection above the raw
-/// `.send(&LifecycleSubscribe { .. })` so component code stops
-/// reconstructing the kind struct (and the `.0` field unwraps) at every
-/// call site — same shape and rationale as
-/// `WindowManagerMailboxExt` on the `aether.window` cap.
-///
-/// Blanket-impl'd over [`MailboxForward<LifecycleCapability>`], so it reaches
-/// every handle `ctx.actor::<LifecycleCapability>()` can return — the §12
-/// wasm-component stage-subscribe site and native cap-to-cap sends alike.
-///
-/// All methods are fire-and-forget. `subscribe` / `unsubscribe` reply
-/// via `aether.lifecycle.subscribe_result`; reply handling stays on the
-/// caller. The cap fail-fasts (`Err`) on a stage its chassis graph
-/// doesn't declare (ADR-0082 §7).
-///
-/// The generic escape hatch is unaffected: `mailbox.send(&LifecycleSubscribe { .. })`
-/// still works, since `send` is an inherent method on the underlying
-/// mailbox type.
-pub trait LifecycleMailboxExt: MailboxForward<LifecycleCapability> {
-    /// Mail `aether.lifecycle.subscribe_self { stage }` to the cap —
-    /// subscribe the *calling* actor to the lifecycle stage `K` (a
-    /// stage kind, e.g. `Tick` / `Render`). The cap resolves the
-    /// subscriber from the inbound's host-stamped `Source` (ADR-0083),
-    /// so the call site spells out neither the stage id nor its own
-    /// mailbox. This is the common form. Idempotent.
-    ///
-    /// `K` is gated on `LifecycleCapability: Publishes<K>`, so a kind
-    /// this cap never broadcasts — a window device event, say — is a
-    /// compile error naming the capability that does publish it.
-    fn subscribe<K: Kind>(&self)
-    where
-        LifecycleCapability: Publishes<K>,
-    {
-        self.forward(&LifecycleSubscribeSelf { stage: K::ID.0 });
-    }
-
-    /// Mail `aether.lifecycle.subscribe { stage, mailbox }` to the cap.
-    /// Add an *explicit* `mailbox` to the subscriber set for stage `K`.
-    /// The rare cross-mailbox form; [`subscribe`](Self::subscribe)
-    /// covers the self case. Idempotent.
-    ///
-    /// Takes a [`MailboxId`] rather than a proven reference because the whole
-    /// body is building wire mail: ADR-0230 keeps a position at the wire and
-    /// a proof in memory, so a proof handed in here would be spent one line
-    /// later. The cap proves the id on arrival and replies `Err` if nothing
-    /// live stands under it.
-    fn subscribe_for<K: Kind>(&self, mailbox: MailboxId)
-    where
-        LifecycleCapability: Publishes<K>,
-    {
-        self.forward(&LifecycleSubscribe { stage: K::ID.0, mailbox: mailbox.0 });
-    }
-
-    /// Mail `aether.lifecycle.unsubscribe_self { stage }` to the cap —
-    /// unsubscribe the *calling* actor from stage `K`. Reflexive twin
-    /// of [`subscribe`](Self::subscribe). Idempotent on "not currently
-    /// subscribed."
-    fn unsubscribe<K: Kind>(&self)
-    where
-        LifecycleCapability: Publishes<K>,
-    {
-        self.forward(&LifecycleUnsubscribeSelf { stage: K::ID.0 });
-    }
-
-    /// Mail `aether.lifecycle.unsubscribe { stage, mailbox }` to the
-    /// cap. Remove an *explicit* `mailbox` from the subscriber set for
-    /// stage `K`. Idempotent on "not currently subscribed."
-    ///
-    /// A [`MailboxId`] for the same reason as
-    /// [`subscribe_for`](Self::subscribe_for) — it builds wire mail — and for
-    /// one more: the cap matches the position against its held references
-    /// without proving it, so a subscriber that has already departed stays
-    /// removable.
-    fn unsubscribe_for<K: Kind>(&self, mailbox: MailboxId)
-    where
-        LifecycleCapability: Publishes<K>,
-    {
-        self.forward(&LifecycleUnsubscribe { stage: K::ID.0, mailbox: mailbox.0 });
-    }
-}
-
-impl<T: MailboxForward<LifecycleCapability>> LifecycleMailboxExt for T {}
 
 /// Push the current stage payload to each subscriber as an untyped envelope.
 /// Untyped because the broadcast kind is chosen at runtime (the current
@@ -171,28 +86,5 @@ pub fn broadcast_to_subscribers<A, M: ReplyMode>(
     };
     for subscriber in set {
         let _ = ctx.send_envelope_tracked_to(*subscriber, stage, payload);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{LifecycleCapability, LifecycleMailboxExt, LifecycleSubscribeSelf};
-    use aether_actor::{WasmActorMailbox, WasmActorMailboxWithContext};
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
-
-    fn assert_facade<T: LifecycleMailboxExt>() {}
-
-    #[test]
-    fn facade_is_available_to_wasm_senders() {
-        assert_facade::<WasmActorMailbox<'static, LifecycleCapability>>();
-        assert_facade::<WasmActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>>();
-    }
-
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    #[test]
-    fn facade_is_available_to_native_senders() {
-        assert_facade::<NativeActorMailbox<'static, LifecycleCapability>>();
-        assert_facade::<NativeActorMailboxWithContext<'static, 'static, LifecycleCapability, LifecycleSubscribeSelf>>();
     }
 }

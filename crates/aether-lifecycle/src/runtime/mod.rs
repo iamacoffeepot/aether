@@ -775,28 +775,37 @@ mod tests {
         );
     }
 
-    /// Round trip through the host SDK path: calling
-    /// `subscribe::<Tick>()` on a `NativeActorMailbox<LifecycleCapability>`
-    /// emits `LifecycleSubscribeSelf { stage = Tick::ID }` whose
-    /// `Source` the transport host-stamps to the calling actor, and
-    /// delivering that mail to the cap lands the calling actor in the
-    /// `Tick` stage set. The wasm FFI shims `export!` emits are
-    /// wasm32-only, so the host test drives the cap through a
-    /// `NativeBinding`.
+    /// Round trip through the host SDK path: a calling actor that declares
+    /// `DependsOn<LifecycleCapability>` sends the request the cap's
+    /// `Publisher` impl builds for `Tick` through the flat
+    /// `ctx.send::<LifecycleCapability>`. That emits
+    /// `LifecycleSubscribeSelf { stage = Tick::ID }` whose `Source` the
+    /// transport host-stamps to the calling actor, and delivering that mail
+    /// to the cap lands the calling actor in the `Tick` stage set. The wasm
+    /// FFI shims `export!` emits are wasm32-only, so the host test drives the
+    /// cap through a `NativeBinding`.
     #[test]
-    fn subscribe_via_native_mailbox_lands_calling_actor_in_stage_set() {
+    fn subscribe_request_via_flat_send_lands_calling_actor_in_stage_set() {
         use std::sync::mpsc;
 
+        use aether_actor::{Addressable, DependsOn, One, Publisher};
         use aether_substrate::mail::Source;
         use aether_substrate::mail::registry::{InboxHandler, OwnedDispatch, noop_handler};
-
-        use crate::LifecycleMailboxExt;
         use aether_substrate::testing::{boot_authority, fresh_substrate, registered_binding};
+
+        struct Caller;
+
+        impl Addressable for Caller {
+            const NAMESPACE: &'static str = "test.lifecycle.caller";
+            type Resolver = One;
+        }
+
+        impl DependsOn<LifecycleCapability> for Caller {}
 
         let (registry, mailer) = fresh_substrate();
 
         // Capturing sink at the lifecycle mailbox: records the single
-        // mail the SDK `subscribe::<Tick>()` emits so the test can read
+        // mail the flat `Tick` subscribe request emits so the test can read
         // back the kind, the host-stamped `Source`, and the payload.
         let (tx, rx) = mpsc::channel::<(KindId, Source, Vec<u8>)>();
         let handler: Arc<dyn InboxHandler> = Arc::new(move |dispatch: OwnedDispatch| {
@@ -804,22 +813,16 @@ mod tests {
             dispatch.discharge();
             let _ = tx.send(captured);
         });
-        registry.register_inbox(
-            &boot_authority(),
-            <LifecycleCapability as aether_actor::Addressable>::NAMESPACE,
-            handler,
-        );
+        registry.register_inbox(&boot_authority(), <LifecycleCapability as Addressable>::NAMESPACE, handler);
 
         // The calling actor: a transport over a registered inbox, so its
         // sends carry `Source::Component` of that inbox's mailbox.
-        let caller = "test.lifecycle.caller";
-        let (tx_binding, sender) = registered_binding(&registry, &mailer, caller, noop_handler());
-        NativeCtx::new_dispatching(&tx_binding, Source::NONE, None, None)
-            .actor::<LifecycleCapability>()
-            .subscribe::<Tick>();
+        let (tx_binding, sender) = registered_binding(&registry, &mailer, Caller::NAMESPACE, noop_handler());
+        NativeCtx::<'_, Caller>::new_for_actor(&tx_binding, Source::NONE, None, None)
+            .send::<LifecycleCapability>(&<LifecycleCapability as Publisher>::subscribe_request::<Tick>());
         tx_binding.flush_outbound();
 
-        let (kind, source, bytes) = rx.try_recv().expect("subscribe::<Tick>() emitted one mail");
+        let (kind, source, bytes) = rx.try_recv().expect("the Tick subscribe request emitted one mail");
         assert_eq!(kind, <LifecycleSubscribeSelf as Kind>::ID, "the SDK self-subscribe sends LifecycleSubscribeSelf");
         let decoded =
             LifecycleSubscribeSelf::decode_from_bytes(&bytes).expect("payload decodes as LifecycleSubscribeSelf");

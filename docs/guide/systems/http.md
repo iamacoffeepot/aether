@@ -172,16 +172,22 @@ reckons with that configuration separately. Content generation is a subject of i
 
 ## How to use it
 
-**From a component.** Address the cap by type. The facade lifts the two common
-verbs to a typed call:
+**From a component.** Declare `depends(HttpCapability)` and send the `Fetch`
+kind:
 
 ```rust
-ctx.actor::<HttpCapability>().get("https://api.example.com/v1/status");
-ctx.actor::<HttpCapability>().post("https://api.example.com/v1/ingest", &body);
+ctx.send::<HttpCapability>(&Fetch {
+    request_id: 1,
+    url: "https://api.example.com/v1/status".into(),
+    method: HttpMethod::Get,
+    headers: Vec::new(),
+    body: Vec::new(),
+    timeout_ms: None,
+});
 ```
 
-These are fire-and-forget and use the chassis default timeout. The result
-arrives later as its own mail, which you receive like any other kind:
+A send is fire-and-forget; `timeout_ms: None` uses the chassis default timeout.
+The result arrives later as its own mail, which you receive like any other kind:
 
 ```rust
 #[handler::single]
@@ -203,11 +209,8 @@ component with several fetches outstanding tells them apart by it — match it
 against whatever state you were waiting to fill. The cap dispatches fetches
 concurrently under a per-sender bound (ADR-0158), so two requests to the same
 URL can be in flight at once; `request_id` is what disambiguates their replies,
-where the echoed `url` (still on both arms, for logs) cannot. The facade's
-`get` / `post` mint `request_id: 0`; for correlation, or for a request that
-needs custom headers, a method beyond GET/POST, a body on a non-POST, or a
-per-request timeout, send the `Fetch` kind directly:
-`ctx.actor::<HttpCapability>().send(&Fetch { request_id, url, method, headers, body, timeout_ms })`.
+where the echoed `url` (still on both arms, for logs) cannot. Custom headers,
+another method, a body, or a per-request timeout are fields on the same `Fetch`.
 The kinds live with the capability in
 `aether-http/src/kinds.rs` (ADR-0121).
 

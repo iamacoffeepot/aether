@@ -34,77 +34,6 @@ pub use config::NamespaceRoots;
 pub use config::{NamespaceRootsLayer, NamespaceRootsOverlay};
 pub use registry::{AdapterRegistry, build_registry};
 
-use aether_actor::MailboxForward;
-
-/// Sender-side facade for actors addressed via
-/// `ctx.actor::<FsCapability>()`.
-///
-/// Lifts the cap-shaped methods (`read(ns, path)`, `write(ns, path,
-/// bytes)`, ...) one indirection above the raw
-/// `.send(&Read { addr })` so component code stops assembling the kind
-/// struct and its [`NamespaceAddr`] at every call site. The cap module owns receive-side
-/// ([`FsCapability`]) AND send-side ([`FsMailboxExt`]) so future
-/// kind additions land both surfaces in one place.
-///
-/// Blanket-impl'd over [`MailboxForward<FsCapability>`], so it reaches every
-/// handle `ctx.actor::<FsCapability>()` can return — the wasm and native
-/// mailboxes and their typed request-context adapters alike — without this
-/// crate naming any of them.
-///
-/// All methods are fire-and-forget. Replies arrive as
-/// `aether.fs.read_result` / `aether.fs.write_result` /
-/// `aether.fs.delete_result` / `aether.fs.list_result`. The echoed
-/// `addr` provides readable domain context; duplicate-safe one-shot
-/// matching uses a typed context bound with `.with_context(&context)`
-/// and recovered with `take_context` (ADR-0139).
-///
-/// Contextual facade calls intentionally discard the request id. Call
-/// the contextual adapter's generic `send` directly when the minted
-/// [`aether_actor::RequestId`] or native [`aether_data::MailId`] is
-/// needed.
-/// Synchronous `read_sync` / `write_sync` wrappers were on the
-/// original issue 580 sketch — parked as a follow-up so this PR
-/// stays mechanical.
-///
-/// The generic escape hatch is unaffected: `mailbox.send(&CustomKind { .. })`
-/// still works for any `K` the cap declares via `HandlesKind<K>`,
-/// since `send` is an inherent method on the underlying mailbox type.
-pub trait FsMailboxExt: MailboxForward<FsCapability> {
-    /// Mail `aether.fs.read { addr }` to the cap.
-    fn read(&self, namespace: impl Into<String>, path: impl Into<String>) {
-        self.forward(&Read { addr: NamespaceAddr::new(namespace, path) });
-    }
-
-    /// Mail `aether.fs.write { addr, bytes }` to the cap. The reply
-    /// echoes `addr` only (bytes are omitted from the echo so a
-    /// megabyte write doesn't produce a megabyte reply).
-    fn write(&self, namespace: impl Into<String>, path: impl Into<String>, bytes: impl Into<Vec<u8>>) {
-        self.forward(&Write { addr: NamespaceAddr::new(namespace, path), bytes: bytes.into() });
-    }
-
-    /// Mail `aether.fs.delete { addr }` to the cap.
-    fn delete(&self, namespace: impl Into<String>, path: impl Into<String>) {
-        self.forward(&Delete { addr: NamespaceAddr::new(namespace, path) });
-    }
-
-    /// Mail `aether.fs.list { addr }` to the cap. `addr.path` is the
-    /// prefix; the reply enumerates entries under it.
-    fn list(&self, namespace: impl Into<String>, prefix: impl Into<String>) {
-        self.forward(&List { addr: NamespaceAddr::new(namespace, prefix) });
-    }
-
-    /// Mail `aether.fs.copy { from, to }` to the cap. `from` is a raw
-    /// host filesystem path; `to` is a namespace-address destination. The
-    /// bytes flow host → namespace inside the substrate — they never ride
-    /// the wire. The reply echoes `from` + `to` without bytes, so a
-    /// large-file copy produces a small ack.
-    fn copy(&self, from: impl Into<String>, to_namespace: impl Into<String>, to_path: impl Into<String>) {
-        self.forward(&Copy { from: from.into(), to: NamespaceAddr::new(to_namespace, to_path) });
-    }
-}
-
-impl<T: MailboxForward<FsCapability>> FsMailboxExt for T {}
-
 /// `aether.fs` cap **identity** (ADR-0122 identity/runtime split). A ZST
 /// carrying only the addressing — `Addressable` (`NAMESPACE`, `Resolver`),
 /// the per-handler `HandlesKind` markers, and the name-inventory entry,
@@ -130,23 +59,3 @@ use aether_actor::actor;
 // `runtime.rs`, gated once here.
 #[cfg(feature = "runtime")]
 mod runtime;
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use aether_actor::{WasmActorMailbox, WasmActorMailboxWithContext};
-    #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-    use aether_substrate::actor::native::{NativeActorMailbox, NativeActorMailboxWithContext};
-
-    fn assert_fs_mailbox_ext<T: FsMailboxExt>() {}
-
-    #[test]
-    fn base_and_contextual_mailbox_shapes_implement_fs_facade() {
-        assert_fs_mailbox_ext::<WasmActorMailbox<'static, FsCapability>>();
-        assert_fs_mailbox_ext::<WasmActorMailboxWithContext<'static, 'static, FsCapability, Read>>();
-        #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-        assert_fs_mailbox_ext::<NativeActorMailbox<'static, FsCapability>>();
-        #[cfg(all(not(target_family = "wasm"), feature = "runtime"))]
-        assert_fs_mailbox_ext::<NativeActorMailboxWithContext<'static, 'static, FsCapability, Read>>();
-    }
-}
