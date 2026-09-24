@@ -4,6 +4,7 @@ use proc_macro2::TokenStream as TokenStream2;
 use quote::quote;
 use syn::{FnArg, ImplItem, Pat, Type};
 
+use crate::check::ApiBinding;
 use crate::export_desc::emit_program_export_desc;
 use crate::parse::ProgramDef;
 
@@ -47,24 +48,33 @@ fn expand_sync(self_ty: &Type, run: &syn::ImplItemFn) -> TokenStream2 {
     }
 }
 
-fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[(syn::Ident, Type)]) -> TokenStream2 {
+fn expand_async(self_ty: &Type, run: &syn::ImplItemFn, sampled: bool, apis: &[ApiBinding]) -> TokenStream2 {
     let block = &run.block;
     let input = &run.sig.inputs[0];
     let env_ident = env_ident(&run.sig.inputs[1]);
     let env_ty = owned_env_type(&run.sig.inputs[1]);
-    let pure_checks = apis.iter().filter(|_| !sampled).map(|(_, ty)| {
+    let target_checks = apis.iter().map(|ApiBinding { ty, name, .. }| {
+        quote! {
+            const _: () = ::aether_bloomery_program::__macro_internals::check_target::<
+                #ty,
+                ::aether_bloomery_program::__macro_internals::api_target::#name,
+            >();
+        }
+    });
+    let pure_checks = apis.iter().filter(|_| !sampled).map(|ApiBinding { ty, .. }| {
         quote! {
             const _: () = ::aether_bloomery_program::__macro_internals::RejectSampledOnPure::<
                 { <#ty as ::aether_bloomery_program::InjectedApi>::SAMPLED },
             >::OK;
         }
     });
-    let bindings = apis.iter().map(|(ident, ty)| {
+    let bindings = apis.iter().map(|ApiBinding { ident, ty, .. }| {
         quote! {
             let mut #ident = <#ty as ::aether_bloomery_program::InjectedApi>::from_env(&mut #env_ident);
         }
     });
     quote! {
+        #(#target_checks)*
         #(#pure_checks)*
         impl ::aether_bloomery_program::AsyncProgram for #self_ty {
             fn run(

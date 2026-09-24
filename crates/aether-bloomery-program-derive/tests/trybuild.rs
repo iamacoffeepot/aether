@@ -13,4 +13,6 @@ fn ui() {
     t.compile_fail("tests/ui/fail_http_on_pure.rs");
     t.compile_fail("tests/ui/fail_binding_before_env.rs");
     t.compile_fail("tests/ui/fail_binding_on_sync.rs");
+    t.compile_fail("tests/ui/fail_unknown_api.rs");
+    t.compile_fail("tests/ui/fail_api_target_mismatch.rs");
 }

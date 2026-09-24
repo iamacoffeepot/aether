@@ -18,7 +18,7 @@ aether-process = { path = "../aether-process", default-features = false }
 aether-component = { path = "../aether-component" }
 aether-data = { path = "../aether-data", features = ["derive"] }
 aether-harness-substrate = { path = "../aether-harness-substrate" }
-aether-http = { path = "../aether-http", default-features = false }
+aether-http = { path = "../aether-http", features = ["runtime"] }
 aether-kinds = { path = "../aether-kinds" }
 wasmparser = "0.246"
 

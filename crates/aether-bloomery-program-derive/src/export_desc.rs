@@ -26,7 +26,7 @@ pub fn emit_program_export_desc(def: &ProgramDef) -> TokenStream2 {
     let intent = &def.intent;
     let input = &def.input;
     let result = &def.result;
-    let api_tys = def.apis.iter().map(|(_, ty)| ty);
+    let api_names = def.apis.iter().map(|api| &api.name);
     quote! {
         #[doc(hidden)]
         #[macro_export]
@@ -44,7 +44,7 @@ pub fn emit_program_export_desc(def: &ProgramDef) -> TokenStream2 {
                                 input: #input,
                                 result: #result,
                                 async_run: #async_run,
-                                apis: [#(#api_tys),*],
+                                apis: [#(#api_names),*],
                             }
                         ]
                     }
