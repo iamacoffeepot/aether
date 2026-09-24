@@ -25,9 +25,10 @@ mod tests {
         FleetHarness, allocate_store_root_for_test, component_wasm_path, dist_component_available,
     };
 
-    /// The probe fixture's declared `Addressable::NAMESPACE` (distinct from the
-    /// `probe` wasm stem).
-    const PROBE_NAMESPACE: &str = "test.probe";
+    /// The declared `Addressable::NAMESPACE` of the bundle's `QuietProbe`
+    /// export (distinct from the `probe` upload name), the export these tests
+    /// load because headless registers no harness observer.
+    const PROBE_NAMESPACE: &str = "test.quiet_probe";
 
     /// The probe's registered ADR-0099 lineage address.
     fn probe_lineage_addr() -> String {
@@ -278,7 +279,7 @@ mod tests {
         // LogTail (it's live).
         let engine = harness.spawn_headless();
         let expected = probe_lineage_addr();
-        let loaded = harness.load_by_selector(engine, "probe");
+        let loaded = harness.load_by_selector(engine, "probe@test.quiet_probe");
         assert_eq!(loaded.addr, expected, "load by selector registers at the lineage addr");
         match harness.log_tail(engine, &expected, None, None) {
             LogTailResult::Ok { .. } => {}
@@ -289,7 +290,7 @@ mod tests {
 
         // Replace the loaded component by hash (ADR-0022 in-place swap,
         // ADR-0116 selector). The trampoline keeps its lineage address.
-        let caps = harness.replace_by_selector(engine, &loaded.addr, &hash);
+        let caps = harness.replace_by_selector(engine, &loaded.addr, &format!("{hash}@test.quiet_probe"));
         assert!(caps.handlers.iter().any(|h| h.id == Tick::ID), "the replaced probe still advertises its Tick handler");
     }
 
@@ -334,7 +335,7 @@ mod tests {
         // namespace-derived ADR-0099 lineage address, matching the load
         // path and `probe_lineage_addr()`.
         let manifest_json = serde_json::json!({
-            "components": [{ "wasm": staged_wasm.to_string_lossy() }],
+            "components": [{ "wasm": staged_wasm.to_string_lossy(), "export": PROBE_NAMESPACE }],
         });
         fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
             .expect("write boot manifest");

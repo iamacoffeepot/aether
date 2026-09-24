@@ -9,11 +9,11 @@
 //! settlement timeout with no diagnostic.
 //!
 //! Drives the strict `Probe` fixture (namespace `test.probe`, no
-//! `#[fallback]`, an `on_set_render(SetRender)` handler) directly through the pub
+//! `#[fallback]`, an `on_tick(Tick)` handler) directly through the pub
 //! `Component::instantiate` / `deliver` API: deliver a `Mail` carrying
-//! `SetRender::ID` (a `#[repr(C)]` 4-byte cast-shape kind) with a 2-byte payload,
-//! which the cast decoder rejects on its `len() == size_of` check, and assert the
-//! dispatch return code. Gated on `require_wasm` like the sibling integration
+//! `Tick::ID` (a `#[repr(C)]` 4-byte cast-shape kind, `delta_micros: u32`) with a
+//! 2-byte payload, which the cast decoder rejects on its `len() == size_of`
+//! check, and assert the dispatch return code. Gated on `require_wasm` like the sibling integration
 //! tests, so it skips cleanly on a wasm-not-built box.
 
 use std::fs;
@@ -21,9 +21,9 @@ use std::sync::Arc;
 
 use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
+use aether_kinds::Tick;
 use aether_substrate::actor::wasm::host_fns;
 use aether_substrate::{Component, ComponentCtx, HubOutbound, Mail, MailboxId, Mailer, Registry};
-use aether_test_fixtures_kinds::SetRender;
 use wasmtime::{Engine, Linker, Module};
 
 #[test]
@@ -43,15 +43,15 @@ fn known_kind_bad_payload_reports_unknown_kind_not_handled() {
     let ctx = ComponentCtx::new(MailboxId(0), registry, mailer, HubOutbound::disconnected());
 
     // `type_tag = None` instantiates the module's entry actor — `Probe`, the
-    // strict (no-`#[fallback]`) receiver (export!(Probe, ProbeWithConfig) makes
-    // the first-listed `Probe` the entry).
+    // strict (no-`#[fallback]`) receiver (`export!(default = Probe, …)` makes
+    // `Probe` the entry).
     let mut component =
         Component::instantiate(&engine, &linker, &module, ctx, &[], None).expect("instantiate Probe fixture");
 
-    // `SetRender` is a `#[repr(C)]` 4-byte cast-shape kind; a 2-byte payload
-    // fails `decode_cast`'s `len() == size_of` check, so the matched dispatch
-    // arm's `decode_kind::<SetRender>()` is `None`.
-    let mail = Mail::new(MailboxId(0), SetRender::ID, vec![0u8, 0u8], 1);
+    // `Tick` is a `#[repr(C)]` 4-byte cast-shape kind (`delta_micros: u32`); a
+    // 2-byte payload fails `decode_cast`'s `len() == size_of` check, so the
+    // matched dispatch arm's `decode_kind::<Tick>()` is `None`.
+    let mail = Mail::new(MailboxId(0), Tick::ID, vec![0u8, 0u8], 1);
     let rc = component.deliver(&mail).expect("deliver");
 
     // Tripwire: pre-fix the arm returned `DISPATCH_HANDLED` (0) once the kind id

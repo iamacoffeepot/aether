@@ -1,5 +1,5 @@
 //! `FleetHarness` `actor_logs` proof (issue 1459, Tier-A): load the
-//! `probe` fixture into a forked substrate and tail its per-actor
+//! bundle's `QuietProbe` export into a forked substrate and tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the one-shot `typed_send_alive` entry
 //! the probe emits on its first tick, assert the substrate-side substring
 //! filter across the real RPC hop, then walk the `since` cursor to confirm
@@ -27,7 +27,7 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
         let mut last_reply = None;
         let mut found = None;

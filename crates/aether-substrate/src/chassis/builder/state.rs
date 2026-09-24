@@ -637,7 +637,7 @@ impl<C: Chassis> Builder<C, HasDriver> {
         };
         // ADR-0230 §3: every mailbox reserved at the Claim stage must have
         // been booted by the driver's Start before the chassis is sealed.
-        check_reservations_booted(booted.reserved_driver_mailboxes.iter().map(|(name, _)| name.as_str()))?;
+        check_reservations_booted(booted.reserved_driver_mailboxes.keys().map(String::as_str))?;
 
         // ADR-0165: a built chassis seals after a *successful* driver `Start`.
         // The `?` above is what enforces the "successful" half — a driver that

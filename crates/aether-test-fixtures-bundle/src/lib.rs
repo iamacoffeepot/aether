@@ -25,8 +25,10 @@ mod inline_child;
 mod mat4_source;
 mod matrix_sweep;
 mod multi_actor;
+mod paint_probe;
 mod peer_routing;
 mod probe;
+mod quiet_probe;
 mod source_forwarder;
 mod source_observer;
 mod stateful_replace;
@@ -50,8 +52,10 @@ pub use inline_child::{
 pub use mat4_source::MatSource;
 pub use matrix_sweep::{MatrixChild, MatrixParent};
 pub use multi_actor::{Panel, RootManager};
+pub use paint_probe::PaintProbe;
 pub use peer_routing::{ParentPeerCaller, ParentPeerTarget};
 pub use probe::{Probe, ProbeWithConfig};
+pub use quiet_probe::QuietProbe;
 pub use source_forwarder::SourceForwarder;
 pub use source_observer::SourceObserver;
 pub use stateful_replace::{Counter, Sidecar};
@@ -65,6 +69,8 @@ pub use ui_widget::UiWidget;
 aether_actor::export!(
     default = Probe,
     ProbeWithConfig,
+    PaintProbe,
+    QuietProbe,
     RootManager,
     Panel,
     ParentPeerCaller,
