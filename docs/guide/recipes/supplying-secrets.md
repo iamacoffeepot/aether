@@ -159,6 +159,60 @@ Replace the file (same name, same mode) and restart the engine that reads it:
 respawn for a hub child. There is no hot reload; a running engine keeps the
 value it read at boot.
 
+## 8. A bloomery engine and the Muse turn
+
+`aether-bloomery` takes the same flags. Its one integration is `aether.http`,
+deny-by-default, so the host a Sampled program posts to must be on
+`--http-allowlist`, and a credential for it is bound with `/bearer`:
+
+```sh
+aether-bloomery --bloomery-journal /var/lib/aether/journal.sqlite \
+  --secrets-dir /etc/aether/secrets \
+  --http-allowlist api.muse.example \
+  --http-secrets api.muse.example/bearer=muse
+```
+
+The `muse.turn` program (ADR-0234) sends no credential of its own, and no key
+enters its input, its result, the journal, or any mail it builds: `aether.http`
+attaches the header inside the fetch. The turn's endpoint must be `https://`,
+because a plain-`http` request to a bound host is refused before anything is
+dialed and the turn is recorded as a refused fault.
+
+### Owner-run live smoke
+
+A live turn spends vendor tokens, so it is a manual step, never a test
+(ADR-0234 decision 8). The `muse_turn` example in `aether-chassis-bloomery`
+seeds a fresh journal, boots the bloomery composition in process with the
+`aether-bloomery` flags you give it after `--`, runs one turn, and prints the
+status, the outcome, the answer text, the usage counts, and the raw body's
+digest — never a header, the raw body, or a flag value. The journal is kept.
+
+1. Create the directory `0700` and the `muse` file `0600` as in
+   [section 1](#1-make-the-directory-and-a-secret-file).
+2. Pre-flight: `aether-bloomery --print-config --secrets-dir <dir>
+   --http-allowlist <vendor-host> --http-secrets <vendor-host>/bearer=muse`
+   lists `muse  set` under `SECRETS`.
+3. Build the bundle: `cargo xtask build-wasm`.
+4. Run one short turn:
+
+   ```sh
+   cargo run -p aether-chassis-bloomery --example muse_turn -- \
+     --journal /tmp/muse-smoke/journal.sqlite \
+     --endpoint https://<vendor-host>/<responses path> \
+     --model <model> --prompt "Say hello." --max-output-tokens 64 \
+     -- --secrets-dir <dir> --http-allowlist <vendor-host> \
+        --http-secrets <vendor-host>/bearer=muse
+   ```
+
+   `--journal` must be an absolute path that does not exist yet, in a
+   directory that does. Expect `status: 200` and `turn: Completed`. A 401 or
+   403 is recorded as `Rejected`: check the binding.
+5. Confirm the key never reached the journal — every count must be 0:
+
+   ```sh
+   grep -c -F -f <dir>/muse /tmp/muse-smoke/journal.sqlite*
+   ```
+
 ## Adding a new consumer
 
 A native capability that needs a secret declares a `SecretRefs` field with the

@@ -9,7 +9,10 @@
 //! egress for Sampled programs (ADR-0234 decision 7), composed with the
 //! capability's own deny-by-default allowlist, so a fetch reaches only the
 //! hosts an operator names with `--http-allowlist` / `AETHER_HTTP_ALLOWLIST`
-//! and every other fetch is answered with a refusal. No exec, TCP,
+//! and every other fetch is answered with a refusal. A credential rides the
+//! same capability: `--http-secrets` binds a secret from the `--secrets-dir`
+//! directory to an allowlisted host (ADR-0235), so no program carries one.
+//! No exec, TCP,
 //! HTTP-serving, or fs capability rides this engine (the
 //! zero-external-integration rule), while the RPC server keeps it drivable
 //! over MCP (ADR-0155 §3).

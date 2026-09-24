@@ -106,19 +106,22 @@ fn find_identifier<'a>(region: &str, names: &[&'a str]) -> Option<(usize, &'a st
 struct PackageSource {
     file: RustSource,
     /// Code that exists only in a test build. A file under the package's
-    /// own `tests/` directory is that in its entirety — it carries no
-    /// `#[cfg(test)]` because the whole target is one.
+    /// own `tests/` or `examples/` directory is that in its entirety — each
+    /// is a dev-only target, built with dev-dependencies and never part of
+    /// the library a dependent compiles, so it carries no `#[cfg(test)]`.
     test_region: String,
-    /// Code a dependent compiles against. Empty for a `tests/` file.
+    /// Code a dependent compiles against. Empty for a `tests/` or
+    /// `examples/` file.
     library_region: String,
 }
 
 fn package_sources(package: &Package) -> Vec<PackageSource> {
     let tests_dir = package_root(package).join(TEST_DIR);
+    let examples_dir = package_root(package).join("examples");
     source::read_all(&source::walk(package_root(package)).rust_files)
         .into_iter()
         .map(|file| {
-            if file.path.starts_with(&tests_dir) {
+            if file.path.starts_with(&tests_dir) || file.path.starts_with(&examples_dir) {
                 let test_region = file.code.clone();
                 PackageSource { file, test_region, library_region: String::new() }
             } else {
