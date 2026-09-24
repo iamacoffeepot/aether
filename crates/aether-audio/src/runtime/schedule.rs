@@ -4,7 +4,7 @@
 
 use std::cmp::Ordering;
 
-use aether_data::MailboxId;
+use aether_actor::ErasedActorRef;
 
 use super::super::kinds::ScheduledNote;
 
@@ -30,7 +30,7 @@ pub const SCHEDULE_MAX_MILLIS: u32 = 600_000;
 pub struct ScheduledEntry {
     pub due_frame: u64,
     pub seq: u64,
-    pub sender_mailbox: MailboxId,
+    pub sender: Option<ErasedActorRef>,
     pub note: ScheduledNote,
 }
 

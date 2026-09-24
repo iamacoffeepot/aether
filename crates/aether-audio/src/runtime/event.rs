@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use crossbeam_queue::ArrayQueue;
 
-use aether_data::MailboxId;
+use aether_actor::ErasedActorRef;
 
 use super::super::kinds::ScheduledEvent;
 use super::sample::SampleBank;
@@ -18,9 +18,10 @@ use super::sample::SampleBank;
 /// limitation (tight-burst percussion may drop notes under load).
 pub const EVENT_QUEUE_CAPACITY: usize = 1024;
 
-/// Event a handler pushes into the audio callback's queue. The
-/// `sender_mailbox` is baked in here (not re-derived on the callback
-/// side) so the callback stays branch-minimal.
+/// Event a handler pushes into the audio callback's queue. The proven
+/// envelope `sender` key is baked in here (not re-derived on the callback
+/// side) so the callback stays branch-minimal. `None` is the key every
+/// caller without a local component sender shares.
 ///
 /// Not `Copy`: the track-start variant carries an `Arc`'d PCM buffer
 /// (the decoded asset) and owned namespace / path strings (ADR-0103
@@ -28,7 +29,7 @@ pub const EVENT_QUEUE_CAPACITY: usize = 1024;
 #[derive(Clone, Debug)]
 pub enum AudioEvent {
     NoteOn {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         pitch: u8,
         velocity: u8,
         instrument_id: u8,
@@ -38,7 +39,7 @@ pub enum AudioEvent {
         pan: i8,
     },
     NoteOff {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         pitch: u8,
         instrument_id: u8,
     },
@@ -52,20 +53,20 @@ pub enum AudioEvent {
     SetReverbSend {
         send: f32,
     },
-    /// Set the live per-sender level trim (ADR-0127). Keyed by the
-    /// envelope sender; the synth holds a `MailboxId -> gain` table
+    /// Set the live per-sender level trim (ADR-0127). Keyed by the proven
+    /// envelope sender; the synth holds a sender-key-to-gain table
     /// resolved once per render block, so the trim ducks already-sounding
     /// voices of that sender. Clamped `0.0..=4.0` on the handler side.
     SetSenderGain {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         gain: f32,
     },
     /// Start (or restart) a track in the dedicated mixer lane. `pcm`
     /// is already mono and resampled to the device rate, so the
-    /// callback walks it by index. Keyed by `(sender_mailbox, lane,
+    /// callback walks it by index. Keyed by `(sender, lane,
     /// namespace, path)` — re-sending the same key restarts the track.
     TrackStart {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         lane: Option<String>,
         namespace: String,
         path: String,
@@ -76,7 +77,7 @@ pub enum AudioEvent {
     /// Fade out and retire the track at this key. A no-op if no track
     /// matches (matching `note_off`).
     TrackStop {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         lane: Option<String>,
         namespace: String,
         path: String,
@@ -92,15 +93,15 @@ pub enum AudioEvent {
         id: u8,
         bank: Arc<SampleBank>,
     },
-    /// A validated batch of timed note events (ADR-0104). `sender_mailbox`
-    /// is the scheduling sender, baked in so every scheduled note keys
+    /// A validated batch of timed note events (ADR-0104). `sender` is
+    /// the scheduling sender's key, baked in so every scheduled note keys
     /// its voice (and note-off matching) by the original caller. The
     /// synth converts each event's `at_millis` to an absolute due frame
     /// against its frame clock at the instant it drains this event, so
     /// the whole batch shares one receipt timebase and chords stay
     /// aligned. One queue slot carries the entire tune.
     Schedule {
-        sender_mailbox: MailboxId,
+        sender: Option<ErasedActorRef>,
         events: Vec<ScheduledEvent>,
     },
 }

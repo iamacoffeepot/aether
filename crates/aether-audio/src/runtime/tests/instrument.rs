@@ -41,9 +41,7 @@ fn loaded_bank_registers_past_builtins_and_plays() {
     synth.fill(&mut buf, 1);
     assert_eq!(synth.bank_count(), 1, "bank not appended past the built-ins");
 
-    sender
-        .push(AudioEvent::NoteOn { sender_mailbox: MailboxId(1), pitch: 60, velocity: 100, instrument_id: id, pan: 0 })
-        .unwrap();
+    sender.push(AudioEvent::NoteOn { sender: None, pitch: 60, velocity: 100, instrument_id: id, pan: 0 }).unwrap();
     synth.fill(&mut buf, 1);
     assert_eq!(synth.voice_count(), 1, "loaded id did not sound a voice");
     assert!(buf.iter().any(|s| s.abs() > 0.0), "sampled instrument produced silence");
@@ -81,7 +79,7 @@ fn note_on_unknown_loaded_id_drops() {
     // An id past the built-ins with no bank registered: no voice.
     sender
         .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             pitch: 60,
             velocity: 100,
             instrument_id: builtin_id_ceiling() + 5,
@@ -108,7 +106,7 @@ fn note_on_outside_every_region_drops() {
     // Pitch 30 falls outside the bank's only region.
     sender
         .push(AudioEvent::NoteOn {
-            sender_mailbox: MailboxId(1),
+            sender: None,
             pitch: 30,
             velocity: 100,
             instrument_id: builtin_id_ceiling(),
@@ -284,10 +282,10 @@ fn sample_voices_count_against_max_voices() {
     let mut buf = vec![0.0f32; 32];
     synth.fill(&mut buf, 1);
     // Saturate the pool with sampled voices: they steal like any other.
-    for i in 0..(MAX_VOICES as u64 + 8) {
+    for _ in 0..MAX_VOICES + 8 {
         sender
             .push(AudioEvent::NoteOn {
-                sender_mailbox: MailboxId(i + 1),
+                sender: None,
                 pitch: 60,
                 velocity: 100,
                 instrument_id: builtin_id_ceiling(),
