@@ -63,6 +63,8 @@ current source.
 - **Wiring an MCP tool** (recompile) — args → tool → wire-kind round-trip.
 - **Writing a component** (the middle) — `#[actor]`, handlers, `export!`,
   loading it, and talking to it.
+- **Addressing a peer you cannot depend on** (the middle) — one actor declares
+  the other and announces itself; the other keeps the envelope sender.
 - **Writing a behavior** (the middle) — compile a narrow filter, host it at a
   tree slot, and swap it without treating it as a security gate.
 - **Drawing your first text** (drive/build) — load a font, draw with explicit
