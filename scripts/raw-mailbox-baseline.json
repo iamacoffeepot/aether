@@ -3,7 +3,7 @@
   "patterns": {
     "mailer()": 35,
     "registry()": 26,
-    "mailbox_id_from_name(": 61,
+    "mailbox_id_from_name(": 54,
     "mailbox_id_from_name_pair(": 9,
     "mailbox_id_from_path(": 46,
     "<recipient>.id() at a send": 0,

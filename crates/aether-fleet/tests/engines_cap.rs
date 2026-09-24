@@ -9,12 +9,13 @@
 // the fork+exec + startup-race-retry + real-process path — the
 // `FleetServer` unit tests cover the error arms in-process.
 
-// Integration test resolves the server/sink actor mailboxes by their NAMESPACE
-// for fixture wiring — reference id derivation, not sibling-cap addressing.
+// The fixtures boot a bare `Builder::<TestChassis>::new` chassis, and the
+// proxy-collision fixture folds the canonical lineage path a proxy spawn will
+// claim — test wiring, not a production chassis or sibling-cap addressing.
 #![allow(clippy::disallowed_methods)]
 
 use aether_actor::Addressable;
-use aether_data::{Kind, MailboxId, Uuid, mailbox_id_from_name, mailbox_id_from_path};
+use aether_data::{Kind, MailboxId, Uuid, mailbox_id_from_path};
 use aether_fleet::{FleetConfig, FleetProxy, FleetServer};
 use aether_kinds::descriptors;
 use aether_kinds::{
@@ -31,7 +32,6 @@ use aether_substrate::content_store::{ContentStore, EvictionPolicy};
 use aether_substrate::mail::mailer::Mailer;
 use aether_substrate::mail::outbound::HubOutbound;
 use aether_substrate::mail::registry::{OwnedDispatch, Registry};
-use aether_substrate::mail::{Mail, Source, SourceAddr};
 use aether_substrate::testing::{TestChassis, boot_authority};
 use std::collections::HashSet;
 use std::env;
@@ -129,7 +129,7 @@ impl NativeActor for ReplySink {
     }
 }
 
-fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>, Arc<Mailer>, ReplyCells) {
+fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassis>, ReplyCells) {
     let registry = Arc::new(Registry::new());
     for d in descriptors::all() {
         let _ = registry.register_kind_with_descriptor(&boot_authority(), d);
@@ -140,7 +140,7 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
     // Each spawned proxy registers its engine's route with the RPC server
     // and holds the spawn open until it is answered, so a hub-shaped
     // chassis composes one; unbound, since nothing here dials it.
-    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), Arc::clone(&mailer))
+    let chassis = Builder::<TestChassis>::new(Arc::clone(&registry), mailer)
         .with_actor_configured::<FleetServer>((), engine_config)
         .with_actor_configured::<RpcServerCapability>(
             RpcServerParams {
@@ -156,7 +156,7 @@ fn boot(engine_config: FleetConfig) -> (Arc<Registry>, PassiveChassis<TestChassi
         .with_actor::<ReplySink>(cells.clone())
         .build_passive()
         .expect("caps boot");
-    (registry, chassis, mailer, cells)
+    (registry, chassis, cells)
 }
 
 /// Distinctive path component planted in the private temp root so a leaked
@@ -297,14 +297,25 @@ fn default_selector() -> BinarySelector {
 
 /// Drive one request kind at `aether.fleet`, reply-to the sink, and
 /// block until `probe` returns a recorded reply (or `deadline` passes).
-fn drive<K: Kind, T>(mailer: &Arc<Mailer>, request: &K, deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
-    let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
-    let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
-    mailer.push(
-        Mail::new(server, K::ID, request.encode_into_bytes(), 1)
-            .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
-    );
+fn drive<K: Kind, T>(
+    chassis: &PassiveChassis<TestChassis>,
+    request: &K,
+    deadline: Duration,
+    probe: impl Fn() -> Option<T>,
+) -> T {
+    send_to_server(chassis, request);
     wait_for(deadline, probe)
+}
+
+/// Send `request` to the chassis's `FleetServer` with its reply routed to
+/// the sink, addressing both through the proofs the chassis recorded.
+fn send_to_server<K: Kind>(chassis: &PassiveChassis<TestChassis>, request: &K) {
+    chassis.send_for_reply(
+        chassis.actor_ref::<FleetServer>().erase(),
+        K::ID,
+        request.encode_into_bytes(),
+        ReplyTarget::Actor { to: chassis.actor_ref::<ReplySink>().erase(), correlation: 1 },
+    );
 }
 
 fn wait_for<T>(deadline: Duration, probe: impl Fn() -> Option<T>) -> T {
@@ -350,29 +361,24 @@ fn assert_port_closes(rpc_port: u16) {
 /// headless substrate child running. Disarm with [`EngineReaper::disarm`]
 /// once the engine is explicitly terminated; the guard then no-ops on drop
 /// (a double-terminate is harmless but wastes a round trip on the happy path).
-struct EngineReaper {
-    mailer: Arc<Mailer>,
+struct EngineReaper<'a> {
+    chassis: &'a PassiveChassis<TestChassis>,
     cells: ReplyCells,
     engine_id: Option<String>,
 }
 
-impl EngineReaper {
+impl EngineReaper<'_> {
     fn disarm(&mut self) {
         self.engine_id = None;
     }
 }
 
-impl Drop for EngineReaper {
+impl Drop for EngineReaper<'_> {
     fn drop(&mut self) {
         let Some(engine_id) = self.engine_id.take() else {
             return;
         };
-        let server = mailbox_id_from_name(<FleetServer as Addressable>::NAMESPACE);
-        let sink = mailbox_id_from_name(<ReplySink as Addressable>::NAMESPACE);
-        self.mailer.push(
-            Mail::new(server, TerminateEngine::ID, TerminateEngine { engine_id }.encode_into_bytes(), 1)
-                .with_reply_to(Source::with_correlation(SourceAddr::Component(sink), 1)),
-        );
+        send_to_server(self.chassis, &TerminateEngine { engine_id });
         let until = Instant::now() + Duration::from_secs(5);
         loop {
             if self.cells.terminate.lock().ok().and_then(|mut g| g.take()).is_some() {
@@ -403,7 +409,7 @@ mod tests {
         let store_dir = env::temp_dir().join(format!("aether-engcap-binstore-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-store-{}-{nanos}", process::id()));
 
-        let (_registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
+        let (_registry, chassis, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
         // Spawn: the cap forks the substrate, and the proxy dials the port
         // the fresh process reports once it binds. The tracked root
@@ -435,11 +441,10 @@ mod tests {
         settled
             .recv_timeout(Duration::from_secs(5))
             .expect("the original root settles after the staged reply is delivered");
-        let mut reaper =
-            EngineReaper { mailer: Arc::clone(&mailer), cells: cells.clone(), engine_id: Some(engine_id.clone()) };
+        let mut reaper = EngineReaper { chassis: &chassis, cells: cells.clone(), engine_id: Some(engine_id.clone()) };
 
         // List: the freshly-spawned engine shows up in the cap's table.
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
@@ -450,7 +455,7 @@ mod tests {
         // Terminate: the cap forwards to the proxy, which SIGKILLs the
         // substrate and self-shuts-down; the table entry is dropped.
         let terminate =
-            drive(&mailer, &TerminateEngine { engine_id: engine_id.clone() }, Duration::from_secs(5), || {
+            drive(&chassis, &TerminateEngine { engine_id: engine_id.clone() }, Duration::from_secs(5), || {
                 cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned").take()
             });
         assert!(
@@ -460,7 +465,7 @@ mod tests {
         reaper.disarm();
 
         // After terminate, the engine is gone from the table.
-        let list_after = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list_after = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
@@ -483,7 +488,7 @@ mod tests {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let store_dir = env::temp_dir().join(format!("aether-engcap-rejected-store-{}-{nanos}", process::id()));
         let root = env::temp_dir().join(format!("aether-engcap-rejected-engine-{}-{nanos}", process::id()));
-        let (registry, chassis, mailer, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
+        let (registry, chassis, cells) = boot(bootstrap_store_config(&store_dir, &root, &headless));
 
         let expected_engine = Uuid::from_u128(1);
         let collision = register_proxy_collision(&registry, expected_engine);
@@ -518,7 +523,7 @@ mod tests {
             "owner rejection emits exactly one spawn result",
         );
 
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(list.engines.is_empty(), "a rejected reservation never becomes publicly live: {list:?}");
@@ -596,13 +601,13 @@ mod tests {
             proxy_connect_budget_secs: 2,
             ..FleetConfig::default()
         };
-        let (_registry, _chassis, mailer, cells) = boot(config);
+        let (_registry, chassis, cells) = boot(config);
 
         // The spawn forks the stand-in, the proxy waits for its port
         // report for the 2 s budget, then the cap returns Err. Deadline comfortably over
         // the budget + fork.
         let spawn = drive(
-            &mailer,
+            &chassis,
             &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Duration::from_secs(20),
             || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
@@ -617,7 +622,7 @@ mod tests {
 
         // The failure is recorded as a `SpawnFailed` death keyed by the
         // same engine_id, so a caller can correlate and reap.
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert!(
@@ -691,16 +696,16 @@ mod tests {
         let store_dir = dir.join("store");
         let root = dir.join("engines");
         let hash = write_inert_binary_store(&store_dir, b"aether-issue-5499-inert-bytes");
-        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+        let (_registry, chassis, cells) = boot(inert_store_config(&store_dir, &root));
 
         fs::create_dir_all(&root).expect("test setup: fleet store root");
         fs::write(root.join(Uuid::from_u128(1).simple().to_string()), b"owned-regular-file-blocking-engine-dir")
             .expect("test setup: block the per-engine dest dir with a regular file");
 
-        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+        let spawn = drive(&chassis, &inert_spawn(&hash), Duration::from_secs(10), || {
             cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
         });
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert_path_free_spawn_failure(spawn, &list, "materializing", &hash, &dir);
@@ -738,9 +743,9 @@ mod tests {
         let root = dir.join("engines");
         let bytes = format!("#!{}\n", dir.join("missing").display());
         let hash = write_inert_binary_store(&store_dir, bytes.as_bytes());
-        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+        let (_registry, chassis, cells) = boot(inert_store_config(&store_dir, &root));
 
-        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+        let spawn = drive(&chassis, &inert_spawn(&hash), Duration::from_secs(10), || {
             cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
         });
         assert!(
@@ -774,7 +779,7 @@ mod tests {
         fs::write(leftover.join("substrate"), b"materialized-by-a-hub-that-is-gone")
             .expect("test setup: the leftover materialized binary");
 
-        let (_registry, chassis, _mailer, _cells) = boot(inert_store_config(&dir.join("store"), &root));
+        let (_registry, chassis, _cells) = boot(inert_store_config(&dir.join("store"), &root));
 
         assert!(!leftover.exists(), "a fresh hub reclaims the engine dirs an earlier one left");
         assert!(bystander.exists(), "the sweep touches only the dirs the cap itself creates");
@@ -804,12 +809,12 @@ mod tests {
         );
         let bytes = format!("#!{}\n", interpreter.display());
         let hash = write_inert_binary_store(&store_dir, bytes.as_bytes());
-        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &root));
+        let (_registry, chassis, cells) = boot(inert_store_config(&store_dir, &root));
 
-        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(10), || {
+        let spawn = drive(&chassis, &inert_spawn(&hash), Duration::from_secs(10), || {
             cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
         });
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert_path_free_spawn_failure(spawn, &list, "spawning", &hash, &dir);
@@ -846,16 +851,16 @@ mod tests {
         let headless = aether_harness_fleet::headless_bin_path().to_string_lossy().into_owned();
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let dir = env::temp_dir().join(format!("aether-engcap-badflag-{}-{nanos}", process::id()));
-        let (_registry, chassis, mailer, cells) =
+        let (_registry, chassis, cells) =
             boot(bootstrap_store_config(&dir.join("store"), &dir.join("engines"), &headless));
 
         let spawn = drive(
-            &mailer,
+            &chassis,
             &SpawnEngine { selector: default_selector(), args: vec!["--no-such-flag".into()], boot_manifest: None },
             Duration::from_secs(30),
             || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
         );
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         let (engine_id, error) = sole_spawn_failure(spawn, &list);
@@ -885,12 +890,12 @@ mod tests {
             &store_dir,
             b"#!/bin/sh\necho \"fatal: could not bind the RPC port (running as $0)\" >&2\nexit 1\n",
         );
-        let (_registry, chassis, mailer, cells) = boot(inert_store_config(&store_dir, &dir.join("engines")));
+        let (_registry, chassis, cells) = boot(inert_store_config(&store_dir, &dir.join("engines")));
 
-        let spawn = drive(&mailer, &inert_spawn(&hash), Duration::from_secs(30), || {
+        let spawn = drive(&chassis, &inert_spawn(&hash), Duration::from_secs(30), || {
             cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take()
         });
-        let list = drive(&mailer, &ListEngines {}, Duration::from_secs(5), || {
+        let list = drive(&chassis, &ListEngines {}, Duration::from_secs(5), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         let (engine_id, error) = sole_spawn_failure(spawn, &list);
@@ -1037,14 +1042,14 @@ mod restart_supervision {
     /// it owes nobody one — so the cap's public list is how a test
     /// observes it at all.
     fn poll_list<T>(
-        mailer: &Arc<Mailer>,
+        chassis: &PassiveChassis<TestChassis>,
         cells: &ReplyCells,
         deadline: Duration,
         probe: impl Fn(&ListEnginesResult) -> Option<T>,
     ) -> Option<T> {
         let until = Instant::now() + deadline;
         loop {
-            let list = drive(mailer, &ListEngines {}, Duration::from_secs(15), || {
+            let list = drive(chassis, &ListEngines {}, Duration::from_secs(15), || {
                 cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
             });
             if let Some(found) = probe(&list) {
@@ -1102,8 +1107,7 @@ mod restart_supervision {
         let stand_in = dir.join("aether-headless");
         write_crashing_stand_in(&stand_in, &real, &argv_log, Some(&dir.join("crashed-once")));
 
-        let (_registry, _chassis, mailer, cells) =
-            boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, 5));
+        let (_registry, chassis, cells) = boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, 5));
 
         // Recipe-fidelity markers: the stand-in records them and forwards
         // only the RPC port flags to the real chassis, so a restart that loses
@@ -1111,7 +1115,7 @@ mod restart_supervision {
         let caller_args = vec!["--fixture-marker".to_owned(), "seven".to_owned()];
         let boot_manifest = dir.join("boot-manifest.json").to_string_lossy().into_owned();
         let spawn = drive(
-            &mailer,
+            &chassis,
             &SpawnEngine {
                 selector: default_selector(),
                 args: caller_args,
@@ -1127,19 +1131,18 @@ mod restart_supervision {
 
         // The successor is any supervised engine that is not the one that
         // died — the restart mints a fresh id by design.
-        let successor = poll_list(&mailer, &cells, Duration::from_secs(SUCCESSOR_DEADLINE_SECS), |list| {
+        let successor = poll_list(&chassis, &cells, Duration::from_secs(SUCCESSOR_DEADLINE_SECS), |list| {
             list.engines.iter().find(|e| e.engine_id != original).map(|e| e.engine_id.clone())
         })
         .unwrap_or_else(|| {
             panic!("a crashed engine must be restarted under a fresh id within {SUCCESSOR_DEADLINE_SECS}s")
         });
-        let mut reaper =
-            EngineReaper { mailer: Arc::clone(&mailer), cells: cells.clone(), engine_id: Some(successor.clone()) };
+        let mut reaper = EngineReaper { chassis: &chassis, cells: cells.clone(), engine_id: Some(successor.clone()) };
         assert_ne!(successor, original, "the successor is a distinct engine, not the corpse re-listed");
 
         // The original's death is on record, and it is a crash — the only
         // reason class restart supervision acts on.
-        let died = poll_list(&mailer, &cells, Duration::from_secs(30), |list| {
+        let died = poll_list(&chassis, &cells, Duration::from_secs(30), |list| {
             list.recently_died.iter().find(|d| d.engine_id == original).map(|d| d.reason.clone())
         })
         .unwrap_or_else(|| panic!("the crashed engine {original} must leave a death record"));
@@ -1170,7 +1173,7 @@ mod restart_supervision {
 
         // Tidy up: terminate the successor, which also exercises the
         // group teardown over a shell parent with a real grandchild.
-        let terminate = drive(&mailer, &TerminateEngine { engine_id: successor }, Duration::from_secs(30), || {
+        let terminate = drive(&chassis, &TerminateEngine { engine_id: successor }, Duration::from_secs(30), || {
             cells.terminate.lock().expect("test setup: terminate cell mutex is never poisoned").take()
         });
         assert!(matches!(terminate, TerminateEngineResult::Ok), "the successor terminates cleanly: {terminate:?}");
@@ -1207,11 +1210,11 @@ mod restart_supervision {
         // without paying for a long loop.
         let burst_limit = 2_u32;
         let expected_deaths = burst_limit as usize + 1;
-        let (_registry, _chassis, mailer, cells) =
+        let (_registry, chassis, cells) =
             boot(restart_config(&dir.join("store"), &dir.join("engines"), &stand_in, burst_limit));
 
         let spawn = drive(
-            &mailer,
+            &chassis,
             &SpawnEngine { selector: default_selector(), args: vec![], boot_manifest: None },
             Duration::from_secs(FIRST_SPAWN_DEADLINE_SECS),
             || cells.spawn.lock().expect("test setup: spawn cell mutex is never poisoned").take(),
@@ -1225,7 +1228,7 @@ mod restart_supervision {
         let crashes = |list: &ListEnginesResult| {
             list.recently_died.iter().filter(|d| matches!(d.reason, DeathReason::Crashed { .. })).count()
         };
-        let reached = poll_list(&mailer, &cells, Duration::from_secs(CRASH_LOOP_DEADLINE_SECS), |list| {
+        let reached = poll_list(&chassis, &cells, Duration::from_secs(CRASH_LOOP_DEADLINE_SECS), |list| {
             (crashes(list) >= expected_deaths).then(|| crashes(list))
         })
         .unwrap_or_else(|| {
@@ -1238,7 +1241,7 @@ mod restart_supervision {
         // And then stops. A cap that kept restarting would add another
         // crash inside this window; one that stopped adds nothing.
         thread::sleep(Duration::from_secs(LOOP_SETTLE_SECS));
-        let settled = drive(&mailer, &ListEngines {}, Duration::from_secs(15), || {
+        let settled = drive(&chassis, &ListEngines {}, Duration::from_secs(15), || {
             cells.list.lock().expect("test setup: list cell mutex is never poisoned").take()
         });
         assert_eq!(
@@ -1274,9 +1277,9 @@ mod operator_pins {
         let config = pin_store_config(&store_dir, &engine_root, 1);
 
         let hash = {
-            let (_registry, chassis, mailer, cells) = boot(config.clone());
+            let (_registry, chassis, cells) = boot(config.clone());
             let uploaded = drive(
-                &mailer,
+                &chassis,
                 &UploadBinary { staged_path: headless.clone(), name: None, pin: true },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1288,7 +1291,7 @@ mod operator_pins {
                 }
                 UploadBinaryResult::Err { error } => panic!("pin:true headless upload failed: {error}"),
             };
-            let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
                 cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
             });
             assert!(
@@ -1297,7 +1300,7 @@ mod operator_pins {
             );
 
             let again = drive(
-                &mailer,
+                &chassis,
                 &UploadBinary { staged_path: headless, name: None, pin: false },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1311,8 +1314,8 @@ mod operator_pins {
         };
 
         {
-            let (_registry, chassis, mailer, cells) = boot(config);
-            let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+            let (_registry, chassis, cells) = boot(config);
+            let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
                 cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
             });
             assert!(
@@ -1334,9 +1337,9 @@ mod operator_pins {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let store_dir = env::temp_dir().join(format!("aether-engcap-pin-wasm-{}-{nanos}", process::id()));
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-wasm-eng-{}-{nanos}", process::id()));
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
         let uploaded = drive(
-            &mailer,
+            &chassis,
             &UploadComponent { staged_path: wasm.to_string_lossy().into_owned(), name: None, pin: true },
             Duration::from_secs(15),
             || cells.upload_component.lock().expect("test setup: upload_component cell mutex is never poisoned").take(),
@@ -1348,7 +1351,7 @@ mod operator_pins {
             }
             UploadComponentResult::Err { error } => panic!("pin:true component upload failed: {error}"),
         };
-        let listed = drive(&mailer, &history_components(), Duration::from_secs(5), || {
+        let listed = drive(&chassis, &history_components(), Duration::from_secs(5), || {
             cells.list_components.lock().expect("test setup: list_components cell mutex is never poisoned").take()
         });
         assert!(
@@ -1368,9 +1371,9 @@ mod operator_pins {
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-dedup-eng-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
-                &mailer,
+                &chassis,
                 &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1383,8 +1386,8 @@ mod operator_pins {
             hash
         };
 
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
-        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
             cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
         });
         assert!(
@@ -1392,7 +1395,7 @@ mod operator_pins {
             "open does not evict; the unpinned seed is still listed under a tiny budget: {listed:?}"
         );
         let upgraded = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: headless, name: None, pin: true },
             Duration::from_secs(30),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1401,7 +1404,7 @@ mod operator_pins {
             UploadBinaryResult::Ok { hash: again, .. } => assert_eq!(again, hash),
             UploadBinaryResult::Err { error } => panic!("dedup pin:true failed: {error}"),
         }
-        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+        let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
             cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
         });
         assert!(
@@ -1418,9 +1421,9 @@ mod operator_pins {
         let nanos = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_nanos());
         let store_dir = env::temp_dir().join(format!("aether-engcap-pin-unknown-{}-{nanos}", process::id()));
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-unknown-eng-{}-{nanos}", process::id()));
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
         let by_name = drive(
-            &mailer,
+            &chassis,
             &SetArtifactPinned { hash: "keep".to_owned(), pinned: true },
             Duration::from_secs(5),
             || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
@@ -1432,7 +1435,7 @@ mod operator_pins {
             SetArtifactPinnedResult::Ok { .. } => panic!("SetArtifactPinned must not resolve names"),
         }
         let unknown =
-            drive(&mailer, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         assert!(
@@ -1452,10 +1455,10 @@ mod operator_pins {
         let store_dir = env::temp_dir().join(format!("aether-engcap-pin-mail-{}-{nanos}", process::id()));
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-mail-eng-{}-{nanos}", process::id()));
         let pressure = env::temp_dir().join(format!("aether-engcap-pin-mail-pressure-{}-{nanos}", process::id()));
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
 
         let uploaded = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: headless, name: Some("keep".to_owned()), pin: false },
             Duration::from_secs(30),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1469,7 +1472,7 @@ mod operator_pins {
         };
 
         let by_name = drive(
-            &mailer,
+            &chassis,
             &SetArtifactPinned { hash: "keep".to_owned(), pinned: true },
             Duration::from_secs(5),
             || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
@@ -1483,7 +1486,7 @@ mod operator_pins {
         }
 
         let unknown =
-            drive(&mailer, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: "0".repeat(64), pinned: true }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         assert!(
@@ -1492,7 +1495,7 @@ mod operator_pins {
         );
 
         let pinned =
-            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: true }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: hash.clone(), pinned: true }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         match pinned {
@@ -1501,7 +1504,7 @@ mod operator_pins {
         }
 
         let unpinned =
-            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         match unpinned {
@@ -1511,7 +1514,7 @@ mod operator_pins {
 
         write_pressure_bin(&pressure, "named-pressure");
         let pressure_upload = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: pressure.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1522,7 +1525,7 @@ mod operator_pins {
         );
 
         let live = drive(
-            &mailer,
+            &chassis,
             &ListEngineBinaries { chassis: None, caps: Vec::new(), target: None, limit: None, include_history: false },
             Duration::from_secs(5),
             || cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take(),
@@ -1548,9 +1551,9 @@ mod operator_pins {
         let pressure_reap = env::temp_dir().join(format!("aether-engcap-pin-unnamed-reap-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
-                &mailer,
+                &chassis,
                 &UploadBinary { staged_path: headless, name: None, pin: false },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1562,10 +1565,12 @@ mod operator_pins {
                 }
                 UploadBinaryResult::Err { error } => panic!("unnamed seed upload failed: {error}"),
             };
-            let pinned =
-                drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: true }, Duration::from_secs(5), || {
-                    cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
-                });
+            let pinned = drive(
+                &chassis,
+                &SetArtifactPinned { hash: hash.clone(), pinned: true },
+                Duration::from_secs(5),
+                || cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take(),
+            );
             match pinned {
                 SetArtifactPinnedResult::Ok { hash: replied, pinned: true } => assert_eq!(replied, hash),
                 other => panic!("unnamed pin via mail must succeed: {other:?}"),
@@ -1574,16 +1579,16 @@ mod operator_pins {
             hash
         };
 
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
         write_pressure_bin(&pressure_keep, "keep-pressure");
         let keep_upload = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: pressure_keep.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
         assert!(matches!(keep_upload, UploadBinaryResult::Ok { .. }), "keep-pressure upload: {keep_upload:?}");
-        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+        let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
             cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
         });
         assert!(
@@ -1592,7 +1597,7 @@ mod operator_pins {
         );
 
         let unpinned =
-            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         match unpinned {
@@ -1602,13 +1607,13 @@ mod operator_pins {
 
         write_pressure_bin(&pressure_reap, "reap-pressure");
         let reap_upload = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: pressure_reap.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
         );
         assert!(matches!(reap_upload, UploadBinaryResult::Ok { .. }), "reap-pressure upload: {reap_upload:?}");
-        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+        let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
             cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
         });
         assert!(
@@ -1630,10 +1635,10 @@ mod operator_pins {
         let store_dir = env::temp_dir().join(format!("aether-engcap-pin-fail-{}-{nanos}", process::id()));
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-fail-eng-{}-{nanos}", process::id()));
         let pressure = env::temp_dir().join(format!("aether-engcap-pin-fail-pressure-{}-{nanos}", process::id()));
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 1));
 
         let uploaded = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: headless, name: None, pin: true },
             Duration::from_secs(30),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1645,7 +1650,7 @@ mod operator_pins {
         occupy_owned_sidecar_as_dir(&store_dir, &hash);
 
         let failed =
-            drive(&mailer, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
+            drive(&chassis, &SetArtifactPinned { hash: hash.clone(), pinned: false }, Duration::from_secs(5), || {
                 cells.set_pinned.lock().expect("test setup: set_pinned cell mutex is never poisoned").take()
             });
         match failed {
@@ -1657,7 +1662,7 @@ mod operator_pins {
 
         write_pressure_bin(&pressure, "fail-pressure");
         let pressure_upload = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: pressure.to_string_lossy().into_owned(), name: None, pin: false },
             Duration::from_secs(15),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1666,7 +1671,7 @@ mod operator_pins {
             matches!(pressure_upload, UploadBinaryResult::Ok { .. }),
             "pressure upload after failed unpin: {pressure_upload:?}"
         );
-        let listed = drive(&mailer, &history_binaries(), Duration::from_secs(5), || {
+        let listed = drive(&chassis, &history_binaries(), Duration::from_secs(5), || {
             cells.list_binaries.lock().expect("test setup: list_binaries cell mutex is never poisoned").take()
         });
         assert!(
@@ -1687,9 +1692,9 @@ mod operator_pins {
         let engine_root = env::temp_dir().join(format!("aether-engcap-pin-upfail-eng-{}-{nanos}", process::id()));
 
         let hash = {
-            let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+            let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
             let uploaded = drive(
-                &mailer,
+                &chassis,
                 &UploadBinary { staged_path: headless.clone(), name: None, pin: false },
                 Duration::from_secs(30),
                 || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),
@@ -1703,9 +1708,9 @@ mod operator_pins {
         };
 
         occupy_owned_sidecar_as_dir(&store_dir, &hash);
-        let (_registry, chassis, mailer, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
+        let (_registry, chassis, cells) = boot(pin_store_config(&store_dir, &engine_root, 17_179_869_184));
         let failed = drive(
-            &mailer,
+            &chassis,
             &UploadBinary { staged_path: headless, name: None, pin: true },
             Duration::from_secs(30),
             || cells.upload_binary.lock().expect("test setup: upload_binary cell mutex is never poisoned").take(),

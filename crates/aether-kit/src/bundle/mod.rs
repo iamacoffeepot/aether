@@ -137,7 +137,7 @@ impl WasmActor for BundleComponent {
 
         let Some(pixels) = ctx.asset(TILE_ASSET_NAME) else {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 asset = TILE_ASSET_NAME,
                 "bundle: embedded tile asset not found in the load window; nothing to make resident",
             );
@@ -146,7 +146,7 @@ impl WasmActor for BundleComponent {
         let expected = TILE_WIDTH as usize * TILE_HEIGHT as usize * TextureFormat::Rgba8.bytes_per_pixel();
         if pixels.len() != expected {
             tracing::warn!(
-                target: "aether_kit_commons",
+                target: "aether_kit",
                 asset = TILE_ASSET_NAME,
                 got = pixels.len(),
                 expected,
@@ -191,7 +191,7 @@ impl WasmActor for BundleComponent {
             }
             CreateTextureResult::Err { error } => {
                 tracing::warn!(
-                    target: "aether_kit_commons",
+                    target: "aether_kit",
                     %error,
                     "bundle: create_texture failed; the tile stays non-resident",
                 );

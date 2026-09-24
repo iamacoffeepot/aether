@@ -315,7 +315,7 @@ frame.
 
 ## How to extend or reuse it
 
-- **A new camera mode** is component work, not substrate work. `aether-kit-commons`'s
+- **A new camera mode** is component work, not substrate work. `aether-kit`'s
   `camera` export is the worked example: it hosts N named cameras, advances each
   on `Tick`, and publishes the active one's `view_proj` on `Render`. It boots a
   default `"main"` camera in orbit mode and exposes driver kinds —
@@ -329,16 +329,16 @@ frame.
   `None` while the active binding is absent or no longer live. This is a
   request/reply read-back, not a subscription stream; the camera still
   publishes only `view_proj` to `aether.render`. Loaded by the
-  `aether_kit_commons@aether.kit.camera` selector, the camera answers at
+  `aether_kit@aether.kit.camera` selector, the camera answers at
   `aether.component/aether.embedded:aether.kit.camera` — the address `LoadResult.path` hands
   back.
 - **Driving a camera from the keyboard** is a peer component's job, not the
-  camera's. `aether-kit-commons`'s `camera-controller` export subscribes `Key` /
+  camera's. `aether-kit`'s `camera-controller` export subscribes `Key` /
   `KeyRelease` / `Tick`, keeps a shadow of the pose it drives, and mails
   `aether.kit.camera.orbit.set` / `aether.kit.camera.topdown.set` deltas to a peer
   camera — WASD pan the target across the ground, the arrows yaw and pitch, Z/X
   dolly the distance, and an idle tick produces no mail. It loads by the
-  `aether_kit_commons@aether.kit.camera-controller` selector with an
+  `aether_kit@aether.kit.camera-controller` selector with an
   `aether.kit.camera-controller.config` init-config that picks the target
   camera, mode, per-tick rates, and clamps, so the camera stays a pure
   projection state machine while the keyboard policy lives in the controller.
