@@ -17,7 +17,7 @@ use aether_substrate::actor::wasm::kind_manifest::{self, ActorInputs, Dependency
 use aether_substrate::mail::MailboxId;
 
 use super::LoadResult;
-use super::dependencies::{dependency_refusal, inline_dependency_refusal, missing_dependency, replacement_refusal};
+use super::dependencies::{dependency_refusal, inline_dependency_refusal, missing_dependency};
 use crate::component::runtime::{BootEntry, ComponentHostCapabilityState, PendingReplace};
 use crate::component::{ComponentHostCapability, LoadDelivered};
 use crate::kinds::BootTeardown;
@@ -642,13 +642,12 @@ impl ComponentHostCapabilityState {
         // route (vacate, not close), so a replace that refills it still
         // proves; an address with no live route answers `Err` here instead of
         // parking a forward nothing will answer.
-        let proven =
-            self.registry.resolve_address(&payload.target).map_err(|error| error.to_string()).and_then(|resolved| {
-                ctx.resolve_live(resolved.mailbox_id)
-                    .map(|actor| (actor, resolved.mailbox_id))
-                    .map_err(|error| error.to_string())
-            });
-        let (actor, position) = match proven {
+        let proven = self
+            .registry
+            .resolve_address(&payload.target)
+            .map_err(|error| error.to_string())
+            .and_then(|resolved| ctx.resolve_live(resolved.mailbox_id).map_err(|error| error.to_string()));
+        let actor = match proven {
             Ok(proven) => proven,
             Err(error) => {
                 let error = format!("no component to replace at {}: {error}", payload.target);
@@ -658,15 +657,13 @@ impl ComponentHostCapabilityState {
         };
         // A replacement installs a module whose inline children are rebuilt
         // on rehydrate, so it is a module load for the ADR-0230 §3 check too.
+        // The module-wide inline check runs here; the trampoline checks the
+        // dependencies of the type the replacement will host.
         if let Ok(actors) = kind_manifest::read_actor_inputs_from_bytes(&payload.wasm)
-            && let Ok(boot) = kind_manifest::read_boot_namespace_from_bytes(&payload.wasm)
             && let Ok(lineage) = kind_manifest::read_actor_lineage_from_bytes(&payload.wasm)
             && let Ok(module_namespace) = kind_manifest::read_namespace_from_bytes(&payload.wasm)
             && let Some(error) =
-                replacement_refusal(&self.registry, position, &actors, payload.export.as_deref(), boot.as_deref())
-                    .or_else(|| {
-                        inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref())
-                    })
+                inline_dependency_refusal(&self.registry, &actors, &lineage, module_namespace.as_deref())
         {
             ctx.defer_reply_to(source).reply(ctx, &ReplaceResult::Err { error });
             return;

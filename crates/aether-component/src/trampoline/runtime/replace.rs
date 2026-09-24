@@ -20,6 +20,7 @@ use aether_substrate::mail::registry::PreparedAliasRoute;
 use aether_substrate::mail::{CostCells, KindId, MailboxId};
 use wasmtime::Module;
 
+use crate::component::replacement_refusal;
 use crate::trampoline::WasmTrampoline;
 
 use super::config::WasmTrampolineConfig;
@@ -139,36 +140,37 @@ impl WasmTrampolineState {
         done.release_no_reply();
     }
 
-    /// ADR-0096: resolve the **effective tag** an export-targeted
-    /// replace instantiates, paired with the capability group to
-    /// advertise. `export = Some(ns)` names an exported actor type of
-    /// the replacement module, hashed to its tag the same way the load
-    /// path resolves `LoadComponent.export` (component.rs `handle_load`);
-    /// an export the new module doesn't declare is a clean `Err`,
-    /// mirroring the load "export not found" message. `export = None`
-    /// reuses the type THIS trampoline currently hosts (`self.type_tag`):
-    /// with no tag, the module's default — the first actor that is not
-    /// `boot` (ADR-0147), the same selection `begin_load` makes — else the
-    /// actor whose namespace hashes to the tag, with an `Err` if the new
-    /// module doesn't export it. `boot` is the boot namespace of the module
-    /// `actors` came from. The returned tag
-    /// drives both the reply capabilities and `Component::instantiate`,
-    /// and on success the caller promotes it to the new `self.type_tag`
-    /// so a later bare replace reuses the *current* hosted type rather
-    /// than reverting to the original load's.
-    pub fn resolve_replace_target(
+    /// ADR-0096: resolve the **effective tag** an export-targeted replace
+    /// instantiates, paired with the group it will host: the group whose
+    /// capabilities the reply advertises and whose dependencies the replace
+    /// checks. `export = Some(ns)` names an exported actor type of the
+    /// replacement module, hashed to its tag the same way the load path
+    /// resolves `LoadComponent.export` (component.rs `handle_load`); an
+    /// export the new module doesn't declare is a clean `Err`, mirroring the
+    /// load "export not found" message. `export = None` reuses the type THIS
+    /// trampoline currently hosts (`self.type_tag`): with no tag, the
+    /// module's default — the first actor that is not `boot` (ADR-0147), the
+    /// same selection `begin_load` makes — else the actor whose namespace
+    /// hashes to the tag, with an `Err` if the new module doesn't export it.
+    /// `boot` is the boot namespace of the module `actors` came from; the
+    /// group is `None` only for a module that declares no group. The
+    /// returned tag drives both the reply capabilities and
+    /// `Component::instantiate`, and on success the caller promotes it to the
+    /// new `self.type_tag` so a later bare replace reuses the *current*
+    /// hosted type rather than reverting to the original load's.
+    pub fn resolve_replace_target<'a>(
         &self,
         export: Option<&str>,
-        actors: &[ActorInputs],
+        actors: &'a [ActorInputs],
         boot: Option<&str>,
-    ) -> Result<(ComponentCapabilities, Option<u64>), String> {
+    ) -> Result<(Option<&'a ActorInputs>, Option<u64>), String> {
         if let Some(requested) = export {
             let group = actors.iter().find(|a| a.namespace.as_deref() == Some(requested)).ok_or_else(|| {
                 let available: Vec<&str> = actors.iter().filter_map(|a| a.namespace.as_deref()).collect();
                 format!("export {requested:?} not found in module; exported types: {available:?}")
             })?;
             return Ok((
-                group.capabilities.clone(),
+                Some(group),
                 // Runtime-name routing: `requested` is the export
                 // namespace from the wire replace request, resolved to
                 // its actor-type tag exactly as the load path does.
@@ -182,7 +184,7 @@ impl WasmTrampolineState {
         // tag — `export!(boot = B, default = A, …)` lists `B` first.
         let Some(tag) = self.type_tag else {
             let hosted = actors.iter().find(|a| boot.is_none_or(|boot| a.namespace.as_deref() != Some(boot)));
-            return Ok((hosted.map(|a| a.capabilities.clone()).unwrap_or_default(), None));
+            return Ok((hosted, None));
         };
         actors
             .iter()
@@ -193,10 +195,20 @@ impl WasmTrampolineState {
                 #[allow(clippy::disallowed_methods)]
                 a.namespace.as_deref().is_some_and(|ns| aether_data::mailbox_id_from_name(ns).0 == tag)
             })
-            .map(|group| (group.capabilities.clone(), Some(tag)))
+            .map(|group| (Some(group), Some(tag)))
             .ok_or_else(|| {
                 format!("replace: new module does not export the actor type (tag {tag:#x}) this trampoline loaded")
             })
+    }
+
+    /// ADR-0230: the replacement's hosted type must find every declared
+    /// dependency live, checked before anything is touched. An actor the
+    /// registry does not name has nothing to refuse and passes.
+    fn check_dependencies(&self, group: Option<&ActorInputs>) -> Result<(), String> {
+        let (Some(group), Some(canonical)) = (group, self.registry.mailbox_name(self.mailbox)) else {
+            return Ok(());
+        };
+        replacement_refusal(&self.registry, &canonical, &group.dependencies).map_or(Ok(()), Err)
     }
 
     /// ADR-0231 §5: the replacement's hosted type must keep every handler
@@ -207,6 +219,7 @@ impl WasmTrampolineState {
     fn check_contract(&self, target: &impl Display, replacement: &ComponentCapabilities) -> Result<(), String> {
         let old_boot = kind_manifest::read_boot_namespace_from_bytes(&self.wasm_bytes)?;
         let (predecessor, _) = self.resolve_replace_target(None, &self.actor_caps, old_boot.as_deref())?;
+        let predecessor = predecessor.map(|group| group.capabilities.clone()).unwrap_or_default();
         contract::contract_break(&predecessor, replacement).map_or(Ok(()), |kind| {
             let name = self.registry.kind_name(kind).unwrap_or_else(|| kind.to_string());
             Err(contract::contract_refusal(target, &name))
@@ -312,14 +325,19 @@ impl WasmTrampolineState {
             Ok(boot) => boot,
             Err(error) => return ReplaceResult::Err { error },
         };
-        let (mut capabilities, effective_tag) =
+        let (group, effective_tag) =
             match self.resolve_replace_target(payload.export.as_deref(), &actors, new_boot.as_deref()) {
                 Ok(resolved) => resolved,
                 Err(error) => return ReplaceResult::Err { error },
             };
 
-        // ADR-0231 §5: checked before anything is touched, so a refusal
-        // leaves the old module (or the empty post-drop slot) as it was.
+        // ADR-0230 and ADR-0231 §5: checked before anything is touched, so a
+        // refusal leaves the old module (or the empty post-drop slot) as it
+        // was.
+        if let Err(error) = self.check_dependencies(group) {
+            return ReplaceResult::Err { error };
+        }
+        let mut capabilities = group.map(|group| group.capabilities.clone()).unwrap_or_default();
         if let Err(error) = self.check_contract(&payload.target, &capabilities) {
             return ReplaceResult::Err { error };
         }
