@@ -433,8 +433,8 @@ reply-driven path as the register, keeping the `geometry_id` from a
 `CreateGeometryResult` handler; the upload belongs to subject load, and every
 frame after that changes only the uniform blob — an animated mesh poses through
 matrices in that blob rather than through a fresh upload.
-The in-tree consumer to study at scale is the watercolour easel's wash program
-([`aether-puppet/src/easel/program/`](https://github.com/iamacoffeepot/aether/tree/main/crates/aether-puppet/src/easel/program)):
+The archived consumer to study at scale is the watercolour easel's wash program
+([`aether-puppet/src/easel/program/`](https://github.com/iamacoffeepot/aether/tree/archive/aether-puppet/crates/aether-puppet/src/easel/program)):
 one static graph of several hundred passes, one uniform blob encoded per
 develop.
 

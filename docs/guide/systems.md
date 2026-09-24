@@ -62,7 +62,6 @@ For the media and product-tools overview, start with
 | [Input](systems/input.md) | key, pointer, text, IME and subscription streams |
 | [Window](systems/window.md) | window lifecycle, mode/title, menu and cursor chrome, unsupported replies |
 | [Widgets](systems/widgets.md) | controls, focus, scroll, panel/editor composition |
-| [Puppet controls](systems/puppet.md) | articulated character pose, gaze, expression and turntable control |
 
 Native capabilities own devices; kit actors compose them into product behavior.
 

@@ -19,8 +19,7 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     /// verb. The body is a flat send of the request `P` builds
     /// ([`Publisher::subscribe_request`](crate::Publisher::subscribe_request)).
     ///
-    /// Its consumers are the puppet motors' `wire` (`aether.puppet-idle`,
-    /// `aether.puppet-turntable`) and the bundle probe fixture's `wire`.
+    /// Its consumers include the bundle probe fixture's `wire`.
     pub fn subscribe<P, K: Kind>(&mut self)
     where
         P: Publishes<K> + Singleton + CallerAddressable,

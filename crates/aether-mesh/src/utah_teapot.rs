@@ -20,7 +20,7 @@
 //! the patches' winding survives it.
 //!
 //! Scale follows the same subject. A turntable sweeps its subject about the
-//! vertical axis, so what has to stay inside `demo/turntable.json`'s framing
+//! vertical axis, so what has to stay inside a turntable's framing
 //! is the radius that sweep traces, and the scale here is the one that puts
 //! this teapot's spout tip exactly where `teapot.dsl`'s handle reached. The
 //! teapot then stands 1.02 units tall on the ground plane rather than 1.30,
