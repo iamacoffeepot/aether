@@ -153,7 +153,12 @@ sender asked for nothing.
 `DeferredReply` is the obligation to answer someone. It carries a
 `SettlementHold` and a reply target and knows nothing about an envelope, so it
 moves `held_open`. `TaskDone` is the same debt with a worker's output attached;
-both surrender a bare `DeferredReply` through `IntoDeferredReply`.
+both surrender a bare `DeferredReply` through `IntoDeferredReply`. Before its
+terminal, a debt can forward any number of already-encoded replies with
+`reply_envelope`, which borrows it: each goes to the waiting caller under the
+root the hold keeps open, and the debt stays owed. The fleet proxy relays each
+reply event a remote engine streams back this way. The typed `reply` stays the
+terminal that discharges the debt.
 
 Keeping them apart is what lets both be outstanding on one chain at the same
 time, which is precisely the deferred case: the handler returns and its inbound
