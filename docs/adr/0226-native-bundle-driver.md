@@ -8,6 +8,7 @@
 - **Amended:** 2026-09-23 — decision 10: the driver sends `WatchHead` on a fresh chain (issue #6401).
 - **Amended:** 2026-09-23 — the bloomery's RPC listener binds only after the journal owner and the driver are mounted, so a reachable engine can take driver calls (issue #6399).
 - **Amended:** 2026-09-24 — a bundle's fetch-on-miss travels invocation → bundle root → driver, and the driver forwards it to the journal owner with the reply pinned to the root; a bundle addresses no journal position (issue #6478).
+- **Amended:** 2026-09-24 — the driver answers a bundle's fetch-on-miss itself, from a byte-bounded cache of found artifacts or one journal read shared by every fetch of that digest, and never caches a missing artifact; `SetHead` destination checks consult the same cache (issue #6258).
 
 ## Context
 
@@ -306,10 +307,12 @@ Nothing on main can carry any of this yet:
   owner and the driver spawned post-build as
   `aether.bloomery.journal:journal` / `aether.bloomery.driver:driver`,
   then binds the RPC listener (issue #6399). A bundle's fetch-on-miss
-  travels invocation → bundle root → driver, the driver forwards it to
-  the journal owner with the reply pinned to the root, and the root
-  relays the answer to the invocation, so bundles address no journal
-  position (issue #6478).
+  travels invocation → bundle root → driver, and the root relays the
+  answer to the invocation, so bundles address no journal position
+  (issue #6478). The driver answers the fetch itself, from a 64 MiB cache
+  of found artifacts evicted least recently used first, or from one
+  journal read shared by every fetch of that digest; a missing artifact
+  is never cached, because it can be stored later (issue #6258).
 - **Amendments.** Following ADR-0224's precedent, the older ADRs stay
   unedited. This ADR amends:
   - ADR-0223: the feeder becomes this driver; `DropComponent` is never

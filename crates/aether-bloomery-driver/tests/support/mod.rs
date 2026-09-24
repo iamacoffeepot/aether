@@ -88,6 +88,8 @@ pub struct World {
     pub eval_roots: BTreeMap<EvaluateTicket, Digest>,
     /// Barrier replies collected from the core, in arrival order.
     pub processed: Vec<(CallerId, Processed)>,
+    /// Fetch-on-miss answers collected from the core, in arrival order.
+    pub fetched: Vec<(CallerId, ReadArtifactResult)>,
     /// Scripted warm replies by batch first seq.
     pub warm_pages: BTreeMap<u64, Warmed>,
     /// Default warm reply when the first seq is unscripted; `None` folds through the batch end.
@@ -135,6 +137,7 @@ impl World {
             reactors: HashMap::new(),
             eval_roots: BTreeMap::new(),
             processed: Vec::new(),
+            fetched: Vec::new(),
             warm_pages: BTreeMap::new(),
             warm_default: None,
             evaluates: BTreeMap::new(),
@@ -274,6 +277,10 @@ impl World {
             }
             Command::Processed { caller, reply } => {
                 self.processed.push((caller, reply));
+                Step::More(Vec::new())
+            }
+            Command::Fetched { caller, result } => {
+                self.fetched.push((caller, result));
                 Step::More(Vec::new())
             }
             Command::Abort { reason } => {

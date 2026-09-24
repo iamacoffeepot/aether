@@ -12,9 +12,9 @@ use std::collections::BTreeMap;
 use aether_bloomery_driver::{CallerId, Command, EvaluateTicket, InvokeTicket, LoadOutcome};
 use aether_bloomery_kinds::{
     AppendRecords, AwaitProcessed, Call, CallProgram, ClosureArtifact, Detail, Digest, DriverRecord, EncodedArtifact,
-    Evaluated, FaultReason, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName, ProgramRef, ReactorIntent,
-    ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName, SetHead, Status, Utf8Text,
-    artifact_digest,
+    Evaluated, FaultReason, Head, Invoked, NativeOrigin, OpaqueBytes, Processed, ProgramName, ProgramRef,
+    ReactorIntent, ReactorName, ReactorSet, RecordedHead, RecordedHeadMove, Ref, RequestSource, RuleName, SetHead,
+    Status, Utf8Text, artifact_digest,
 };
 use aether_data::Kind;
 use reactor_world::{activated_records, failed_records, head_moves, reactor_set, rejected_records, requested_records};
@@ -283,6 +283,40 @@ fn set_head_refusals_fail_only_that_intent() {
     assert_eq!(failed_records(&world).len(), 3);
     assert_eq!(head_moves(&world).len(), 2, "the chained swap sees the earlier move");
     assert_eq!(requested_records(&world).len(), 1, "the sibling intent still stands");
+}
+
+#[test]
+fn repeated_set_head_destinations_read_once() {
+    // Catches a destination re-read for every intent that names it, and a
+    // cached destination whose kind is never compared with the head's.
+    let (mut world, commands) = World::open();
+    let set = reactor_set(&["a"]);
+    let set_digest = world.store_set(&set);
+    let bundle_a = world.store_reactor(b"reactor-a");
+    world.seed_set_root(set_digest);
+    world.seed_move("a", bundle_a);
+    let dest = world.store(OpaqueBytes::ID, b"dest-bytes");
+    world.seed_move("target", digest(7));
+
+    let set_intent = |set_head: &SetHead| {
+        ReactorIntent::new(reactor_name("r"), rule_name("rule"), SetHead::ID, set_head.encode_into_bytes())
+    };
+    let intents = vec![
+        set_intent(&SetHead::new(&program_head("target"), Some(Ref::from_digest(digest(7))), Ref::from_digest(dest))),
+        set_intent(&SetHead::new(&program_head("other"), None, Ref::from_digest(dest))),
+        set_intent(&SetHead::new(&Head::<Utf8Text>::new("text"), None, Ref::from_digest(dest))),
+    ];
+    world.evaluates.insert(3, Evaluated::Completed { seq: 3, intents });
+    script_quiet(&mut world, 10);
+    let manual = world.drive(commands);
+    assert!(manual.is_empty());
+    assert!(world.abort.is_none());
+
+    assert_eq!(world.reads_seen.iter().filter(|seen| **seen == dest).count(), 1, "the destination is read once");
+    assert_eq!(head_moves(&world).len(), 2);
+    let failed = failed_records(&world);
+    assert_eq!(failed.len(), 1);
+    assert!(failed[0].1.reason.as_str().contains("wrong kind"), "a cached destination still checks its kind");
 }
 
 #[test]
