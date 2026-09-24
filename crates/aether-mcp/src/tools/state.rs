@@ -242,7 +242,7 @@ impl Mcp {
 
     /// Pre-resolve a `spawn_substrate` boot list against the component
     /// registry (ADR-0116) and stage it as a temp boot-manifest JSON the
-    /// hub injects as `AETHER_BOOT_MANIFEST` (issue 1776). For each spec
+    /// hub addresses to the child as `--boot-manifest` argv (issue 1776). For each spec
     /// aether-mcp resolves the selector hub-local to its wasm bytes, writes
     /// the bytes to a per-process-unique temp `.wasm`, and points the
     /// manifest entry's `wasm` at that staged path — so the substrate boot

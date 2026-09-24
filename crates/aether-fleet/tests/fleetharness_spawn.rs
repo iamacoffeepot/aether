@@ -30,6 +30,6 @@ mod tests {
             "freshly spawned engine should have a near-zero heartbeat age, got {}ms",
             descriptor.last_heartbeat_age_millis,
         );
-        assert_ne!(descriptor.rpc_port, 0, "the cap reports the assigned RPC port");
+        assert_ne!(descriptor.rpc_port, 0, "the cap reports the substrate's RPC port");
     }
 }

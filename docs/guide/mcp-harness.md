@@ -33,8 +33,8 @@ The **tunnel** is the only thing your MCP client talks to. It supervises and
 re-forks the two backends below it, which is the point: you can rebuild and
 restart the hub without your MCP session ever dropping. **aether-mcp** is the RPC
 client — it turns a tool call into a wire `Call` and relays it. The **hub** owns
-the fleet: it forks substrates, assigns each a localhost RPC port, optionally
-heartbeats them, and routes your mail to the right one by `engine_id`. A
+the fleet: it forks substrates, learns the localhost RPC port each one picks
+and reports, optionally heartbeats them, and routes your mail to the right one by `engine_id`. A
 **substrate** is one running engine — a full chassis — and you can have several
 at once.
 

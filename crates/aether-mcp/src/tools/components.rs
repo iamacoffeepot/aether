@@ -36,8 +36,8 @@ pub(super) struct ResolvedComponent {
 }
 
 /// The temp files a `stage_boot_manifest` wrote (ADR-0116): the
-/// boot-manifest JSON the hub injects as `AETHER_BOOT_MANIFEST` plus the
-/// staged component `.wasm` files it points at. The substrate reads them
+/// boot-manifest JSON the hub addresses to the child as `--boot-manifest`
+/// argv plus the staged component `.wasm` files it points at. The substrate reads them
 /// at boot, before the spawn reply returns; the spawn caller
 /// [`cleanup`](StagedBootManifest::cleanup)s them once it has.
 pub(super) struct StagedBootManifest {
