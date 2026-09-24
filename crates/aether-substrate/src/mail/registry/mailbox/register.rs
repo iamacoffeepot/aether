@@ -56,16 +56,23 @@ impl Registry {
     /// Issue 634 Phase 4 retired the dedicated `Component` variant,
     /// so this now drops any live `Inbox` or `Inline` mailbox.
     ///
-    /// No production caller (iamacoffeepot/aether#4152 audited every one:
-    /// all are tests). The `WasmTrampoline` shutdown path this comment
-    /// used to name reaches [`CostTable::drop_mailbox`](crate::mail::cost::CostTable::drop_mailbox)
-    /// now, which clears the per-handler cost cells and never touches a
+    /// The production callers are the boot and eager-spawn unwinds:
+    /// `ChassisCtx::unclaim_mailbox`, reached when a capability or pumped
+    /// boot fails after its claim, and the eager spawn's actor-registry
+    /// collision arm. Each retires a route that reached `Live` rather than
+    /// deleting it, so a reference minted while it was `Live` still names
+    /// its path (ADR-0230), and the name stays free for a later boot of the
+    /// same actor. They ignore the `Err`: an unknown, `Starting`, or
+    /// already-dropped id leaves nothing to retire. The `WasmTrampoline`
+    /// shutdown path this comment once named reaches
+    /// [`CostTable::drop_mailbox`](crate::mail::cost::CostTable::drop_mailbox)
+    /// instead, which clears the per-handler cost cells and never touches a
     /// registry route.
     ///
     /// Direct write path — takes a [`BootAuthority`] like every other
-    /// eager mutator (iamacoffeepot/aether#4161), so the remaining callers
-    /// (all tests, which use it to clear a deliberately-installed collision
-    /// route) name the same authority production boot would.
+    /// eager mutator (iamacoffeepot/aether#4161), so only the boot unwind,
+    /// the boot / embedder eager spawn, and tests (which use it to retire a
+    /// deliberately-installed collision route) can name it.
     ///
     /// # Panics
     /// Panics if the inner routing lock is poisoned — fail-fast per
@@ -219,29 +226,6 @@ impl Registry {
             Err(NameConflict { name }) => {
                 panic!("mailbox name already registered: {name}")
             }
-        }
-    }
-
-    /// Issue 607 Phase 7: fully remove a registered mailbox. Used in
-    /// the chassis-boot unwind path when a singleton's `init` fails
-    /// after `try_register_inbox` claimed the slot — the partial-
-    /// boot state must not leak into a later cap's namespace lookup.
-    /// Returns `true` if the entry existed and was a live (`Inbox`
-    /// or `Inline`) variant and was removed; `false` if the id is
-    /// unknown or already in `Dropped` state. Component entries go
-    /// through [`Self::drop_mailbox`] (which transitions to
-    /// `Dropped` rather than removing) — the lifecycle difference
-    /// is intentional: components can re-register the same id after
-    /// a drop, chassis-bound mailboxes are torn down on cap
-    /// teardown and the id can be freshly recreated.
-    ///
-    /// Direct write path — takes a [`BootAuthority`] so only the boot
-    /// unwind and the boot / embedder eager spawn can name it
-    /// (iamacoffeepot/aether#4156).
-    pub(crate) fn remove_closure(&self, authority: &BootAuthority, id: MailboxId) -> bool {
-        match self.apply_one(authority, RegistryEffect::RemoveMailbox(id)) {
-            Ok(RegistryApplied::Removed(removed)) => removed,
-            Ok(_) | Err(_) => unreachable!("remove effect is infallible and returns a bool"),
         }
     }
 

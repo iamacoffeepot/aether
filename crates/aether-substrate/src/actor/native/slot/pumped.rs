@@ -752,10 +752,11 @@ mod tests {
         let self_id = MailboxId(0x_0DED_0011);
         let (wake_tx, wake_rx) = crossbeam_channel::unbounded();
         let mut slot = boot_probe(&fx, self_id, PumpProbe::default(), false, Some(wake_tx));
+        let probe = fx.registry.resolve_live(self_id).expect("the booted probe's route is live");
 
         let state_after_turn = slot.host_turn(|state, ctx| {
             state.pings = 10;
-            ctx.send_detached_to(Registry::structural_erased(self_id), &Ping { seq: 1 });
+            ctx.send_detached_to(probe, &Ping { seq: 1 });
             state.pings
         });
         assert_eq!(state_after_turn, Some(10));

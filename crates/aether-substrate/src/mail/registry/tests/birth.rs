@@ -269,7 +269,6 @@ fn starting_is_keyed_only_and_excluded_from_every_live_surface() {
     assert!(wakes.recv_timeout(Duration::from_millis(20)).is_err(), "Starting emits no public inventory event");
     assert!(registry.route_generation() > initial_route_generation, "Starting advances only the keyed generation");
     assert!(matches!(registry.drop_mailbox(&auth(), id), Err(DropError::UnknownId(found)) if found == id));
-    assert!(!registry.remove_closure(&auth(), id), "ordinary removal does not treat Starting as live");
     let slot: Arc<dyn Drainable> = Arc::new(TestSlot);
     let handle = SeizeHandle::new(Arc::new(SlotState::new()), Arc::downgrade(&slot));
     assert!(!registry.install_seize_handle(&auth(), id, handle), "Starting rejects seize installation");

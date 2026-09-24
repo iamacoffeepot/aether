@@ -27,9 +27,9 @@
 /// [`Registry::register_inbox`], [`Registry::try_register_inbox`],
 /// [`Registry::try_register_inbox_with_id`], [`Registry::register_inline`],
 /// [`Registry::register_kind`], [`Registry::register_kind_with_descriptor`],
-/// [`Registry::drop_mailbox`], `Registry::remove_closure`, and
-/// `Registry::install_seize_handle` — forwards one down through the private
-/// `insert` / `insert_with_id` / `register_kind_internal` helpers. A
+/// [`Registry::drop_mailbox`], and `Registry::install_seize_handle` —
+/// forwards one down through the private `insert` / `insert_with_id` /
+/// `register_kind_internal` helpers. A
 /// capability, a component, or any other downstream crate reaches those
 /// mutators only if boot hands it the token; a handler never receives one,
 /// so the eager path is unreachable from steady state by construction

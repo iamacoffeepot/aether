@@ -220,12 +220,15 @@ impl Spawner {
             // SubnameInUse for the caller; the singleton's claim wins
             // (it landed first).
             //
-            // Issue 607 Phase 7: the sink WAS registered above; remove
-            // it before returning so the failed spawn doesn't leave
-            // a dangling sink that warn-drops mail. The actor itself
-            // (init succeeded) drops naturally as `actor` falls out
-            // of scope.
-            self.registry.remove_closure(authority, id);
+            // Issue 607 Phase 7: the sink WAS registered above; retire
+            // it before returning so the failed spawn doesn't leave a
+            // live sink behind. Retiring leaves the route `Dropped` with
+            // its name kept and re-registrable, so a reference minted
+            // while it was `Live` still names its path (ADR-0230). The
+            // `Err` of an already-retired route leaves nothing to undo.
+            // The actor itself (init succeeded) drops naturally as
+            // `actor` falls out of scope.
+            let _ = self.registry.drop_mailbox(authority, id);
             return Err(SpawnError::SubnameInUse { full_name: full_name.to_string() });
         }
 

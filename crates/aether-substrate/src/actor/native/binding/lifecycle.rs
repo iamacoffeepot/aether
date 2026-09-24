@@ -280,6 +280,13 @@ impl NativeBinding {
         self.mailer.actor_path(reference)
     }
 
+    /// The reference for a host-stamped position that holds a route record,
+    /// or `None`. The path behind
+    /// [`NativeCtx::sender`](crate::actor::native::ctx::NativeCtx::sender).
+    pub(crate) fn stamped_sender(&self, position: MailboxId) -> Option<ErasedActorRef> {
+        self.mailer.stamped_sender(position)
+    }
+
     /// The first declared dependency with no `Live` route for a child placed
     /// under this binding's actor. The path behind
     /// [`NativeCtx::missing_child_dependency`](crate::actor::native::ctx::NativeCtx::missing_child_dependency).

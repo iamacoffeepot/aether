@@ -328,7 +328,6 @@ pub enum RegistryEffect {
         activation: PreparedActivation,
     },
     DropMailbox(MailboxId),
-    RemoveMailbox(MailboxId),
     InstallSeize {
         id: MailboxId,
         handle: SeizeHandle,
@@ -379,7 +378,6 @@ pub enum RegistryApplied {
     /// Outcome of [`RegistryEffect::RetireAlias`]: `true` when a live alias
     /// route was retired, `false` when the id named no alias to retire.
     AliasRetired(bool),
-    Removed(bool),
     SeizeInstalled(bool),
     Kind(KindId),
 }

@@ -367,13 +367,21 @@ impl Mailer {
     /// # Panics
     ///
     /// When the route table holds no record for `reference`: the registry
-    /// mints a reference only for a route that reached `Live`, keeps that
+    /// mints a reference only for a route that holds a record, keeps that
     /// route's proven name through `Dropped`, and removes a route only when
-    /// its birth fails, so a missing record is a broken invariant (ADR-0063).
+    /// a `Starting` reservation is cancelled, so a missing record is a broken
+    /// invariant (ADR-0063).
     pub(crate) fn actor_path(&self, reference: ErasedActorRef) -> ActorPath {
         self.registry
             .actor_path(reference)
             .expect("a minted reference names a route whose proven canonical name the registry keeps for the session")
+    }
+
+    /// The reference for a host-stamped position that holds a route record,
+    /// as [`Registry::stamped_sender`] mints it. The crate-private path behind
+    /// [`NativeCtx::sender`](crate::actor::native::ctx::NativeCtx::sender).
+    pub(crate) fn stamped_sender(&self, position: aether_data::MailboxId) -> Option<ErasedActorRef> {
+        self.registry.stamped_sender(position)
     }
 
     /// The first declared dependency with no `Live` route for a child placed
@@ -532,8 +540,9 @@ impl Mailer {
             SourceAddr::Session(_) | SourceAddr::EngineMailbox { .. } => {
                 // The replier minted `reply_id` in its own id space, so its
                 // sender half is the replying actor: stamped on the session
-                // reply for an embedder to read (ADR-0230 §3).
-                let stamp = reply_id.map(|id| Registry::structural_erased(id.sender));
+                // reply for an embedder to read (ADR-0230 §3), when that
+                // position holds a route.
+                let stamp = reply_id.and_then(|id| self.registry.stamped_sender(id.sender));
                 self.outbound.as_ref().is_some_and(|outbound| outbound.send_reply_stamped(sender, result, stamp))
             }
             SourceAddr::Component(mailbox) => {

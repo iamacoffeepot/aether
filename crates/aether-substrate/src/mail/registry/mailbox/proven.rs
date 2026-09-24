@@ -1,19 +1,22 @@
 //! The registry's liveness reads, [`Registry::is_live`] over a reference and
-//! the crate-private position form beside it, and the five mints beside
+//! the crate-private position form beside it, and the six mints beside
 //! them.
 //!
-//! The callers of the gated mint outside the SDK itself. Three mint with no
-//! read: the `Registry::declared_dependency` caller proved the dependency
-//! `Live` at the dependent's birth, the `Registry::structural_erased` caller
-//! mints a host-supplied position — the stamped dispatch source — and every
+//! The callers of the gated mint outside the SDK itself. Two mint with no
+//! read, and both are typed: the `Registry::declared_dependency` caller
+//! proved the dependency `Live` at the dependent's birth, and every
 //! `Registry::activated` caller has just published the actor's own `Live`
 //! route, whether the birth was a staged child, an embedder spawn, or a
-//! chassis-composed capability. The fourth, `Registry::resolve_live`, is the
-//! only one that answers the liveness question itself, because the position
-//! it is handed arrived in a payload and nothing upstream proved it. The
-//! fifth, `Registry::loaded`, types a reference the caller already holds, and
-//! the sixth, `Registry::live_child`, answers the same liveness question for a
-//! child address folded beneath a parent the caller already proved.
+//! chassis-composed capability. The third, `Registry::stamped_sender`, mints
+//! a host-stamped position — a dispatch source, or the sender half of a
+//! reply's mail id — only once one published-route read finds a record
+//! standing there, so every erased reference names a route. The fourth,
+//! `Registry::resolve_live`, is the only one that answers the liveness
+//! question itself, because the position it is handed arrived in a payload
+//! and nothing upstream proved it. The fifth, `Registry::loaded`, types a
+//! reference the caller already holds, and the sixth, `Registry::live_child`,
+//! answers the same liveness question for a child address folded beneath a
+//! parent the caller already proved.
 
 use core::fmt;
 use std::error::Error;
@@ -168,27 +171,34 @@ impl Registry {
         __mint_actor_ref(position)
     }
 
-    /// Mint an erased reference for the host-stamped dispatch `position`,
-    /// with no registry read (ADR-0230).
+    /// Mint an erased reference for the host-stamped `position` when a route
+    /// record stands there, and `None` when none does (ADR-0230).
     ///
-    /// Its first caller,
-    /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender),
-    /// discharges the obligation the stamped dispatch source already
-    /// answers: the host stamped this position at dispatch, so the answer is
-    /// already known. For a reply it mints the replier, the sender half of
-    /// the mail id the replying actor minted in its own id space.
+    /// The position is a stamp the host wrote — the dispatch source, or the
+    /// sender half of the mail id a replier minted in its own id space — but
+    /// `Mail`, `Source`, and the mailer's push and reply entries are public,
+    /// so a stamp alone does not show the position was ever registered. The
+    /// one read settles it: a reference minted here names a record
+    /// [`Self::actor_path`] reads through the same view, and no path removes a
+    /// record that has emitted mail, so its path answers for the session.
     ///
-    /// Its second is the `host_turn` self-mail test in
-    /// `crate::actor::native::slot::pumped`, which names the position it
-    /// booted the probe at: a host turn has no sender, so
-    /// `NativeCtx::sender` cannot serve.
+    /// Every lifecycle counts. A `Dropped` or retired-alias record is the
+    /// departed actor a [`MonitorNotice`](aether_kinds::MonitorNotice) is
+    /// stamped with, and a `Starting` record is a post-seal pumped actor whose
+    /// `wire` mail leaves before its route is promoted. The chassis sentinel
+    /// answers `None` with no special case, because no publish arm ever
+    /// records a route at it.
     ///
-    /// Its third is the session arm of `Mailer::send_reply` (and the wasm
-    /// guest's `reply_mail_p32` session arm), which stamps the replying
-    /// actor's own position on the egressed reply event: the reply was
-    /// minted in that actor's id space, so the answer is already known.
-    pub(crate) fn structural_erased(position: MailboxId) -> ErasedActorRef {
-        __mint_erased_actor_ref(position)
+    /// The cost is one lock-free load of the published route view and one
+    /// hash probe — the read `route_lookup` already takes on every send.
+    ///
+    /// Its callers are
+    /// [`NativeCtx::sender`](crate::actor::native::NativeCtx::sender), for
+    /// both a component source and a reply's replier, and the session arms
+    /// of `Mailer::send_reply` and the wasm guest's `reply_mail_p32`, which
+    /// stamp the replying actor on an egressed reply event.
+    pub(crate) fn stamped_sender(&self, position: MailboxId) -> Option<ErasedActorRef> {
+        self.routes.load().entry_for(&position).map(|_| __mint_erased_actor_ref(position))
     }
 
     /// Type the stamped sender of a load reply as the loaded actor `R`
@@ -219,12 +229,12 @@ impl Registry {
     /// Prove a `position` that arrived in a payload (ADR-0230 section 3's
     /// payload-borne-id door), or say why it cannot be proven.
     ///
-    /// The module's first mint that performs a read. The other three
-    /// discharge an obligation something upstream already answered — a
-    /// refused birth, a host-stamped dispatch source, a published child
-    /// route — whereas a position carried in a kind
-    /// field is a position and nothing more, so the only authority on whether
-    /// it is occupied is this view. The read is the same published-route walk
+    /// The module's one mint that answers the liveness question. The typed
+    /// mints discharge an obligation something upstream already answered — a
+    /// refused birth, a published route — and [`Self::stamped_sender`] asks
+    /// only whether any record stands at a host stamp, whereas a position
+    /// carried in a kind field is a position and nothing more, so the only
+    /// authority on whether it is occupied is this view. The read is the same published-route walk
     /// [`Self::entry_at`] takes, so a proof and a dispatch agree by construction
     /// rather than by two lookups kept in step.
     ///
@@ -410,7 +420,10 @@ mod tests {
             )
             .expect("register a trampoline-named route");
 
-        assert_eq!(registry.loaded::<ProbeChild>(Registry::structural_erased(cap)), Err(AdoptRefused::NotComponent));
-        assert!(registry.loaded::<ProbeChild>(Registry::structural_erased(trampoline)).is_ok());
+        let cap = registry.resolve_live(cap).expect("the capability route is live");
+        let trampoline = registry.resolve_live(trampoline).expect("the trampoline route is live");
+
+        assert_eq!(registry.loaded::<ProbeChild>(cap), Err(AdoptRefused::NotComponent));
+        assert!(registry.loaded::<ProbeChild>(trampoline).is_ok());
     }
 }

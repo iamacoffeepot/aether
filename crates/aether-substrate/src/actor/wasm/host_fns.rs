@@ -12,7 +12,7 @@ use wasmtime::{Caller, Linker};
 
 use crate::actor::wasm::component::{ComponentCtx, PendingSpawn, StateBundle, TRAMPOLINE_NAMESPACE};
 use crate::mail::boundary::is_engine_only;
-use crate::mail::registry::{PreparedAliasRoute, Registry};
+use crate::mail::registry::PreparedAliasRoute;
 use crate::mail::{KindId, MailboxId, SourceAddr};
 use crate::runtime::log_install;
 
@@ -630,8 +630,9 @@ pub fn register(linker: &mut Linker<ComponentCtx>) -> wasmtime::Result<()> {
                     };
                     let origin = ctx.registry.mailbox_name(ctx.sender);
                     // The guest replies in its own name: stamp its own
-                    // position, which the host bound it to (ADR-0230 §3).
-                    let stamp = Some(Registry::structural_erased(ctx.sender));
+                    // position, which the host bound it to (ADR-0230 §3),
+                    // when that position holds a route.
+                    let stamp = ctx.registry.stamped_sender(ctx.sender);
                     ctx.outbound.egress_to_session(token, &kind_name, payload, origin, correlation, stamp);
                 }
                 SourceAddr::Component(mbox) => {
