@@ -15,6 +15,11 @@
 //! variant is retained as an escape hatch for future vocabulary
 //! additions but is unreachable from any v1 input.
 //!
+//! `sphere` is an icosphere whose `subdivisions` is the refinement
+//! level (0 = icosahedron, 20 faces; each level quadruples the faces),
+//! capped at [`MAX_SPHERE_SUBDIVISIONS`] because the growth is
+//! exponential.
+//!
 //! Boolean composition was retired by ADR-0062; the prior implementation
 //! lives on `archive/csg-bsp`.
 //!
@@ -31,8 +36,7 @@ use crate::point::Point3;
 use crate::simplify;
 use crate::tessellate;
 use aether_math::Vec3;
-use std::f32::consts::FRAC_PI_2;
-use std::f32::consts::PI;
+use std::collections::HashMap;
 use std::f32::consts::TAU;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -47,7 +51,14 @@ pub enum MeshError {
     NotYetImplemented(&'static str),
     #[error("mesh coordinate out of fixed-point range: {0}")]
     OutOfRange(#[from] FixedError),
+    #[error("sphere subdivisions {subdivisions} exceeds the icosphere level cap of {max}")]
+    SphereSubdivisionsTooHigh { subdivisions: u32, max: u32 },
 }
+
+/// Highest icosphere refinement level a `sphere` accepts. Each level
+/// multiplies the face count by four, so level 4 is already 5120 faces;
+/// a higher level fails with [`MeshError::SphereSubdivisionsTooHigh`].
+pub const MAX_SPHERE_SUBDIVISIONS: u32 = 4;
 
 /// Wire entry: evaluate `node` polygon-domain, run the cleanup +
 /// CDT-tessellation pipeline, then fan back to wire `Triangle`s.
@@ -517,9 +528,13 @@ fn mesh_cone(
     mesh_lathe(out, &profile, segments, color, offset)
 }
 
-/// UV sphere of `radius`, centered at `offset`. `subdivisions` controls
-/// both the number of latitude rings and the number of longitude
-/// segments. Implemented as a lathe of a half-circle profile.
+/// Icosphere of `radius`, centered at `offset` (ADR-0026).
+/// `subdivisions` is the refinement level: level 0 is the regular
+/// icosahedron (20 faces) and each level splits every triangle into
+/// four through its edge midpoints, re-projected onto the sphere, for
+/// `20 * 4^subdivisions` faces. Shared edges share one cached midpoint,
+/// so the shell is watertight by construction. A level above
+/// [`MAX_SPHERE_SUBDIVISIONS`] is refused before any allocation.
 fn mesh_sphere(
     out: &mut Vec<LoopPolygon>,
     radius: f32,
@@ -527,16 +542,74 @@ fn mesh_sphere(
     color: u32,
     offset: Vec3,
 ) -> Result<(), MeshError> {
-    if subdivisions < 3 {
-        return Ok(());
+    if subdivisions > MAX_SPHERE_SUBDIVISIONS {
+        return Err(MeshError::SphereSubdivisionsTooHigh { subdivisions, max: MAX_SPHERE_SUBDIVISIONS });
     }
-    let n = subdivisions as usize;
-    let mut profile: Vec<[f32; 2]> = Vec::with_capacity(n + 1);
-    for i in 0..=n {
-        let theta = -FRAC_PI_2 + (i as f32) * PI / (n as f32);
-        profile.push([radius * theta.cos(), radius * theta.sin()]);
+
+    let t = (1.0 + 5.0_f32.sqrt()) * 0.5;
+    let mut vertices: Vec<Vec3> = [
+        [-1.0, t, 0.0],
+        [1.0, t, 0.0],
+        [-1.0, -t, 0.0],
+        [1.0, -t, 0.0],
+        [0.0, -1.0, t],
+        [0.0, 1.0, t],
+        [0.0, -1.0, -t],
+        [0.0, 1.0, -t],
+        [t, 0.0, -1.0],
+        [t, 0.0, 1.0],
+        [-t, 0.0, -1.0],
+        [-t, 0.0, 1.0],
+    ]
+    .into_iter()
+    .map(|v| Vec3::from_array(v).normalize())
+    .collect();
+    // Wound CCW from outside.
+    let mut faces: Vec<[usize; 3]> = vec![
+        [0, 11, 5],
+        [0, 5, 1],
+        [0, 1, 7],
+        [0, 7, 10],
+        [0, 10, 11],
+        [1, 5, 9],
+        [5, 11, 4],
+        [11, 10, 2],
+        [10, 7, 6],
+        [7, 1, 8],
+        [3, 9, 4],
+        [3, 4, 2],
+        [3, 2, 6],
+        [3, 6, 8],
+        [3, 8, 9],
+        [4, 9, 5],
+        [2, 4, 11],
+        [6, 2, 10],
+        [8, 6, 7],
+        [9, 8, 1],
+    ];
+
+    for _ in 0..subdivisions {
+        let mut midpoints: HashMap<(usize, usize), usize> = HashMap::new();
+        let mut midpoint = |i: usize, j: usize| {
+            *midpoints.entry((i.min(j), i.max(j))).or_insert_with(|| {
+                vertices.push(((vertices[i] + vertices[j]) * 0.5).normalize());
+                vertices.len() - 1
+            })
+        };
+        faces = faces
+            .iter()
+            .flat_map(|&[a, b, c]| {
+                let (ab, bc, ca) = (midpoint(a, b), midpoint(b, c), midpoint(c, a));
+                [[a, ab, ca], [b, bc, ab], [c, ca, bc], [ab, bc, ca]]
+            })
+            .collect();
     }
-    mesh_lathe(out, &profile, subdivisions, color, offset)
+
+    for [a, b, c] in faces {
+        let corners = [a, b, c].map(|i| offset + vertices[i] * radius);
+        push_polygon_from_f32(out, &corners, color)?;
+    }
+    Ok(())
 }
 
 /// Right-triangular prism (ramp) with extents `(x, y, z)` centered at

@@ -38,7 +38,7 @@ fn plain_cylinder_is_watertight() {
 
 #[test]
 fn plain_sphere_is_watertight() {
-    assert_watertight("(sphere 0.5 12 :color 0)");
+    assert_watertight("(sphere 0.5 3 :color 0)");
 }
 
 /// Box rotated 30° around Y — every face plane off-grid. Catches BSP
@@ -59,5 +59,5 @@ fn tilted_cylinder_is_geometric() {
 /// invariant; this catches downstream snap drift only if it appears.
 #[test]
 fn translated_sphere_is_geometric() {
-    assert_geometric("(translate (0.37 0.41 -0.23) (sphere 0.5 12 :color 0))");
+    assert_geometric("(translate (0.37 0.41 -0.23) (sphere 0.5 3 :color 0))");
 }
