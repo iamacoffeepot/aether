@@ -87,7 +87,7 @@ impl NativeActor for BundleDriver {
     }
 
     #[handler::manual]
-    fn on_call(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, call: Call) {
+    fn on_call(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, call: Call) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.call(call);
         self.callers.insert(caller, owed);
@@ -95,11 +95,7 @@ impl NativeActor for BundleDriver {
     }
 
     #[handler::manual]
-    fn on_await_processed(
-        &mut self,
-        ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>,
-        request: AwaitProcessed,
-    ) {
+    fn on_await_processed(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, request: AwaitProcessed) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.await_processed(request);
         self.callers.insert(caller, owed);
@@ -128,7 +124,7 @@ impl NativeActor for BundleDriver {
     /// artifact cache or one shared journal read per digest, and the parked
     /// reply carries the answer back to the root with the root's correlation.
     #[handler::manual]
-    fn on_fetch_artifact(&mut self, ctx: &mut NativeCtx<'_, aether_substrate::Erased, Manual>, request: ReadArtifact) {
+    fn on_fetch_artifact(&mut self, ctx: &mut NativeCtx<'_, Self, Manual>, request: ReadArtifact) {
         let owed = ctx.defer_reply_to(ctx.reply_target());
         let (caller, commands) = self.core.fetch_artifact(request);
         self.callers.insert(caller, owed);

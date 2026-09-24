@@ -1,6 +1,6 @@
 //! Performing the core's commands: one iterative loop over typed sends.
 
-use aether_actor::{Reaches, ReplyMode};
+use aether_actor::{DependsOn, ReplyMode};
 use aether_bloomery_kinds::{BUNDLE_NAMESPACE, Digest, StatusQuery};
 use aether_component::ComponentHostCapability;
 use aether_data::Kind;
@@ -21,7 +21,7 @@ impl BundleDriver {
     /// it. The head watch rides a fresh chain: the journal parks it until the
     /// head moves, and the chain that happens to re-arm it did not cause the
     /// wait.
-    pub(crate) fn perform<M: ReplyMode, A: Reaches<ComponentHostCapability>>(
+    pub(crate) fn perform<M: ReplyMode, A: DependsOn<ComponentHostCapability>>(
         &mut self,
         ctx: &mut NativeCtx<'_, A, M>,
         commands: Vec<Command>,
@@ -42,12 +42,15 @@ impl BundleDriver {
                 }
                 Command::Load { ticket, bundle, wasm } => {
                     self.loading.insert(ticket, bundle);
-                    let _ = ctx.actor::<ComponentHostCapability>().with_context(&ticket).send(&LoadComponent {
-                        wasm,
-                        name: Some(bundle.to_string()),
-                        config: Vec::new(),
-                        export: Some(BUNDLE_NAMESPACE.to_owned()),
-                    });
+                    let _ = ctx.send_with_context::<ComponentHostCapability>(
+                        &LoadComponent {
+                            wasm,
+                            name: Some(bundle.to_string()),
+                            config: Vec::new(),
+                            export: Some(BUNDLE_NAMESPACE.to_owned()),
+                        },
+                        &ticket,
+                    );
                 }
                 Command::Invoke { ticket, bundle, request } => self.send_to_root(ctx, bundle, &request, &ticket),
                 Command::WatchHead { ticket, request } => {
