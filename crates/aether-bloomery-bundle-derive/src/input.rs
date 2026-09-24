@@ -48,7 +48,9 @@ pub struct ProgramMeta {
     pub result: Type,
     pub async_run: bool,
     pub sampled: bool,
-    pub apis: Vec<Type>,
+    /// Canonical API names (`Http`, `Process`): each resolves through the
+    /// SDK's `__macro_internals::api_target` table.
+    pub apis: Vec<Ident>,
 }
 
 pub enum NamespaceTok {
@@ -118,8 +120,8 @@ impl Parse for ProgramMeta {
                 "apis" => {
                     let content;
                     syn::bracketed!(content in input);
-                    let types = Punctuated::<Type, Token![,]>::parse_terminated(&content)?;
-                    apis = types.into_iter().collect();
+                    let names = Punctuated::<Ident, Token![,]>::parse_terminated(&content)?;
+                    apis = names.into_iter().collect();
                 }
                 "input" => input_ty = Some(input.parse()?),
                 "result" => result = Some(input.parse()?),

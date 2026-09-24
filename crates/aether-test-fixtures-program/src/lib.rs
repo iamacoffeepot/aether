@@ -5,9 +5,8 @@ use std::future;
 use aether_actor::export;
 use aether_bloomery_kinds::{Digest, Mode, OpaqueBytes, Ref, Refusal, Utf8Text};
 use aether_bloomery_program::kinds::Detail;
-use aether_bloomery_program::{Async, Env, Http, Process, Program, Sync, program};
+use aether_bloomery_program::{Async, Env, Http, Program, Sync, program};
 use aether_http::{Fetch, FetchResult, HttpMethod};
-use aether_process::{Run, RunResult};
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.summarize.input")]
@@ -106,42 +105,6 @@ impl Program for FetchBody {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.program.exec.input")]
-struct ExecInput {
-    binary: Ref<Utf8Text>,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
-#[kind(name = "test.program.exec.result")]
-struct ExecResult {
-    stdout: Ref<OpaqueBytes>,
-}
-
-struct Exec;
-
-#[program]
-impl Program for Exec {
-    const NAME: &'static str = "test.program.exec";
-    const MODE: Mode = Mode::Sampled;
-    const INTENT: &'static str = "Run a binary and stage stdout.";
-    type Input = ExecInput;
-    type Result = ExecResult;
-
-    async fn run(input: Self::Input, env: &mut Env<Async>, mut process: Process) -> Result<Self::Result, Refusal> {
-        let binary = env.read_text(input.binary).await?;
-        match process
-            .run(Run { binary, args: Vec::new(), env: Vec::new(), stdin: Vec::new(), timeout_millis: 0 })
-            .await?
-        {
-            RunResult::Ok { stdout, .. } => Ok(ExecResult { stdout: env.stage_bytes(&stdout) }),
-            RunResult::TimedOut { .. } | RunResult::Err { .. } => {
-                Err(Refusal::Refused { reason: Detail::new("process run did not complete") })
-            }
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
 #[kind(name = "test.program.stall.input")]
 struct StallInput {
     marker: u32,
@@ -196,14 +159,10 @@ impl Program for ReadUncited {
     }
 }
 
-export!(
-    public = [Summarize, Refuse, FetchBody, Exec, Stall, ReadUncited],
-    generators = [aether_bloomery_bundle::bundle],
-);
+export!(public = [Summarize, Refuse, FetchBody, Stall, ReadUncited], generators = [aether_bloomery_bundle::bundle],);
 
 const _: Summarize = Summarize;
 const _: Refuse = Refuse;
 const _: FetchBody = FetchBody;
-const _: Exec = Exec;
 const _: Stall = Stall;
 const _: ReadUncited = ReadUncited;

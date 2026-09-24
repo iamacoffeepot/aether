@@ -43,8 +43,18 @@ struct ReadUncitedResult {
     text: Ref<Utf8Text>,
 }
 
+/// Local mirror of `aether-test-fixtures-program-process`'s `test.program.exec.input`.
+#[derive(Debug, Clone, PartialEq, Eq, aether_data::Storage)]
+#[kind(name = "test.program.exec.input")]
+struct ExecInput {
+    binary: Ref<Utf8Text>,
+}
+
 /// The `program` head the seed binds to the fixture bundle.
 const PROGRAM: Head<OpaqueBytes> = Head::new("program");
+
+/// The `process` head the seed binds to the `Process` fixture bundle.
+const PROCESS: Head<OpaqueBytes> = Head::new("process");
 
 #[test]
 fn program_calls_record_caused_outcomes_from_one_loaded_root() -> Result<(), Box<dyn Error>> {
@@ -196,5 +206,38 @@ fn fetch_on_miss_reads_through_the_mounted_journal() -> Result<(), Box<dyn Error
         }
         other => panic!("expected a Transition outcome, got {other:?}"),
     }
+    Ok(())
+}
+
+#[test]
+fn a_bundle_with_a_process_program_is_refused_where_process_is_not_composed() -> Result<(), Box<dyn Error>> {
+    // Catches an invocation whose `depends` is missing or not load-checked (the load succeeds and the call hangs, #6602), a generator that declares the wrong target (the refusal names another namespace), and a refused load the driver does not record.
+    let Some(wasm_path) = require_wasm("aether_test_fixtures_program_process") else {
+        return Ok(());
+    };
+    let wasm = fs::read(&wasm_path)?;
+    let mut seed = Batch::new();
+    let bundle = seed.stage_bytes(&wasm);
+    seed.push_event(&RecordedHeadMove::new(RecordedHead::from(&PROCESS), bundle.digest()), None)?;
+    let binary = seed.stage_text("true");
+    let input = seed.stage_encoded(&ExecInput { binary })?.digest();
+
+    let mut harness = BloomeryHarness::start([seed]);
+    let origin = NativeOrigin::new("test.driver")?;
+    let exec = Call { program: PROCESS, name: ProgramName::new("test.program.exec")?, input, origin, key: 1 };
+    match harness.call(&exec) {
+        CallOutcome::Fault { key: 1, fault, .. } => {
+            let FaultReason::BundleUnavailable { reason } = &fault.reason else {
+                panic!("a refused load faults BundleUnavailable, got {:?}", fault.reason);
+            };
+            assert!(
+                reason.as_str().contains("depends on aether.process, which is not live"),
+                "the refusal names the uncomposed target, got {reason:?}"
+            );
+            assert_eq!(fault.program.bundle(), bundle.digest());
+        }
+        other => panic!("expected a BundleUnavailable fault, got {other:?}"),
+    }
+    harness.assert_appended(Seq(1), &[Record::of::<Requested>(None), Record::of::<Fault>(Some(Seq(2)))]);
     Ok(())
 }

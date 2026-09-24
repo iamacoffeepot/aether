@@ -1,0 +1,25 @@
+[package]
+name = "aether-test-fixtures-program-process"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+# WASM fixture bundle whose one program takes `Process`, so its invocation
+# declares `ProcessCapability` and the host refuses to load it wherever that
+# capability is not composed. That is why it is not in the shared program
+# fixture, which the bloomery chassis must load. Structural discovery
+# (cdylib + aether-actor) includes it in `cargo xtask build-wasm`.
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-process = { path = "../aether-process", default-features = false }
+
+[lints]
+workspace = true
