@@ -114,7 +114,7 @@ enum Shadow {
 }
 
 /// Keyboard driver for a peer camera component. Singleton, like the camera it
-/// drives; loaded as a non-entry export of `aether_kit_commons.wasm`.
+/// drives; loaded as a non-entry export of `aether_kit.wasm`.
 pub struct CameraController {
     config: ControllerConfig,
     held: Held,

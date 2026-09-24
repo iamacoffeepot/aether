@@ -1,5 +1,5 @@
 //! Mesh-viewer scenario tests. Each test boots a `SubstrateHarness`, loads
-//! `aether-kit-commons`'s wasm artifact (built separately for
+//! `aether-kit`'s wasm artifact (built separately for
 //! `wasm32-unknown-unknown`) selecting the non-entry `mesh_viewer`
 //! export (ADR-0096), seeds a fixture `.dsl` / `.obj` file into the
 //! substrate's `save://` namespace, and drives the component through
@@ -10,7 +10,7 @@
 //! - No wgpu adapter is available (driverless Linux runners without
 //!   `mesa-vulkan-drivers`).
 //! - The component's wasm hasn't been built — tests read
-//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit_commons.wasm`
+//!   `target/wasm32-unknown-unknown/{debug,release}/aether_kit.wasm`
 //!   and skip with an `eprintln!` when both paths are absent. CI
 //!   builds the wasm before invoking `cargo test`.
 //!
@@ -30,17 +30,17 @@ use aether_harness_substrate_capture::test_helpers::{
 };
 use aether_harness_substrate_capture::visual::{Image, decode_png, differs_from_background};
 use aether_kinds::{LoadComponent, MeshLoadResult, Render, WindowId, WindowSize};
-use aether_kit_commons::camera::{CameraComponent, CameraOrbitSet, OrbitParams};
-use aether_kit_commons::mesh::{LoadMesh, MeshViewer};
+use aether_kit::camera::{CameraComponent, CameraOrbitSet, OrbitParams};
+use aether_kit::mesh::{LoadMesh, MeshViewer};
 use core::f32::consts::FRAC_PI_2;
 
-// Force linkage of `aether-kit-commons`'s `inventory::submit!` `KindDescriptor`
+// Force linkage of `aether-kit`'s `inventory::submit!` `KindDescriptor`
 // entries into this test binary. Cargo treats integration tests as
 // separate crates that link against the test target's host rlib, but
 // the linker strips inventory submits for kinds the test code doesn't
 // statically reference.
 #[allow(unused_imports)]
-use aether_kit_commons as _;
+use aether_kit as _;
 use std::fs;
 use std::path::Path;
 
@@ -81,7 +81,7 @@ fn load_kit_export<R: Addressable>(
     (actor, path)
 }
 
-/// Load `aether-kit-commons`'s pre-built wasm into the harness, selecting the
+/// Load `aether-kit`'s pre-built wasm into the harness, selecting the
 /// `mesh_viewer` export (ADR-0096; the kit is defaultless per ADR-0138, so
 /// the export selector is required), and await `LoadResult`. The viewer
 /// declares `aether.kit.camera` as a dependency, so the camera export loads
@@ -151,7 +151,7 @@ fn vertical_outline_thickness(image: &Image) -> u32 {
 
 #[test]
 fn edge_on_outline_stays_visible_and_keeps_apparent_width() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let wasm = fs::read(wasm_path).expect("read kit wasm");
@@ -247,7 +247,7 @@ fn assert_draw_triangle_observed(harness: &SubstrateHarness) {
 /// emission, and the per-tick render-sink replay.
 #[test]
 fn dsl_box_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -285,7 +285,7 @@ fn dsl_box_loads_and_renders() {
 /// this guards the whole OBJ branch while the DSL branch keeps working.
 #[test]
 fn obj_quad_loads_and_renders() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -323,7 +323,7 @@ fn obj_quad_loads_and_renders() {
 /// the clear color.
 #[test]
 fn parse_failure_keeps_prior_mesh() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -373,7 +373,7 @@ fn parse_failure_keeps_prior_mesh() {
 /// from rendered geometry.
 #[test]
 fn good_dsl_load_replies_ok() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -409,7 +409,7 @@ fn good_dsl_load_replies_ok() {
 /// `engine_logs`.
 #[test]
 fn bad_dsl_load_replies_err() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");
@@ -443,7 +443,7 @@ fn bad_dsl_load_replies_err() {
 /// load must not steal the first load's eventual `MeshLoadResult`.
 #[test]
 fn overlapping_loads_reply_to_their_own_requesters() {
-    let Some(wasm_path) = require_runtime("aether_kit_commons") else {
+    let Some(wasm_path) = require_runtime("aether_kit") else {
         return;
     };
     let sandbox = init_save_sandbox("kit-mesh");

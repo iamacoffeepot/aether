@@ -263,12 +263,12 @@ mod tests {
         // Parity with the structural sweep CI runs before this xtask: a drop
         // here surfaces as an AETHER_REQUIRE_RUNTIME panic. The
         // test fixtures are three single-output cdylib crates discovered the
-        // same way as `aether-kit-commons` — no example path.
+        // same way as `aether-kit` — no example path.
         for expected in [
             "aether_test_fixtures_bundle",
             "aether_test_fixtures_stateful_typed",
             "aether_test_fixtures_stateful_reshaped",
-            "aether_kit_commons",
+            "aether_kit",
         ] {
             assert!(stems.contains(expected), "discovery dropped component {expected}; found {stems:?}");
         }

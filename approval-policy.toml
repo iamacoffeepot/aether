@@ -162,7 +162,7 @@ glob = "docs/guide/**"
 tier = "auto"
 
 [[rules]]
-glob = "crates/aether-kit-commons/**"
+glob = "crates/aether-kit/**"
 tier = "auto"
 
 [[rules]]

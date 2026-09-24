@@ -1,7 +1,7 @@
 # Media, interaction, and product tools
 
 These systems turn engine state into human-visible or editable output. Native
-capabilities own devices and low-level resources; `aether-kit-commons` and
+capabilities own devices and low-level resources; `aether-kit` and
 `aether-kit-widget` actors compose them into reusable camera, mesh, and
 widget behavior.
 

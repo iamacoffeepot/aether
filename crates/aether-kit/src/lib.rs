@@ -1,4 +1,4 @@
-//! `aether-kit-commons` — the common standalone actors (camera, mesh viewer, asset bundle).
+//! `aether-kit` — the common standalone actors (camera, mesh viewer, asset bundle).
 //!
 //! Reusable game-building actors that run on the substrate. Each system is
 //! one module under the crate root that co-locates the actor with its own
@@ -7,20 +7,20 @@
 //! no data/runtime split, just one module per actor:
 //!
 //! - [`camera::CameraComponent`] — the multi-camera driver, selected by the
-//!   `aether_kit_commons@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
+//!   `aether_kit@aether.kit.camera` export (ADR-0096). Its `aether.kit.camera.*`
 //!   driver kinds live in [`camera`].
 //! - [`camera::controller::CameraController`] — a keyboard driver that steers a
 //!   peer [`camera::CameraComponent`] (WASD / arrows / zoom), selected by the
-//!   `aether_kit_commons@aether.kit.camera-controller` export. Its
+//!   `aether_kit@aether.kit.camera-controller` export. Its
 //!   `aether.kit.camera-controller.config` init-config lives in
 //!   [`camera::controller`].
 //! - [`mesh::MeshViewer`] — loads a `.dsl` / `.obj` mesh file and replays it
-//!   to the render sink, selected by the `aether_kit_commons@aether.kit.mesh`
+//!   to the render sink, selected by the `aether_kit@aether.kit.mesh`
 //!   export. Its `aether.kit.mesh.load` kind lives in [`mesh`].
 //! - [`bundle::BundleComponent`] — the reference asset bundle (ADR-0163 §4):
 //!   carries a tile in a wasm custom section, makes it an engine resident in
 //!   the load window, draws it every frame, and destroys it symmetrically on
-//!   teardown. Selected by the `aether_kit_commons@aether.kit.bundle` export;
+//!   teardown. Selected by the `aether_kit@aether.kit.bundle` export;
 //!   it has no driver kinds, so no `kinds` submodule.
 //!
 //! The terrain-authoring stack — the mark / world / terra / mover actors and
