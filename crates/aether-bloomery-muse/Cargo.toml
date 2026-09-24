@@ -1,0 +1,26 @@
+[package]
+name = "aether-bloomery-muse"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+description = "The muse.turn Sampled bloomery program: one stateless responses-API turn per run (ADR-0234)."
+
+# One bundle crate: the cdylib is the program bundle `cargo xtask build-wasm`
+# discovers structurally (cdylib + aether-actor); the rlib lets the native
+# integration test drive `MuseTurn` through `start_async`.
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+aether-actor = { path = "../aether-actor" }
+aether-bloomery-bundle = { path = "../aether-bloomery-bundle" }
+aether-bloomery-kinds = { path = "../aether-bloomery-kinds" }
+aether-bloomery-program = { path = "../aether-bloomery-program" }
+aether-data = { path = "../aether-data", features = ["derive"] }
+aether-http = { path = "../aether-http", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+serde_json = { workspace = true }
+
+[lints]
+workspace = true
