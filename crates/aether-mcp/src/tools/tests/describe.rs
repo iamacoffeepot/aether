@@ -505,7 +505,6 @@ async fn describe_component_keys_the_engine_resolved_path_and_forwards_the_suppl
             }
             .encode_into_bytes(),
         }],
-        settle: true,
     }])));
     let (_chassis, port) = boot_hub_with_address_route_replies(engine, canonical, Arc::clone(&calls), replies);
     let mcp = connect_mcp(port);

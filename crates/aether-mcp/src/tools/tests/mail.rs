@@ -177,7 +177,6 @@ async fn settled_mail_reads_the_declared_reply_contract_from_the_engine_resolved
             payload: aether_codec::encode_schema(&reply_params, &reply_descriptor.schema)
                 .expect("component reply schema encodes"),
         }],
-        settle: true,
     }])));
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -306,7 +305,6 @@ async fn traced_walk_tails_each_layer_by_the_engine_paths() {
             kind: TraceTailResult::ID,
             payload: TraceTailResult::Ok { entries, next_since: 0, truncated_before: None }.encode_into_bytes(),
         }],
-        settle: true,
     };
     let engine = EngineId(Uuid::from_u128(0x4057));
     let calls = Arc::new(Mutex::new(Vec::new()));

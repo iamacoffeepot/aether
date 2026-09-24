@@ -288,7 +288,7 @@ impl EgressBackend for RecordingBackend {
 /// implementation is `aether-hub::HubProtocolBackend`, which serialises
 /// to `EngineToHub` frames and writes them to a TCP socket).
 ///
-/// The crate-private `send_reply` / `send_reply_stamped` pair encodes a
+/// The crate-private `send_reply` / `send_reply_envelope_stamped` pair routes a
 /// reply for a `Session` / `EngineMailbox` sender and hands it to the
 /// wired backend. Callers reach it through `Mailer::send_reply`, the
 /// complete reply router.
@@ -416,24 +416,30 @@ impl HubOutbound {
     where
         K: aether_data::Kind,
     {
-        self.send_reply_stamped(sender, result, None)
+        self.send_reply_envelope_stamped(sender, K::ID, K::NAME, result.encode_into_bytes(), None)
     }
 
-    /// [`Self::send_reply`] with the replying actor's `stamp`, which rides a
-    /// session reply's [`EgressEvent::ToSession`] `sender`. Its caller is
-    /// `Mailer::send_reply`, which stamps the actor whose handler replied.
-    pub(crate) fn send_reply_stamped<K>(&self, sender: Source, result: &K, stamp: Option<ErasedActorRef>) -> bool
-    where
-        K: aether_data::Kind,
-    {
-        let payload = result.encode_into_bytes();
+    /// [`Self::send_reply`] for an already-encoded `payload` of `kind`, whose
+    /// registered name is `kind_name`, with the replying actor's `stamp`,
+    /// which rides a session reply's [`EgressEvent::ToSession`] `sender`. Its
+    /// other caller is the mailer's hub arm, shared by `Mailer::send_reply`
+    /// and `Mailer::send_reply_envelope`, which stamps the actor whose handler
+    /// replied.
+    pub(crate) fn send_reply_envelope_stamped(
+        &self,
+        sender: Source,
+        kind: KindId,
+        kind_name: &str,
+        payload: Vec<u8>,
+        stamp: Option<ErasedActorRef>,
+    ) -> bool {
         match sender.addr {
             SourceAddr::Session(token) => {
-                self.egress_to_session(token, K::NAME, payload, None, sender.correlation_id, stamp);
+                self.egress_to_session(token, kind_name, payload, None, sender.correlation_id, stamp);
                 true
             }
             SourceAddr::EngineMailbox { engine_id, mailbox_id } => {
-                self.egress_to_engine_mailbox(engine_id, mailbox_id, K::ID, payload, 1, sender.correlation_id);
+                self.egress_to_engine_mailbox(engine_id, mailbox_id, kind, payload, 1, sender.correlation_id);
                 true
             }
             SourceAddr::None | SourceAddr::Component(_) => false,
