@@ -138,18 +138,15 @@ pub fn is_engine_only(kind: KindId) -> bool {
 /// fixtures below declare it: two instanced children beneath one root make a
 /// hole under that root ambiguous by construction.
 #[cfg(test)]
-// The fixtures register their own canonical mailboxes: the fold of an expanded
-// path is the reference value under test, not a sibling-cap address.
-#[allow(clippy::disallowed_methods)] // aether-suppression-request: moved test; fixtures fold their own canonical paths
 mod tests {
     use aether_actor::Addressable;
-    use aether_data::{ActorPath, Kind, KindDescriptor, Schema, mailbox_id_from_path};
+    use aether_data::{ActorPath, Kind, KindDescriptor, Schema};
     use aether_kinds::MonitorNotice;
 
     use crate::actor::native::{NativeActor, NativeCtx, NativeInitCtx};
     use crate::chassis::error::BootError;
     use crate::mail::registry::noop_handler;
-    use crate::testing::boot_authority;
+    use crate::testing::{boot_authority, registered_ref};
 
     use super::*;
 
@@ -212,13 +209,6 @@ mod tests {
         fn on_poke(&mut self, _ctx: &mut NativeCtx<'_>, _mail: Poke) {}
     }
 
-    fn register(registry: &Registry, canonical: &str) {
-        let mailbox_id = mailbox_id_from_path(canonical);
-        registry
-            .try_register_inbox_with_id(&boot_authority(), mailbox_id, canonical, noop_handler())
-            .expect("canonical name is free");
-    }
-
     fn bundle(recipient: &str) -> Vec<NamedMail> {
         vec![NamedMail {
             recipient: ActorPath::new(recipient).expect("fixture recipient is a well-formed actor path"),
@@ -237,8 +227,8 @@ mod tests {
         let registry = Registry::new();
         registry.register_kind(&boot_authority(), <Poke as Kind>::NAME);
         let canonical = format!("{}/{}:one", DiagnosticsRoot::NAMESPACE, FirstChild::NAMESPACE);
-        register(&registry, DiagnosticsRoot::NAMESPACE);
-        register(&registry, &canonical);
+        registered_ref(&registry, DiagnosticsRoot::NAMESPACE, noop_handler());
+        registered_ref(&registry, &canonical, noop_handler());
 
         // Canonical input is unchanged — it never touched short-path expansion.
         let accepted = accept(&registry, bundle(&canonical), "test bundle").expect("canonical recipient resolves");

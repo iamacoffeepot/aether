@@ -10,6 +10,7 @@
 - **Amended:** 2026-09-24 — §3's declared-dependency proof `DependsOn<R>` is an `unsafe trait` that only `#[actor(depends(..))]` implements; its safety contract is that the macro also records the dependency entry the pre-`init` check reads, and a hand-written safe impl is refused with `E0200` (#6614).
 - **Amended:** 2026-09-24 — §2: a proven reference's canonical `ActorPath` is readable through the host registry (`NativeCtx::actor_path`) for diagnostics, as text only, never a position or anything sendable; the registry proves each route's name against the ADR-0166 grammar when the route is first published, so the read cannot fail for a reference it minted (#6635).
 - **Amended:** 2026-09-24 — every `ErasedActorRef` is route-backed: an unwound boot or eager spawn retires its `Live` route to `Dropped` (name kept, re-registrable) instead of removing it, so `CancelStarting` is the only edge that removes a route; and the envelope sender mints through one published-route read, `None` for a stamped position with no route (the chassis sentinel) (#6656).
+- **Amended:** 2026-09-24 — an off-thread helper that must decide about a peer it holds a proof of reads an `ActorProbe` from the init ctx (`ctx.actor_probe()`); the probe answers whether that actor is `Live` now and whether it accepts a kind, takes proofs only, and sends, resolves, and enumerates nothing (#6324).
 - **Amended:** 2026-09-24 — a guest host's receive surface is a declaration the substrate reads: a native actor that runs a guest implements `GuestHost`, and `NativeCtx::sync_guest` makes its accept set and cost rows match that declaration, so no actor reads its own position and no other actor writes a guest host's accept set. `NativeCtx::path`, bounded on `GuestHost`, reads a guest host's own canonical path as text only (issue 6350).
 
 Amends [ADR-0099](0099-actor-identity-and-addressing.md) (the lineage fold
@@ -199,7 +200,10 @@ ADR-0232's flat verbs exposed two gaps:
 An off-thread helper that only wakes its own actor — an accept loop, a socket
 reader, a timer — holds a `SelfWake<K>` from the ctx (`ctx.self_wake::<K>()`)
 rather than any of these: it names no position, carries no reference, and can
-send only that one wake.
+send only that one wake. A helper that must also decide about a peer it holds a
+proof of, like the http reader choosing a live route member, holds an
+`ActorProbe` from `ctx.actor_probe()` beside its `SelfWake<K>`, and the probe
+grants no send, no lookup by name or position, and no registry.
 
 What arrived stays a position. The payload-borne door changes nothing about
 the wire: `SubscribeWindow.mailbox` is still a `MailboxId` and still decodes

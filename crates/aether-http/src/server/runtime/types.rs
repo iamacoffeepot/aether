@@ -17,17 +17,13 @@ pub type SharedRoutes = Arc<RwLock<RouteTable>>;
 /// Read-mostly state a reader thread consults to make the fast-path
 /// decision itself (ADR-0135 §2): the shared route table, the connection's
 /// peer string (captured once at adoption; every request's `peer_addr`
-/// clones it on the reader thread rather than the shard), and the two
-/// registries route resolution reads through the matched member's proven
-/// reference (ADR-0230) — the routing registry's `is_live`, which skips a
-/// departed member its notice has not yet purged, and the capability
-/// registry's `accepts_actor`, which answers whether it takes the streamed
-/// body path.
+/// clones it on the reader thread rather than the shard), and the probe
+/// route resolution reads the matched member's liveness and streamed-body
+/// acceptance through, over its proven reference (ADR-0230).
 pub struct ReaderShared {
     pub routes: SharedRoutes,
     pub peer: String,
-    pub registry: Arc<Registry>,
-    pub capabilities: Arc<CapabilityRegistry>,
+    pub probe: ActorProbe,
 }
 
 /// Boot config the supervisor builds for each dispatch shard it spawns
