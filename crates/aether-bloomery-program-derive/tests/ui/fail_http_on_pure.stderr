@@ -1,11 +1,3 @@
-warning: unused import: `Refusal`
- --> tests/ui/fail_http_on_pure.rs:1:35
-  |
-1 | use aether_bloomery_kinds::{Mode, Refusal};
-  |                                   ^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
-
 error[E0599]: no associated function or constant named `OK` found for struct `aether_bloomery_program::__macro_internals::RejectSampledOnPure<true>` in the current scope
   --> tests/ui/fail_http_on_pure.rs:18:1
    |

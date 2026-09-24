@@ -415,8 +415,7 @@ fn expand_send_pending(program: &TokenStream2, targets: &[TokenStream2]) -> Toke
 fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 {
     let name = &entry.meta.name;
     let intent = &entry.meta.intent;
-    let input = &entry.meta.input;
-    let result = &entry.meta.result;
+    let ty = &entry.ty;
     let hash = fnv1a_64(name.value().as_bytes());
     let len_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_LEN_{hash:016X}");
     let bytes_ident = format_ident!("__AETHER_BLOOMERY_PROGRAM_BYTES_{hash:016X}");
@@ -433,8 +432,8 @@ fn expand_section(entry: &ProgramEntry, program: &TokenStream2) -> TokenStream2 
         );
         const #bytes_ident: [u8; #len_ident] = #program::__macro_internals::write_program_record::<#len_ident>(
             #name.as_bytes(),
-            <#input as #program::__macro_internals::Kind>::ID.0,
-            <#result as #program::__macro_internals::Kind>::ID.0,
+            <<#ty as #program::Program>::Input as #program::__macro_internals::Kind>::ID.0,
+            <<#ty as #program::Program>::Result as #program::__macro_internals::Kind>::ID.0,
             #mode,
             #intent.as_bytes(),
         );
