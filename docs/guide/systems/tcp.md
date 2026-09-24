@@ -23,9 +23,11 @@ explicit.
 | Kind | Meaning |
 |---|---|
 | `aether.tcp.bind_listener` | bind an address and create a listener actor |
+| `aether.tcp.bind_listener_self` | bind with the sender as consumer |
 | `aether.tcp.unbind_listener` | stop one owned listener |
 | `aether.tcp.list_listeners` | inspect active listener instances |
 | `aether.tcp.connect` | establish an outbound connection and session actor |
+| `aether.tcp.connect_self` | connect with the sender as consumer |
 
 Bind/connect results carry success or a bounded error. Readiness notifications
 separate actor creation from a socket being usable. A connect timeout or bind
@@ -51,11 +53,18 @@ one peer read. Reassembly and full-write loops are native responsibilities.
 
 ## Consumer binding
 
-Route helpers bind a session to the actor that owns the application protocol.
-Wasm and native extensions expose the same conceptual operations while keeping
-raw sockets in native state. The session actor stamps and routes readiness,
-data, and close events; the consumer should not derive sibling mailbox ids by
-hand.
+A consumer actor binds itself to its sessions with a `_self` kind:
+`ctx.send::<TcpCapability>(&BindListenerSelf { .. })` or
+`ctx.send::<TcpCapability>(&ConnectSelf { .. })`. The capability takes the
+consumer from the proven sender, so the actor never names its own position.
+
+Each session delivers `session_data` and `session_closed` as itself, so the
+host stamps the session as the envelope sender. The consumer writes or closes
+through that sender: `ctx.sender()`, then
+`ctx.send_to(session, &SessionWrite { .. })` or `&SessionClose {}`. Accepted
+and outbound sessions are addressed the same way. There are no route helpers,
+and the consumer never derives a session's mailbox from its name. Raw sockets
+stay in native state.
 
 Listener/session names live under the engine's lineage. They are not globally
 unique across engines and should be discovered from result/notification data,
@@ -97,7 +106,7 @@ exposing an application actor directly to a raw connection.
 
 ## Change route
 
-- Public kinds/helpers: `crates/aether-tcp/src/{kinds,route}.rs`
+- Public kinds: `crates/aether-tcp/src/kinds.rs`
 - Control runtime: `crates/aether-tcp/src/runtime.rs`
 - Listener actor: `crates/aether-tcp/src/listener/`
 - Session actor: `crates/aether-tcp/src/session/`
