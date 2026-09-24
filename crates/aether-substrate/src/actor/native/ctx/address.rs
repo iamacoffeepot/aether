@@ -131,7 +131,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
 
     /// ADR-0080 §5: derive the inherited `root` to stamp on outbound
     /// mail from this ctx's in-flight context. `None` when there is none,
-    /// in which case `NativeBinding::send_mail_with_lineage` mints a fresh
+    /// in which case `NativeBinding::push_envelope_buffered` mints a fresh
     /// root from the outbound's own `mail_id`.
     pub(crate) fn outbound_root(&self) -> Option<MailId> {
         self.in_flight_root

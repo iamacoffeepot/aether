@@ -214,9 +214,7 @@ impl Dispatch<Self> for HoldRelay {
         // Hold acquired before the worker spawns; the worker sleeps so
         // the handler's `Finished` lands first (in_flight 0, held_open 1
         // — not settled), then exits to release the hold (settle).
-        let _join = ctx.spawn_inherit::<Self, _>(|_inherit| {
-            thread::sleep(Duration::from_millis(1));
-        });
+        let _join = ctx.spawn_inherit(|| thread::sleep(Duration::from_millis(1)));
         Some(())
     }
 }

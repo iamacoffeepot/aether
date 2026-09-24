@@ -1447,7 +1447,7 @@ fn send_propagates_in_flight_lineage_on_closure_branch() {
 /// Companion: with no in-flight context (chassis-bypass / test
 /// fixture), `ctx.send` mints a fresh root chain — `parent_mail`
 /// is `None` and `root == mail_id`. This is the same shape
-/// `NativeBinding::send_mail_with_lineage(None, None)` produces.
+/// `NativeBinding::push_envelope_buffered(None, None)` produces.
 #[test]
 fn send_without_in_flight_mints_fresh_root_chain() {
     let registry = Arc::new(Registry::new());
