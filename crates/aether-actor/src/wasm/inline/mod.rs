@@ -649,26 +649,41 @@ impl Registry {
     }
 }
 
+/// Where a membrane dispatch came from, which decides whether the dispatched
+/// inline child may read the host's reply correlation (ADR-0139).
+#[derive(Clone, Copy)]
+enum DispatchOrigin {
+    /// A top-level `receive_p32` dispatch, whose reply correlation the host
+    /// set for this call.
+    Host,
+    /// An item drained from the cluster queue, which carries no host
+    /// correlation.
+    Cluster,
+}
+
 /// ADR-0114 decision #3: the receive membrane every `export!`
-/// `receive_p32` shim routes inbound mail through. The shim passes its
-/// component's own `registry` (the emitted `static __AETHER_INLINE`).
-/// When the routed recipient is the parent's own mailbox id, dispatch the
-/// parent (`dispatch_own`); otherwise take the inline child the producer
-/// addressed out of `registry`, dispatch it with a ctx self-identified as
-/// the child and carrying the same `registry` ([`WasmCtx::__new`]), and
-/// reinsert. An unrecognised recipient falls back to the parent's dispatch
-/// — the existing unmatched path (the parent's `#[fallback]`, or the
-/// `DISPATCH_UNKNOWN_KIND` sentinel for a strict receiver), never a
-/// short-circuit drop.
+/// `receive_p32` shim routes inbound mail through, for the top-level host
+/// dispatch only. The shim passes its component's own `registry` (the
+/// emitted `static __AETHER_INLINE`). When the routed recipient is the
+/// parent's own mailbox id, dispatch the parent (`dispatch_own`); otherwise
+/// take the inline child the producer addressed out of `registry`, dispatch
+/// it with a ctx self-identified as the child and carrying the same
+/// `registry` ([`WasmCtx::__new`]), and reinsert. An unrecognised recipient
+/// falls back to the parent's dispatch — the existing unmatched path (the
+/// parent's `#[fallback]`, or the `DISPATCH_UNKNOWN_KIND` sentinel for a
+/// strict receiver), never a short-circuit drop.
 ///
 /// `source` is the inbound source threaded onto the dispatched child's ctx
-/// (issues 1987 + 2001): the enqueuing member's id when called off the drain,
-/// the host-resolved inbound source for a top-level dispatch (the `receive_p32`
+/// (issues 1987 + 2001): the host-resolved inbound source (the `receive_p32`
 /// membrane threads the same value it received over the ABI), or
 /// `NO_INBOUND_SOURCE` (`0`) when there is no peer-component origin. The child's
 /// `ctx.sender()` is a single read of this field. The own-id path's ctx
 /// is built by `dispatch_own`, which the caller has already bound to the same
 /// `source`.
+///
+/// A child dispatched here reads the host's reply correlation through
+/// `in_reply_to()`, so a reply to a request the child sent — delivered to the
+/// child's alias — is matched to that request (issue 6530).
 ///
 /// For a normal (non-inline) actor the routed recipient equals the
 /// parent's own id, so the membrane no-ops straight to `dispatch_own` —
@@ -683,6 +698,23 @@ pub fn membrane_dispatch<F>(
 where
     F: FnOnce(Mail<'_>) -> u32,
 {
+    dispatch_member(own_mailbox_id, mail, registry, source, DispatchOrigin::Host, dispatch_own)
+}
+
+/// The membrane body shared by the top-level dispatch and the drain. `origin`
+/// picks the dispatched child's ctx: a [`DispatchOrigin::Host`] child reads the
+/// host's reply correlation, a [`DispatchOrigin::Cluster`] child never does.
+fn dispatch_member<F>(
+    own_mailbox_id: u64,
+    mail: Mail<'_>,
+    registry: &Registry,
+    source: u64,
+    origin: DispatchOrigin,
+    dispatch_own: F,
+) -> u32
+where
+    F: FnOnce(Mail<'_>) -> u32,
+{
     let recipient = mail.recipient().0;
     if recipient == own_mailbox_id {
         return dispatch_own(mail);
@@ -690,7 +722,10 @@ where
     let id = MailboxId(recipient);
     match registry.take(id) {
         Some(mut child) => {
-            let mut ctx = WasmCtx::__new_local_dispatch(recipient, registry, source);
+            let mut ctx = match origin {
+                DispatchOrigin::Host => WasmCtx::__new(recipient, registry, source),
+                DispatchOrigin::Cluster => WasmCtx::__new_local_dispatch(recipient, registry, source),
+            };
             let rc = child.erased_dispatch(&mut ctx, mail);
             registry.reinsert(id, child);
             rc
@@ -714,14 +749,17 @@ where
 /// overlap (the borrow-aliasing the #1945 bounce proved). `mk_own` is that
 /// per-item factory: it is called once per drained item *with that item's
 /// sender* (the "from" half) so the own-path ctx the closure builds carries
-/// the same inbound source the child path threads through
-/// [`membrane_dispatch`]; the resulting closure is handed straight to
-/// `membrane_dispatch` and dropped before the next iteration.
+/// the same inbound source the child path threads through the membrane;
+/// the resulting closure is handed straight to the membrane and dropped
+/// before the next iteration.
 ///
 /// Issue 1987: each drained member's identity (its own id, `item.recipient`)
 /// rides on the sends it makes (the ctx threads it as the `from` half through
 /// `route_or_enqueue`), and each item's inbound source (`item.sender`) rides
 /// on the dispatched ctx — no ambient host re-stamp, no registry cell.
+///
+/// Drained members get a cluster ctx, so `in_reply_to()` never reads the outer
+/// dispatch's correlation.
 ///
 /// Reentrancy and cycles are handled by the queue, not by nested dispatch:
 /// a drained item's handler that sends to a busy cluster member just pushes
@@ -759,7 +797,7 @@ where
         // identity) as their `from` through `route_or_enqueue` — no host
         // re-stamp.
         let dispatch_own = mk_own(item.sender);
-        membrane_dispatch(self_id, mail, registry, item.sender, dispatch_own);
+        dispatch_member(self_id, mail, registry, item.sender, DispatchOrigin::Cluster, dispatch_own);
     }
 }
 
@@ -771,7 +809,7 @@ mod tests {
     use crate::wasm::ErasedWasmActor;
     use crate::wasm::ctx::NO_INBOUND_SOURCE;
     use crate::{ActorTypeTag, CallerScope, WasmCtx};
-    use aether_data::MailboxId;
+    use aether_data::{MailboxId, RequestId};
     use alloc::boxed::Box;
     use alloc::rc::Rc;
     use alloc::string::String;
@@ -871,6 +909,34 @@ mod tests {
             // the ctx's despawn clears the empty slot and the membrane's
             // `reinsert` will find nothing.
             ctx.despawn_inline_child(self.id);
+            CHILD_CODE
+        }
+        fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
+        fn erased_unwire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
+        fn erased_on_dehydrate(&mut self, _ctx: &mut crate::WasmDropCtx<'_>) {}
+        fn erased_on_rehydrate(
+            &mut self,
+            _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>,
+            _prior: PriorState<'_>,
+        ) {
+        }
+    }
+
+    /// A child that records the `in_reply_to()` its ctx answered on its last
+    /// dispatch and whether it was dispatched at all, so the drain guard can
+    /// assert a drained child never reads the outer host correlation.
+    struct ReplyProbeChild {
+        dispatched: Rc<Cell<bool>>,
+        observed_reply: Rc<Cell<Option<RequestId>>>,
+    }
+
+    impl ErasedWasmActor for ReplyProbeChild {
+        fn erased_namespace(&self) -> &'static str {
+            "test.inline.reply_probe_child"
+        }
+        fn erased_dispatch(&mut self, ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>, _mail: Mail<'_>) -> u32 {
+            self.dispatched.set(true);
+            self.observed_reply.set(ctx.in_reply_to());
             CHILD_CODE
         }
         fn erased_wire(&mut self, _ctx: &mut WasmCtx<'_, crate::Erased, crate::Manual>) {}
@@ -1373,5 +1439,40 @@ mod tests {
         assert_eq!(rc, CHILD_CODE, "the child handled the direct dispatch");
         assert_eq!(dispatches.get(), 1, "the child was dispatched once");
         assert_eq!(observed.get(), None, "a top-level dispatch reads no in-place source (no source on the ctx)");
+    }
+
+    /// A child dispatched off the drain reads `in_reply_to() == None`: a queued
+    /// intra-cluster send never crossed the host envelope, so the drained ctx
+    /// must not read the outer dispatch's reply correlation (ADR-0139). On the
+    /// host build that read would reach the `reply_correlation` stub, which
+    /// panics.
+    #[test]
+    fn drained_child_never_reads_the_host_reply_correlation() {
+        let registry = Registry::new();
+        let root = 0x9000_u64;
+        let child = 0x9001_u64;
+        registry.set_self_id(root);
+        let dispatched = Rc::new(Cell::new(false));
+        let observed_reply = Rc::new(Cell::new(None));
+        registry.insert_child(
+            MailboxId(child),
+            0,
+            String::from("reply_probe"),
+            false,
+            root,
+            Vec::new(),
+            Box::new(ReplyProbeChild {
+                dispatched: Rc::clone(&dispatched),
+                observed_reply: Rc::clone(&observed_reply),
+            }),
+        );
+
+        registry.route_or_enqueue(child, 1, &[0x00], 1, ChainMode::Inherit, root);
+        drain_cluster_queue(&registry, |_source| {
+            |_mail| panic!("own dispatch must not run for a child-addressed item")
+        });
+
+        assert!(dispatched.get(), "the drained item reached the child");
+        assert_eq!(observed_reply.get(), None, "a drained child reads no host reply correlation");
     }
 }
