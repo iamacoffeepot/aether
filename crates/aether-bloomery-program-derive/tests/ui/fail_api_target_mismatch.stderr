@@ -1,0 +1,19 @@
+warning: unused import: `Refusal`
+ --> tests/ui/fail_api_target_mismatch.rs:1:35
+  |
+1 | use aether_bloomery_kinds::{Mode, Refusal};
+  |                                   ^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+error[E0271]: type mismatch resolving `<Http as InjectedApi>::Target == ProcessCapability`
+  --> tests/ui/fail_api_target_mismatch.rs:27:71
+   |
+27 |     async fn run(input: Self::Input, _env: &mut Env<Async>, _process: Process) -> Result<Self::Result, Refusal> {
+   |                                                                       ^^^^^^^ expected `ProcessCapability`, found `HttpCapability`
+   |
+note: required by a bound in `aether_bloomery_program::__macro_internals::check_target`
+  --> $WORKSPACE/crates/aether-bloomery-program/src/lib.rs
+   |
+   |     pub const fn check_target<Api: InjectedApi<Target = T>, T>() {}
+   |                                                ^^^^^^^^^^ required by this bound in `check_target`

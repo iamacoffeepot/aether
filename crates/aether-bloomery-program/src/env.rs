@@ -13,7 +13,7 @@ use core::pin::Pin;
 use core::str;
 use core::task::{Context, Poll};
 
-use aether_actor::{Addressable, CallerAddressable, Replies, ReplyMode, Sends, Singleton, WasmCtx};
+use aether_actor::{Addressable, CallerAddressable, ErasedActorRef, Replies, ReplyMode, Sends, Singleton, WasmCtx};
 use aether_bloomery_kinds::{
     ClosureArtifact, Digest, EncodedArtifact, OpaqueBytes, ReadArtifactResult, Ref, Refusal, Utf8Text,
 };
@@ -53,7 +53,8 @@ pub struct PendingArtifact {
 ///
 /// `mailbox` / `kind_id` / `expected_reply` are the pump's type-erased
 /// view. The request value stays `K` inside [`Self::dispatch`], which
-/// sends it to the binding's target by type.
+/// sends it through the proof the invocation minted for the binding's
+/// target.
 pub struct PendingCall {
     /// `Addressable::NAMESPACE` of the binding's target actor.
     pub mailbox: &'static str,
@@ -65,21 +66,16 @@ pub struct PendingCall {
 }
 
 trait DispatchBody: Send {
-    fn send(&self, sends: &mut Sends<'_>);
+    fn send(&self, sends: &mut Sends<'_>, target: ErasedActorRef);
 }
 
-struct CapturedSend<A, K> {
+struct CapturedSend<K> {
     mail: K,
-    _target: PhantomData<fn() -> A>,
 }
 
-impl<A, K> DispatchBody for CapturedSend<A, K>
-where
-    A: Singleton + CallerAddressable + Replies<K>,
-    K: ActorMail + Send,
-{
-    fn send(&self, sends: &mut Sends<'_>) {
-        sends.actor::<A>().send(&self.mail);
+impl<K: ActorMail + Send> DispatchBody for CapturedSend<K> {
+    fn send(&self, sends: &mut Sends<'_>, target: ErasedActorRef) {
+        sends.send_to(target, &self.mail);
     }
 }
 
@@ -93,23 +89,25 @@ impl PendingCall {
             mailbox: A::NAMESPACE,
             kind_id: K::ID,
             expected_reply: A::Reply::ID,
-            body: Box::new(CapturedSend::<A, K> { mail, _target: PhantomData }),
+            body: Box::new(CapturedSend { mail }),
         }
     }
 
-    /// Send the captured request to the binding's target through a typed send.
+    /// Send the captured request through `target`, the proof the invocation
+    /// minted from its declared dependency on this call's target.
     ///
-    /// The program chose the target at run time, when its binding captured
-    /// the call, and the captured body hides the target and kind behind a
-    /// trait object. A trait object cannot carry a method generic over the
-    /// sending actor, so this erases the sender's view once, here. The
-    /// target still answers the kind: `T: Replies<K>` was checked when the
-    /// call was captured. The bundle's allowlist, built from its declared
-    /// APIs, refuses any undeclared target before this call. #6469 replaces
-    /// the erased view with a send that the invocation's declared
-    /// dependencies prove.
-    pub fn dispatch<A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>) {
-        self.body.send(&mut ctx.erase().sends());
+    /// The invocation matches [`Self::mailbox`] against the targets it
+    /// declares and mints `target` for the one that matches, so the proof
+    /// names the actor the binding captured the call for. The program chose
+    /// that target at run time, and the captured body hides the target and
+    /// kind behind a trait object, which cannot carry a method generic over
+    /// the sending actor. So this erases the sender's view once, here, and
+    /// uses it only to send through the proof. The target still answers the
+    /// kind: `A: Replies<K>` was checked when the call was captured. The send
+    /// inherits the handler's causal chain, so `prev_correlation` after this
+    /// call names the captured request.
+    pub fn dispatch<A, M: ReplyMode>(&self, ctx: &mut WasmCtx<'_, A, M>, target: ErasedActorRef) {
+        self.body.send(&mut ctx.erase().sends(), target);
     }
 }
 
@@ -132,8 +130,24 @@ pub enum Pending {
     Send(PendingCall),
 }
 
+mod sealed {
+    /// Closes [`super::InjectedApi`] to the APIs this crate names.
+    pub trait Sealed {}
+
+    impl Sealed for super::Http {}
+    impl Sealed for super::Process {}
+}
+
 /// Trailing `run` argument constructed from [`Env<Async>`].
-pub trait InjectedApi: Sized {
+///
+/// The set is closed: [`Http`] and [`Process`] are its only members, and the
+/// trait is sealed. `#[program]` accepts a trailing binding only by one of
+/// those names, maps the name to its target capability through the table in
+/// `__macro_internals::api_target`, and emits a check at the parameter that
+/// this trait's [`Self::Target`] is the table's type. The bundle's invocation
+/// declares each distinct target as a dependency and sends a captured call
+/// only through a proof minted from that declaration.
+pub trait InjectedApi: sealed::Sealed + Sized {
     /// Actor this binding may send to.
     type Target: Addressable;
     /// Sampled APIs cannot pair with [`crate::kinds::Mode::Pure`].
@@ -142,24 +156,21 @@ pub trait InjectedApi: Sized {
     fn from_env(env: &mut Env<Async>) -> Self;
 }
 
-/// Generic actor handle sharing the invocation environment pointer with [`Env<Async>`].
-pub struct Binding<A: Addressable> {
+/// Actor handle sharing the invocation environment pointer with [`Env<Async>`]:
+/// the one implementation [`Http`] and [`Process`] share.
+struct Binding<A: Addressable> {
     env: Env<Async>,
     _target: PhantomData<A>,
 }
 
-impl<A: Addressable> InjectedApi for Binding<A> {
-    type Target = A;
-    const SAMPLED: bool = true;
-
-    fn from_env(env: &mut Env<Async>) -> Self {
+impl<A: Addressable> Binding<A> {
+    /// Share the invocation's environment pointer.
+    fn new(env: &mut Env<Async>) -> Self {
         Self { env: *env, _target: PhantomData }
     }
-}
 
-impl<A: Addressable> Binding<A> {
     /// Send `mail` and await `<A as Replies<K>>::Reply`.
-    pub fn call<K>(
+    fn call<K>(
         &mut self,
         mail: K,
     ) -> impl Future<Output = Result<<A as Replies<K>>::Reply, Refusal>> + Send + 'static
@@ -171,7 +182,7 @@ impl<A: Addressable> Binding<A> {
     }
 }
 
-/// Sampled HTTP sugar over [`Binding<aether_http::HttpCapability>`].
+/// Sampled HTTP API: captures a call to [`aether_http::HttpCapability`].
 pub struct Http(Binding<aether_http::HttpCapability>);
 
 impl InjectedApi for Http {
@@ -179,7 +190,7 @@ impl InjectedApi for Http {
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
-        Self(Binding::from_env(env))
+        Self(Binding::new(env))
     }
 }
 
@@ -193,7 +204,7 @@ impl Http {
     }
 }
 
-/// Sampled process sugar over [`Binding<aether_process::ProcessCapability>`].
+/// Sampled process API: captures a call to [`aether_process::ProcessCapability`].
 pub struct Process(Binding<aether_process::ProcessCapability>);
 
 impl InjectedApi for Process {
@@ -201,7 +212,7 @@ impl InjectedApi for Process {
     const SAMPLED: bool = true;
 
     fn from_env(env: &mut Env<Async>) -> Self {
-        Self(Binding::from_env(env))
+        Self(Binding::new(env))
     }
 }
 

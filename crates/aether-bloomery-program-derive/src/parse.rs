@@ -4,9 +4,7 @@ use aether_bloomery_kinds::ProgramName;
 use syn::spanned::Spanned;
 use syn::{Expr, ExprLit, ImplItem, ImplItemConst, ItemImpl, Lit, LitStr, Type};
 
-use syn::Ident;
-
-use crate::check::{pair_run_with_env, reject_run_receiver, trailing_apis};
+use crate::check::{ApiBinding, pair_run_with_env, reject_run_receiver, trailing_apis};
 
 pub struct ProgramDef {
     pub item: ItemImpl,
@@ -17,7 +15,7 @@ pub struct ProgramDef {
     pub result: Type,
     pub async_run: bool,
     pub sampled: bool,
-    pub apis: Vec<(Ident, Type)>,
+    pub apis: Vec<ApiBinding>,
 }
 
 pub fn parse_program(item: ItemImpl) -> syn::Result<ProgramDef> {
