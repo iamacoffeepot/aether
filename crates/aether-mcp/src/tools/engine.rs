@@ -64,7 +64,7 @@ pub(super) async fn list_engines(mcp: &Mcp, args: ListEnginesArgs) -> Result<Str
 
 pub(super) async fn spawn_substrate(mcp: &Mcp, args: SpawnSubstrateArgs) -> Result<String, McpError> {
     // A boot list rides in as a temp boot-manifest JSON of file paths;
-    // the hub injects its path as AETHER_BOOT_MANIFEST and the
+    // the hub addresses its path to the child as --boot-manifest argv and the
     // single-host substrate reads the staged wasm itself (issue 1776).
     // ADR-0116: each component is a registry selector, so aether-mcp
     // pre-resolves it to bytes and stages those bytes to a temp wasm
