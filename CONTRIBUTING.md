@@ -17,7 +17,7 @@ PR:
 
 ```
 cargo fmt -- --check
-cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
 GitHub Actions is the merge gate: a pull request runs the affected subset of the test suite on one shard, and `main` runs the full suite across three. `CI pass` aggregates
