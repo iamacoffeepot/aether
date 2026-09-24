@@ -50,8 +50,8 @@ use alloc::vec;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Reaches, Sends, Subname,
-    WasmActor, WasmCtx, WasmInitCtx, actor,
+    ActorInitError, Addressable, Erased, ErasedActorRef, ErasedWasmActor, Manual, ModuleChild, Reaches, Rebuildable,
+    Sends, Subname, WasmActor, WasmCtx, WasmInitCtx, actor,
 };
 use aether_data::Kind;
 use aether_kinds::keycode::KEY_TAB;
@@ -893,7 +893,7 @@ fn apply_availability<A>(sends: &mut Sends<'_, A>, effects: AvailabilityEffects,
 /// logging and dropping the slot on failure.
 fn spawn<C, A>(ctx: &mut WasmCtx<'_, A, Manual>, subname: &str, config: &C::Config) -> Option<ErasedActorRef>
 where
-    C: ModuleChild + ErasedWasmActor,
+    C: ModuleChild + ErasedWasmActor + Rebuildable,
     <C as WasmActor>::State: ErasedWasmActor,
 {
     match ctx.spawn_inline::<C>(Subname::Named(subname), config) {

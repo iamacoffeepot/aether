@@ -406,6 +406,7 @@ const HAND_LIST_FIXTURES: &[&str] = &[
     "rejects_struct_missing_runtime",
     "rejects_struct_no_handler",
     "rejects_struct_no_namespace",
+    "rejects_unlisted_inline_child",
     "rejects_wasm_child_spawn_without_placement",
     "single_handler_cannot_read_reply_target",
     "single_handler_cannot_reply",

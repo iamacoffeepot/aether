@@ -187,7 +187,8 @@ impl WasmActor for InlineFsDemuxParent {
 }
 
 /// Inline child of [`InlineFsDemuxParent`] that runs the [`FsDemux`] flow. It
-/// is not exported: the parent constructs it in-process.
+/// is listed as private, not exported: the parent constructs it in-process
+/// and a replace rebuilds it.
 pub struct InlineFsDemuxChild {
     demux: FsDemux,
 }

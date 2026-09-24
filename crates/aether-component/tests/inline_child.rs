@@ -18,12 +18,12 @@ use aether_actor::{ActorRef, Addressable, ChildOf, Instanced};
 use aether_component::{ComponentHostCapability, WasmTrampoline};
 use aether_data::{Kind, LoadName};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots, write_fixture};
-use aether_harness_substrate::{HarnessOp, SubstrateHarness};
+use aether_harness_substrate::{HarnessOp, SubstrateHarness, SubstrateHarnessError};
 use aether_kinds::{LoadComponent, ReplaceComponent, ReplaceResult};
 use aether_test_fixtures_bundle::{
-    InlineDespawnChild, InlineDespawnParent, InlineFsDemuxChild, InlineFsDemuxParent, InlineStatefulChild,
-    InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild, NestedLineageLeaf,
-    NestedLineageParent,
+    InlineChild, InlineDespawnChild, InlineDespawnParent, InlineFsDemuxChild, InlineFsDemuxParent, InlineParent,
+    InlineStatefulChild, InlineStatefulParent, InlineTagParent, NestedDetachedLeaf, NestedLineageChild,
+    NestedLineageLeaf, NestedLineageParent,
 };
 use aether_test_fixtures_kinds::{
     Bump, CountQuery, CountReport, DespawnChild, FsDemuxReport, INLINE_WHO_CHILD, INLINE_WHO_PARENT, InlineEcho,
@@ -152,6 +152,93 @@ fn replace_preserves_inline_child_state_via_reconstruct() {
         CountReport { count: 2 },
         "the inline child's state must survive replace_component via the composite bundle + \
          rehydrate reconstruct; got {post_count:?} (0 means the child was not reconstructed)",
+    );
+}
+
+/// Issue 6136: a private inline child — one its module lists under
+/// `export!(…, private = [..])` rather than exporting — is rebuilt by a
+/// `replace_component` swap and keeps answering its own mail. `InlineChild`
+/// answers `InlineProbe` with the child marker and its parent with the parent
+/// marker, so a rebuild that consulted only the exported types would drop the
+/// child while its alias survived, and the parent would answer in its place.
+#[test]
+fn replace_rebuilds_a_private_inline_child() {
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+    const FIXTURE_NAME: &str = "inline_child_private";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let (parent, path) = harness
+        .load::<InlineParent>(LoadComponent {
+            wasm,
+            name: Some(FIXTURE_NAME.to_owned()),
+            config: Vec::new(),
+            export: Some("test.inline.parent".to_owned()),
+        })
+        .unwrap_or_else(|error| panic!("inline_child_private load failed: {error}"));
+    let child = await_child::<InlineParent, InlineChild>(&harness, parent, "widget");
+    let pre = harness
+        .execute(vec![("probe", HarnessOp::send_and_await_reply(&child, &InlineProbe))])
+        .expect("pre-replace probe");
+    assert_eq!(
+        pre.reply::<InlineEcho>("probe").expect("decode pre-replace InlineEcho"),
+        InlineEcho { who: INLINE_WHO_CHILD },
+        "the private inline child answers its own probe before the replace",
+    );
+
+    let wasm = fs::read(&wasm_path).expect("re-read fixture wasm");
+    let swapped = harness
+        .execute(vec![(
+            "swap",
+            HarnessOp::send_and_await_reply(
+                &harness.actor_ref::<ComponentHostCapability>(),
+                &ReplaceComponent { target: path, wasm, drain_timeout_ms: None, config: Vec::new(), export: None },
+            ),
+        )])
+        .expect("replace sequence");
+    match swapped.reply::<ReplaceResult>("swap").expect("decode ReplaceResult") {
+        ReplaceResult::Ok { .. } => {}
+        ReplaceResult::Err { error } => panic!("replace_component: {error}"),
+    }
+
+    let post = harness
+        .execute(vec![("probe", HarnessOp::send_and_await_reply(&child, &InlineProbe))])
+        .expect("post-replace probe");
+    assert_eq!(
+        post.reply::<InlineEcho>("probe").expect("decode post-replace InlineEcho"),
+        InlineEcho { who: INLINE_WHO_CHILD },
+        "the private inline child must be rebuilt under its old alias; the parent answering means the replace \
+         dropped it",
+    );
+}
+
+/// Issue 6136: listing a type under `export!(…, private = [..])` makes it
+/// rebuildable, not loadable. The host must refuse an export selector that
+/// names the private `InlineChild`, so the private list stays out of the
+/// constructor table and the manifest sections the host reads.
+#[test]
+fn a_private_inline_child_is_not_loadable_by_selector() {
+    const BUNDLE_STEM: &str = "aether_test_fixtures_bundle";
+
+    let Some(wasm_path) = require_wasm(BUNDLE_STEM) else {
+        return;
+    };
+    let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
+    let wasm = fs::read(&wasm_path).expect("read fixture wasm");
+
+    let loaded = harness.load_any(&LoadComponent {
+        wasm,
+        name: Some("inline_child_private_selector".to_owned()),
+        config: Vec::new(),
+        export: Some(InlineChild::NAMESPACE.to_owned()),
+    });
+    assert!(
+        matches!(loaded, Err(SubstrateHarnessError::Load(_))),
+        "a private inline child must not load by export selector; got {loaded:?}",
     );
 }
 
