@@ -98,7 +98,7 @@ mod tests {
         let sandbox = init_save_sandbox("headless-runtime-manifest");
         let manifest_path = sandbox.join("boot-manifest.json");
         let manifest_json = serde_json::json!({
-            "components": [{ "wasm": wasm_path, "name": "probe" }],
+            "components": [{ "wasm": wasm_path, "name": "probe", "export": "test.quiet_probe" }],
         });
         fs::write(&manifest_path, serde_json::to_vec(&manifest_json).expect("serialize boot manifest"))
             .expect("write boot manifest");

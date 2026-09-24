@@ -1,5 +1,5 @@
 //! `FleetHarness` `load_component` proof (issue 1451, Tier-A): load a real
-//! wasm component (the `probe` fixture, located through
+//! wasm component (the bundle's `QuietProbe` export, located through
 //! `dist/manifest.json`) into a forked substrate and assert it registers
 //! at its ADR-0099 lineage address.
 
@@ -11,15 +11,15 @@ mod tests {
 
     use aether_harness_fleet::{FleetHarness, dist_component_available};
 
-    /// Load the `probe` component and assert `LoadResult.path` is the
-    /// `/`-rendered lineage
+    /// Load the bundle's `QuietProbe` export and assert `LoadResult.path` is
+    /// the `/`-rendered lineage
     /// `aether.component/aether.embedded:<NAMESPACE>` (ADR-0099
-    /// §3/§4). The probe example's `Addressable::NAMESPACE` is
-    /// `test.probe` — distinct from the wasm stem (`probe`),
-    /// so this also pins that the registered name comes from the
-    /// component's declared namespace, not the file name. Also
-    /// asserts the recorded `CallRecord` trace captured the load
-    /// round-trip, exercising the benchmark-ready trace object.
+    /// §3/§4). The selected export's `Addressable::NAMESPACE` is
+    /// `test.quiet_probe` — distinct from the wasm stem
+    /// (`aether_test_fixtures_bundle`), so this also pins that the
+    /// registered name comes from the selected export's namespace, not the
+    /// file name. Also asserts the recorded `CallRecord` trace captured the
+    /// load round-trip, exercising the benchmark-ready trace object.
     #[test]
     fn fleetharness_loads_probe_at_its_lineage_address() {
         if !dist_component_available("aether_test_fixtures_bundle") {
@@ -27,9 +27,9 @@ mod tests {
         }
         let mut harness = FleetHarness::start();
         let engine = harness.spawn_headless();
-        let addr = harness.load(engine, "aether_test_fixtures_bundle");
+        let addr = harness.load_full_export(engine, "aether_test_fixtures_bundle", "test.quiet_probe").addr;
 
-        let expected = format!("aether.component/{}:test.probe", WasmTrampoline::NAMESPACE);
+        let expected = format!("aether.component/{}:test.quiet_probe", WasmTrampoline::NAMESPACE);
         assert_eq!(addr, expected, "LoadResult.path should be the ADR-0099 lineage address");
 
         // The recorded trace captures the load as a first-class

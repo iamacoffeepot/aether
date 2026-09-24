@@ -23,7 +23,7 @@ use aether_data::Kind;
 use aether_harness_substrate::test_helpers::require_wasm;
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{CostTail, CostTailResult, LoadComponent, Tick};
-use aether_test_fixtures_kinds::SetRender;
+use aether_test_fixtures_kinds::UnsubscribeKeys;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
 // land in this test binary (mirrors `cap_registry.rs`).
@@ -51,9 +51,9 @@ fn init_seeds_cells_and_dispatch_folds() {
     let mut harness = SubstrateHarness::builder().size(64, 48).with_component_host().build().expect("boot");
     let probe = load_probe(&mut harness, &wasm_path);
 
-    // At construction, before any dispatch: both declared handlers
-    // (`Tick`, `SetRender`) are seeded at the neutral seed (`samples =
-    // 0`) — the known-but-unrun state. If `init`'s seed had not run, the
+    // At construction, before any dispatch: the declared handlers
+    // (`Tick`, `UnsubscribeKeys`, …) are seeded at the neutral seed
+    // (`samples = 0`) — the known-but-unrun state. If `init`'s seed had not run, the
     // table would hold no rows for this mailbox.
     {
         let CostTailResult::Ok { rows } = harness.cost_table().tail(probe, &CostTail { kind: None }) else {
@@ -61,13 +61,13 @@ fn init_seeds_cells_and_dispatch_folds() {
         };
         let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell seeded at init");
         assert_eq!(tick.samples, 0, "neutral seed before any dispatch");
-        assert!(rows.iter().any(|r| r.kind_id == SetRender::ID), "SetRender handler cell seeded at init");
+        assert!(rows.iter().any(|r| r.kind_id == UnsubscribeKeys::ID), "UnsubscribeKeys handler cell seeded at init");
     }
 
     // Advance 3 ticks → the probe's on_tick dispatches 3× → 3 folds into
     // the Tick cell. A nonzero count proves the per-actor cache was
     // stamped at construction (the redesign's load-bearing claim) and the
-    // fold reached it. `SetRender` is never dispatched, so it stays at the
+    // fold reached it. `UnsubscribeKeys` is never dispatched, so it stays at the
     // neutral seed.
     harness.execute(vec![("advance", HarnessOp::advance(3))]).expect("advance 3");
 
@@ -76,6 +76,7 @@ fn init_seeds_cells_and_dispatch_folds() {
     };
     let tick = rows.iter().find(|r| r.kind_id == Tick::ID).expect("Tick handler cell present");
     assert_eq!(tick.samples, 3, "three Tick dispatches folded into the init-seeded cell");
-    let set_render = rows.iter().find(|r| r.kind_id == SetRender::ID).expect("SetRender handler cell present");
-    assert_eq!(set_render.samples, 0, "an un-dispatched handler stays at the neutral seed");
+    let unsubscribe =
+        rows.iter().find(|r| r.kind_id == UnsubscribeKeys::ID).expect("UnsubscribeKeys handler cell present");
+    assert_eq!(unsubscribe.samples, 0, "an un-dispatched handler stays at the neutral seed");
 }

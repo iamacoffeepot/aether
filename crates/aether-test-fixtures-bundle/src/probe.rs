@@ -17,24 +17,19 @@
 //!   `SubstrateHarness::count_observed` (issue 775 retired the
 //!   `BroadcastCapability` MCP fan-out; the harness now owns a private
 //!   catch-all observer mailbox for these scenario observations).
-//! - On the first tick, emits a `tracing::info!("typed_send_alive")`
-//!   that flows through the actor-aware subscriber (issue #581) →
-//!   per-actor `LogBuffer` → drain at handler exit ships a `LogBatch`
-//!   to the `aether.log` mailbox. Pre-#581 this fixture exercised the
-//!   issue-563 stage-5 typed-sender path against `LogEvent`; #581
-//!   demoted `LogEvent` to a non-mailable struct so the buffer-and-
-//!   drain shape is the only sender path for log content.
-//! - Receives `aether.test_fixture.set_render { r, g, b, visible }`
-//!   to update render state. When `visible` is non-zero, `on_tick`
-//!   emits a colored `DrawTriangle` to the chassis render sink, so
-//!   `capture_frame` scenarios can observe pre-mail effects in the
-//!   captured PNG.
+//! - Reports every `Key` and `TextInput` it receives to the same observer,
+//!   and drops its `Key` subscription on `UnsubscribeKeys`.
+//!
+//! It declares the observer it reports to, and only the `SubstrateHarness`
+//! registers that observer, so `Probe` loads only there. The render
+//! behaviour lives on `PaintProbe` and the asset-window pull and first-tick
+//! log on `QuietProbe`, each its own actor that declares what it mails
+//! (ADR-0232 §6).
 //!
 //! ADR-0090 c1: this fixture moved from `aether-test-fixture-probe`'s
-//! `src/lib.rs` to `aether-test-fixtures-bundle/src/probe.rs`. The
-//! actor source is unchanged; the shared `TickObserved` / `SetRender`
-//! kinds moved to the sibling lib so integration tests can import
-//! them without reaching into a cdylib.
+//! `src/lib.rs` to `aether-test-fixtures-bundle/src/probe.rs`; the shared
+//! `TickObserved` kinds moved to the sibling lib so integration tests can
+//! import them without reaching into a cdylib.
 //!
 //! # `ProbeWithConfig`
 //!
@@ -47,8 +42,8 @@
 //!
 //! The fixture stashes `(seed, label)` at boot and replies with a
 //! `ConfigEcho` on every `ConfigQuery` mail so a test can assert the
-//! config round-tripped intact. No tick / render behaviour — the
-//! sibling `Probe` covers that.
+//! config round-tripped intact. No tick behaviour — the sibling
+//! `Probe` covers that.
 //!
 //! Consumers load it from the `probe` bundle stem with
 //! `export: Some("test.probe_with_config")` (ADR-0096).
@@ -58,33 +53,25 @@
 // `ProbeWithConfig::on_config_query` takes `&mut self` for the same reason.
 #![allow(clippy::unused_self)]
 
-use aether_actor::{
-    ActorInitError, AssetWindow, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor,
-};
+use aether_actor::{ActorInitError, Erased, Manual, OutboundReply, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_kinds::{Key, TextInput, Tick};
 use aether_lifecycle::LifecycleCapability;
-use aether_math::Rgb;
-use aether_render::{DrawTriangle, RenderCapability, Vertex};
 use aether_test_fixtures_kinds::{
-    AssetProbe, AssetProbeResult, ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SetRender,
-    SubstrateHarnessObserver, TextInputObserved, TickObserved, UnsubscribeKeys,
+    ConfigEcho, ConfigQuery, KeyObserved, ProbeConfig, SubstrateHarnessObserver, TextInputObserved, TickObserved,
+    UnsubscribeKeys,
 };
 use aether_window::WindowCapability;
 
 pub struct Probe {
     tick_count: u64,
-    render: SetRender,
-    /// ADR-0163 §3 (#3984): what `wire` pulled from the asset load window,
-    /// surfaced later through [`Probe::on_asset_probe`].
-    asset: AssetProbeResult,
 }
 
-#[actor(depends(LifecycleCapability), depends(WindowCapability))]
+#[actor(depends(LifecycleCapability), depends(WindowCapability), depends(SubstrateHarnessObserver))]
 impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
     fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
-        Ok(Probe { tick_count: 0, render: SetRender::default(), asset: AssetProbeResult::default() })
+        Ok(Probe { tick_count: 0 })
     }
 
     /// Issue 640: explicit subscribe in `wire`; init can't mail (its ctx
@@ -98,22 +85,10 @@ impl WasmActor for Probe {
         ctx.subscribe::<LifecycleCapability, Tick>();
         ctx.subscribe::<WindowCapability, Key>();
         ctx.subscribe::<WindowCapability, TextInput>();
-        // ADR-0163 §3 (#3984): pull the bundle's asset through the load
-        // window (open during `wire`) and stash a content fingerprint —
-        // length + a wrapping-sum checksum — so a later `AssetProbe` proves
-        // the guest-side pull round-tripped the exact bytes across the FFI
-        // and that the value survived the window closing after `wire`.
-        if let Some(bytes) = ctx.asset("asset_fixture.txt") {
-            let checksum = bytes.iter().fold(0u64, |acc, &byte| acc.wrapping_add(u64::from(byte)));
-            self.asset = AssetProbeResult { pulled: true, len: bytes.len() as u64, checksum };
-        }
     }
 
     /// Counts ticks delivered to this mailbox; broadcasts the running
-    /// total so scenarios can observe it on the loopback. When the
-    /// stored render state is `visible`, also emits a colored
-    /// `DrawTriangle` covering most of the frame so `capture_frame`
-    /// scenarios can see the pre-mail effect in the PNG.
+    /// total so scenarios can observe it on the loopback.
     ///
     /// # Agent
     /// Not sent manually; the substrate's tick fanout fires it once
@@ -124,16 +99,6 @@ impl WasmActor for Probe {
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
         ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.tick_count });
-        if self.tick_count == 1 {
-            tracing::info!(target: "aether_test_fixture_probe", "typed_send_alive");
-        }
-        if self.render.visible != 0 {
-            let r = f32::from(self.render.r) / 255.0;
-            let g = f32::from(self.render.g) / 255.0;
-            let b = f32::from(self.render.b) / 255.0;
-            let v = |x: f32, y: f32| Vertex { x, y, z: 0.5, color: Rgb::new(r, g, b) };
-            ctx.actor::<RenderCapability>().send(&DrawTriangle { verts: [v(-0.9, -0.9), v(0.9, -0.9), v(0.0, 0.9)] });
-        }
     }
 
     /// Broadcasts a `key_observed` for each `Key` dispatch, so the
@@ -171,35 +136,6 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
         ctx.actor::<SubstrateHarnessObserver>().send(&TextInputObserved { text: input.text });
-    }
-
-    /// Updates the stored render state. Subsequent ticks paint the
-    /// new color (or stop painting when `visible == 0`).
-    ///
-    /// # Agent
-    /// Send via `send_mail` with `kind_name = "aether.test_fixture.set_render"`
-    /// and params `{ r, g, b, visible }`. Used by `capture_frame`
-    /// scenarios to flip the fixture's render output between frames.
-    #[handler::single]
-    fn on_set_render(&mut self, _ctx: &mut WasmCtx<'_>, mail: SetRender) {
-        self.render = mail;
-    }
-
-    /// ADR-0163 §3 (#3984): reply with the fingerprint of the asset this
-    /// fixture pulled from its load window during `wire`. Runs post-`wire`
-    /// (the window has closed), so a non-zero `pulled` reply proves the
-    /// guest-side `AssetWindow::asset` pull worked while the window was open
-    /// and the bytes survived into the instance's ordinary state.
-    ///
-    /// # Agent
-    /// Send `aether.test_fixtures.asset_probe`; the reply
-    /// `aether.test_fixtures.asset_probe_result` carries `{ pulled, len,
-    /// checksum }`.
-    #[handler::manual]
-    fn on_asset_probe(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, _query: AssetProbe) {
-        if ctx.reply_target().is_some() {
-            ctx.reply(&self.asset);
-        }
     }
 }
 

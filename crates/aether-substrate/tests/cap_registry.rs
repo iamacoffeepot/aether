@@ -23,7 +23,7 @@ use aether_fs::{FsCapability, Write};
 use aether_harness_substrate::test_helpers::{init_save_sandbox, require_wasm, test_namespace_roots};
 use aether_harness_substrate::{HarnessOp, SubstrateHarness};
 use aether_kinds::{DropComponent, DropResult, LoadComponent, Ping, ReplaceComponent, ReplaceResult, Tick};
-use aether_test_fixtures_kinds::{Bump, InlineProbe, SetRender};
+use aether_test_fixtures_kinds::{Bump, InlineProbe, UnsubscribeKeys};
 use std::fs;
 
 // Pin the fixture rlib so its descriptor `inventory::submit!` entries
@@ -39,7 +39,7 @@ fn load_named(harness: &mut SubstrateHarness, wasm_path: &Path, name: &str) -> (
 }
 
 /// A freshly-loaded probe's trampoline mailbox accepts the kinds the
-/// probe declares `#[handler]`s for (`Tick`, `Key`, `SetRender`) and
+/// probe declares `#[handler]`s for (`Tick`, `Key`, `UnsubscribeKeys`) and
 /// rejects kinds it doesn't (`Ping`).
 #[test]
 fn cap_registry_reports_accepted_kinds() {
@@ -51,7 +51,7 @@ fn cap_registry_reports_accepted_kinds() {
     let caps = harness.capability_registry();
 
     assert!(caps.accepts_actor(probe, Tick::ID), "probe should accept its declared Tick handler");
-    assert!(caps.accepts_actor(probe, SetRender::ID), "probe should accept its declared SetRender handler");
+    assert!(caps.accepts_actor(probe, UnsubscribeKeys::ID), "probe should accept its declared UnsubscribeKeys handler");
     assert!(!caps.accepts_actor(probe, Ping::ID), "probe has no Ping handler and no fallback — must reject Ping");
 }
 

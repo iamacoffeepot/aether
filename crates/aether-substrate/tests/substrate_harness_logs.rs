@@ -1,4 +1,5 @@
-//! `SubstrateHarness` actor-log reader proof (issue 1856): load the `probe` fixture,
+//! `SubstrateHarness` actor-log reader proof (issue 1856): load the bundle's
+//! `QuietProbe` export,
 //! advance one tick to fire its first-tick `tracing::info!`, tail its per-actor
 //! `ActorLogRing` (ADR-0081) for the `typed_send_alive` info entry, then walk
 //! the `since` cursor to confirm it does not re-yield the seen entry.
@@ -43,7 +44,12 @@ mod tests {
 
         let wasm = fs::read(&wasm_path).expect("read probe wasm");
         let (probe, _) = harness
-            .load_any(&LoadComponent { wasm, name: Some(PROBE_NAME.to_owned()), config: Vec::new(), export: None })
+            .load_any(&LoadComponent {
+                wasm,
+                name: Some(PROBE_NAME.to_owned()),
+                config: Vec::new(),
+                export: Some("test.quiet_probe".to_owned()),
+            })
             .expect("load probe");
 
         harness.execute(vec![("tick", HarnessOp::advance(1))]).expect("advance one tick");
