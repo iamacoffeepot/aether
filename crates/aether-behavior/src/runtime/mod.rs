@@ -282,8 +282,8 @@ pub trait Behavior: Sized {
         let _ = ctx;
     }
 
-    /// Per-frame work, dispatched on the SDK-owned frame sentinel (no kit
-    /// coupling).
+    /// Per-frame work, dispatched on the SDK-owned frame sentinel (no widget
+    /// crate coupling).
     fn on_frame(&mut self, ctx: &mut BehaviorCtx<'_>) {
         let _ = ctx;
     }
