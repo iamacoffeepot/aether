@@ -149,6 +149,18 @@ impl<'a, A> WasmCtx<'a, A, Manual> {
         // capability, never adds it.
         unsafe { &mut *ptr::from_mut(self).cast::<WasmCtx<'a, A, Single>>() }
     }
+
+    /// Reply target for the mail currently being dispatched. Mirrors
+    /// [`OutboundReply::reply_target`](crate::OutboundReply::reply_target).
+    ///
+    /// The handle belongs to the manual reply surface: a manual handler may
+    /// keep it and answer later with `reply_to`. A single handler cannot read
+    /// it, because the substrate frees a single-class dispatch's handle when
+    /// the handler returns (ADR-0112, #6412).
+    #[must_use]
+    pub fn reply_target(&self) -> Option<ReplyHandle> {
+        self.sender
+    }
 }
 
 impl<'a, M: ReplyMode> WasmCtx<'a, Erased, M> {
@@ -204,13 +216,6 @@ impl<A, M: ReplyMode> WasmCtx<'_, A, M> {
     #[doc(hidden)]
     pub fn __set_reply_to(&mut self, sender: Option<ReplyHandle>) {
         self.sender = sender;
-    }
-
-    /// Reply target for the mail currently being dispatched. Mirrors
-    /// [`OutboundReply::reply_target`](crate::OutboundReply::reply_target).
-    #[must_use]
-    pub fn reply_target(&self) -> Option<ReplyHandle> {
-        self.sender
     }
 
     /// Correlation id of the request this inbound reply answers.
