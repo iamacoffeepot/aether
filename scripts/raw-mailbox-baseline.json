@@ -10,6 +10,6 @@
     "clippy::disallowed_methods": 174,
     ".actor::<": 46,
     ".to(&": 7,
-    "ctx.self_id()": 5
+    "ctx.self_id()": 4
   }
 }

@@ -13,7 +13,7 @@
 //! item via `NativeCtx::deliver_detached` (fresh causal chain — the wake
 //! mail is causally unrelated to the wire-borne Call), then subscribes
 //! to settlement of the resulting root via
-//! `SettlementRegistry::subscribe_settlement_mail`. A path that does not
+//! `NativeCtx::subscribe_settlement`. A path that does not
 //! resolve to a `Live` actor closes the call at once with
 //! `RpcError::NotPresent`. Any reply mail
 //! addressed back at this cap with the dispatch's correlation id
