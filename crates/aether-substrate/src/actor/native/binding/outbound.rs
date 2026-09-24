@@ -7,7 +7,7 @@ use std::sync::atomic::Ordering;
 use aether_kinds::trace::Nanos;
 
 use super::NativeBinding;
-use super::pending::{ComponentOrigin, PendingBirthWork, PendingMail, PendingOwnerBatchWork, PendingPayload};
+use super::pending::{ComponentOrigin, PendingMail, PendingOwnerBatchWork, PendingPayload};
 use crate::mail::registry::effect::{PreparedSpawnCommit, RegistryBatch, RegistryBatchResult};
 use crate::mail::ring::{MailRing, RingFull};
 use crate::mail::{MailId, Source, SourceAddr};
@@ -62,7 +62,7 @@ pub(super) struct OutboundBuffer {
     pub(super) component_origins: Vec<ComponentOrigin>,
     /// Births are rare; this vector remains unallocated on the ordinary
     /// mail-only handler path.
-    pub(super) births: Vec<PendingBirthWork>,
+    pub(super) births: Vec<PreparedSpawnCommit>,
     /// Handler-staged registry batches are uncommon and stay unallocated on
     /// the ordinary mail-only path.
     pub(super) owner_batches: Vec<PendingOwnerBatchWork>,
@@ -196,14 +196,11 @@ impl NativeBinding {
         mail_id
     }
 
-    /// Append one prepared child birth at its exact declaration point in the
-    /// current handler's outbound work. The ordinary no-spawn path pays only
-    /// the empty-vector check at flush.
+    /// Append one prepared child birth to the current handler's outbound
+    /// work. The ordinary no-spawn path pays only the empty-vector check at
+    /// flush.
     pub(crate) fn stage_child_birth(&self, commit: PreparedSpawnCommit) {
-        let mut buffer = self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063");
-        let after_mail = buffer.mails.len();
-        let recipient = commit.route.id;
-        buffer.births.push(PendingBirthWork { after_mail, recipient, commit });
+        self.outbound.lock().expect("outbound buffer poisoned; fail-fast per ADR-0063").births.push(commit);
     }
 
     /// Append one typed registry batch to the handler's ordered outbound work.
