@@ -285,8 +285,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // typed handlers; chassis-peripheral kinds (Phase 1 migration)
     // ride the fallback. The fallback runs only on dispatch table
     // misses, so per-handler `HandlesKind<K>` markers are still
-    // authoritative at the type system — `ctx.actor::<X>().send(K)`
-    // compiles only for declared K.
+    // authoritative at the type system — `ctx.send::<X>(&k)` (through
+    // `SendableTo<X>`) compiles only for declared K.
     // ADR-0169: an adopted handler set is a receive surface too, so an actor
     // whose whole block moved into a set (the window instance runtimes) is not
     // an empty receiver.
@@ -741,8 +741,8 @@ pub fn expand_native_actor_trait(item: ItemImpl, opts: &ActorOpts, emit: NativeE
     // `#[cfg(not(target_family = "wasm"))]` so a cap crate
     // can compile for `wasm32-unknown-unknown` without the substrate
     // dep — wasm consumers see only the always-on Addressable +
-    // HandlesKind markers, which is enough for typed
-    // `ctx.actor::<R>().send(...)` against cap markers.
+    // HandlesKind markers, which is enough for typed flat sends
+    // (`ctx.send::<R>(...)`, through `SendableTo<R>`) against cap markers.
     //
     // Gate is `target_arch` not `feature = "runtime"` because
     // NativeActor/NativeDispatch are wasm-incompatible by definition;
@@ -1181,7 +1181,7 @@ fn emit_native_identity_markers(
 
     // Issue 576 + issue 603: a fallback-only (true catch-all) cap emits a single
     // blanket `impl<K: Kind> HandlesKind<K>` so any typed
-    // `ctx.actor::<X>().send(&payload)` compiles for every K. Strict / hybrid
+    // `ctx.send::<X>(&payload)` compiles for every K. Strict / hybrid
     // caps keep per-handler impls — only declared kinds compile via typed sends.
     let handles_kind_impls: Vec<TokenStream2> = if has_fallback && handler_kinds.is_empty() {
         let kind_param: syn::Ident = syn::parse_quote!(__AetherCatchAllK);

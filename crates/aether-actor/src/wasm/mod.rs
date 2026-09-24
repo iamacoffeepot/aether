@@ -18,10 +18,6 @@
 //!   - [`WasmInitCtx`] / [`WasmCtx`] / [`WasmDropCtx`] — concrete per-stage
 //!     ctx structs, each impling the relevant subset of the per-stage
 //!     capability traits in [`crate::model::ctx`].
-//!   - [`WasmActorMailbox<R>`] — actor-typed sender returned by
-//!     `ctx.actor::<R>()`, plus
-//!     [`WasmActorMailboxWithContext`] for a typed request context bound to
-//!     subsequent sends.
 //!   - [`WasmActor`] trait — entry point with the `init` constructor and
 //!     the `wire` / `unwire` / `on_dehydrate` / `on_rehydrate` lifecycle
 //!     hooks (ADR-0101). `init` returns `Result<Self, ActorInitError>` so a
@@ -53,7 +49,6 @@ use core::fmt;
 pub mod bridge;
 pub mod ctx;
 pub mod inline;
-pub mod mailbox;
 mod raw;
 
 // Re-exports of `Wasm*` types — the `Wasm` prefix is deliberate (native/wasm split);
@@ -63,8 +58,6 @@ pub use ctx::{
     ActorTypeTag, InlineChild, NO_INBOUND_SOURCE, RelativeMailbox, Sends, SpawnError, WasmCtx, WasmDropCtx,
     WasmInitCtx, WireCtx,
 };
-#[allow(clippy::module_name_repetitions)]
-pub use mailbox::{WasmActorMailbox, WasmActorMailboxWithContext};
 
 /// Error returned by [`Lifecycle::init`](crate::Lifecycle::init) when the actor cannot start
 /// (config parse failure, required handle missing, malformed env var).
@@ -1141,8 +1134,8 @@ macro_rules! __export_internal {
 
         /// # Safety
         /// ADR-0090: legacy zero-config `init` shim. Called by older
-        /// substrate builds that don't know about `init_with_config_p32`. Reaches
-        /// into `init_with_config` with empty config bytes, resolving typed
+        /// substrate builds that don't know about `init_with_config_p32`.
+        /// Forwards to `init_with_config` with empty config bytes, resolving typed
         /// config actors through their compiled `Config::default()`.
         #[cfg(all(target_family = "wasm", not(feature = "library")))]
         #[unsafe(no_mangle)]
@@ -1355,8 +1348,7 @@ macro_rules! __export_internal {
             );
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> =
-                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
             0
@@ -2110,8 +2102,7 @@ macro_rules! __export_multi_internal {
             );
             let __aether_state = __AETHER_INLINE.compose_request_context_state(__aether_user_state);
             if let Some((version, bytes)) = __aether_state {
-                let mut ctx: $crate::WasmDropCtx<'_> =
-                    $crate::WasmDropCtx::__new(mailbox_id, __AETHER_INLINE.parent_id_for(mailbox_id));
+                let mut ctx: $crate::WasmDropCtx<'_> = $crate::WasmDropCtx::__new(mailbox_id);
                 ctx.save_state(version, &bytes);
             }
             0

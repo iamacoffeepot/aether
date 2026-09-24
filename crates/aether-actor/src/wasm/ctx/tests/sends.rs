@@ -1,12 +1,11 @@
-//! The reply-mode-free send view (`ctx.sends()`): that it addresses and
-//! stamps outbound mail exactly as the [`WasmCtx`] it was taken from.
+//! The reply-mode-free send view (`ctx.sends()`): that it routes and stamps
+//! outbound mail exactly as the [`WasmCtx`] it was taken from.
 
 use super::{NO_INBOUND_SOURCE, Registry, WasmCtx, recording_target};
 use crate::model::ctx::{Erased, Manual};
 use crate::model::{Addressable, Embedded, HandlesKind};
 use crate::reference::{ActorRef, ErasedActorRef};
 use crate::wasm::inline::drain_cluster_queue;
-use aether_data::mailbox_id_from_path;
 use alloc::string::String;
 use alloc::vec::Vec;
 
@@ -21,7 +20,7 @@ impl HandlesKind<()> for SendsPeer {}
 
 /// Tripwire: `Sends` carries its own copy of the routing every `WasmCtx` send
 /// verb performs, so the two can drift. A view that stamped a different `from`,
-/// resolved a different recipient, or bypassed the inline registry would show
+/// routed to a different recipient, or bypassed the inline registry would show
 /// up here as a missing dispatch or a different observed source.
 ///
 /// Every recipient here is a cluster member, so each send routes in place and
@@ -61,38 +60,16 @@ fn drain_to_members(registry: &Registry, leg: &'static str) {
     });
 }
 
-/// Tripwire: typed resolution through the view walks the same caller scope as
-/// the ctx. `Embedded` seeds from the *logical parent*, so a view that seeded
-/// from its own mailbox instead — the easy transcription slip — resolves a
-/// different id here while the ctx still resolves the right one.
-#[allow(clippy::disallowed_methods)] // aether-suppression-request: fixture builds synthetic lineage ids
+/// `send_to` on the ctx and on its `sends()` view sends through a proven
+/// reference — each routes to the reference's id stamped with the sending
+/// actor's own id. The legs go through the `Target` impls for `ActorRef<R>`
+/// and for a borrow of one, so an impl that forwarded the wrong proof misses
+/// the target here, and a routing call that transposed recipient and sender
+/// routes to the sender's own id (no dispatch here) and stamps the target as
+/// the source; either half fails this test. Synthetic ids keep the fixture off
+/// the name fold, so the test needs no suppression.
 #[test]
-fn sends_view_resolves_typed_peers_through_the_same_caller_scope() {
-    let registry = Registry::new();
-    let parent = mailbox_id_from_path("test.wasm.sends_host");
-    let current = mailbox_id_from_path("test.wasm.sends_host/test.wasm.sends_caller");
-    registry.set_self_id(current.0);
-    registry.set_parent_id(parent.0);
-
-    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(current.0, &registry, NO_INBOUND_SOURCE);
-
-    let through_ctx = ctx.actor::<SendsPeer>().mailbox_id();
-    let through_view = ctx.sends().actor::<SendsPeer>().mailbox_id();
-    assert_ne!(parent, current, "the fixture's parent and current mailboxes differ, so the scope choice is visible");
-    assert_eq!(through_view, through_ctx, "the view resolves the parent-scoped peer the ctx resolves");
-}
-
-/// `to` and `send_to` on the ctx and on its `sends()` view all send through a
-/// proven reference — each routes to the reference's id stamped with the
-/// sending actor's own id. The `send_to` legs go through the `Target` impls
-/// for `ActorRef<R>` and for a borrow of one, so an impl that forwarded the
-/// wrong proof misses the target here. The two `u64` arguments of
-/// `WasmActorMailbox::new` are the recipient and the sender in that order,
-/// so a transposition routes to the sender's own id (no dispatch here) and
-/// stamps the target as the source; either half fails this test. Synthetic
-/// ids keep the fixture off the name fold, so the test needs no suppression.
-#[test]
-fn to_sends_through_a_proven_reference_on_ctx_and_view() {
+fn send_to_sends_through_a_proven_reference_on_ctx_and_view() {
     use aether_data::MailboxId;
 
     let registry = Registry::new();
@@ -106,24 +83,14 @@ fn to_sends_through_a_proven_reference_on_ctx_and_view() {
     let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root.0, &registry, NO_INBOUND_SOURCE);
     let reference = ActorRef::<SendsPeer>::new(target);
 
-    ctx.to(&reference).send(&());
-    drain_to_members(&registry, "the ctx to send");
-    assert_eq!(probe.dispatches.get(), 1, "the ctx's to send reaches the reference's id");
-    assert_eq!(probe.source.get(), Some(root), "and stamps the sending actor as the source");
-
-    ctx.sends().to(&reference).send(&());
-    drain_to_members(&registry, "the view to send");
-    assert_eq!(probe.dispatches.get(), 2, "the view's to send reaches the same id");
-    assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
-
     ctx.send_to(reference, &());
     drain_to_members(&registry, "the ctx send_to through a typed reference");
-    assert_eq!(probe.dispatches.get(), 3, "the ctx's send_to through the reference reaches its id");
+    assert_eq!(probe.dispatches.get(), 1, "the ctx's send_to through the reference reaches its id");
     assert_eq!(probe.source.get(), Some(root), "and stamps the sending actor as the source");
 
     let borrowed = &reference;
     ctx.sends().send_to(borrowed, &());
     drain_to_members(&registry, "the view send_to through a borrowed reference");
-    assert_eq!(probe.dispatches.get(), 4, "the view's send_to through the reference reaches the same id");
+    assert_eq!(probe.dispatches.get(), 2, "the view's send_to through the reference reaches the same id");
     assert_eq!(probe.source.get(), Some(root), "and stamps the same source");
 }

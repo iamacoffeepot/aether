@@ -3,13 +3,11 @@
 //! deposit the ADR-0114 §5 composite dehydrate collects into.
 
 use core::marker::PhantomData;
-use core::num::NonZeroU64;
 
-use aether_data::{ActorMail, Kind, MailboxId};
+use aether_data::{ActorMail, Kind};
 
 use crate::model::ctx::mail_sender::MailSender;
 use crate::model::ctx::persistence::Persistence;
-use crate::model::{Addressable, CallerAddressable, CallerScope, CallerScoped, HandlesKind, Singleton};
 use crate::reference::ErasedActorRef;
 use crate::wasm::bridge::{mail, persist};
 use alloc::vec::Vec;
@@ -36,19 +34,15 @@ impl CapturedState {
 }
 
 /// Narrowed capability handle for the `on_dehydrate` save hook.
-/// Outbound mail still works through [`MailSender`]; the reply / resolve
+/// Outbound mail goes only through a proof, by
+/// [`MailSender::send_detached_to`]; the typed-send, reply, and resolve
 /// surfaces are intentionally absent.
 // The `Wasm` prefix carries the native/wasm split signal; bare `DropCtx` loses that.
 #[allow(clippy::module_name_repetitions)]
 pub struct WasmDropCtx<'a> {
-    /// The actor's own mailbox id (its lineage carry), so a buffered
-    /// `send` resolves the receiver through `R::resolve(self.mailbox)`
-    /// like every other ctx (ADR-0099 §5).
+    /// The actor's own mailbox id, stamped as the "from" half of every send
+    /// (issue 1987).
     mailbox: u64,
-    /// The actor's logical parent mailbox, in the macro-emitted ABI encoding:
-    /// `0` means no parent (legacy guests and cluster roots without parent
-    /// metadata).
-    parent: u64,
     /// ADR-0114 §5: when `Some`, `save_state` records into this buffer
     /// instead of the host import, so the dehydrate compose can collect
     /// the parent's and each child's bundle and pack one composite. `None`
@@ -62,8 +56,8 @@ impl<'a> WasmDropCtx<'a> {
     /// Forwards `save_state` to the host import.
     #[doc(hidden)]
     #[must_use]
-    pub fn __new(mailbox: u64, parent: u64) -> Self {
-        Self { mailbox, parent, capture: None, _borrow: PhantomData }
+    pub fn __new(mailbox: u64) -> Self {
+        Self { mailbox, capture: None, _borrow: PhantomData }
     }
 
     /// Not part of the public API; called only by the dehydrate compose
@@ -72,12 +66,8 @@ impl<'a> WasmDropCtx<'a> {
     /// before a single real host `save_state`.
     #[doc(hidden)]
     #[must_use]
-    pub(crate) fn __new_capturing(mailbox: u64, parent: u64, capture: &'a mut CapturedState) -> Self {
-        Self { mailbox, parent, capture: Some(capture), _borrow: PhantomData }
-    }
-
-    fn scope_mailbox(&self, scope: CallerScope) -> u64 {
-        scope.select(MailboxId(self.mailbox), NonZeroU64::new(self.parent).map(|parent| MailboxId(parent.get())))
+    pub(crate) fn __new_capturing(mailbox: u64, capture: &'a mut CapturedState) -> Self {
+        Self { mailbox, capture: Some(capture), _borrow: PhantomData }
     }
 
     /// Deposit a migration bundle. Mirrors [`Persistence::save_state`].
@@ -109,59 +99,11 @@ impl<'a> WasmDropCtx<'a> {
 }
 
 impl MailSender for WasmDropCtx<'_> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            false,
-            self.mailbox,
-        );
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        mail::send_mail(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            bytes,
-            payloads.len() as u32,
-            false,
-            self.mailbox,
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         mail::prev_correlation()
     }
 
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        mail::send_mail(
-            R::resolve(self.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            true,
-            self.mailbox,
-        );
-    }
-
-    // By-id detached send — the by-name body with the caller's id.
+    // By-id detached send, stamping the caller's id as the sender.
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         mail::send_mail(target.id().0, K::ID.0, &bytes, 1, true, self.mailbox);
@@ -175,18 +117,5 @@ impl Persistence for WasmDropCtx<'_> {
         // the bundle through `Persistence::save_state_kind`, which calls
         // this trait method, so a capturing ctx must intercept here too.
         WasmDropCtx::save_state(self, version, bytes);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn drop_ctx_preserves_parent_scope() {
-        let ctx = WasmDropCtx::__new(0x4d02, 0x4d01);
-
-        assert_eq!(ctx.scope_mailbox(CallerScope::Current), 0x4d02);
-        assert_eq!(ctx.scope_mailbox(CallerScope::Parent), 0x4d01);
     }
 }

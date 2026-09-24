@@ -7,15 +7,15 @@
 //! The pattern matches the per-handler [`crate::actor::native::ctx::NativeCtx`]:
 //! threads receive a ctx that grants send authority and carries the
 //! inheritance choice in its type. There is no way to send mail
-//! without holding one.
+//! without holding one. Both ctxs send through a held proof with
+//! [`MailSender::send_detached_to`]; neither carries a typed send.
 //!
 //! Two ctx flavours:
 //!
 //! - [`InheritCtx<A>`] — captures the spawning handler's in-flight
-//!   `(mail_id, root)`. Sends inherit `root` and stamp
-//!   `parent_mail = self.in_flight.mail_id`. Correct shape for
-//!   short-burst CPU offload that is *part of* the current handler's
-//!   causal closure.
+//!   `(mail_id, root)` and holds the chain open until the worker exits.
+//!   Correct shape for short-burst CPU offload that is *part of* the
+//!   current handler's causal closure.
 //! - [`RootCtx<A>`] — no in-flight context. Each send mints a fresh
 //!   root with `sender = A.mailbox` (per ADR-0080 §1 / §5). Correct
 //!   shape for long-lived workers that respond to external events
@@ -45,8 +45,7 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::thread::{self, JoinHandle};
 
-use aether_actor::{Addressable, ErasedActorRef, HandlesKind};
-use aether_actor::{CallerAddressable, CallerScoped, MailSender, Singleton};
+use aether_actor::{Addressable, ErasedActorRef, MailSender, Singleton};
 use aether_data::{ActorMail, MailId};
 
 use crate::actor::native::binding::NativeBinding;
@@ -54,10 +53,10 @@ use crate::actor::native::offload::fail_fast;
 use crate::runtime::trace::SettlementHold;
 
 /// ADR-0080 §12 spawn-context that captures the spawning handler's
-/// in-flight `(mail_id, root)`. Outbound sends from the worker
-/// thread inherit the parent root and stamp `parent_mail` to the
-/// in-flight mail id, so spawned-thread work folds into the parent
-/// handler's causal chain in the trace graph.
+/// in-flight `(mail_id, root)` and holds the parent chain open until the
+/// worker exits, so spawned-thread work settles inside the parent
+/// handler's causal closure. Its one send, the by-proof
+/// [`MailSender::send_detached_to`], mints a fresh root.
 ///
 /// `A` is the spawning actor's type. Held only as a phantom marker
 /// for now; future work may use it to scope which actor types
@@ -91,85 +90,24 @@ impl<A> InheritCtx<A> {
     }
 
     /// The in-flight `MailId` this ctx inherited from its spawning
-    /// handler, `None` when it had none. Outbound sends use this as
-    /// `parent_mail`.
+    /// handler, `None` when it had none.
     #[must_use]
     pub fn inherited_mail_id(&self) -> Option<MailId> {
         self.inherited_mail_id
     }
 
-    /// The chain root this ctx inherited from its spawning handler.
-    /// Outbound sends inherit this as their `root`; `None` when the
-    /// spawning handler ran in no chain.
+    /// The chain root this ctx inherited from its spawning handler, whose
+    /// settlement the ctx holds open; `None` when the spawning handler ran
+    /// in no chain.
     #[must_use]
     pub fn inherited_root(&self) -> Option<MailId> {
-        self.inherited_root
-    }
-
-    fn outbound_parent(&self) -> Option<MailId> {
-        self.inherited_mail_id
-    }
-
-    fn outbound_root(&self) -> Option<MailId> {
         self.inherited_root
     }
 }
 
 impl<A: Addressable> MailSender for InheritCtx<A> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        // Batch count rides as `u32` on the wire (matches the FFI ABI);
-        // realistic mail batches stay well below `u32::MAX`.
-        #[allow(clippy::cast_possible_truncation)]
-        let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            bytes,
-            count,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
-    }
-
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
     }
 
     // By-id detached send: `None` / `None` lineage mints a fresh root
@@ -185,7 +123,8 @@ impl<A: Addressable> MailSender for InheritCtx<A> {
 /// mailbox as producer (per ADR-0080 §1 / §5). Correct shape for
 /// long-lived workers that respond to external events with no
 /// caller-supplied causal context — TCP per-connection workers, future
-/// pollers, etc.
+/// pollers, etc. Its one send is the by-proof
+/// [`MailSender::send_detached_to`].
 pub struct RootCtx<A> {
     binding: Arc<NativeBinding>,
     _phantom: PhantomData<fn() -> A>,
@@ -200,66 +139,12 @@ impl<A> RootCtx<A> {
 }
 
 impl<A: Addressable> MailSender for RootCtx<A> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        // No inherited parent / root — each send mints its own chain
-        // rooted at the freshly minted `MailId` (sender = A.mailbox).
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        // Batch count rides as `u32` on the wire (matches the FFI ABI);
-        // realistic mail batches stay well below `u32::MAX`.
-        #[allow(clippy::cast_possible_truncation)]
-        let count = payloads.len() as u32;
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            bytes,
-            count,
-            None,
-            None,
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
     }
 
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.send_mail_with_lineage(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
-    }
-
-    // By-id detached send. A root ctx already mints a fresh chain per send,
-    // so this matches its other sends' `None` / `None` lineage.
+    // By-id detached send. A root ctx has no captured chain, so every send
+    // mints a fresh root with `None` / `None` lineage.
     fn send_detached_to<K: ActorMail>(&mut self, target: ErasedActorRef, payload: &K) {
         let bytes = payload.encode_into_bytes();
         self.binding.send_mail_with_lineage(target.id().0, K::ID.0, &bytes, 1, None, None);
@@ -296,8 +181,7 @@ where
     // worker exit.
     //
     // A ctx without an in-flight root has no chain to keep open, so the
-    // acquire hands back no hold. Symmetric with the `outbound_root` /
-    // `outbound_parent` `None` cases.
+    // acquire hands back no hold.
     let hold = in_flight_root.map(|root| binding.mailer().acquire_settlement_hold(root));
     let aborter = binding.fatal_aborter();
     thread::Builder::new()
@@ -343,7 +227,6 @@ mod tests {
     use super::*;
     use std::sync::Mutex;
 
-    use aether_actor::{CallerScope, Resolve};
     use aether_data::{Kind, KindId, MailboxId};
 
     use crate::mail::registry::{OwnedDispatch, Registry};
@@ -361,41 +244,11 @@ mod tests {
         type Resolver = aether_actor::One;
     }
 
-    impl HandlesKind<aether_kinds::Tick> for StubActor {}
-
-    struct ParentScopeResolver;
-
-    impl Resolve for ParentScopeResolver {
-        type Args<'a> = ();
-
-        fn resolve(caller_carry: u64, _namespace: &str, (): ()) -> MailboxId {
-            MailboxId(caller_carry)
-        }
-
-        fn candidate(caller_carry: u64, namespace: &str, key: Option<&str>) -> Option<MailboxId> {
-            key.is_none().then(|| Self::resolve(caller_carry, namespace, ()))
-        }
-    }
-
-    impl CallerScoped for ParentScopeResolver {
-        const SCOPE: CallerScope = CallerScope::Parent;
-    }
-
-    struct ParentScopedActor;
-
-    impl Addressable for ParentScopedActor {
-        const NAMESPACE: &'static str = "test.spawn_thread.parent_scoped";
-        type Resolver = ParentScopeResolver;
-    }
-
-    impl HandlesKind<aether_kinds::Tick> for ParentScopedActor {}
-
     #[derive(Clone, Debug)]
     struct CapturedDispatch {
         mail_id: Option<MailId>,
         root: Option<MailId>,
         parent_mail: Option<MailId>,
-        sender: aether_data::Source,
     }
 
     fn fresh_substrate() -> (Arc<Registry>, Arc<Mailer>) {
@@ -422,117 +275,19 @@ mod tests {
                     mail_id: dispatch.mail_id,
                     root: dispatch.root,
                     parent_mail: dispatch.parent_mail,
-                    sender: dispatch.sender,
                 });
             }),
         );
         captured
     }
 
-    fn register_capture_at(registry: &Registry, id: MailboxId) -> Arc<Mutex<Vec<CapturedDispatch>>> {
-        let captured: Arc<Mutex<Vec<CapturedDispatch>>> = Arc::new(Mutex::new(Vec::new()));
-        let captured_for_handler = Arc::clone(&captured);
-        registry
-            .try_register_inbox_with_id(
-                &boot_authority(),
-                id,
-                ParentScopedActor::NAMESPACE,
-                Arc::new(move |dispatch: OwnedDispatch| {
-                    dispatch.discharge();
-                    captured_for_handler.lock().unwrap().push(CapturedDispatch {
-                        mail_id: dispatch.mail_id,
-                        root: dispatch.root,
-                        parent_mail: dispatch.parent_mail,
-                        sender: dispatch.sender,
-                    });
-                }),
-            )
-            .expect("register parent-scoped capture");
-        captured
-    }
-
-    #[test]
-    fn offload_contexts_preserve_parent_scoped_resolution() {
-        let (registry, mailer) = fresh_substrate();
-        let parent = MailboxId(0x4a11);
-        let current = MailboxId(0x4a12);
-        let captured = register_capture_at(&registry, parent);
-        let binding = Arc::new(NativeBinding::new_for_test_with_parent(Arc::clone(&mailer), current, Some(parent)));
-        let inherited_root = MailId::new(MailboxId(0x4a13), 1);
-        let inherited_mail = MailId::new(MailboxId(0x4a14), 2);
-
-        spawn_inherit::<StubActor, _>(Arc::clone(&binding), Some(inherited_mail), Some(inherited_root), |mut ctx| {
-            <InheritCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(
-                &mut ctx,
-                &aether_kinds::Tick::default(),
-            );
-        })
-        .join()
-        .expect("inherit worker joins");
-        spawn_detached::<StubActor, _>(binding, |mut ctx| {
-            <RootCtx<StubActor> as MailSender>::send::<ParentScopedActor, _>(&mut ctx, &aether_kinds::Tick::default());
-        })
-        .join()
-        .expect("root worker joins");
-
-        assert_eq!(captured.lock().unwrap().len(), 2, "both offload ctx flavours resolve through the parent");
-    }
-
-    /// `InheritCtx`-spawned thread's typed send carries the
-    /// inherited root and stamps `parent_mail = inherited_mail_id`.
-    /// Settlement is held open until the worker thread exits per
-    /// ADR-0080 §12 / iamacoffeepot/aether#716; see
-    /// `spawn_inherit_acquires_and_releases_settlement_hold` below
-    /// for the held-open verification.
-    #[test]
-    fn inherit_ctx_send_carries_root_and_parent_mail() {
-        let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, StubActor::NAMESPACE);
-
-        let producer_mailbox = MailboxId(0xAA);
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
-
-        let inherited_root = MailId::new(MailboxId(0x1234), 7);
-        let inherited_mail_id = MailId::new(MailboxId(0x5678), 13);
-
-        let join = spawn_inherit::<StubActor, _>(
-            Arc::clone(&binding),
-            Some(inherited_mail_id),
-            Some(inherited_root),
-            move |mut inherit| {
-                <InheritCtx<StubActor> as MailSender>::send::<StubActor, _>(
-                    &mut inherit,
-                    &aether_kinds::Tick::default(),
-                );
-            },
-        );
-        join.join().expect("inherit worker thread joins");
-
-        let captured = captured.lock().unwrap();
-        assert_eq!(captured.len(), 1, "exactly one mail dispatched");
-        let dispatch = &captured[0];
-        assert_eq!(dispatch.root, Some(inherited_root), "spawned-thread send inherits parent root");
-        assert_eq!(
-            dispatch.parent_mail,
-            Some(inherited_mail_id),
-            "spawned-thread send stamps parent_mail = inherited mail_id"
-        );
-        // `mail_id.sender` is the producer (the actor's binding mailbox);
-        // `mail_id.correlation_id` came from the binding's per-actor counter.
-        assert_eq!(
-            dispatch.mail_id.map(|id| id.sender),
-            Some(producer_mailbox),
-            "fresh mail_id carries the binding's actor mailbox as producer"
-        );
-        assert!(dispatch.mail_id.is_some_and(|id| id.correlation_id > 0), "fresh mail_id has a non-zero correlation");
-    }
-
-    /// An explicit typed detached send from `InheritCtx` cuts the captured
+    /// A detached send through a proof from `InheritCtx` cuts the captured
     /// lineage and mints a fresh root.
     #[test]
     fn inherit_ctx_detached_send_mints_fresh_root() {
         let (registry, mailer) = fresh_substrate();
-        let typed = register_capture(&registry, StubActor::NAMESPACE);
+        let captured = register_capture(&registry, StubActor::NAMESPACE);
+        let target = Registry::structural_erased(registry.lookup(StubActor::NAMESPACE).expect("capture registered"));
 
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xAB)));
         let inherited_root = MailId::new(MailboxId(0x1234), 7);
@@ -543,104 +298,39 @@ mod tests {
             Some(inherited_mail_id),
             Some(inherited_root),
             move |mut inherit| {
-                <InheritCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
-                    &mut inherit,
-                    &aether_kinds::Tick::default(),
-                );
+                inherit.send_detached_to(target, &aether_kinds::Tick::default());
             },
         );
         join.join().expect("inherit worker thread joins");
 
-        let typed = typed.lock().unwrap();
-        assert_eq!(typed.len(), 1, "one typed detached mail dispatched");
-        for dispatch in typed.iter() {
+        let captured = captured.lock().unwrap();
+        assert_eq!(captured.len(), 1, "one detached mail dispatched");
+        for dispatch in captured.iter() {
             assert_eq!(dispatch.parent_mail, None, "detached send has no parent");
             assert_eq!(dispatch.root, dispatch.mail_id, "detached send is its own root");
         }
     }
 
-    /// `RootCtx`-spawned thread's typed send mints a fresh root
-    /// chain — root == its own `mail_id`, `parent_mail` = None.
-    #[test]
-    fn root_ctx_send_mints_fresh_root_with_no_parent() {
-        let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, StubActor::NAMESPACE);
-
-        let producer_mailbox = MailboxId(0xBB);
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
-
-        let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
-            <RootCtx<StubActor> as MailSender>::send::<StubActor, _>(&mut root, &aether_kinds::Tick::default());
-        });
-        join.join().expect("root worker thread joins");
-
-        let captured = captured.lock().unwrap();
-        assert_eq!(captured.len(), 1, "exactly one mail dispatched");
-        let dispatch = &captured[0];
-        assert_eq!(dispatch.parent_mail, None, "RootCtx send has no parent — chassis-root style");
-        assert_eq!(dispatch.root, dispatch.mail_id, "RootCtx send is its own root");
-        assert_eq!(
-            dispatch.mail_id.map(|id| id.sender),
-            Some(producer_mailbox),
-            "fresh mail_id carries the binding's actor mailbox as producer"
-        );
-        let _ = dispatch.sender;
-    }
-
-    /// An explicit typed detached send from `RootCtx` mints a fresh root,
-    /// matching the ctx's root-producing ordinary sends.
+    /// A detached send through a proof from `RootCtx` mints a fresh root
+    /// with no parent.
     #[test]
     fn root_ctx_detached_send_mints_fresh_root() {
         let (registry, mailer) = fresh_substrate();
-        let typed = register_capture(&registry, StubActor::NAMESPACE);
+        let captured = register_capture(&registry, StubActor::NAMESPACE);
+        let target = Registry::structural_erased(registry.lookup(StubActor::NAMESPACE).expect("capture registered"));
 
         let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), MailboxId(0xBC)));
         let join = spawn_detached::<StubActor, _>(binding, move |mut root| {
-            <RootCtx<StubActor> as MailSender>::send_detached::<StubActor, _>(
-                &mut root,
-                &aether_kinds::Tick::default(),
-            );
-        });
-        join.join().expect("root worker thread joins");
-
-        let typed = typed.lock().unwrap();
-        assert_eq!(typed.len(), 1, "one typed detached mail dispatched");
-        for dispatch in typed.iter() {
-            assert_eq!(dispatch.parent_mail, None, "detached send has no parent");
-            assert_eq!(dispatch.root, dispatch.mail_id, "detached send is its own root");
-        }
-    }
-
-    /// Multiple `RootCtx` sends each mint independent root chains.
-    /// The `mail_id` correlation counter advances; each send's `root`
-    /// equals its own `mail_id` (a chain of one).
-    #[test]
-    fn root_ctx_each_send_is_an_independent_root() {
-        let (registry, mailer) = fresh_substrate();
-        let captured = register_capture(&registry, StubActor::NAMESPACE);
-
-        let producer_mailbox = MailboxId(0xCC);
-        let binding = Arc::new(NativeBinding::new_for_test(Arc::clone(&mailer), producer_mailbox));
-
-        let join = spawn_detached::<StubActor, _>(Arc::clone(&binding), move |mut root| {
-            for _ in 0..3 {
-                <RootCtx<StubActor> as MailSender>::send::<StubActor, _>(&mut root, &aether_kinds::Tick::default());
-            }
+            root.send_detached_to(target, &aether_kinds::Tick::default());
         });
         join.join().expect("root worker thread joins");
 
         let captured = captured.lock().unwrap();
-        assert_eq!(captured.len(), 3);
-        for d in captured.iter() {
-            assert_eq!(d.root, d.mail_id, "each send is its own root");
-            assert_eq!(d.parent_mail, None);
+        assert_eq!(captured.len(), 1, "one detached mail dispatched");
+        for dispatch in captured.iter() {
+            assert_eq!(dispatch.parent_mail, None, "detached send has no parent");
+            assert_eq!(dispatch.root, dispatch.mail_id, "detached send is its own root");
         }
-        // Correlation ids are monotonic per actor — three sends, three
-        // distinct values.
-        let mut ids: Vec<u64> = captured.iter().filter_map(|d| d.mail_id.map(|id| id.correlation_id)).collect();
-        ids.sort_unstable();
-        ids.dedup();
-        assert_eq!(ids.len(), 3, "three distinct correlation ids");
     }
 
     /// ADR-0080 §12 / iamacoffeepot/aether#716: `spawn_inherit`

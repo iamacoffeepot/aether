@@ -3,10 +3,11 @@
 //! relative verbs' in-place routing.
 
 use super::{NO_INBOUND_SOURCE, Registry, SucceedingChild, WasmCtx, install_inline_child};
+use crate::mail::Mail;
 use crate::model::ctx::{Erased, Manual, Single};
 use crate::model::{Addressable, Embedded, HandlesKind, Resolve};
-use crate::wasm::WasmActorMailbox;
 use crate::wasm::inline::RouteDecision;
+use crate::wasm::{ActorInitError, WasmInitCtx};
 use aether_data::{MailboxId, Source, mailbox_id_from_path};
 use alloc::string::String;
 use alloc::vec::Vec;
@@ -20,6 +21,24 @@ impl Addressable for EmbeddedPeer {
 }
 
 impl HandlesKind<()> for EmbeddedPeer {}
+
+/// Types the ctx that sends to [`EmbeddedPeer`]: the flat typed verbs exist
+/// only on a ctx whose actor declares its recipient.
+struct PeerDependent;
+
+#[crate::actor(depends(EmbeddedPeer))]
+impl crate::WasmActor for PeerDependent {
+    const NAMESPACE: &'static str = "test.wasm.peer_dependent";
+
+    fn init(_ctx: &mut WasmInitCtx<'_>) -> Result<Self, ActorInitError> {
+        Ok(Self)
+    }
+
+    #[fallback]
+    fn fallback(&mut self, _ctx: &mut WasmCtx<'_>, _mail: Mail<'_>) {
+        let _ = self;
+    }
+}
 
 #[test]
 fn local_dispatch_ctx_never_reads_host_reply_correlation() {
@@ -77,16 +96,16 @@ fn embedded_actor_resolution_and_delivery_use_entry_and_inline_logical_parents()
     )
     .expect("install nested embedded peer");
 
-    let entry_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
-    let child_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
+    let mut entry_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(entry.0, &registry, NO_INBOUND_SOURCE);
+    let mut child_ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(child.0, &registry, NO_INBOUND_SOURCE);
+    let entry_ctx = entry_ctx.__for_actor::<PeerDependent>();
+    let child_ctx = child_ctx.__for_actor::<PeerDependent>();
 
-    let default = entry_ctx.actor::<EmbeddedPeer>();
-    let nested = child_ctx.actor::<EmbeddedPeer>();
-    assert_eq!(default.mailbox_id(), default_entry_peer);
-    assert_eq!(nested.mailbox_id(), nested_peer);
+    assert_eq!(entry_ctx.actor_ref::<EmbeddedPeer>().id(), default_entry_peer);
+    assert_eq!(child_ctx.actor_ref::<EmbeddedPeer>().id(), nested_peer);
 
-    default.send(&());
-    nested.send(&());
+    entry_ctx.send::<EmbeddedPeer>(&());
+    child_ctx.send::<EmbeddedPeer>(&());
     assert_eq!(registry.queued_len(), 2, "default and nested parent-scoped sends route locally");
 }
 
@@ -146,17 +165,23 @@ fn ctx_relative_verbs_resolve_and_route_in_place() {
     assert_eq!(registry.queued_len(), 1, "a send to a resolved relative enqueues locally — no scheduler hop");
 }
 
+/// A tracked send to a resident cluster member never leaves the guest, so it
+/// enqueues in place and returns the no-correlation sentinel instead of a
+/// stale host correlation. Owned logic: the local branch of the tracked-send
+/// routing.
 #[test]
 fn send_tracked_local_route_enqueues_and_returns_no_correlation() {
     let registry = Registry::new();
+    let parent = 0x7000_u64;
     let root = 0x7100_u64;
     registry.set_self_id(root);
-    let child = MailboxId(0x7101);
-    install_inline_child::<SucceedingChild>(&registry, child, 0, String::from("widget"), false, root, Vec::new(), ())
+    registry.set_parent_id(parent);
+    let peer = Embedded::resolve(parent, EmbeddedPeer::NAMESPACE, ());
+    install_inline_child::<SucceedingChild>(&registry, peer, 0, String::from("peer"), false, root, Vec::new(), ())
         .expect("install inline child");
 
-    let mailbox = WasmActorMailbox::<SucceedingChild>::new(child.0, root, &registry);
-    let request = mailbox.send_tracked(&());
+    let mut ctx: WasmCtx<'_, Erased, Manual> = WasmCtx::__new(root, &registry, NO_INBOUND_SOURCE);
+    let request = ctx.__for_actor::<PeerDependent>().send_tracked::<EmbeddedPeer>(&());
     assert_eq!(request.0, Source::NO_CORRELATION, "local inline sends have no host-minted request id");
     assert_eq!(registry.queued_len(), 1, "local tracked sends enqueue their payload before returning the sentinel");
 }

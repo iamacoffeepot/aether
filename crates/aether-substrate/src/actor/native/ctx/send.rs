@@ -19,8 +19,8 @@
 //! than lying in its manifest.
 
 use aether_actor::{
-    Addressable, CallerAddressable, CallerScoped, DependencyResolver, DependsOn, ErasedActorRef, HandlesKind,
-    MailSender, Manual, OutboundReply, ReplyMode, SendableTo, Singleton, Target,
+    CallerAddressable, DependencyResolver, DependsOn, ErasedActorRef, MailSender, Manual, OutboundReply, ReplyMode,
+    SendableTo, Singleton, Target,
 };
 use aether_data::{ActorMail, Kind, KindId, MailId, RequestId};
 
@@ -60,8 +60,8 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     ///
     /// Recipients still aren't known to share a receiver type at compile site
     /// — subscribers register at runtime — so this keeps taking a runtime set
-    /// rather than the typed `R: Singleton + HandlesKind<K>` shape of
-    /// [`MailSender::send`]. What each one is has narrowed: an
+    /// rather than the typed `R: Singleton + HandlesKind<K>` shape of the
+    /// flat [`Self::send`]. What each one is has narrowed: an
     /// [`ErasedActorRef`] the publisher already holds, proven when the
     /// subscription was accepted (ADR-0230), not a position handed over at
     /// the fan-out. The empty recipient set is a fast no-op — encoding only
@@ -400,69 +400,14 @@ fn refuse_engine_only(kind: KindId) -> bool {
 }
 
 // The per-stage capability trait impls (`MailSender` / `OutboundReply`).
-// `send` / `send_many` inherit this handler's
-// in-flight lineage (ADR-0080 §7); `send_detached` /
-// `send_detached_to` explicitly suppress it. `shutdown` / `monitor`
+// `send_detached_to` suppresses this handler's in-flight lineage
+// (ADR-0080 §7). `shutdown` / `monitor`
 // are inherent methods on `NativeCtx` that reach into the
 // substrate-internal spawner + actor registry.
 
 impl<M: ReplyMode, A> MailSender for NativeCtx<'_, A, M> {
-    fn send<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
-    fn send_many<R, K>(&mut self, payloads: &[K])
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail + bytemuck::NoUninit,
-    {
-        let bytes: &[u8] = bytemuck::cast_slice(payloads);
-        // Batch count rides as `u32` on the wire (matches the FFI ABI);
-        // realistic mail batches stay well below `u32::MAX`.
-        #[allow(clippy::cast_possible_truncation)]
-        let count = payloads.len() as u32;
-        self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            bytes,
-            count,
-            self.outbound_parent(),
-            self.outbound_root(),
-        );
-    }
-
     fn prev_correlation(&self) -> u64 {
         self.binding.prev_correlation()
-    }
-
-    fn send_detached<R, K>(&mut self, payload: &K)
-    where
-        R: Singleton + CallerAddressable + HandlesKind<K>,
-        K: ActorMail,
-    {
-        let bytes = payload.encode_into_bytes();
-        // ADR-0080 §7: suppress the in-flight lineage so the recipient
-        // starts a fresh causal chain.
-        self.binding.push_envelope_buffered(
-            R::resolve(self.binding.scope_mailbox(<<R as Addressable>::Resolver as CallerScoped>::SCOPE), ()).0,
-            K::ID.0,
-            &bytes,
-            1,
-            None,
-            None,
-        );
     }
 
     // By-id detached send — the by-name body with the caller's id, `None` /

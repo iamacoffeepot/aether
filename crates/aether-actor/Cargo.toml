@@ -43,10 +43,10 @@ serde = { workspace = true, default-features = false, features = ["alloc"] }
 tracing = { workspace = true, default-features = false }
 
 [dev-dependencies]
-# Examples migrate from kind-typed `Mailbox` resolutions to actor-
-# typed `ctx.actor::<R>()` calls (issue 575) — needs the cap markers
-# in scope. `aether-substrate` deps back on `aether-actor`, but cargo
-# permits dev-dep cycles for the test-target build graph.
+# Examples address caps by actor type through the flat ctx verbs
+# (issue 575) — needs the cap markers in scope. `aether-substrate` deps
+# back on `aether-actor`, but cargo permits dev-dep cycles for the
+# test-target build graph.
 # iamacoffeepot/aether#3749: the lifecycle cap was extracted to
 # `aether-lifecycle`; the `hello` example subscribes to `LifecycleCapability`
 # through the flat `ctx.subscribe` verb. Its departure left no path into the old

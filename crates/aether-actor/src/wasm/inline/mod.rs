@@ -357,15 +357,6 @@ impl Registry {
         scope.select(current, self.logical_parent_of(current))
     }
 
-    /// Return a cluster member's logical parent as a raw mailbox id, `0`
-    /// when it has none (the encoding [`crate::WasmDropCtx`] decodes). Macro
-    /// expansions use this when constructing a [`crate::WasmDropCtx`].
-    #[doc(hidden)]
-    #[must_use]
-    pub fn parent_id_for(&self, current: u64) -> u64 {
-        self.logical_parent_of(MailboxId(current)).map_or(0, |parent| parent.0)
-    }
-
     fn logical_parent_of(&self, id: MailboxId) -> Option<MailboxId> {
         if id.0 == self.self_id.get() {
             return self.parent_id.get().map(|parent| MailboxId(parent.get()));

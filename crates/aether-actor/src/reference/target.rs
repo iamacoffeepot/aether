@@ -24,7 +24,7 @@ mod sealed {
 /// context-carrying siblings) take `impl Target<K>`, so the kind is inferred
 /// from the payload and no turbofish is written. An [`ActorRef<R>`] is a
 /// target only for the kinds `R` handles, which keeps the compile-time check
-/// the `ctx.to(&reference)` handle had. An [`ErasedActorRef`] is a target for
+/// a typed send to `R` carries. An [`ErasedActorRef`] is a target for
 /// every kind, unchecked, as ADR-0230 §2 allows for a proof whose actor type
 /// the holder cannot name. Either way the kind must be [`ActorMail`], so no
 /// target carries engine-only mail (ADR-0233). A borrow of either is a target too, so a reference

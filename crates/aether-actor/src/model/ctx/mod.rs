@@ -12,9 +12,8 @@
 //! `WasmInitCtx` / `WasmCtx` / `WasmDropCtx` in [`crate::wasm::ctx`];
 //! native-side `NativeInitCtx` / `NativeCtx` in
 //! `aether_substrate::actor::native::ctx`. Each impls the trait
-//! subset applicable to its stage; default-impl bodies on
-//! [`MailSender`] cover the routing methods so the per-impl code is
-//! the stage-specific accessors.
+//! subset applicable to its stage and supplies its own bodies; the typed
+//! sends are each ctx's inherent flat verbs, not trait methods.
 
 pub mod mail_sender;
 pub mod outbound_reply;
