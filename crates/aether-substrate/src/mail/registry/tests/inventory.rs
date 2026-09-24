@@ -10,7 +10,7 @@ use crate::mail::MailboxId;
 use crate::mail::registry::{Registry, canonical_mailbox_id, noop_handler};
 use crate::testing::boot_authority as auth;
 
-use super::support::{InventorySubscriber, inventory_subscription_fixture};
+use super::support::inventory_subscription_fixture;
 
 /// Issue iamacoffeepot/aether#730: `list_mailbox_descriptors`
 /// snapshots the table sorted by name, categorises each entry by
@@ -70,7 +70,7 @@ fn list_mailbox_descriptors_ids_match_name_hashes() {
 #[test]
 fn inventory_wake_follows_coherent_publication_and_coalesces() {
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
-    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    let subscription = registry.subscribe_inventory(target, mailer);
     assert_eq!(
         wakes.recv_timeout(Duration::from_millis(100)).expect("subscription emits an initial local wake"),
         aether_actor::RegistryChanged::ID
@@ -97,7 +97,7 @@ fn inventory_wake_follows_coherent_publication_and_coalesces() {
 #[test]
 fn inventory_acknowledgement_rearms_from_one_coherent_generation_pair() {
     let (registry, mailer, wakes, target) = inventory_subscription_fixture();
-    let subscription = registry.subscribe_inventory::<InventorySubscriber>(target, mailer);
+    let subscription = registry.subscribe_inventory(target, mailer);
     wakes.recv_timeout(Duration::from_millis(100)).expect("initial wake");
     let observed = registry.inventory();
 

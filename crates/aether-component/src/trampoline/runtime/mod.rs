@@ -71,13 +71,12 @@ impl NativeActor for WasmTrampoline {
     fn init(config: WasmTrampolineConfig, ctx: &mut NativeInitCtx<'_>) -> Result<WasmTrampolineState, BootError> {
         let mailbox = ctx.self_id();
         let mailer = ctx.mailer();
-        let mut substrate_ctx =
-            ComponentCtx::new(mailbox, Arc::clone(&config.registry), Arc::clone(&mailer), Arc::clone(&config.outbound));
-        // Wire the trampoline's binding so the guest's reply /
-        // outbound-mail host fns route through *this* trampoline's
-        // binding (issue 634 Phase 4 PR 3 — single source of inbox
-        // truth lives on `NativeBinding`, not on `ComponentCtx`).
-        substrate_ctx.install_binding(Arc::clone(ctx.binding()));
+        let mut substrate_ctx = ComponentCtx::new(
+            Arc::clone(ctx.binding()),
+            Arc::clone(&config.registry),
+            Arc::clone(&mailer),
+            Arc::clone(&config.outbound),
+        );
         // ADR-0163 §3 (#3984): index an asset load window over the module's
         // `aether.asset.*` sections and install it before instantiate, so
         // the guest's `init` (run inside `instantiate`) and its later `wire`

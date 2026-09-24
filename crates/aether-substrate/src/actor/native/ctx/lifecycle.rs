@@ -134,7 +134,7 @@ impl<M: ReplyMode, A> NativeCtx<'_, A, M> {
     where
         A: HandlesKind<RegistryChanged>,
     {
-        self.binding.subscribe_inventory::<A>()
+        self.binding.subscribe_inventory()
     }
 
     /// ADR-0079 §8 (amended): declare the calling actor's mailbox
