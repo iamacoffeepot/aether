@@ -1,13 +1,15 @@
 //! The bloomery chassis CLI root (ADR-0090 unit d, issue 1258). [`BloomeryCli`]
-//! is journal-driven — no full-stack caps — so it flattens the bloomery and
-//! RPC-server overlays plus the four tuning overlays the chassis resolves off its
-//! own source stack, alongside the source-selecting [`ChassisMeta`] flags. The
+//! is journal-driven — no full-stack caps — so it flattens the bloomery,
+//! RPC-server, and HTTP-egress overlays plus the four tuning overlays the
+//! chassis resolves off its own source stack, alongside the source-selecting
+//! [`ChassisMeta`] flags. The
 //! shared staging / flag-naming / help-forwarding machinery lives in
 //! `aether_chassis::cli`.
 
 use aether_chassis::boot::{ActorRingOverlay, RegistryQueueOverlay, SchedulerTuningOverlay, env_only_after_help};
 use aether_chassis::chassis_cli;
 use aether_chassis::cli::ChassisMeta;
+use aether_http::HttpOverlay;
 use aether_rpc::RpcServerOverlay;
 use aether_substrate::config::SettlementOverlay;
 use clap::Parser;
@@ -36,6 +38,15 @@ pub struct BloomeryCli {
     #[command(flatten)]
     pub rpc: RpcServerOverlay,
 
+    /// HTTP egress knobs for Sampled programs (ADR-0234 decision 7):
+    /// `--http-allowlist` shadows `AETHER_HTTP_ALLOWLIST`, the hosts a fetch
+    /// may reach. Absent → the member's empty default, which denies every
+    /// fetch. The other `--http-*` flags (`--http-disable`,
+    /// `--http-require-https`, and the body, timeout, and in-flight bounds)
+    /// ride the same overlay.
+    #[command(flatten)]
+    pub http: HttpOverlay,
+
     /// Per-actor ring-capacity knobs (issue 1990): `--actor-*`. The chassis
     /// resolves `ActorRingConfig` off its own source stack for the actors its
     /// registry hosts.
@@ -62,13 +73,15 @@ pub struct BloomeryCli {
     pub meta: ChassisMeta,
 }
 
-// The bloomery composes the component host plus the RPC server; `--rpc-port`
-// rides the derive-emitted `RpcServerOverlay` (#3849) like every other flag.
+// The bloomery composes the component host, HTTP egress, and the RPC server;
+// `--rpc-port` rides the derive-emitted `RpcServerOverlay` (#3849) and
+// `--http-allowlist` the derive-emitted `HttpOverlay`, like every other flag.
 // The four tuning overlays the chassis resolves off its own source stack ride
 // beside the bloomery's own overlay.
 chassis_cli!(BloomeryCli {
     BloomeryOverlay,
     RpcServerOverlay,
+    HttpOverlay,
     ActorRingOverlay,
     SchedulerTuningOverlay,
     RegistryQueueOverlay,

@@ -10,6 +10,7 @@ use aether_bloomery_kinds::ClosureLimit;
 use aether_chassis::boot::{ChassisBase, RuntimeConfig};
 use aether_chassis_bloomery::BloomeryConfig;
 use aether_chassis_bloomery::chassis::{BloomeryChassis, BloomeryEnv};
+use aether_http::HttpConfig;
 use aether_substrate::Subname;
 use aether_substrate::config::ConfigSources;
 
@@ -24,7 +25,8 @@ impl SeededJournal {
     /// The chassis is built through `BloomeryChassis::build_mounted` with
     /// default base members and the widest closure limit, and is never
     /// `run()`: mail dispatches on the substrate's own threads, and the
-    /// passives tear down when the harness drops.
+    /// passives tear down when the harness drops. Config resolves
+    /// hermetically, so HTTP egress keeps its compiled deny-all default.
     ///
     /// # Panics
     ///
@@ -32,7 +34,13 @@ impl SeededJournal {
     /// spawn.
     #[must_use]
     pub fn boot(self) -> BloomeryHarness {
-        let (chassis, mounted) = BloomeryChassis::build_mounted(env(&self.journal))
+        self.boot_with(None)
+    }
+
+    /// [`SeededJournal::boot`], with `http` staged as the programmatic HTTP
+    /// egress config when it is `Some`.
+    fn boot_with(self, http: Option<HttpConfig>) -> BloomeryHarness {
+        let (chassis, mounted) = BloomeryChassis::build_mounted(env(&self.journal, http))
             .unwrap_or_else(|error| panic!("boot the bloomery chassis over {}: {error}", self.journal.display()));
         let (sender, arrivals) = mpsc::channel();
         let sink = chassis
@@ -55,6 +63,26 @@ impl BloomeryHarness {
         SeededJournal::new(batches).boot()
     }
 
+    /// [`BloomeryHarness::start`], with HTTP egress allowed to exactly
+    /// `hosts`.
+    ///
+    /// This is the only way a scenario opens egress: config resolves
+    /// hermetically, so `start` keeps the capability's empty allowlist and
+    /// every fetch is answered `AllowlistDenied`. Each host matches a fetch
+    /// URL's host exactly, whatever its port.
+    ///
+    /// # Panics
+    ///
+    /// Panics when the seed does not append or the chassis does not boot.
+    #[must_use]
+    pub fn start_allowing(
+        batches: impl IntoIterator<Item = Batch>,
+        hosts: impl IntoIterator<Item = impl Into<String>>,
+    ) -> Self {
+        let http = HttpConfig { allowlist: hosts.into_iter().map(Into::into).collect(), ..HttpConfig::default() };
+        SeededJournal::new(batches).boot_with(Some(http))
+    }
+
     /// The journal file the chassis opened.
     #[must_use]
     pub fn journal_path(&self) -> &Path {
@@ -63,10 +91,16 @@ impl BloomeryHarness {
 }
 
 /// A chassis env with default base members and the bloomery knobs pointing at
-/// `journal`.
-fn env(journal: &Path) -> BloomeryEnv {
+/// `journal`, over a hermetic source stack: programmatic over argv over
+/// default, never the process environment. `http`, when present, is staged as
+/// the programmatic HTTP egress config.
+fn env(journal: &Path, http: Option<HttpConfig>) -> BloomeryEnv {
+    let mut sources = ConfigSources::hermetic();
+    if let Some(http) = http {
+        sources.set_override(http);
+    }
     BloomeryEnv {
-        base: ChassisBase { sources: ConfigSources::new(None), ..Default::default() },
+        base: ChassisBase { sources, ..Default::default() },
         runtime: RuntimeConfig::default(),
         bloomery: BloomeryConfig {
             journal: Some(journal.display().to_string()),

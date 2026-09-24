@@ -6,9 +6,11 @@ license.workspace = true
 publish = false
 
 # The bloomery chassis (issue #6244): the journal-driven engine. Boots the
-# shared base stratum plus the component host and the RPC server, then spawns
-# the journal owner and the bundle driver over one journal file. Produces the
-# `aether-bloomery` binary over the shared `aether-chassis` composition layer.
+# shared base stratum plus the component host, HTTP egress, and the RPC server,
+# then spawns the journal owner and the bundle driver over one journal file.
+# Produces the `aether-bloomery` binary over the shared `aether-chassis`
+# composition layer. HTTP egress is its one sanctioned integration (ADR-0234
+# decision 7), deny-by-default until an operator names hosts on the allowlist.
 
 [[bin]]
 name = "aether-bloomery"
@@ -25,9 +27,11 @@ aether-actor = { path = "../aether-actor" }
 aether-chassis = { path = "../aether-chassis" }
 aether-substrate = { path = "../aether-substrate" }
 # The bloomery cap set: the component host the driver's `Command::Load`
-# targets, the RPC server every substrate chassis composes (ADR-0155 §3),
-# and the journal owner plus bundle driver the mount seam spawns.
+# targets, the deny-by-default HTTP egress Sampled programs fetch through
+# (ADR-0234 decision 7), the RPC server every substrate chassis composes
+# (ADR-0155 §3), and the journal owner plus bundle driver the mount seam spawns.
 aether-component = { path = "../aether-component" }
+aether-http = { path = "../aether-http" }
 aether-rpc = { path = "../aether-rpc" }
 aether-bloomery-journal = { path = "../aether-bloomery-journal" }
 aether-bloomery-driver = { path = "../aether-bloomery-driver" }
@@ -42,6 +46,11 @@ tracing = { workspace = true, features = ["std", "attributes"] }
 
 [dev-dependencies]
 aether-harness-bloomery = { path = "../aether-harness-bloomery" }
+# The Muse scenario imports the turn kinds it seeds and reads back, and locates
+# the `muse` bundle wasm by this crate's stem, so a bundle change re-runs it.
+aether-bloomery-muse = { path = "../aether-bloomery-muse" }
+# The Muse scenario reads the request body its loopback stub server received.
+serde_json = { workspace = true }
 # The crash scenario forks the `aether-bloomery` binary through the hub, SIGKILLs it, and reads the restarted engine over the wire.
 aether-harness-fleet = { path = "../aether-harness-fleet" }
 # `require_wasm`, which locates the program fixture bundle the crash scenario seeds.

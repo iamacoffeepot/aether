@@ -1,9 +1,14 @@
 //! aether-chassis-bloomery: the bloomery chassis (issue #6244), the
 //! journal-driven engine. Boots the shared base stratum plus the component
-//! host and the RPC server, mounts the journal owner and the bundle driver
-//! over one journal file, and only then binds the RPC listener (issue
-//! #6399). Produces the `aether-bloomery` binary over the shared
+//! host, HTTP egress, and the RPC server, mounts the journal owner and the
+//! bundle driver over one journal file, and only then binds the RPC listener
+//! (issue #6399). Produces the `aether-bloomery` binary over the shared
 //! `aether-chassis` composition layer.
+//!
+//! HTTP egress is the engine's one sanctioned integration (ADR-0234 decision
+//! 7): Sampled programs fetch through it, and it keeps the capability's own
+//! deny-by-default allowlist, so a fetch reaches only the hosts an operator
+//! names with `--http-allowlist` and any other fetch is recorded as a refusal.
 //!
 //! The composition answers ADR-0226's deferred "chassis mounting": the driver
 //! and the journal become RPC-addressable mailboxes on this engine, so journal
