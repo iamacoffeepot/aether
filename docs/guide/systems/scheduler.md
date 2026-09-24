@@ -229,10 +229,12 @@ its own deque 0→1→0 and would never visit the injector. Every
 worker probes the injector once before continuing, so a captured worker starves
 shared work for at most ~K cycles.
 
-**Panics.** A handler panic is caught at the worker boundary and escalated
-through the chassis `FatalAborter` (fail-fast per ADR-0063) — the pool never
-silently loses a worker thread. A `dispatch_blocking` worker, the off-thread half
-of a handler turn, escalates a panic in its closure through the same aborter.
+**Panics.** A panic anywhere on a pool worker escalates through the chassis
+`FatalAborter` (fail-fast per ADR-0063): in a handler, while acquiring the next
+slot, or while dropping an actor's last slot reference — so the pool never
+silently loses a worker thread. A handler panic's reason names the actor; the
+rest name the worker thread. A `dispatch_blocking` worker, the off-thread half of
+a handler turn, escalates a panic in its closure through the same aborter.
 
 ## Where roots enter
 
