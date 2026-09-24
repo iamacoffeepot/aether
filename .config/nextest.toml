@@ -30,8 +30,8 @@ retries = 1
 filter = "package(=aether-kit-widget) & binary(widget_render_interaction)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# Every binary under `crates/aether-kit-commons/tests/` cold-loads and compiles
-# `aether_kit_commons.wasm` and boots a wgpu `SubstrateHarness`, so they are one
+# Every binary under `crates/aether-kit/tests/` cold-loads and compiles
+# `aether_kit.wasm` and boots a wgpu `SubstrateHarness`, so they are one
 # slow class rather than a fixed allowlist: #2805 measured the camera scenario
 # around 56.5s and mesh around 52-53s against the default 60s cap, and
 # iamacoffeepot/aether#3527 saw two more binaries cross 60s the same way,
@@ -39,7 +39,7 @@ slow-timeout = { period = "300s", terminate-after = 1 }
 # `kind(test)` scopes the cap to the integration binaries; the crate's
 # `kind(lib)` unit tests keep the 60s default.
 [[profile.ci.overrides]]
-filter = "package(=aether-kit-commons) & kind(test)"
+filter = "package(=aether-kit) & kind(test)"
 slow-timeout = { period = "120s", terminate-after = 1 }
 
 # The `Publishes<K>` subscribe-bound harness pays a nested-cold-build cost:
@@ -53,7 +53,7 @@ slow-timeout = { period = "120s", terminate-after = 1 }
 filter = "package(=aether-subscribe-ui-tests) & binary(subscribe_bounds)"
 slow-timeout = { period = "300s", terminate-after = 1 }
 
-# The fleetharness replace binary also cold-loads `aether_kit_commons.wasm` and
+# The fleetharness replace binary also cold-loads `aether_kit.wasm` and
 # was measured in #2805 around 156.8s against the 180s bundle cap. Keep the
 # package-wide cap intact and widen only this known slow binary. This override
 # used to sit near the end of the file, below the package-wide `kind(test)`
@@ -82,7 +82,7 @@ slow-timeout = { period = "180s", terminate-after = 1 }
 # classes: the harness tests (cap_registry / cost_table /
 # substrate_harness_logs, iamacoffeepot/aether#3770) cold-load fixture wasm
 # — cap_registry's replace test additionally cold-compiles
-# `aether_kit_commons.wasm`, the exact load that pushed the aether-kit-commons
+# `aether_kit.wasm`, the exact load that pushed the aether-kit
 # binaries past 60s (#2805) — and the fleet log-tail test (`fleetharness_logs`,
 # iamacoffeepot/aether#3781) forks a real debug
 # `aether-headless` process and waits for it to bind. The fork

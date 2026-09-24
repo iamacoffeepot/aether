@@ -3,7 +3,7 @@
 //! ribbons.
 //!
 //! Library only (ADR-0053): it produces triangles and renders nothing.
-//! `aether-kit-commons`'s `aether.kit.mesh` export uses it to mesh DSL text
+//! `aether-kit`'s `aether.kit.mesh` export uses it to mesh DSL text
 //! loaded from disk, the engine's triangle consumers share the indexed OBJ
 //! importer, the `dsl_to_obj` example converts a `.dsl` file to Wavefront
 //! OBJ for any external viewer, and the `utah_teapot` example writes the

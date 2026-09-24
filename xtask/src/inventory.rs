@@ -77,7 +77,7 @@ pub struct Component {
     pub from_example: bool,
     /// Wasm output filename stem — the lib or example target name. This
     /// is the same string `locate_component_wasm` keys on (e.g.
-    /// `aether_kit_commons`, `probe`).
+    /// `aether_kit`, `probe`).
     pub stem: String,
     /// Package features to enable for this component's wasm build — the
     /// features whose declared value pulls in `aether-behavior`

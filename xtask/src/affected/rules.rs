@@ -90,8 +90,8 @@ mod tests {
         }
 
         for path in [
-            "crates/aether-kit-commons/src/lib.rs",
-            "crates/aether-kit-commons/Cargo.toml",
+            "crates/aether-kit/src/lib.rs",
+            "crates/aether-kit/Cargo.toml",
             "docs/guide/testing.md",
             "xtask/src/bloom/roll/coverage.rs",
         ] {
