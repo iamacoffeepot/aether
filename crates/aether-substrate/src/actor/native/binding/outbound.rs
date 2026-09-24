@@ -85,7 +85,7 @@ impl OutboundBuffer {
 
 impl NativeBinding {
     /// ADR-0087 / 2b: the buffering counterpart to
-    /// [`Self::push_envelope_returning_root`], used by the per-handler
+    /// [`Self::push_envelope_returning_root_before_push`], used by the per-handler
     /// send surface ([`super::ctx::NativeCtx`](crate::actor::native::ctx::NativeCtx)).
     /// Rather than allocating an
     /// owned `Vec` and routing immediately, it copies the bytes into the

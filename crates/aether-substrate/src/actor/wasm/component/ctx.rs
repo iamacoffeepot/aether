@@ -422,7 +422,7 @@ impl ComponentCtx {
 
         // ADR-0080 §1 (issue iamacoffeepot/aether#722): mint the
         // outbound's MailId from the same correlation that drives
-        // reply routing — symmetric with `NativeBinding::send_mail_with_lineage`,
+        // reply routing — symmetric with `NativeBinding::push_envelope_buffered`,
         // which uses one counter for both.
         let mail_id = MailId::new(from, correlation);
         self.send_routed(recipient, kind, payload, count, reply_to, mail_id, false, from);

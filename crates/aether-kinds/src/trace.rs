@@ -130,7 +130,7 @@ pub enum TraceEvent {
         t: Nanos,
     },
     /// ADR-0080 §12 / iamacoffeepot/aether#716: a thread-spawn primitive
-    /// (currently `InheritCtx<A>` via `NativeCtx::spawn_inherit`) acquired
+    /// (currently `NativeCtx::spawn_inherit`) acquired
     /// a `SettlementHold` against `root`. The observer increments the
     /// root's `held_open` counter and gates `Settled` emission on
     /// `(in_flight == 0 && held_open == 0)`. Pushed by the parent thread

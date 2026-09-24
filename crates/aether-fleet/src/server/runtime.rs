@@ -609,9 +609,9 @@ impl<P> FleetServerState<P> {
     /// reader on `ctx`: every chunk reaches the hub log as it would have
     /// inherited, and the redacted end of it rides out as
     /// [`PreparedFork::stderr`] for a failure detail.
-    fn prepare_fork<A, M: ReplyMode>(
+    fn prepare_fork<M: ReplyMode>(
         &mut self,
-        ctx: &NativeCtx<'_, A, M>,
+        ctx: &NativeCtx<'_, FleetServer, M>,
         exec_source: &Path,
         recipe: &SpawnRecipe,
     ) -> Result<PreparedFork, PrepareFailure> {
@@ -661,11 +661,8 @@ impl<P> FleetServerState<P> {
                 }
             };
         // The reader answers to the child's pipe, not to any mail chain,
-        // and sends nothing, so it lets its root ctx go at once.
-        ctx.spawn_detached::<FleetServer, _>(move |root| {
-            drop(root);
-            tee.run();
-        });
+        // and sends nothing.
+        ctx.spawn_detached(move || tee.run());
 
         Ok(PreparedFork { engine_id, port_file, child, stderr })
     }

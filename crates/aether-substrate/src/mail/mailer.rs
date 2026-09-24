@@ -264,7 +264,7 @@ impl Mailer {
     /// into one call so chassis-side mail (Tick fanout from the
     /// frame loop, hub-bridged inbound, MCP-bridged) gets observable
     /// lineage without duplicating the producer-side hook in
-    /// `NativeBinding::send_mail_with_lineage`.
+    /// `NativeBinding::push_envelope_returning_root_before_push`.
     ///
     /// Returns the freshly minted `MailId` so the caller can
     /// subscribe to its settlement via the chassis
@@ -437,7 +437,7 @@ impl Mailer {
     ///
     /// Equivalent to [`Self::send_reply`] with an absent lineage
     /// triple — the bare form is the lineage form's chassis-root case,
-    /// as `NativeBinding::send_mail_with_lineage` is with `None` / `None`.
+    /// as `NativeBinding::push_envelope_buffered` is with `None` / `None`.
     pub fn send_reply_unchained<K>(&self, sender: Source, result: &K) -> bool
     where
         K: Kind,
