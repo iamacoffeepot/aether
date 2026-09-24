@@ -40,7 +40,7 @@ pub struct Hello {}
 ///
 /// Capture a frame to see the triangle. A frame that has gone a solid color
 /// means the tick path stalled.
-#[actor(depends(LifecycleCapability), depends(RenderCapability))]
+#[actor(depends(LifecycleCapability, RenderCapability))]
 impl WasmActor for Hello {
     const NAMESPACE: &'static str = "example.hello";
 

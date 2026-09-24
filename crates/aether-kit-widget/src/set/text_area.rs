@@ -7,7 +7,7 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use aether_actor::{ActorInitError, Reaches, WasmActor, WasmCtx, WasmInitCtx, actor};
+use aether_actor::{ActorInitError, DependsOn, WasmActor, WasmCtx, WasmInitCtx, actor};
 use aether_clipboard::{ClipboardCapability, GetClipboardTextResult, SetClipboardTextResult};
 use aether_kinds::keycode::{KEY_DOWN, KEY_ENTER, KEY_UP};
 use aether_kinds::{ImePreedit, Key, Modifiers, MouseButton, MouseButtonRelease, MouseMove, TextInput, mouse_button};
@@ -111,7 +111,7 @@ impl TextAreaWidget {
         apply_text_control_state(ctx, &mut self.state, &mut self.edit, &mut self.dragging, next);
     }
 
-    fn pump_font_metrics<A: Reaches<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
+    fn pump_font_metrics<A: DependsOn<TextCapability>>(&mut self, ctx: &mut WasmCtx<'_, A>) {
         pump_text_font_metrics(ctx, &mut self.font_metrics);
     }
 
@@ -372,7 +372,7 @@ impl WidgetDefaults for TextAreaWidget {
 /// Enter inserts a newline; Ctrl+Enter emits [`TextCommitted`] to the parent.
 /// A re-sent config resizes and restyles it in place, holding the buffer;
 /// [`SetText`] replaces what it holds.
-#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability), depends(ClipboardCapability))]
+#[actor(instanced, composable, handler_set(WidgetDefaults), depends(TextCapability, ClipboardCapability))]
 impl WasmActor for TextAreaWidget {
     type Config = TextAreaConfig;
     const NAMESPACE: &'static str = "aether.kit.widget.text_area";

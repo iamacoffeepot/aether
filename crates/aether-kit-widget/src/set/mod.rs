@@ -101,8 +101,10 @@ use alloc::string::String;
 use alloc::vec::Vec;
 use core::mem;
 
-use aether_actor::{Reaches, WasmCtx};
-use aether_clipboard::{ClipboardCapability, ClipboardMailboxExt, GetClipboardTextResult, SetClipboardTextResult};
+use aether_actor::{DependsOn, WasmCtx};
+use aether_clipboard::{
+    ClipboardCapability, GetClipboardText, GetClipboardTextResult, SetClipboardText, SetClipboardTextResult,
+};
 use aether_kinds::keycode::{
     KEY_A, KEY_BACKSPACE, KEY_C, KEY_DELETE, KEY_END, KEY_ENTER, KEY_HOME, KEY_LEFT, KEY_RIGHT, KEY_SPACE, KEY_V, KEY_X,
 };
@@ -335,7 +337,7 @@ pub(super) fn apply_edit_command(edit: &mut TextEditState, command: EditCommand,
 ///
 /// `paste_pending` is the control's own single-flight guard: a second Paste
 /// while a clipboard read is outstanding is dropped rather than queued.
-pub(super) fn run_edit_key<A: Reaches<ClipboardCapability>>(
+pub(super) fn run_edit_key<A: DependsOn<ClipboardCapability>>(
     ctx: &mut WasmCtx<'_, A>,
     edit: &mut TextEditState,
     paste_pending: &mut bool,
@@ -344,11 +346,11 @@ pub(super) fn run_edit_key<A: Reaches<ClipboardCapability>>(
 ) -> bool {
     let effect = apply_edit_command(edit, command, mutable);
     if let Some(text) = effect.copy {
-        ctx.actor::<ClipboardCapability>().set_text(&text);
+        ctx.send::<ClipboardCapability>(&SetClipboardText { text });
     }
     if effect.request_paste && !*paste_pending {
         *paste_pending = true;
-        ctx.actor::<ClipboardCapability>().get_text();
+        ctx.send::<ClipboardCapability>(&GetClipboardText);
     }
     effect.changed
 }
@@ -429,13 +431,16 @@ fn apply_text_control_state<A>(
     }
 }
 
-fn pump_text_font_metrics<A: Reaches<TextCapability>>(ctx: &mut WasmCtx<'_, A>, font_metrics: &mut FontMetricsAdapter) {
+fn pump_text_font_metrics<A: DependsOn<TextCapability>>(
+    ctx: &mut WasmCtx<'_, A>,
+    font_metrics: &mut FontMetricsAdapter,
+) {
     if let Some(id) = font_metrics.take_pending_request() {
-        ctx.actor::<TextCapability>().send(&FontMetricsRequest { font: FontRef::Id(id) });
+        ctx.send::<TextCapability>(&FontMetricsRequest { font: FontRef::Id(id) });
     }
 }
 
-fn apply_text_theme<A: Reaches<TextCapability>>(
+fn apply_text_theme<A: DependsOn<TextCapability>>(
     ctx: &mut WasmCtx<'_, A>,
     font_metrics: &mut FontMetricsAdapter,
     theme: &mut Theme,
@@ -449,7 +454,7 @@ fn apply_text_theme<A: Reaches<TextCapability>>(
 /// Install a font-metrics reply and pump whatever newer request the settled
 /// flight deferred. A stale reply — its font is no longer the desired one —
 /// is dropped by the adapter.
-fn accept_font_metrics_result<A: Reaches<TextCapability>>(
+fn accept_font_metrics_result<A: DependsOn<TextCapability>>(
     ctx: &mut WasmCtx<'_, A>,
     font_metrics: &mut FontMetricsAdapter,
     result: FontMetricsResult,

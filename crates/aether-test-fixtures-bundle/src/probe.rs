@@ -66,7 +66,7 @@ pub struct Probe {
     tick_count: u64,
 }
 
-#[actor(depends(LifecycleCapability), depends(WindowCapability), depends(SubstrateHarnessObserver))]
+#[actor(depends(LifecycleCapability, WindowCapability, SubstrateHarnessObserver))]
 impl WasmActor for Probe {
     const NAMESPACE: &'static str = "test.probe";
 
@@ -98,7 +98,7 @@ impl WasmActor for Probe {
     #[handler::single]
     fn on_tick(&mut self, ctx: &mut WasmCtx<'_>, _: Tick) {
         self.tick_count += 1;
-        ctx.actor::<SubstrateHarnessObserver>().send(&TickObserved { count: self.tick_count });
+        ctx.send::<SubstrateHarnessObserver>(&TickObserved { count: self.tick_count });
     }
 
     /// Broadcasts a `key_observed` for each `Key` dispatch, so the
@@ -111,7 +111,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.key_observed`.
     #[handler::single]
     fn on_key(&mut self, ctx: &mut WasmCtx<'_>, key: Key) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&KeyObserved { code: key.code });
+        ctx.send::<SubstrateHarnessObserver>(&KeyObserved { code: key.code });
     }
 
     /// Unsubscribe this probe from `Key` on every window, the self-addressed
@@ -135,7 +135,7 @@ impl WasmActor for Probe {
     /// Watch `receive_mail` for `aether.test_fixture.text_input_observed`.
     #[handler::single]
     fn on_text_input(&mut self, ctx: &mut WasmCtx<'_>, input: TextInput) {
-        ctx.actor::<SubstrateHarnessObserver>().send(&TextInputObserved { text: input.text });
+        ctx.send::<SubstrateHarnessObserver>(&TextInputObserved { text: input.text });
     }
 }
 
