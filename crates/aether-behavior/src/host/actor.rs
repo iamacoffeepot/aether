@@ -19,11 +19,11 @@ use alloc::string::String;
 use alloc::vec::Vec;
 
 use aether_actor::{
-    ActorInitError, ActorTypeTag, Erased, ErasedActorRef, Mail, MailboxId, Manual, OutboundReply, PriorState,
-    ReplyHandle, SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
+    ActorInitError, ActorTypeTag, ErasedActorRef, Mail, MailboxId, Manual, OutboundReply, PriorState, ReplyHandle,
+    SpawnError, Subname, WasmActor, WasmCtx, WasmDropCtx, WasmInitCtx, actor,
 };
 use aether_data::KindId;
-use aether_fs::{FsCapability, FsMailboxExt, ReadResult};
+use aether_fs::{FsCapability, NamespaceAddr, Read, ReadResult};
 use wasmi::Engine;
 
 use crate::envelope::EffectTarget;
@@ -134,7 +134,8 @@ impl WasmActor for BehaviorHost {
                 origin: ScriptLoadOrigin::Boot,
                 source: ScriptSource::FsRef { namespace: namespace.clone(), path: path.clone() },
             };
-            ctx.actor::<FsCapability>().with_context(&context).read(namespace, path);
+            let _ =
+                ctx.send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(namespace, path) }, &context);
         }
 
         if self.slot.is_some() {
@@ -184,20 +185,21 @@ impl WasmActor for BehaviorHost {
     /// reply target through the async read as a request context.
     #[allow(clippy::unused_self)] // aether-suppression-request: required wasm handler receiver
     #[handler::manual]
-    fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, msg: LoadScript) {
+    fn on_load_script(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, msg: LoadScript) {
         let context = ScriptLoadContext {
             reply: ctx.reply_target(),
             origin: ScriptLoadOrigin::Runtime,
             source: ScriptSource::FsRef { namespace: msg.namespace.clone(), path: msg.path.clone() },
         };
-        ctx.actor::<FsCapability>().with_context(&context).read(msg.namespace, msg.path);
+        let _ = ctx
+            .send_with_context::<FsCapability>(&Read { addr: NamespaceAddr::new(msg.namespace, msg.path) }, &context);
     }
 
     /// The fs read reply for a `load_script` (or the boot `FsRef` fetch). Swaps
     /// the script on `Ok`, keeps the prior on `Err`, and recovers the parked
     /// `load_script_result` reply from the request context when one is pending.
     #[handler::manual]
-    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Erased, Manual>, reply: ReadResult) {
+    fn on_read_result(&mut self, ctx: &mut WasmCtx<'_, Self, Manual>, reply: ReadResult) {
         let Some(context) = ctx.take_context::<ScriptLoadContext>() else {
             return;
         };
@@ -557,7 +559,6 @@ mod tests {
     use aether_actor::Lifecycle;
     use aether_actor::wasm::{NO_INBOUND_SOURCE, inline::Registry};
     use aether_data::wire;
-    use aether_fs::NamespaceAddr;
     use alloc::string::ToString;
     use alloc::vec;
     use alloc::vec::Vec;

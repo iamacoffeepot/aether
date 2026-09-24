@@ -4,7 +4,6 @@
 //! macro-authored precedence handlers the routing tests drive.
 
 use aether_actor::{Manual, actor};
-use aether_component::ComponentHostCapability;
 use aether_data::Kind;
 use aether_substrate::actor::native::{Erased, NativeActor, NativeCtx, NativeInitCtx};
 use aether_substrate::chassis::error::BootError;
@@ -139,7 +138,7 @@ impl NativeActor for WiredRouteHandler {
     }
 
     fn wire(_state: &mut WiredRouteHandlerState, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/wired-extra".to_string(),
             method: None,
             kind: <HttpServerRequest as Kind>::ID,
@@ -278,14 +277,13 @@ impl NativeActor for SilentPeer {
 /// A deferred-route handler (ADR-0154 §2): `/echo` forwards to
 /// [`EchoPeer`] and answers on its `EchoSay` reply; `/blackhole`
 /// forwards to [`SilentPeer`] and is answered `502` by the settlement
-/// net when that chain settles without a reply. `ctx.defer(..)` resolves
-/// its recipient through the component host, hence the dependency on
-/// [`ComponentHostCapability`].
+/// net when that chain settles without a reply. `ctx.defer(..)` forwards to
+/// a declared dependency, hence `depends` names both peers.
 pub struct DeferRouteHandler;
 pub struct DeferRouteHandlerState;
 
 #[http::router]
-#[actor(singleton, root, depends(HttpServerCapability, EchoPeer, SilentPeer, ComponentHostCapability))]
+#[actor(singleton, root, depends(HttpServerCapability, EchoPeer, SilentPeer))]
 impl NativeActor for DeferRouteHandler {
     type State = DeferRouteHandlerState;
     type Config = ();
@@ -298,7 +296,7 @@ impl NativeActor for DeferRouteHandler {
     /// `GET /echo` — forward to the echo peer by type, answer on its
     /// reply. `defer(&request)` captures the request; `.to::<R>()` forwards it.
     #[http::route(Get, "/echo")]
-    fn echo(_state: &mut DeferRouteHandlerState, ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>) -> http::Outcome {
+    fn echo(_state: &mut DeferRouteHandlerState, mut ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "hi".to_string() }).to::<EchoPeer>()
     }
 
@@ -307,7 +305,7 @@ impl NativeActor for DeferRouteHandler {
     #[http::route(Get, "/blackhole")]
     fn blackhole(
         _state: &mut DeferRouteHandlerState,
-        ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>,
+        mut ctx: http::Ctx<'_, NativeCtx<'_, Self, Manual>>,
     ) -> http::Outcome {
         ctx.defer(&EchoAsk { text: "void".to_string() }).to::<SilentPeer>()
     }

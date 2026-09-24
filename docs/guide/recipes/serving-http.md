@@ -99,7 +99,7 @@ impl WasmActor for Web {
     // narrower prefix instead (see §Claiming routes) to own just one path
     // family and leave the rest to other handlers.
     fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/".to_string(),
             method: None,
             kind: HttpServerRequest::ID,
@@ -209,7 +209,7 @@ use aether_data::Kind as _;
 
 // In an `#[actor(depends(HttpServerCapability))]` block.
 fn wire(&mut self, ctx: &mut WireCtx<'_, '_>) {
-    ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+    ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
         prefix: "/api".to_string(),
         method: None,                        // or Some(HttpMethod::Get)
         kind: HttpServerRequest::ID,
@@ -365,9 +365,9 @@ an `impl NativeActor` takes `http::Ctx<'_, NativeCtx<'_>>` with a
 
 The router types a route's ctx by its actor: `http::Ctx<'_, WasmCtx<'_>>` reads
 as `http::Ctx<'_, WasmCtx<'_, Self>>`. A route therefore reaches the peers its
-actor declares with `depends(..)` through the typed verbs —
-`ctx.actor_ref::<R>()`, and on the guest `ctx.send::<R>(..)` — and a route that
-calls `ctx.actor::<R>()` needs `depends(R)` like any other handler.
+actor declares with `depends(..)` through the flat verbs — `ctx.send::<R>(..)`
+and its siblings, on both transports — and a route that sends to `R` needs
+`depends(R)` like any other handler.
 
 Drop to the raw `register_route_self` surface above for a streaming route
 (`HttpResponseStreamOpen`) — the typed surface returns `HttpServerResponse`, so

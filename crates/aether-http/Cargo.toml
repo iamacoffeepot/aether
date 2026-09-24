@@ -18,16 +18,11 @@ publish = false
 # family. They stay two distinct capabilities — separate cap structs,
 # separate `NAMESPACE` / mailboxes.
 #
-# It depends downward on `aether-component`: `defer.rs` names
-# `ComponentHostCapability` to resolve the handler component a deferred
-# request is answered through (ADR-0154). That is a genuine use, not a
-# facade.
-#
 # The ADR-0122 identity/runtime split rides the `runtime` feature: the
 # mail kinds, the wasm-safe cap identities with their `Addressable`,
 # per-handler `HandlesKind`, and name-inventory markers, the typed route
 # surface, and the stream handles compile always-on, so a marker-only wasm
-# guest can address `ctx.actor::<HttpCapability>()` and author
+# guest can send `ctx.send::<HttpCapability>(..)` and author
 # `#[http::router]` routes without dragging the substrate through. The
 # `aether_substrate`-typed half (both cap states, the listener and its
 # dispatch shards, the deferred-reply obligation table) is gated behind it.
@@ -46,7 +41,6 @@ ignored = ["clap", "aether-test-fixtures-bundle"]
 [features]
 default = ["runtime"]
 runtime = [
-    "aether-component/runtime",
     "dep:aether-substrate",
     "dep:base64",
     "dep:clap",
@@ -61,12 +55,6 @@ runtime = [
 aether-actor = { path = "../aether-actor" }
 aether-data = { path = "../aether-data" }
 aether-kinds = { path = "../aether-kinds" }
-# ADR-0154: `defer.rs` names `ComponentHostCapability` to address the
-# handler component a deferred request is answered through, resolving the
-# handler beneath the host's carry.
-# `default-features = false` keeps the marker-only wasm build from dragging
-# wasmtime through; the `runtime` feature forwards `aether-component/runtime`.
-aether-component = { path = "../aether-component", default-features = false }
 # ADR-0131: the `#[http::router]` / `#[http::route]` / `#[http::reply]` proc
 # macros, re-exported from this crate's root. Proc-macro crates are
 # host-compiled, so the unconditional dep leaves the wasm-header-only build

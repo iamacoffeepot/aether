@@ -30,7 +30,7 @@ impl NativeActor for ColdHttpHandler {
     }
 
     fn wire(_state: &mut ColdHttpHandlerState, ctx: &mut NativeCtx<'_>) {
-        ctx.actor::<HttpServerCapability>().send(&RegisterRouteSelf {
+        ctx.send::<HttpServerCapability>(&RegisterRouteSelf {
             prefix: "/".to_owned(),
             method: None,
             kind: <HttpServerRequest as Kind>::ID,

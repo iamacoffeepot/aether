@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-06-18
 - **Accepted:** 2026-06-19 (implementation arc iamacoffeepot/aether#2063 landed)
-- **Last amended:** 2026-08-05
+- **Last amended:** 2026-09-23
 
 ## Context
 
@@ -114,7 +114,7 @@ This is a scope-selection failure, not loss of routing information in `with_tag`
 
 **So the spelling is refused rather than repaired.** A marker trait `CallerScoped` sits on the strategy — implemented for `One` (a root cap sits at the root whoever asks), `Many` (a keyed child of the caller), and `EmbeddedMany` (a spawned sibling, whose lineage extends its spawner's, ADR-0099 §Negative) — and its elaborating actor-level companion `CallerAddressable` joins the cardinality marker on every carry-passing surface: `ctx.actor::<R>()` and `MailSender::{send, send_many, send_detached}` on both transports. `Embedded` is absent from `CallerScoped`, so an embedded target is an `E0277` whose `#[diagnostic::on_unimplemented]` names the spelling that supplies the host carry: `ctx.actor::<ComponentHostCapability>().loaded::<Peer>(name)`.
 
-Refusing is not merely the cheaper half of a trade. A component's load name is a runtime fact — `load_component(name = …)`, and `replicas: N` produces `base-0 … base-N` and no default-named instance at all — so a bare type reference could only ever have meant "the instance loaded under its default name," a guess the by-name verb states outright. The surfaces that already supply the host carry (`resolve_embedded`, `ComponentHost{Wasm,Native}Ext::loaded`, `aether-http`'s `Ctx::defer(&request).to::<R>()`) are unchanged and remain the way to reach a loaded component.
+Refusing is not merely the cheaper half of a trade. A component's load name is a runtime fact — `load_component(name = …)`, and `replicas: N` produces `base-0 … base-N` and no default-named instance at all — so a bare type reference could only ever have meant "the instance loaded under its default name," a guess the by-name verb states outright. The surfaces that already supply the host carry (`resolve_embedded`, `ComponentHost{Wasm,Native}Ext::loaded`) are unchanged and remain the way to reach a loaded component. (`aether-http`'s `Ctx::defer(&request).to::<R>()` was listed here until #6468, which moved it onto the router's declared dependency, ADR-0154 as amended.)
 
 Nothing about identity moves: no resolver arithmetic changes, no `MailboxId` changes, no wire or FFI ABI change. What changes is which spellings compile. One consequence worth naming: with `Embedded` off the keyless surface, `One` is the only strategy it admits, so `ctx.actor::<R>()` reads no carry today and means exactly "the root-pinned singleton `R`." The parameter stays for the keyless caller-relative strategy ADR-0166 defers ("a true keyless singleton beneath a native parent requires a relative singleton resolver"), which joins by implementing `CallerScoped`.
 
@@ -124,7 +124,7 @@ The 2026-08-04 refusal above was correct for the context available then, but its
 
 The selected parent is already a tagged routing mailbox. Its low 60 bits contain every bit a later lineage fold can observe, so passing it directly to `Embedded::resolve` is equivalent to retaining a separate untagged FNV state. No resolver arithmetic, wire representation, FFI ABI, or per-send lookup changes. What changes is scope selection and the compile contract: embedded recipients now satisfy `CallerAddressable`, including `MailSender::{send, send_many, send_detached}` and typed actor construction.
 
-Default-name and explicit-name component-peer routes are distinct only at the namespace argument. The default typed path uses `R::NAMESPACE`; `peer_named` uses its supplied load name. `ComponentHost{Wasm,Native}Ext::loaded` and `resolve_embedded` remain explicit routes from a component-host mailbox, and HTTP deferral keeps using the stored component-host handle where its caller deliberately chose that root.
+Default-name and explicit-name component-peer routes are distinct only at the namespace argument. The default typed path uses `R::NAMESPACE`; `peer_named` uses its supplied load name. `ComponentHost{Wasm,Native}Ext::loaded` and `resolve_embedded` remain explicit routes from a component-host mailbox. (HTTP deferral used the stored component-host handle until #6468; it now forwards to a declared dependency of the router, ADR-0154 as amended.)
 
 ## Related
 
