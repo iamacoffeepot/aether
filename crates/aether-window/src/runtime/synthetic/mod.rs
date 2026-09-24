@@ -406,7 +406,7 @@ mod tests {
     #[test]
     fn explicit_subscriptions_validate_before_mutating_routes() {
         let (binding, mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mut state = test_state();
         let unknown = MailboxId(0xBAD);
 
@@ -492,7 +492,7 @@ mod tests {
     #[test]
     fn name_is_stable_after_title_mutation() {
         let (binding, _mailer) = test_ctx();
-        let mut ctx = NativeCtx::new(&binding, Source::NONE, MailId::NONE, MailId::NONE);
+        let mut ctx = NativeCtx::new_for_actor(&binding, Source::NONE, MailId::NONE, MailId::NONE);
         let mut state = test_state();
         let id = WindowId(7);
         state.windows.insert(
